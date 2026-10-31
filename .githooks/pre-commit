@@ -169,7 +169,12 @@ if ((${#sql_files[@]})); then
   if [[ ! -x "$sqlfluff" || ! -x "$repo_root/.venv-sqlfluff/bin/python" ]]; then
     warn_missing_tool .venv-sqlfluff 'SQL formatting'
   else
-    (cd "$stage_tree" && "$sqlfluff" fix --config .sqlfluff "${sql_files[@]}")
+    fix_status=0
+    (cd "$stage_tree" && "$sqlfluff" fix --config .sqlfluff "${sql_files[@]}") || fix_status=$?
+    case "$fix_status" in
+      0|1) ;;
+      *) exit "$fix_status" ;;
+    esac
   fi
 fi
 

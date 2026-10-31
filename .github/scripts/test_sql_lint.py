@@ -436,6 +436,128 @@ class SQLFluffRuleTests(unittest.TestCase):
             )
             self.assertEqual(lint.returncode, 0, lint.stdout)
 
+    def test_precommit_keeps_fix_when_unfixable_sql_remains(self) -> None:
+        long_literal = "'" + ("x" * 130) + "'"
+        malformed_sql = f"select {long_literal} as long_value;\n"
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            probe = root / "probe.sql"
+            probe.write_text(malformed_sql, encoding="utf-8")
+            config = REPO_ROOT / ".sqlfluff"
+            fix = subprocess.run(
+                [self.sqlfluff, "fix", "--config", str(config), str(probe)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(fix.returncode, 1, fix.stdout)
+            self.assertIn("SELECT", probe.read_text(encoding="utf-8"))
+            remaining = subprocess.run(
+                [self.sqlfluff, "lint", "--config", str(config), str(probe)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertIn("LT05", remaining.stdout)
+
+            repo = root / "repo"
+            repo.mkdir()
+            for relative in (".githooks", "bin", "internal/store/queries"):
+                (repo / relative).mkdir(parents=True, exist_ok=True)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout
+
+            git("init", "--quiet")
+            git("config", "user.name", "SQL hook fixture")
+            git("config", "user.email", "sql-hook-fixture@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            empty_hooks = repo / "empty-hooks"
+            empty_hooks.mkdir()
+            git("config", "core.hooksPath", str(empty_hooks))
+
+            for hook in ("pre-commit", "commit-msg"):
+                shutil.copyfile(REPO_ROOT / f".githooks/{hook}", repo / f".githooks/{hook}")
+                shutil.copymode(REPO_ROOT / f".githooks/{hook}", repo / f".githooks/{hook}")
+            shutil.copyfile(config, repo / ".sqlfluff")
+            shutil.copyfile(REPO_ROOT / "Makefile", repo / "Makefile")
+            sqlc = repo / "bin/sqlc"
+            sqlc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sqlc.chmod(0o755)
+            git("add", "--all")
+            git("commit", "--quiet", "-m", "chore(test): create sql hook fixture")
+
+            sqlfluff_dir = repo / ".venv-sqlfluff/bin"
+            sqlfluff_dir.mkdir(parents=True)
+            (sqlfluff_dir / "sqlfluff").symlink_to(Path(self.sqlfluff).resolve())
+            (sqlfluff_dir / "python").symlink_to(Path(sys.executable).resolve())
+            git("config", "core.hooksPath", str(repo / ".githooks"))
+
+            staged_sql = repo / "internal/store/queries/unfixable.sql"
+            staged_sql.write_text(malformed_sql, encoding="utf-8")
+            git("add", "internal/store/queries/unfixable.sql")
+            commit = subprocess.run(
+                ["git", "commit", "--quiet", "-m", "chore(test): keep sql autofix"],
+                cwd=repo,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            self.assertEqual(commit.returncode, 0, commit.stdout)
+            committed_sql = git("show", "HEAD:internal/store/queries/unfixable.sql")
+            self.assertIn("SELECT", committed_sql)
+            self.assertIn(long_literal, committed_sql)
+            lint = subprocess.run(
+                [
+                    self.sqlfluff,
+                    "lint",
+                    "--config",
+                    str(config),
+                    str(staged_sql),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertNotEqual(lint.returncode, 0)
+            self.assertIn("LT05", lint.stdout)
+
+            sqlfluff_error = root / "sqlfluff-error"
+            sqlfluff_error.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+            sqlfluff_error.chmod(0o755)
+            sqlfluff_path = sqlfluff_dir / "sqlfluff"
+            sqlfluff_path.unlink()
+            sqlfluff_path.symlink_to(sqlfluff_error)
+            error_sql = repo / "internal/store/queries/tool_error.sql"
+            error_sql.write_text("SELECT 1;\n", encoding="utf-8")
+            git("add", "internal/store/queries/tool_error.sql")
+            failed_commit = subprocess.run(
+                ["git", "commit", "--quiet", "-m", "chore(test): reject sqlfluff error"],
+                cwd=repo,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            self.assertNotEqual(failed_commit.returncode, 0, failed_commit.stdout)
+            self.assertEqual(
+                git("diff", "--cached", "--name-only").strip(),
+                "internal/store/queries/tool_error.sql",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
