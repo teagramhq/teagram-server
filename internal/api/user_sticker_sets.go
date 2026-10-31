@@ -297,7 +297,10 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 		}
 		seen[document.ID] = true
 		keywords, _ := input.GetKeywords()
-		if !validUserStickerText(input.Emoji, keywords) {
+		if !validUserStickerEmoji(input.Emoji) {
+			return nil, nil, errStickerEmojiInvalid
+		}
+		if !validUserStickerKeywords(keywords) {
 			return nil, nil, errStickerSetInvalid
 		}
 		if kind == "mask" && keywords != "" {
@@ -392,9 +395,12 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 	return userStickerSetResponse(set, r.UserID, h.dcID, nil), nil, nil
 }
 
-func validUserStickerText(emoji, keywords string) bool {
-	if !utf8.ValidString(emoji) || emoji == "" || strings.ContainsRune(emoji, 0) || utf8.RuneCountInString(emoji) > maxUserStickerEmojiRunes ||
-		!utf8.ValidString(keywords) || strings.ContainsRune(keywords, 0) {
+func validUserStickerEmoji(emoji string) bool {
+	return utf8.ValidString(emoji) && emoji != "" && !strings.ContainsRune(emoji, 0) && utf8.RuneCountInString(emoji) <= maxUserStickerEmojiRunes
+}
+
+func validUserStickerKeywords(keywords string) bool {
+	if !utf8.ValidString(keywords) || strings.ContainsRune(keywords, 0) {
 		return false
 	}
 	if keywords == "" {

@@ -130,18 +130,19 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*tg.InputStickerSetItem)
+		want   string
 	}{
-		{name: "empty emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = "" }},
-		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }},
-		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }},
-		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }},
+		{name: "empty emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = "" }, want: "STICKER_EMOJI_INVALID"},
+		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }, want: "STICKER_EMOJI_INVALID"},
+		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }, want: "STICKERSET_INVALID"},
+		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }, want: "STICKERSET_INVALID"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
 			request := createStickerRequest("too_long_"+strings.ReplaceAll(test.name, " ", "_"), file, false, false)
 			test.mutate(&request.Stickers[0])
-			if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != "STICKERSET_INVALID" {
-				t.Fatalf("invalid %s = %q, want STICKERSET_INVALID", test.name, got)
+			if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != test.want {
+				t.Fatalf("invalid %s = %q, want %s", test.name, got, test.want)
 			}
 		})
 	}
