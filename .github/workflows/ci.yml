@@ -72,6 +72,16 @@ jobs:
               echo "Leaving pull request CI run ${run_id} in status ${run_status}."
               continue
             fi
+            if ! started_jobs="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+              --jq '.jobs[]? | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped")) | .id' 2>/dev/null)"; then
+              echo "::warning::Could not check jobs for pull request CI run ${run_id}; leaving it alone."
+              continue
+            fi
+            if [[ -n "$started_jobs" ]]; then
+              echo "Leaving pull request CI run ${run_id}; it has started jobs."
+              continue
+            fi
             if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
               cancelled_pr_run_targets+="${run_id}:${run_created_at} "
             else
@@ -84,15 +94,16 @@ jobs:
     name: 'ops: dispatch-pr-ci-recovery'
     needs:
       - ops-prioritize-main
-      - lint-go
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint-go.result != 'skipped' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
+    # Evaluate the PR-only skip before main prioritization can cancel a queued
+    # PR run. Main fan-out jobs share the priority dependency and unlock here.
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: write
 
     steps:
-      - name: Dispatch cancelled pull request CI recovery after main fan-out starts
+      - name: Dispatch cancelled pull request CI recovery
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED_PR_RUN_TARGETS: ${{ needs.ops-prioritize-main.outputs.cancelled_pr_run_targets }}
@@ -1077,6 +1088,10 @@ jobs:
           bash -n deploy/teagram-demo/forced-command.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
+          bash -n deploy/teagram-demo/ops/turnstile-signin-rollout.sh
+          bash -n deploy/teagram-demo/ops/turnstile-signin-rollback.sh
+          sh -n deploy/teagram-demo/ops/turnstile-signin-on.sh
+          sh -n deploy/teagram-demo/ops/turnstile-signin-off.sh
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
           bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
@@ -1088,6 +1103,7 @@ jobs:
           bash -n deploy/teagram-demo/activity-credential.sh
           bash -n deploy/teagram-demo/test-activity-credential-handoff.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
           bash -n deploy/teagram-demo/test-seed-compose.sh
           bash -n deploy/link-edge/deploy-main.sh
@@ -1116,6 +1132,10 @@ jobs:
             deploy/teagram-demo/forced-command.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
+            deploy/teagram-demo/ops/turnstile-signin-rollout.sh \
+            deploy/teagram-demo/ops/turnstile-signin-rollback.sh \
+            deploy/teagram-demo/ops/turnstile-signin-on.sh \
+            deploy/teagram-demo/ops/turnstile-signin-off.sh \
             deploy/teagram-demo/test-install-teagram-demo-ops.sh \
             deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
@@ -1127,6 +1147,7 @@ jobs:
             deploy/teagram-demo/activity-credential.sh \
             deploy/teagram-demo/test-activity-credential-handoff.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-turnstile-signin-rollout.sh \
             deploy/teagram-demo/test-image-release.sh \
             deploy/teagram-demo/test-seed-compose.sh \
             deploy/link-edge/deploy-main.sh \
