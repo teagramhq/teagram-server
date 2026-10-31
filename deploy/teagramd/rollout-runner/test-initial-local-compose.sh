@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
 readonly ARTIFACT_NAME=.rollout-compose.initial-local.yml
-readonly ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
+readonly ARTIFACT_SHA=cae507e1ec740a64a0bb547a4df2844d29d7328b9d87b32119ec905c648dab7d
 readonly APP_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-initial-local-compose.XXXXXXXX")
 chmod 700 "$TMP"
@@ -105,6 +105,7 @@ jq -e '
   (.services | keys) == ["migrate", "postgres", "telegramd"]
   and .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"
   and .services.telegramd.environment.TG_PUBLIC_LINK_PREFIX == "https://links.example.invalid/"
+  and .services.telegramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "0"
   and ([.services.telegramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
   and ([.services.telegramd.depends_on | keys[]] == ["migrate"])
   and ((.services.telegramd.secrets // []) | length) == 0

@@ -55,6 +55,7 @@ services:
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:-0}
       TG_CLIENT_ADDR_TRUST: socket
       TG_BLOB_DIR: /var/lib/telegramd-blobs
     ports:
