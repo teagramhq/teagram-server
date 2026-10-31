@@ -4,7 +4,7 @@
   {"scenario": "messages.getHistory group", "check": "timing", "issue": "MAIN-2577"},
   {"scenario": "messages.search", "check": "rows", "issue": "MAIN-2578"},
   {"scenario": "messages.search", "check": "timing", "issue": "MAIN-2578"},
-  {"scenario": "contacts.getContacts", "check": "timing", "issue": "MAIN-2579"},
+  {"scenario": "contacts.getContacts", "check": "timing", "issue": "MAIN-3015"},
   {"scenario": "updates.getDifference 1 day offline", "check": "seqscan", "issue": "MAIN-2580", "scan": "dialogs#7749668c"},
   {"scenario": "updates.getDifference 1 day offline", "check": "rows", "issue": "MAIN-2580"},
   {"scenario": "updates.getDifference 1 day offline", "check": "timing", "issue": "MAIN-2580"},
