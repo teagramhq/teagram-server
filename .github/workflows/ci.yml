@@ -184,6 +184,99 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  check-security:
+    name: 'check: security'
+    needs: ops-prioritize-main
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - name: Install pinned security scanners
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned OSV report parser dependency
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/osv-checker-deps" \
+            -r .github/scripts/requirements-security.txt
+          echo "PYTHONPATH=$RUNNER_TEMP/osv-checker-deps" >> "$GITHUB_ENV"
+
+      - name: Test security report gates
+        run: python3 -m unittest discover -s .github/scripts -p 'test_check_osv_report.py'
+
+      - name: Scan reachable server vulnerabilities
+        run: |
+          set +e
+          govulncheck -json ./... > "$RUNNER_TEMP/govulncheck-report.json"
+          govulncheck_status=$?
+          set -e
+          if [[ "$govulncheck_status" -ne 0 && "$govulncheck_status" -ne 3 ]]; then
+            echo "govulncheck failed with exit status $govulncheck_status" >&2
+            exit "$govulncheck_status"
+          fi
+
+      - name: Scan Go modules and npm lockfiles with OSV Scanner
+        run: |
+          # OSV Scanner's Go extractor reads go.mod. Each module graph is pinned
+          # by its adjacent go.sum, which is not a supported standalone input.
+          set +e
+          docker run --rm \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/src,readonly" \
+            ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 \
+            scan source --format json --no-call-analysis=go \
+            --lockfile /src/go.mod \
+            --lockfile /src/tools/go.mod \
+            --lockfile /src/pnpm-lock.yaml \
+            --lockfile /src/internal/admin/ui/package-lock.json \
+            --lockfile /src/deploy/browser-acceptance/package-lock.json \
+            --lockfile /src/tools/reaction-artwork/package-lock.json \
+            --lockfile /src/tools/stickerbundle/package-lock.json \
+            > "$RUNNER_TEMP/osv-report.json"
+          scanner_status=$?
+          set -e
+          if [[ "$scanner_status" -gt 1 ]]; then
+            echo "OSV Scanner failed with exit status $scanner_status" >&2
+            exit "$scanner_status"
+          fi
+
+      - name: Apply security severity and fix policy
+        run: |
+          python3 .github/scripts/check_osv_report.py \
+            "$RUNNER_TEMP/osv-report.json" \
+            "$RUNNER_TEMP/govulncheck-report.json"
+
+      - name: Scan pull request commits for secrets
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$BASE_SHA$HEAD_SHA" in
+            *[!0-9a-f]*) echo "pull request commit is not a hexadecimal SHA" >&2; exit 1 ;;
+          esac
+          gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
+            --redact=100 --no-banner --report-format=json \
+            --report-path="$RUNNER_TEMP/gitleaks-report.json"
+
   lint-go:
     name: 'lint: go'
     needs: ops-prioritize-main
@@ -1305,6 +1398,7 @@ jobs:
     if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     needs:
       - ops-prioritize-main
+      - check-security
       - test-go
       - check-sticker-license
       - test-photo-worker
@@ -1332,6 +1426,7 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
+          CHECK_SECURITY_RESULT: ${{ needs.check-security.result }}
           TEST_GO_RESULT: ${{ needs.test-go.result }}
           CHECK_STICKER_LICENSE_RESULT: ${{ needs.check-sticker-license.result }}
           LINT_GO_RESULT: ${{ needs.lint-go.result }}
@@ -1359,6 +1454,7 @@ jobs:
           fi
           lane_results=(
             "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
+            "check-security=$CHECK_SECURITY_RESULT"
             "test-go=$TEST_GO_RESULT"
             "check-sticker-license=$CHECK_STICKER_LICENSE_RESULT"
             "test-photo-worker=$TEST_PHOTO_WORKER_RESULT"
@@ -1381,6 +1477,7 @@ jobs:
             "check-demo-web-pin=$CHECK_DEMO_WEB_PIN_RESULT"
           )
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
+                "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
                 "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
                 "$TEST_PHOTO_WORKER_RESULT" != "success" ||
