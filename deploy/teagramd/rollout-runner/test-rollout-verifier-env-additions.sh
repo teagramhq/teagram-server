@@ -338,8 +338,12 @@ zero_tailnet_default_compose=$(jq -c \
 zero_tailnet_default=$(snapshot_from_json \
   "$zero_tailnet_default_inspect" "$zero_tailnet_default_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+rollback_tailnet_default=$(snapshot_from_json \
+  "$previous_tailnet_default_inspect" "$previous_tailnet_default_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
 printf '%s\n' "$previous_tailnet_default" > "$TMP/tailnet-default-baseline.snapshot.json"
 printf '%s\n' "$zero_tailnet_default" > "$TMP/tailnet-default-target.snapshot.json"
+printf '%s\n' "$rollback_tailnet_default" > "$TMP/tailnet-default-rollback.snapshot.json"
 if ! compare_snapshots \
   "$TMP/tailnet-default-baseline.snapshot.json" "$TMP/tailnet-default-target.snapshot.json" \
   sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
@@ -349,6 +353,15 @@ if ! compare_snapshots \
   exit 1
 fi
 printf '%s\n' 'PASS zero tailnet default matches the prior empty value in full baseline comparison'
+if ! compare_snapshots \
+  "$TMP/tailnet-default-baseline.snapshot.json" "$TMP/tailnet-default-rollback.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/tailnet-default-rollback-comparisons.tsv"; then
+  printf '%s\n' 'FAIL empty tailnet rollback changed the normalized baseline digests' >&2
+  cat "$TMP/tailnet-default-rollback-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS empty tailnet rollback matches the normalized baseline digests'
 
 image_env_inspect=$(jq -c \
   --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
