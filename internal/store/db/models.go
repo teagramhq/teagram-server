@@ -631,9 +631,11 @@ type NotifySettingsDifferenceCursor struct {
 }
 
 type OwnerDialogCount struct {
-	OwnerID     int64
-	DialogCount int64
-	Initialized bool
+	OwnerID                 int64
+	DialogCount             int64
+	Initialized             bool
+	DialogUnreadTotal       int64
+	DialogUnreadInitialized bool
 }
 
 type PeerSettingsBarDismissal struct {

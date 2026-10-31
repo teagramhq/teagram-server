@@ -58,6 +58,10 @@ const (
 	needleEvery  = 10
 )
 
+// Difference measurements hold in-window event volume constant across fixture
+// sizes so row reads measure database scale, not response volume.
+const differenceEventsPerDay = 20
+
 var fixtures = []spec{
 	scaled("1x", 100),
 	scaled("100x", shrink()),
@@ -85,7 +89,7 @@ func scaled(name string, divisor int) spec {
 		Subscribers:   100_000 / divisor,
 		GroupMessages: 200_000 / divisor,
 		GroupPhotos:   max(2, 200/divisor),
-		DayEvents:     2_000 / divisor,
+		DayEvents:     differenceEventsPerDay,
 	}
 }
 
@@ -131,6 +135,14 @@ func needleMessageCount(messages int) int {
 		return 0
 	}
 	return (messages-1)/needleEvery + 1
+}
+
+func TestDifferenceFixtureEventsStayConstantAcrossScale(t *testing.T) {
+	small := scaled("1x", 100)
+	large := scaled("100x", 1)
+	if small.DayEvents != differenceEventsPerDay || large.DayEvents != differenceEventsPerDay {
+		t.Fatalf("difference day events = %d at 1x and %d at 100x, want %d at both scales", small.DayEvents, large.DayEvents, differenceEventsPerDay)
+	}
 }
 
 // fixture is what the seeder leaves for the harness: the ids every scenario
