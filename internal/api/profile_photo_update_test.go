@@ -153,17 +153,15 @@ func TestUpdateProfilePhotoRejectsFallbackAndBotBeforeRateAdmission(t *testing.T
 		t.Fatalf("bot request error = %s, want INPUT_REQUEST_INVALID", rpcMessage(t, err))
 	}
 
-	result, err := api.UpdateProfilePhotoForTestWithRateLimit(f.s, f.owner, &tg.PhotosUpdateProfilePhotoRequest{ID: input}, rate)
+	// Probe the budget directly. The handler's valid selection does rate
+	// admission and profile-lock waiting under a 250 ms deadline; a timeout
+	// there says nothing about whether these rejected requests consumed a token.
+	limited, err := f.s.CheckRateLimit(context.Background(), f.owner, "update_profile", rate)
 	if err != nil {
-		t.Fatalf("valid selection after two early refusals: %v", err)
+		t.Fatalf("check update-profile budget after early refusals: %v", err)
 	}
-	photo, ok := result.(*tg.PhotosPhoto)
-	if !ok {
-		t.Fatalf("valid selection result = %T, want *tg.PhotosPhoto", result)
-	}
-	selectedPhoto, ok := photo.Photo.(*tg.Photo)
-	if !ok || selectedPhoto.ID != selected {
-		t.Fatalf("valid selection photo = %T/%+v, want %d", photo.Photo, photo.Photo, selected)
+	if limited != nil {
+		t.Fatalf("fallback or bot request consumed the update-profile budget: %+v", limited)
 	}
 }
 
