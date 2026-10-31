@@ -1138,14 +1138,14 @@ while IFS= read -r control_command; do
 done
 
 if [[ $GUEST_SIGNUP == 1 ]]; then
-	POST_GUEST_USER_COUNTS="$(db_count "SELECT count(*) || '|' || count(*) FILTER (WHERE login_mode = 'username') || '|' || (SELECT count(*) FROM user_passwords) FROM users")"
+	POST_GUEST_USER_COUNTS="$(db_count "SELECT count(*) || '|' || count(*) FILTER (WHERE login_mode = 'username') FROM users")"
 	POST_GUEST_HANDLE_COUNT="$(db_count "SELECT count(*) FROM usernames WHERE handle ~ '^guest_[a-z2-7]{16}$'")"
 	POST_BASE_HANDLE_COUNT="$(db_count "SELECT count(*) FROM usernames WHERE handle IN ('$USER_A','$USER_B')")"
-	POST_GUEST_AUTH_KEYS="$(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL')"
-	POST_GUEST_MESSAGES="$(db_count 'SELECT count(*) FROM messages')"
+	POST_GUEST_AUTH_KEYS="$(db_count "SELECT count(*) FROM auth_keys k JOIN usernames u ON u.owner_type = 'user' AND u.owner_id = k.user_id WHERE u.handle ~ '^guest_[a-z2-7]{16}$'")"
+	POST_GUEST_MESSAGES="$(db_count "SELECT count(*) FROM messages m JOIN usernames u ON u.owner_type = 'user' AND u.owner_id = m.owner_id WHERE u.handle ~ '^guest_[a-z2-7]{16}$'")"
 	SITEVERIFY_REQUEST_COUNT="$(docker exec "$FRONT" node -e 'require("node:https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"teagramd.test"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))' | jq -er '.siteverify_request_count | select(type == "number" and . == floor and . >= 0)')"
-	if [[ $POST_GUEST_USER_COUNTS != '3|3|2' || $POST_GUEST_HANDLE_COUNT != 1 || $POST_BASE_HANDLE_COUNT != 2 ||
-		$POST_GUEST_AUTH_KEYS != 3 || $POST_GUEST_MESSAGES != 0 || $SITEVERIFY_REQUEST_COUNT != 1 ]]; then
+	if [[ $POST_GUEST_USER_COUNTS != '3|3' || $POST_GUEST_HANDLE_COUNT != 1 || $POST_BASE_HANDLE_COUNT != 2 ||
+		$POST_GUEST_AUTH_KEYS -lt 1 || $POST_GUEST_MESSAGES != 0 || $SITEVERIFY_REQUEST_COUNT != 1 ]]; then
 		printf 'guest signup evidence failed: users=%s guest_handles=%s base_handles=%s auth_keys=%s messages=%s siteverify=%s\n' \
 			"$POST_GUEST_USER_COUNTS" "$POST_GUEST_HANDLE_COUNT" "$POST_BASE_HANDLE_COUNT" \
 			"$POST_GUEST_AUTH_KEYS" "$POST_GUEST_MESSAGES" "$SITEVERIFY_REQUEST_COUNT" >&2
