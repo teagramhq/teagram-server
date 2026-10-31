@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+warn_missing_tool() {
+  printf 'warning: pre-commit: %s is missing; skipping %s\n' "$1" "$2" >&2
+}
+
+mapfile -d '' -t staged_files < <(git diff --cached --no-renames --name-only -z)
+((${#staged_files[@]})) || exit 0
+
+needs_snapshot=false
+for path in "${staged_files[@]}"; do
+  case "$path" in
+    *.go|*.sql|sqlc.yaml|migrations/*) needs_snapshot=true ;;
+  esac
+done
+[[ "$needs_snapshot" == true ]] || exit 0
+
+tmp_root="$(mktemp -d)"
+trap 'rm -rf -- "$tmp_root"' EXIT
+base_tree="$tmp_root/base"
+stage_tree="$tmp_root/stage"
+tmp_index="$tmp_root/index"
+mkdir -p "$base_tree" "$stage_tree"
+# Tools operate on index snapshots so they never read unstaged source edits.
+git checkout-index --all --prefix="$base_tree/"
+cp -a "$base_tree/." "$stage_tree/"
+index_path="$(git rev-parse --git-path index)"
+if [[ "$index_path" != /* ]]; then
+  index_path="$repo_root/$index_path"
+fi
+cp -- "$index_path" "$tmp_index"
+
+# Update index blobs directly so unstaged hunks never enter a staged path.
+sync_index_entry() {
+  local index_file="$1"
+  local tree="$2"
+  local path="$3"
+  local entry mode object stage remainder blob
+  local file="$tree/$path"
+
+  if [[ -f "$file" ]]; then
+    entry="$(GIT_INDEX_FILE="$index_file" git ls-files --stage -- "$path")"
+    if [[ -n "$entry" ]]; then
+      read -r mode object stage remainder <<< "$entry"
+      if [[ "$stage" != 0 ]]; then
+        printf 'error: pre-commit: cannot update unmerged index path %s\n' "$path" >&2
+        return 1
+      fi
+    else
+      mode=100644
+    fi
+    blob="$(git hash-object -w --path="$path" -- "$file")"
+    GIT_INDEX_FILE="$index_file" git update-index --add --cacheinfo "$mode" "$blob" "$path"
+  else
+    GIT_INDEX_FILE="$index_file" git update-index --force-remove -- "$path"
+  fi
+}
+
+candidate_files=()
+add_candidate() {
+  local path="$1"
+  local existing
+  for existing in "${candidate_files[@]}"; do
+    [[ "$existing" == "$path" ]] && return 0
+  done
+  candidate_files+=("$path")
+}
+
+add_tree_files() {
+  local tree="$1"
+  local directory="$2"
+  local path
+  [[ -d "$tree/$directory" ]] || return 0
+  while IFS= read -r -d '' path; do
+    add_candidate "$path"
+  done < <(cd "$tree" && find "$directory" -type f -print0)
+}
+
+go_files=()
+sql_files=()
+go_package_dirs=()
+has_sqlc_input=false
+has_migration=false
+for path in "${staged_files[@]}"; do
+  case "$path" in
+    *.go)
+      if [[ -f "$base_tree/$path" ]]; then
+        go_files+=("$path")
+        add_candidate "$path"
+      fi
+      ;;
+    *.sql)
+      has_sqlc_input=true
+      if [[ -f "$base_tree/$path" ]]; then
+        sql_files+=("$path")
+        add_candidate "$path"
+      fi
+      ;;
+  esac
+  [[ "$path" == sqlc.yaml ]] && has_sqlc_input=true
+  [[ "$path" == migrations/* ]] && has_migration=true
+done
+
+for path in "${go_files[@]}"; do
+  if [[ "$path" == */* ]]; then
+    package_dir="${path%/*}"
+  else
+    package_dir=.
+  fi
+  already_added=false
+  for existing_dir in "${go_package_dirs[@]}"; do
+    if [[ "$existing_dir" == "$package_dir" ]]; then
+      already_added=true
+      break
+    fi
+  done
+  [[ "$already_added" == true ]] || go_package_dirs+=("$package_dir")
+done
+
+if ((${#go_files[@]})); then
+  if ! command -v golangci-lint >/dev/null 2>&1; then
+    warn_missing_tool golangci-lint 'Go formatting and autofixes'
+  else
+    formatted_file="$tmp_root/formatted-go"
+    for path in "${go_files[@]}"; do
+      if ! (cd "$stage_tree" && golangci-lint fmt --config .golangci.yml --stdin < "$path") > "$formatted_file"; then
+        exit 1
+      fi
+      cat -- "$formatted_file" > "$stage_tree/$path"
+      sync_index_entry "$tmp_index" "$stage_tree" "$path"
+    done
+
+    # Keep this aligned with enabled linters that advertise autofix support.
+    autofix_linters='canonicalheader,copyloopvar,errorlint,exptostd,fatcontext,gocritic,govet,intrange,modernize,mirror,misspell,nolintlint,perfsprint,sloglint,staticcheck,tagalign,testifylint,usetesting'
+    for package_dir in "${go_package_dirs[@]}"; do
+      if [[ ! -d "$stage_tree/$package_dir" ]]; then
+        exit 1
+      fi
+      patch_file="$(mktemp "$tmp_root/go-patch.XXXXXX")"
+      (
+        cd "$repo_root/$package_dir"
+        GIT_INDEX_FILE="$tmp_index" git diff --cached --binary --no-renames --relative -- '*.go'
+      ) > "$patch_file"
+      if ! (
+        cd "$stage_tree/$package_dir"
+        golangci-lint run \
+          --config "$stage_tree/.golangci.yml" \
+          --enable-only "$autofix_linters" \
+          --fix \
+          --issues-exit-code 0 \
+          --new-from-patch "$patch_file" \
+          .
+      ); then
+        exit 1
+      fi
+    done
+    for path in "${go_files[@]}"; do
+      sync_index_entry "$tmp_index" "$stage_tree" "$path"
+    done
+  fi
+fi
+
+if ((${#sql_files[@]})); then
+  sqlfluff="$repo_root/.venv-sqlfluff/bin/sqlfluff"
+  if [[ ! -x "$sqlfluff" || ! -x "$repo_root/.venv-sqlfluff/bin/python" ]]; then
+    warn_missing_tool .venv-sqlfluff 'SQL formatting'
+  else
+    fix_status=0
+    (cd "$stage_tree" && "$sqlfluff" fix --config .sqlfluff "${sql_files[@]}") || fix_status=$?
+    case "$fix_status" in
+      0|1) ;;
+      *) exit "$fix_status" ;;
+    esac
+  fi
+fi
+
+if [[ "$has_sqlc_input" == true ]]; then
+  sqlc_ran=false
+  if command -v make >/dev/null 2>&1 && { [[ -x "$stage_tree/bin/sqlc" ]] || command -v go >/dev/null 2>&1; }; then
+    mkdir -p "$stage_tree/bin"
+    (cd "$stage_tree" && make sqlc)
+    sqlc_ran=true
+  elif [[ -x "$stage_tree/bin/sqlc" ]]; then
+    (cd "$stage_tree" && ./bin/sqlc generate)
+    sqlc_ran=true
+  elif command -v sqlc >/dev/null 2>&1; then
+    (cd "$stage_tree" && sqlc generate)
+    sqlc_ran=true
+  else
+    warn_missing_tool sqlc 'SQL query generation'
+  fi
+  if [[ "$sqlc_ran" == true ]]; then
+    add_tree_files "$base_tree" internal/store/db
+    add_tree_files "$stage_tree" internal/store/db
+  fi
+fi
+
+if [[ "$has_migration" == true ]]; then
+  if ! command -v atlas >/dev/null 2>&1; then
+    warn_missing_tool atlas 'migration hashing'
+  else
+    (cd "$stage_tree" && atlas migrate hash --env local)
+    if [[ -f "$base_tree/migrations/atlas.sum" || -f "$stage_tree/migrations/atlas.sum" ]]; then
+      add_candidate migrations/atlas.sum
+    fi
+  fi
+fi
+
+for path in "${candidate_files[@]}"; do
+  base_file="$base_tree/$path"
+  stage_file="$stage_tree/$path"
+  worktree_file="$repo_root/$path"
+  base_exists=false
+  stage_exists=false
+  [[ -f "$base_file" ]] && base_exists=true
+  [[ -f "$stage_file" ]] && stage_exists=true
+
+  if [[ "$base_exists" == true && "$stage_exists" == true ]] && cmp -s -- "$base_file" "$stage_file"; then
+    continue
+  fi
+  [[ "$base_exists" == true || "$stage_exists" == true ]] || continue
+
+  safe_worktree_update=false
+  # Leave any path with unstaged edits untouched; only refresh clean worktree files.
+  if [[ "$base_exists" == true ]]; then
+    if [[ -f "$worktree_file" ]] && git diff-files --quiet -- "$path"; then
+      safe_worktree_update=true
+    fi
+  elif [[ ! -e "$worktree_file" && ! -L "$worktree_file" ]]; then
+    safe_worktree_update=true
+  fi
+
+  sync_index_entry "$index_path" "$stage_tree" "$path"
+  if [[ "$safe_worktree_update" == true ]]; then
+    if [[ "$stage_exists" == true ]]; then
+      mkdir -p "$(dirname "$worktree_file")"
+      cp -p -- "$stage_file" "$worktree_file"
+    else
+      rm -f -- "$worktree_file"
+    fi
+  fi
+done

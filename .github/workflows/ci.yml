@@ -277,6 +277,24 @@ jobs:
             --head "$HEAD_SHA" \
             --sqlfluff .venv-sqlfluff/bin/sqlfluff
 
+  test-git-hooks:
+    name: 'test: git-hooks'
+    needs: ops-prioritize-main
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Test commit message validation and merge exemptions
+        run: bash test/githooks/commit-msg-merge.sh
+
+      - name: Test selective pre-push checks
+        run: python3 -B .github/scripts/test_git_hooks.py
+
   test-browser-acceptance:
     name: 'test: browser-acceptance'
     needs: ops-prioritize-main
@@ -1385,6 +1403,7 @@ jobs:
       - test-websocket-d1
       - test-websocket-permanent-exchange
       - lint-sql
+      - test-git-hooks
       - lint-css
       - test-browser-acceptance
       - build-browser-acceptance-image
@@ -1411,6 +1430,7 @@ jobs:
           TEST_WEBSOCKET_D1_RESULT: ${{ needs.test-websocket-d1.result }}
           TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT: ${{ needs.test-websocket-permanent-exchange.result }}
           LINT_SQL_RESULT: ${{ needs.lint-sql.result }}
+          TEST_GIT_HOOKS_RESULT: ${{ needs.test-git-hooks.result }}
           LINT_CSS_RESULT: ${{ needs.lint-css.result }}
           TEST_BROWSER_ACCEPTANCE_RESULT: ${{ needs.test-browser-acceptance.result }}
           BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.build-browser-acceptance-image.result }}
@@ -1437,6 +1457,7 @@ jobs:
             "test-websocket-d1=$TEST_WEBSOCKET_D1_RESULT"
             "test-websocket-permanent-exchange=$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT"
             "lint-sql=$LINT_SQL_RESULT"
+            "test-git-hooks=$TEST_GIT_HOOKS_RESULT"
             "lint-css=$LINT_CSS_RESULT"
             "test-browser-acceptance=$TEST_BROWSER_ACCEPTANCE_RESULT"
             "build-browser-acceptance-image=$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT"
@@ -1458,6 +1479,7 @@ jobs:
                 "$TEST_WEBSOCKET_D1_RESULT" != "success" ||
                 "$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT" != "success" ||
                 "$LINT_SQL_RESULT" != "success" ||
+                "$TEST_GIT_HOOKS_RESULT" != "success" ||
                 "$LINT_CSS_RESULT" != "success" ||
                 "$TEST_BROWSER_ACCEPTANCE_RESULT" != "success" ||
                 "$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
@@ -1495,6 +1517,7 @@ jobs:
       - test-migrations
       - test-smoke
       - lint-sql
+      - test-git-hooks
       - check-sqlc-drift
       - test-websocket-d1
       - test-websocket-permanent-exchange
