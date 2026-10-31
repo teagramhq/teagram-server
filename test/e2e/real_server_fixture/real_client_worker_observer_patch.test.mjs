@@ -33,6 +33,24 @@ function loadBrowserModule(browserPath, observation) {
   return module.exports;
 }
 
+function patchBrowserForTest(t) {
+  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
+  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
+  const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
+  t.after(() => rmSync(webRoot, {recursive: true, force: true}));
+  const scripts = join(webRoot, 'scripts/real-client');
+  mkdirSync(scripts, {recursive: true});
+  for(const name of ['browser.cjs', 'observation.cjs']) {
+    copyFileSync(join(sourceRoot, 'scripts/real-client', name), join(scripts, name));
+  }
+
+  patchRealClientObserver(webRoot);
+  const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
+  const browserPath = join(scripts, 'browser.cjs');
+  const browser = loadBrowserModule(browserPath, observation);
+  return {browser, browserPath, observation};
+}
+
 class FakeBrowserSession extends EventEmitter {
   constructor(resourceEntries) {
     super();
@@ -58,21 +76,40 @@ class FakeBrowserSession extends EventEmitter {
   }
 }
 
+test('the patched direct-message assertion counts stable message ids once', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser, browserPath} = patchBrowserForTest(t);
+  const browserSource = readFileSync(browserPath, 'utf8');
+  const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
+    browserSource.indexOf('async function waitForMessageReaction'));
+  assert.match(sendTextSource, /getSingleExactMessageTextFailure\(message, text\)/);
+  assert.doesNotMatch(sendTextSource, /const count = await message\.count\(\)/);
+  const messageLocator = (bubbles) => ({
+    evaluateAll: async (inspect) => inspect(bubbles.map(({id, text}) => ({
+      closest: () => ({getAttribute: () => id}),
+      cloneNode: () => ({
+        querySelectorAll: () => [],
+        textContent: text,
+      }),
+    }))),
+  });
+  const matchingText = 'browser-ci-hello';
+  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
+    {id: '-7', text: matchingText},
+    {id: '-7', text: matchingText},
+  ]), matchingText), null);
+  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
+    {id: '-7', text: matchingText},
+    {id: '8', text: matchingText},
+  ]), matchingText), 'count');
+  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
+    {id: '', text: matchingText},
+  ]), matchingText), 'missing_message_id');
+});
+
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
-  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
-  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
-  const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
-  t.after(() => rmSync(webRoot, {recursive: true, force: true}));
-  const scripts = join(webRoot, 'scripts/real-client');
-  mkdirSync(scripts, {recursive: true});
-  for(const name of ['browser.cjs', 'observation.cjs']) {
-    copyFileSync(join(sourceRoot, 'scripts/real-client', name), join(scripts, name));
-  }
-
-  patchRealClientObserver(webRoot);
-  const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
-  const browser = loadBrowserModule(join(scripts, 'browser.cjs'), observation);
+  const {browser, observation} = patchBrowserForTest(t);
   assert.equal(observation.allowCdpMethod('worker', 'Runtime.evaluate'), true);
   assert.equal(observation.classifyWorkerSourceFetchFromResourceTiming([
     {name: 'https://teagramd.test/index.worker-Abc123_-.js', responseStatus: 200},

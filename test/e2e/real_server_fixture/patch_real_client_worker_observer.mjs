@@ -19,9 +19,43 @@ export function patchRealClientObserver(webRoot) {
   const browserPath = join(webRoot, 'scripts/real-client/browser.cjs');
   let observation = readFileSync(observationPath, 'utf8');
   let browser = readFileSync(browserPath, 'utf8');
-  if(observation.includes('noteMtprotoSourceFetch') || browser.includes('collectMtprotoSourceFetches')) {
+  if(observation.includes('noteMtprotoSourceFetch') || browser.includes('collectMtprotoSourceFetches') ||
+      browser.includes('Count stable server message identities')) {
     throw new Error('pinned web observer is already patched');
   }
+
+  const originalMessageTextAssertion = `async function getSingleExactMessageTextFailure(messages, expected) {
+  const texts = await messages.evaluateAll((elements) => elements.map((element) => {
+    const text = element.cloneNode(true);
+    text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
+    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
+    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
+    return text.textContent;
+  }));
+  return getSingleExactMessageFailure(texts, expected);
+}`;
+  const messageTextAssertion = `async function getSingleExactMessageTextFailure(messages, expected) {
+  // Count stable server message identities, not duplicate DOM elements.
+  const matches = await messages.evaluateAll((elements) => elements.map((element) => {
+    const text = element.cloneNode(true);
+    text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
+    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
+    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
+    const messageId = element.closest('.bubble')?.getAttribute('data-mid') || '';
+    return {messageId, text: text.textContent};
+  }));
+  if(matches.length === 0 || matches.some(({messageId}) => !/^-?[0-9]{1,20}(?:\\.[0-9]{1,4})?$/.test(messageId))) {
+    return 'missing_message_id';
+  }
+  if(new Set(matches.map(({messageId}) => messageId)).size !== 1) return 'count';
+  if(matches.some(({text}) => text !== expected)) return 'content';
+  return null;
+}`;
+  browser = replaceOnce(browser, originalMessageTextAssertion, messageTextAssertion, 'stable message identity assertion');
+  browser = replaceOnce(browser,
+    '    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);',
+    '    const failure = await getSingleExactMessageTextFailure(message, text);\n    if(failure) failStage(`${stage}_message_count`);',
+    'direct message identity assertion');
 
   const originalWorkerMethods = `const WORKER_CDP_METHODS = Object.freeze([
   'Network.enable',
