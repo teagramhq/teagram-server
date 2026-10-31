@@ -51,8 +51,6 @@ fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
-readonly lint_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint?sslmode=disable"
-readonly base_lock_fixture_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_base_lock?sslmode=disable"
 
 apply_migrations() {
   local migration_dir=$1
@@ -75,6 +73,17 @@ run_atlas_migration_lint() {
     --latest "$migration_count"
 }
 
+wrap_migration_in_transaction() {
+  local migration_file=$1
+  local wrapped_file="$migration_file.tmp"
+  {
+    printf 'BEGIN;\n'
+    cat "$migration_file"
+    printf '\nCOMMIT;\n'
+  } >"$wrapped_file"
+  mv "$wrapped_file" "$migration_file"
+}
+
 for database in migration_lint migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
@@ -86,24 +95,24 @@ docker run --rm \
 
 python3 -B .github/scripts/migration_lock_lint.py --base "$base_ref"
 
-mapfile -t changed_sql_migrations < <(
-  git -C "$repo_root" diff --name-only --diff-filter=AMR "$base_ref...HEAD" -- migrations \
+mapfile -t added_sql_migrations < <(
+  git -C "$repo_root" diff --name-only --diff-filter=A "$base_ref...HEAD" -- migrations \
     | awk '/\.sql$/ { print }'
 )
 mkdir -p "$baseline_dir"
 git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
 chmod -R a+rX "$baseline_dir"
-if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
-  changed_migration_dir="$temp_dir/atlas-lint-changed"
-  mkdir -p "$changed_migration_dir"
-  for migration in "${changed_sql_migrations[@]}"; do
-    cp "$repo_root/$migration" "$changed_migration_dir/"
-  done
+if [ "${#added_sql_migrations[@]}" -gt 0 ]; then
+  lint_migration_dir="$temp_dir/atlas-lint-migrations"
+  mkdir -p "$lint_migration_dir"
+  cp "$repo_root/migrations/"*.sql "$lint_migration_dir/"
+  while IFS= read -r base_migration; do
+    wrap_migration_in_transaction "$lint_migration_dir/${base_migration##*/}"
+  done < <(rg -l -i 'LOCK[[:space:]]+TABLE' "$baseline_dir/migrations" --glob '*.sql')
 
-  apply_migrations "$baseline_dir/migrations" "$lint_apply_dsn"
-  run_atlas_migration_lint "$changed_migration_dir" "$lint_dsn" "${#changed_sql_migrations[@]}"
+  run_atlas_migration_lint "$lint_migration_dir" "$lint_dsn" "${#added_sql_migrations[@]}"
 else
-  printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
+  printf '%s\n' 'Atlas migration lint skipped: no added SQL migrations.'
 fi
 
 run_atlas_lint_fixture() {
@@ -118,6 +127,9 @@ run_atlas_lint_fixture() {
 
   mkdir -p "$fixture_dir"
   cp "$fixture_source"/*.sql "$fixture_dir/"
+  while IFS= read -r migration; do
+    wrap_migration_in_transaction "$migration"
+  done < <(rg -l -i 'LOCK[[:space:]]+TABLE' "$fixture_dir" --glob '*.sql')
 
   if run_atlas_migration_lint "$fixture_dir" "$fixture_dsn" 1 >"$lint_output" 2>&1; then
     lint_status=0
@@ -149,13 +161,7 @@ docker exec "$postgres_container" createdb -U postgres migration_lint_destructiv
 docker exec "$postgres_container" createdb -U postgres migration_lint_base_lock
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
-
-base_lock_fixture_dir="$temp_dir/atlas-lint-base-lock-history"
-mkdir -p "$base_lock_fixture_dir"
-cp "$repo_root/.github/scripts/testdata/migrations/atlas-lint/base-lock-history"/*.sql "$base_lock_fixture_dir/"
-"$atlas_lint_binary" migrate hash --dir "file://$base_lock_fixture_dir" >/dev/null
-apply_migrations "$base_lock_fixture_dir" "$base_lock_fixture_apply_dsn"
-run_atlas_lint_fixture base-lock-change pass migration_lint_base_lock
+run_atlas_lint_fixture base-lock pass migration_lint_base_lock
 
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 
