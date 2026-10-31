@@ -26,6 +26,7 @@ OPTIONAL_VALUES = {
     "TG_ADVERTISE_DEMO_GUEST_SIGN_UP": {"true"},
     "TG_TURNSTILE_SIGNIN_ENABLED": {"false", "true"},
 }
+QA_BYPASS_TOKEN_PATH = pathlib.Path("/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token")
 
 
 def reject(message: str) -> None:
@@ -33,7 +34,7 @@ def reject(message: str) -> None:
     raise SystemExit(1)
 
 
-def read_turnstile_secret(path: pathlib.Path) -> str:
+def read_runtime_secret(path: pathlib.Path, name: str, pattern: str, format_error: str) -> str:
     try:
         secret_dir_metadata = path.parent.lstat()
         secret_metadata = path.lstat()
@@ -46,7 +47,7 @@ def read_turnstile_secret(path: pathlib.Path) -> str:
         or secret_dir_metadata.st_uid != 0
         or stat.S_IMODE(secret_dir_metadata.st_mode) != 0o700
     ):
-        reject("turnstile-secret-directory-owner-or-mode")
+        reject(f"{name}-directory-owner-or-mode")
     if (
         stat.S_ISLNK(secret_metadata.st_mode)
         or not stat.S_ISREG(secret_metadata.st_mode)
@@ -54,10 +55,28 @@ def read_turnstile_secret(path: pathlib.Path) -> str:
         or secret_metadata.st_gid != 65532
         or stat.S_IMODE(secret_metadata.st_mode) != 0o440
     ):
-        reject("turnstile-secret-file-owner-group-or-mode")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", secret_key):
-        reject("turnstile-secret-key-format")
+        reject(f"{name}-file-owner-group-or-mode")
+    if not re.fullmatch(pattern, secret_key):
+        reject(format_error)
     return secret_key
+
+
+def read_turnstile_secret(path: pathlib.Path) -> str:
+    return read_runtime_secret(
+        path,
+        "turnstile-secret",
+        r"[A-Za-z0-9_-]+",
+        "turnstile-secret-key-format",
+    )
+
+
+def read_qa_bypass_token(path: pathlib.Path) -> str:
+    return read_runtime_secret(
+        path,
+        "turnstile-qa-bypass-token",
+        r"[A-Za-z0-9_-]{32,256}",
+        "turnstile-qa-bypass-token-format",
+    )
 
 
 def validate_values(values: dict[str, str]) -> None:
@@ -83,8 +102,11 @@ def validate_values(values: dict[str, str]) -> None:
         reject("turnstile-secret-file-path")
     secret_path = pathlib.Path(secret_path_value)
     secret_key = read_turnstile_secret(secret_path)
+    qa_bypass_token = read_qa_bypass_token(QA_BYPASS_TOKEN_PATH)
     if site_key == secret_key:
         reject("turnstile-key-reuse")
+    if qa_bypass_token in {site_key, secret_key}:
+        reject("turnstile-qa-bypass-token-reuse")
     if any(values[name] != value for name, value in EXPECTED.items()):
         reject("fixed-demo-settings")
     if values["TG_WEBSOCKET_ALLOWED_ORIGINS"] != "https://web.teagram.io,https://demo.teagram.io":

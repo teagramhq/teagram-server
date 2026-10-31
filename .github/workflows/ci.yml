@@ -2437,6 +2437,8 @@ jobs:
           cat > .env <<'ENV'
           POSTGRES_PASSWORD=ci-local-mode-postgres
           TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+          TG_TURNSTILE_TEST_MODE=true
+          TG_TURNSTILE_HOSTNAMES=localhost,127.0.0.1
           ENV
           printf 'TEAGRAM_MEDIA_KEY_SOURCE_DIR=%s\nTG_MEDIA_KEY_CURRENT=1\n' "$media_key_dir" >> .env
           chmod 600 .env
@@ -2447,6 +2449,9 @@ jobs:
           docker compose config --format json >"$RUNNER_TEMP/teagram-server-local-compose.json"
           jq -e '
             .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+            and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "true"
+            and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "localhost,127.0.0.1"
+            and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
             and ([.services.teagramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
             and ((.services.teagramd.secrets // []) | length) == 1
             and any(.services.teagramd.secrets[]; .source == "teagramd_turnstile" and .target == "teagramd-turnstile")
@@ -2778,12 +2783,23 @@ jobs:
           test "$(sudo stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys")" = 700:65532:65532
           test "$(sudo stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys/1.key")" = 600:65532:65532
 
+          env -u TG_TURNSTILE_TEST_MODE -u TG_TURNSTILE_HOSTNAMES \
+            POSTGRES_PASSWORD=ci-public-turnstile \
+            TG_PUBLIC_LINK_PREFIX=https://web.teagram.io/ \
+            docker compose --env-file /dev/null --file docker-compose.yml config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-public-turnstile-default.json"
+          jq -e '
+            .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
+            and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io"
+          ' "$RUNNER_TEMP/teagram-server-compose-public-turnstile-default.json"
+
           env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
             -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
           jq -e '
             (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "")
             and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "")
             and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
             and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
             and (.secrets.teagramd_turnstile.file == "/dev/null")

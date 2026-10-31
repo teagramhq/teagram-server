@@ -327,6 +327,8 @@ services:
       # while creating the first account through auth.signUp, then change it
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
+      TG_TURNSTILE_TEST_MODE: ${TG_TURNSTILE_TEST_MODE:-false}
+      TG_TURNSTILE_HOSTNAMES: "${TG_TURNSTILE_HOSTNAMES:-web.teagram.io}"
       # User-issued invites stay disabled unless the operator sets a quota.
       TG_USER_INVITE_QUOTA: ${TG_USER_INVITE_QUOTA:-}
       # Public WebSocket traffic is served by the isolated proxy-trust replica
@@ -345,6 +347,7 @@ services:
       # source path stays on the Compose side.
       TG_TURNSTILE_SITE_KEY: ${TEAGRAM_TURNSTILE_SITE_KEY:-}
       TG_TURNSTILE_SECRET_KEY_FILE: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:+/run/secrets/teagramd-turnstile}
+      TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
       TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.

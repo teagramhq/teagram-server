@@ -22,7 +22,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 76d39df4e1a271e9d2800536647f03a1c28bcace
+      REAL_CLIENT_WEB_REVISION: 8857e666a6b1bdb542c3975cb7abbb7e1a9c1fa7
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: teagramhq/teagram-web
-          ref: 76d39df4e1a271e9d2800536647f03a1c28bcace
+          ref: ${{ env.REAL_CLIENT_WEB_REVISION }}
           path: web-source
           persist-credentials: false
 
