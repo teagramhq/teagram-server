@@ -110,6 +110,9 @@ compose() {
     "$@"
 }
 
+# shellcheck source=deploy/qa-invite/rollback.sh
+source "$REPO_ROOT/deploy/qa-invite/rollback.sh"
+
 ensure_tls() {
   local key=$TLS_DIR/server.key cert=$TLS_DIR/server.crt key_tmp cert_tmp
   [[ ! -L "$TLS_DIR" ]] || fail 'TLS directory must not be a symlink'
@@ -204,35 +207,6 @@ probe_endpoint() {
   jq -e --arg mtproto "$HOST_NAME:443" --arg websocket "wss://$HOST_NAME/apiws" \
     '.mtproto.endpoint == $mtproto and .websocket.endpoint == $websocket' \
     <<< "$document" >/dev/null
-}
-
-rollback_failed_up() {
-  local previous_ref=$1 dump=$2 restore_ok=1
-  compose down --remove-orphans || true
-  if [[ -n "$dump" && -s "$dump" ]]; then
-    compose up -d --wait postgres || restore_ok=0
-    compose exec -T postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
-    compose exec -T postgres createdb -U postgres teagram_rollback || restore_ok=0
-    if compose exec -T postgres pg_restore -U postgres --no-owner --no-privileges \
-      --exit-on-error -d teagram_rollback < "$dump" &&
-      compose exec -T postgres dropdb -U postgres teagram </dev/null &&
-      compose exec -T postgres createdb -U postgres teagram </dev/null &&
-      compose exec -T postgres pg_restore -U postgres --no-owner --no-privileges \
-        --exit-on-error -d teagram < "$dump"; then
-      compose exec -T postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
-    else
-      restore_ok=0
-      printf '%s\n' 'qa-invite: automatic database restore failed; preserve the dump for manual recovery' >&2
-    fi
-  fi
-  if [[ -n "$previous_ref" && "$restore_ok" == 1 ]]; then
-    write_env "$previous_ref"
-    compose up -d --wait --no-deps teagramd tls-edge haproxy || {
-      restore_ok=0
-      printf '%s\n' 'qa-invite: previous image could not be restored automatically' >&2
-    }
-  fi
-  [[ "$restore_ok" == 1 ]] || printf '%s\n' 'qa-invite: stack remains down; inspect the retained database dump before retrying' >&2
 }
 
 do_up() {

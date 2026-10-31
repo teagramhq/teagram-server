@@ -52,23 +52,21 @@ jobs:
           ISSUE_KEY: ${{ inputs.issue }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
-          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
           QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
           QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
-          QA_ACCOUNTS_SSH_KEY: ${{ secrets.QA_ACCOUNTS_SSH_KEY }}
-          QA_ACCOUNTS_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
         run: |
+          [[ "$GITHUB_REF" == refs/heads/main ]] || {
+            echo "::error::Deploy qa-invite may run only from main"
+            exit 1
+          }
           [[ "$ISSUE_KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]
           [[ "$REQUESTED_ACTION" =~ ^(up|down|status|create-account)$ ]]
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" ]]
           [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
           (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
           if [[ "$REQUESTED_ACTION" == create-account ]]; then
             [[ "$ACCOUNT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
             ACCOUNT_NAME=${ACCOUNT_NAME,,}
-            [[ -n "$QA_ACCOUNTS_SSH_KEY" && -n "$QA_ACCOUNTS_KNOWN_HOSTS" ]]
             [[ "$QA_ACCOUNTS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
             [[ "$QA_ACCOUNTS_PORT" =~ ^[0-9]{1,5}$ ]]
             (( 10#$QA_ACCOUNTS_PORT >= 1 && 10#$QA_ACCOUNTS_PORT <= 65535 ))
@@ -107,13 +105,21 @@ jobs:
         env:
           DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
-          QA_ACCOUNTS_SSH_KEY: ${{ secrets.QA_ACCOUNTS_SSH_KEY }}
-          QA_ACCOUNTS_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
+          QA_ACCOUNTS_SSH_KEY: ${{ steps.input.outputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
+          QA_ACCOUNTS_KNOWN_HOSTS: ${{ steps.input.outputs.action == 'create-account' && vars.QA_ACCOUNTS_KNOWN_HOSTS || '' }}
         run: |
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" ]] || {
+            echo "::error::Demo deployment credentials are not configured"
+            exit 1
+          }
           install -d -m 0700 "$RUNNER_TEMP/ssh-qa-invite"
           (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_demo")
           printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"
           if [[ "${{ steps.input.outputs.action }}" == create-account ]]; then
+            [[ -n "$QA_ACCOUNTS_SSH_KEY" && -n "$QA_ACCOUNTS_KNOWN_HOSTS" ]] || {
+              echo "::error::QA account-writer credentials are not configured"
+              exit 1
+            }
             (umask 077 && printf '%s\n' "$QA_ACCOUNTS_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_qa")
             printf '%s\n' "$QA_ACCOUNTS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts"
           fi
@@ -133,6 +139,7 @@ jobs:
             }
 
       - name: Create an operator account and store its credential on QA
+        id: create_account
         if: ${{ steps.input.outputs.action == 'create-account' }}
         env:
           ACCOUNT_NAME: ${{ steps.input.outputs.account_name }}
@@ -145,34 +152,48 @@ jobs:
           set -Eeuo pipefail
           password_file="$RUNNER_TEMP/qa-invite-account-password"
           record_file="$RUNNER_TEMP/qa-invite-account-record"
-          trap 'rm -f -- "$password_file" "$record_file"' EXIT
+          store_result_file="$RUNNER_TEMP/qa-invite-account-store-result"
+          result_file="$RUNNER_TEMP/qa-invite-create-result"
+          error_file="$RUNNER_TEMP/qa-invite-create-error"
+          trap 'rm -f -- "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"' EXIT
           umask 077
           openssl rand -hex 32 > "$password_file"
           password=$(<"$password_file")
           printf '::add-mask::%s\n' "$password"
           printf '%s\t%s\n' "$ACCOUNT_NAME" "$password" > "$record_file"
-          ssh -T -p "$QA_ACCOUNTS_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_qa" \
+          unset password
+          if ! ssh -T -p "$QA_ACCOUNTS_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_qa" \
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts" \
-            "qa@$QA_ACCOUNTS_HOST" store < "$record_file" >/dev/null
-          result_file="$RUNNER_TEMP/qa-invite-create-result"
-          error_file="$RUNNER_TEMP/qa-invite-create-error"
+            "qa@$QA_ACCOUNTS_HOST" store < "$record_file" > "$store_result_file"; then
+            echo "::error::Could not confirm QA credential storage; retain the QA record and reconcile before retrying"
+            exit 1
+          fi
+          if ! grep -Fxq "stored=${ACCOUNT_NAME,,}" "$store_result_file"; then
+            echo "::error::QA credential storage confirmation was invalid; reconcile before retrying"
+            exit 1
+          fi
           if ! ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "root@$DEMO_DEPLOY_HOST" "qa-invite $SOURCE_SHA create-account $ACCOUNT_NAME" \
             < "$password_file" > "$result_file" 2> "$error_file"; then
-            ssh -T -p "$QA_ACCOUNTS_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_qa" \
-              -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-              -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts" \
-              "qa@$QA_ACCOUNTS_HOST" "remove ${ACCOUNT_NAME,,}" </dev/null >/dev/null || true
-            echo "::error::Operator account creation failed; the pending QA credential was removed"
+            echo "::error::Operator account result is unknown; its QA credential was retained for reconciliation"
             exit 1
           fi
-          grep -Fxq "account-created=${ACCOUNT_NAME,,}" "$result_file"
-          rm -f -- "$password_file" "$record_file" "$result_file" "$error_file"
-          printf 'operator-account-created=%s credential-stored=qa-user-file\n' "${ACCOUNT_NAME,,}" >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -Fxq "account-created=${ACCOUNT_NAME,,}" "$result_file"; then
+            echo "::error::Operator account confirmation was invalid; its QA credential was retained for reconciliation"
+            exit 1
+          fi
+          rm -f -- "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"
+          for path in "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || {
+              echo "::error::Could not verify removal of temporary account credential data"
+              exit 1
+            }
+          done
+          printf 'account_name=%s\n' "${ACCOUNT_NAME,,}" >> "$GITHUB_OUTPUT"
 
       - name: Run the reviewed QA invite operation
         if: ${{ steps.input.outputs.action != 'create-account' }}
@@ -199,4 +220,16 @@ jobs:
 
       - name: Remove deployment keys
         if: always()
-        run: rm -rf -- "$RUNNER_TEMP/ssh-qa-invite"
+        run: |
+          ssh_dir="$RUNNER_TEMP/ssh-qa-invite"
+          rm -rf -- "$ssh_dir"
+          [[ ! -e "$ssh_dir" && ! -L "$ssh_dir" ]] || {
+            echo "::error::Could not verify removal of temporary deployment keys"
+            exit 1
+          }
+
+      - name: Report operator account creation
+        if: ${{ success() && steps.create_account.outputs.account_name != '' }}
+        env:
+          ACCOUNT_NAME: ${{ steps.create_account.outputs.account_name }}
+        run: printf 'operator-account-created=%s credential-stored=qa-user-file\n' "$ACCOUNT_NAME" >> "$GITHUB_STEP_SUMMARY"

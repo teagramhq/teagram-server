@@ -28,6 +28,14 @@ Run the `Deploy qa-invite.` workflow from `main` with one operation:
 | `create-account` | Creates an operator account and stores its handle/password in `/home/qa/.qa-accounts-invite` with mode 0600. |
 | `down` | Stops the stack while preserving its data and identity. |
 
+If the demo SSH response is lost after credentials are stored, the workflow
+fails without deleting the QA credential or reporting account creation as
+successful. Reconcile by checking sign-in from teagram-qa with the saved
+credential. If the account exists, keep using that record. If it does not,
+remove its stale line from the QA-owned credential file only after confirming
+absence, then retry the workflow. A successful summary is written only after
+the temporary runner password files and SSH keys are removed and verified.
+
 The server uses `TG_REGISTRATION=invite`, `TG_USER_INVITE_QUOTA=5`, and
 `TG_USER_INVITE_MIN_ACCOUNT_AGE=0` on the raw and WebSocket listeners. The
 workflow accepts account names from 2 to 32 ASCII letters, digits, or
