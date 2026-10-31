@@ -1460,7 +1460,7 @@ query_lexemes AS (
     FROM parsed_query AS parsed
     CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
 ),
-selected_query AS (
+selected_query AS MATERIALIZED (
     SELECT ql.tsquery, ql.lexeme
     FROM query_lexemes AS ql
     LEFT JOIN message_search_posting_counts AS counts
@@ -1473,25 +1473,26 @@ selected_query AS (
 )
 SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
 FROM selected_query AS q
-JOIN message_search_postings AS p
-  ON p.owner_id = $1::bigint
- AND p.peer_type = $2::smallint
- AND p.peer_id = $3::bigint
- AND p.lexeme = q.lexeme
-JOIN messages AS m
-  ON m.owner_id = p.owner_id
- AND m.local_id = p.local_id
- AND m.peer_type = p.peer_type
- AND m.peer_id = p.peer_id
-WHERE p.owner_id = $1::bigint
-  AND p.peer_type = $2::smallint
-  AND p.peer_id = $3::bigint
-  AND m.deleted = false
-  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-  AND m.message_tsv @@ q.tsquery
-  AND ($4::bigint = 0 OR p.local_id < $4::bigint)
-ORDER BY p.local_id DESC
-LIMIT $5::int
+CROSS JOIN LATERAL (
+    SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
+    FROM message_search_postings AS p
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE p.owner_id = $1::bigint
+      AND p.peer_type = $2::smallint
+      AND p.peer_id = $3::bigint
+      AND p.lexeme = q.lexeme
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND ($4::bigint = 0 OR p.local_id < $4::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT $5::int
+) AS m
+ORDER BY m.local_id DESC
 `
 
 type SearchMessagesByPostingsParams struct {

@@ -292,7 +292,7 @@ query_lexemes AS (
     FROM parsed_query AS parsed
     CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
 ),
-selected_query AS (
+selected_query AS MATERIALIZED (
     SELECT ql.tsquery, ql.lexeme
     FROM query_lexemes AS ql
     LEFT JOIN message_search_posting_counts AS counts
@@ -305,25 +305,26 @@ selected_query AS (
 )
 SELECT m.*
 FROM selected_query AS q
-JOIN message_search_postings AS p
-  ON p.owner_id = sqlc.arg(owner_id)::bigint
- AND p.peer_type = sqlc.arg(peer_type)::smallint
- AND p.peer_id = sqlc.arg(peer_id)::bigint
- AND p.lexeme = q.lexeme
-JOIN messages AS m
-  ON m.owner_id = p.owner_id
- AND m.local_id = p.local_id
- AND m.peer_type = p.peer_type
- AND m.peer_id = p.peer_id
-WHERE p.owner_id = sqlc.arg(owner_id)::bigint
-  AND p.peer_type = sqlc.arg(peer_type)::smallint
-  AND p.peer_id = sqlc.arg(peer_id)::bigint
-  AND m.deleted = false
-  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-  AND m.message_tsv @@ q.tsquery
-  AND (sqlc.arg(offset_id)::bigint = 0 OR p.local_id < sqlc.arg(offset_id)::bigint)
-ORDER BY p.local_id DESC
-LIMIT sqlc.arg(lim)::int;
+CROSS JOIN LATERAL (
+    SELECT m.*
+    FROM message_search_postings AS p
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE p.owner_id = sqlc.arg(owner_id)::bigint
+      AND p.peer_type = sqlc.arg(peer_type)::smallint
+      AND p.peer_id = sqlc.arg(peer_id)::bigint
+      AND p.lexeme = q.lexeme
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND (sqlc.arg(offset_id)::bigint = 0 OR p.local_id < sqlc.arg(offset_id)::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+) AS m
+ORDER BY m.local_id DESC;
 
 -- SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
 -- file_id <> 0 as a top-level predicate so the partial messages_file_idx can
