@@ -60,12 +60,14 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,mirror-rustfs-qualification-images,ops-prioritize-main,restore-readiness,rustfs-transition-qualification,test-browser-acceptance,test-compose,test-e2e-admin,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,mirror-rustfs-qualification-images,ops-prioritize-main,restore-readiness,rustfs-transition-qualification,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'check-demo-web-pin'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
+    ci_fail 'the required CI gate must include the git-hooks lane'
   [[ "$(ci_query '.jobs."schema-gate-postgres" // ""')" == '' ]] ||
     ci_fail 'the obsolete PostgreSQL schema gate must be removed'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'schema-gate-postgres'* ]] ||
@@ -79,12 +81,23 @@ check_ci_contract() {
     ci_fail 'the required CI gate must receive the pinned demo web artifact result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
     ci_fail 'the required CI gate must receive the migrations result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_GIT_HOOKS_RESULT')" == '${{ needs.test-git-hooks.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the git-hooks result'
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$CHECK_DEMO_WEB_PIN_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed demo web artifact build'
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed migrations lane'
+  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq '"$TEST_GIT_HOOKS_RESULT" != "success"' ||
+    ci_fail 'the required CI gate must reject a failed git-hooks lane'
+  [[ "$(ci_query '.jobs."test-git-hooks".name')" == 'test: git-hooks' ]] ||
+    ci_fail 'the git-hooks lane must follow the CI job naming convention'
+  [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test commit message validation and merge exemptions") | .run')" == 'bash test/githooks/commit-msg-merge.sh' ]] ||
+    ci_fail 'the git-hooks lane must run the commit-message regression fixture'
+  [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test selective pre-push checks") | .run')" == 'python3 -B .github/scripts/test_git_hooks.py' ]] ||
+    ci_fail 'the git-hooks lane must run the pre-push regression fixture'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
