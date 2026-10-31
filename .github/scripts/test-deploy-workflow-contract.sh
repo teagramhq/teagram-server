@@ -50,8 +50,12 @@ ci_query() {
 }
 
 check_ci_contract() {
-  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'pull_request,push' ]] ||
-    ci_fail 'triggers must be exactly push and pull_request'
+  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
+    ci_fail 'triggers must be exactly merge_group, pull_request, and push'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check RPC performance workflow contract") | .env.GOPROXY')" == 'https://proxy.golang.org|direct' ]] ||
+    ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
+  [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
+    ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
     ci_fail 'push CI must be limited to main'
   [[ "$(ci_query '.concurrency.group')" == "$expected_ci_group" ]] ||
@@ -130,6 +134,35 @@ check_ci_contract() {
     ci_fail 'the tested image digest artifact must be named for its source SHA'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with."if-no-files-found"')" == 'error' ]] ||
     ci_fail 'publishing must fail if the trusted image digest artifact is missing'
+
+  local manifest_start deploy_start
+  manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
+  [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
+     "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
+    ci_fail 'the manifest check must invoke kubectl directly in its k3s container'
+  [[ "$manifest_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the manifest check must wait for K3s to register a node before kubectl wait'
+  [[ "$manifest_start" != *"k3s kubectl"* ]] ||
+    ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
+  [[ "$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Check public WebSocket ingress invariants") | .env.KUBECONFIG')" == '${{ runner.temp }}/k3s.yaml' ]] ||
+    ci_fail 'the public WebSocket invariant check must use the job-local k3s API'
+
+  deploy_start="$(ci_query '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run')"
+  [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
+     "$deploy_start" == *"docker exec teagram-k3s kubectl wait"* ]] ||
+    ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
+  [[ "$deploy_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the deployment check must wait for K3s to register a node before kubectl wait'
+  [[ "$deploy_start" == *'cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"'* &&
+     "$deploy_start" == *'--volume "$RUNNER_TEMP/k8s-agent-images:/var/lib/rancher/k3s/agent/images:ro"'* &&
+     "$deploy_start" == *'kubectl get nodes --output json'* &&
+     "$deploy_start" == *'status.images[]?.names[]?'* ]] ||
+    ci_fail 'the deployment check must preload workload images and verify them through the Kubernetes node API'
+  [[ "$deploy_start" != *"teagram-k3s k3s ctr"* &&
+     "$deploy_start" != *"teagram-k3s k3s crictl"* ]] ||
+    ci_fail 'the deployment check must not invoke unavailable k3s image subcommands'
+  [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
+    ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
 
 # Run the actual target step against controlled forge responses.
@@ -781,6 +814,8 @@ self_test() {
   done
 
   local ci_mutations=(
+    'del(.on.merge_group)'
+    '.on.merge_group.types = ["workflow_dispatch"]'
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'

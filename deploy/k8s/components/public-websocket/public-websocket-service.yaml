@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: teagramd-public
+  labels:
+    app.kubernetes.io/name: teagramd-public
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: teagramd-public
+  ports:
+    - name: public-websocket
+      protocol: TCP
+      port: 2446
+      targetPort: public-proxy

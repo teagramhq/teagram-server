@@ -294,7 +294,7 @@ GITHUB_REPOSITORY=example/repo \
 [[ "$(<"$test_tmp/staggered-reads")" == 3 && "$(<"$test_tmp/staggered-reruns")" == $'123\n456' ]] ||
   fail 'recovery must poll both IDs together and rerun each as soon as cancellation completes'
 
-expected_roots=$'build-browser-acceptance-image\nbuild-server-image\ncheck-demo-web-pin\ncheck-deploy-workflow\ncheck-sqlc-drift\ncheck-sticker-license\nlint-css\nlint-go\nlint-sql\nmirror-rustfs-qualification-images\npublish-demo-image\nrestore-readiness\nrustfs-transition-qualification\ntest-browser-acceptance\ntest-compose\ntest-e2e-admin\ntest-go\ntest-migrations\ntest-photo-worker\ntest-real-server-fixtures\ntest-smoke\ntest-websocket-d1\ntest-websocket-permanent-exchange'
+expected_roots=$'build-browser-acceptance-image\nbuild-server-image\ncheck-demo-web-pin\ncheck-deploy-workflow\ncheck-k8s-manifests\ncheck-sqlc-drift\ncheck-sticker-license\nlint-css\nlint-go\nlint-sql\nmirror-rustfs-qualification-images\npublish-demo-image\npublish-k8s-images\nrestore-readiness\nrustfs-transition-qualification\ntest-browser-acceptance\ntest-compose\ntest-e2e-admin\ntest-go\ntest-k8s-deploy\ntest-migrations\ntest-photo-worker\ntest-real-server-fixtures\ntest-smoke\ntest-websocket-d1\ntest-websocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and (.value.needs == "ops-prioritize-main" or (.value.needs[] == "ops-prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
@@ -366,6 +366,13 @@ while IFS= read -r job; do
     fail "$job must bypass the skipped priority job on pull requests"
 done <<< "$actual_roots"
 
+sticker_bundle_if="$(query '.jobs."check-sticker-license".if')"
+[[ "$sticker_bundle_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$sticker_bundle_if" == *"github.event_name == 'merge_group'"* ]] ||
+  fail 'the sticker bundle must be available to merge-group deployment tests'
+k8s_deploy_if="$(query '.jobs."test-k8s-deploy".if')"
+[[ "$k8s_deploy_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$k8s_deploy_if" == *"github.event_name == 'merge_group'"* && "$k8s_deploy_if" == *"needs.check-sticker-license.result == 'success'"* ]] ||
+  fail 'the K8s deployment test must run on merge groups after the sticker bundle'
+
 always_jobs="$(query '.jobs | to_entries[] | select(.key != "ci" and ((.value.if // "") | contains("always()"))) | .key')"
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
@@ -383,13 +390,15 @@ ci_needs="$(query '.jobs.ci.needs[]')"
 [[ "$ci_needs" == *'ops-prioritize-main'* ]] ||
   fail 'the required ci summary must depend on the priority job'
 ci_if="$(query '.jobs.ci.if')"
-[[ "$ci_if" == *'always()'* && "$ci_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'failure'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'cancelled'"* ]] ||
-  fail 'the required ci summary must run to report priority-gate failures on main'
+[[ "$ci_if" == *'always()'* && "$ci_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'failure'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'cancelled'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$ci_if" == *"github.event_name == 'pull_request'"* && "$ci_if" == *"github.event_name == 'merge_group'"* ]] ||
+  fail 'the required ci summary must run after priority on main, pull requests, and merge groups'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == "\${{ needs.ops-prioritize-main.result }}" ]] ||
   fail 'the required ci summary must inspect the priority result'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'
 summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')"
+[[ "$summary_run" == *'if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then'* && "$summary_run" == *'"$MAIN_PRIORITY_RESULT" != skipped'* && "$summary_run" == *'"$K8S_DEPLOY_RESULT" != success'* ]] ||
+  fail 'the merge-group ci summary must require the skipped priority gate and K8s deployment lane'
 [[ "$summary_run" == *'"$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success"'* && "$summary_run" != *'expected_browser_acceptance_image_result=skipped'* ]] ||
   fail 'the required ci summary must require browser images on pull requests and main pushes'
 

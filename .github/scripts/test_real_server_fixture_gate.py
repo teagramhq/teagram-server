@@ -214,12 +214,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # The publisher and recovery dispatcher are main-push-only. The
-        # main-priority job is skipped on PRs and checked separately. MAIN-2918
-        # is deleting the other three lanes.
+        # Image publishers run after their build and CI gates; the recovery
+        # dispatcher and demo publisher are main-push-only. The main-priority
+        # job is skipped on PRs and checked separately.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
+            "publish-k8s-images",
             "ops-dispatch-pr-ci-recovery",
             "ops-prioritize-main",
             "mirror-rustfs-qualification-images",

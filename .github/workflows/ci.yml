@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -119,7 +121,7 @@ jobs:
   check-sticker-license:
     name: 'check: sticker-license'
     needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -268,7 +270,7 @@ jobs:
 
       - name: Lint query sources and new migrations
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha) || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
@@ -963,7 +965,7 @@ jobs:
           D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
           D1_REPAIRED_WEB_CHECKOUT: ${{ github.workspace }}/web-client-repaired
           D1_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          D1_FOLLOWUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          D1_FOLLOWUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha) || github.sha }}
           D1_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash .github/scripts/run-websocket-d1.sh
@@ -1130,6 +1132,8 @@ jobs:
         run: .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check RPC performance workflow contract
+        env:
+          GOPROXY: 'https://proxy.golang.org|direct'
         run: .github/scripts/test-perf-workflow-contract.sh
 
       - name: Check main CI queue priority contract
@@ -1367,9 +1371,430 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  check-k8s-manifests:
+    name: "check: k8s-manifests"
+    needs: ops-prioritize-main
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    env:
+      K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
+      KUBECTL_VERSION: v1.37.1
+      KUBECONFORM_VERSION: v0.8.0
+      KUBERNETES_VERSION: 1.37.1
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install pinned kubectl and kubeconform
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/k8s-tools"
+          mkdir -p "$tools_dir"
+          curl --fail --silent --show-error --location \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+            --output "$tools_dir/kubectl"
+          printf '%s  %s\n' 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8 "$tools_dir/kubectl" \
+            | sha256sum --check --status
+          chmod 0755 "$tools_dir/kubectl"
+
+          kubeconform_archive=kubeconform-linux-amd64.tar.gz
+          curl --fail --silent --show-error --location \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/${kubeconform_archive}" \
+            --output "$tools_dir/$kubeconform_archive"
+          printf '%s  %s\n' 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 "$tools_dir/$kubeconform_archive" \
+            | sha256sum --check --status
+          tar --extract --gzip --file "$tools_dir/$kubeconform_archive" --directory "$tools_dir" kubeconform
+          chmod 0755 "$tools_dir/kubeconform"
+          echo "$tools_dir" >> "$GITHUB_PATH"
+
+      - name: Start pinned k3s API for client dry-run
+        run: |
+          set -euo pipefail
+          docker run --detach --privileged --name k8s-manifest-check \
+            --publish 127.0.0.1:6443:6443 \
+            "$K3S_IMAGE" server \
+            --disable=traefik \
+            --disable=servicelb \
+            --disable=metrics-server \
+            --tls-san=127.0.0.1 \
+            --write-kubeconfig-mode=644
+          node_registered=false
+          for attempt in $(seq 1 90); do
+            if docker exec k8s-manifest-check kubectl get nodes --no-headers 2>/dev/null | grep --quiet .; then
+              node_registered=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$node_registered" != true ]]; then
+            echo "k3s API did not register a node within 180 seconds" >&2
+            exit 1
+          fi
+          docker exec k8s-manifest-check kubectl wait \
+            --for=condition=Ready node --all --timeout=180s
+          docker cp k8s-manifest-check:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=condition=Ready node --all --timeout=180s
+
+      - name: Render and validate production and CI overlays
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
+          required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
+          test "$required_migration" = "$latest_migration"
+          for overlay in prod ci; do
+            rendered="$RUNNER_TEMP/k8s-${overlay}.yaml"
+            kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
+            kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
+            kubectl apply --dry-run=client --validate=false --filename "$rendered"
+          done
+          for image in teagramd teagram-migrations teagramd-mc-init link-edge-landing link-edge-selector; do
+            grep --quiet --extended-regexp \
+              "image: ghcr\\.io/teagramhq/${image}@sha256:[0-9a-f]{64}$" \
+              "$RUNNER_TEMP/k8s-prod.yaml"
+          done
+          migrations_digest=$(sed -n 's/^ *image: ghcr.io\/teagramhq\/teagram-migrations@sha256:\([0-9a-f]*\)$/\1/p' "$RUNNER_TEMP/k8s-prod.yaml" | head -n 1)
+          rustfs_init_digest=$(sed -n 's/^ *image: ghcr.io\/teagramhq\/teagramd-mc-init@sha256:\([0-9a-f]*\)$/\1/p' "$RUNNER_TEMP/k8s-prod.yaml" | head -n 1)
+          test "${#migrations_digest}" -eq 64
+          test "${#rustfs_init_digest}" -eq 64
+          grep --fixed-strings --quiet "name: db-migrations-${migrations_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
+          grep --fixed-strings --quiet "name: rustfs-init-${rustfs_init_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
+
+      - name: Check public WebSocket ingress invariants
+        env:
+          KUBECONFIG: ${{ runner.temp }}/k3s.yaml
+        run: bash deploy/k8s/test-public-websocket-component.sh
+
+      - name: Remove k3s manifest-check server
+        if: always()
+        run: docker rm --force --volumes k8s-manifest-check || true
+
+  test-k8s-deploy:
+    name: "test: k8s-deploy"
+    needs:
+      - ops-prioritize-main
+      - check-sticker-license
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) && needs.check-sticker-license.result == 'success' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+
+    env:
+      K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
+      POSTGRES_TEST_PASSWORD: k3s-postgres-ci-password
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
+      - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
+
+      - name: Build the exact workload images used by k3s
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --build-context sticker-bundle=build \
+            --build-arg STICKER_BUNDLE_SOURCE=sticker-bundle \
+            --build-arg "TEAGRAMD_SOURCE_REVISION=$GITHUB_SHA" \
+            --tag ghcr.io/teagramhq/teagramd:ci --load .
+          docker buildx build \
+            --file deploy/link-edge/Dockerfile \
+            --target linklanding \
+            --build-arg EDGE_IMAGE_SOURCE=https://github.com/teagramhq/teagram-server \
+            --build-arg "EDGE_IMAGE_REVISION=$GITHUB_SHA" \
+            --tag ghcr.io/teagramhq/link-edge-landing:ci --load .
+          docker buildx build \
+            --file deploy/link-edge/Dockerfile \
+            --target selector \
+            --build-arg EDGE_IMAGE_SOURCE=https://github.com/teagramhq/teagram-server \
+            --build-arg "EDGE_IMAGE_REVISION=$GITHUB_SHA" \
+            --tag ghcr.io/teagramhq/link-edge-selector:ci --load .
+          docker buildx build \
+            --file deploy/k8s/Dockerfile.migrations \
+            --build-arg "TEAGRAMD_SOURCE_REVISION=$GITHUB_SHA" \
+            --tag ghcr.io/teagramhq/teagram-migrations:ci --load .
+          docker buildx build \
+            --file Dockerfile.mc \
+            --build-arg "TEAGRAMD_SOURCE_REVISION=$GITHUB_SHA" \
+            --tag ghcr.io/teagramhq/teagramd-mc-init:ci --load .
+
+      - name: Verify image provenance labels
+        run: |
+          set -euo pipefail
+          for image in \
+            ghcr.io/teagramhq/teagramd:ci \
+            ghcr.io/teagramhq/link-edge-landing:ci \
+            ghcr.io/teagramhq/link-edge-selector:ci \
+            ghcr.io/teagramhq/teagram-migrations:ci \
+            ghcr.io/teagramhq/teagramd-mc-init:ci; do
+            source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
+            revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            test "$source" = https://github.com/teagramhq/teagram-server
+            test "$revision" = "$GITHUB_SHA"
+          done
+
+      - name: Save the tested images for k3s and GHCR publication
+        run: |
+          docker save --output "$RUNNER_TEMP/k8s-images.tar" \
+            ghcr.io/teagramhq/teagramd:ci \
+            ghcr.io/teagramhq/link-edge-landing:ci \
+            ghcr.io/teagramhq/link-edge-selector:ci \
+            ghcr.io/teagramhq/teagram-migrations:ci \
+            ghcr.io/teagramhq/teagramd-mc-init:ci
+
+      - name: Start the pinned k3s server with production disable flags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          mkdir -p "$RUNNER_TEMP/k8s-agent-images"
+          cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"
+          docker run --detach --privileged --name teagram-k3s \
+            --publish 127.0.0.1:6443:6443 \
+            --volume "$RUNNER_TEMP/k8s-agent-images:/var/lib/rancher/k3s/agent/images:ro" \
+            "$K3S_IMAGE" server \
+            --disable=traefik \
+            --disable=servicelb \
+            --disable=metrics-server \
+            --tls-san=127.0.0.1 \
+            --write-kubeconfig-mode=644
+          node_registered=false
+          for attempt in $(seq 1 90); do
+            if docker exec teagram-k3s kubectl get nodes --no-headers 2>/dev/null | grep --quiet .; then
+              node_registered=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$node_registered" != true ]]; then
+            echo "k3s API did not register a node within 180 seconds" >&2
+            exit 1
+          fi
+          docker exec teagram-k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+          docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=condition=Ready node --all --timeout=180s
+          required_images=(
+            ghcr.io/teagramhq/teagramd:ci
+            ghcr.io/teagramhq/link-edge-landing:ci
+            ghcr.io/teagramhq/link-edge-selector:ci
+            ghcr.io/teagramhq/teagram-migrations:ci
+            ghcr.io/teagramhq/teagramd-mc-init:ci
+          )
+          all_images_present=false
+          for attempt in $(seq 1 90); do
+            node_images="$(kubectl get nodes --output json)"
+            all_images_present=true
+            for image in "${required_images[@]}"; do
+              if ! jq --exit-status --arg image "$image" \
+                'any(.items[]?.status.images[]?.names[]?; . == $image)' \
+                <<<"$node_images" >/dev/null; then
+                all_images_present=false
+                break
+              fi
+            done
+            if [[ "$all_images_present" == true ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$all_images_present" != true ]]; then
+            echo "K3s did not import all workload images within 180 seconds" >&2
+            kubectl get nodes --output json \
+              | jq -r '.items[] | .metadata.name as $node | .status.images[]?.names[]? | "\($node): \(.)"' \
+              >&2
+            exit 1
+          fi
+          kubectl create namespace teagram
+          auth=$(printf '%s:%s' "$GITHUB_ACTOR" "$GITHUB_TOKEN" | base64 --wrap=0)
+          jq --null-input --arg auth "$auth" '{auths:{"ghcr.io":{auth:$auth}}}' \
+            > "$RUNNER_TEMP/ghcr-config.json"
+          kubectl create secret generic ghcr-pull --namespace teagram \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson="$RUNNER_TEMP/ghcr-config.json"
+          rm -f "$RUNNER_TEMP/ghcr-config.json"
+
+          printf '%s' "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-password"
+          printf 'postgres://postgres:%s@postgres:5432/teagram?sslmode=disable' \
+            "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-dsn"
+          kubectl create secret generic postgres-credentials --namespace teagram \
+            --from-file=POSTGRES_PASSWORD="$RUNNER_TEMP/postgres-password" \
+            --from-file=TG_POSTGRES_DSN="$RUNNER_TEMP/postgres-dsn"
+          rm -f "$RUNNER_TEMP/postgres-password" "$RUNNER_TEMP/postgres-dsn"
+
+          printf '%s' k3s-rustfs-ci-access > "$RUNNER_TEMP/rustfs-access-key"
+          printf '%s' k3s-rustfs-ci-secret > "$RUNNER_TEMP/rustfs-secret-key"
+          kubectl create secret generic rustfs-credentials --namespace teagram \
+            --from-file=RUSTFS_ACCESS_KEY="$RUNNER_TEMP/rustfs-access-key" \
+            --from-file=RUSTFS_SECRET_KEY="$RUNNER_TEMP/rustfs-secret-key"
+          rm -f "$RUNNER_TEMP/rustfs-access-key" "$RUNNER_TEMP/rustfs-secret-key"
+
+          printf '%s' teagramd-ci-access > "$RUNNER_TEMP/blob-access-key"
+          printf '%s' teagramd-ci-secret > "$RUNNER_TEMP/blob-secret-key"
+          kubectl create secret generic teagramd-blob-credentials --namespace teagram \
+            --from-file=TG_BLOB_S3_ACCESS_KEY_ID="$RUNNER_TEMP/blob-access-key" \
+            --from-file=TG_BLOB_S3_SECRET_ACCESS_KEY="$RUNNER_TEMP/blob-secret-key"
+          rm -f "$RUNNER_TEMP/blob-access-key" "$RUNNER_TEMP/blob-secret-key"
+
+          printf '%064d' 0 > "$RUNNER_TEMP/media-key"
+          kubectl create secret generic teagramd-media-keys --namespace teagram \
+            --from-file=1.key="$RUNNER_TEMP/media-key"
+          rm -f "$RUNNER_TEMP/media-key"
+          kubectl create configmap teagramd-runtime --namespace teagram \
+            --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
+            --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443
+
+      - name: Apply the rendered CI overlay to k3s
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
+
+      - name: Check RustFS initializer secret mounts
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl get jobs --namespace teagram \
+            --selector=app.kubernetes.io/name=rustfs-init --output json \
+            | jq --exit-status '
+                select(.items | length == 1)
+                | .items[0].spec.template.spec as $pod
+                | [$pod.containers[]
+                  | select(.name == "rustfs-init")
+                  | .volumeMounts[].mountPath] as $mounts
+                | ([$mounts[] | select(. == "/run/secrets")] | length) == 1
+                  and ([$mounts[] | select(startswith("/run/secrets/"))] | length) == 0
+                  and ([$pod.volumes[]
+                    | select(.name == "rustfs-init-secrets")
+                    | .projected.sources[].secret.items[].path] | sort)
+                    == (["rustfs-root-access-key", "rustfs-root-secret-key",
+                      "teagramd-blob-secret-key"] | sort)
+              '
+
+      - name: Wait for migration, RustFS, and application rollouts
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl rollout status statefulset/postgres --namespace teagram --timeout=180s
+          kubectl rollout status statefulset/rustfs --namespace teagram --timeout=180s
+          kubectl wait --for=condition=complete jobs \
+            --selector=app.kubernetes.io/name=db-migrations \
+            --namespace teagram --timeout=900s
+          kubectl wait --for=condition=complete jobs \
+            --selector=app.kubernetes.io/name=rustfs-init \
+            --namespace teagram --timeout=600s
+          kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
+          app_pod=$(kubectl get pods --namespace teagram \
+            --selector=app.kubernetes.io/name=teagramd \
+            --output jsonpath='{.items[0].metadata.name}')
+          test -n "$app_pod"
+          identity_log=$(kubectl logs "$app_pod" --namespace teagram --container ensure-server-identity)
+          rsa_fingerprint=$(sed -n 's/^RSA identity ready: fingerprint=\(-\{0,1\}[0-9][0-9]*\) path=.*/\1/p' <<<"$identity_log")
+          grep --extended-regexp --quiet '^-?[0-9]+$' <<<"$rsa_fingerprint"
+          kubectl create configmap teagramd-public-identity --namespace teagram \
+            --from-literal="TG_RSA_KEY_FINGERPRINT=$rsa_fingerprint"
+          kubectl rollout status deployment/teagramd-public --namespace teagram --timeout=240s
+          kubectl rollout status deployment/linklanding --namespace teagram --timeout=180s
+          kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
+          kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s
+
+      - name: Smoke link routing and perform a real MTProto key exchange
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            service/linkselector 18081:8081 > "$RUNNER_TEMP/linkselector-port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          cleanup() {
+            kill "$port_forward_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 2 \
+              http://127.0.0.1:18081/+k3s-smoke \
+              --output "$RUNNER_TEMP/link-smoke.html"; then
+              break
+            fi
+            sleep 2
+          done
+          grep --fixed-strings --quiet 'Open this in Teagram' "$RUNNER_TEMP/link-smoke.html"
+          kill "$port_forward_pid"
+          wait "$port_forward_pid" 2>/dev/null || true
+          trap - EXIT
+
+          app_pod=$(kubectl get pods --namespace teagram \
+            --selector app.kubernetes.io/name=teagramd \
+            --output jsonpath='{.items[0].metadata.name}')
+          test -n "$app_pod"
+          kubectl exec --namespace teagram "$app_pod" -- \
+            /usr/local/bin/teagramd client-config > "$RUNNER_TEMP/client.json"
+          chmod 0644 "$RUNNER_TEMP/client.json"
+
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            service/teagramd 12443:2443 > "$RUNNER_TEMP/mtproto-port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if docker run --rm --network host \
+              --volume "$RUNNER_TEMP/client.json:/client.json:ro" \
+              --entrypoint /usr/local/bin/mtproto-smoke \
+              ghcr.io/teagramhq/teagramd:ci \
+              --endpoint 127.0.0.1:12443 --discovery-file /client.json; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "MTProto smoke did not complete through the k3s Service" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Collect k3s diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl get pods,jobs,persistentvolumeclaims --namespace teagram --output wide
+          kubectl get events --namespace teagram --sort-by=.lastTimestamp
+          kubectl describe pods --namespace teagram
+          for pod in $(kubectl get pods --namespace teagram --output name); do
+            kubectl logs --namespace teagram "$pod" --all-containers --tail=100
+          done
+          docker logs --tail 100 teagram-k3s
+
+      - name: Upload images used by this deployment check
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: k8s-images-${{ github.sha }}
+          path: ${{ runner.temp }}/k8s-images.tar
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Remove the disposable k3s server
+        if: always()
+        run: docker rm --force --volumes teagram-k3s || true
+
   ci:
     name: ci
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) }}
     needs:
       - ops-prioritize-main
       - test-go
@@ -1391,6 +1816,8 @@ jobs:
       - test-migrations
       - check-deploy-workflow
       - check-demo-web-pin
+      - check-k8s-manifests
+      - test-k8s-deploy
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1417,7 +1844,17 @@ jobs:
           TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
           CHECK_DEMO_WEB_PIN_RESULT: ${{ needs.check-demo-web-pin.result }}
+          K8S_MANIFESTS_RESULT: ${{ needs.check-k8s-manifests.result }}
+          K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            if [[ "$MAIN_PRIORITY_RESULT" != skipped || "$K8S_DEPLOY_RESULT" != success ]]; then
+              echo "::error::Merge-group deployment lane did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, k8s-deploy=$K8S_DEPLOY_RESULT)"
+              exit 1
+            fi
+            echo "Merge-group deployment lane passed"
+            exit 0
+          fi
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
@@ -1443,6 +1880,8 @@ jobs:
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
             "check-demo-web-pin=$CHECK_DEMO_WEB_PIN_RESULT"
+            "check-k8s-manifests=$K8S_MANIFESTS_RESULT"
+            "test-k8s-deploy=$K8S_DEPLOY_RESULT"
           )
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -1463,12 +1902,93 @@ jobs:
                 "$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
                 "$TEST_MIGRATIONS_RESULT" != "success" ||
                 "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ||
-                "$CHECK_DEMO_WEB_PIN_RESULT" != "success" ]]; then
+                "$CHECK_DEMO_WEB_PIN_RESULT" != "success" ||
+                "$K8S_MANIFESTS_RESULT" != "success" ||
+                "$K8S_DEPLOY_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
           fi
           echo "All required CI lanes passed"
+
+  publish-k8s-images:
+    name: "publish: k8s-images"
+    if: >-
+      ${{
+        (github.event_name == 'pull_request' && !cancelled() ||
+          github.event_name != 'pull_request' && always()) &&
+        always() &&
+        (needs.ops-prioritize-main.result == 'success' ||
+          (needs.ops-prioritize-main.result == 'skipped' &&
+            github.event_name == 'pull_request')) &&
+        needs.ci.result == 'success' &&
+        needs.check-k8s-manifests.result == 'success' &&
+        needs.test-k8s-deploy.result == 'success' &&
+        (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        )
+      }}
+    needs:
+      - ops-prioritize-main
+      - ci
+      - check-k8s-manifests
+      - test-k8s-deploy
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: k8s-images-${{ github.sha }}
+          path: ${{ runner.temp }}/k8s-images
+
+      - name: Load the images that passed the k3s deployment check
+        run: docker load --input "$RUNNER_TEMP/k8s-images/k8s-images.tar"
+
+      - name: Publish immutable commit tags and capture digests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          images=(
+            ghcr.io/teagramhq/teagramd
+            ghcr.io/teagramhq/teagram-migrations
+            ghcr.io/teagramhq/teagramd-mc-init
+            ghcr.io/teagramhq/link-edge-landing
+            ghcr.io/teagramhq/link-edge-selector
+          )
+          digest_file="$RUNNER_TEMP/k8s-image-digests.json"
+          printf '{"commit":"%s","images":[' "$GITHUB_SHA" > "$digest_file"
+          separator=
+          for image in "${images[@]}"; do
+            revision=$(docker image inspect "$image:ci" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            test "$revision" = "$GITHUB_SHA"
+            tag="$image:sha-$GITHUB_SHA"
+            docker image tag "$image:ci" "$tag"
+            digest=$(docker image push --quiet "$tag")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s{"name":"%s","reference":"%s@%s"}' \
+              "$separator" "$image" "$image" "$digest" >> "$digest_file"
+            separator=,
+          done
+          printf ']}\n' >> "$digest_file"
+          jq --exit-status --arg commit "$GITHUB_SHA" \
+            '.commit == $commit and (.images | length == 5) and all(.images[]; (.reference | test("@sha256:[0-9a-f]{64}$")))' \
+            "$digest_file"
+
+      - name: Upload immutable image digests
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: k8s-image-digests-${{ github.sha }}
+          path: ${{ runner.temp }}/k8s-image-digests.json
+          if-no-files-found: error
+          retention-days: 30
 
   publish-demo-image:
     name: 'publish: demo-image'

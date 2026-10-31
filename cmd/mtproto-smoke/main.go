@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -49,6 +50,9 @@ type serverIdentity struct {
 }
 
 func main() {
+	endpoint := flag.String("endpoint", liveMTProtoEndpoint, "MTProto host:port to probe")
+	discoveryURL := flag.String("discovery-url", liveDiscoveryURL, "HTTPS client discovery URL")
+	discoveryFile := flag.String("discovery-file", "", "read client discovery JSON from a local file")
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
 	flag.Parse()
 	quotaExpectationSet := false
@@ -63,12 +67,15 @@ func main() {
 	if flag.NArg() != 0 {
 		log.Fatal("unexpected arguments")
 	}
-	if err := run(*expectedInviteQuota); err != nil {
+	if quotaExpectationSet && *discoveryFile != "" {
+		log.Fatal("--expect-user-invite-quota cannot be combined with --discovery-file")
+	}
+	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(expectedInviteQuota int) error {
+func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
@@ -82,24 +89,30 @@ func run(expectedInviteQuota int) error {
 		},
 	}
 	if expectedInviteQuota >= 0 {
-		settings, err := probeAppConfig(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client)
+		settings, err := probeAppConfig(ctx, endpoint, discoveryURL, client)
 		if err != nil {
-			return fmt.Errorf("MTProto app-config smoke on %s: %w", liveMTProtoEndpoint, err)
+			return fmt.Errorf("MTProto app-config smoke on %s: %w", endpoint, err)
 		}
 		if settings.registrationMode != "invite" || !settings.userInvitesEnabled || settings.userInviteQuota != expectedInviteQuota {
 			return fmt.Errorf("help.getAppConfig registration_mode=%q user_invites_enabled=%t user_invite_quota=%d; want invite, true, %d",
 				settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota, expectedInviteQuota)
 		}
 		if _, err := fmt.Printf("help.getAppConfig passed on %s registration_mode=%s user_invites_enabled=%t user_invite_quota=%d\n",
-			liveMTProtoEndpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
+			endpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
 			return fmt.Errorf("write app-config smoke result: %w", err)
 		}
 		return nil
 	}
-	if err := probe(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client); err != nil {
-		return fmt.Errorf("MTProto smoke on %s: %w", liveMTProtoEndpoint, err)
+	var err error
+	if discoveryFile != "" {
+		err = probeFile(ctx, endpoint, discoveryFile)
+	} else {
+		err = probe(ctx, endpoint, discoveryURL, client)
 	}
-	if _, err := fmt.Printf("MTProto auth-key exchange passed on %s\n", liveMTProtoEndpoint); err != nil {
+	if err != nil {
+		return fmt.Errorf("MTProto smoke on %s: %w", endpoint, err)
+	}
+	if _, err := fmt.Printf("MTProto auth-key exchange passed on %s\n", endpoint); err != nil {
 		return fmt.Errorf("write smoke result: %w", err)
 	}
 	return nil
@@ -206,6 +219,37 @@ func probe(ctx context.Context, endpoint, discoveryURL string, client *http.Clie
 	if err != nil {
 		return err
 	}
+	return probeIdentity(ctx, endpoint, identity)
+}
+
+func probeFile(ctx context.Context, endpoint, path string) (returnErr error) {
+	if err := discovery.ValidateEndpoint(endpoint); err != nil {
+		return fmt.Errorf("validate target endpoint: %w", err)
+	}
+	file, err := os.Open(path) // #nosec G304 -- the operator selects a local discovery file; its contents are size-limited and parsed below.
+	if err != nil {
+		return fmt.Errorf("open client discovery file: %w", err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close client discovery file: %w", err))
+		}
+	}()
+	body, err := io.ReadAll(io.LimitReader(file, maxDiscoveryBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("read client discovery file: %w", err)
+	}
+	if len(body) > maxDiscoveryBodyBytes {
+		return fmt.Errorf("client discovery exceeds %d bytes", maxDiscoveryBodyBytes)
+	}
+	identity, err := parseIdentity(body)
+	if err != nil {
+		return err
+	}
+	return probeIdentity(ctx, endpoint, identity)
+}
+
+func probeIdentity(ctx context.Context, endpoint string, identity serverIdentity) error {
 	targetPort, err := endpointPort(endpoint)
 	if err != nil {
 		return fmt.Errorf("read target port: %w", err)
@@ -244,6 +288,10 @@ func fetchIdentity(ctx context.Context, discoveryURL string, client *http.Client
 	if len(body) > maxDiscoveryBodyBytes {
 		return serverIdentity{}, fmt.Errorf("client discovery exceeds %d bytes", maxDiscoveryBodyBytes)
 	}
+	return parseIdentity(body)
+}
+
+func parseIdentity(body []byte) (serverIdentity, error) {
 	var document discovery.Document
 	if err := json.Unmarshal(body, &document); err != nil {
 		return serverIdentity{}, fmt.Errorf("decode client discovery: %w", err)

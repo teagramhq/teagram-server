@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: teagram
+
+resources:
+  - ../prod
+
+configMapGenerator:
+  - name: teagramd-runtime
+    literals:
+      - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+      - TG_ADVERTISE_ADDR=127.0.0.1:12443
+  - name: link-edge-runtime
+    literals:
+      - TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
+
+images:
+  - name: ghcr.io/teagramhq/teagramd
+    newTag: ci
+  - name: ghcr.io/teagramhq/teagram-migrations
+    newTag: ci
+  - name: ghcr.io/teagramhq/teagramd-mc-init
+    newTag: ci
+  - name: ghcr.io/teagramhq/link-edge-landing
+    newTag: ci
+  - name: ghcr.io/teagramhq/link-edge-selector
+    newTag: ci
+
+patches:
+  - path: cloudflared-ci.yaml
