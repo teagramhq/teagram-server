@@ -302,10 +302,12 @@ case "$*" in
       *) service=teagramd-public-2 ;;
     esac
     runtime_env=$(jq -c --arg service "$service" --arg cidr "${FIXTURE_RUNNING_PUBLIC_PROXY_CIDR:-}" \
-      --arg advertise_addr "${TG_ADVERTISE_ADDR:-}" '
+      --arg advertise_addr "${TG_ADVERTISE_ADDR:-}" \
+      --arg running_advertise_addr "${FIXTURE_RUNNING_PUBLIC_ADVERTISE_ADDR:-}" '
       .services[$service].environment | to_entries |
       map(
         if .key == "TG_CLIENT_ADDR_PROXY_CIDRS" and $cidr != "" then .value = $cidr
+        elif .key == "TG_ADVERTISE_ADDR" and $running_advertise_addr != "" then .value = $running_advertise_addr
         elif .key == "TG_ADVERTISE_ADDR" and $advertise_addr != "" then .value = $advertise_addr
         else . end
       ) |
@@ -420,6 +422,8 @@ expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres 
   DEPLOY_SHA="$second" FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR=0.0.0.0/0
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PROXY_CIDR=0.0.0.0/0
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_ADVERTISE_ADDR=stale.tailnet.example.test:2443
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS=1
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
