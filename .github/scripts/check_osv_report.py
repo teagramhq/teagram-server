@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Fail on fixed high or critical OSV findings and summarize findings without fixes."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+from cvss import CVSS2, CVSS3, CVSS4
+
+
+SAFE_ID = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def cvss_score(vector: str, score_type: str | None) -> float:
+    normalized_type = score_type.upper() if isinstance(score_type, str) else ""
+    if not normalized_type:
+        if vector.startswith("CVSS:4.0/"):
+            normalized_type = "CVSS_V4"
+        elif vector.startswith(("CVSS:3.0/", "CVSS:3.1/")):
+            normalized_type = "CVSS_V3"
+        else:
+            normalized_type = "CVSS_V2"
+
+    try:
+        if normalized_type == "CVSS_V2":
+            if vector.startswith("CVSS:2.0/"):
+                vector = vector.removeprefix("CVSS:2.0/")
+            return CVSS2(vector).scores()[0]
+        if normalized_type == "CVSS_V3":
+            return CVSS3(vector).scores()[0]
+        if normalized_type == "CVSS_V4":
+            return CVSS4(vector).scores()[0]
+    except Exception:
+        return 10.0
+    return 10.0
+
+
+def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
+    candidates: list[Any] = []
+    severity = vulnerability.get("severity", [])
+    if isinstance(severity, list):
+        candidates.extend(severity)
+    elif severity:
+        candidates.append(severity)
+
+    database_specific = vulnerability.get("database_specific", {})
+    if isinstance(database_specific, dict):
+        candidates.append(database_specific.get("severity"))
+    affected = vulnerability.get("affected", [])
+    if isinstance(affected, list):
+        for item in affected:
+            if not isinstance(item, dict):
+                continue
+            for key in ("database_specific", "ecosystem_specific"):
+                details = item.get(key, {})
+                if isinstance(details, dict):
+                    candidates.append(details.get("severity"))
+
+    for candidate in candidates:
+        score_type = None
+        if isinstance(candidate, dict):
+            score_type = candidate.get("type")
+            candidate = candidate.get("score")
+        if not isinstance(candidate, (str, int, float)):
+            continue
+        if isinstance(candidate, str):
+            normalized = candidate.strip().upper()
+            if normalized in {"HIGH", "CRITICAL"}:
+                return True
+            if normalized in {"NONE", "LOW", "MEDIUM", "MODERATE"}:
+                continue
+            try:
+                score = float(candidate)
+            except ValueError:
+                score = cvss_score(candidate, score_type)
+        else:
+            score = float(candidate)
+        if score >= 7.0:
+            return True
+    return False
+
+
+def fixed_versions(vulnerability: dict[str, Any]) -> list[str]:
+    versions: set[str] = set()
+    affected = vulnerability.get("affected", [])
+    if isinstance(affected, list):
+        for item in affected:
+            if not isinstance(item, dict):
+                continue
+            ranges = item.get("ranges", [])
+            if isinstance(ranges, list):
+                for version_range in ranges:
+                    if not isinstance(version_range, dict):
+                        continue
+                    events = version_range.get("events", [])
+                    if isinstance(events, list):
+                        for event in events:
+                            if isinstance(event, dict):
+                                value = event.get("fixed")
+                                if isinstance(value, str) and value.strip():
+                                    versions.add(value.strip())
+            for key in ("database_specific", "ecosystem_specific"):
+                details = item.get(key, {})
+                if isinstance(details, dict):
+                    for fixed_key in ("fixed", "fixed_version", "fixedVersion"):
+                        value = details.get(fixed_key)
+                        if isinstance(value, str) and value.strip():
+                            versions.add(value.strip())
+    return sorted(versions)
+
+
+def analyze(report: dict[str, Any]) -> tuple[list[str], list[str]]:
+    results = report.get("results")
+    if not isinstance(results, list):
+        raise ValueError("OSV-Scanner report is missing a results array")
+
+    failures: set[str] = set()
+    without_fixes: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            raise ValueError("OSV-Scanner report contains an invalid result")
+        source = result.get("source", {})
+        source_path = source.get("path", "unknown source") if isinstance(source, dict) else "unknown source"
+        packages = result.get("packages", [])
+        if not isinstance(packages, list):
+            raise ValueError("OSV-Scanner report contains an invalid packages list")
+        for package_result in packages:
+            if not isinstance(package_result, dict):
+                raise ValueError("OSV-Scanner report contains an invalid package result")
+            package = package_result.get("package", {})
+            if not isinstance(package, dict):
+                raise ValueError("OSV-Scanner report contains an invalid package")
+            name = package.get("name")
+            version = package.get("version")
+            if not isinstance(name, str) or not isinstance(version, str):
+                raise ValueError("OSV-Scanner package is missing its name or version")
+            vulnerabilities = package_result.get("vulnerabilities", [])
+            if not isinstance(vulnerabilities, list):
+                raise ValueError("OSV-Scanner report contains an invalid vulnerabilities list")
+            for vulnerability in vulnerabilities:
+                if not isinstance(vulnerability, dict):
+                    raise ValueError("OSV-Scanner report contains an invalid vulnerability")
+                identifier = vulnerability.get("id")
+                if not isinstance(identifier, str) or not SAFE_ID.fullmatch(identifier):
+                    raise ValueError("OSV-Scanner returned a vulnerability without a safe ID")
+                item = f"{identifier} in {name}@{version} ({source_path})"
+                fixes = fixed_versions(vulnerability)
+                if not fixes:
+                    without_fixes.add(item)
+                elif severity_is_high_or_critical(vulnerability):
+                    failures.add(f"{item}; fixed versions: {', '.join(fixes)}")
+    return sorted(failures), sorted(without_fixes)
+
+
+def parse_govulncheck_report(report_path: Path) -> list[str]:
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"could not read govulncheck report: {error}") from error
+
+    decoder = json.JSONDecoder()
+    messages: list[dict[str, Any]] = []
+    offset = 0
+    while offset < len(text):
+        while offset < len(text) and text[offset].isspace():
+            offset += 1
+        if offset == len(text):
+            break
+        try:
+            message, offset = decoder.raw_decode(text, offset)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"could not parse govulncheck report: {error}") from error
+        if not isinstance(message, dict):
+            raise ValueError("govulncheck emitted a non-object JSON message")
+        messages.append(message)
+
+    if not any(
+        isinstance(message.get("config"), dict)
+        and message["config"].get("scanner_name") == "govulncheck"
+        for message in messages
+    ):
+        raise ValueError("govulncheck report is missing its scanner configuration")
+
+    findings: set[str] = set()
+    for message in messages:
+        finding = message.get("finding")
+        if finding is None:
+            continue
+        if not isinstance(finding, dict) or not isinstance(finding.get("osv"), str):
+            raise ValueError("govulncheck emitted a finding without a vulnerability ID")
+        trace = finding.get("trace", [])
+        if not isinstance(trace, list):
+            raise ValueError("govulncheck emitted an invalid finding trace")
+        if any(
+            isinstance(frame, dict)
+            and isinstance(frame.get("function"), str)
+            and frame["function"]
+            for frame in trace
+        ):
+            findings.add(finding["osv"])
+    return sorted(findings)
+
+
+def summary_text(reachable_findings: list[str], without_fixes: list[str]) -> str:
+    lines = ["### Security scan"]
+    if reachable_findings:
+        lines.append("- govulncheck reachable findings: " + ", ".join(reachable_findings))
+    else:
+        lines.append("- govulncheck reachable findings: none")
+    lines.append("- OSV findings without a fixed version:")
+    if without_fixes:
+        lines.extend(f"  - {finding}" for finding in without_fixes)
+    else:
+        lines.append("  - none")
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(
+            "usage: check_osv_report.py <osv-report.json> <govulncheck-report.json>",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise ValueError("OSV-Scanner report is not an object")
+        failures, without_fixes = analyze(report)
+        reachable_findings = parse_govulncheck_report(Path(sys.argv[2]))
+        summary = summary_text(reachable_findings, without_fixes)
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with Path(summary_path).open("a", encoding="utf-8") as output:
+                output.write(summary)
+        else:
+            print(summary, end="")
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if failures:
+        print("OSV-Scanner found fixed high or critical vulnerabilities:")
+        for failure in failures:
+            print(f"- {failure}")
+        return 1
+    print("OSV-Scanner found no fixed high or critical vulnerabilities")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
