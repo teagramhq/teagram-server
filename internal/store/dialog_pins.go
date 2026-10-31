@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
@@ -118,18 +119,41 @@ func (s *Store) DialogPinChangeAt(ctx context.Context, ownerID int64) (time.Time
 	}
 }
 
+// customPlanDB runs statements as unnamed prepared statements, so Postgres
+// plans each execution with its actual arguments instead of switching to a
+// cached generic plan after five executions on a pooled connection.
+type customPlanDB struct {
+	db.DBTX
+}
+
+func (c customPlanDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return c.DBTX.Exec(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
+func (c customPlanDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return c.DBTX.Query(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
+func (c customPlanDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return c.DBTX.QueryRow(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
 // DialogsWithPins returns one dialog page with active default-folder pin flags.
 // The peer cursor breaks ties between dialogs with the same top message, and
-// excludePinned applies the live-membership predicate before paging.
+// excludePinned applies the live-membership predicate before paging. The page
+// query uses custom plans: its generic plan is several times slower for owners
+// with many dialogs.
 func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, offsetPeerType PeerType, offsetPeerID int64, limit int, excludePinned bool) ([]Dialog, error) {
-	rows, err := s.q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
-		OwnerID: ownerID, OffsetID: offsetID,
-		OffsetPeerType: int16(offsetPeerType), OffsetPeerID: offsetPeerID,
-		ExcludePinned: excludePinned,
-		Lim:           int32(limit), //nolint:gosec // limit is validated and bounded by the handler
+	rows, profile, err := s.dialogsPageWithPins(ctx, dialogsPageParams{
+		ownerID: ownerID, offsetID: offsetID, offsetPeerType: offsetPeerType,
+		offsetPeerID: offsetPeerID, limit: limit, excludePinned: excludePinned,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dialogs for owner with pins: %w", err)
+	}
+	var mapStarted time.Time
+	if profile.enabled {
+		mapStarted = time.Now()
 	}
 	out := make([]Dialog, len(rows))
 	for i, row := range rows {
@@ -140,7 +164,44 @@ func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, of
 			Pinned: row.Pinned != nil && *row.Pinned,
 		}
 	}
+	if profile.enabled {
+		profile.postQueryGo += time.Since(mapStarted)
+		profile.log()
+	}
 	return out, nil
+}
+
+type dialogsPageParams struct {
+	ownerID        int64
+	offsetID       int64
+	offsetPeerType PeerType
+	offsetPeerID   int64
+	limit          int
+	excludePinned  bool
+}
+
+func (s *Store) dialogsPageWithPinsGenerated(ctx context.Context, params dialogsPageParams) ([]db.DialogsCursorPageWithPinsRow, error) {
+	q := db.New(customPlanDB{s.pool})
+	if params.offsetID == 0 && params.offsetPeerType == 0 {
+		first, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+			OwnerID: params.ownerID, ExcludePinned: params.excludePinned,
+			Lim: int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
+		})
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]db.DialogsCursorPageWithPinsRow, len(first))
+		for i, row := range first {
+			rows[i] = db.DialogsCursorPageWithPinsRow(row)
+		}
+		return rows, nil
+	}
+	return q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
+		OwnerID: params.ownerID, OffsetID: params.offsetID,
+		OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
+		ExcludePinned: params.excludePinned,
+		Lim:           int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
+	})
 }
 
 // CountDialogsWithPins returns the full list count used by getDialogs' slice

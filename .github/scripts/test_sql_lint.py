@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from textwrap import dedent
 from pathlib import Path
 from unittest.mock import patch
 
@@ -266,6 +269,294 @@ class SQLFluffRuleTests(unittest.TestCase):
         result = self.lint_fixture(f"SELECT 1 AS {'a' * 130};\n")
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("LT05", result.stdout)
+
+    def test_precommit_formats_staged_sql_and_preserves_worktree_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = Path(tempdir) / "repo"
+            repo.mkdir()
+            for relative in (".githooks", "bin", "internal/store/queries", "migrations"):
+                (repo / relative).mkdir(parents=True, exist_ok=True)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout
+
+            git("init", "--quiet")
+            git("config", "user.name", "SQL hook fixture")
+            git("config", "user.email", "sql-hook-fixture@example.invalid")
+            empty_hooks = repo / "empty-hooks"
+            empty_hooks.mkdir()
+            git("config", "core.hooksPath", str(empty_hooks))
+            shutil.copyfile(REPO_ROOT / ".githooks/pre-commit", repo / ".githooks/pre-commit")
+            shutil.copymode(REPO_ROOT / ".githooks/pre-commit", repo / ".githooks/pre-commit")
+            shutil.copyfile(REPO_ROOT / ".githooks/commit-msg", repo / ".githooks/commit-msg")
+            shutil.copymode(REPO_ROOT / ".githooks/commit-msg", repo / ".githooks/commit-msg")
+            shutil.copyfile(REPO_ROOT / ".sqlfluff", repo / ".sqlfluff")
+            shutil.copyfile(REPO_ROOT / "Makefile", repo / "Makefile")
+            (repo / ".golangci.yml").write_text("fixture: true\n", encoding="utf-8")
+
+            sqlc = repo / "bin/sqlc"
+            sqlc.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "source = Path('internal/store/queries/source.sql').read_text(encoding='utf-8')\n"
+                "output = Path('internal/store/db/source.sql.go')\n"
+                "output.parent.mkdir(parents=True, exist_ok=True)\n"
+                "output.write_text(source, encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            sqlc.chmod(0o755)
+
+            venv_bin = repo / ".venv-sqlfluff/bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "sqlfluff").symlink_to(Path(self.sqlfluff).resolve())
+            (venv_bin / "python").symlink_to(Path(sys.executable).resolve())
+
+            example_go = repo / "internal/example/example.go"
+            example_go.parent.mkdir(parents=True)
+            source_sql = repo / "internal/store/queries/source.sql"
+            source_sql.write_text("SELECT 0;\n", encoding="utf-8")
+            format_sql = repo / "internal/store/queries/format.sql"
+            format_sql.write_text("SELECT 0;\n", encoding="utf-8")
+            migration = repo / "migrations/20261031000000_hook_test.sql"
+            migration.write_text("CREATE TABLE hook_test (id integer);\n", encoding="utf-8")
+            example_go.write_text("package example\n", encoding="utf-8")
+            git("add", "--all")
+            git("commit", "--quiet", "-m", "chore(test): create hook fixture")
+            git("config", "core.hooksPath", str(repo / ".githooks"))
+
+            example_go.write_text("package example\n// format_me\n// autofix_me\n", encoding="utf-8")
+            source_sql.write_text("SELECT 2;\n", encoding="utf-8")
+            format_sql.write_text("select 1;\n", encoding="utf-8")
+            migration.write_text("CREATE TABLE hook_test (id bigint);\n", encoding="utf-8")
+            git("add", "internal/example/example.go", "internal/store/queries", "migrations")
+            source_sql.write_text("SELECT 2;\n-- unstaged query note\n", encoding="utf-8")
+            example_go.write_text(
+                "package example\n// format_me\n// autofix_me\n// unstaged go note\n",
+                encoding="utf-8",
+            )
+            migration.write_text(
+                "CREATE TABLE hook_test (id integer);\n-- unstaged migration note\n",
+                encoding="utf-8",
+            )
+
+            tools = Path(tempdir) / "tools"
+            tools.mkdir()
+            (tools / "golangci-lint").write_text(
+                dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import pathlib
+                    import sys
+
+                    if sys.argv[1] == "fmt":
+                        sys.stdout.write(sys.stdin.read().replace("format_me", "format_fixed"))
+                    elif sys.argv[1] == "run":
+                        path = pathlib.Path("example.go")
+                        path.write_text(path.read_text().replace("autofix_me", "autofix_fixed"))
+                    else:
+                        raise SystemExit(2)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (tools / "golangci-lint").chmod(0o755)
+            (tools / "atlas").write_text(
+                dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import hashlib
+                    from pathlib import Path
+
+                    lines = []
+                    for path in sorted(Path("migrations").glob("*.sql")):
+                        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                        lines.append(f"{digest} {path.as_posix()}")
+                    Path("migrations/atlas.sum").write_text("\\n".join(lines) + "\\n")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (tools / "atlas").chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{tools}{os.pathsep}{environment['PATH']}"
+            commit = subprocess.run(
+                ["git", "commit", "--quiet", "-m", "chore(test): run staged hooks"],
+                cwd=repo,
+                env=environment,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(commit.returncode, 0, commit.stdout)
+
+            def committed(path: str) -> str:
+                return git("show", f"HEAD:{path}")
+
+            formatted_sql = committed("internal/store/queries/format.sql")
+            self.assertIn("SELECT 1;", formatted_sql, commit.stdout)
+            self.assertNotIn("select 1;", formatted_sql, commit.stdout)
+            self.assertNotIn("unstaged query note", committed("internal/store/queries/source.sql"))
+            self.assertIn("unstaged query note", source_sql.read_text(encoding="utf-8"))
+
+            staged_go = committed("internal/example/example.go")
+            self.assertIn("format_fixed", staged_go)
+            self.assertIn("autofix_fixed", staged_go)
+            self.assertNotIn("unstaged go note", staged_go)
+            self.assertIn("unstaged go note", example_go.read_text(encoding="utf-8"))
+
+            generated = committed("internal/store/db/source.sql.go")
+            staged_source = committed("internal/store/queries/source.sql")
+            self.assertEqual(generated, staged_source)
+            self.assertNotIn("unstaged query note", generated)
+
+            staged_migration_path = "migrations/20261031000000_hook_test.sql"
+            staged_migration = committed(staged_migration_path)
+            expected_hash = hashlib.sha256(staged_migration.encode()).hexdigest()
+            self.assertIn(
+                f"{expected_hash} {staged_migration_path}", committed("migrations/atlas.sum")
+            )
+            self.assertIn("unstaged migration note", migration.read_text(encoding="utf-8"))
+
+            lint = subprocess.run(
+                ["make", "lint-sql"],
+                cwd=repo,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(lint.returncode, 0, lint.stdout)
+
+    def test_precommit_keeps_fix_when_unfixable_sql_remains(self) -> None:
+        long_comment = "-- " + ("x" * 130)
+        malformed_sql = f"select 1;\n{long_comment}\n"
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            probe = root / "probe.sql"
+            probe.write_text(malformed_sql, encoding="utf-8")
+            config = REPO_ROOT / ".sqlfluff"
+            fix = subprocess.run(
+                [self.sqlfluff, "fix", "--config", str(config), str(probe)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(fix.returncode, 1, fix.stdout)
+            self.assertIn("SELECT", probe.read_text(encoding="utf-8"))
+            remaining = subprocess.run(
+                [self.sqlfluff, "lint", "--config", str(config), str(probe)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertIn("LT05", remaining.stdout)
+
+            repo = root / "repo"
+            repo.mkdir()
+            for relative in (".githooks", "bin", "internal/store/queries"):
+                (repo / relative).mkdir(parents=True, exist_ok=True)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout
+
+            git("init", "--quiet")
+            git("config", "user.name", "SQL hook fixture")
+            git("config", "user.email", "sql-hook-fixture@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            empty_hooks = repo / "empty-hooks"
+            empty_hooks.mkdir()
+            git("config", "core.hooksPath", str(empty_hooks))
+
+            for hook in ("pre-commit", "commit-msg"):
+                shutil.copyfile(REPO_ROOT / f".githooks/{hook}", repo / f".githooks/{hook}")
+                shutil.copymode(REPO_ROOT / f".githooks/{hook}", repo / f".githooks/{hook}")
+            shutil.copyfile(config, repo / ".sqlfluff")
+            shutil.copyfile(REPO_ROOT / "Makefile", repo / "Makefile")
+            sqlc = repo / "bin/sqlc"
+            sqlc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sqlc.chmod(0o755)
+            git("add", "--all")
+            git("commit", "--quiet", "-m", "chore(test): create sql hook fixture")
+
+            sqlfluff_dir = repo / ".venv-sqlfluff/bin"
+            sqlfluff_dir.mkdir(parents=True)
+            (sqlfluff_dir / "sqlfluff").symlink_to(Path(self.sqlfluff).resolve())
+            (sqlfluff_dir / "python").symlink_to(Path(sys.executable).resolve())
+            git("config", "core.hooksPath", str(repo / ".githooks"))
+
+            staged_sql = repo / "internal/store/queries/unfixable.sql"
+            staged_sql.write_text(malformed_sql, encoding="utf-8")
+            git("add", "internal/store/queries/unfixable.sql")
+            commit = subprocess.run(
+                ["git", "commit", "--quiet", "-m", "chore(test): keep sql autofix"],
+                cwd=repo,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            self.assertEqual(commit.returncode, 0, commit.stdout)
+            committed_sql = git("show", "HEAD:internal/store/queries/unfixable.sql")
+            self.assertIn("SELECT", committed_sql)
+            self.assertIn(long_comment, committed_sql)
+            lint = subprocess.run(
+                [
+                    self.sqlfluff,
+                    "lint",
+                    "--config",
+                    str(config),
+                    str(staged_sql),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertNotEqual(lint.returncode, 0)
+            self.assertIn("LT05", lint.stdout)
+
+            sqlfluff_error = root / "sqlfluff-error"
+            sqlfluff_error.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+            sqlfluff_error.chmod(0o755)
+            sqlfluff_path = sqlfluff_dir / "sqlfluff"
+            sqlfluff_path.unlink()
+            sqlfluff_path.symlink_to(sqlfluff_error)
+            error_sql = repo / "internal/store/queries/tool_error.sql"
+            error_sql.write_text("SELECT 1;\n", encoding="utf-8")
+            git("add", "internal/store/queries/tool_error.sql")
+            failed_commit = subprocess.run(
+                ["git", "commit", "--quiet", "-m", "chore(test): reject sqlfluff error"],
+                cwd=repo,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            self.assertNotEqual(failed_commit.returncode, 0, failed_commit.stdout)
+            self.assertEqual(
+                git("diff", "--cached", "--name-only").strip(),
+                "internal/store/queries/tool_error.sql",
+            )
 
 
 if __name__ == "__main__":

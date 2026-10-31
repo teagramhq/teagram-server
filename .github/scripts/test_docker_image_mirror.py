@@ -15,17 +15,13 @@ ROOT = Path(__file__).resolve().parents[2]
 ACTIVE_DOCKERFILES = (
     "Dockerfile",
     "Dockerfile.mc",
-    "Dockerfile.minio-test",
     "deploy/browser-acceptance/Dockerfile",
     "deploy/link-edge/Dockerfile",
-    "deploy/teagramd/mixed-trust-probe.Dockerfile",
     "test/e2e/real_server_fixture/Dockerfile",
 )
 ACTIVE_IMAGE_CONFIGS = (
     ".github/workflows/ci.yml",
     "docker-compose.yml",
-    "docker-compose.mixed-trust.yml",
-    "docker-compose.mixed-trust.probe.yml",
     "deploy/browser-acceptance/compose.yaml",
     "deploy/link-edge/compose.yaml",
     "deploy/link-edge/control-compose.yaml",
@@ -33,9 +29,7 @@ ACTIVE_IMAGE_CONFIGS = (
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
-    ".github/scripts/mirror_rustfs_qualification_images.sh",
     ".github/scripts/run-busybox-phase-check.sh",
-    ".github/scripts/smoke-mixed-trust-compose.sh",
     "deploy/teagramd/rollout-runner/README.md",
     "deploy/teagramd/rollout-runner/qualify-rustfs-transition.py",
     "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh",
@@ -59,13 +53,6 @@ EXTERNAL_REGISTRIES = (
     "public.ecr.aws/",
     "quay.io/",
 )
-RUSTFS_QUALIFICATION_PULL_SCRIPTS = (
-    "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh",
-    "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh",
-    "deploy/teagramd/rollout-runner/test-stack-move-runner.sh",
-)
-
-
 def is_unqualified_hub_image(image: str) -> bool:
     if image.startswith("${") or image in {"scratch"}:
         return False
@@ -203,7 +190,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images\n      - check-sticker-license$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
         )
         self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
@@ -258,35 +245,6 @@ class DockerImageMirrorTests(unittest.TestCase):
                         f"{relative_path} pulls {match.group(0)} directly from Docker Hub"
                     )
 
-    def test_rustfs_qualification_pulls_avoid_docker_hub(self) -> None:
-        for relative_path in RUSTFS_QUALIFICATION_PULL_SCRIPTS:
-            with self.subTest(path=relative_path):
-                content = (ROOT / relative_path).read_text(encoding="utf-8")
-                self.assertNotIn(
-                    "docker.io/",
-                    content,
-                    f"{relative_path} pulls directly from Docker Hub",
-                )
-                self.assertNotIn(
-                    "mirror.gcr.io/",
-                    content,
-                    f"{relative_path} pulls from the Docker Hub mirror",
-                )
-                self.assertNotIn(
-                    "public.ecr.aws/",
-                    content,
-                    f"{relative_path} pulls from ECR Public, which exceeded its data limit in CI",
-                )
-
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        job = re.search(
-            r"(?ms)^  rustfs-transition-qualification:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
-            workflow,
-        )
-        self.assertIsNotNone(job, "RustFS qualification job is missing")
-        self.assertIn("uses: ariga/setup-atlas@v0.3", job.group(1))
-        self.assertIn("version: v1.2.0", job.group(1))
-
     def test_rustfs_schema_fixture_waits_for_postgres_tcp(self) -> None:
         script = (
             ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
@@ -304,46 +262,6 @@ class DockerImageMirrorTests(unittest.TestCase):
             'pg_isready -h 127.0.0.1 -p 5432 -U postgres -q',
             script,
         )
-
-    def test_rustfs_fixture_mirror_is_digest_pinned_and_precedes_qualification(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        mirror_job = re.search(
-            r"(?ms)^  mirror-rustfs-qualification-images:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
-            workflow,
-        )
-        qualification_job = re.search(
-            r"(?ms)^  rustfs-transition-qualification:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
-            workflow,
-        )
-        self.assertIsNotNone(mirror_job, "RustFS fixture mirror job is missing")
-        self.assertIsNotNone(qualification_job, "RustFS qualification job is missing")
-        self.assertIn("packages: write", mirror_job.group(1))
-        self.assertIn("packages: read", qualification_job.group(1))
-        self.assertIn(
-            "needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images",
-            qualification_job.group(1),
-        )
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", qualification_job.group(1))
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", qualification_job.group(1))
-        self.assertIn("github.event_name == 'pull_request'", qualification_job.group(1))
-        self.assertIn("docker login ghcr.io", qualification_job.group(1))
-
-        mirror_script = (
-            ROOT / ".github/scripts/mirror_rustfs_qualification_images.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn("skopeo copy --all --preserve-digests", mirror_script)
-        for image in (
-            "mirror.gcr.io/library/postgres@sha256:"
-            "721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
-            "ghcr.io/teagramhq/teagram-server-postgres:16-alpine",
-            "mirror.gcr.io/library/postgres@sha256:"
-            "77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
-            "ghcr.io/teagramhq/teagram-server-postgres:18-alpine",
-            "mirror.gcr.io/library/busybox@sha256:"
-            "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
-            "ghcr.io/teagramhq/teagram-server-busybox:1.37",
-        ):
-            self.assertIn(image, mirror_script)
 
     def test_pinned_images_keep_their_digests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

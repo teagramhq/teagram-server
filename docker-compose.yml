@@ -41,10 +41,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: teagram
       PGDATA: /var/lib/postgresql/18/docker
-    # Match the reviewed 2-vCPU / 4-GiB LXC settings. The mixed-trust overlay
-    # runs three teagramd processes with 8 pool connections plus 1 LISTEN
-    # connection each (27 total), then 1 migration, 1 maintenance, and 10 for
-    # administration and operational headroom: 39, rounded up to 40.
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     # An open port is not readiness: Postgres accepts connections during its own
     # init and then drops them. migrate waits on this instead of racing it.
@@ -314,6 +310,9 @@ services:
       # key; serving never generates an RSA identity or a pinned master key.
       TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      # Profile replicas must inherit an operator override applied to the base
+      # service after Compose resolves `extends`.
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
       # Interpolated, not hardcoded: the default is the tgkey volume, and an
       # operator who sets the variable in .env gets their path instead. Point it
       # outside /var/lib/teagramd or /var/lib/teagramd-blobs and the server
@@ -368,7 +367,7 @@ services:
       # DNAT rule the host firewall never sees, so "2443:2443" would hand this
       # server to the whole network the laptop is on.
       - "127.0.0.1:2443:2443"
-    # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
+    # TG_LISTEN_ADDR stays unset. TG_ADVERTISE_ADDR stays empty unless configured.
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
     # which is right for this stack: the only client is on the host and arrives
@@ -415,6 +414,7 @@ services:
     environment:
       TG_CLIENT_ADDR_TRUST: proxy-v2
       TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
       TG_REPLICA_ID: public-1
       TG_REPLICA_COUNT: "3"
       TG_WEBSOCKET_LISTEN_ADDR: ""
@@ -444,6 +444,7 @@ services:
     environment:
       TG_CLIENT_ADDR_TRUST: proxy-v2
       TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
       TG_REPLICA_ID: public-2
       TG_REPLICA_COUNT: "3"
       TG_WEBSOCKET_LISTEN_ADDR: ""
