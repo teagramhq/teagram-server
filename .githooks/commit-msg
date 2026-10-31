@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+message_file="${1:?commit message file path is required}"
+IFS= read -r subject < "$message_file" || true
+
+if [[ ! "$subject" =~ ^(feat|fix|refactor|perf|docs|test|chore|build|ci|style|revert)\([[:alnum:]_.-]+\)!?:[[:space:]]+.+$ ]]; then
+  printf 'commit-msg: subject must match conventional format type(scope): summary\n' >&2
+  exit 1
+fi
+
+if [[ "$subject" =~ (^|[^[:alnum:]])[A-Z][A-Z0-9]+-[0-9]+([^[:alnum:]]|$) ]]; then
+  printf 'commit-msg: subject must not contain an issue key\n' >&2
+  exit 1
+fi
+
+if grep -Eiq '^[[:space:]]*Co-Authored-By[[:space:]]*:' "$message_file"; then
+  printf 'commit-msg: message must not include a Co-Authored-By trailer\n' >&2
+  exit 1
+fi
+
+if grep -Eiq '^[[:space:]]*Generated with([[:space:]]|$)' "$message_file"; then
+  printf 'commit-msg: message must not include a Generated with line\n' >&2
+  exit 1
+fi

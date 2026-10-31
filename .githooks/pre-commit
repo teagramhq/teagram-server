@@ -13,6 +13,7 @@ mapfile -d '' -t staged_files < <(git diff --cached --no-renames --name-only -z)
 
 go_files=()
 sql_files=()
+go_package_dirs=()
 has_sqlc_input=false
 has_migration=false
 for path in "${staged_files[@]}"; do
@@ -29,13 +30,33 @@ for path in "${staged_files[@]}"; do
   [[ "$path" == migrations/* ]] && has_migration=true
 done
 
+for path in "${go_files[@]}"; do
+  if [[ "$path" == */* ]]; then
+    package_dir="${path%/*}"
+  else
+    package_dir=.
+  fi
+  already_added=false
+  for existing_dir in "${go_package_dirs[@]}"; do
+    if [[ "$existing_dir" == "$package_dir" ]]; then
+      already_added=true
+      break
+    fi
+  done
+  [[ "$already_added" == true ]] || go_package_dirs+=("$package_dir")
+done
+
 if ((${#go_files[@]})); then
   if ! command -v golangci-lint >/dev/null 2>&1; then
-    warn_missing_tool golangci-lint 'Go formatting'
+    warn_missing_tool golangci-lint 'Go formatting and autofixes'
   else
     tmp_file=""
+    tmp_tree=""
+    patch_file=""
     cleanup() {
       [[ -z "$tmp_file" ]] || rm -f -- "$tmp_file"
+      [[ -z "$patch_file" ]] || rm -f -- "$patch_file"
+      [[ -z "$tmp_tree" ]] || rm -rf -- "$tmp_tree"
     }
     trap cleanup EXIT
     for path in "${go_files[@]}"; do
@@ -47,6 +68,49 @@ if ((${#go_files[@]})); then
       rm -f -- "$tmp_file"
       tmp_file=""
     done
+    git add -- "${go_files[@]}"
+
+    # Keep this aligned with enabled linters that advertise autofix support.
+    autofix_linters='canonicalheader,copyloopvar,errorlint,exptostd,fatcontext,gocritic,govet,intrange,modernize,mirror,misspell,nolintlint,perfsprint,sloglint,staticcheck,tagalign,testifylint,usetesting'
+    # Run package fixers against the index snapshot, then copy back staged files only.
+    tmp_tree="$(mktemp -d)"
+    git checkout-index --all --prefix="$tmp_tree/"
+    for package_dir in "${go_package_dirs[@]}"; do
+      if [[ ! -d "$package_dir" ]]; then
+        exit 1
+      fi
+      patch_file="$(mktemp)"
+      (
+        cd "$package_dir"
+        git diff --cached --binary --no-renames --relative -- '*.go'
+      ) > "$patch_file"
+      if ! (
+        cd "$tmp_tree/$package_dir"
+        golangci-lint run \
+          --config "$tmp_tree/.golangci.yml" \
+          --enable-only "$autofix_linters" \
+          --fix \
+          --issues-exit-code 0 \
+          --new-from-patch "$patch_file" \
+          .
+      ); then
+        exit 1
+      fi
+      rm -f -- "$patch_file"
+      patch_file=""
+      for path in "${go_files[@]}"; do
+        if [[ "$path" == */* ]]; then
+          file_package_dir="${path%/*}"
+        else
+          file_package_dir=.
+        fi
+        if [[ "$file_package_dir" == "$package_dir" && -f "$tmp_tree/$path" ]]; then
+          cp -- "$tmp_tree/$path" "$path"
+        fi
+      done
+    done
+    rm -rf -- "$tmp_tree"
+    tmp_tree=""
     git add -- "${go_files[@]}"
     trap - EXIT
   fi
