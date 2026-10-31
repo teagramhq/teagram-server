@@ -79,8 +79,13 @@ initializer runs; dialogs with no messages are ready immediately, and new
 dialogs use postings from their first message.
 
 Reverting the application leaves these additive tables, index, and triggers in
-place. The old search query ignores them, so they remain harmless until the
-application is deployed again.
+place. The old search query ignores the postings, so its results remain
+unchanged; the database triggers still maintain postings on message writes.
+Application rollback alone does not stop collection or erase existing rows.
+
+The lexemes are sensitive message-derived data. Their access, retention,
+erasure, and rollback boundaries are documented in the
+[message-search postings threat model](security.md#threat-model-private-message-search-postings).
 
 Browser acceptance binding evidence is an additive, unenrolled expansion.
 Its versioned read API, owner-only enrollment transaction, retention and rollback

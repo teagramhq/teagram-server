@@ -158,3 +158,55 @@ establish trust.
 The published username policy is advisory to clients; the server remains the
 enforcement boundary. This change does not alter login-code verification,
 password verification, session binding, or account admission semantics.
+
+# Threat model: private message-search postings
+
+## Assets and boundaries
+
+`message_search_postings.lexeme` stores normalized plaintext terms derived from
+private message bodies, alongside owner, dialog, and message identifiers. It is
+not a hash or an anonymized representation: common and distinctive terms can
+reveal message content. Treat the postings table, its index, database backups,
+and database access as sensitive at least as the source `messages` rows. The
+`message_search_unready_dialogs` table contains owner and dialog identifiers,
+but no message text or lexemes. The search query itself is sensitive too:
+slow-statement diagnostics can retain bound search text under the existing
+[PostgreSQL diagnostic policy](#postgresql-query-diagnostics).
+
+`messages.search` passes the authenticated MTProto owner ID to the store. Both
+search paths constrain the owner and dialog; the postings path joins back to
+the same owner-local message row and rechecks the complete query, deletion
+state, and expiry before returning source message rows. No RPC returns posting
+lexemes. The migration adds no row-level security or per-owner database grants;
+tenant isolation is enforced in application SQL. The current Compose runtime
+uses the shared `postgres` role, so a database operator or compromised runtime
+credential can read lexemes across owners, as it can read source messages.
+
+## Abuse cases and controls
+
+| Abuse case | Control and remaining risk |
+|---|---|
+| A caller selects another owner's or another dialog's terms | The RPC derives the owner from the authenticated request; the store query scopes by owner and dialog, joins on the same owner, and rechecks the source message's full text vector and visibility. This is application-layer isolation, so a query or store authorization defect could cross that boundary. |
+| A database reader infers private text from the postings | Lexemes are stored in plaintext form and can be dictionary-matched. This migration adds no separate encryption or reader role. Restrict database and backup access under the same controls as message content; do not treat postings as de-identified data. |
+| An edit, delete, or expiry leaves searchable terms behind | The database trigger replaces postings in the same transaction as a text or dialog change, and removes them on soft delete. Hard deletion of a source message cascades to its postings. Search excludes expired messages immediately; the existing five-minute bounded history sweep marks expired copies deleted, which removes their postings transactionally. If that worker is delayed or failing, physical removal can lag while the search filter still hides the message. |
+
+## Retention, erasure, and rollback
+
+There is no separate posting lifetime. Live postings follow the corresponding
+message copy: edits replace them, soft deletion removes them, and hard deletion
+cascades to them. A soft-deleted message body remains in its tombstone row in
+`messages`; removing its postings is not full erasure of that source body.
+Expired copies are also soft-deleted by the periodic history sweep. The server
+does not set a general expiry for message history, so messages without a TTL
+remain until the existing message-delete path changes them. User deletions do
+not scrub already-created database backups; backup retention remains an
+operator control, as described in
+[self-hosting](self-hosting.md#back-up-and-restore).
+
+An application-only rollback leaves the additive trigger active. Older code
+ignores the postings, but new message writes continue populating them and the
+rollback does not erase existing lexemes. Stopping that collection or erasing
+the live derived rows requires a separately planned schema operation; dropping
+the postings table does not erase source messages or backup copies. See the
+[migration behavior](migrations.md#ordered-message-search-postings) for the
+additive schema details.
