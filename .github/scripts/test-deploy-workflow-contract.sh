@@ -69,8 +69,10 @@ check_ci_contract() {
   ci_needs="$(ci_query '.jobs.ci.needs | join(",")')"
   [[ "$ci_needs" != *'restore-readiness'* && "$ci_needs" != *'rustfs-transition-qualification'* && "$ci_needs" != *'mirror-rustfs-qualification-images'* ]] ||
     ci_fail 'removed rollout qualification jobs must stay out of the required gate'
-  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'check-demo-web-pin'* ]] ||
-    ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'check-demo-web-pin'* ]] ||
+    ci_fail 'the required CI gate must not wait for the demo web artifact check'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".continue-on-error')" == "\${{ github.event_name == 'push' }}" ]] ||
+    ci_fail 'a demo web pin failure must not fail main push CI'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
@@ -84,15 +86,16 @@ check_ci_contract() {
     ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
   [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
     ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
-  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT')" == '${{ needs.check-demo-web-pin.result }}' ]] ||
-    ci_fail 'the required CI gate must receive the pinned demo web artifact result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT // ""')" == '' ]] ||
+    ci_fail 'the required CI gate must not receive the demo web pin result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
     ci_fail 'the required CI gate must receive the migrations result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_GIT_HOOKS_RESULT')" == '${{ needs.test-git-hooks.result }}' ]] ||
     ci_fail 'the required CI gate must receive the git-hooks result'
-  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
-    grep -Fq '"$CHECK_DEMO_WEB_PIN_RESULT" != "success"' ||
-    ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  if ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq 'CHECK_DEMO_WEB_PIN_RESULT'; then
+    ci_fail 'the required CI gate must not inspect the demo web pin result'
+  fi
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed migrations lane'
