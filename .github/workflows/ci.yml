@@ -1650,14 +1650,17 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          kubectl get job rustfs-init --namespace teagram --output json \
+          kubectl get jobs --namespace teagram \
+            --selector=app.kubernetes.io/name=rustfs-init --output json \
             | jq --exit-status '
-                [.spec.template.spec.containers[]
+                select(.items | length == 1)
+                | .items[0].spec.template.spec as $pod
+                | [$pod.containers[]
                   | select(.name == "rustfs-init")
                   | .volumeMounts[].mountPath] as $mounts
                 | ([$mounts[] | select(. == "/run/secrets")] | length) == 1
                   and ([$mounts[] | select(startswith("/run/secrets/"))] | length) == 0
-                  and ([.spec.template.spec.volumes[]
+                  and ([$pod.volumes[]
                     | select(.name == "rustfs-init-secrets")
                     | .projected.sources[].secret.items[].path] | sort)
                     == (["rustfs-root-access-key", "rustfs-root-secret-key",
