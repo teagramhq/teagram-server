@@ -1,4 +1,4 @@
-h1:KWBlQEYdjK6AMwvH6EhF02GFkmkFE+WNys8qK5VhRXU=
+h1:a1HM9rjDjBZIvezpIX4mlH4hjSIgDQg41LCFYuMjUDM=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -148,4 +148,5 @@ h1:KWBlQEYdjK6AMwvH6EhF02GFkmkFE+WNys8qK5VhRXU=
 20261030000001_owner_dialog_unread_totals.sql h1:DkX9TLffGfpE5XB6cGezohEKMQ9jicdG5GJUsG7YYJs=
 20261030000002_backfill_owner_dialog_unread_totals.sql h1:evg/8ckUCvGRXqUMrlSQg7MSI6TGOrwVBv3jxQ4eZ7g=
 20261030000003_drop_owner_dialog_unread_totals_backfill.sql h1:451YnTAbU0RARHJlASexo9M8TKIdFkEOdZWPTf6Bbpw=
-20261031000001_user_created_sticker_sets.sql h1:l/aYl3tReaptGlZBVqp7qgPHJ1TA9+kcesU0FDVJ7io=
+20261031000001_channel_messages_history_service_count_idx.sql h1:G3OV8lMrrbu/4ZE+CvwWxkEJ+hYTDao7Is/VCxnXuJ4=
+20261031000002_user_created_sticker_sets.sql h1:/05nDGgb6iO6MjBpyUfnYXPFY70rkB3b1olqDk7mvOI=

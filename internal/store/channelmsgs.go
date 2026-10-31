@@ -1400,13 +1400,31 @@ func (s *Store) ChannelHistoryWithOffset(
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 
-	count, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
+	countRow, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
 		ChannelID: channelID,
 		OwnerID:   ownerID,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, ErrNotMember
+	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("count channel history: %w", err)
 	}
+	postCount, err := channelPostUnreadSummaryCount(
+		countRow.Entitled,
+		countRow.StatusExists,
+		countRow.SummaryVersion,
+		countRow.SummaryReady,
+		countRow.TotalLive,
+		0,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count channel history posts: %w", err)
+	}
+	if countRow.ExpiredPostCount > postCount {
+		return nil, 0, fmt.Errorf("%w: expired posts exceed live summary", ErrChannelPostSummaryCorrupt)
+	}
+	count := postCount - countRow.ExpiredPostCount + countRow.ServiceCount
 	var msgs []ChannelMessage
 	switch {
 	case offsetID == 0 && offsetDate != 0:
