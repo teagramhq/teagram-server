@@ -110,6 +110,7 @@ compose() {
     "$@"
 }
 
+# shellcheck disable=SC1091 # The reviewed archive supplies the referenced helper.
 # shellcheck source=deploy/qa-invite/rollback.sh
 source "$REPO_ROOT/deploy/qa-invite/rollback.sh"
 

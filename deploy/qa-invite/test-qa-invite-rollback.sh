@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # The fixture script expands in its child Bash.
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -15,8 +16,6 @@ run_fixture() {
   local running=$1 down_rc=$2 docker_rc=$3
   : > "$events"
   export RUNNING_CONTAINERS="$running" DOWN_RC="$down_rc" DOCKER_RC="$docker_rc" EVENTS="$events" DUMP="$dump" ROLLBACK="$ROLLBACK"
-  # Variables intentionally expand in the fixture child Bash.
-  # shellcheck disable=SC2016
   bash -Eeuo pipefail -c '
       compose() {
         printf "compose %s\n" "$*" >> "$EVENTS"

@@ -1169,8 +1169,10 @@ jobs:
           bash -n deploy/teagram-demo/init-demo.sh
           bash -n deploy/teagram-demo/forced-command.sh
           bash -n deploy/qa-invite/remote.sh
+          bash -n deploy/qa-invite/rollback.sh
           bash -n deploy/qa-invite/qa-account-writer.sh
           bash -n deploy/qa-invite/test-qa-invite-contract.sh
+          bash -n deploy/qa-invite/test-qa-invite-rollback.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
           sh -n deploy/teagram-demo/ops/install-qa-invite-command.sh
@@ -1220,8 +1222,10 @@ jobs:
             deploy/teagram-demo/init-demo.sh \
             deploy/teagram-demo/forced-command.sh \
             deploy/qa-invite/remote.sh \
+            deploy/qa-invite/rollback.sh \
             deploy/qa-invite/qa-account-writer.sh \
             deploy/qa-invite/test-qa-invite-contract.sh \
+            deploy/qa-invite/test-qa-invite-rollback.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
             deploy/teagram-demo/ops/install-qa-invite-command.sh \
