@@ -876,12 +876,83 @@ func TestHistoryKeepsNormalFileMediaSeparateFromStickerMedia(t *testing.T) {
 	if sticker == nil || sticker.MimeType != "application/x-tgsticker" {
 		t.Fatalf("sticker media = %+v, want TGS sticker document", sticker)
 	}
+	hasStickerAttribute := false
 	for _, attribute := range sticker.Attributes {
 		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
-			return
+			hasStickerAttribute = true
+			break
 		}
 	}
-	t.Fatalf("sticker attributes = %+v, want sticker attribute", sticker.Attributes)
+	if !hasStickerAttribute {
+		t.Fatalf("sticker attributes = %+v, want sticker attribute", sticker.Attributes)
+	}
+
+	assertStickerMessage := func(path string, class tg.MessageClass) {
+		t.Helper()
+		message, ok := class.(*tg.Message)
+		if !ok {
+			t.Fatalf("%s message = %T, want *tg.Message", path, class)
+		}
+		media, ok := message.Media.(*tg.MessageMediaDocument)
+		if !ok {
+			t.Fatalf("%s media = %T, want *tg.MessageMediaDocument", path, message.Media)
+		}
+		document, ok := media.Document.(*tg.Document)
+		if !ok || document.MimeType != "application/x-tgsticker" {
+			t.Fatalf("%s document = %#v, want TGS sticker document", path, media.Document)
+		}
+		for _, attribute := range document.Attributes {
+			if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+				return
+			}
+		}
+		t.Fatalf("%s document attributes = %+v, want sticker attribute", path, document.Attributes)
+	}
+
+	recipientHistory, err := s.History(ctx, recipient.ID, store.PeerTypeUser, owner.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read recipient history: %v", err)
+	}
+	var stickerLocalID int64
+	for _, message := range recipientHistory {
+		if message.Text == "sticker message" {
+			stickerLocalID = message.LocalID
+			break
+		}
+	}
+	if stickerLocalID == 0 {
+		t.Fatal("sticker message missing from recipient history")
+	}
+
+	byID, err := api.GetMessagesForTest(s, recipient.ID, &tg.MessagesGetMessagesRequest{
+		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: int(stickerLocalID)}},
+	})
+	if err != nil {
+		t.Fatalf("get sticker message by id: %v", err)
+	}
+	byIDResult, ok := byID.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getMessages result = %T, want *tg.MessagesMessages", byID)
+	}
+	if len(byIDResult.Messages) != 1 {
+		t.Fatalf("getMessages returned %d messages, want one", len(byIDResult.Messages))
+	}
+	assertStickerMessage("getMessages", byIDResult.Messages[0])
+
+	peerDialogs, err := api.GetPeerDialogsForTest(s, recipient.ID, &tg.MessagesGetPeerDialogsRequest{
+		Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerUser(recipient.ID, owner.ID)}},
+	})
+	if err != nil {
+		t.Fatalf("get peer dialogs with sticker message: %v", err)
+	}
+	peerDialogsResult, ok := peerDialogs.(*tg.MessagesPeerDialogs)
+	if !ok {
+		t.Fatalf("getPeerDialogs result = %T, want *tg.MessagesPeerDialogs", peerDialogs)
+	}
+	if len(peerDialogsResult.Messages) != 1 {
+		t.Fatalf("getPeerDialogs returned %d messages, want one", len(peerDialogsResult.Messages))
+	}
+	assertStickerMessage("getPeerDialogs", peerDialogsResult.Messages[0])
 }
 
 func createStickerRequest(shortName string, file store.File, masks, emojis bool) *tg.StickersCreateStickerSetRequest {
