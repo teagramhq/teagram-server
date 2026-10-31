@@ -1226,6 +1226,9 @@ jobs:
     needs: ops-prioritize-main
     if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
+    continue-on-error: ${{ github.event_name == 'push' }}
+    outputs:
+      result: ${{ steps.pin_result.outputs.result }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1300,6 +1303,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Expose the pin result to the demo publisher
+        if: ${{ always() }}
+        id: pin_result
+        env:
+          PIN_JOB_STATUS: ${{ job.status }}
+        run: printf 'result=%s\n' "$PIN_JOB_STATUS" >> "$GITHUB_OUTPUT"
+
   ci:
     name: ci
     if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
@@ -1324,7 +1334,6 @@ jobs:
       - build-browser-acceptance-image
       - test-migrations
       - check-deploy-workflow
-      - check-demo-web-pin
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1351,7 +1360,6 @@ jobs:
           BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.build-browser-acceptance-image.result }}
           TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
-          CHECK_DEMO_WEB_PIN_RESULT: ${{ needs.check-demo-web-pin.result }}
         run: |
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
@@ -1378,7 +1386,6 @@ jobs:
             "build-browser-acceptance-image=$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT"
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
-            "check-demo-web-pin=$CHECK_DEMO_WEB_PIN_RESULT"
           )
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -1399,8 +1406,7 @@ jobs:
                 "$TEST_BROWSER_ACCEPTANCE_RESULT" != "success" ||
                 "$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
                 "$TEST_MIGRATIONS_RESULT" != "success" ||
-                "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ||
-                "$CHECK_DEMO_WEB_PIN_RESULT" != "success" ]]; then
+                "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -1409,7 +1415,7 @@ jobs:
 
   publish-demo-image:
     name: 'publish: demo-image'
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
       - ops-prioritize-main
       - test-browser-acceptance
