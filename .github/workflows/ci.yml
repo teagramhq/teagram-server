@@ -3329,6 +3329,7 @@ jobs:
           bash deploy/teagramd/rollout-runner/test-local-compose-598359e.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-df9ffe5.sh
           bash deploy/teagramd/rollout-runner/test-rollout-runtime-pins.sh
+          bash deploy/teagramd/rollout-runner/test-remove-public-profile-containers.sh
           bash deploy/teagramd/rollout-runner/test-rollout-verifier-env-additions.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0

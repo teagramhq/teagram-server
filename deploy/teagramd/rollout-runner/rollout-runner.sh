@@ -54,6 +54,7 @@ ROLLOUT_COMPOSE_SERVICE=teagramd
 INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
+REMOVED_PUBLIC_PROFILE_SERVICES=()
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
@@ -870,6 +871,81 @@ current_service_id() {
   id=$(printf '%s' "$id" | head -n 1)
   [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$id"
+}
+
+remove_orphaned_public_profile_services() {
+  local baseline_container=$1 project target_services service container_ids container_id found=0
+  local -a observed_services=() remove_ids=()
+  REMOVED_PUBLIC_PROFILE_SERVICES=()
+
+  project=$(docker inspect "$baseline_container" \
+    --format '{{ index .Config.Labels "com.docker.compose.project" }}' </dev/null) || {
+    fail 'cannot read the baseline Compose project before removing public profile orphans'
+    return 1
+  }
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    fail 'baseline Compose project label is missing or invalid before public profile cleanup'
+    return 1
+  }
+
+  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+    container_ids=$(docker ps --all --quiet --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service" </dev/null) || {
+      fail "cannot list old Compose containers for public profile service $service"
+      return 1
+    }
+    if [ -n "$container_ids" ]; then
+      observed_services+=("$service")
+      found=1
+    fi
+  done
+  [ "$found" = 1 ] || return 0
+
+  target_services=$(docker compose --profile public config --services </dev/null) || {
+    fail 'cannot inspect target Compose services before removing public profile orphans'
+    return 1
+  }
+  for service in "${observed_services[@]}"; do
+    if printf '%s\n' "$target_services" | grep -Fxq "$service"; then
+      continue
+    fi
+    container_ids=$(docker ps --all --quiet --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service" </dev/null) || {
+      fail "cannot recheck old Compose containers for public profile service $service"
+      return 1
+    }
+    [ -n "$container_ids" ] || continue
+    while IFS= read -r container_id; do
+      [ -n "$container_id" ] || continue
+      [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+        fail "old Compose container ID for public profile service $service is invalid"
+        return 1
+      }
+      remove_ids+=("$container_id")
+    done <<< "$container_ids"
+    REMOVED_PUBLIC_PROFILE_SERVICES+=("$service")
+  done
+
+  [ "${#remove_ids[@]}" -gt 0 ] || return 0
+  docker rm -f "${remove_ids[@]}" </dev/null >/dev/null || {
+    fail 'cannot remove orphaned public profile containers before replacing teagramd'
+    return 1
+  }
+  printf 'removed orphaned public profile containers project=%s services=%s\n' \
+    "$project" "${REMOVED_PUBLIC_PROFILE_SERVICES[*]}"
+}
+
+restore_removed_public_profile_services() {
+  [ "${#REMOVED_PUBLIC_PROFILE_SERVICES[@]}" -gt 0 ] || return 0
+  docker compose --profile public up -d --no-build --no-deps \
+    "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}" </dev/null || {
+    fail 'could not restore removed public profile services during rollback'
+    return 1
+  }
+  printf 'restored baseline public profile services after rollback: %s\n' \
+    "${REMOVED_PUBLIC_PROFILE_SERVICES[*]}"
 }
 
 rollout_compose_service() {
@@ -2502,6 +2578,7 @@ perform_rollback() {
     return 1
   fi
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
+  restore_removed_public_profile_services || return 1
   rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
@@ -2801,6 +2878,11 @@ run_apply() {
     rc=$?
     restore_checkout_and_tag || return 1
     fail "pre-rollout teagramd logs could not be preserved (exit=$rc); baseline checkout and image restored"
+    return 1
+  fi
+  if remove_orphaned_public_profile_services "$baseline_id"; then :; else
+    rc=$?
+    rollback_after_target_failure "public_profile_cleanup_exit_$rc" || return 2
     return 1
   fi
   if docker compose up -d </dev/null; then :; else
