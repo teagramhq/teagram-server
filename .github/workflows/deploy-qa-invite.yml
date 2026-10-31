@@ -197,6 +197,7 @@ jobs:
 
       - name: Run the reviewed QA invite operation
         if: ${{ steps.input.outputs.action != 'create-account' }}
+        shell: bash
         env:
           REQUESTED_ACTION: ${{ steps.input.outputs.action }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}

@@ -50,6 +50,9 @@ grep -Fq 'create-account' "$FORCED_COMMAND" || fail 'forced command does not acc
 grep -Fq "qa-invite \$SOURCE_SHA create-account \$ACCOUNT_NAME" "$WORKFLOW" || fail 'workflow account creation does not use the pinned main SHA'
 grep -Fq 'QA_ACCOUNTS_SSH_KEY' "$WORKFLOW" || fail 'workflow has no restricted QA credential transfer path'
 grep -Fq '[[ "$GITHUB_REF" == refs/heads/main ]]' "$WORKFLOW" || fail 'deployment workflow must reject non-main dispatches'
+operation_step=$(sed -n '/- name: Run the reviewed QA invite operation/,/- name: Remove deployment keys/p' "$WORKFLOW")
+grep -Eq '^[[:space:]]+shell: bash$' <<< "$operation_step" ||
+  fail 'QA operations must use Bash pipefail so failed SSH commands cannot be masked by tee'
 input_validation=$(sed -n '/- name: Validate operation and deployment settings/,/- name: Resolve the tested main image digest/p' "$WORKFLOW")
 ! grep -Fq '${{ secrets.' <<< "$input_validation" || fail 'deployment secrets must not be injected before main-ref validation'
 grep -Fq 'Operator account result is unknown; its QA credential was retained for reconciliation' "$WORKFLOW" ||
