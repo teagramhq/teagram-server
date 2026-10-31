@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,21 @@ func TestAuthKeyExchangeP95AllowsOneOutlier(t *testing.T) {
 		return
 	}
 	t.Fatal("auth key exchange scenario missing")
+}
+
+func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
+	for _, sc := range scenarios() {
+		if sc.name != "contacts.getContacts" {
+			continue
+		}
+		for _, boundary := range []string{"server-side", "decrypted contacts RPC", "full response write", "no-reply frames excluded"} {
+			if !strings.Contains(sc.note, boundary) {
+				t.Errorf("contacts.getContacts note %q does not describe %q", sc.note, boundary)
+			}
+		}
+		return
+	}
+	t.Fatal("contacts.getContacts scenario missing")
 }
 
 type call = func(ctx context.Context) error
@@ -148,11 +164,22 @@ func scenarios() []scenario {
 		}),
 		{
 			name: "contacts.getContacts", kind: perfreport.Read, samples: readSamples, fullSet: true,
-			note: "answers every contact by protocol, so only its query count is held to scale invariance",
+			note: "server-side time from the decrypted contacts RPC dispatch through completion of the full response write (no-reply frames excluded, client decoding excluded); answers every contact by protocol, so only its query count is held to scale invariance",
 			setup: fixed(func(e *env) call {
 				return func(ctx context.Context) error {
+					if err := e.srv.rpcTimer.start(); err != nil {
+						return err
+					}
 					_, err := e.owner.api.ContactsGetContacts(ctx, 0)
-					return err
+					elapsed, timingErr := e.srv.rpcTimer.finish(ctx)
+					if err != nil {
+						return err
+					}
+					if timingErr != nil {
+						return timingErr
+					}
+					e.elapsed = elapsed
+					return nil
 				}
 			}),
 		},

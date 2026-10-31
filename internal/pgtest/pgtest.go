@@ -56,6 +56,9 @@ const (
 	// readyProbe bounds one connection attempt, readyInterval spaces them out.
 	readyProbe    = 5 * time.Second
 	readyInterval = 250 * time.Millisecond
+	// databaseCleanupTimeout bounds best-effort database cleanup after a test or
+	// failed template build, so teardown cannot hold up the test process forever.
+	databaseCleanupTimeout = 10 * time.Second
 	// bridgeProbe bounds the one-shot routability test for the container's
 	// bridge address. An unroutable address is dropped rather than refused, so
 	// this is a timeout in the failing case and must stay short.
@@ -254,6 +257,16 @@ func ensureTemplate(ctx context.Context) (retErr error) {
 	if _, err := conn.Exec(ctx, `CREATE DATABASE `+building); err != nil {
 		return fmt.Errorf("create building: %w", err)
 	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), databaseCleanupTimeout)
+		defer cancel()
+		if _, err := conn.Exec(cleanupCtx, `DROP DATABASE IF EXISTS `+building+` WITH (FORCE)`); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("drop failed template build %s: %w", building, err))
+		}
+	}()
 	if err := applyMigrations(ctx, building); err != nil {
 		return err
 	}
@@ -386,6 +399,36 @@ func DSNFrom(dbName string) string {
 	return replaceDBName(AdminDSN(), dbName)
 }
 
+// RegisterDatabaseCleanup drops a test database when tb ends, including when
+// the test fails. Cleanup uses a bounded context and reports errors on tb.
+func RegisterDatabaseCleanup(tb testing.TB, name string) {
+	tb.Helper()
+	tb.Cleanup(func() {
+		if err := dropDatabase(name); err != nil {
+			tb.Errorf("pgtest cleanup database %s: %v", name, err)
+		}
+	})
+}
+
+func dropDatabase(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), databaseCleanupTimeout)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, adminDSN)
+	if err != nil {
+		return fmt.Errorf("connect to admin database for cleanup: %w", err)
+	}
+	_, dropErr := conn.Exec(ctx, `DROP DATABASE IF EXISTS `+pgx.Identifier{name}.Sanitize()+` WITH (FORCE)`)
+	if dropErr != nil {
+		dropErr = fmt.Errorf("drop database: %w", dropErr)
+	}
+	closeErr := conn.Close(ctx)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close cleanup connection: %w", closeErr)
+	}
+	return errors.Join(dropErr, closeErr)
+}
+
 // RandomHex returns 16 hex characters of randomness, for callers that build
 // database names in the same "t_" namespace DSN uses.
 func RandomHex() string {
@@ -461,15 +504,8 @@ func DSNFor(out io.Writer) (string, func(), error) {
 	}
 
 	return replaceDBName(adminDSN, name), func() {
-		dctx := context.Background()
-		dconn, err := pgx.Connect(dctx, adminDSN)
-		if err != nil {
-			_, _ = fmt.Fprintf(out, "pgtest cleanup connect: %v\n", err) //nolint:errcheck // diagnostics only
-			return
-		}
-		defer func() { _ = dconn.Close(dctx) }() //nolint:errcheck // best-effort close of cleanup conn
-		if _, err := dconn.Exec(dctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
-			_, _ = fmt.Fprintf(out, "pgtest cleanup drop %s: %v\n", name, err) //nolint:errcheck // diagnostics only
+		if err := dropDatabase(name); err != nil {
+			_, _ = fmt.Fprintf(out, "pgtest cleanup database %s: %v\n", name, err) //nolint:errcheck // diagnostics only
 		}
 	}, nil
 }
@@ -497,13 +533,17 @@ func Prewarm() error {
 // string. The database is dropped on test cleanup. Safe for t.Parallel().
 func DSN(tb testing.TB) string {
 	tb.Helper()
+	return cloneDatabase(tb, "t_"+randName(tb))
+}
+
+func cloneDatabase(tb testing.TB, name string) string {
+	tb.Helper()
 	once.Do(setup)
 	if errSetup != nil {
 		tb.Fatalf("pgtest setup: %v", errSetup)
 	}
 
 	ctx := context.Background()
-	name := "t_" + randName(tb)
 
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
@@ -511,22 +551,14 @@ func DSN(tb testing.TB) string {
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close of admin conn
 
-	// G201 is not a risk here: name is internally-generated hex and templateName
-	// is a constant prefix + hex hash; Postgres DDL cannot bind identifiers.
+	// G201 is not a risk here: both identifiers are test-helper inputs and are
+	// quoted before interpolation because Postgres DDL cannot bind identifiers.
 	if _, err := conn.Exec(ctx,
-		fmt.Sprintf(`CREATE DATABASE %s TEMPLATE %s`, name, templateName),
+		fmt.Sprintf(`CREATE DATABASE %s TEMPLATE %s`, pgx.Identifier{name}.Sanitize(), pgx.Identifier{templateName}.Sanitize()),
 	); err != nil {
 		tb.Fatalf("clone db: %v", err)
 	}
-	tb.Cleanup(func() {
-		dctx := context.Background()
-		dconn, err := pgx.Connect(dctx, adminDSN)
-		if err != nil {
-			return
-		}
-		defer func() { _ = dconn.Close(dctx) }()                                              //nolint:errcheck // best-effort close of cleanup conn
-		_, _ = dconn.Exec(dctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)) //nolint:errcheck // best-effort drop on cleanup
-	})
+	RegisterDatabaseCleanup(tb, name)
 
 	return replaceDBName(adminDSN, name)
 }

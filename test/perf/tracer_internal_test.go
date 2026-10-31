@@ -14,7 +14,7 @@ func TestQueryTracerCapturesStatementDuration(t *testing.T) {
 	t.Parallel()
 
 	tracer := &queryTracer{}
-	tracer.reset(true)
+	tracer.reset(true, false)
 	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "SELECT 1"})
 	time.Sleep(time.Millisecond)
 	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{})
