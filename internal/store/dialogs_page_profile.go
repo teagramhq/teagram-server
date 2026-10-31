@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -34,17 +36,69 @@ func (s *Store) dialogsPageWithPins(ctx context.Context, params dialogsPageParam
 	}
 	defer conn.Release()
 
-	rows, timings, err := db.New(customPlanDB{DBTX: conn}).DialogPageWithPinsProfiled(ctx, db.DialogPageWithPinsProfileParams{
+	q := db.New(dialogPageProfileDBTX{
+		DBTX:    customPlanDB{DBTX: conn},
+		profile: &profile,
+	})
+	if params.offsetID == 0 && params.offsetPeerType == 0 {
+		first, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+			OwnerID: params.ownerID, ExcludePinned: params.excludePinned,
+			Lim: int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
+		})
+		if err != nil {
+			return nil, profile, err
+		}
+		started = time.Now()
+		rows := make([]db.DialogsCursorPageWithPinsRow, len(first))
+		for i, row := range first {
+			rows[i] = db.DialogsCursorPageWithPinsRow(row)
+		}
+		profile.postQueryGo += time.Since(started)
+		return rows, profile, nil
+	}
+	rows, err := q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
 		OwnerID: params.ownerID, OffsetID: params.offsetID,
 		OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
 		ExcludePinned: params.excludePinned,
 		Lim:           int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
-		FirstPage:     params.offsetID == 0 && params.offsetPeerType == 0,
 	})
-	profile.queryRoundTrip = timings.QueryRoundTrip
-	profile.rowScanDecode = timings.RowScanDecode
-	profile.postQueryGo = timings.PostQueryGo
 	return rows, profile, err
+}
+
+type dialogPageProfileDBTX struct {
+	db.DBTX
+
+	profile *dialogsPageProfile
+}
+
+func (q dialogPageProfileDBTX) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	started := time.Now()
+	rows, err := q.DBTX.Query(ctx, sql, args...)
+	q.profile.queryRoundTrip += time.Since(started)
+	if err != nil {
+		return rows, err
+	}
+	return dialogPageProfileRows{Rows: rows, profile: q.profile}, nil
+}
+
+type dialogPageProfileRows struct {
+	pgx.Rows
+
+	profile *dialogsPageProfile
+}
+
+func (r dialogPageProfileRows) Next() bool {
+	started := time.Now()
+	next := r.Rows.Next()
+	r.profile.rowScanDecode += time.Since(started)
+	return next
+}
+
+func (r dialogPageProfileRows) Scan(dest ...any) error {
+	started := time.Now()
+	err := r.Rows.Scan(dest...)
+	r.profile.rowScanDecode += time.Since(started)
+	return err
 }
 
 func (profile dialogsPageProfile) log() {
