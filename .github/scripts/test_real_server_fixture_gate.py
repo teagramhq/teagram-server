@@ -214,12 +214,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # The publisher and recovery dispatcher are main-push-only. The
+        # The publisher and recovery dispatcher are main-push-only. The demo
+        # pin is advisory and must not gate the production CI aggregate. The
         # main-priority job is skipped on PRs and checked separately. MAIN-2918
         # is deleting the other three lanes.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
+            "check-demo-web-pin",
             "ops-dispatch-pr-ci-recovery",
             "ops-prioritize-main",
             "mirror-rustfs-qualification-images",
