@@ -23,6 +23,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -58,9 +59,10 @@ type server struct {
 }
 
 // rpcTimingHandler times dispatched RPCs only while one perf scenario opens a
-// timing window. A dispatched handler returns after Conn.SendResult has
-// completed the full transport write. MTProto service messages such as
-// msgs_ack are handled before this boundary and do not enter the timer.
+// timing window. It also tags the request context so SQL spans use this same
+// boundary. A dispatched handler returns after Conn.SendResult has completed
+// the full transport write. MTProto service messages such as msgs_ack are
+// handled before this boundary and do not enter the timer.
 type rpcTimingHandler struct {
 	next     mtproto.Handler
 	active   atomic.Bool
@@ -126,8 +128,16 @@ func (h *rpcTimingHandler) OnMessage(c *mtproto.Conn, req *mtproto.Request) erro
 	h.mu.Unlock()
 
 	started := time.Now()
+	window := newQueryTimingWindow(started)
+	requestCtx := req.Ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	req.Ctx = context.WithValue(requestCtx, queryTimingWindowContextKey{}, window)
 	err := h.next.OnMessage(c, req)
-	elapsed := time.Since(started)
+	finished := time.Now()
+	window.finish(finished)
+	elapsed := finished.Sub(started)
 
 	h.mu.Lock()
 	h.samples = append(h.samples, elapsed)
@@ -260,6 +270,38 @@ func TestRPCTimingHandlerCorrelatesContactsRPC(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("dispatches = %d, want both RPCs forwarded", calls)
+	}
+}
+
+func TestRPCTimingHandlerScopesSQLToContactsDispatch(t *testing.T) {
+	tracer := &queryTracer{}
+	tracer.reset(false, true)
+	trace := func(ctx context.Context, name string) {
+		t.Helper()
+		ctx = tracer.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "-- name: " + name + " :one\nSELECT 1"})
+		tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{})
+	}
+	h := &rpcTimingHandler{next: mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+		trace(req.Ctx, "ListContacts")
+		return nil
+	})}
+	if err := h.start(); err != nil {
+		t.Fatal(err)
+	}
+	trace(context.Background(), "AuthKeyByID")
+	request := perfRPCRequest(t, &tg.ContactsGetContactsRequest{})
+	request.Ctx = context.Background()
+	if err := h.OnMessage(nil, request); err != nil {
+		t.Fatalf("dispatch contacts RPC: %v", err)
+	}
+	trace(context.Background(), "AfterReply")
+	if _, err := h.finish(context.Background()); err != nil {
+		t.Fatalf("finish contacts timing: %v", err)
+	}
+
+	got := tracer.timingWindow()
+	if len(got) != 1 || got[0].name != "ListContacts" {
+		t.Fatalf("SQL timings = %+v, want only ListContacts inside the RPC dispatch window", got)
 	}
 }
 
