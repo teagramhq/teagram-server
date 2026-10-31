@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail on fixed high or critical OSV findings and summarize findings without fixes."""
+"""Fail on fixed high or critical dependency and reachable Go findings."""
 
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ def analyze(report: dict[str, Any]) -> tuple[list[str], list[str]]:
     return sorted(failures), sorted(without_fixes)
 
 
-def parse_govulncheck_report(report_path: Path) -> list[str]:
+def parse_govulncheck_report(report_path: Path) -> dict[str, dict[str, Any]]:
     try:
         text = report_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -186,13 +186,32 @@ def parse_govulncheck_report(report_path: Path) -> list[str]:
     ):
         raise ValueError("govulncheck report is missing its scanner configuration")
 
-    findings: set[str] = set()
+    osv_entries: dict[str, dict[str, Any]] = {}
+    findings: dict[str, dict[str, Any]] = {}
     for message in messages:
+        if "osv" in message:
+            vulnerability = message["osv"]
+            if not isinstance(vulnerability, dict):
+                raise ValueError("govulncheck emitted invalid OSV metadata")
+            identifier = vulnerability.get("id")
+            if not isinstance(identifier, str) or not SAFE_ID.fullmatch(identifier):
+                raise ValueError("govulncheck emitted OSV metadata without a safe ID")
+            existing = osv_entries.get(identifier)
+            if existing is not None and existing != vulnerability:
+                raise ValueError(f"govulncheck emitted conflicting OSV metadata for {identifier}")
+            osv_entries[identifier] = vulnerability
+
         finding = message.get("finding")
         if finding is None:
             continue
         if not isinstance(finding, dict) or not isinstance(finding.get("osv"), str):
             raise ValueError("govulncheck emitted a finding without a vulnerability ID")
+        identifier = finding["osv"]
+        if not SAFE_ID.fullmatch(identifier):
+            raise ValueError("govulncheck emitted a finding with an unsafe vulnerability ID")
+        fixed_version = finding.get("fixed_version", "")
+        if not isinstance(fixed_version, str):
+            raise ValueError("govulncheck emitted an invalid fixed version")
         trace = finding.get("trace", [])
         if not isinstance(trace, list):
             raise ValueError("govulncheck emitted an invalid finding trace")
@@ -202,8 +221,45 @@ def parse_govulncheck_report(report_path: Path) -> list[str]:
             and frame["function"]
             for frame in trace
         ):
-            findings.add(finding["osv"])
-    return sorted(findings)
+            existing = findings.get(identifier)
+            if (
+                existing is not None
+                and existing.get("fixed_version")
+                and fixed_version
+                and existing["fixed_version"] != fixed_version
+            ):
+                raise ValueError(
+                    f"govulncheck emitted conflicting fixed versions for {identifier}"
+                )
+            if existing is None or (not existing.get("fixed_version") and fixed_version):
+                findings[identifier] = finding
+
+    missing_metadata = sorted(findings.keys() - osv_entries.keys())
+    if missing_metadata:
+        raise ValueError(
+            "govulncheck findings are missing OSV metadata: " + ", ".join(missing_metadata)
+        )
+    return {
+        identifier: {"finding": findings[identifier], "osv": osv_entries[identifier]}
+        for identifier in sorted(findings)
+    }
+
+
+def analyze_govulncheck_findings(
+    findings: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    failures: set[str] = set()
+    without_fixes: set[str] = set()
+    for identifier, joined in findings.items():
+        vulnerability = joined["osv"]
+        finding = joined["finding"]
+        fixed_version = finding.get("fixed_version", "")
+        item = f"{identifier} reachable via govulncheck"
+        if not fixed_version:
+            without_fixes.add(item)
+        elif severity_is_high_or_critical(vulnerability):
+            failures.add(f"{item}; fixed version: {fixed_version}")
+    return sorted(failures), sorted(without_fixes)
 
 
 def summary_text(reachable_findings: list[str], without_fixes: list[str]) -> str:
@@ -212,7 +268,7 @@ def summary_text(reachable_findings: list[str], without_fixes: list[str]) -> str
         lines.append("- govulncheck reachable findings: " + ", ".join(reachable_findings))
     else:
         lines.append("- govulncheck reachable findings: none")
-    lines.append("- OSV findings without a fixed version:")
+    lines.append("- Findings without a fixed version:")
     if without_fixes:
         lines.extend(f"  - {finding}" for finding in without_fixes)
     else:
@@ -233,7 +289,12 @@ def main() -> int:
             raise ValueError("OSV-Scanner report is not an object")
         failures, without_fixes = analyze(report)
         reachable_findings = parse_govulncheck_report(Path(sys.argv[2]))
-        summary = summary_text(reachable_findings, without_fixes)
+        govulncheck_failures, govulncheck_without_fixes = analyze_govulncheck_findings(
+            reachable_findings
+        )
+        failures = sorted(set(failures) | set(govulncheck_failures))
+        without_fixes = sorted(set(without_fixes) | set(govulncheck_without_fixes))
+        summary = summary_text(sorted(reachable_findings), without_fixes)
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary_path:
             with Path(summary_path).open("a", encoding="utf-8") as output:
@@ -245,11 +306,11 @@ def main() -> int:
         return 1
 
     if failures:
-        print("OSV-Scanner found fixed high or critical vulnerabilities:")
+        print("Security scanners found fixed high or critical vulnerabilities:")
         for failure in failures:
             print(f"- {failure}")
         return 1
-    print("OSV-Scanner found no fixed high or critical vulnerabilities")
+    print("Security scanners found no fixed high or critical vulnerabilities")
     return 0
 
 

@@ -3,12 +3,22 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from check_osv_report import analyze, parse_govulncheck_report, summary_text
+import check_osv_report
+from check_osv_report import (
+    analyze,
+    analyze_govulncheck_findings,
+    parse_govulncheck_report,
+    summary_text,
+)
 
 
 def vulnerability(
@@ -44,6 +54,16 @@ def report(*vulnerabilities: dict[str, object]) -> dict[str, object]:
             }
         ]
     }
+
+
+def govulncheck_findings(*messages: dict[str, object]) -> dict[str, dict[str, object]]:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        report_path = Path(temporary_directory) / "govulncheck.json"
+        report_path.write_text(
+            "\n".join(json.dumps(message) for message in messages),
+            encoding="utf-8",
+        )
+        return parse_govulncheck_report(report_path)
 
 
 class CheckOSVReportTest(unittest.TestCase):
@@ -117,11 +137,13 @@ class CheckOSVReportTest(unittest.TestCase):
         self.assertEqual(len(failures), 1)
 
     def test_govulncheck_only_returns_reachable_findings(self) -> None:
+        osv_metadata = {"id": "GO-2026-1", "severity": "HIGH"}
         messages = [
             {"config": {"scanner_name": "govulncheck"}},
             {
                 "finding": {
                     "osv": "GO-2026-1",
+                    "fixed_version": "go1.25.4",
                     "trace": [{"function": "example.com/app.call"}],
                 }
             },
@@ -131,6 +153,7 @@ class CheckOSVReportTest(unittest.TestCase):
                     "trace": [{"function": ""}],
                 }
             },
+            {"osv": osv_metadata},
         ]
         with tempfile.TemporaryDirectory() as temporary_directory:
             report_path = Path(temporary_directory) / "govulncheck.json"
@@ -139,9 +162,101 @@ class CheckOSVReportTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(
-                parse_govulncheck_report(report_path),
-                ["GO-2026-1"],
+            findings = parse_govulncheck_report(report_path)
+
+        self.assertEqual(list(findings), ["GO-2026-1"])
+        self.assertEqual(findings["GO-2026-1"]["osv"], osv_metadata)
+        self.assertEqual(
+            findings["GO-2026-1"]["finding"]["fixed_version"], "go1.25.4"
+        )
+
+    def test_main_fails_for_govulncheck_only_fixed_high_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            osv_report_path = Path(temporary_directory) / "osv.json"
+            osv_report_path.write_text(json.dumps({"results": []}), encoding="utf-8")
+            govulncheck_report_path = Path(temporary_directory) / "govulncheck.json"
+            govulncheck_report_path.write_text(
+                "\n".join(
+                    json.dumps(message)
+                    for message in (
+                        {"config": {"scanner_name": "govulncheck"}},
+                        {
+                            "finding": {
+                                "osv": "GO-2026-6",
+                                "fixed_version": "go1.25.4",
+                                "trace": [{"function": "crypto/example.Verify"}],
+                            }
+                        },
+                        {
+                            "osv": vulnerability(
+                                "GO-2026-6",
+                                "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                                "go1.25.4",
+                            )
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+            summary_path = Path(temporary_directory) / "summary.md"
+            output = StringIO()
+            with (
+                patch.object(
+                    check_osv_report.sys,
+                    "argv",
+                    [
+                        "check_osv_report.py",
+                        str(osv_report_path),
+                        str(govulncheck_report_path),
+                    ],
+                ),
+                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}),
+                redirect_stdout(output),
+            ):
+                status = check_osv_report.main()
+
+        self.assertEqual(status, 1)
+        self.assertIn("GO-2026-6", output.getvalue())
+        self.assertIn("fixed version: go1.25.4", output.getvalue())
+
+    def test_reachable_unfixed_high_govulncheck_finding_is_summarized(self) -> None:
+        findings = govulncheck_findings(
+            {"config": {"scanner_name": "govulncheck"}},
+            {
+                "osv": vulnerability(
+                    "GO-2026-4",
+                    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                    None,
+                )
+            },
+            {
+                "finding": {
+                    "osv": "GO-2026-4",
+                    "trace": [{"function": "crypto/example.Verify"}],
+                }
+            },
+        )
+
+        failures, without_fixes = analyze_govulncheck_findings(findings)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(without_fixes, ["GO-2026-4 reachable via govulncheck"])
+        self.assertIn(
+            "GO-2026-4 reachable via govulncheck",
+            summary_text(list(findings), without_fixes),
+        )
+
+    def test_reachable_govulncheck_finding_requires_osv_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing OSV metadata"):
+            govulncheck_findings(
+                {"config": {"scanner_name": "govulncheck"}},
+                {
+                    "finding": {
+                        "osv": "GO-2026-5",
+                        "fixed_version": "go1.25.4",
+                        "trace": [{"function": "crypto/example.Verify"}],
+                    }
+                },
             )
 
 
