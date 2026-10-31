@@ -464,6 +464,8 @@ type RateLimitsConfig struct {
 	SearchGlobal store.RateLimitConfig
 	// PollVote limits messages.sendVote per account.
 	PollVote store.RateLimitConfig
+	// CreateStickerSet limits expensive stickers.createStickerSet parsing per account.
+	CreateStickerSet store.RateLimitConfig
 	// SaveFilePart limits upload.saveFilePart and upload.saveBigFilePart per
 	// account, on one shared budget: both write the same rows, so a budget each
 	// would let an account double its part rate by alternating between them.
@@ -541,7 +543,8 @@ type RateLimitsConfig struct {
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
 // 20 chat creates per 24h, 120 member adds per 24h, 20 channel creates per 24h,
 // 300 message searches per hour, 300 contacts searches per hour, 300 global
-// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client
+// searches per hour, 60 poll votes per 60s, 3 sticker-set creates per 60s,
+// 600 upload parts per 60s, per client
 // network 10 sendCode calls per hour across at most 20 distinct phone numbers
 // per 24h, 10 failed
 // signIn attempts per hour per client network, 5 failed checkPassword attempts
@@ -570,19 +573,20 @@ type RateLimitsConfig struct {
 // instead of at ones it invented.
 func DefaultRateLimits() RateLimitsConfig {
 	return RateLimitsConfig{
-		MessageSend:    store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
-		CreateChat:     store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
-		AddChatUser:    store.RateLimitConfig{Limit: 120, Window: 24 * time.Hour},
-		CreateChannel:  store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
-		SearchMessages: store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		GetMessages:    store.RateLimitConfig{Limit: 120, Window: time.Minute},
-		SearchContacts: store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		SearchGlobal:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		PollVote:       store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
-		SaveFilePart:   store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
-		UploadBytes:    store.RateLimitConfig{Window: time.Hour},
-		GetFile:        store.RateLimitConfig{Limit: 50, Window: time.Second},
-		GetFileReplica: store.RateLimitConfig{Limit: 400, Window: time.Second},
+		MessageSend:      store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
+		CreateChat:       store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		AddChatUser:      store.RateLimitConfig{Limit: 120, Window: 24 * time.Hour},
+		CreateChannel:    store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		SearchMessages:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		GetMessages:      store.RateLimitConfig{Limit: 120, Window: time.Minute},
+		SearchContacts:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		SearchGlobal:     store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		PollVote:         store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
+		CreateStickerSet: store.RateLimitConfig{Limit: 3, Window: time.Minute},
+		SaveFilePart:     store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
+		UploadBytes:      store.RateLimitConfig{Window: time.Hour},
+		GetFile:          store.RateLimitConfig{Limit: 50, Window: time.Second},
+		GetFileReplica:   store.RateLimitConfig{Limit: 400, Window: time.Second},
 		SendCodeIP: store.SendCodeIPLimits{
 			Calls:  store.RateLimitConfig{Limit: 10, Window: time.Hour},
 			Phones: store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
@@ -1643,6 +1647,23 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_UPDATE_PROFILE_WINDOW must be a duration")
 		}
 		cfg.RateLimits.UpdateProfile.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CREATE_STICKER_SET"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CREATE_STICKER_SET must be an integer")
+		}
+		cfg.RateLimits.CreateStickerSet.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW must be a duration")
+		}
+		cfg.RateLimits.CreateStickerSet.Window = d
+	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_CREATE_STICKER_SET", "TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW", cfg.RateLimits.CreateStickerSet); err != nil {
+		return Config{}, err
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION"); v != "" {
 		n, err := strconv.Atoi(v)

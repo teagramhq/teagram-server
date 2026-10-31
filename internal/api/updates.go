@@ -98,7 +98,9 @@ func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, files m
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
+		if media, ok := files[*m.StickerDocumentID]; ok {
+			msg.SetMedia(media)
+		} else if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
 			msg.SetMedia(&tg.MessageMediaUnsupported{})
@@ -278,7 +280,9 @@ func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
+		if media, ok := files[*m.StickerDocumentID]; ok {
+			msg.SetMedia(media)
+		} else if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
 			msg.SetMedia(&tg.MessageMediaUnsupported{})

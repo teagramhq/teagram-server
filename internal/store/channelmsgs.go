@@ -525,7 +525,7 @@ func (s *Store) PostChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
 	entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
-	if stickerDocumentID >= 0 {
+	if stickerDocumentID == 0 {
 		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
 	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, entities)
@@ -600,7 +600,7 @@ func (s *Store) ChannelStickerRetryAs(
 	if randomID == 0 {
 		return ChannelMessage{}, 0, false, nil
 	}
-	if stickerDocumentID >= 0 {
+	if stickerDocumentID == 0 {
 		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -619,6 +619,9 @@ func (s *Store) ChannelStickerRetryAs(
 		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state for sticker retry: %w", err)
 	}
 	if _, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentID); err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
 	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, false, &stickerDocumentID)
@@ -847,7 +850,7 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, err
 		}
 	}
-	if stickerDocumentID != nil && (*stickerDocumentID >= 0 || fileID != nil) {
+	if stickerDocumentID != nil && (*stickerDocumentID == 0 || fileID != nil) {
 		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
 
@@ -891,6 +894,11 @@ func (s *Store) postChannelMessage(
 			role, err = checkPostRights(ctx, qtx, channelID, fromID)
 		}
 		if err != nil {
+			return ChannelMessage{}, 0, false, err
+		}
+	}
+	if stickerDocumentID != nil {
+		if err = lockLiveUserStickerDocuments(ctx, qtx, *stickerDocumentID); err != nil {
 			return ChannelMessage{}, 0, false, err
 		}
 	}
