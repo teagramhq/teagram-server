@@ -45,6 +45,14 @@ type Contact struct {
 	Mutual bool
 }
 
+// ContactWithUser is a contact edge, its rendered user record, and visible
+// current profile photo, if any.
+type ContactWithUser struct {
+	Contact Contact
+	User    User
+	PhotoID int64
+}
+
 func validContactIDs(ownerID, contactID int64) bool {
 	return ownerID > 0 && contactID > 0 && ownerID != contactID
 }
@@ -263,6 +271,45 @@ func (s *Store) Contacts(ctx context.Context, ownerID int64) ([]Contact, int, er
 		contacts[i] = Contact{UserID: row.ContactID, Mutual: row.Mutual}
 		if i == 0 {
 			total = int(row.Total)
+		}
+	}
+	return contacts, total, nil
+}
+
+// ContactsWithUsers loads a full contact page, user records, and visible
+// current profile photos in one query. It is intended for full-list responses;
+// hash-only checks should use Contacts so they do not hydrate users
+// unnecessarily.
+func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactWithUser, int, error) {
+	rows, err := s.q.ContactsWithUsers(ctx, ownerID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list contacts with users: %w", err)
+	}
+	if len(rows) == 0 {
+		return []ContactWithUser{}, 0, nil
+	}
+	total := int(rows[0].Total)
+	if len(rows) != total {
+		return nil, 0, fmt.Errorf("list contacts with users: got %d rows for %d contacts", len(rows), total)
+	}
+	contacts := make([]ContactWithUser, len(rows))
+	for i, row := range rows {
+		var photoID int64
+		if row.PhotoFileID != nil {
+			photoID = *row.PhotoFileID
+		}
+		contacts[i] = ContactWithUser{
+			Contact: Contact{UserID: row.ContactID, Mutual: row.Mutual},
+			User: UserFromDB(db.UserByIDRow{
+				ID:         row.ID,
+				FirstName:  row.FirstName,
+				LastName:   row.LastName,
+				IsOnline:   row.IsOnline,
+				LastSeenAt: row.LastSeenAt,
+				Username:   row.Username,
+				Kind:       row.Kind,
+			}),
+			PhotoID: photoID,
 		}
 	}
 	return contacts, total, nil

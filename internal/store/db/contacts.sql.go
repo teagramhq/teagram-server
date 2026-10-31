@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const contactExists = `-- name: ContactExists :one
@@ -62,6 +64,98 @@ func (q *Queries) ContactStates(ctx context.Context, arg ContactStatesParams) ([
 	for rows.Next() {
 		var i ContactStatesRow
 		if err := rows.Scan(&i.ContactID, &i.Mutual); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const contactsWithUsers = `-- name: ContactsWithUsers :many
+WITH contact_rows AS MATERIALIZED (
+    SELECT uc.contact_id, COUNT(*) OVER () AS total
+    FROM user_contacts uc
+    WHERE uc.owner_id = $1::BIGINT
+), mutual_contacts AS MATERIALIZED (
+    SELECT reverse.owner_id
+    FROM user_contacts reverse
+    WHERE reverse.contact_id = $1::BIGINT
+), visible_photos AS MATERIALIZED (
+    SELECT s.user_id, s.current_file_id
+    FROM profile_photo_state s
+    JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
+    JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+    WHERE s.user_id = ANY(ARRAY(SELECT contact_id FROM contact_rows))
+      AND s.current_file_id IS NOT NULL
+      AND f.stored = true
+      AND f.media_kind = 'photo'
+      AND NOT EXISTS (
+          SELECT 1 FROM blocked_users bu
+          WHERE bu.blocker_id = up.user_id
+            AND bu.blocked_id = $1::BIGINT
+      )
+)
+SELECT contact_rows.contact_id,
+       (mutual_contacts.owner_id IS NOT NULL)::BOOLEAN AS mutual,
+       contact_rows.total,
+       u.id,
+       u.first_name,
+       u.last_name,
+       u.is_online,
+       u.last_seen_at,
+       un.handle AS username,
+       u.kind,
+       visible_photos.current_file_id AS photo_file_id
+FROM contact_rows
+JOIN users u ON u.id = contact_rows.contact_id
+LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
+LEFT JOIN mutual_contacts ON mutual_contacts.owner_id = contact_rows.contact_id
+LEFT JOIN visible_photos ON visible_photos.user_id = u.id
+ORDER BY contact_rows.contact_id
+`
+
+type ContactsWithUsersRow struct {
+	ContactID   int64
+	Mutual      bool
+	Total       int64
+	ID          int64
+	FirstName   string
+	LastName    string
+	IsOnline    bool
+	LastSeenAt  pgtype.Timestamptz
+	Username    *string
+	Kind        string
+	PhotoFileID *int64
+}
+
+// Load the full contact page, user records, and visible current photos
+// together. Incoming edges use the reverse contact index, and photos retain
+// the live gallery, stored-file, media-kind, and block checks.
+func (q *Queries) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactsWithUsersRow, error) {
+	rows, err := q.db.Query(ctx, contactsWithUsers, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ContactsWithUsersRow
+	for rows.Next() {
+		var i ContactsWithUsersRow
+		if err := rows.Scan(
+			&i.ContactID,
+			&i.Mutual,
+			&i.Total,
+			&i.ID,
+			&i.FirstName,
+			&i.LastName,
+			&i.IsOnline,
+			&i.LastSeenAt,
+			&i.Username,
+			&i.Kind,
+			&i.PhotoFileID,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
