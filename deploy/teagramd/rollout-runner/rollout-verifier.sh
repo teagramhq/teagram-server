@@ -165,7 +165,9 @@ verify_target_tailnet_exchange_limit() {
     | ($compose.services[$service].environment // null) as $compose_env
     | (($inspect | item).Config.Env // null) as $container_env
     | if ($compose_env | type) != "object" or ($container_env | type) != "array" then false
-      elif ($compose_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) then false
+      elif ($compose_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) then
+        # A pinned legacy render predates the mapping; its container must not set it.
+        all($container_env[]; type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))
       else
         $compose_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET as $resolved
         | [$container_env[] | select(type == "string" and startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="))

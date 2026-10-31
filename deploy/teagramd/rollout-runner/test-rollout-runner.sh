@@ -77,7 +77,7 @@ CCE_LOCAL_COMPOSE_ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b
 CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=0a7568443ed5945214ba36489f0ca923f5cd9adf1b2b337b2038567c56045ac5
+INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -452,11 +452,6 @@ if [ "${1:-}" = inspect ]; then
     env_json=$(jq -c --arg value "$login_codes" \
       'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
       <<< "$env_json")
-    tailnet_value=0
-    if [ "$cfg" = baseline ] || [ "$cfg" = rollback ]; then tailnet_value=''; fi
-    env_json=$(jq -c --arg value "$tailnet_value" \
-      'map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + $value]' \
-      <<< "$env_json")
     compose_service=teagramd
     if [ "${MOCK_SCENARIO:-}" = initial-local-target-compose-render ]; then
       compose_service=$(jq -er 'if .services.telegramd then "telegramd" elif .services.teagramd then "teagramd" else error("server service missing") end' \
@@ -493,6 +488,14 @@ if [ "${1:-}" = inspect ]; then
         ' <<< "$env_json")
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
+      # Docker sets the tailnet limit only when the starting Compose maps it.
+      env_json=$(jq -c --slurpfile compose "$turnstile_compose" '
+        ($compose[0].services.teagramd // $compose[0].services.telegramd).environment as $env
+        | map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))
+          + (if ($env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET"))
+             then ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + ($env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET | tostring)]
+             else [] end)
+      ' <<< "$env_json")
     fi
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'

@@ -595,6 +595,17 @@ if verify_target_tailnet_exchange_limit \
   exit 1
 fi
 printf '%s\n' 'PASS target renders must resolve a numeric tailnet value'
+legacy_tailnet_target_inspect=$(jq -c \
+  '.Config.Env |= map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))' \
+  <<< "$(inspect_json '')")
+if ! verify_target_tailnet_exchange_limit \
+  "$legacy_tailnet_target_inspect" "$missing_tailnet_target_compose" target selected-compose-render \
+  >/dev/null 2>"$TMP/tailnet-legacy-render.err"; then
+  printf '%s\n' 'FAIL pinned legacy render without a tailnet mapping was rejected' >&2
+  cat "$TMP/tailnet-legacy-render.err" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS pinned legacy render without a tailnet mapping is accepted'
 
 : > "$ENV_FILE"
 empty_tailnet_rollback_inspect=$(jq -c \
