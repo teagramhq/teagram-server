@@ -491,7 +491,12 @@ services:
     ports:
       - "127.0.0.1:2446:2446"
     volumes:
-      - ./deploy/teagramd/haproxy-public-websocket.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - type: bind
+        source: ./deploy/teagramd/haproxy-public-websocket.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
       interval: 10s

@@ -133,9 +133,11 @@ def main() -> int:
     require(
         config_mount.get("type") == "bind"
         and config_mount.get("read_only") is True
+        and isinstance(config_mount.get("bind"), dict)
+        and config_mount["bind"].get("create_host_path") is False
         and isinstance(config_source, str)
         and os.path.realpath(config_source) == os.path.realpath(args.haproxy_config),
-        "public HAProxy must mount the reviewed config file read-only",
+        "public HAProxy must mount the reviewed config file read-only without creating its host path",
     )
     require(proxy.get("healthcheck", {}).get("test", [])[-1:] == ["http://127.0.0.1:8404/healthz"], "public HAProxy must expose a private readiness monitor")
     require(proxy.get("logging", {}).get("driver") == "json-file", "public HAProxy must retain bounded container logs")

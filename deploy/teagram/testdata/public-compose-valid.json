@@ -128,7 +128,9 @@
       "stop_grace_period": "2m0s",
       "volumes": [
         {
-          "bind": {},
+          "bind": {
+            "create_host_path": false
+          },
           "read_only": true,
           "source": "/fixture/deploy/teagramd/haproxy-public-websocket.cfg",
           "target": "/usr/local/etc/haproxy/haproxy.cfg",

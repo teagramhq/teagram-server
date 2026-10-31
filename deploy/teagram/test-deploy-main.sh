@@ -10,6 +10,7 @@ ops_script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
 public_compose_fixture_template="$(cd "$(dirname "$0")" && pwd)/testdata/public-compose-valid.json"
 public_checker="$(cd "$(dirname "$0")" && pwd)/../teagramd/rollout-runner/public-websocket-check.py"
 public_haproxy_config="$(cd "$(dirname "$0")" && pwd)/../teagramd/haproxy-public-websocket.cfg"
+repo_root="$(cd "$(dirname "$script")/../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 public_compose_fixture="$tmp/public-compose-valid.json"
@@ -19,6 +20,18 @@ jq --arg source "$public_haproxy_config" '
     if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .source = $source else . end
   )
 ' "$public_compose_fixture_template" > "$public_compose_fixture"
+rendered_public_compose=$(docker compose --env-file /dev/null --project-directory "$repo_root" \
+  --file "$repo_root/docker-compose.yml" --profile public config --no-interpolate --format json)
+jq -e '
+  [.services["public-haproxy"].volumes[] | select(.target == "/usr/local/etc/haproxy/haproxy.cfg")] as $mounts |
+  ($mounts | length) == 1 and
+  $mounts[0].type == "bind" and
+  $mounts[0].read_only == true and
+  $mounts[0].bind.create_host_path == false
+' <<< "$rendered_public_compose" >/dev/null || {
+  echo 'FAIL Compose must render the public HAProxy config mount without host-path creation' >&2
+  exit 1
+}
 jq '
   .services.teagramd.environment.TG_ADVERTISE_ADDR = "tailnet.example.test:2443" |
   .services["teagramd-public-1"].environment.TG_ADVERTISE_ADDR = "" |
@@ -90,6 +103,14 @@ if jq --arg source "$tmp/override/deploy/teagramd/haproxy-public-websocket.cfg" 
   )
 ' "$public_compose_fixture" | python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
   echo 'FAIL public topology checker accepted an alternate HAProxy config source' >&2
+  exit 1
+fi
+if jq '
+  .services["public-haproxy"].volumes |= map(
+    if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .bind.create_host_path = true else . end
+  )
+' "$public_compose_fixture" | python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted implicit HAProxy host-path creation' >&2
   exit 1
 fi
 printf 'tracked fixture\n' > "$tmp/work/tracked.txt"
