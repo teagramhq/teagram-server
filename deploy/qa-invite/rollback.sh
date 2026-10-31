@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 rollback_failed_up() {
   local previous_ref=$1 dump=$2 restore_ok=1 running_containers
   if ! compose down --remove-orphans; then
