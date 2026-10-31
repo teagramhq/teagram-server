@@ -43,7 +43,7 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET":"0","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
   local extra=$1 replica_count=${2:-1} log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
@@ -52,7 +52,7 @@ inspect_json() {
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
+        Config:{Env:($base + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"] + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
         HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
@@ -122,8 +122,9 @@ replica_count_snapshot() {
 }
 
 exchange_budget_snapshot() {
-  local name=$1 value=$2 added=${3:-} env_content=${4:-} actual_value actual inspected compose_json
+  local name=$1 value=$2 added=${3:-} env_content=${4:-} actual_value actual inspected compose_json tailnet_value=
   actual_value=${5:-$value}
+  if [ "$name" = target ]; then tailnet_value=0; fi
   if [ -n "$env_content" ]; then
     printf '%s\n' "$env_content" > "$ENV_FILE"
   else
@@ -134,19 +135,21 @@ exchange_budget_snapshot() {
     actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP=$actual_value"
   fi
   inspected=$(inspect_json "$actual")
-  inspected=$(jq -c --arg value "$value" '
-    .Config.Env += [
-      "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
+  inspected=$(jq -c --arg value "$value" --arg tailnet_value "$tailnet_value" '
+    .Config.Env |= (
+      map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + [
+      "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + $tailnet_value,
       "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
       "TG_KEY_EXCHANGE_PER_CONNECTION=",
       "TG_KEY_EXCHANGE_GLOBAL_RATE=",
       "TG_KEY_EXCHANGE_GLOBAL_BURST="
-    ] + (if $value == "" then ["TG_RATE_LIMIT_KEY_EXCHANGE_IP="] else [] end)
+      ] + (if $value == "" then ["TG_RATE_LIMIT_KEY_EXCHANGE_IP="] else [] end)
+    )
   ' <<< "$inspected")
-  compose_json=$(jq -c --arg value "$value" '
+  compose_json=$(jq -c --arg value "$value" --arg tailnet_value "$tailnet_value" '
     .services.teagramd.environment += {
       TG_RATE_LIMIT_KEY_EXCHANGE_IP:$value,
-      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:"",
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:$tailnet_value,
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW:"",
       TG_KEY_EXCHANGE_PER_CONNECTION:"",
       TG_KEY_EXCHANGE_GLOBAL_RATE:"",
@@ -158,13 +161,15 @@ exchange_budget_snapshot() {
 }
 
 tailnet_limit_snapshot() {
-  local name=$1 actual_value=$2 env_content=$3 env_mode=$4 compose_value=$5 inspected compose_json added= changed= actual
+  local name=$1 actual_value=$2 env_content=$3 env_mode=$4 compose_value=$5 inspected compose_json added= changed=
   printf '%s\n' "$env_content" > "$ENV_FILE"
-  actual=
-  if [ -n "$actual_value" ]; then
-    actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=$actual_value"
-  fi
-  inspected=$(inspect_json "$actual")
+  inspected=$(inspect_json '')
+  inspected=$(jq -c --arg value "$actual_value" '
+    .Config.Env |= (
+      map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))
+      + (if $value == "" then [] else ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + $value] end)
+    )
+  ' <<< "$inspected")
   compose_json=$(jq -c --arg value "$compose_value" \
     '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=$value' <<< "$COMPOSE_JSON")
   case "$env_mode" in
@@ -323,7 +328,8 @@ if ! compare_snapshots \
 fi
 
 previous_tailnet_default_inspect=$(jq -c \
-  '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' <<< "$(inspect_json '')")
+  '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="])' \
+  <<< "$(inspect_json '')")
 previous_tailnet_default_compose=$(jq -c \
   '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
   <<< "$COMPOSE_JSON")
@@ -331,7 +337,8 @@ previous_tailnet_default=$(snapshot_from_json \
   "$previous_tailnet_default_inspect" "$previous_tailnet_default_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 zero_tailnet_default_inspect=$(jq -c \
-  '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"]' <<< "$(inspect_json '')")
+  '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"])' \
+  <<< "$(inspect_json '')")
 zero_tailnet_default_compose=$(jq -c \
   '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="0"' \
   <<< "$COMPOSE_JSON")
@@ -566,7 +573,9 @@ if tailnet_limit_snapshot target 20 '' retained 0 \
 fi
 printf '%s\n' 'PASS target tailnet value must match the resolved Compose default'
 
-nonzero_tailnet_target_inspect=$(inspect_json 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=20')
+nonzero_tailnet_target_inspect=$(jq -c \
+  '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=20"])' \
+  <<< "$(inspect_json '')")
 missing_tailnet_target_compose=$(jq -c \
   'del(.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)' \
   <<< "$COMPOSE_JSON")
@@ -588,7 +597,8 @@ fi
 printf '%s\n' 'PASS target renders must resolve a numeric tailnet value'
 
 : > "$ENV_FILE"
-empty_tailnet_rollback_inspect=$(jq -c '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' \
+empty_tailnet_rollback_inspect=$(jq -c \
+  '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="])' \
   <<< "$(inspect_json '')")
 empty_tailnet_rollback_compose=$(jq -c \
   '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
