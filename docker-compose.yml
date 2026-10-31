@@ -349,8 +349,9 @@ services:
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
       TG_CLIENT_ADDR_TRUST: socket
-      # Empty values preserve the binary defaults; operators can tune each
-      # key-exchange budget through the deployment environment.
+      # Empty values preserve binary defaults except the tailnet per-network
+      # budget, which resolves to 0 (disabled) when unset or empty.
+      # Operators can tune each key-exchange budget through the deployment environment.
       TG_RATE_LIMIT_KEY_EXCHANGE_IP: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP:-}
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:-0}
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW:-}
