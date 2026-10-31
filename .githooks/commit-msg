@@ -4,6 +4,15 @@ set -euo pipefail
 message_file="${1:?commit message file path is required}"
 IFS= read -r subject < "$message_file" || true
 
+merge_head="$(git rev-parse --git-path MERGE_HEAD)"
+if [[ -e "$merge_head" ]]; then
+  exit 0
+fi
+
+case "$subject" in
+  'Merge '*|'Revert "'*|'fixup! '*|'squash! '*|'amend! '*) exit 0 ;;
+esac
+
 if [[ ! "$subject" =~ ^(feat|fix|refactor|perf|docs|test|chore|build|ci|style|revert)\([[:alnum:]_.-]+\)!?:[[:space:]]+.+$ ]]; then
   printf 'commit-msg: subject must match conventional format type(scope): summary\n' >&2
   exit 1
