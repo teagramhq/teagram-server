@@ -1,0 +1,6 @@
+CREATE TABLE users (
+    id BIGINT PRIMARY KEY,
+    first_name TEXT NOT NULL
+);
+
+LOCK TABLE users IN SHARE MODE;

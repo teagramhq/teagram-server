@@ -33,6 +33,59 @@ function loadBrowserModule(browserPath, observation) {
   return module.exports;
 }
 
+function patchBrowserForTest(t) {
+  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
+  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
+  const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
+  t.after(() => rmSync(webRoot, {recursive: true, force: true}));
+  const scripts = join(webRoot, 'scripts/real-client');
+  mkdirSync(scripts, {recursive: true});
+  for(const name of ['browser.cjs', 'observation.cjs']) {
+    copyFileSync(join(sourceRoot, 'scripts/real-client', name), join(scripts, name));
+  }
+
+  patchRealClientObserver(webRoot);
+  const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
+  const browserPath = join(scripts, 'browser.cjs');
+  const browser = loadBrowserModule(browserPath, observation);
+  return {browser, browserPath, observation};
+}
+
+function messageBubble(messageId, sendState) {
+  return {
+    getAttribute: (name) => name === 'data-mid' ? messageId : null,
+    classList: {
+      contains: (name) => name === 'is-sending' ? sendState === 'pending' :
+        name === 'is-error' ? sendState === 'failed' : false,
+    },
+  };
+}
+
+function messageLocator(samples) {
+  let sampleIndex = 0;
+  return {
+    async evaluateAll(inspect) {
+      const sample = samples[Math.min(sampleIndex, samples.length - 1)];
+      sampleIndex++;
+      return inspect(sample.map((bubble) => ({closest: () => bubble})));
+    },
+    get sampleCount() {
+      return sampleIndex;
+    },
+  };
+}
+
+function messagePage() {
+  return {
+    async evaluate() {
+      return undefined;
+    },
+    async waitForTimeout(milliseconds) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+    },
+  };
+}
+
 class FakeBrowserSession extends EventEmitter {
   constructor(resourceEntries) {
     super();
@@ -58,21 +111,77 @@ class FakeBrowserSession extends EventEmitter {
   }
 }
 
+test('the patched direct-message assertion settles idless and pending/sent bubble transients by element identity', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser, browserPath} = patchBrowserForTest(t);
+  const browserSource = readFileSync(browserPath, 'utf8');
+  const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
+    browserSource.indexOf('async function waitForMessageReaction'));
+  assert.match(sendTextSource,
+    /const messageStage = `\$\{stage\}_message_count`;\s+const settled = await waitForDirectMessageCount\(page, message, messageStage, timeoutMs\);/);
+
+  const page = messagePage();
+  const sentBubble = messageBubble('8', 'sent');
+  const message = messageLocator([
+    [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
+    [messageBubble('-7', 'pending'), messageBubble('8', 'sent')],
+    [sentBubble, sentBubble],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), true);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'settled');
+  assert.equal(trace.samples[0].count, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[0].bubbles)), [
+    {messageId: null, sendState: 'sent'},
+    {messageId: null, sendState: 'sent'},
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[1].bubbles)), [
+    {messageId: '-7', sendState: 'pending'},
+    {messageId: '8', sendState: 'sent'},
+  ]);
+  assert.equal(trace.samples.length >= 3, true);
+  assert.equal(trace.samples.at(-1).count, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples.at(-1).bubbles)), [
+    {messageId: '8', sendState: 'sent'},
+  ]);
+});
+
+test('the patched direct-message assertion fails if idless duplicate bubbles persist through settling', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser} = patchBrowserForTest(t);
+  const page = messagePage();
+  const message = messageLocator([
+    [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 250), false);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'settle_timeout');
+  assert.ok(trace.samples.length > 1);
+  assert.ok(trace.samples.every((sample) => sample.count === 2));
+});
+
+test('the patched direct-message assertion rejects two bubble elements with one id', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser} = patchBrowserForTest(t);
+  const page = messagePage();
+  const message = messageLocator([
+    [messageBubble('8', 'sent'), messageBubble('8', 'sent')],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), false);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'duplicate_bubbles');
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[0].bubbles)), [
+    {messageId: '8', sendState: 'sent'},
+    {messageId: '8', sendState: 'sent'},
+  ]);
+});
+
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
-  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
-  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
-  const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
-  t.after(() => rmSync(webRoot, {recursive: true, force: true}));
-  const scripts = join(webRoot, 'scripts/real-client');
-  mkdirSync(scripts, {recursive: true});
-  for(const name of ['browser.cjs', 'observation.cjs']) {
-    copyFileSync(join(sourceRoot, 'scripts/real-client', name), join(scripts, name));
-  }
-
-  patchRealClientObserver(webRoot);
-  const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
-  const browser = loadBrowserModule(join(scripts, 'browser.cjs'), observation);
+  const {browser, observation} = patchBrowserForTest(t);
   assert.equal(observation.allowCdpMethod('worker', 'Runtime.evaluate'), true);
   assert.equal(observation.classifyWorkerSourceFetchFromResourceTiming([
     {name: 'https://teagramd.test/index.worker-Abc123_-.js', responseStatus: 200},
