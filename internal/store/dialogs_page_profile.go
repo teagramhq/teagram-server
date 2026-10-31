@@ -34,7 +34,7 @@ func (s *Store) dialogsPageWithPins(ctx context.Context, params dialogsPageParam
 	}
 	defer conn.Release()
 
-	rows, timings, err := db.New(conn).DialogPageWithPinsProfiled(ctx, db.DialogPageWithPinsProfileParams{
+	rows, timings, err := db.New(dialogPageQueryExecModeDBTX{DBTX: conn}).DialogPageWithPinsProfiled(ctx, db.DialogPageWithPinsProfileParams{
 		OwnerID: params.ownerID, OffsetID: params.offsetID,
 		OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
 		ExcludePinned: params.excludePinned,

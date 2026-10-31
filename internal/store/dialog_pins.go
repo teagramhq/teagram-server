@@ -158,9 +158,22 @@ type dialogsPageParams struct {
 	excludePinned  bool
 }
 
+// dialogPageQueryExecModeDBTX keeps page queries parameter-sensitive after
+// repeated calls. pgx's default cached statement can switch to a generic plan
+// after five executions, which makes the large-owner page query slower.
+type dialogPageQueryExecModeDBTX struct {
+	db.DBTX
+}
+
+func (q dialogPageQueryExecModeDBTX) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	args = append([]any{pgx.QueryExecModeCacheDescribe}, args...)
+	return q.DBTX.Query(ctx, sql, args...)
+}
+
 func (s *Store) dialogsPageWithPinsGenerated(ctx context.Context, params dialogsPageParams) ([]db.DialogsCursorPageWithPinsRow, error) {
+	q := db.New(dialogPageQueryExecModeDBTX{DBTX: s.pool})
 	if params.offsetID == 0 && params.offsetPeerType == 0 {
-		first, err := s.q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+		first, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
 			OwnerID: params.ownerID, ExcludePinned: params.excludePinned,
 			Lim: int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
 		})
@@ -173,7 +186,7 @@ func (s *Store) dialogsPageWithPinsGenerated(ctx context.Context, params dialogs
 		}
 		return rows, nil
 	}
-	return s.q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
+	return q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
 		OwnerID: params.ownerID, OffsetID: params.offsetID,
 		OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
 		ExcludePinned: params.excludePinned,
