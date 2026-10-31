@@ -50,10 +50,12 @@ else
 fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
 readonly lint_base_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_base?sslmode=disable"
+readonly lint_checkpoint_base_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_checkpoint_base?sslmode=disable"
+readonly lint_checkpoint_dev_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_checkpoint_dev?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
 
-for database in migration_lint migration_lint_base migration_fresh migration_upgrade; do
+for database in migration_lint migration_lint_base migration_lint_checkpoint_base migration_lint_checkpoint_dev migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
 
@@ -65,6 +67,42 @@ apply_migrations() {
     --volume "$migration_dir:/migrations:ro" \
     "$atlas_apply_image" \
     migrate apply --dir file:///migrations --url "$database_dsn"
+}
+
+run_checkpointed_atlas_lint() {
+  local changed_lint_dir=$1
+  local base_migrations_dir=$2
+  local base_checkpoint=$3
+  local base_database=$4
+  local base_dsn=$5
+  local dev_dsn=$6
+  shift 6
+
+  local checkpoint_file="$changed_lint_dir/$base_checkpoint"
+  if [ -e "$checkpoint_file" ]; then
+    printf 'Changed migration overlaps the Atlas lint checkpoint: %s\n' "$checkpoint_file" >&2
+    return 1
+  fi
+
+  # Atlas lint executes each base statement separately, which cannot replay
+  # historical LOCK TABLE statements. Apply the base with Atlas's migration
+  # runner, then seed lint from a schema-only checkpoint of that database.
+  apply_migrations "$base_migrations_dir" "$base_dsn"
+  {
+    printf '%s\n' '-- atlas:checkpoint'
+    docker exec --env "PGPASSWORD=$password" "$postgres_container" pg_dump \
+      --username=postgres \
+      --dbname="$base_database" \
+      --schema-only \
+      --no-owner \
+      --no-privileges \
+      --no-comments \
+      --exclude-table=public.atlas_schema_revisions
+  } | sed '/^\\restrict /d; /^\\unrestrict$/d' > "$checkpoint_file"
+  "$atlas_lint_binary" migrate lint \
+    --dir "file://$changed_lint_dir" \
+    --dev-url "$dev_dsn" \
+    "$@"
 }
 
 docker run --rm \
@@ -98,30 +136,13 @@ if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
     printf 'No base migration available for Atlas lint checkpoint (%s).\n' "$base_ref" >&2
     exit 1
   fi
-  checkpoint_file="$changed_lint_dir/$(basename "$base_checkpoint")"
-  if [ -e "$checkpoint_file" ]; then
-    printf 'Changed migration overlaps the Atlas lint checkpoint: %s\n' "$checkpoint_file" >&2
-    exit 1
-  fi
-
-  # Atlas lint executes each base statement separately, which cannot replay
-  # historical LOCK TABLE statements. Apply the base with Atlas's migration
-  # runner, then seed lint from a schema-only checkpoint of that database.
-  apply_migrations "$baseline_dir/migrations" "$lint_base_dsn"
-  {
-    printf '%s\n' '-- atlas:checkpoint'
-    docker exec --env "PGPASSWORD=$password" "$postgres_container" pg_dump \
-      --username=postgres \
-      --dbname=migration_lint_base \
-      --schema-only \
-      --no-owner \
-      --no-privileges \
-      --no-comments \
-      --exclude-table=public.atlas_schema_revisions
-  } | sed '/^\\restrict /d; /^\\unrestrict$/d' > "$checkpoint_file"
-  "$atlas_lint_binary" migrate lint \
-    --dir "file://$changed_lint_dir" \
-    --dev-url "$lint_dsn" \
+  run_checkpointed_atlas_lint \
+    "$changed_lint_dir" \
+    "$baseline_dir/migrations" \
+    "$(basename "$base_checkpoint")" \
+    migration_lint_base \
+    "$lint_base_dsn" \
+    "$lint_dsn" \
     --git-base "$base_ref" \
     --git-dir "$repo_root"
 else
@@ -174,6 +195,22 @@ docker exec "$postgres_container" createdb -U postgres migration_lint_additive
 docker exec "$postgres_container" createdb -U postgres migration_lint_destructive
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
+
+checkpoint_base_dir="$temp_dir/atlas-lint-checkpoint-base"
+checkpoint_changed_dir="$temp_dir/atlas-lint-checkpoint-changed"
+mkdir -p "$checkpoint_base_dir" "$checkpoint_changed_dir"
+cp "$repo_root/.github/scripts/testdata/migrations/atlas-lint/checkpoint-base/"*.sql "$checkpoint_base_dir/"
+cp "$repo_root/.github/scripts/testdata/migrations/atlas-lint/additive/20260103000000_add_users_email_index.sql" "$checkpoint_changed_dir/"
+"$atlas_lint_binary" migrate hash --dir "file://$checkpoint_base_dir" >/dev/null
+run_checkpointed_atlas_lint \
+  "$checkpoint_changed_dir" \
+  "$checkpoint_base_dir" \
+  20260102000000_lock_users.sql \
+  migration_lint_checkpoint_base \
+  "$lint_checkpoint_base_dsn" \
+  "$lint_checkpoint_dev_dsn" \
+  --latest 1
+printf '%s\n' 'Atlas migration lint checkpoint fixture passed.'
 
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 
