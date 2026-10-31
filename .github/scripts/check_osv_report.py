@@ -40,7 +40,7 @@ def cvss_score(vector: str, score_type: str | None) -> float:
     return 10.0
 
 
-def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
+def severity_classification(vulnerability: dict[str, Any]) -> bool | None:
     candidates: list[Any] = []
     severity = vulnerability.get("severity", [])
     if isinstance(severity, list):
@@ -61,6 +61,7 @@ def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
                 if isinstance(details, dict):
                     candidates.append(details.get("severity"))
 
+    has_severity = False
     for candidate in candidates:
         score_type = None
         if isinstance(candidate, dict):
@@ -73,6 +74,7 @@ def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
             if normalized in {"HIGH", "CRITICAL"}:
                 return True
             if normalized in {"NONE", "LOW", "MEDIUM", "MODERATE"}:
+                has_severity = True
                 continue
             try:
                 score = float(candidate)
@@ -80,9 +82,48 @@ def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
                 score = cvss_score(candidate, score_type)
         else:
             score = float(candidate)
+        has_severity = True
         if score >= 7.0:
             return True
-    return False
+    return False if has_severity else None
+
+
+def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
+    return severity_classification(vulnerability) is True
+
+
+def aliased_advisory_severities(report: dict[str, Any]) -> dict[str, bool]:
+    """Index known OSV Scanner severities by advisory ID and aliases."""
+    severities: dict[str, bool] = {}
+    results = report.get("results", [])
+    if not isinstance(results, list):
+        return severities
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        packages = result.get("packages", [])
+        if not isinstance(packages, list):
+            continue
+        for package in packages:
+            if not isinstance(package, dict):
+                continue
+            vulnerabilities = package.get("vulnerabilities", [])
+            if not isinstance(vulnerabilities, list):
+                continue
+            for vulnerability in vulnerabilities:
+                if not isinstance(vulnerability, dict):
+                    continue
+                severity = severity_classification(vulnerability)
+                if severity is None:
+                    continue
+                identifiers = [vulnerability.get("id")]
+                aliases = vulnerability.get("aliases", [])
+                if isinstance(aliases, list):
+                    identifiers.extend(aliases)
+                for identifier in identifiers:
+                    if isinstance(identifier, str) and SAFE_ID.fullmatch(identifier):
+                        severities[identifier] = severities.get(identifier, False) or severity
+    return severities
 
 
 def fixed_versions(vulnerability: dict[str, Any]) -> list[str]:
@@ -247,9 +288,11 @@ def parse_govulncheck_report(report_path: Path) -> dict[str, dict[str, Any]]:
 
 def analyze_govulncheck_findings(
     findings: dict[str, dict[str, Any]],
+    aliased_severities: dict[str, bool] | None = None,
 ) -> tuple[list[str], list[str]]:
     failures: set[str] = set()
     without_fixes: set[str] = set()
+    aliased_severities = aliased_severities or {}
     for identifier, joined in findings.items():
         vulnerability = joined["osv"]
         finding = joined["finding"]
@@ -257,8 +300,24 @@ def analyze_govulncheck_findings(
         item = f"{identifier} reachable via govulncheck"
         if not fixed_version:
             without_fixes.add(item)
-        elif severity_is_high_or_critical(vulnerability):
+            continue
+
+        severity = severity_classification(vulnerability)
+        if severity is None:
+            aliases = vulnerability.get("aliases", [])
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    if isinstance(alias, str) and alias in aliased_severities:
+                        severity = aliased_severities[alias]
+                        if severity:
+                            break
+
+        if severity is True:
             failures.add(f"{item}; fixed version: {fixed_version}")
+        elif severity is None:
+            failures.add(
+                f"{item}; fixed version: {fixed_version}; severity unavailable; failing closed"
+            )
     return sorted(failures), sorted(without_fixes)
 
 
@@ -288,9 +347,10 @@ def main() -> int:
         if not isinstance(report, dict):
             raise ValueError("OSV-Scanner report is not an object")
         failures, without_fixes = analyze(report)
+        aliased_severities = aliased_advisory_severities(report)
         reachable_findings = parse_govulncheck_report(Path(sys.argv[2]))
         govulncheck_failures, govulncheck_without_fixes = analyze_govulncheck_findings(
-            reachable_findings
+            reachable_findings, aliased_severities
         )
         failures = sorted(set(failures) | set(govulncheck_failures))
         without_fixes = sorted(set(without_fixes) | set(govulncheck_without_fixes))
@@ -306,11 +366,11 @@ def main() -> int:
         return 1
 
     if failures:
-        print("Security scanners found fixed high or critical vulnerabilities:")
+        print("Security scanners found blocking vulnerabilities:")
         for failure in failures:
             print(f"- {failure}")
         return 1
-    print("Security scanners found no fixed high or critical vulnerabilities")
+    print("Security scanners found no blocking vulnerabilities")
     return 0
 
 

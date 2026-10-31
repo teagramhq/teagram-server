@@ -246,6 +246,80 @@ class CheckOSVReportTest(unittest.TestCase):
             summary_text(list(findings), without_fixes),
         )
 
+    def test_fixed_reachable_govulncheck_finding_without_severity_fails_closed(self) -> None:
+        findings = govulncheck_findings(
+            {"config": {"scanner_name": "govulncheck"}},
+            {"osv": {"id": "GO-2026-7", "aliases": ["GHSA-unknown-severity"]}},
+            {
+                "finding": {
+                    "osv": "GO-2026-7",
+                    "fixed_version": "go1.25.4",
+                    "trace": [{"function": "crypto/example.Verify"}],
+                }
+            },
+        )
+
+        failures, without_fixes = analyze_govulncheck_findings(findings)
+
+        self.assertEqual(without_fixes, [])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("severity unavailable; failing closed", failures[0])
+
+    def test_fixed_reachable_govulncheck_finding_uses_alias_advisory_severity(self) -> None:
+        findings = govulncheck_findings(
+            {"config": {"scanner_name": "govulncheck"}},
+            {"osv": {"id": "GO-2026-8", "aliases": ["GHSA-high-alias"]}},
+            {
+                "finding": {
+                    "osv": "GO-2026-8",
+                    "fixed_version": "go1.25.4",
+                    "trace": [{"function": "crypto/example.Verify"}],
+                }
+            },
+        )
+        osv_report = report(
+            vulnerability(
+                "GHSA-high-alias",
+                "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                None,
+            )
+        )
+
+        failures, without_fixes = analyze_govulncheck_findings(
+            findings, check_osv_report.aliased_advisory_severities(osv_report)
+        )
+
+        self.assertEqual(without_fixes, [])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("fixed version: go1.25.4", failures[0])
+
+    def test_fixed_reachable_govulncheck_finding_uses_known_medium_alias_severity(self) -> None:
+        findings = govulncheck_findings(
+            {"config": {"scanner_name": "govulncheck"}},
+            {"osv": {"id": "GO-2026-9", "aliases": ["GHSA-medium-alias"]}},
+            {
+                "finding": {
+                    "osv": "GO-2026-9",
+                    "fixed_version": "go1.25.4",
+                    "trace": [{"function": "crypto/example.Verify"}],
+                }
+            },
+        )
+        osv_report = report(
+            vulnerability(
+                "GHSA-medium-alias",
+                "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
+                None,
+            )
+        )
+
+        failures, without_fixes = analyze_govulncheck_findings(
+            findings, check_osv_report.aliased_advisory_severities(osv_report)
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(without_fixes, [])
+
     def test_reachable_govulncheck_finding_requires_osv_metadata(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing OSV metadata"):
             govulncheck_findings(
