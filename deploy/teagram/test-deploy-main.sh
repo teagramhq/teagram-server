@@ -13,15 +13,22 @@ public_haproxy_config="$(cd "$(dirname "$0")" && pwd)/../teagramd/haproxy-public
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 public_compose_fixture="$tmp/public-compose-valid.json"
+public_compose_override_fixture="$tmp/public-compose-live-override.json"
 jq --arg source "$public_haproxy_config" '
   .services["public-haproxy"].volumes |= map(
     if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .source = $source else . end
   )
 ' "$public_compose_fixture_template" > "$public_compose_fixture"
+jq '
+  .services.teagramd.environment.TG_ADVERTISE_ADDR = "tailnet.example.test:2443" |
+  .services["teagramd-public-1"].environment.TG_ADVERTISE_ADDR = "" |
+  .services["teagramd-public-2"].environment.TG_ADVERTISE_ADDR = ""
+' "$public_compose_fixture" > "$public_compose_override_fixture"
 
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+unset TG_ADVERTISE_ADDR
 
 # The LXC forced command still loads this path. Keep it able to forward to the
 # canonical deploy script after the repo's directory rename.
@@ -239,6 +246,7 @@ case "$*" in
   *'config --format json'*)
     replica_count=${FIXTURE_COMPOSE_REPLICA_COUNT:-${TG_REPLICA_COUNT:-1}}
     jq --arg count "$replica_count" \
+      --arg advertise_addr "${TG_ADVERTISE_ADDR:-}" \
       --arg haproxy_source "$DEPLOY_DIR/deploy/teagramd/haproxy-public-websocket.cfg" \
       --arg rendered_cidr "${FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR:-}" '
         .services.teagramd.environment.TG_REPLICA_COUNT = $count |
@@ -250,6 +258,10 @@ case "$*" in
         if $rendered_cidr == "" then . else
           .services["teagramd-public-1"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr |
           .services["teagramd-public-2"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr
+        end |
+        if $advertise_addr == "" then . else
+          .services["teagramd-public-1"].environment.TG_ADVERTISE_ADDR = $advertise_addr |
+          .services["teagramd-public-2"].environment.TG_ADVERTISE_ADDR = $advertise_addr
         end
       ' "$FIXTURE_PUBLIC_COMPOSE_JSON"
     ;;
@@ -289,9 +301,16 @@ case "$*" in
       *bbbbbbbbbbbb*) service=teagramd-public-1 ;;
       *) service=teagramd-public-2 ;;
     esac
-    runtime_env=$(jq -c --arg service "$service" --arg cidr "${FIXTURE_RUNNING_PUBLIC_PROXY_CIDR:-}" '
+    runtime_env=$(jq -c --arg service "$service" --arg cidr "${FIXTURE_RUNNING_PUBLIC_PROXY_CIDR:-}" \
+      --arg advertise_addr "${TG_ADVERTISE_ADDR:-}" \
+      --arg running_advertise_addr "${FIXTURE_RUNNING_PUBLIC_ADVERTISE_ADDR:-}" '
       .services[$service].environment | to_entries |
-      map(if .key == "TG_CLIENT_ADDR_PROXY_CIDRS" and $cidr != "" then .value = $cidr else . end) |
+      map(
+        if .key == "TG_CLIENT_ADDR_PROXY_CIDRS" and $cidr != "" then .value = $cidr
+        elif .key == "TG_ADVERTISE_ADDR" and $running_advertise_addr != "" then .value = $running_advertise_addr
+        elif .key == "TG_ADVERTISE_ADDR" and $advertise_addr != "" then .value = $advertise_addr
+        else . end
+      ) |
       map(.key + "=" + (.value | tostring))
     ' "$FIXTURE_PUBLIC_COMPOSE_JSON")
     jq -cn --argjson env "$runtime_env" --arg bind "${FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS:-0}" '
@@ -326,7 +345,7 @@ export LINK_EDGE_DEPLOY_LOG="$tmp/link-edge-deploys"
 export DEPLOY_ACTION_LOG="$tmp/deploy-actions"
 export DEPLOY_IMAGE_ID_FILE="$tmp/root/current-image-id"
 export FIXTURE_HAPROXY_LOADED_CONFIG_FILE="$tmp/haproxy-loaded-config"
-export FIXTURE_PUBLIC_COMPOSE_JSON="$public_compose_fixture"
+export FIXTURE_PUBLIC_COMPOSE_JSON="$public_compose_override_fixture"
 : > "$LINK_EDGE_DEPLOY_LOG"
 : > "$DEPLOY_ACTION_LOG"
 printf 'reviewed\n' > "$FIXTURE_HAPROXY_LOADED_CONFIG_FILE"
@@ -403,6 +422,8 @@ expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres 
   DEPLOY_SHA="$second" FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR=0.0.0.0/0
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PROXY_CIDR=0.0.0.0/0
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_ADVERTISE_ADDR=stale.tailnet.example.test:2443
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS=1
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
