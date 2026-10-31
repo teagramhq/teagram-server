@@ -1646,6 +1646,24 @@ jobs:
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
 
+      - name: Check RustFS initializer secret mounts
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl get job rustfs-init --namespace teagram --output json \
+            | jq --exit-status '
+                [.spec.template.spec.containers[]
+                  | select(.name == "rustfs-init")
+                  | .volumeMounts[].mountPath] as $mounts
+                | ([$mounts[] | select(. == "/run/secrets")] | length) == 1
+                  and ([$mounts[] | select(startswith("/run/secrets/"))] | length) == 0
+                  and ([.spec.template.spec.volumes[]
+                    | select(.name == "rustfs-init-secrets")
+                    | .projected.sources[].secret.items[].path] | sort)
+                    == (["rustfs-root-access-key", "rustfs-root-secret-key",
+                      "teagramd-blob-secret-key"] | sort)
+              '
+
       - name: Wait for migration, RustFS, and application rollouts
         run: |
           set -euo pipefail

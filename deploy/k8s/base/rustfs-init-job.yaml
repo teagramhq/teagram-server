@@ -71,12 +71,8 @@ spec:
               cpu: 250m
               memory: 256Mi
           volumeMounts:
-            - name: rustfs-credentials
+            - name: rustfs-init-secrets
               mountPath: /run/secrets
-              readOnly: true
-            - name: teagramd-blob-credentials
-              mountPath: /run/secrets/teagramd-blob-secret-key
-              subPath: TG_BLOB_S3_SECRET_ACCESS_KEY
               readOnly: true
             - name: rustfs-policy
               mountPath: /policy/teagramd-blob.json
@@ -85,22 +81,22 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: rustfs-credentials
-          secret:
-            secretName: rustfs-credentials
+        - name: rustfs-init-secrets
+          projected:
             defaultMode: 0440
-            items:
-              - key: RUSTFS_ACCESS_KEY
-                path: rustfs-root-access-key
-              - key: RUSTFS_SECRET_KEY
-                path: rustfs-root-secret-key
-        - name: teagramd-blob-credentials
-          secret:
-            secretName: teagramd-blob-credentials
-            defaultMode: 0440
-            items:
-              - key: TG_BLOB_S3_SECRET_ACCESS_KEY
-                path: TG_BLOB_S3_SECRET_ACCESS_KEY
+            sources:
+              - secret:
+                  name: rustfs-credentials
+                  items:
+                    - key: RUSTFS_ACCESS_KEY
+                      path: rustfs-root-access-key
+                    - key: RUSTFS_SECRET_KEY
+                      path: rustfs-root-secret-key
+              - secret:
+                  name: teagramd-blob-credentials
+                  items:
+                    - key: TG_BLOB_S3_SECRET_ACCESS_KEY
+                      path: teagramd-blob-secret-key
         - name: rustfs-policy
           configMap:
             name: rustfs-policy
