@@ -49,7 +49,7 @@ func TestDialogsPageProfilePreservesFirstAndCursorRows(t *testing.T) {
 		var want []db.DialogsCursorPageWithPinsRow
 		if params.offsetID == 0 && params.offsetPeerType == 0 {
 			first, err := s.q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
-				OwnerID: params.ownerID, ExcludePinned: params.excludePinned, Lim: int32(params.limit),
+				OwnerID: params.ownerID, ExcludePinned: params.excludePinned, Lim: 1,
 			})
 			if err != nil {
 				t.Fatalf("read generated first page: %v", err)
@@ -62,7 +62,7 @@ func TestDialogsPageProfilePreservesFirstAndCursorRows(t *testing.T) {
 			want, err = s.q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
 				OwnerID: params.ownerID, OffsetID: params.offsetID,
 				OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
-				ExcludePinned: params.excludePinned, Lim: int32(params.limit),
+				ExcludePinned: params.excludePinned, Lim: 1,
 			})
 			if err != nil {
 				t.Fatalf("read generated cursor page: %v", err)

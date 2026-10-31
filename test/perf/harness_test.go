@@ -234,17 +234,21 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 	return r
 }
 
-func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) error) error {
+func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) error) (err error) {
 	const profileEnv = "TG_PERF_PROFILE_GETDIALOGS"
 	previous, hadPrevious := os.LookupEnv(profileEnv)
 	if err := os.Setenv(profileEnv, "1"); err != nil {
 		return err
 	}
 	defer func() {
+		var restoreErr error
 		if hadPrevious {
-			_ = os.Setenv(profileEnv, previous)
+			restoreErr = os.Setenv(profileEnv, previous)
 		} else {
-			_ = os.Unsetenv(profileEnv)
+			restoreErr = os.Unsetenv(profileEnv)
+		}
+		if restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore %s: %w", profileEnv, restoreErr))
 		}
 	}()
 	return call(ctx)

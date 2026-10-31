@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
@@ -118,9 +119,30 @@ func (s *Store) DialogPinChangeAt(ctx context.Context, ownerID int64) (time.Time
 	}
 }
 
+// customPlanDB runs statements as unnamed prepared statements, so Postgres
+// plans each execution with its actual arguments instead of switching to a
+// cached generic plan after five executions on a pooled connection.
+type customPlanDB struct {
+	db.DBTX
+}
+
+func (c customPlanDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return c.DBTX.Exec(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
+func (c customPlanDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return c.DBTX.Query(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
+func (c customPlanDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return c.DBTX.QueryRow(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
+}
+
 // DialogsWithPins returns one dialog page with active default-folder pin flags.
 // The peer cursor breaks ties between dialogs with the same top message, and
-// excludePinned applies the live-membership predicate before paging.
+// excludePinned applies the live-membership predicate before paging. The page
+// query uses custom plans: its generic plan is several times slower for owners
+// with many dialogs.
 func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, offsetPeerType PeerType, offsetPeerID int64, limit int, excludePinned bool) ([]Dialog, error) {
 	rows, profile, err := s.dialogsPageWithPins(ctx, dialogsPageParams{
 		ownerID: ownerID, offsetID: offsetID, offsetPeerType: offsetPeerType,
@@ -158,20 +180,8 @@ type dialogsPageParams struct {
 	excludePinned  bool
 }
 
-// dialogPageQueryExecModeDBTX keeps page queries parameter-sensitive after
-// repeated calls. pgx's default cached statement can switch to a generic plan
-// after five executions, which makes the large-owner page query slower.
-type dialogPageQueryExecModeDBTX struct {
-	db.DBTX
-}
-
-func (q dialogPageQueryExecModeDBTX) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	args = append([]any{pgx.QueryExecModeCacheDescribe}, args...)
-	return q.DBTX.Query(ctx, sql, args...)
-}
-
 func (s *Store) dialogsPageWithPinsGenerated(ctx context.Context, params dialogsPageParams) ([]db.DialogsCursorPageWithPinsRow, error) {
-	q := db.New(dialogPageQueryExecModeDBTX{DBTX: s.pool})
+	q := db.New(customPlanDB{s.pool})
 	if params.offsetID == 0 && params.offsetPeerType == 0 {
 		first, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
 			OwnerID: params.ownerID, ExcludePinned: params.excludePinned,
