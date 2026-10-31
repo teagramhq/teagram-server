@@ -51,6 +51,41 @@ function patchBrowserForTest(t) {
   return {browser, browserPath, observation};
 }
 
+function messageBubble(messageId, sendState) {
+  return {
+    getAttribute: (name) => name === 'data-mid' ? messageId : null,
+    classList: {
+      contains: (name) => name === 'is-sending' ? sendState === 'pending' :
+        name === 'is-error' ? sendState === 'failed' : false,
+    },
+  };
+}
+
+function messageLocator(samples) {
+  let sampleIndex = 0;
+  return {
+    async evaluateAll(inspect) {
+      const sample = samples[Math.min(sampleIndex, samples.length - 1)];
+      sampleIndex++;
+      return inspect(sample.map((bubble) => ({closest: () => bubble})));
+    },
+    get sampleCount() {
+      return sampleIndex;
+    },
+  };
+}
+
+function messagePage() {
+  return {
+    async evaluate() {
+      return undefined;
+    },
+    async waitForTimeout(milliseconds) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+    },
+  };
+}
+
 class FakeBrowserSession extends EventEmitter {
   constructor(resourceEntries) {
     super();
@@ -76,35 +111,51 @@ class FakeBrowserSession extends EventEmitter {
   }
 }
 
-test('the patched direct-message assertion counts stable message ids once', async (t) => {
+test('the patched direct-message assertion settles a pending and sent bubble pair by element identity', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const {browser, browserPath} = patchBrowserForTest(t);
   const browserSource = readFileSync(browserPath, 'utf8');
   const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
     browserSource.indexOf('async function waitForMessageReaction'));
-  assert.match(sendTextSource, /getSingleExactMessageTextFailure\(message, text\)/);
-  assert.doesNotMatch(sendTextSource, /const count = await message\.count\(\)/);
-  const messageLocator = (bubbles) => ({
-    evaluateAll: async (inspect) => inspect(bubbles.map(({id, text}) => ({
-      closest: () => ({getAttribute: () => id}),
-      cloneNode: () => ({
-        querySelectorAll: () => [],
-        textContent: text,
-      }),
-    }))),
-  });
-  const matchingText = 'browser-ci-hello';
-  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
-    {id: '-7', text: matchingText},
-    {id: '-7', text: matchingText},
-  ]), matchingText), null);
-  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
-    {id: '-7', text: matchingText},
-    {id: '8', text: matchingText},
-  ]), matchingText), 'count');
-  assert.equal(await browser.getSingleExactMessageTextFailure(messageLocator([
-    {id: '', text: matchingText},
-  ]), matchingText), 'missing_message_id');
+  assert.match(sendTextSource,
+    /const messageStage = `\$\{stage\}_message_count`;\s+const settled = await waitForDirectMessageCount\(page, message, messageStage, timeoutMs\);/);
+
+  const page = messagePage();
+  const sentBubble = messageBubble('8', 'sent');
+  const message = messageLocator([
+    [messageBubble('-7', 'pending'), messageBubble('8', 'sent')],
+    [sentBubble, sentBubble],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), true);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'settled');
+  assert.equal(trace.samples[0].count, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[0].bubbles)), [
+    {messageId: '-7', sendState: 'pending'},
+    {messageId: '8', sendState: 'sent'},
+  ]);
+  assert.equal(trace.samples.at(-1).count, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples.at(-1).bubbles)), [
+    {messageId: '8', sendState: 'sent'},
+  ]);
+});
+
+test('the patched direct-message assertion rejects two bubble elements with one id', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser} = patchBrowserForTest(t);
+  const page = messagePage();
+  const message = messageLocator([
+    [messageBubble('8', 'sent'), messageBubble('8', 'sent')],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), false);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'duplicate_bubbles');
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[0].bubbles)), [
+    {messageId: '8', sendState: 'sent'},
+    {messageId: '8', sendState: 'sent'},
+  ]);
 });
 
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {

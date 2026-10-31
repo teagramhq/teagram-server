@@ -20,42 +20,86 @@ export function patchRealClientObserver(webRoot) {
   let observation = readFileSync(observationPath, 'utf8');
   let browser = readFileSync(browserPath, 'utf8');
   if(observation.includes('noteMtprotoSourceFetch') || browser.includes('collectMtprotoSourceFetches') ||
-      browser.includes('Count stable server message identities')) {
+      browser.includes('waitForDirectMessageCount')) {
     throw new Error('pinned web observer is already patched');
   }
 
-  const originalMessageTextAssertion = `async function getSingleExactMessageTextFailure(messages, expected) {
-  const texts = await messages.evaluateAll((elements) => elements.map((element) => {
-    const text = element.cloneNode(true);
-    text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
-    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
-    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
-    return text.textContent;
-  }));
-  return getSingleExactMessageFailure(texts, expected);
-}`;
-  const messageTextAssertion = `async function getSingleExactMessageTextFailure(messages, expected) {
-  // Count stable server message identities, not duplicate DOM elements.
-  const matches = await messages.evaluateAll((elements) => elements.map((element) => {
-    const text = element.cloneNode(true);
-    text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
-    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
-    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
-    const messageId = element.closest('.bubble')?.getAttribute('data-mid') || '';
-    return {messageId, text: text.textContent};
-  }));
-  if(matches.length === 0 || matches.some(({messageId}) => !/^-?[0-9]{1,20}(?:\\.[0-9]{1,4})?$/.test(messageId))) {
-    return 'missing_message_id';
+  const directMessageWaiter = `async function waitForDirectMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
+  currentStage = stage;
+  await startGroupMessageTrace(page, stage);
+  const deadline = Date.now() + Math.min(timeoutMs, GROUP_MESSAGE_SETTLE_TIMEOUT_MS);
+  let stableSince;
+  let lastResult = 'pending';
+  while(Date.now() <= deadline) {
+    let sample;
+    try {
+      sample = await message.evaluateAll((elements) => {
+        // Count each bubble element. Its data-mid is diagnostic only while the
+        // optimistic message is replaced by its sent copy.
+        const bubbleElements = [...new Set(elements.map((element) => element.closest('.bubble')).filter(Boolean))];
+        const bubbles = bubbleElements.map((bubble) => {
+          const id = bubble.getAttribute('data-mid') || '';
+          const sendState = bubble.classList.contains('is-error') ? 'failed' :
+            bubble.classList.contains('is-sending') ? 'pending' : 'sent';
+          return {
+            messageId: /^-?[0-9]{1,20}(\\.[0-9]{1,4})?$/.test(id) ? id : null,
+            sendState
+          };
+        });
+        const serverIds = bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter(Boolean);
+        return {
+          count: bubbles.length,
+          bubbles,
+          distinctIds: new Set(bubbles.map((bubble) => bubble.messageId).filter(Boolean)).size > 1,
+          distinctServerIds: new Set(serverIds).size > 1
+        };
+      });
+    } catch {
+      groupMessageTrace.result = 'read_error';
+      return false;
+    }
+    groupMessageTrace.samples.push(sample);
+    lastResult = groupMessageSampleResult(sample);
+    if(['disappeared', 'missing_message_id', 'failed_bubble', 'multiple_ids', 'duplicate_bubbles'].includes(lastResult)) {
+      groupMessageTrace.result = lastResult;
+      return false;
+    }
+    if(lastResult === 'sent') {
+      if(stableSince === undefined) stableSince = Date.now();
+      else if(Date.now() - stableSince >= GROUP_MESSAGE_STABLE_WINDOW_MS) {
+        groupMessageTrace.result = 'settled';
+        return true;
+      }
+    } else {
+      stableSince = undefined;
+    }
+
+    const remaining = deadline - Date.now();
+    if(remaining <= 0) break;
+    try {
+      await page.waitForTimeout(Math.min(GROUP_MESSAGE_SAMPLE_INTERVAL_MS, remaining));
+    } catch {
+      groupMessageTrace.result = 'read_error';
+      return false;
+    }
   }
-  if(new Set(matches.map(({messageId}) => messageId)).size !== 1) return 'count';
-  if(matches.some(({text}) => text !== expected)) return 'content';
-  return null;
-}`;
-  browser = replaceOnce(browser, originalMessageTextAssertion, messageTextAssertion, 'stable message identity assertion');
+
+  groupMessageTrace.result = lastResult === 'pending' || lastResult === 'transient_pair' ? 'settle_timeout' : 'stability_timeout';
+  return false;
+}
+`;
   browser = replaceOnce(browser,
-    '    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);',
-    '    const failure = await getSingleExactMessageTextFailure(message, text);\n    if(failure) failStage(`${stage}_message_count`);',
-    'direct message identity assertion');
+    'async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {',
+    `${directMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
+    'direct message settle helper');
+  browser = replaceOnce(browser,
+    '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);',
+    '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForDirectMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);',
+    'direct message settle assertion');
+  browser = replaceOnce(browser,
+    'waitForGroupMessageCount, waitForPollMessage',
+    'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
+    'direct message settle helper export');
 
   const originalWorkerMethods = `const WORKER_CDP_METHODS = Object.freeze([
   'Network.enable',
