@@ -15,6 +15,20 @@ ACTION=server
 if [[ "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})$ ]]; then
   readonly SHA=${BASH_REMATCH[1]}
   readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
+elif [[ "$COMMAND" =~ ^qa-invite\ ([0-9a-f]{40})\ (up)\ (sha256:[0-9a-f]{64})$ ]]; then
+  ACTION=qa-invite
+  readonly SHA=${BASH_REMATCH[1]}
+  readonly QA_ACTION=${BASH_REMATCH[2]}
+  readonly QA_IMAGE_DIGEST=${BASH_REMATCH[3]}
+elif [[ "$COMMAND" =~ ^qa-invite\ ([0-9a-f]{40})\ (down|status)$ ]]; then
+  ACTION=qa-invite
+  readonly SHA=${BASH_REMATCH[1]}
+  readonly QA_ACTION=${BASH_REMATCH[2]}
+elif [[ "$COMMAND" =~ ^qa-invite\ ([0-9a-f]{40})\ (create-account)\ ([A-Za-z][A-Za-z0-9_]{1,31})$ ]]; then
+  ACTION=qa-invite
+  readonly SHA=${BASH_REMATCH[1]}
+  readonly QA_ACTION=${BASH_REMATCH[2]}
+  readonly QA_ACCOUNT_NAME=${BASH_REMATCH[3]}
 elif [[ "$COMMAND" =~ ^web\ ([0-9a-f]{40})\ ([0-9a-f]{40})\ (sha256:[0-9a-f]{64})\ ([0-9a-f]{64})$ ]]; then
   ACTION=web
   readonly DEMO_SHA=${BASH_REMATCH[1]}
@@ -22,7 +36,7 @@ elif [[ "$COMMAND" =~ ^web\ ([0-9a-f]{40})\ ([0-9a-f]{40})\ (sha256:[0-9a-f]{64}
   readonly WEB_ARTIFACT_DIGEST=${BASH_REMATCH[3]}
   readonly WEB_ARCHIVE_SHA256=${BASH_REMATCH[4]}
 else
-  echo 'demo deploy key accepts a server image release or a pinned web artifact release' >&2
+  echo 'demo deploy key accepts server/web releases or a reviewed qa-invite operation' >&2
   exit 1
 fi
 
@@ -62,6 +76,30 @@ if [[ "$ACTION" == server ]]; then
     }
   fi
   exit "$deploy_rc"
+fi
+
+if [[ "$ACTION" == qa-invite ]]; then
+  git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main || {
+    echo "$SHA is not on origin/main; refusing" >&2
+    exit 1
+  }
+  WORK_DIR=$(mktemp -d /tmp/teagram-qa-invite.XXXXXXXX)
+  trap 'rm -rf -- "$WORK_DIR"' EXIT
+  git -C "$REPO" archive --format=tar "$SHA" deploy/qa-invite migrations |
+    tar -xf - -C "$WORK_DIR" || {
+      echo 'could not extract the reviewed QA invite project' >&2
+      exit 1
+    }
+  args=("$QA_ACTION")
+  case "$QA_ACTION" in
+    up) args+=("$SHA" "$QA_IMAGE_DIGEST") ;;
+    create-account) args+=("$QA_ACCOUNT_NAME") ;;
+  esac
+  env -i PATH="$PATH" HOME=/root \
+    QA_INVITE_REPO_ROOT="$WORK_DIR" \
+    QA_INVITE_STATE_DIR="$REPO/.state/qa-invite" \
+    bash "$WORK_DIR/deploy/qa-invite/remote.sh" "${args[@]}"
+  exit "$?"
 fi
 
 [[ "$(git -C "$REPO" rev-parse HEAD)" == "$DEMO_SHA" ]] || {

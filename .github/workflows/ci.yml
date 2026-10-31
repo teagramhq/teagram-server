@@ -1121,6 +1121,7 @@ jobs:
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy.yml \
             .github/workflows/deploy-demo.yml \
+            .github/workflows/deploy-qa-invite.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
@@ -1128,6 +1129,9 @@ jobs:
 
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh
+
+      - name: Check isolated QA invite deployment contract
+        run: deploy/qa-invite/test-qa-invite-contract.sh
 
       - name: Check RPC performance workflow contract
         run: .github/scripts/test-perf-workflow-contract.sh
@@ -1164,8 +1168,12 @@ jobs:
           bash -n deploy/teagram-demo/demo-common.sh
           bash -n deploy/teagram-demo/init-demo.sh
           bash -n deploy/teagram-demo/forced-command.sh
+          bash -n deploy/qa-invite/remote.sh
+          bash -n deploy/qa-invite/qa-account-writer.sh
+          bash -n deploy/qa-invite/test-qa-invite-contract.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
+          sh -n deploy/teagram-demo/ops/install-qa-invite-command.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollback.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-on.sh
@@ -1211,8 +1219,12 @@ jobs:
             deploy/teagram-demo/demo-common.sh \
             deploy/teagram-demo/init-demo.sh \
             deploy/teagram-demo/forced-command.sh \
+            deploy/qa-invite/remote.sh \
+            deploy/qa-invite/qa-account-writer.sh \
+            deploy/qa-invite/test-qa-invite-contract.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
+            deploy/teagram-demo/ops/install-qa-invite-command.sh \
             deploy/teagram-demo/ops/turnstile-signin-rollout.sh \
             deploy/teagram-demo/ops/turnstile-signin-rollback.sh \
             deploy/teagram-demo/ops/turnstile-signin-on.sh \
