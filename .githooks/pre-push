@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+warn_missing_tool() {
+  printf 'warning: pre-push: %s is missing; skipping %s\n' "$1" "$2" >&2
+}
+
+local_shas=()
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [[ -n "${local_sha:-}" ]] || continue
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  local_shas+=("$local_sha")
+done
+((${#local_shas[@]})) || exit 0
+
+base_ref="${GIT_HOOK_BASE_REF:-}"
+if [[ -z "$base_ref" ]]; then
+  base_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+  if [[ -z "$base_ref" ]] && git rev-parse --verify --quiet origin/main^{commit} >/dev/null; then
+    base_ref=origin/main
+  elif [[ -z "$base_ref" ]] && git rev-parse --verify --quiet main^{commit} >/dev/null; then
+    base_ref=main
+  fi
+fi
+if [[ -z "$base_ref" ]] || ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  printf 'warning: pre-push: base branch is unavailable; skipping local checks\n' >&2
+  exit 0
+fi
+
+tmp_diff="$(mktemp)"
+trap 'rm -f -- "$tmp_diff"' EXIT
+head_sha="$(git rev-parse HEAD)"
+sql_queries_changed=false
+migrations_changed=false
+for local_sha in "${local_shas[@]}"; do
+  if ! git diff --no-renames --name-only -z "$base_ref...$local_sha" -- > "$tmp_diff"; then
+    printf 'error: pre-push: could not compare %s with %s\n' "$local_sha" "$base_ref" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      internal/store/queries/*.sql)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: SQL checks require the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        sql_queries_changed=true
+        ;;
+      migrations/*)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: migration checks require the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        migrations_changed=true
+        ;;
+    esac
+  done < "$tmp_diff"
+done
+
+sqlfluff_available=false
+if [[ -x .venv-sqlfluff/bin/sqlfluff && -x .venv-sqlfluff/bin/python ]]; then
+  sqlfluff_available=true
+fi
+
+if [[ "$sql_queries_changed" == true ]]; then
+  if [[ "$sqlfluff_available" == false ]]; then
+    warn_missing_tool .venv-sqlfluff/bin/sqlfluff 'SQL linting'
+  elif ! command -v make >/dev/null 2>&1; then
+    warn_missing_tool make 'SQL linting'
+  else
+    make lint-sql
+  fi
+fi
+
+if [[ "$migrations_changed" == true ]]; then
+  if [[ "$sqlfluff_available" == true ]]; then
+    .venv-sqlfluff/bin/python .github/scripts/sql_lint.py \
+      --base "$base_ref" \
+      --head "$head_sha" \
+      --sqlfluff .venv-sqlfluff/bin/sqlfluff
+  elif [[ "$sql_queries_changed" == false ]]; then
+    warn_missing_tool .venv-sqlfluff/bin/sqlfluff 'changed migration SQL linting'
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn_missing_tool docker 'migration checks'
+  elif ! command -v atlas >/dev/null 2>&1; then
+    warn_missing_tool atlas 'migration checks'
+  elif ! command -v python3 >/dev/null 2>&1; then
+    warn_missing_tool python3 'migration checks'
+  else
+    MIGRATIONS_BASE_REF="$base_ref" \
+      POSTGRES_IMAGE="${POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66}" \
+      ATLAS_APPLY_IMAGE="${ATLAS_APPLY_IMAGE:-mirror.gcr.io/arigaio/atlas:1.2.0-alpine}" \
+      ATLAS_LINT_BIN="${ATLAS_LINT_BIN:-$(command -v atlas)}" \
+      bash .github/scripts/test-migrations.sh
+  fi
+fi

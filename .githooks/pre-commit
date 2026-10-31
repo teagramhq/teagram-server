@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+warn_missing_tool() {
+  printf 'warning: pre-commit: %s is missing; skipping %s\n' "$1" "$2" >&2
+}
+
+mapfile -d '' -t staged_files < <(git diff --cached --no-renames --name-only -z)
+((${#staged_files[@]})) || exit 0
+
+go_files=()
+sql_files=()
+has_sqlc_input=false
+has_migration=false
+for path in "${staged_files[@]}"; do
+  case "$path" in
+    *.go)
+      [[ -f "$path" ]] && go_files+=("$path")
+      ;;
+    *.sql)
+      has_sqlc_input=true
+      [[ -f "$path" ]] && sql_files+=("$path")
+      ;;
+  esac
+  [[ "$path" == sqlc.yaml ]] && has_sqlc_input=true
+  [[ "$path" == migrations/* ]] && has_migration=true
+done
+
+if ((${#go_files[@]})); then
+  if ! command -v golangci-lint >/dev/null 2>&1; then
+    warn_missing_tool golangci-lint 'Go formatting'
+  else
+    tmp_file=""
+    cleanup() {
+      [[ -z "$tmp_file" ]] || rm -f -- "$tmp_file"
+    }
+    trap cleanup EXIT
+    for path in "${go_files[@]}"; do
+      tmp_file="$(mktemp)"
+      if ! golangci-lint fmt --config .golangci.yml --stdin < "$path" > "$tmp_file"; then
+        exit 1
+      fi
+      cat -- "$tmp_file" > "$path"
+      rm -f -- "$tmp_file"
+      tmp_file=""
+    done
+    git add -- "${go_files[@]}"
+    trap - EXIT
+  fi
+fi
+
+if ((${#sql_files[@]})); then
+  sqlfluff=".venv-sqlfluff/bin/sqlfluff"
+  if [[ ! -x "$sqlfluff" || ! -x .venv-sqlfluff/bin/python ]]; then
+    warn_missing_tool .venv-sqlfluff 'SQL formatting'
+  else
+    "$sqlfluff" fix --config .sqlfluff "${sql_files[@]}"
+    git add -- "${sql_files[@]}"
+  fi
+fi
+
+if [[ "$has_sqlc_input" == true ]]; then
+  sqlc_ran=false
+  if command -v make >/dev/null 2>&1 && { [[ -x bin/sqlc ]] || command -v go >/dev/null 2>&1; }; then
+    make sqlc
+    sqlc_ran=true
+  elif [[ -x bin/sqlc ]]; then
+    ./bin/sqlc generate
+    sqlc_ran=true
+  elif command -v sqlc >/dev/null 2>&1; then
+    sqlc generate
+    sqlc_ran=true
+  else
+    warn_missing_tool sqlc 'SQL query generation'
+  fi
+  if [[ "$sqlc_ran" == true && -d internal/store/db ]]; then
+    git add --all -- internal/store/db
+  fi
+fi
+
+if [[ "$has_migration" == true ]]; then
+  if ! command -v atlas >/dev/null 2>&1; then
+    warn_missing_tool atlas 'migration hashing'
+  else
+    atlas migrate hash --env local
+    if [[ -f migrations/atlas.sum ]]; then
+      git add -- migrations/atlas.sum
+    fi
+  fi
+fi
