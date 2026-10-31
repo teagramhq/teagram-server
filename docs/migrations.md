@@ -69,7 +69,7 @@ later task.)
 
 ### Ordered message-search postings
 
-Migration `20261030000004_message_search_postings.sql` adds an ordered lexeme
+Migration `20261031000002_message_search_postings.sql` adds an ordered lexeme
 posting table and a marker table for dialogs whose existing history has not
 been initialized. Message inserts, text edits, soft deletes, and hard deletes
 keep the postings in sync transactionally. The migration does not copy
