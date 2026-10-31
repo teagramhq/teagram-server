@@ -85,11 +85,12 @@ func TestBotAPIGetUpdates(t *testing.T) {
 	if len(botBUpdates) != 1 || botBUpdates[0].Message.Text != "bot B message" {
 		t.Fatalf("bot B updates = %+v, want its own text", botBUpdates)
 	}
+	botBOffset := botBUpdates[0].UpdateID
 	if offset, err := f.store.BotUpdateOffset(f.ctx, botA.ID, tokenA); err != nil || offset != firstNextOffset {
 		t.Fatalf("bot A offset = %d, err %v, want %d", offset, err, firstNextOffset)
 	}
-	if offset, err := f.store.BotUpdateOffset(f.ctx, botB.ID, tokenB); err != nil || offset != 0 {
-		t.Fatalf("bot B offset = %d, err %v, want independent offset 0", offset, err)
+	if offset, err := f.store.BotUpdateOffset(f.ctx, botB.ID, tokenB); err != nil || offset != botBOffset {
+		t.Fatalf("bot B offset = %d, err %v, want its returned update offset %d", offset, err, botBOffset)
 	}
 
 	botReply := sendBotAPIMessage(t, f.ctx, client, serverURL, tokenA, humanA.id, "bot reply")
@@ -173,8 +174,8 @@ func TestBotAPIGetUpdates(t *testing.T) {
 	if replayed.Code != http.StatusOK || string(replayed.Body) != "{\"ok\":true,\"result\":[]}\n" {
 		t.Fatalf("bot A replay response = (%d, %q), want empty", replayed.Code, replayed.Body)
 	}
-	if offset, err := f.store.BotUpdateOffset(f.ctx, botB.ID, tokenB); err != nil || offset != 0 {
-		t.Fatalf("bot B offset after bot A polls = %d, err %v, want 0", offset, err)
+	if offset, err := f.store.BotUpdateOffset(f.ctx, botB.ID, tokenB); err != nil || offset != botBOffset {
+		t.Fatalf("bot B offset after bot A polls = %d, err %v, want unchanged %d", offset, err, botBOffset)
 	}
 }
 
