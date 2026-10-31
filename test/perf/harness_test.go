@@ -141,7 +141,7 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 		if only != "" && !strings.Contains(sc.name, only) {
 			continue
 		}
-		r := measure(ctx, e, explain, sc)
+		r := measure(t, ctx, e, explain, sc)
 		r.Fixture = f.Spec.Name
 		t.Logf("%s %s: p50 %.2f ms, p95 %.2f ms, %d queries, %d rows read, %d B allocated %s",
 			f.Spec.Name, sc.name, r.P50Ms, r.P95Ms, r.Queries, r.RowsRead, r.AllocBytes, r.Error)
@@ -150,7 +150,8 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 	return results
 }
 
-func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfreport.Result {
+func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc scenario) perfreport.Result {
+	t.Helper()
 	r := perfreport.Result{Name: sc.name, Kind: sc.kind, FullSet: sc.fullSet, Note: sc.note}
 	fail := func(err error) perfreport.Result {
 		r.Error = err.Error()
@@ -165,6 +166,9 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 	}
 	tracer := e.srv.tracer
 	var latencies []float64
+	var sqlTimes []float64
+	var nonSQLTimes []float64
+	statementTimes := map[string][]float64{}
 	var queries, allocs []int64
 	for i := range warmup + sc.samples {
 		if sc.prepare != nil {
@@ -176,7 +180,7 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 			return fail(err)
 		}
 		measured := i >= warmup
-		tracer.reset(i == warmup)
+		tracer.reset(i == warmup, sc.name == "contacts.getContacts")
 		allocBefore := heapAllocs()
 		e.elapsed = 0
 		start := time.Now()
@@ -192,6 +196,10 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 		}
 		allocated := heapAllocs() - allocBefore
 		n, captured := tracer.window()
+		statementDurations := make(map[string]time.Duration)
+		for _, timing := range tracer.timingWindow() {
+			statementDurations[timing.name] += timing.elapsed
+		}
 		if i == warmup {
 			rows, scans, unexplained := explain.statements(ctx, captured)
 			r.RowsRead, r.SeqScans, r.Unexplained = rows, scans, unexplained
@@ -205,7 +213,15 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 			}
 		}
 		if measured {
-			latencies = append(latencies, float64(elapsed.Microseconds())/1000)
+			totalMS := float64(elapsed.Microseconds()) / 1000
+			var sqlElapsed time.Duration
+			for name, duration := range statementDurations {
+				sqlElapsed += duration
+				statementTimes[name] = append(statementTimes[name], float64(duration.Microseconds())/1000)
+			}
+			latencies = append(latencies, totalMS)
+			sqlTimes = append(sqlTimes, float64(sqlElapsed.Microseconds())/1000)
+			nonSQLTimes = append(nonSQLTimes, totalMS-float64(sqlElapsed.Microseconds())/1000)
 			queries = append(queries, int64(n))
 			allocs = append(allocs, int64(allocated)) // #nosec G115 -- one RPC allocates far below MaxInt64
 		}
@@ -218,6 +234,25 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 	r.P95Ms = percentile(latencies, 95)
 	r.Queries = int(queries[(len(queries)-1)/2])
 	r.AllocBytes = allocs[(len(allocs)-1)/2]
+	if sc.name == "contacts.getContacts" {
+		slices.Sort(sqlTimes)
+		slices.Sort(nonSQLTimes)
+		t.Logf("%s %s server-time breakdown: total p50/p95 %.2f/%.2f ms; SQL p50/p95 %.2f/%.2f ms; non-SQL residual p50/p95 %.2f/%.2f ms",
+			e.f.Spec.Name, sc.name, r.P50Ms, r.P95Ms,
+			percentile(sqlTimes, 50), percentile(sqlTimes, 95),
+			percentile(nonSQLTimes, 50), percentile(nonSQLTimes, 95))
+		names := make([]string, 0, len(statementTimes))
+		for name := range statementTimes {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			statementSamples := statementTimes[name]
+			slices.Sort(statementSamples)
+			t.Logf("%s %s SQL %s p50/p95: %.2f/%.2f ms", e.f.Spec.Name, sc.name, name,
+				percentile(statementSamples, 50), percentile(statementSamples, 95))
+		}
+	}
 	return r
 }
 

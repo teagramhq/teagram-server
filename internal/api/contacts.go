@@ -175,7 +175,7 @@ func (h *handlers) handleGetContacts(r *mtproto.Request) (bin.Encoder, error) {
 		}
 		owners[i] = user
 	}
-	rendered, err := h.usersToTL(r.Ctx, owners, r.UserID, false)
+	rendered, err := h.usersToTLWithContactStates(r.Ctx, owners, r.UserID, false, contacts)
 	if err != nil {
 		h.log.Error("get contact users: render", "user_id", r.UserID, "err", err)
 		return nil, errInternal
