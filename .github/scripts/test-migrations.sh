@@ -12,6 +12,7 @@ readonly network="migration-ci-${suffix}"
 readonly postgres_container="migration-ci-postgres-${suffix}"
 readonly temp_dir="$(mktemp -d "$repo_root/.migration-ci.XXXXXX")"
 readonly baseline_dir="$temp_dir/base"
+readonly lint_migrations_dir="$temp_dir/lint-migrations"
 
 cleanup() {
   docker rm --force "$postgres_container" >/dev/null 2>&1 || true
@@ -19,6 +20,16 @@ cleanup() {
   rm -rf -- "$temp_dir"
 }
 trap cleanup EXIT
+
+apply_migrations() {
+  local migration_dir=$1
+  local database_dsn=$2
+  docker run --rm \
+    --network "$network" \
+    --volume "$migration_dir:/migrations:ro" \
+    "$atlas_apply_image" \
+    migrate apply --dir file:///migrations --url "$database_dsn"
+}
 
 chmod 755 "$temp_dir"
 docker network create "$network" >/dev/null
@@ -56,6 +67,11 @@ for database in migration_lint migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
 
+mkdir -p "$baseline_dir"
+git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
+chmod -R a+rX "$baseline_dir"
+apply_migrations "$baseline_dir/migrations" "$upgrade_dsn"
+
 docker run --rm \
   --volume "$repo_root/migrations:/migrations:ro" \
   "$atlas_apply_image" \
@@ -68,11 +84,43 @@ mapfile -t changed_sql_migrations < <(
     | awk '/\.sql$/ { print }'
 )
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
+  # Atlas lint replays base statements outside their file transactions, which
+  # fails on historical LOCK TABLEs. Seed it from a real base apply instead.
+  first_migration="${changed_sql_migrations[0]##*/}"
+  first_version="${first_migration%%_*}"
+  if [[ ! "$first_version" =~ ^[0-9]{14}$ ]]; then
+    printf 'cannot create Atlas lint checkpoint before migration with invalid version: %s\n' "$first_migration" >&2
+    exit 1
+  fi
+  checkpoint_version="$(printf '%014d' "$((10#$first_version - 1))")"
+  checkpoint_file="$lint_migrations_dir/${checkpoint_version}_atlas_lint_checkpoint.sql"
+
+  mkdir -p "$lint_migrations_dir"
+  printf '%s\n\n' '-- atlas:checkpoint' > "$checkpoint_file"
+  docker exec "$postgres_container" pg_dump \
+    --schema-only \
+    --no-owner \
+    --no-privileges \
+    --no-comments \
+    --exclude-table=public.atlas_schema_revisions \
+    --username=postgres \
+    --dbname=migration_upgrade \
+    | sed \
+      -e '/^\\restrict /d' \
+      -e '/^\\unrestrict /d' \
+      -e '/^CREATE SCHEMA public;$/d' \
+      -e '/^ALTER SCHEMA public OWNER TO /d' \
+      >> "$checkpoint_file"
+
+  for migration in "${changed_sql_migrations[@]}"; do
+    cp "$repo_root/$migration" "$lint_migrations_dir/"
+  done
+  "$atlas_lint_binary" migrate hash --dir "file://$lint_migrations_dir" >/dev/null
+
   "$atlas_lint_binary" migrate lint \
-    --dir "file://$repo_root/migrations" \
+    --dir "file://$lint_migrations_dir" \
     --dev-url "$lint_dsn" \
-    --git-base "$base_ref" \
-    --git-dir "$repo_root"
+    --latest "${#changed_sql_migrations[@]}"
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
 fi
@@ -124,22 +172,7 @@ docker exec "$postgres_container" createdb -U postgres migration_lint_destructiv
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
 
-apply_migrations() {
-  local migration_dir=$1
-  local database_dsn=$2
-  docker run --rm \
-    --network "$network" \
-    --volume "$migration_dir:/migrations:ro" \
-    "$atlas_apply_image" \
-    migrate apply --dir file:///migrations --url "$database_dsn"
-}
-
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
-
-mkdir -p "$baseline_dir"
-git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
-chmod -R a+rX "$baseline_dir"
-apply_migrations "$baseline_dir/migrations" "$upgrade_dsn"
 
 docker exec "$postgres_container" psql \
   -X \

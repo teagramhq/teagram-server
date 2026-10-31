@@ -1896,32 +1896,90 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 }
 
 const countChannelHistory = `-- name: CountChannelHistory :one
-SELECT count(*)::bigint
-FROM channel_messages cm
-JOIN channel_participants cp
-  ON cp.channel_id = cm.channel_id
- AND cp.user_id = $1::bigint
-WHERE cm.channel_id = $2::bigint
-  AND cm.deleted = false
-  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-  AND cm.local_id > cp.available_min_id
-  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
-  AND EXISTS (
-      SELECT 1 FROM channels c
-      WHERE c.id = $2::bigint AND c.deleted_at IS NULL
-  )
+WITH member AS MATERIALIZED (
+    SELECT participant.available_min_id
+    FROM channel_participants AS participant
+    JOIN channels AS channel
+      ON channel.id = participant.channel_id
+     AND channel.deleted_at IS NULL
+    WHERE participant.channel_id = $1::bigint
+      AND participant.user_id = $2::bigint
+      AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+), summary AS MATERIALIZED (
+    SELECT result.entitled,
+           result.status_exists,
+           result.summary_version,
+           result.summary_ready,
+           result.total_live
+    FROM member
+    CROSS JOIN LATERAL channel_post_unread_suffix_counts(
+        $1::bigint,
+        $2::bigint,
+        member.available_min_id
+    ) AS result(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
+), service_count AS (
+    SELECT count(*)::bigint AS count
+    FROM member
+    JOIN channel_messages AS service
+      ON service.channel_id = $1::bigint
+     AND service.local_id > member.available_min_id
+    WHERE service.deleted = false
+      AND service.action_type <> 0
+      AND (service.expires_at IS NULL OR service.expires_at > statement_timestamp())
+), expired_post_count AS (
+    SELECT count(*)::bigint AS count
+    FROM member
+    JOIN channel_messages AS expired
+      ON expired.channel_id = $1::bigint
+     AND expired.local_id > member.available_min_id
+    WHERE expired.deleted = false
+      AND expired.action_type = 0
+      AND expired.expires_at <= statement_timestamp()
+)
+SELECT summary.entitled::boolean AS entitled,
+       summary.status_exists::boolean AS status_exists,
+       summary.summary_version::smallint AS summary_version,
+       summary.summary_ready::boolean AS summary_ready,
+       summary.total_live::bigint AS total_live,
+       COALESCE(service_count.count, 0)::bigint AS service_count,
+       COALESCE(expired_post_count.count, 0)::bigint AS expired_post_count
+FROM summary
+CROSS JOIN service_count
+CROSS JOIN expired_post_count
 `
 
 type CountChannelHistoryParams struct {
-	OwnerID   int64
 	ChannelID int64
+	OwnerID   int64
 }
 
-func (q *Queries) CountChannelHistory(ctx context.Context, arg CountChannelHistoryParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countChannelHistory, arg.OwnerID, arg.ChannelID)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+type CountChannelHistoryRow struct {
+	Entitled         bool
+	StatusExists     bool
+	SummaryVersion   int16
+	SummaryReady     bool
+	TotalLive        int64
+	ServiceCount     int64
+	ExpiredPostCount int64
+}
+
+// Count content posts from the exact member-floor summary. Expired content
+// remains in that summary until the TTL sweeper marks it deleted, so subtract
+// currently expired posts through the expiry index. Service rows are sparse
+// relative to content posts and have their own partial history index.
+func (q *Queries) CountChannelHistory(ctx context.Context, arg CountChannelHistoryParams) (CountChannelHistoryRow, error) {
+	row := q.db.QueryRow(ctx, countChannelHistory, arg.ChannelID, arg.OwnerID)
+	var i CountChannelHistoryRow
+	err := row.Scan(
+		&i.Entitled,
+		&i.StatusExists,
+		&i.SummaryVersion,
+		&i.SummaryReady,
+		&i.TotalLive,
+		&i.ServiceCount,
+		&i.ExpiredPostCount,
+	)
+	return i, err
 }
 
 const countFilteredChannelPosts = `-- name: CountFilteredChannelPosts :one
