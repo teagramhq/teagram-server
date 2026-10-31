@@ -186,7 +186,8 @@ spec:
             - name: TG_BLOB_S3_ALLOW_INSECURE_HTTP
               value: "true"
             - name: TG_MEDIA_KEY_DIR
-              value: /run/teagramd/media-keys
+              # The projected Secret's versioned directory has safe directory permissions.
+              value: /run/teagramd/media-keys/..data
             - name: TG_MEDIA_KEY_CURRENT
               value: "1"
             - name: TG_BLOB_DIR
