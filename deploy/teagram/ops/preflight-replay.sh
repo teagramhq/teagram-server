@@ -446,7 +446,8 @@ target_runner=$(prepare_target_runner "$target_runner_source") || exit 1
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   name=preflight
   [ "$checkout" = "$TMP_DIR/baseline" ] && name=baseline
-  bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
+  ROLLOUT_PREFLIGHT_TURNSTILE_SECRET_SOURCE="$LIVE_ROOT/.secrets/teagramd-turnstile" \
+    bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
     "$name" "$project_name" "$compose_selection" >/dev/null || exit $?
 done
 

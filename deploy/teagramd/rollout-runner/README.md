@@ -229,8 +229,13 @@ allowed during an ordinary rollout is the initial exact read-only bind from
 `teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
 mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
 application checkout. The runner pins the host path and key version after that
-first rollout; later changes remain blocked. Any project, volume, or other
-mount change fails closed and asks for the explicit `move-stack` action.
+first rollout; later changes remain blocked. The public WebSocket profile's
+persistent-mount addition is limited to `teagramd-public-1`,
+`teagramd-public-2`, and `public-haproxy`: both replicas must retain the exact
+`teagramd` mount set, and HAProxy may mount only its reviewed configuration
+read-only. Existing service mounts, project identity, and named volume
+mappings must still match. Any other project, volume, or mount change fails
+closed and asks for the explicit `move-stack` action.
 `deploy-main.sh` continues to call `apply`, so a main-branch deployment that
 contains the project rename exits before changing the running stack until the
 move action is run. The normal readiness and rollback gates still apply when

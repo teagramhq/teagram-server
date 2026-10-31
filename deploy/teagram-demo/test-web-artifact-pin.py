@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import urllib.error
 from typing import Any
 
 
@@ -109,7 +111,103 @@ def fake_fetch(responses: dict[str, Any]):
     return fetch
 
 
+def check_fetch_retries_transient_errors() -> None:
+    delays: list[float] = []
+    calls = 0
+
+    def flaky_open(_request: Any, *, timeout: int) -> io.BytesIO:
+        nonlocal calls
+        if timeout != 20:
+            raise SystemExit("upstream metadata request used the wrong timeout")
+        calls += 1
+        if calls == 1:
+            raise urllib.error.URLError("temporary network failure")
+        return io.BytesIO(b'{"ok":true}')
+
+    result = MODULE.fetch_json(
+        "https://example.invalid/metadata",
+        open_url=flaky_open,
+        sleep=delays.append,
+    )
+    if result != {"ok": True} or calls != 2 or delays != [1.0]:
+        raise SystemExit("transient upstream metadata failure was not retried once")
+
+    delays.clear()
+    calls = 0
+
+    def rate_limited_open(request: Any, *, timeout: int) -> io.BytesIO:
+        nonlocal calls
+        if timeout != 20:
+            raise SystemExit("upstream metadata request used the wrong timeout")
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {"Retry-After": "3"},
+                io.BytesIO(),
+            )
+        return io.BytesIO(b'{"ok":true}')
+
+    result = MODULE.fetch_json(
+        "https://example.invalid/metadata",
+        open_url=rate_limited_open,
+        sleep=delays.append,
+    )
+    if result != {"ok": True} or calls != 2 or delays != [3.0]:
+        raise SystemExit("upstream rate limit was not retried using Retry-After")
+
+    calls = 0
+
+    def permanently_missing_open(request: Any, *, timeout: int) -> io.BytesIO:
+        nonlocal calls
+        if timeout != 20:
+            raise SystemExit("upstream metadata request used the wrong timeout")
+        calls += 1
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO())
+
+    try:
+        MODULE.fetch_json(
+            "https://example.invalid/metadata",
+            open_url=permanently_missing_open,
+            sleep=delays.append,
+        )
+    except ValueError as error:
+        if "HTTP 404" not in str(error):
+            raise SystemExit("permanent upstream HTTP error was reported incorrectly") from error
+    else:
+        raise SystemExit("permanent upstream HTTP error was accepted")
+    if calls != 1:
+        raise SystemExit("permanent upstream HTTP error was retried")
+
+    delays.clear()
+    calls = 0
+
+    def persistently_unavailable_open(_request: Any, *, timeout: int) -> io.BytesIO:
+        nonlocal calls
+        if timeout != 20:
+            raise SystemExit("upstream metadata request used the wrong timeout")
+        calls += 1
+        raise urllib.error.URLError("upstream remains unavailable")
+
+    try:
+        MODULE.fetch_json(
+            "https://example.invalid/metadata",
+            open_url=persistently_unavailable_open,
+            sleep=delays.append,
+        )
+    except ValueError as error:
+        if "3 attempts" not in str(error):
+            raise SystemExit("exhausted metadata retries were reported incorrectly") from error
+    else:
+        raise SystemExit("persistent upstream metadata failure was accepted")
+    if calls != MODULE.FETCH_MAX_ATTEMPTS or delays != [1.0, 2.0]:
+        raise SystemExit("upstream metadata retry limit or backoff was incorrect")
+
+
 def main() -> None:
+    check_fetch_retries_transient_errors()
     actual_pin = MODULE.validate_pin_document(
         json.loads(MODULE.PIN_PATH.read_text(encoding="utf-8"))
     )

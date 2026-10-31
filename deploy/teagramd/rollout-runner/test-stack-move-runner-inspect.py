@@ -202,6 +202,84 @@ class InspectComposeSelectionTest(unittest.TestCase):
         )
         print("PASS rollout layout still rejects writable media mounts and persistent-volume changes")
 
+    def test_public_websocket_services_preserve_existing_persistent_mounts(self) -> None:
+        runner = load_runner()
+        server_mounts = [
+            {"type": "volume", "source": "teagram_tgkey", "target": "/var/lib/teagramd", "read_only": False},
+            {"type": "volume", "source": "teagram_tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+        ]
+        haproxy_mount = {
+            "type": "bind",
+            "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+            "target": "/usr/local/etc/haproxy/haproxy.cfg",
+            "read_only": True,
+            "bind": {"create_host_path": True},
+        }
+        source = {
+            "project": "teagram",
+            "server": "teagramd",
+            "server_mounts": copy.deepcopy(server_mounts),
+            "postgres_mounts": [
+                {"type": "volume", "source": "teagram_pgdata", "target": "/var/lib/postgresql", "read_only": False},
+            ],
+            "persistent_service_mounts": {
+                "postgres": [
+                    {"type": "volume", "source": "teagram_pgdata", "target": "/var/lib/postgresql", "read_only": False},
+                ],
+                "teagramd": copy.deepcopy(server_mounts),
+            },
+            "volumes": {
+                "pgdata": "teagram_pgdata",
+                "tgkey": "teagram_tgkey",
+                "tgblobs": "teagram_tgblobs",
+            },
+        }
+        target = copy.deepcopy(source)
+        target["persistent_service_mounts"].update({
+            "teagramd-public-1": copy.deepcopy(server_mounts),
+            "teagramd-public-2": copy.deepcopy(server_mounts),
+            "public-haproxy": [copy.deepcopy(haproxy_mount)],
+        })
+        target_config = {
+            "name": "teagram",
+            "services": {
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": copy.deepcopy(server_mounts),
+                },
+                "teagramd-public-1": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(server_mounts),
+                },
+                "teagramd-public-2": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(server_mounts),
+                },
+                "public-haproxy": {
+                    "profiles": ["public"],
+                    "volumes": [copy.deepcopy(haproxy_mount)],
+                },
+            },
+        }
+
+        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
+        changed_replica = copy.deepcopy(target)
+        changed_replica["persistent_service_mounts"]["teagramd-public-1"][0]["source"] = "other_tgkey"
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, changed_replica, target_config))
+
+        changed_proxy = copy.deepcopy(target)
+        changed_proxy["persistent_service_mounts"]["public-haproxy"][0]["read_only"] = False
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, changed_proxy, target_config))
+
+        unprofiled = copy.deepcopy(target_config)
+        unprofiled["services"]["teagramd-public-1"]["profiles"] = []
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, unprofiled))
+        print("PASS public WebSocket profile additions keep server data mounts unchanged")
+
     def test_pinned_local_compose_is_used_for_both_layouts_without_s3_env(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="stack-move-inspect-") as temporary:

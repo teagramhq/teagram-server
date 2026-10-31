@@ -65,6 +65,12 @@ S3_BLOB_ENVIRONMENT = (
     "TG_BLOB_S3_CA_PATH",
     "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
 )
+PUBLIC_WEBSOCKET_SERVICES = frozenset({
+    "public-haproxy",
+    "teagramd-public-1",
+    "teagramd-public-2",
+})
+PUBLIC_WEBSOCKET_REPLICAS = frozenset({"teagramd-public-1", "teagramd-public-2"})
 
 
 class MoveError(Exception):
@@ -488,6 +494,97 @@ def _is_approved_media_key_mount_addition(
     return True
 
 
+def _is_public_haproxy_config_mount(mounts: object) -> bool:
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        return False
+    mount = mounts[0]
+    source = mount.get("source")
+    bind_options = mount.get("bind")
+    return (
+        mount.get("type") == "bind"
+        and isinstance(source, str)
+        and source.endswith("/deploy/teagramd/haproxy-public-websocket.cfg")
+        and mount.get("target") == "/usr/local/etc/haproxy/haproxy.cfg"
+        and mount.get("read_only") is True
+        and bind_options in ({}, {"create_host_path": True})
+    )
+
+
+def _is_approved_public_websocket_addition(
+    source: dict[str, object],
+    target: dict[str, object],
+    target_config: dict[str, object],
+) -> bool:
+    if source.keys() != target.keys() or any(
+        source.get(key) != target.get(key)
+        for key in ("project", "server", "postgres_mounts", "volumes")
+    ):
+        return False
+    if source.get("project") != TARGET_PROJECT or source.get("server") != TARGET_SERVER:
+        return False
+
+    source_services = source.get("persistent_service_mounts")
+    target_services = target.get("persistent_service_mounts")
+    if not isinstance(source_services, dict) or not isinstance(target_services, dict):
+        return False
+    if set(target_services) != set(source_services) | PUBLIC_WEBSOCKET_SERVICES:
+        return False
+
+    source_server_mounts = source.get("server_mounts")
+    target_server_mounts = target.get("server_mounts")
+    if not (
+        source_server_mounts == target_server_mounts
+        or _has_only_one_addition(source_server_mounts, target_server_mounts, MEDIA_KEY_MOUNT)
+    ):
+        return False
+    for service, source_mounts in source_services.items():
+        target_mounts = target_services.get(service)
+        if service == TARGET_SERVER:
+            if not (
+                source_mounts == target_mounts
+                or _has_only_one_addition(source_mounts, target_mounts, MEDIA_KEY_MOUNT)
+            ):
+                return False
+        elif source_mounts != target_mounts:
+            return False
+
+    for replica in PUBLIC_WEBSOCKET_REPLICAS:
+        if target_services.get(replica) != target_server_mounts:
+            return False
+
+    if not _is_public_haproxy_config_mount(target_services.get("public-haproxy")):
+        return False
+
+    services = target_config.get("services")
+    if not isinstance(services, dict):
+        return False
+    server = services.get(TARGET_SERVER)
+    if not isinstance(server, dict):
+        return False
+    server_volumes = server.get("volumes")
+    if not isinstance(server_volumes, list):
+        return False
+    for name in PUBLIC_WEBSOCKET_REPLICAS:
+        replica = services.get(name)
+        if not isinstance(replica, dict) or replica.get("profiles") != ["public"]:
+            return False
+        if replica.get("volumes") != server_volumes:
+            return False
+
+    haproxy = services.get("public-haproxy")
+    if not isinstance(haproxy, dict) or haproxy.get("profiles") != ["public"]:
+        return False
+    return haproxy.get("volumes") == [
+        {
+            "type": "bind",
+            "source": target_services["public-haproxy"][0]["source"],
+            "target": "/usr/local/etc/haproxy/haproxy.cfg",
+            "read_only": True,
+            "bind": target_services["public-haproxy"][0].get("bind"),
+        },
+    ]
+
+
 def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool:
     if source == target:
         return False
@@ -515,6 +612,8 @@ def ordinary_rollout_layout_changed(
     if current_version != "1":
         return True
 
+    if _is_approved_public_websocket_addition(source, target, target_config):
+        return False
     return layout_changed(source, target)
 
 

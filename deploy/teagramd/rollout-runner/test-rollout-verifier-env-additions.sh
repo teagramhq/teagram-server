@@ -1108,6 +1108,22 @@ turnstile_compose=$(jq -c --arg source "$turnstile_secret_source" '
     }]
   | .secrets.teagramd_turnstile = {file:$source}
 ' <<< "$COMPOSE_JSON")
+preflight_secret_dir="$TMP/preflight-live/.secrets"
+mkdir -m 700 -p "$preflight_secret_dir"
+preflight_secret_source="$preflight_secret_dir/teagramd-turnstile"
+: > "$preflight_secret_source"
+chmod 444 "$preflight_secret_source"
+preflight_turnstile_compose=$(jq -c --arg source "$preflight_secret_source" \
+  '.secrets.teagramd_turnstile.file=$source' <<< "$turnstile_compose")
+ROLLOUT_PREFLIGHT_TURNSTILE_SECRET_SOURCE="$preflight_secret_source" \
+  verify_turnstile_compose_configuration "$preflight_turnstile_compose"
+if ROLLOUT_PREFLIGHT_TURNSTILE_SECRET_SOURCE="$preflight_secret_source" \
+  verify_turnstile_compose_configuration "$turnstile_compose" \
+  >/dev/null 2>"$TMP/turnstile-preflight-source.err"; then
+  printf '%s\n' 'FAIL preflight accepted a temporary checkout secret path' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS preflight Turnstile validation uses the existing live secret path'
 turnstile_enabled_local_compose=$(jq -c '
   .services.teagramd.secrets = []
   | .secrets |= del(.teagramd_turnstile)
