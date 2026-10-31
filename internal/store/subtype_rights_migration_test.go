@@ -48,18 +48,7 @@ func TestFileSubtypeRightsMigrationPreservesLegacyAndStoresNewStates(t *testing.
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+dbName); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		conn, err := pgx.Connect(cleanupCtx, pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(cleanupCtx) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(cleanupCtx, `DROP DATABASE IF EXISTS `+dbName+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", dbName, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, dbName)
 
 	conn, err := pgx.Connect(ctx, pgtest.DSNFrom(dbName))
 	if err != nil {

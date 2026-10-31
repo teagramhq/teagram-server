@@ -732,17 +732,7 @@ func TestServerAdministrationMigrationClosesNonEmptyDatabase(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	conn, err := pgx.Connect(ctx, pgtest.DSNFrom(name))
 	if err != nil {
@@ -809,17 +799,7 @@ func TestServerAdministrationMigrationSerializesLegacyInsert(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	legacyConn, err := pgx.Connect(ctx, dsn)
@@ -960,17 +940,7 @@ func TestServerAdministrationMigrationRejectsQueuedLegacyInsert(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	legacyConn, err := pgx.Connect(ctx, dsn)
@@ -1340,18 +1310,7 @@ func TestOpenRejectsPartBlobMigrationMissing(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create db: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx := context.Background()
-		conn, err := pgx.Connect(ctx, pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	conn, err := pgx.Connect(ctx, dsn)
