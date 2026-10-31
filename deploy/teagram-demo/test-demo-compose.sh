@@ -87,6 +87,8 @@ jq -e \
   and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
   and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
@@ -477,8 +479,10 @@ jq -e '
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/bootstrap.json" >/dev/null
@@ -507,8 +511,10 @@ jq -e '
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
