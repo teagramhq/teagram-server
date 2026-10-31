@@ -22,7 +22,10 @@ EXPECTED = {
     "TEAGRAM_DEMO_BLOB_PATH": "/srv/teagram-demo-blobs/data",
     "TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE": "/var/lib/teagram-demo/secrets/turnstile-secret-key",
 }
-OPTIONAL_EXPECTED = {"TG_ADVERTISE_DEMO_GUEST_SIGN_UP": "true"}
+OPTIONAL_VALUES = {
+    "TG_ADVERTISE_DEMO_GUEST_SIGN_UP": {"true"},
+    "TG_TURNSTILE_SIGNIN_ENABLED": {"false", "true"},
+}
 
 
 def reject(message: str) -> None:
@@ -57,6 +60,42 @@ def read_turnstile_secret(path: pathlib.Path) -> str:
     return secret_key
 
 
+def validate_values(values: dict[str, str]) -> None:
+    expected_names = set(EXPECTED) | {
+        "TG_WEBSOCKET_ALLOWED_ORIGINS",
+        "POSTGRES_PASSWORD", "TG_AUTHKEY_ENC_KEY",
+        "TEAGRAM_DEMO_TURNSTILE_SITE_KEY",
+    }
+    optional_names = set(OPTIONAL_VALUES)
+    if not expected_names.issubset(values) or set(values) - expected_names - optional_names:
+        reject("variable-set")
+    if not re.fullmatch(r"[0-9a-f]{64}", values["POSTGRES_PASSWORD"]):
+        reject("postgres-password-format")
+    if not re.fullmatch(r"[0-9a-f]{64}", values["TG_AUTHKEY_ENC_KEY"]):
+        reject("authkey-encryption-key-format")
+    if values["POSTGRES_PASSWORD"] == values["TG_AUTHKEY_ENC_KEY"]:
+        reject("secret-reuse")
+    site_key = values["TEAGRAM_DEMO_TURNSTILE_SITE_KEY"]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", site_key):
+        reject("turnstile-site-key-format")
+    secret_path_value = values["TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE"]
+    if secret_path_value != EXPECTED["TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE"]:
+        reject("turnstile-secret-file-path")
+    secret_path = pathlib.Path(secret_path_value)
+    secret_key = read_turnstile_secret(secret_path)
+    if site_key == secret_key:
+        reject("turnstile-key-reuse")
+    if any(values[name] != value for name, value in EXPECTED.items()):
+        reject("fixed-demo-settings")
+    if values["TG_WEBSOCKET_ALLOWED_ORIGINS"] != "https://web.teagram.io,https://demo.teagram.io":
+        reject("fixed-demo-settings")
+    if any(values[name] not in allowed for name, allowed in OPTIONAL_VALUES.items() if name in values):
+        reject("fixed-demo-settings")
+    if os.path.realpath(values["TEAGRAM_DEMO_BLOB_PATH"]) != values["TEAGRAM_DEMO_BLOB_PATH"]:
+        reject("blob-path-not-canonical")
+    print("demo env=valid")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         reject("usage")
@@ -83,41 +122,7 @@ def main() -> None:
             reject("assignment-shape")
         values[name] = value
 
-    expected_names = set(EXPECTED) | {
-        "TG_WEBSOCKET_ALLOWED_ORIGINS",
-        "POSTGRES_PASSWORD", "TG_AUTHKEY_ENC_KEY",
-        "TEAGRAM_DEMO_TURNSTILE_SITE_KEY",
-    }
-    if frozenset(values) not in {
-        frozenset(expected_names),
-        frozenset(expected_names | OPTIONAL_EXPECTED.keys()),
-    }:
-        reject("variable-set")
-    if not re.fullmatch(r"[0-9a-f]{64}", values["POSTGRES_PASSWORD"]):
-        reject("postgres-password-format")
-    if not re.fullmatch(r"[0-9a-f]{64}", values["TG_AUTHKEY_ENC_KEY"]):
-        reject("authkey-encryption-key-format")
-    if values["POSTGRES_PASSWORD"] == values["TG_AUTHKEY_ENC_KEY"]:
-        reject("secret-reuse")
-    site_key = values["TEAGRAM_DEMO_TURNSTILE_SITE_KEY"]
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", site_key):
-        reject("turnstile-site-key-format")
-    secret_path_value = values["TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE"]
-    if secret_path_value != EXPECTED["TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE"]:
-        reject("turnstile-secret-file-path")
-    secret_path = pathlib.Path(secret_path_value)
-    secret_key = read_turnstile_secret(secret_path)
-    if site_key == secret_key:
-        reject("turnstile-key-reuse")
-    if any(values[name] != value for name, value in EXPECTED.items()):
-        reject("fixed-demo-settings")
-    if values["TG_WEBSOCKET_ALLOWED_ORIGINS"] != "https://web.teagram.io,https://demo.teagram.io":
-        reject("fixed-demo-settings")
-    if any(values[name] != value for name, value in OPTIONAL_EXPECTED.items() if name in values):
-        reject("fixed-demo-settings")
-    if os.path.realpath(values["TEAGRAM_DEMO_BLOB_PATH"]) != values["TEAGRAM_DEMO_BLOB_PATH"]:
-        reject("blob-path-not-canonical")
-    print("demo env=valid")
+    validate_values(values)
 
 
 if __name__ == "__main__":

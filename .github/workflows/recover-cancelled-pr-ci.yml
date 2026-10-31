@@ -78,6 +78,23 @@ jobs:
                 continue
               fi
 
+              if ! failed_job_count="$(gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+                --jq '[.jobs[]? | select(.name != "ci" and .conclusion == "failure")] | length' \
+                | awk '{ total += $1 } END { print total + 0 }')"; then
+                echo "::warning::Could not inspect jobs for cancelled pull request CI run ${run_id}; retrying."
+                continue
+              fi
+              if [[ ! "$failed_job_count" =~ ^[0-9]+$ ]]; then
+                echo "::warning::Could not validate failed job count for cancelled pull request CI run ${run_id}; retrying."
+                continue
+              fi
+              if (( failed_job_count > 0 )); then
+                unset "outstanding_pr_run_ids[$run_id]"
+                echo "Skipping cancelled pull request CI run ${run_id}: it has ${failed_job_count} failed CI job(s), so the router already handled fail-fast."
+                continue
+              fi
+
               if [[ ! "$run_head_sha" =~ ^[[:xdigit:]]{40}$ || -z "$run_pr_numbers" ]]; then
                 unset "outstanding_pr_run_ids[$run_id]"
                 echo "::warning::Skipping cancelled pull request CI run ${run_id}: its head SHA or pull request number is unavailable; rerun it manually if its check remains cancelled. Issue: $ISSUE"

@@ -194,10 +194,11 @@ before retrying.
 
 ## Deploy path
 
-The `Deploy.` workflow runs the existing dev deploy first. The optional
-`deploy-demo` job depends on that job and receives the exact same tested SHA.
-It is disabled unless the `demo` GitHub environment variable
-`TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
+The `Deploy.` workflow runs the dev server deploy and publishes a small
+handoff artifact containing the exact tested SHA and CI run ID. On success,
+the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
+and reports its own result. The demo deploy is disabled unless the `demo` GitHub
+environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
 
 Before enabling it, configure the `demo` GitHub environment with:
 
@@ -221,11 +222,11 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 `forced-command.sh` accepts the full commit SHA and trusted server image digest,
 then separately accepts a bounded web archive tied to the current demo
 checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
-server deploys. The `Deploy.` workflow downloads the server digest from the
-successful server CI run. `web-artifact-pin.json` first records teagram-web
-PR #121's head, successful validation run, and the artifact digest reported by
-that run's log; this candidate pin is never deployed. After #121 merges, the
-pin changes to the green `master` publication. The
+server deploys. `Deploy demo.` downloads the server digest from the successful
+server CI run named by the handoff artifact. `web-artifact-pin.json` first
+records teagram-web PR #121's head, successful validation run, and artifact
+digest reported by that run's log; this candidate pin is never deployed. After
+#121 merges, the pin changes to the green `master` publication. The
 read-only deploy preflight then requires the pin to match the public web
 manifest and a successful, checksum-named publication artifact. The
 secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned
@@ -303,6 +304,31 @@ it, it saves and verifies `authorized_keys` under the root-only
 `/var/backups/teagram-demo-ops/` directory. Restore that saved file from a
 separate root channel if the menu must be rolled back. The Gatus definitions
 in `gatus.yaml` are HTTPS probes and do not use an SSH key.
+
+The reviewed `turnstile-signin-on` and `turnstile-signin-off` ops scripts change
+only `TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
+`ROLLOUT_RUNNER_ADDED_ENV` path for the first assignment and the
+`ROLLOUT_RUNNER_CHANGED_ENV` path for later boolean changes. Each change saves
+the prior root-only `.env` under
+`/var/backups/teagram-demo-turnstile-signin/`, validates the rendered Compose
+settings and redeploys the active tested image through `deploy-main.sh`, which
+takes a database dump and checks the candidate before HAProxy cutover. Signup
+keys, signup advertisement and verification remain unchanged. To disable the
+signin challenge, run `ssh -T teagram-demo 'run <main-sha> turnstile-signin-off'`;
+to restore it, use `turnstile-signin-on`. If a deployment fails, the script
+restores the prior `.env` snapshot and redeploys that flag state. It never prints
+Turnstile key values.
+
+After enabling public signin, verify signin and signup challenges from the
+public web origin with
+`go run ./deploy/teagram-demo/turnstile-signin-probe.go active`. The probe reads
+only `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`; it sends an invalid phone number and
+prints the challenge family with the site key redacted. The enable/disable ops
+script also requires TCP timeouts to the documented tailnet host, demo-host
+LAN address and LAN router before reporting success. If the public signin probe
+fails, disable signin with
+`ssh -T teagram-demo 'run <main-sha> turnstile-signin-off'` and verify the
+rollback with `go run ./deploy/teagram-demo/turnstile-signin-probe.go disabled`.
 
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the
