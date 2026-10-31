@@ -164,6 +164,21 @@ compose_public() {
 		-f docker-compose.public-websocket.local-validation.yml "$@"
 }
 
+public_advertise_override="$work_dir/public-advertise-override.yml"
+cat > "$public_advertise_override" <<'YAML'
+services:
+  teagramd:
+    environment:
+      TG_ADVERTISE_ADDR: tailnet.example.test:2443
+YAML
+compose_public_with_advertise_override() {
+	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
+		--profile public -f docker-compose.yml -f docker-compose.local-blobs.yml \
+		-f docker-compose.mixed-trust.validation.yml \
+		-f docker-compose.public-websocket.local-validation.yml \
+		-f "$public_advertise_override" "$@"
+}
+
 compose_for_service() {
 	service=$1
 	shift
@@ -232,6 +247,21 @@ python3 -B deploy/teagramd/rollout-runner/public-websocket-check.py \
 	--haproxy-config deploy/teagramd/haproxy-public-websocket.cfg \
 	--host-port "${mixed_ports[4]}" \
 	< "$work_dir/public-compose.json"
+
+compose_public_with_advertise_override config --format json > "$work_dir/public-override-compose.json"
+public_advertise_addr=$(jq -er '.services.teagramd.environment.TG_ADVERTISE_ADDR' \
+	"$work_dir/public-override-compose.json")
+TG_ADVERTISE_ADDR="$public_advertise_addr" compose_public_with_advertise_override \
+	config --format json > "$work_dir/public-override-resolved-compose.json"
+python3 -B deploy/teagramd/rollout-runner/public-websocket-check.py \
+	--haproxy-config deploy/teagramd/haproxy-public-websocket.cfg \
+	--host-port "${mixed_ports[4]}" \
+	< "$work_dir/public-override-resolved-compose.json"
+jq -e --arg advertise_addr "$public_advertise_addr" '
+	(.services.teagramd.environment.TG_ADVERTISE_ADDR == $advertise_addr)
+	and (.services["teagramd-public-1"].environment.TG_ADVERTISE_ADDR == $advertise_addr)
+	and (.services["teagramd-public-2"].environment.TG_ADVERTISE_ADDR == $advertise_addr)
+' "$work_dir/public-override-resolved-compose.json" >/dev/null
 
 python3 - "$compose_default_json" "$work_dir/legacy-compose.json" "$work_dir/public-compose.json" "${mixed_ports[4]}" <<'PY'
 import json
