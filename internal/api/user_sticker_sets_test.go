@@ -798,6 +798,92 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	}
 }
 
+func TestHistoryKeepsNormalFileMediaSeparateFromStickerMedia(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819029")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551819030")
+	if err != nil {
+		t.Fatalf("create recipient: %v", err)
+	}
+
+	const uploadID = int64(902901)
+	saveParts(t, s, owner.ID, uploadID, validStickerTGS(t))
+	normalSend, err := api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerUser(owner.ID, recipient.ID),
+		Media:   uploadedDocument(uploadID, 1, "same-file.tgs", "application/octet-stream"),
+		Message: "normal document", RandomID: 902902,
+	})
+	if err != nil {
+		t.Fatalf("send normal document: %v", err)
+	}
+	normalDocument := documentOf(t, normalSend)
+	files, err := s.FilesByIDs(ctx, []int64{normalDocument.ID})
+	if err != nil {
+		t.Fatalf("load uploaded file: %v", err)
+	}
+	file, ok := files[normalDocument.ID]
+	if !ok {
+		t.Fatalf("uploaded file %d is missing", normalDocument.ID)
+	}
+	createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("same_file", file, false, false))
+
+	_, err = api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerUser(owner.ID, recipient.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}},
+		Message: "sticker message", RandomID: 902903,
+	})
+	if err != nil {
+		t.Fatalf("send sticker message: %v", err)
+	}
+
+	history, err := api.GetHistoryForTest(s, recipient.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(recipient.ID, owner.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("get history: %v", err)
+	}
+	result, ok := history.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("history = %T, want *tg.MessagesMessages", history)
+	}
+	mediaByText := make(map[string]*tg.Document, len(result.Messages))
+	for _, class := range result.Messages {
+		message, ok := class.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaDocument)
+		if !ok {
+			t.Fatalf("%q media = %T, want *tg.MessageMediaDocument", message.Message, message.Media)
+		}
+		document, ok := media.Document.(*tg.Document)
+		if !ok {
+			t.Fatalf("%q document = %T, want *tg.Document", message.Message, media.Document)
+		}
+		mediaByText[message.Message] = document
+	}
+
+	if got := mediaByText["normal document"]; got == nil || got.MimeType != "application/octet-stream" {
+		t.Fatalf("normal document media = %+v, want original generic document", got)
+	}
+	sticker := mediaByText["sticker message"]
+	if sticker == nil || sticker.MimeType != "application/x-tgsticker" {
+		t.Fatalf("sticker media = %+v, want TGS sticker document", sticker)
+	}
+	for _, attribute := range sticker.Attributes {
+		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+			return
+		}
+	}
+	t.Fatalf("sticker attributes = %+v, want sticker attribute", sticker.Attributes)
+}
+
 func createStickerRequest(shortName string, file store.File, masks, emojis bool) *tg.StickersCreateStickerSetRequest {
 	return &tg.StickersCreateStickerSetRequest{
 		UserID: &tg.InputUserSelf{}, Title: "Generated stickers", ShortName: shortName,

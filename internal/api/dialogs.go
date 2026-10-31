@@ -393,10 +393,7 @@ func (h *handlers) handleGetPeerDialogs(r *mtproto.Request) (bin.Encoder, error)
 func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialogsSnapshot, viewerID int64) (*tg.MessagesPeerDialogs, error) {
 	tlDialogs := make([]tg.DialogClass, 0, len(snapshot.Dialogs))
 	tlMsgs := make([]tg.MessageClass, 0, len(snapshot.Dialogs))
-	files := make(map[int64]tg.MessageMediaClass, len(snapshot.Files))
-	for id, file := range snapshot.Files {
-		files[id] = h.fileMediaToTL(file)
-	}
+	files := h.messageReadFileMedia(snapshot.Files)
 	selectedMessages := make([]store.Message, 0, len(snapshot.Dialogs))
 	for _, selected := range snapshot.Dialogs {
 		if selected.Message != nil {

@@ -784,7 +784,7 @@ func pollDraftFromInput(media *tg.InputMediaPoll) (store.PollDraft, error) {
 func messageToTLWithPoll(
 	message store.Message,
 	createUsers []int64,
-	files map[int64]tg.MessageMediaClass,
+	files *messageMedia,
 	replyTexts map[int32]string,
 	reactions []store.Reaction,
 	poll store.Poll,
