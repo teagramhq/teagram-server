@@ -111,7 +111,7 @@ class FakeBrowserSession extends EventEmitter {
   }
 }
 
-test('the patched direct-message assertion settles a pending and sent bubble pair by element identity', async (t) => {
+test('the patched direct-message assertion settles idless and pending/sent bubble transients by element identity', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const {browser, browserPath} = patchBrowserForTest(t);
   const browserSource = readFileSync(browserPath, 'utf8');
@@ -123,6 +123,7 @@ test('the patched direct-message assertion settles a pending and sent bubble pai
   const page = messagePage();
   const sentBubble = messageBubble('8', 'sent');
   const message = messageLocator([
+    [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
     [messageBubble('-7', 'pending'), messageBubble('8', 'sent')],
     [sentBubble, sentBubble],
   ]);
@@ -132,13 +133,33 @@ test('the patched direct-message assertion settles a pending and sent bubble pai
   assert.equal(trace.result, 'settled');
   assert.equal(trace.samples[0].count, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[0].bubbles)), [
+    {messageId: null, sendState: 'sent'},
+    {messageId: null, sendState: 'sent'},
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.samples[1].bubbles)), [
     {messageId: '-7', sendState: 'pending'},
     {messageId: '8', sendState: 'sent'},
   ]);
+  assert.equal(trace.samples.length >= 3, true);
   assert.equal(trace.samples.at(-1).count, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(trace.samples.at(-1).bubbles)), [
     {messageId: '8', sendState: 'sent'},
   ]);
+});
+
+test('the patched direct-message assertion fails if idless duplicate bubbles persist through settling', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser} = patchBrowserForTest(t);
+  const page = messagePage();
+  const message = messageLocator([
+    [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
+  ]);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 250), false);
+
+  const trace = await browser.captureGroupMessageState();
+  assert.equal(trace.result, 'settle_timeout');
+  assert.ok(trace.samples.length > 1);
+  assert.ok(trace.samples.every((sample) => sample.count === 2));
 });
 
 test('the patched direct-message assertion rejects two bubble elements with one id', async (t) => {

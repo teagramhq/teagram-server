@@ -60,7 +60,7 @@ export function patchRealClientObserver(webRoot) {
     }
     groupMessageTrace.samples.push(sample);
     lastResult = groupMessageSampleResult(sample);
-    if(['disappeared', 'missing_message_id', 'failed_bubble', 'multiple_ids', 'duplicate_bubbles'].includes(lastResult)) {
+    if(['disappeared', 'failed_bubble', 'multiple_ids', 'duplicate_bubbles'].includes(lastResult)) {
       groupMessageTrace.result = lastResult;
       return false;
     }
@@ -84,7 +84,8 @@ export function patchRealClientObserver(webRoot) {
     }
   }
 
-  groupMessageTrace.result = lastResult === 'pending' || lastResult === 'transient_pair' ? 'settle_timeout' : 'stability_timeout';
+  groupMessageTrace.result = lastResult === 'pending' || lastResult === 'transient_pair' ||
+    lastResult === 'missing_message_id' ? 'settle_timeout' : 'stability_timeout';
   return false;
 }
 `;
