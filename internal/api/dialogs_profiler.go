@@ -3,8 +3,10 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -28,9 +30,14 @@ func startGetDialogsProfiler() *getDialogsProfiler {
 		return nil
 	}
 	fixture := os.Getenv("TG_PERF_FIXTURE")
+	var stages []string
 	return newGetDialogsProfiler(func(name string, duration time.Duration) {
-		log.Printf("messages.getDialogs server %s stage: %s %.2f ms", fixture,
-			name, float64(duration.Microseconds())/1000)
+		if name == "server handler total" {
+			log.Printf("messages.getDialogs server %s stages: %s; total %.2f ms", fixture,
+				strings.Join(stages, " "), float64(duration.Microseconds())/1000)
+			return
+		}
+		stages = append(stages, fmt.Sprintf("%s=%.2fms", name, float64(duration.Microseconds())/1000))
 	})
 }
 

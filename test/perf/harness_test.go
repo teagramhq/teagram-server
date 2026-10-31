@@ -185,7 +185,7 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		e.elapsed = 0
 		start := time.Now()
 		var callErr error
-		if sc.name == "messages.getDialogs" && i == warmup {
+		if sc.name == "messages.getDialogs" && measured {
 			callErr = callWithGetDialogsProfile(ctx, call)
 		} else {
 			callErr = call(ctx)
