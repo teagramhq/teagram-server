@@ -41,13 +41,9 @@ TARGET_REPORT_VOLUME_NAME = "teagram_blob_key_rotate_reports"
 SOURCE_SERVER = "telegramd"
 TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
+PUBLIC_PROFILE_SERVICES = frozenset({"public-haproxy", "teagramd-public-1", "teagramd-public-2"})
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
-PUBLIC_WEBSOCKET_PROFILE_SERVICES = frozenset({
-    "public-haproxy",
-    "teagramd-public-1",
-    "teagramd-public-2",
-})
 MEDIA_KEY_MOUNT = {
     "type": "bind",
     "source": "/etc/teagramd/media-keys",
@@ -515,7 +511,17 @@ def _without_initial_public_profile_mounts(
     additions = set(target_services) - set(source_services)
     if not additions:
         return target
-    if additions != PUBLIC_WEBSOCKET_PROFILE_SERVICES:
+    selected_profiles = {
+        profile.strip()
+        for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
+        if profile.strip()
+    }
+    if (
+        "public" not in selected_profiles
+        or os.environ.get("ROLLOUT_RUNNER_PUBLIC_WEBSOCKET") != "1"
+    ):
+        return None
+    if additions != PUBLIC_PROFILE_SERVICES:
         return None
 
     base_service = configured_services.get(TARGET_SERVER)
@@ -544,14 +550,18 @@ def _without_initial_public_profile_mounts(
         proxy_mounts = service_mounts(target_config, "public-haproxy")
     except MoveError:
         return None
+    proxy_source = proxy_mounts[0].get("source") if len(proxy_mounts) == 1 else None
     if (
         len(proxy_mounts) != 1
         or proxy_mounts[0].get("type") != "bind"
         or proxy_mounts[0].get("target") != "/usr/local/etc/haproxy/haproxy.cfg"
         or proxy_mounts[0].get("read_only") is not True
-        or not str(proxy_mounts[0].get("source", "")).endswith(
+        or not isinstance(proxy_source, str)
+        or not proxy_source.startswith("/")
+        or not proxy_source.endswith(
             "/deploy/teagramd/haproxy-public-websocket.cfg"
         )
+        or proxy_mounts[0].get("bind") not in (None, {}, {"create_host_path": False})
         or target_services.get("public-haproxy") != proxy_mounts
     ):
         return None
@@ -563,7 +573,7 @@ def _without_initial_public_profile_mounts(
     normalized_services = normalized.get("persistent_service_mounts")
     if not isinstance(normalized_services, dict):
         return None
-    for name in PUBLIC_WEBSOCKET_PROFILE_SERVICES:
+    for name in PUBLIC_PROFILE_SERVICES:
         normalized_services.pop(name, None)
     return normalized
 
