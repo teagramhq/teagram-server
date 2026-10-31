@@ -114,6 +114,8 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: logs
+              mountPath: /logs
       volumes:
         - name: rustfs-credentials
           secret:
@@ -126,6 +128,9 @@ spec:
                 path: root-secret-key
         - name: tmp
           emptyDir: {}
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
   volumeClaimTemplates:
     - metadata:
         name: data
