@@ -2725,7 +2725,7 @@ run_apply() {
   fi
   verify_runtime_sources || return 1
 
-  local layout_report layout_changed
+  local layout_report layout_changed layout_diagnostics
   layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
     --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" \
     --env-file "$ENV_FILE" --override "$OVERRIDE_FILE") || {
@@ -2737,7 +2737,19 @@ run_apply() {
     return 1
   }
   [ "$layout_changed" = false ] || {
-    fail 'Compose project or persistent mounts changed; use the explicit move-stack action'
+    layout_diagnostics=$(printf '%s' "$layout_report" | jq -er '
+      .layout_diagnostics
+      | select(type == "object")
+      | .reason as $reason
+      | .public_profile as $public_profile
+      | .changed_components as $components
+      | select(($reason | type) == "string")
+      | select(($public_profile | type) == "string")
+      | select(($components | type) == "array")
+      | select(all($components[]; test("^(project|server|server_mounts|postgres_mounts|persistent_service_mounts|volumes)$")))
+      | "reason=\($reason) components=\($components | join(",")) public_profile=\($public_profile)"
+    ') || layout_diagnostics='unavailable'
+    fail "Compose project or persistent mounts changed ($layout_diagnostics); use the explicit move-stack action"
     return 1
   }
   TARGET_DATABASE=$(printf '%s' "$layout_report" | jq -er '.target_database | select(type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*$"))') || {
