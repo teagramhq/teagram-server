@@ -205,7 +205,7 @@ assert public_base["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
 assert public_base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
 assert public_base["environment"]["TG_REPLICA_COUNT"] == "1"
 assert public_base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
-assert not any(str(port.get("target")) == "2446" for port in public_base.get("ports", []))
+assert not public_base.get("ports")
 assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]
 assert proxy["networks"]["public-ingress"]["ipv4_address"] == "198.18.131.10"
 assert proxy["networks"]["public-backend"]["ipv4_address"] == "198.18.132.10"
