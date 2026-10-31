@@ -2,14 +2,11 @@
 set -euo pipefail
 
 script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
-replay_script="$(cd "$(dirname "$0")" && pwd)/ops/replay-check.sh"
 failure_report_script="$(cd "$(dirname "$0")" && pwd)/ops/target-failure-report.sh"
 evidence_script="$(cd "$(dirname "$0")" && pwd)/ops/rollout-evidence.sh"
 tmp=$(mktemp -d)
-unrelated=$(mktemp -d /tmp/teagram-ops.test-unrelated.XXXXXX)
 cleanup() {
   /bin/rm -rf -- "$tmp"
-  /bin/rm -rf -- "$unrelated"
 }
 trap cleanup EXIT
 
@@ -27,18 +24,20 @@ printf 'fixture env only\n' > "$tmp/repo/.env.rustfs-parked"
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TARGET_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 OFF_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
+OLD_MAIN_SHA=ffffffffffffffffffffffffffffffffffffffff
 CONTAINER_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 REPORT_TARGET_SHA=abcdef1234567890abcdef1234567890abcdef12
 REPORT_SOURCE_SHA=1234567890abcdef1234567890abcdef12345678
 REPORT_PREFIX=${REPORT_TARGET_SHA:0:12}
-export OPS_SHA TARGET_SHA OFF_MAIN_SHA CONTAINER_ID REPORT_TARGET_SHA REPORT_SOURCE_SHA REPORT_PREFIX
+export OPS_SHA TARGET_SHA OFF_MAIN_SHA OLD_MAIN_SHA CONTAINER_ID \
+  REPORT_TARGET_SHA REPORT_SOURCE_SHA REPORT_PREFIX
 export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
-export MOCK_OP_SCRIPT="$replay_script" MOCK_REPORT_SCRIPT="$failure_report_script"
+export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
-export MOCK_VERIFIER="$tmp/verifier.sh" MOCK_RUNNER="$tmp/runner.sh"
+export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
-export MOCK_VERIFIER_CALL="$tmp/verifier-call.log"
-export MOCK_PRIVATE_EVIDENCE_LOG="$tmp/private-evidence.log" MOCK_ROOT="$tmp/root"
+export MOCK_ROOT="$tmp/root"
+export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
@@ -52,25 +51,25 @@ case "$1" in
   fetch) exit 0 ;;
   merge-base)
     if [[ "${2:-}" == --is-ancestor && "${4:-}" == origin/main && \
-      ( "${3:-}" == "$OPS_SHA" || "${3:-}" == "$TARGET_SHA" ) ]]; then
+      ( "${3:-}" == "$OPS_SHA" || "${3:-}" == "$TARGET_SHA" || \
+        "${3:-}" == "$OLD_MAIN_SHA" ) ]]; then
       exit 0
     fi
     exit 1
     ;;
   cat-file)
     [[ "${2:-}" == -e ]] || exit 99
-    [[ "${3:-}" == "$OPS_SHA:deploy/teagram/ops/replay-check.sh" || \
-      "${3:-}" == "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh" || \
-      "${3:-}" == "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh" || \
-      "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh" || \
-      "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh" ]]
+    case "${3:-}" in
+      "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh"|\
+      "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh"|\
+      "$OPS_SHA:deploy/teagram/ops/invite-web-signup-url.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
+      *) exit 1 ;;
+    esac
     ;;
   show)
     case "${2:-}" in
-      "$OPS_SHA:deploy/teagram/ops/replay-check.sh")
-        sed -e "s|/opt/teagram|$MOCK_REPO|g" -e "s|/root|$MOCK_ROOT|g" \
-          -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_OP_SCRIPT"
-        ;;
       "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh")
         sed -e "s|/root|$MOCK_ROOT|g" "$MOCK_REPORT_SCRIPT"
         ;;
@@ -78,8 +77,13 @@ case "$1" in
         sed -e "s|/root|$MOCK_ROOT|g" \
           -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_EVIDENCE_SCRIPT"
         ;;
-      "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh") cat "$MOCK_RUNNER" ;;
-      "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_VERIFIER" ;;
+      "$OPS_SHA:deploy/teagram/ops/invite-web-signup-url.sh")
+        cat "$MOCK_INVITE_SCRIPT"
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
+        printf '#!/bin/sh\ntouch "%s"\n' "$MOCK_RETIRED_SCRIPT_MARKER"
+        ;;
       *) exit 1 ;;
     esac
     ;;
@@ -138,32 +142,13 @@ printf 'log_reader=%s\n' "${SSH_ORIGINAL_COMMAND:-}"
 LOGS
 chmod 755 "$tmp/bin/"*
 
-cat > "$MOCK_VERIFIER" <<'VERIFIER'
+cat > "$MOCK_INVITE_SCRIPT" <<'INVITE'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$#" == 4 && "$1" == ready && "$2" == target && "$3" == "$CONTAINER_ID" ]]
-[[ "$PWD" == "$MOCK_REPO" && "$ROLLOUT_CHECKOUT_PATH" == "$MOCK_REPO" ]]
-printf 'sha=%s args=%s compose=%s env_files=%s cwd=%s\n' \
-  "$TARGET_SHA" "$*" "$COMPOSE_FILE" "$COMPOSE_ENV_FILES" "$PWD" > "$MOCK_VERIFIER_CALL"
-printf '%s\n' "$4" > "$MOCK_PRIVATE_EVIDENCE_LOG"
-if [[ "${MOCK_VERIFIER_NO_EVIDENCE:-0}" == 1 ]]; then
-  exit 0
-fi
-printf 'sample=ready\n' > "$4/readiness-target.tsv"
-if [[ "${MOCK_VERIFIER_STATUS:-0}" == 0 ]]; then
-  printf 'role=target result=ready elapsed=0\n' > "$4/readiness-target.tsv.result"
-  printf 'role=target result=ready max_seconds=120\n' > "$4/readiness-target.result"
-  printf '%s\n' 'role=target result=ready max_seconds=120'
-else
-  printf 'role=target result=timeout max_seconds=120 elapsed=0\n' > "$4/readiness-target.tsv.result"
-  printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS" > "$4/readiness-target.result"
-  printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS"
-  exit "$MOCK_VERIFIER_STATUS"
-fi
-VERIFIER
-chmod 755 "$MOCK_VERIFIER"
-verifier_sha=$(sha256sum "$MOCK_VERIFIER" | cut -d' ' -f1)
-printf 'readonly APPROVED_VERIFIER_SHA=%s\n' "$verifier_sha" > "$MOCK_RUNNER"
+printf 'invite-operation args:'
+printf ' <%s>' "$@"
+printf '\n'
+INVITE
 
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
@@ -203,6 +188,9 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url'* ]]
+  [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
+  [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
 done
 
 report_dir="$MOCK_ROOT/main1238-${REPORT_PREFIX}-20261027T124539Z.target"
@@ -216,49 +204,28 @@ report_output=$(run_command "run $OPS_SHA target-failure-report $REPORT_PREFIX")
   "$report_output" == *'target_failure_gate=target_readiness_rejected_exit_1'* && \
   "$report_output" == *'readiness_result=failed'* ]]
 
+invite_check=$(run_command "run $OPS_SHA invite-web-signup-url --check")
+[[ "$invite_check" == 'invite-operation args: <--check>' ]]
+invite_apply=$(run_command "run $OPS_SHA invite-web-signup-url")
+[[ "$invite_apply" == 'invite-operation args: <>' ]]
+invite_rollback=$(run_command "run $OPS_SHA invite-web-signup-url --rollback")
+[[ "$invite_rollback" == 'invite-operation args: <--rollback>' ]]
+
 sentinel="$tmp/arbitrary-command-ran"
 expect_status 64 "touch $sentinel"
 [[ ! -e "$sentinel" ]]
 expect_status 64 'run'
-expect_status 64 "run gggggggggggggggggggggggggggggggggggggggg replay-check $TARGET_SHA"
-expect_status 64 "run ${OPS_SHA:0:7} replay-check $TARGET_SHA"
-expect_status 65 "run $OFF_MAIN_SHA replay-check $TARGET_SHA"
-expect_status 66 "run $OPS_SHA missing-script $TARGET_SHA"
+expect_status 64 "run gggggggggggggggggggggggggggggggggggggggg rollout-evidence"
+expect_status 64 "run ${OPS_SHA:0:7} rollout-evidence"
+expect_status 65 "run $OFF_MAIN_SHA rollout-evidence"
+expect_status 64 "run $OPS_SHA missing-script $TARGET_SHA"
+expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
+expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
+expect_status 64 "run $OLD_MAIN_SHA replay-check"
+[[ ! -e "$MOCK_RETIRED_SCRIPT_MARKER" ]]
 for bad_name in 'nested/name' . .. 'Uppercase'; do
   expect_status 64 "run $OPS_SHA $bad_name $TARGET_SHA"
 done
-
-mkdir -p "$unrelated/keep"
-printf 'keep this directory\n' > "$unrelated/keep/sentinel"
-output=$(run_command "run $OPS_SHA replay-check $TARGET_SHA")
-[[ "$output" == *'role=target result=ready'* && "$output" == *"replay_check=pass target_sha=$TARGET_SHA evidence="* ]]
-evidence=${output##*evidence=}
-[[ -d "$evidence" && -f "$evidence/readiness-target.tsv" && \
-  "$(cat "$evidence/readiness-target.tsv.result")" == 'role=target result=ready elapsed=0' && \
-  -f "$evidence/replay-check.result" ]]
-[[ "$(cat "$evidence/replay-check.result")" == "result=pass target_sha=$TARGET_SHA container_id=$CONTAINER_ID evidence=$evidence" ]]
-private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
-[[ "$(cat "$MOCK_VERIFIER_CALL")" == *"sha=$TARGET_SHA args=ready target $CONTAINER_ID $private_evidence compose=$MOCK_REPO/docker-compose.yml:$MOCK_REPO/docker-compose.override.yml env_files=$MOCK_REPO/.env,$MOCK_REPO/.env.rustfs-parked cwd=$MOCK_REPO"* ]]
-
-status=0
-output=$(MOCK_VERIFIER_STATUS=2 run_command "run $OPS_SHA replay-check $TARGET_SHA" 2>&1) || status=$?
-[[ "$status" == 2 && "$output" == *"replay_check=failed exit=2 target_sha=$TARGET_SHA evidence="* ]]
-failed_evidence=${output##*evidence=}
-[[ -d "$failed_evidence" && -f "$failed_evidence/readiness-target.tsv" && \
-  "$(cat "$failed_evidence/readiness-target.tsv.result")" == 'role=target result=timeout max_seconds=120 elapsed=0' && \
-  "$(cat "$failed_evidence/readiness-target.result")" == 'role=target result=failed exit=2 max_seconds=120' ]]
-private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
-
-status=0
-output=$(MOCK_VERIFIER_NO_EVIDENCE=1 run_command "run $OPS_SHA replay-check $TARGET_SHA" 2>&1) || status=$?
-[[ "$status" == 1 && "$output" == *"reason=invalid-readiness-evidence evidence="* ]]
-invalid_evidence=${output##*evidence=}
-[[ -d "$invalid_evidence" && "$(cat "$invalid_evidence/replay-check.result")" == \
-  "result=failed target_sha=$TARGET_SHA reason=invalid-readiness-evidence evidence=$invalid_evidence" ]]
-private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
 
 chmod 700 "$MOCK_ROOT"
 old_target_dir="$MOCK_ROOT/main1238-${OFF_MAIN_SHA:0:12}-20261027T230000Z.target"
@@ -335,9 +302,4 @@ for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
 done
-[[ -f "$unrelated/keep/sentinel" ]]
-/bin/rm -rf -- "$evidence"
-/bin/rm -rf -- "$failed_evidence"
-/bin/rm -rf -- "$invalid_evidence"
-
 printf '%s\n' 'teagram-ops fixture cases pass'

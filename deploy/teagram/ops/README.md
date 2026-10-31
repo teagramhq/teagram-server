@@ -3,13 +3,48 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <script-name> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url> [args]
 ```
 
-The runner fetches `origin/main`, checks the commit ancestry and script name,
-and executes the script recorded in that commit. Keep every operation narrowly
-scoped to its named purpose. Validate arguments before using them, fail closed,
-and never put secrets in arguments, logs, or output.
+The runner fetches `origin/main`, checks the commit ancestry, and accepts only
+`target-failure-report`, `rollout-evidence`, and `invite-web-signup-url`. A
+script's presence in an older main commit does not authorize a retired
+operation. The allowlist lives in
+`teagram-ops.sh`; tests cover both retired names at an older main SHA. Keep
+every operation narrowly scoped to its named purpose. Validate arguments
+before using them, fail closed, and never put secrets in arguments, logs, or
+output.
+
+## Threat model
+
+Assets at risk include the host filesystem and root-owned evidence,
+`/opt/teagram` configuration and secrets, the Docker daemon, and persistent
+service data. The caller supplies `SSH_ORIGINAL_COMMAND`; `run` executes a
+selected Git blob as root. An ancestor SHA from `origin/main` proves reviewed
+lineage, but does not authorize every path present in that historical tree.
+The host, Git origin,
+protected `main`, review process, and custody of the forced-command key are
+trusted. This command menu is not a sandbox.
+
+The main threat is a caller using the privileged key to select an unintended
+operation or arguments, or a bug in a root operation exposing secrets or
+changing the host. A compromised key or maliciously merged operation can
+therefore become host-root execution. The dispatcher limits `run` to the three
+current operation names before fetching Git data, verifies the full SHA is on
+`origin/main`, constructs the script path itself, and does not evaluate a
+caller-provided shell command. The evidence operations validate their inputs
+and emit bounded, sanitized output. `invite-web-signup-url` accepts only the
+documented no-argument apply, `--check`, and `--rollback` modes; check is
+read-only, and apply or rollback changes only its public URL assignment and the
+matching rollout-environment digest record. It verifies the current record,
+refuses unrelated or desktop URL changes, and stages the update under the
+deployment lock. Dispatcher tests cover all three modes and attempts to select
+deleted scripts from an older main commit.
+
+The allowlist blocks retired operation names at every SHA, while older
+versions of an allowlisted operation remain callable if present on `main`.
+Keep the list narrow and review each operation as root code. Adding an
+operation requires updating the allowlist and its boundary tests.
 
 Do not `source` the deploy runner or rollout verifier. Invoke reviewed tools as
 child processes with explicit arguments and check their exit status. Access
@@ -25,25 +60,6 @@ invocation-owned directories and print a concise result, including the target
 and evidence path where relevant. A repeated invocation must not change the
 live service state. The forced-command runner removes only the `/tmp/teagram-ops.*`
 directory it created with `mktemp`.
-
-`replay-check.sh` is read-only. It requires a full SHA on `origin/main` that
-matches the live image revision, runs that commit's rollout verifier as a child
-process, and stores its bounded readiness evidence under `/tmp`. The verifier's
-required private directory under `/root` is created and cleaned by this CLI
-operation; only the two validated readiness output files are copied to the
-private `/tmp` evidence directory. For the S3 Compose selection, the script
-accepts exactly one parked environment file at the approved path and passes
-that path to Compose without printing its values.
-
-`rollback-public-websocket.sh` is the pre-revert step for a deployed public
-WebSocket route. Run it through `teagram-ops` with the current deployed SHA;
-it takes `/tmp/teagram-deploy.lock`, verifies the live checkout and base image
-match that SHA, removes only the `teagram` project's `public-haproxy`,
-`teagramd-public-1`, and `teagramd-public-2` containers, then confirms those
-containers are gone and no container publishes host port 2446. After it
-succeeds, revert the route commit and let `Deploy.` recreate base `teagramd`
-with its original `127.0.0.1:2446` publish. The operation is repeatable and
-does not touch volumes or the database.
 
 `rollout-evidence.sh` is read-only and takes no arguments. Run it through the
 same CLI as `ssh teagram run <main-sha> rollout-evidence`. It reports the
@@ -76,6 +92,16 @@ ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
 It checks that the recorded environment is exactly the saved `.env` plus the
 quota setting, then reruns the probe against the current live image without
 applying another rollout.
+
+`rollback-public-websocket.sh` is the pre-revert step for a deployed public
+WebSocket route. Run it through `teagram-ops` with the current deployed SHA;
+it takes `/tmp/teagram-deploy.lock`, verifies the live checkout and base image
+match that SHA, removes only the `teagram` project's `public-haproxy`,
+`teagramd-public-1`, and `teagramd-public-2` containers, then confirms those
+containers are gone and no container publishes host port 2446. After it
+succeeds, revert the route commit and let `Deploy.` recreate base `teagramd`
+with its original `127.0.0.1:2446` publish. The operation is repeatable and
+does not touch volumes or the database.
 
 ## User-invite quota threat model
 

@@ -22,8 +22,11 @@ teagram-ops verbs (read-only unless noted):
   logs <since>              teagramd logs since an RFC3339 UTC time (same as teagram-logs)
   env-names                 names of keys in /opt/teagram/.env, never values
   fingerprints              sha256 of .env, override, rollout-env record and compose files
-  run <40-hex-sha> <name> [args]   CHANGES THE BOX: runs deploy/teagram/ops/<name>.sh from that commit,
-                            only if the commit is on origin/main
+  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url> [args]
+                            runs an allowlisted script from that commit only if
+                            the commit is on origin/main
+                            invite-web-signup-url default (apply) and --rollback
+                            mutate the live .env; --check is read-only
 EOF
 }
 
@@ -56,6 +59,14 @@ case "$VERB" in
     [ "${#SHA}" -eq 40 ] || { echo "teagram-ops: need a 40-character hex SHA" >&2; exit 64; }
     case "$NAME" in [a-z0-9]*) ;; *) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in *[!a-z0-9-]*) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
+    case "$NAME" in
+      target-failure-report|rollout-evidence|invite-web-signup-url) ;;
+      *)
+        logger -t teagram-ops "refused operation: $NAME"
+        echo "teagram-ops: operation is not allowlisted" >&2
+        exit 64
+        ;;
+    esac
     git -C "$REPO" fetch -q origin main
     git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main || { logger -t teagram-ops "refused: $SHA not on main"; echo "teagram-ops: $SHA is not on origin/main" >&2; exit 65; }
     P="deploy/teagram/ops/$NAME.sh"
