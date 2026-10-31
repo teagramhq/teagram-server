@@ -1129,9 +1129,9 @@ snapshot_from_json() {
     | if ($raw_env | type) != "array" or any($raw_env[]; type != "string") then error("container environment must be an array of strings")
       else $raw_env
         # The old Compose pass-through resolved unset tailnet limits to an empty
-        # value. Normalize only that baseline representation to the new zero
+        # value. Normalize baseline and rollback snapshots to the new zero
         # default; target snapshots retain and pin their inspected value.
-        | map(if $snapshot_name == "baseline" and . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="
+        | map(if ($snapshot_name | IN("baseline", "rollback")) and . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="
               then "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0" else . end)
         | map(. as $entry
           | select(($image_env | index($entry)) == null or
@@ -1268,9 +1268,9 @@ snapshot_from_json() {
       # Compose includes extension anchors in its rendered output. Their
       # expanded service fields remain in the digest; the anchors do not.
       with_entries(select((.key | startswith("x-")) | not))
-      # The old baseline empty tailnet pass-through is equivalent to the new
-      # zero default. Keep the target value in its digest so it remains pinned.
-      | if $snapshot_name == "baseline" and
+      # The old baseline and rollback empty tailnet pass-throughs are
+      # equivalent to the new zero default. Keep the target value pinned.
+      | if ($snapshot_name | IN("baseline", "rollback")) and
            .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "" then
           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET = "0"
         else . end
