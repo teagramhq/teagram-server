@@ -108,7 +108,7 @@ if [ "${#added_sql_migrations[@]}" -gt 0 ]; then
   cp "$repo_root/migrations/"*.sql "$lint_migration_dir/"
   while IFS= read -r base_migration; do
     wrap_migration_in_transaction "$lint_migration_dir/${base_migration##*/}"
-  done < <(rg -l -i 'LOCK[[:space:]]+TABLE' "$baseline_dir/migrations" --glob '*.sql')
+  done < <(grep -rliE --include='*.sql' 'LOCK[[:space:]]+TABLE' "$baseline_dir/migrations")
 
   run_atlas_migration_lint "$lint_migration_dir" "$lint_dsn" "${#added_sql_migrations[@]}"
 else
@@ -129,7 +129,7 @@ run_atlas_lint_fixture() {
   cp "$fixture_source"/*.sql "$fixture_dir/"
   while IFS= read -r migration; do
     wrap_migration_in_transaction "$migration"
-  done < <(rg -l -i 'LOCK[[:space:]]+TABLE' "$fixture_dir" --glob '*.sql')
+  done < <(grep -rliE --include='*.sql' 'LOCK[[:space:]]+TABLE' "$fixture_dir")
 
   if run_atlas_migration_lint "$fixture_dir" "$fixture_dsn" 1 >"$lint_output" 2>&1; then
     lint_status=0
