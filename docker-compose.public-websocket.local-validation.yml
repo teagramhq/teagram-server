@@ -3,9 +3,13 @@
 services:
   teagramd:
     environment:
-      # The general mixed-trust smoke uses three replicas. Keep the public
-      # route's base socket-trust listener on its production count of one.
+      # Keep the public route's base socket-trust listener at its production
+      # count of one; only the dedicated public listeners need two replicas.
       TG_REPLICA_COUNT: "1"
+    # The proof reaches the stack only through public-haproxy. Publishing the
+    # base listener would collide with any stack already holding 2443 on the
+    # runner.
+    ports: !override []
 
   teagramd-public-1:
     environment:

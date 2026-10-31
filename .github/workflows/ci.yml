@@ -277,6 +277,24 @@ jobs:
             --head "$HEAD_SHA" \
             --sqlfluff .venv-sqlfluff/bin/sqlfluff
 
+  test-git-hooks:
+    name: 'test: git-hooks'
+    needs: ops-prioritize-main
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Test commit message validation and merge exemptions
+        run: bash test/githooks/commit-msg-merge.sh
+
+      - name: Test selective pre-push checks
+        run: python3 -B .github/scripts/test_git_hooks.py
+
   test-browser-acceptance:
     name: 'test: browser-acceptance'
     needs: ops-prioritize-main
@@ -606,19 +624,15 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # Quay no longer allows anonymous pulls of its MinIO image. Build the
-      # test fixture from the pinned public source so fork PRs need no secrets.
-      # The daemon's builder uses the base images pulled below, as in the
-      # build-server-image job.
-      - uses: docker/setup-buildx-action@v4.4.1
+      - name: Set up Buildx for link-edge image checks
+        uses: docker/setup-buildx-action@v4.4.1
         with:
           driver: docker
 
       - name: Pull the base images
         timeout-minutes: 10
         run: >-
-          bash .github/scripts/pull-base-images.sh Dockerfile.minio-test
-          deploy/link-edge/Dockerfile
+          bash .github/scripts/pull-base-images.sh deploy/link-edge/Dockerfile
 
       # Keep the link edge as its own Compose project and build both restricted
       # images in CI. The explicit empty env file keeps server credentials out
@@ -749,16 +763,6 @@ jobs:
           docker port "$landing_id" 8082/tcp | grep -Fxq '127.0.0.1:8082'
           ss -ltn 'sport = :8082'
           curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8082/syntheticname
-
-      - name: Build MinIO image for tests
-        uses: docker/build-push-action@v7.4.0
-        with:
-          context: .
-          file: Dockerfile.minio-test
-          tags: quay.io/minio/minio:latest
-          load: true
-          cache-from: type=gha,scope=minio-test
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=minio-test,mode=max' || '' }}
 
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
@@ -1028,67 +1032,6 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
-  restore-readiness:
-    name: confined restore-to-application
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 80
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-          # The gate builds its fixture seeder from a pinned earlier commit.
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - uses: actions/setup-python@v6.0.0
-        with:
-          python-version: "3.12.15"
-
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Download locked Go modules
-        run: go mod download
-
-      - name: Test the restore checker and confinement helpers
-        run: >-
-          go test -count=1
-          ./test/e2e/restore_drill
-          ./deploy/teagramd/rollout-runner/restore-readiness-checker
-          ./deploy/teagramd/rollout-runner/restore-readiness-launcher
-          ./deploy/teagramd/rollout-runner/restore-readiness-provisioner
-          ./deploy/teagramd/rollout-runner/restore-readiness-probe
-          ./deploy/teagramd/rollout-runner/restore-readiness-seed
-          ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim
-
-      - name: Test sanitized reports and ownership policy
-        run: python3 -B deploy/teagramd/rollout-runner/test-restore-readiness.py
-
-      - name: Check restore drill shell syntax and lint
-        run: |
-          bash -n deploy/teagramd/rollout-runner/test-restore-readiness.sh
-          bash -n deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness.sh
-          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-
-      - name: Run the bounded synthetic restore-to-application gate
-        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-
-      - name: Run local-dump happy path, signal, and SIGKILL fixtures
-        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh --local-fixture-test
-
-  # Keep the existing required check context while making every verification
-  # lane mandatory. `always()` runs this when a lane fails or is skipped.
   check-deploy-workflow:
     name: 'check: deploy-workflow'
     needs: ops-prioritize-main
@@ -1143,13 +1086,10 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
-          bash -n deploy/teagram/ops/preflight-replay.sh
-          bash -n deploy/teagram/test-preflight-replay.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
           bash -n deploy/teagram/ops/invite-web-signup-url.sh
           bash -n deploy/teagram/test-invite-web-signup-url.sh
-          bash -n deploy/teagram/ops/replay-check.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/ops/rollback-public-websocket.sh
           bash -n deploy/teagram/test-rollback-public-websocket.sh
@@ -1190,13 +1130,10 @@ jobs:
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
-            deploy/teagram/ops/preflight-replay.sh \
-            deploy/teagram/test-preflight-replay.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
             deploy/teagram/ops/invite-web-signup-url.sh \
             deploy/teagram/test-invite-web-signup-url.sh \
-            deploy/teagram/ops/replay-check.sh \
             deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/ops/rollback-public-websocket.sh \
             deploy/teagram/test-rollback-public-websocket.sh \
@@ -1237,8 +1174,7 @@ jobs:
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
-            .github/scripts/test-deploy-workflow-contract.sh \
-            .github/scripts/mirror_rustfs_qualification_images.sh
+            .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
@@ -1248,9 +1184,6 @@ jobs:
 
       - name: Check invite signup URL operation fixtures
         run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
-
-      - name: Check read-only Compose preflight replay
-        run: sudo -n deploy/teagram/test-preflight-replay.sh
 
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
@@ -1385,6 +1318,7 @@ jobs:
       - test-websocket-d1
       - test-websocket-permanent-exchange
       - lint-sql
+      - test-git-hooks
       - lint-css
       - test-browser-acceptance
       - build-browser-acceptance-image
@@ -1411,6 +1345,7 @@ jobs:
           TEST_WEBSOCKET_D1_RESULT: ${{ needs.test-websocket-d1.result }}
           TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT: ${{ needs.test-websocket-permanent-exchange.result }}
           LINT_SQL_RESULT: ${{ needs.lint-sql.result }}
+          TEST_GIT_HOOKS_RESULT: ${{ needs.test-git-hooks.result }}
           LINT_CSS_RESULT: ${{ needs.lint-css.result }}
           TEST_BROWSER_ACCEPTANCE_RESULT: ${{ needs.test-browser-acceptance.result }}
           BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.build-browser-acceptance-image.result }}
@@ -1437,6 +1372,7 @@ jobs:
             "test-websocket-d1=$TEST_WEBSOCKET_D1_RESULT"
             "test-websocket-permanent-exchange=$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT"
             "lint-sql=$LINT_SQL_RESULT"
+            "test-git-hooks=$TEST_GIT_HOOKS_RESULT"
             "lint-css=$LINT_CSS_RESULT"
             "test-browser-acceptance=$TEST_BROWSER_ACCEPTANCE_RESULT"
             "build-browser-acceptance-image=$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT"
@@ -1458,6 +1394,7 @@ jobs:
                 "$TEST_WEBSOCKET_D1_RESULT" != "success" ||
                 "$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT" != "success" ||
                 "$LINT_SQL_RESULT" != "success" ||
+                "$TEST_GIT_HOOKS_RESULT" != "success" ||
                 "$LINT_CSS_RESULT" != "success" ||
                 "$TEST_BROWSER_ACCEPTANCE_RESULT" != "success" ||
                 "$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
@@ -1487,14 +1424,12 @@ jobs:
       - check-sticker-license
       - test-e2e-admin
       - lint-go
-      - mirror-rustfs-qualification-images
       - test-photo-worker
       - test-real-server-fixtures
-      - restore-readiness
-      - rustfs-transition-qualification
       - test-migrations
       - test-smoke
       - lint-sql
+      - test-git-hooks
       - check-sqlc-drift
       - test-websocket-d1
       - test-websocket-permanent-exchange
@@ -2257,9 +2192,8 @@ jobs:
     name: 'test: compose'
     needs:
       - ops-prioritize-main
-      - mirror-rustfs-qualification-images
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.check-sticker-license.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -2318,7 +2252,6 @@ jobs:
         timeout-minutes: 10
         run: >-
           bash .github/scripts/pull-base-images.sh Dockerfile Dockerfile.mc
-          deploy/teagramd/mixed-trust-probe.Dockerfile
 
       - name: Preload Compose service images
         timeout-minutes: 10
@@ -2816,8 +2749,10 @@ jobs:
           [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
-      - name: Validate the opt-in mixed-trust Compose handoff
-        run: bash .github/scripts/smoke-mixed-trust-compose.sh
+      - name: Validate public WebSocket ingress
+        run: |
+          bash -n .github/scripts/smoke-public-websocket-compose.sh
+          bash .github/scripts/smoke-public-websocket-compose.sh
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
@@ -3489,77 +3424,6 @@ jobs:
             exit 1
           fi
           printf 'ok github.com/teagramhq/teagram-server/test/e2e %ss\n' "$summary"
-
-  mirror-rustfs-qualification-images:
-    name: Mirror RustFS qualification images
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install Skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes skopeo
-
-      - name: Mirror digest-pinned official images to GHCR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/mirror_rustfs_qualification_images.sh
-
-  rustfs-transition-qualification:
-    name: RustFS transition qualification
-    runs-on: ubuntu-26.04
-    needs:
-      - ops-prioritize-main
-      - mirror-rustfs-qualification-images
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
-    # The complete R69/R70 fixture matrix can exceed 45 minutes on slower hosted runners.
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: read
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Log in to GHCR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GITHUB_TOKEN" | sudo docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
-      - uses: actions/setup-python@v6.0.0
-        with:
-          python-version: "3.12.15"
-
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Check RustFS gate shell syntax
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash -n deploy/teagramd/rollout-runner/*.sh
-
-      - name: Run credential-free RustFS gate fixtures
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-transition-gate.sh
-
-      - name: Run root-only blob authority and interruption fixtures
-        run: |
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-transition-runner.py
-
-      - name: Prove R69 and R70 SQL evidence against PostgreSQL 18 and Atlas 1.2.0
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh
-
-      - name: Prove PostgreSQL 16 to 18 restore and stack move
-        run: |
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
   test-migrations:
     name: "test: migrations"

@@ -8,18 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-func openDialogPinsStore(t *testing.T) *Store {
+func openDialogPinsStore(t *testing.T, options ...Option) *Store {
 	t.Helper()
 	ctx := context.Background()
 	blobs, err := blob.NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatalf("create blob store: %v", err)
 	}
-	s, err := Open(ctx, pgtest.DSN(t), pgtest.EncKey(), WithBlobStore(blobs))
+	options = append(options, WithBlobStore(blobs))
+	s, err := Open(ctx, pgtest.DSN(t), pgtest.EncKey(), options...)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -29,6 +33,92 @@ func openDialogPinsStore(t *testing.T) *Store {
 		}
 	})
 	return s
+}
+
+type dialogPinsQueryModeTracer struct {
+	mu      sync.Mutex
+	queries [][]any
+}
+
+func (tracer *dialogPinsQueryModeTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	tracer.mu.Lock()
+	tracer.queries = append(tracer.queries, append([]any(nil), data.Args...))
+	tracer.mu.Unlock()
+	return ctx
+}
+
+func (*dialogPinsQueryModeTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (tracer *dialogPinsQueryModeTracer) reset() {
+	tracer.mu.Lock()
+	tracer.queries = nil
+	tracer.mu.Unlock()
+}
+
+func (tracer *dialogPinsQueryModeTracer) snapshot() [][]any {
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	queries := make([][]any, len(tracer.queries))
+	for i := range tracer.queries {
+		queries[i] = append([]any(nil), tracer.queries[i]...)
+	}
+	return queries
+}
+
+func TestDialogsWithPinsUsesCustomPlans(t *testing.T) {
+	t.Parallel()
+	tracer := &dialogPinsQueryModeTracer{}
+	s := openDialogPinsStore(t, WithQueryTracer(tracer))
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+15551369991")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	firstPeer, err := s.CreateUser(ctx, "+15551369992")
+	if err != nil {
+		t.Fatalf("create first peer: %v", err)
+	}
+	secondPeer, err := s.CreateUser(ctx, "+15551369993")
+	if err != nil {
+		t.Fatalf("create second peer: %v", err)
+	}
+	for _, dialog := range []struct {
+		peerID     int64
+		topMessage int64
+	}{{firstPeer.ID, 20}, {secondPeer.ID, 10}} {
+		if err := s.q.UpsertDialog(ctx, db.UpsertDialogParams{
+			OwnerID: owner.ID, PeerType: int16(PeerTypeUser), PeerID: dialog.peerID,
+			TopMessage: dialog.topMessage,
+		}); err != nil {
+			t.Fatalf("insert dialog for peer %d: %v", dialog.peerID, err)
+		}
+	}
+
+	for _, page := range []struct {
+		name           string
+		offsetID       int64
+		offsetPeerType PeerType
+		offsetPeerID   int64
+		wantPeerID     int64
+	}{
+		{name: "first", wantPeerID: firstPeer.ID},
+		{name: "cursor", offsetID: 20, offsetPeerType: PeerTypeUser, offsetPeerID: firstPeer.ID, wantPeerID: secondPeer.ID},
+	} {
+		t.Run(page.name, func(t *testing.T) {
+			tracer.reset()
+			got, err := s.DialogsWithPins(ctx, owner.ID, page.offsetID, page.offsetPeerType, page.offsetPeerID, 1, false)
+			if err != nil {
+				t.Fatalf("read %s page: %v", page.name, err)
+			}
+			if len(got) != 1 || got[0].PeerID != page.wantPeerID {
+				t.Fatalf("%s page = %+v, want peer %d", page.name, got, page.wantPeerID)
+			}
+			queries := tracer.snapshot()
+			if len(queries) != 1 || len(queries[0]) == 0 || queries[0][0] != pgx.QueryExecModeExec {
+				t.Fatalf("%s page query args = %v, want QueryExecModeExec as the first argument", page.name, queries)
+			}
+		})
+	}
 }
 
 func TestDialogPinPositionMustBePresent(t *testing.T) {

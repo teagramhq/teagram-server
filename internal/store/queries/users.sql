@@ -39,6 +39,139 @@ FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = ANY(sqlc.arg(ids)::bigint[]);
 
+-- Channel history always returns the same profile query shape regardless of
+-- the number of distinct authors in its page. Entitlement, contacts and last
+-- seen privacy are evaluated together so a page written by the viewer does
+-- not skip statements that a page by many members needs.
+-- name: ChannelHistoryUsersForViewer :many
+WITH candidate_ids AS MATERIALIZED (
+    SELECT candidate.id, candidate.ordinality
+    FROM UNNEST(sqlc.arg(ids)::bigint[]) WITH ORDINALITY AS candidate(id, ordinality)
+), entitled_ids AS MATERIALIZED (
+    SELECT sqlc.arg(viewer_id)::bigint AS id
+    WHERE sqlc.arg(viewer_id)::bigint = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT dialog.peer_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = sqlc.arg(viewer_id)::bigint
+      AND dialog.peer_type = 1
+      AND dialog.peer_id = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT dialog.owner_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = ANY(sqlc.arg(ids)::bigint[])
+      AND dialog.peer_type = 1
+      AND dialog.peer_id = sqlc.arg(viewer_id)::bigint
+    UNION
+    SELECT peer.user_id
+    FROM chat_participants AS viewer
+    JOIN chat_participants AS peer ON viewer.chat_id = peer.chat_id
+    WHERE viewer.user_id = sqlc.arg(viewer_id)::bigint
+      AND peer.user_id = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT member.user_id
+    FROM channel_participants AS viewer
+    JOIN channel_participants AS member ON viewer.channel_id = member.channel_id
+    WHERE viewer.user_id = sqlc.arg(viewer_id)::bigint
+      AND member.user_id = ANY(sqlc.arg(ids)::bigint[])
+      AND (viewer.banned_until IS NULL OR viewer.banned_until <= now())
+      AND (member.banned_until IS NULL OR member.banned_until <= now())
+)
+SELECT u.id,
+       u.phone,
+       u.first_name,
+       u.last_name,
+       u.created_at,
+       u.is_online,
+       u.last_seen_at,
+       un.handle AS username,
+       u.kind,
+       (entitled.id IS NOT NULL)::boolean AS entitled,
+       (viewer_contact.contact_id IS NOT NULL)::boolean AS has_contact,
+       COALESCE(reverse_contact.owner_id IS NOT NULL, false)::boolean AS mutual_contact,
+       COALESCE(owner_rule.base_rule, 'everybody')::text AS owner_base_rule,
+       EXISTS (
+           SELECT 1 FROM blocked_users blocked
+           WHERE blocked.blocker_id = u.id
+             AND blocked.blocked_id = sqlc.arg(viewer_id)::bigint
+       ) AS owner_blocked,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users rule_user
+           WHERE rule_user.owner_id = u.id
+             AND rule_user.privacy_key = 'status_timestamp'
+             AND rule_user.user_id = sqlc.arg(viewer_id)::bigint
+             AND rule_user.entry_type = 'disallow'
+       ) AS owner_disallowed,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users rule_user
+           WHERE rule_user.owner_id = u.id
+             AND rule_user.privacy_key = 'status_timestamp'
+             AND rule_user.user_id = sqlc.arg(viewer_id)::bigint
+             AND rule_user.entry_type = 'allow'
+       ) AS owner_allowed,
+       EXISTS (
+           SELECT 1 FROM user_contacts contact
+           WHERE contact.owner_id = u.id
+             AND contact.contact_id = sqlc.arg(viewer_id)::bigint
+       ) AS owner_contact,
+       COALESCE((
+           EXISTS (
+               SELECT 1 FROM blocked_users blocked
+               WHERE blocked.blocker_id = sqlc.arg(viewer_id)::bigint
+                 AND blocked.blocked_id = u.id
+           )
+           OR EXISTS (
+               SELECT 1 FROM user_privacy_rules viewer_rule
+               WHERE viewer_rule.owner_id = sqlc.arg(viewer_id)::bigint
+                 AND viewer_rule.privacy_key = 'status_timestamp'
+                 AND (
+                     EXISTS (
+                         SELECT 1 FROM user_privacy_rule_users rule_user
+                         WHERE rule_user.owner_id = sqlc.arg(viewer_id)::bigint
+                           AND rule_user.privacy_key = 'status_timestamp'
+                           AND rule_user.user_id = u.id
+                           AND rule_user.entry_type = 'disallow'
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1 FROM user_privacy_rule_users rule_user
+                             WHERE rule_user.owner_id = sqlc.arg(viewer_id)::bigint
+                               AND rule_user.privacy_key = 'status_timestamp'
+                               AND rule_user.user_id = u.id
+                               AND rule_user.entry_type = 'allow'
+                         )
+                         AND (
+                             viewer_rule.base_rule = 'nobody'
+                             OR (
+                                 viewer_rule.base_rule = 'contacts'
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM user_contacts contact
+                                     WHERE contact.owner_id = sqlc.arg(viewer_id)::bigint
+                                       AND contact.contact_id = u.id
+                                 )
+                             )
+                         )
+                     )
+                 )
+           )
+       ), false)::boolean AS viewer_hides_from_owner
+FROM candidate_ids AS candidate
+JOIN users AS u ON u.id = candidate.id
+LEFT JOIN usernames AS un
+  ON un.owner_type = 'user'
+ AND un.owner_id = u.id
+LEFT JOIN entitled_ids AS entitled ON entitled.id = u.id
+LEFT JOIN user_contacts AS viewer_contact
+  ON viewer_contact.owner_id = sqlc.arg(viewer_id)::bigint
+ AND viewer_contact.contact_id = u.id
+LEFT JOIN user_contacts AS reverse_contact
+  ON reverse_contact.owner_id = u.id
+ AND reverse_contact.contact_id = sqlc.arg(viewer_id)::bigint
+LEFT JOIN user_privacy_rules AS owner_rule
+  ON owner_rule.owner_id = u.id
+ AND owner_rule.privacy_key = 'status_timestamp'
+ORDER BY candidate.ordinality;
+
 -- name: EntitledUserIDs :many
 -- Returns the subset of ids the viewer is entitled to see live. An id is
 -- entitled iff any of the four live edges holds:
