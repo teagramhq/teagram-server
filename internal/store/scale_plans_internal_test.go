@@ -485,6 +485,91 @@ func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
 	}
 }
 
+func TestLastSeenPrivacyForViewerUsesContactIDsAtLargeUserScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, query := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-user-scale' || n, 'Scale ' || n FROM generate_series(1, 115002) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 5001) n`,
+		`ANALYZE users`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatalf("seed contact privacy plan: %v", err)
+		}
+	}
+
+	contactRows, err := db.New(pool).ListContacts(ctx, 1)
+	if err != nil {
+		t.Fatalf("list contact edges: %v", err)
+	}
+	if len(contactRows) != 5000 {
+		t.Fatalf("contact edges = %d, want 5000", len(contactRows))
+	}
+	ids := make([]int64, len(contactRows))
+	for i, row := range contactRows {
+		ids[i] = row.ContactID
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	privacyRows, err := db.New(traced).EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
+		ViewerID: 1,
+		OwnerIds: ids,
+	})
+	if err != nil {
+		t.Fatalf("evaluate contact privacy: %v", err)
+	}
+	if len(privacyRows) != 5000 {
+		t.Fatalf("contact privacy rows = %d, want 5000", len(privacyRows))
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contact privacy query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contact privacy query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contact privacy query: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "users" {
+			t.Fatalf("contact privacy query sequentially scans users for caller contact ids: %s", raw)
+		}
+	}
+	if rows := plans[0].Plan.rowsReadFrom("users"); rows > 5001 {
+		t.Fatalf("contact privacy query reads %.0f users for 5000 contact ids", rows)
+	}
+}
+
 func TestHistoryPageAroundReadsOnlyItsWindow(t *testing.T) {
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
