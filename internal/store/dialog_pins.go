@@ -122,28 +122,16 @@ func (s *Store) DialogPinChangeAt(ctx context.Context, ownerID int64) (time.Time
 // The peer cursor breaks ties between dialogs with the same top message, and
 // excludePinned applies the live-membership predicate before paging.
 func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, offsetPeerType PeerType, offsetPeerID int64, limit int, excludePinned bool) ([]Dialog, error) {
-	var rows []db.DialogsCursorPageWithPinsRow
-	var err error
-	if offsetID == 0 && offsetPeerType == 0 {
-		var first []db.DialogsFirstPageWithPinsRow
-		first, err = s.q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
-			OwnerID: ownerID, ExcludePinned: excludePinned,
-			Lim: int32(limit), //nolint:gosec // limit is validated and bounded by the handler
-		})
-		rows = make([]db.DialogsCursorPageWithPinsRow, len(first))
-		for i, row := range first {
-			rows[i] = db.DialogsCursorPageWithPinsRow(row)
-		}
-	} else {
-		rows, err = s.q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
-			OwnerID: ownerID, OffsetID: offsetID,
-			OffsetPeerType: int16(offsetPeerType), OffsetPeerID: offsetPeerID,
-			ExcludePinned: excludePinned,
-			Lim:           int32(limit), //nolint:gosec // limit is validated and bounded by the handler
-		})
-	}
+	rows, profile, err := s.dialogsPageWithPins(ctx, dialogsPageParams{
+		ownerID: ownerID, offsetID: offsetID, offsetPeerType: offsetPeerType,
+		offsetPeerID: offsetPeerID, limit: limit, excludePinned: excludePinned,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("dialogs for owner with pins: %w", err)
+	}
+	var mapStarted time.Time
+	if profile.enabled {
+		mapStarted = time.Now()
 	}
 	out := make([]Dialog, len(rows))
 	for i, row := range rows {
@@ -154,7 +142,43 @@ func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, of
 			Pinned: row.Pinned != nil && *row.Pinned,
 		}
 	}
+	if profile.enabled {
+		profile.postQueryGo += time.Since(mapStarted)
+		profile.log()
+	}
 	return out, nil
+}
+
+type dialogsPageParams struct {
+	ownerID        int64
+	offsetID       int64
+	offsetPeerType PeerType
+	offsetPeerID   int64
+	limit          int
+	excludePinned  bool
+}
+
+func (s *Store) dialogsPageWithPinsGenerated(ctx context.Context, params dialogsPageParams) ([]db.DialogsCursorPageWithPinsRow, error) {
+	if params.offsetID == 0 && params.offsetPeerType == 0 {
+		first, err := s.q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+			OwnerID: params.ownerID, ExcludePinned: params.excludePinned,
+			Lim: int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
+		})
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]db.DialogsCursorPageWithPinsRow, len(first))
+		for i, row := range first {
+			rows[i] = db.DialogsCursorPageWithPinsRow(row)
+		}
+		return rows, nil
+	}
+	return s.q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
+		OwnerID: params.ownerID, OffsetID: params.offsetID,
+		OffsetPeerType: int16(params.offsetPeerType), OffsetPeerID: params.offsetPeerID,
+		ExcludePinned: params.excludePinned,
+		Lim:           int32(params.limit), //nolint:gosec // limit is validated and bounded by the handler
+	})
 }
 
 // CountDialogsWithPins returns the full list count used by getDialogs' slice

@@ -185,7 +185,7 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		e.elapsed = 0
 		start := time.Now()
 		var callErr error
-		if sc.name == "messages.getDialogs" && measured {
+		if shouldProfileGetDialogsSample(sc.name, i) {
 			callErr = callWithGetDialogsProfile(ctx, call)
 		} else {
 			callErr = call(ctx)
@@ -250,6 +250,10 @@ func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) e
 	return call(ctx)
 }
 
+func shouldProfileGetDialogsSample(name string, sample int) bool {
+	return name == "messages.getDialogs" && sample == warmup
+}
+
 func logQueryDurations(t *testing.T, fixture string, rpcDuration time.Duration, captured []capturedQuery) {
 	t.Helper()
 	totals := make(map[string]time.Duration)
@@ -304,6 +308,21 @@ func TestCallWithGetDialogsProfileRestoresEnvironment(t *testing.T) {
 	}
 	if got := os.Getenv(profileEnv); got != "previous" {
 		t.Fatalf("profile environment after call = %q, want previous", got)
+	}
+}
+
+func TestGetDialogsProfilingUsesOneMeasuredSample(t *testing.T) {
+	profiled := 0
+	for sample := 0; sample < warmup+readSamples; sample++ {
+		if shouldProfileGetDialogsSample("messages.getDialogs", sample) {
+			profiled++
+		}
+	}
+	if profiled != 1 {
+		t.Fatalf("profiled samples = %d, want 1", profiled)
+	}
+	if shouldProfileGetDialogsSample("messages.getHistory", warmup) {
+		t.Fatal("profiled a different scenario")
 	}
 }
 
