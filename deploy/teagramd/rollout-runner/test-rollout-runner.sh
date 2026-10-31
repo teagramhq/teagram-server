@@ -251,6 +251,15 @@ SH
   cat > "$bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -eu
+# The pinned initial-local render predates the tailnet mapping.
+if [ "${1:-}" = compose ] && [ -z "${MOCK_INITIAL_LOCAL_RENDER:-}" ] && \
+   [[ "${COMPOSE_FILE:-}" == *.rollout-compose.initial-local.yml* ]] && \
+   [[ " $* " == *" config --format json "* ]]; then
+  rendered=$(MOCK_INITIAL_LOCAL_RENDER=1 "$0" "$@")
+  jq -c '.services |= with_entries(if (.key | IN("teagramd", "telegramd")) and (.value.environment | type) == "object"
+    then .value.environment |= del(.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET) else . end)' <<< "$rendered"
+  exit 0
+fi
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
 if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
   if [ "${MOCK_SCENARIO:-}" = s3-accepted-apply ] && \
@@ -731,7 +740,12 @@ fi
         else
           printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
         fi
-        cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
+        if [[ "${COMPOSE_FILE:-}" == *.rollout-compose.initial-local.yml* ]]; then
+          jq -c '.services.teagramd.environment |= del(.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)' \
+            "$MOCK_STATE/target-compose.json" > "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
+        else
+          cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
+        fi
       fi
       exit 0
       ;;

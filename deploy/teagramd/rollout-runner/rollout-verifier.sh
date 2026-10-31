@@ -1131,9 +1131,12 @@ snapshot_from_json() {
       else $raw_env
         # The old Compose pass-through resolved unset tailnet limits to an empty
         # value. Normalize baseline and rollback snapshots to the new zero
-        # default; target snapshots retain and pin their inspected value.
+        # default; target snapshots retain and pin their inspected value. The
+        # pinned legacy render omits the limit, which is equivalent everywhere.
         | map(if ($snapshot_name | IN("baseline", "rollback")) and . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="
               then "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0" else . end)
+        | if all(.[]; startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)
+          then . + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"] else . end
         | map(. as $entry
           | select(($image_env | index($entry)) == null or
                   ($configured_env_names | index($entry | split("=")[0])) != null))
@@ -1269,10 +1272,13 @@ snapshot_from_json() {
       # Compose includes extension anchors in its rendered output. Their
       # expanded service fields remain in the digest; the anchors do not.
       with_entries(select((.key | startswith("x-")) | not))
-      # The old baseline and rollback empty tailnet pass-throughs are
-      # equivalent to the new zero default. Keep the target value pinned.
-      | if ($snapshot_name | IN("baseline", "rollback")) and
-           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "" then
+      # The old baseline and rollback empty tailnet mappings, and the omitted
+      # mapping of the pinned legacy render, are equivalent to the new zero
+      # default. Keep any other target value pinned.
+      | (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment) as $tailnet_env
+      | if ($tailnet_env | type) == "object" and
+           (($tailnet_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) or
+            (($snapshot_name | IN("baseline", "rollback")) and $tailnet_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "")) then
           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET = "0"
         else . end
       |
