@@ -60,8 +60,15 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,mirror-rustfs-qualification-images,ops-prioritize-main,restore-readiness,rustfs-transition-qualification,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,ops-prioritize-main,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
+  for removed_job in restore-readiness rustfs-transition-qualification mirror-rustfs-qualification-images; do
+    [[ "$(ci_query ".jobs | has(\"$removed_job\")")" == 'false' ]] ||
+      ci_fail "$removed_job must stay out of CI"
+  done
+  ci_needs="$(ci_query '.jobs.ci.needs | join(",")')"
+  [[ "$ci_needs" != *'restore-readiness'* && "$ci_needs" != *'rustfs-transition-qualification'* && "$ci_needs" != *'mirror-rustfs-qualification-images'* ]] ||
+    ci_fail 'removed rollout qualification jobs must stay out of the required gate'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'check-demo-web-pin'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
@@ -687,7 +694,7 @@ check_contract() {
   grep -Fq '(( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))' <<< "$demo_port_run" ||
     fail 'demo SSH port must be within 1..65535'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
-    grep -Fq 'StrictHostKeyChecking=yes' || fail 'the demo ssh step must verify the host key'
+    grep -F 'StrictHostKeyChecking=yes' >/dev/null || fail 'the demo ssh step must verify the host key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
     fail 'the demo job must use its environment-scoped deploy key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||
