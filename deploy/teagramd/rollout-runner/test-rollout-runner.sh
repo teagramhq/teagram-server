@@ -232,7 +232,7 @@ printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
 if { [ "$script_name" = stack-move-runner.py ] || [ "$script_name" = stack-move-runner.pinned ]; } && \
    [ "${2:-}" = inspect ]; then
   if [ "${MOCK_SCENARIO:-}" = project-layout-changed ]; then
-    printf '%s\n' '{"changed":true}'
+    printf '%s\n' '{"changed":true,"differences":[{"service":"teagramd","mount_target":"/var/lib/teagramd","field":"source"}]}'
   else
     printf '%s\n' '{"changed":false,"source_database":"teagram","target_database":"teagram"}'
   fi
@@ -2167,11 +2167,12 @@ root=$(cat "$TMP/project-layout-change-root-path")
 state=$(cat "$TMP/project-layout-change-state-path")
 if [ "$status" != 0 ] && \
    grep -q 'Compose project or persistent mounts changed; use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
+   grep -Fq 'layout_difference={"service":"teagramd","mount_target":"/var/lib/teagramd","field":"source"}' "$TMP/project-layout-change.stderr" && \
    grep -q '^python3 stack-move-runner.py inspect$' "$TMP/project-layout-change-events" && \
    ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose (build|up)|^git .* (merge|reset)' "$TMP/project-layout-change-events" && \
    [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
    [ ! -e "$root.backup" ] && [ ! -e "$root.target" ]; then
-  pass 'apply rejects a project or persistent-mount change before touching the live stack'
+  pass 'apply logs a sanitized layout difference and rejects it before touching the live stack'
 else
   show_fixture_failure project-layout-change "$status"
   fail 'apply must refuse a project or persistent-mount change before live-stack effects'

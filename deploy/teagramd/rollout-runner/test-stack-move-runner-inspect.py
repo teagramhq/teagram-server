@@ -33,6 +33,140 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
+    def test_public_profile_addition_accepts_local_blobs_private_override_layout(self) -> None:
+        runner = load_runner()
+        shared_mounts = [
+            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
+            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+            {
+                "type": "bind",
+                "source": "/opt/teagram/.state/blob-mode",
+                "target": "/run/teagramd/blob-mode",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
+        ]
+        private_media_mount = {
+            "type": "bind",
+            "source": "/etc/teagramd/media-keys",
+            "target": "/run/teagramd/media-keys",
+            "read_only": True,
+            "bind": {},
+        }
+        postgres_mounts = [
+            {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/18/docker", "read_only": False},
+            {
+                "type": "bind",
+                "source": "/opt/teagram/deploy/postgres/postgresql.conf",
+                "target": "/etc/postgresql/postgresql.conf",
+                "read_only": True,
+                "bind": {},
+            },
+        ]
+        target_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": copy.deepcopy(postgres_mounts)},
+                "teagramd": {
+                    "environment": {
+                        "TG_BLOB_DIR": "/var/lib/teagramd-blobs",
+                        "TG_BLOB_S3_ENDPOINT": None,
+                        "TG_MEDIA_KEY_DIR": None,
+                        "TG_MEDIA_KEY_CURRENT": None,
+                    },
+                    "volumes": [*copy.deepcopy(shared_mounts), copy.deepcopy(private_media_mount)],
+                },
+                "public-haproxy": {
+                    "profiles": ["public"],
+                    "volumes": [{
+                        "type": "bind",
+                        "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+                        "target": "/usr/local/etc/haproxy/haproxy.cfg",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }],
+                },
+                "teagramd-public-1": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(shared_mounts),
+                },
+                "teagramd-public-2": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(shared_mounts),
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+                "tgblobs": {"name": "teagram_tgblobs"},
+            },
+        }
+        source_config = copy.deepcopy(target_config)
+        for name in ("public-haproxy", "teagramd-public-1", "teagramd-public-2"):
+            source_config["services"].pop(name)
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        with mock.patch.dict(os.environ, {
+            "COMPOSE_PROFILES": "public",
+            "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
+        }, clear=True):
+            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
+            configured_media_keys = copy.deepcopy(target_config)
+            configured_media_keys["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_DIR"
+            ] = "/run/teagramd/media-keys"
+            configured_media_keys["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_CURRENT"
+            ] = "1"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(configured_media_keys, "teagramd"), configured_media_keys,
+                )
+            )
+
+            changed_project = copy.deepcopy(target_config)
+            changed_project["name"] = "another-project"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_project, "teagramd"), changed_project,
+                )
+            )
+
+            changed_persistent_mount = copy.deepcopy(target_config)
+            changed_persistent_mount["services"]["teagramd"]["volumes"][0]["source"] = "other-key"
+            changed_persistent_mount["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_DIR"
+            ] = "secret-env-value-sentinel"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_persistent_mount, "teagramd"), changed_persistent_mount,
+                )
+            )
+            differences = runner.sanitized_layout_differences(
+                source, runner.layout(changed_persistent_mount, "teagramd"), changed_persistent_mount,
+            )
+            self.assertIn({
+                "service": "teagramd",
+                "mount_target": "/var/lib/teagramd",
+                "field": "source",
+            }, differences)
+            self.assertIn({
+                "service": "teagramd",
+                "mount_target": "/run/teagramd/media-keys",
+                "field": "media_key_environment",
+            }, differences)
+            self.assertNotIn("secret-env-value-sentinel", json.dumps(differences))
+
+            changed_volume = copy.deepcopy(target_config)
+            changed_volume["volumes"]["tgkey"]["name"] = "teagram_other_tgkey"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_volume, "teagramd"), changed_volume,
+                )
+            )
+
     def test_public_profile_addition_reuses_existing_data_mounts(self) -> None:
         runner = load_runner()
         server_mounts = [

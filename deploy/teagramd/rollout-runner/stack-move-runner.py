@@ -495,6 +495,39 @@ def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool
     return not _is_approved_media_key_mount_addition(source, target)
 
 
+def _is_approved_media_key_mount(mount: object) -> bool:
+    if not isinstance(mount, dict):
+        return False
+    if mount == MEDIA_KEY_MOUNT:
+        return True
+    normalized = dict(mount)
+    if normalized.get("bind") == {}:
+        normalized["bind"] = {"create_host_path": False}
+    return normalized == MEDIA_KEY_MOUNT
+
+
+def _public_replica_mounts_match(
+    base_mounts: object,
+    replica_mounts: object,
+    allow_private_media_key_omission: bool,
+) -> bool:
+    if not isinstance(base_mounts, list) or not isinstance(replica_mounts, list):
+        return False
+    if replica_mounts == base_mounts:
+        return True
+    if not allow_private_media_key_omission:
+        return False
+    media_key_mounts = [
+        index for index, mount in enumerate(base_mounts)
+        if _is_approved_media_key_mount(mount)
+    ]
+    if len(media_key_mounts) != 1:
+        return False
+    expected = list(base_mounts)
+    expected.pop(media_key_mounts[0])
+    return replica_mounts == expected
+
+
 def _without_initial_public_profile_mounts(
     source: dict[str, object],
     target: dict[str, object],
@@ -527,6 +560,10 @@ def _without_initial_public_profile_mounts(
     base_service = configured_services.get(TARGET_SERVER)
     if not isinstance(base_service, dict) or base_service.get("profiles"):
         return None
+    base_environment = base_service.get("environment")
+    if not isinstance(base_environment, dict):
+        return None
+    allow_private_media_key_omission = _local_blob_media_keys_are_cleared(base_environment)
     try:
         base_mounts = service_mounts(target_config, TARGET_SERVER)
     except MoveError:
@@ -540,7 +577,15 @@ def _without_initial_public_profile_mounts(
             replica_mounts = service_mounts(target_config, name)
         except MoveError:
             return None
-        if replica_mounts != base_mounts or target_services.get(name) != target_services.get(TARGET_SERVER):
+        if (
+            not _public_replica_mounts_match(
+                base_mounts, replica_mounts, allow_private_media_key_omission,
+            )
+            or not _public_replica_mounts_match(
+                target_services.get(TARGET_SERVER), target_services.get(name),
+                allow_private_media_key_omission,
+            )
+        ):
             return None
 
     proxy_service = configured_services.get("public-haproxy")
@@ -578,6 +623,23 @@ def _without_initial_public_profile_mounts(
     return normalized
 
 
+def _local_blob_media_keys_are_cleared(environment: dict[str, object]) -> bool:
+    return (
+        environment.get("TG_BLOB_DIR") == TARGET_LOCAL_BLOB_PATH
+        and all(environment.get(name) in (None, "") for name in S3_BLOB_ENVIRONMENT)
+        and environment.get("TG_MEDIA_KEY_DIR") in (None, "")
+        and environment.get("TG_MEDIA_KEY_CURRENT") in (None, "")
+    )
+
+
+def _media_key_environment_is_valid(environment: dict[str, object]) -> bool:
+    configured_media_keys = (
+        environment.get("TG_MEDIA_KEY_DIR") == "/run/teagramd/media-keys"
+        and environment.get("TG_MEDIA_KEY_CURRENT") == "1"
+    )
+    return configured_media_keys or _local_blob_media_keys_are_cleared(environment)
+
+
 def ordinary_rollout_layout_changed(
     source: dict[str, object],
     target: dict[str, object],
@@ -593,16 +655,122 @@ def ordinary_rollout_layout_changed(
     volumes = service.get("volumes") if isinstance(service, dict) else None
     if not isinstance(environment, dict) or not isinstance(volumes, list):
         return True
-    if environment.get("TG_MEDIA_KEY_DIR") != "/run/teagramd/media-keys":
-        return True
-    current_version = environment.get("TG_MEDIA_KEY_CURRENT")
-    if current_version != "1":
+    if not _media_key_environment_is_valid(environment):
         return True
 
     normalized_target = _without_initial_public_profile_mounts(source, target, target_config)
     if normalized_target is None:
         return True
     return layout_changed(source, normalized_target)
+
+
+def sanitized_layout_differences(
+    source: dict[str, object],
+    target: dict[str, object],
+    target_config: dict[str, object],
+) -> list[dict[str, str | None]]:
+    differences: set[tuple[str, str | None, str]] = set()
+
+    if source.get("project") != target.get("project") or target_config.get("name") != TARGET_PROJECT:
+        differences.add(("<project>", None, "name"))
+    if source.get("server") != target.get("server"):
+        differences.add(("<layout>", None, "server"))
+
+    source_services = source.get("persistent_service_mounts")
+    target_services = target.get("persistent_service_mounts")
+    if isinstance(source_services, dict) and isinstance(target_services, dict):
+        for service in sorted(set(source_services) | set(target_services)):
+            before = source_services.get(service, [])
+            after = target_services.get(service, [])
+            if not isinstance(before, list) or not isinstance(after, list):
+                differences.add((str(service), None, "mounts"))
+                continue
+            before_by_target: dict[str | None, list[dict[str, object]]] = {}
+            after_by_target: dict[str | None, list[dict[str, object]]] = {}
+            for mount in before:
+                if isinstance(mount, dict):
+                    mount_target = mount.get("target")
+                    safe_target = mount_target if isinstance(mount_target, str) else None
+                    before_by_target.setdefault(safe_target, []).append(mount)
+            for mount in after:
+                if isinstance(mount, dict):
+                    mount_target = mount.get("target")
+                    safe_target = mount_target if isinstance(mount_target, str) else None
+                    after_by_target.setdefault(safe_target, []).append(mount)
+
+            for mount_target in sorted(
+                set(before_by_target) | set(after_by_target),
+                key=lambda item: item or "",
+            ):
+                before_mounts = before_by_target.get(mount_target, [])
+                after_mounts = after_by_target.get(mount_target, [])
+                if len(before_mounts) != len(after_mounts):
+                    differences.add((str(service), mount_target, "mount"))
+                    continue
+                before_mounts = sorted(
+                    before_mounts,
+                    key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
+                )
+                after_mounts = sorted(
+                    after_mounts,
+                    key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
+                )
+                for before_mount, after_mount in zip(before_mounts, after_mounts):
+                    for field in ("type", "source", "read_only", "bind"):
+                        if before_mount.get(field) != after_mount.get(field):
+                            differences.add((str(service), mount_target, field))
+
+    source_volumes = source.get("volumes")
+    target_volumes = target.get("volumes")
+    if isinstance(source_volumes, dict) and isinstance(target_volumes, dict):
+        changed_volumes = {
+            name for name in set(source_volumes) | set(target_volumes)
+            if source_volumes.get(name) != target_volumes.get(name)
+        }
+        for name in changed_volumes:
+            references = set()
+            for layout_value in (source, target):
+                service_mounts = layout_value.get("persistent_service_mounts")
+                if not isinstance(service_mounts, dict):
+                    continue
+                for service, mounts in service_mounts.items():
+                    if not isinstance(mounts, list):
+                        continue
+                    for mount in mounts:
+                        if isinstance(mount, dict) and mount.get("source") == name:
+                            mount_target = mount.get("target")
+                            references.add((
+                                str(service),
+                                mount_target if isinstance(mount_target, str) else None,
+                            ))
+            if references:
+                for service, mount_target in references:
+                    differences.add((service, mount_target, "volume_name"))
+            else:
+                differences.add(("<volumes>", None, "definition"))
+
+    services = target_config.get("services")
+    service = services.get(TARGET_SERVER) if isinstance(services, dict) else None
+    if not isinstance(service, dict):
+        differences.add((TARGET_SERVER, None, "service"))
+    else:
+        environment = service.get("environment")
+        if not isinstance(environment, dict):
+            differences.add((TARGET_SERVER, MEDIA_KEY_MOUNT["target"], "environment"))
+        elif not _media_key_environment_is_valid(environment):
+            differences.add((TARGET_SERVER, MEDIA_KEY_MOUNT["target"], "media_key_environment"))
+        if not isinstance(service.get("volumes"), list):
+            differences.add((TARGET_SERVER, None, "volumes"))
+
+    return [
+        {"service": service, "mount_target": mount_target, "field": field}
+        for service, mount_target, field in sorted(
+            differences,
+            key=lambda difference: (
+                difference[0], difference[1] or "", difference[2],
+            ),
+        )
+    ]
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
@@ -1953,8 +2121,12 @@ def inspect(args: argparse.Namespace) -> None:
         source_layout = layout(source, source_server_name)
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
+        changed = ordinary_rollout_layout_changed(source_layout, target_layout, target)
         print(json.dumps({
-            "changed": ordinary_rollout_layout_changed(source_layout, target_layout, target),
+            "changed": changed,
+            "differences": sanitized_layout_differences(
+                source_layout, target_layout, target,
+            ) if changed else [],
             "source": source_layout,
             "target": target_layout,
             "source_database": database_name(source),
