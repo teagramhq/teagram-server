@@ -997,9 +997,13 @@ func (h *handlers) renderUsers(ctx context.Context, users map[int64]store.User, 
 	for _, id := range visibleIDs {
 		visibleUsers = append(visibleUsers, users[id])
 	}
-	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
-	if err != nil {
-		return nil, err
+	privacySubjects := lastSeenPrivacySubjects(visibleUsers, viewerID)
+	visibility := make(map[int64]store.LastSeenVisibility, len(privacySubjects))
+	if len(privacySubjects) > 0 {
+		visibility, err = h.lastSeenVisibilityForUsers(ctx, privacySubjects, viewerID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]tg.UserClass, 0, len(users))
 	for id, u := range users {
