@@ -196,7 +196,7 @@ expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner
   fail 'a cache-miss fixture seed must fit within the 150-minute performance job budget'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
-[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
+[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance|CallWithGetDialogsProfileRestoresEnvironment|GetDialogsProfilingUsesEveryMeasuredSample)$"* ]] ||
   fail 'the performance harness selection must run the stale fixture version regression test'
 postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -p 5432 -U postgres -q"* ]] ||
