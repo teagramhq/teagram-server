@@ -342,17 +342,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+database); err != nil {
 		t.Fatalf("create migration database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+database+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", database, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, database)
 
 	migrationName := "20261013000079_browser_acceptance_probe.sql"
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
