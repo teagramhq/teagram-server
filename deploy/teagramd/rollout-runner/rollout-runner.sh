@@ -1000,9 +1000,38 @@ probe_restored_public_replica() {
     >/dev/null 2>&1
 }
 
+public_backend_network_name() {
+  local haproxy_id=$1 project network_names network
+  project=$(docker inspect "$haproxy_id" \
+    --format '{{ index .Config.Labels "com.docker.compose.project" }}' \
+    </dev/null 2>/dev/null) || {
+    fail 'cannot read the restored public-haproxy Compose project label'
+    return 1
+  }
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    fail 'restored public-haproxy has a missing or invalid Compose project label'
+    return 1
+  }
+  network_names=$(docker network ls \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.network=public-backend' \
+    --format '{{.Name}}' </dev/null 2>/dev/null) || {
+    fail 'cannot resolve the restored public backend network by its Compose labels'
+    return 1
+  }
+  network=${network_names%%$'\n'*}
+  [ -n "$network" ] && [ "$network_names" = "$network" ] && \
+    [[ "$network" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
+    fail 'restored Compose project must have exactly one valid public backend network'
+    return 1
+  }
+  printf '%s' "$network"
+}
+
 wait_for_restored_public_profile_health() {
-  local service removed_service container_ids id state health address expected_address haproxy_id
+  local service removed_service container_ids id state health address expected_address haproxy_id public_backend_network
   local ready deadline remaining
+  public_backend_network=''
   local -a services_to_check=()
   local -A ready_ids=()
   [ "${#REMOVED_PUBLIC_PROFILE_SERVICES[@]}" -gt 0 ] || return 0
@@ -1072,10 +1101,17 @@ wait_for_restored_public_profile_health() {
                 teagramd-public-2) expected_address=198.18.132.22 ;;
                 *) fail "unknown restored public profile service $service"; return 1 ;;
               esac
-              address=$(docker inspect "$id" \
-                --format '{{with index .NetworkSettings.Networks "public-backend"}}{{.IPAddress}}{{end}}' \
-                </dev/null 2>/dev/null) || address=''
               haproxy_id=${ready_ids[public-haproxy]:-}
+              [ -n "$haproxy_id" ] || {
+                fail 'restored public replica has no verified HAProxy container'
+                return 1
+              }
+              if [ -z "$public_backend_network" ]; then
+                public_backend_network=$(public_backend_network_name "$haproxy_id") || return 1
+              fi
+              address=$(docker inspect "$id" \
+                --format "{{with index .NetworkSettings.Networks \"$public_backend_network\"}}{{.IPAddress}}{{end}}" \
+                </dev/null 2>/dev/null) || address=''
               if [ "$address" = "$expected_address" ] && [ -n "$haproxy_id" ] && \
                   probe_restored_public_replica "$haproxy_id" "$address"; then
                 ready=1

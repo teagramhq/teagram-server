@@ -9,12 +9,13 @@ BASELINE_CONTAINER=$(printf 'a%.0s' {1..64})
 PUBLIC_HAPROXY_CONTAINER=$(printf 'b%.0s' {1..64})
 PUBLIC_REPLICA_ONE_CONTAINER=$(printf 'c%.0s' {1..64})
 PUBLIC_REPLICA_TWO_CONTAINER=$(printf 'd%.0s' {1..64})
-MOCK_PROJECT=fixture
+MOCK_PROJECT=teagram
 MOCK_ORPHANS=1
 MOCK_STOP_TIMEOUT=120
 MOCK_TARGET_SERVICES=$'postgres\nteagramd'
 MOCK_HAPROXY_HEALTH=healthy
 MOCK_PUBLIC_PROBE_FAILURE_IP=
+MOCK_NO_PUBLIC_NETWORK=0
 
 docker() {
 	printf 'docker' >> "$TEST_EVENTS"
@@ -22,6 +23,11 @@ docker() {
 	printf '\n' >> "$TEST_EVENTS"
 	if [[ "${1:-}" == inspect && "${2:-}" == "$BASELINE_CONTAINER" && "${3:-}" == --format ]]; then
 		[[ "${4:-}" == '{{ index .Config.Labels "com.docker.compose.project" }}' ]]
+		printf '%s\n' "$MOCK_PROJECT"
+		return 0
+	fi
+	if [[ "${1:-}" == inspect && "${2:-}" == "$PUBLIC_HAPROXY_CONTAINER" && "${3:-}" == --format &&
+		"${4:-}" == '{{ index .Config.Labels "com.docker.compose.project" }}' ]]; then
 		printf '%s\n' "$MOCK_PROJECT"
 		return 0
 	fi
@@ -38,7 +44,8 @@ docker() {
 		printf '%s\n' "$MOCK_HAPROXY_HEALTH"
 		return 0
 	fi
-	if [[ "${1:-}" == inspect && "${3:-}" == --format && "${4:-}" == '{{with index .NetworkSettings.Networks "public-backend"}}{{.IPAddress}}{{end}}' ]]; then
+	if [[ "${1:-}" == inspect && "${3:-}" == --format &&
+		"${4:-}" == '{{with index .NetworkSettings.Networks "teagram_public-backend"}}{{.IPAddress}}{{end}}' ]]; then
 		case "${2:-}" in
 			"$PUBLIC_REPLICA_ONE_CONTAINER") printf '198.18.132.21\n'; return 0 ;;
 			"$PUBLIC_REPLICA_TWO_CONTAINER") printf '198.18.132.22\n'; return 0 ;;
@@ -76,6 +83,20 @@ docker() {
 			teagramd-public-1) printf '%s\n' "$PUBLIC_REPLICA_ONE_CONTAINER" ;;
 			teagramd-public-2) printf '%s\n' "$PUBLIC_REPLICA_TWO_CONTAINER" ;;
 			esac
+		return 0
+	fi
+	if [[ "${1:-}" == network && "${2:-}" == ls ]]; then
+		local project_filter=0 network_filter=0
+		for arg in "$@"; do
+			case "$arg" in
+				"label=com.docker.compose.project=$MOCK_PROJECT") project_filter=1 ;;
+				label=com.docker.compose.network=public-backend) network_filter=1 ;;
+			esac
+		done
+		[[ "$project_filter" == 1 && "$network_filter" == 1 ]]
+		if [[ "$MOCK_NO_PUBLIC_NETWORK" == 0 ]]; then
+			printf '%s_public-backend\n' "$MOCK_PROJECT"
+		fi
 		return 0
 	fi
 	if [[ "${1:-}" == exec && "${2:-}" == "$PUBLIC_HAPROXY_CONTAINER" ]]; then
@@ -192,6 +213,17 @@ for address in 198.18.132.21 198.18.132.22; do
 		exit 1
 	fi
 done
+if ! grep -Fq '<network> <ls>' "$TEST_EVENTS" ||
+	! grep -Fq 'teagram_public-backend' "$TEST_EVENTS"; then
+	echo 'FAIL replica health probes must use the real Compose public-backend network name' >&2
+	exit 1
+fi
+MOCK_NO_PUBLIC_NETWORK=1
+if wait_for_restored_public_profile_health >"$TEST_TMP/missing-network.stdout" 2>"$TEST_TMP/missing-network.stderr"; then
+	echo 'FAIL readiness must reject a missing Compose public-backend network' >&2
+	exit 1
+fi
+MOCK_NO_PUBLIC_NETWORK=0
 MOCK_PUBLIC_PROBE_FAILURE_IP=198.18.132.22
 if wait_for_restored_public_profile_health >"$TEST_TMP/replica-health.stdout" 2>"$TEST_TMP/replica-health.stderr"; then
 	echo 'FAIL public profile readiness must reject an unhealthy restored replica' >&2
