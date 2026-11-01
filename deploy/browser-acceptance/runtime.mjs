@@ -129,8 +129,8 @@ function diagnosticResult(diagnostic, targets, handshakes, targetMatch, status) 
 
 export function createWebSocketObservation() {
   const connections = new Map();
+  const pendingHandshakes = new Map();
   let expectedEndpoint = null;
-  let orphanCount = 0;
   let handshakeCount = 0;
   let pendingWorkers = 0;
   let malformed = false;
@@ -138,7 +138,7 @@ export function createWebSocketObservation() {
   let closed = false;
 
   function hasObservedFailure() {
-    if (malformed || orphanCount > 0 || workerUnobservable || (closed && pendingWorkers > 0)) return true;
+    if (malformed || workerUnobservable || (closed && pendingWorkers > 0)) return true;
     return [...connections.values()].some((connection) => !connection.match || connection.responses >= 2 ||
       (connection.responses === 1 && connection.status !== 101));
   }
@@ -149,7 +149,7 @@ export function createWebSocketObservation() {
     const entries = [...connections.values()];
     const targetMatch = entries.every((connection) => connection.match);
     if (malformed) return diagnosticResult("observation-malformed", targets, handshakes, false, 0);
-    if (orphanCount > 0) return diagnosticResult("untracked-handshake", targets, handshakes, false, 0);
+    if (pendingHandshakes.size > 0) return diagnosticResult("untracked-handshake", targets, handshakes, false, 0);
     if (workerUnobservable) return diagnosticResult("worker-unobservable", targets, handshakes, false, 0);
     if (closed && pendingWorkers > 0) return diagnosticResult("worker-pending", targets, handshakes, false, 0);
     if (targets === 0) return diagnosticResult("no-target", targets, handshakes, false, 0);
@@ -221,7 +221,14 @@ export function createWebSocketObservation() {
           match = false;
         }
       }
-      connections.set(requestId, { match, responses: 0, status: 0 });
+      const connection = { match, responses: 0, status: 0 };
+      connections.set(requestId, connection);
+      const pending = pendingHandshakes.get(requestId);
+      if (pending) {
+        connection.responses = pending.responses;
+        connection.status = pending.status;
+        pendingHandshakes.delete(requestId);
+      }
     },
     handshakeResponse(params) {
       if (closed) return;
@@ -243,7 +250,17 @@ export function createWebSocketObservation() {
       handshakeCount = Math.min(2, handshakeCount + 1);
       const connection = connections.get(requestId);
       if (!connection) {
-        orphanCount = Math.min(2, orphanCount + 1);
+        let pending = pendingHandshakes.get(requestId);
+        if (!pending) {
+          if (pendingHandshakes.size >= 8) {
+            malformed = true;
+            return;
+          }
+          pending = { responses: 0, status: 0 };
+          pendingHandshakes.set(requestId, pending);
+        }
+        pending.responses = Math.min(2, pending.responses + 1);
+        if (pending.responses === 1) pending.status = status;
         return;
       }
       connection.responses = Math.min(2, connection.responses + 1);
@@ -265,7 +282,7 @@ export function createWebSocketObservation() {
     },
     isSettled() {
       if (closed || hasObservedFailure()) return true;
-      return pendingWorkers === 0 && connections.size > 0 &&
+      return pendingWorkers === 0 && pendingHandshakes.size === 0 && connections.size > 0 &&
         [...connections.values()].every((connection) => connection.responses === 1);
     },
     diagnostic,
