@@ -704,6 +704,11 @@ jobs:
           key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-mod-${{ runner.os }}-
 
+      # Another workflow can save this key without test-only modules, and the
+      # e2e step must not print download messages into its JSON stream.
+      - name: Download Go modules
+        run: go mod download
+
       # The run-specific key makes the restore miss exactly and load the newest
       # cache for this go.sum through the prefix. Only main saves the richer
       # snapshot produced by this run.
