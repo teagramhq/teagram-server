@@ -18,8 +18,8 @@ expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
 expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}"
-expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
-expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
+expected_ci_group='${{ github.workflow }}-main'
+expected_ci_cancel='false'
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
@@ -55,9 +55,11 @@ check_ci_contract() {
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
     ci_fail 'push CI must be limited to main'
   [[ "$(ci_query '.concurrency.group')" == "$expected_ci_group" ]] ||
-    ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
+    ci_fail 'main CI and pull request runs must share the main concurrency group'
+  [[ "$(ci_query '.concurrency.queue')" == 'max' ]] ||
+    ci_fail 'main CI and pull request runs must preserve queued workflow runs'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
-    ci_fail 'only pull request updates may cancel in-progress CI runs'
+    ci_fail 'pull request runs must not cancel main CI or each other'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
   [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,ops-prioritize-main,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
@@ -812,7 +814,8 @@ self_test() {
   local ci_mutations=(
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
-    '.concurrency."cancel-in-progress" = false'
+    '.concurrency.queue = "single"'
+    '.concurrency."cancel-in-progress" = true'
     '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'
