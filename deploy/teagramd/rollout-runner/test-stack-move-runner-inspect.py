@@ -91,6 +91,49 @@ class InspectComposeSelectionTest(unittest.TestCase):
             "field": "read_only",
         }, differences)
 
+    def test_sanitized_layout_differences_report_postgres_tmpfs_option_names(self) -> None:
+        runner = load_runner()
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": [
+                    {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql"},
+                    {
+                        "type": "tmpfs",
+                        "target": "/run/postgres-cache",
+                        "tmpfs": {"size": 65536, "mode": 0o700},
+                    },
+                ]},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": [
+                        {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                    ],
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"]["postgres"]["volumes"][1]["tmpfs"]["size"] = 131072
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+        differences = runner.sanitized_layout_differences(source, target, target_config)
+        self.assertIn({
+            "service": "postgres",
+            "mount_target": "/run/postgres-cache",
+            "field": "tmpfs.size",
+        }, differences)
+        self.assertNotIn("65536", json.dumps(differences))
+        self.assertNotIn("131072", json.dumps(differences))
+
     def test_public_profile_addition_accepts_local_blobs_private_override_layout(self) -> None:
         runner = load_runner()
         shared_mounts = [

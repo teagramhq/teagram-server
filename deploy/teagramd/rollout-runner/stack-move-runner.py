@@ -687,6 +687,40 @@ def _record_sanitized_mount_differences(
             safe_target = mount_target if isinstance(mount_target, str) else None
             after_by_target.setdefault(safe_target, []).append(mount)
 
+    missing = object()
+
+    def changed_fields(
+        before_value: object,
+        after_value: object,
+        prefix: str = "",
+    ) -> set[str]:
+        before_is_dict = isinstance(before_value, dict)
+        after_is_dict = isinstance(after_value, dict)
+        if before_is_dict or after_is_dict:
+            before_fields = before_value if before_is_dict else {}
+            after_fields = after_value if after_is_dict else {}
+            field_names = set(before_fields) | set(after_fields)
+            if not field_names:
+                if (
+                    before_is_dict != after_is_dict
+                    or (before_value is missing) != (after_value is missing)
+                ):
+                    return {prefix or "mount"}
+                return set()
+
+            changed: set[str] = set()
+            for field_name in sorted(field_names, key=str):
+                field = str(field_name)
+                field_path = f"{prefix}.{field}" if prefix else field
+                changed.update(changed_fields(
+                    before_fields.get(field_name, missing),
+                    after_fields.get(field_name, missing),
+                    field_path,
+                ))
+            return changed
+
+        return {prefix or "mount"} if before_value != after_value else set()
+
     for mount_target in sorted(
         set(before_by_target) | set(after_by_target),
         key=lambda item: item or "",
@@ -705,9 +739,8 @@ def _record_sanitized_mount_differences(
             key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
         )
         for before_mount, after_mount in zip(before_mounts, after_mounts):
-            for field in ("type", "source", "read_only", "bind"):
-                if before_mount.get(field) != after_mount.get(field):
-                    differences.add((service, mount_target, field))
+            for field in changed_fields(before_mount, after_mount):
+                differences.add((service, mount_target, field))
 
 
 def sanitized_layout_differences(
