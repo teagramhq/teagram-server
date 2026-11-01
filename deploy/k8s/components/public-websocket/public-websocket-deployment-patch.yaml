@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teagramd-public
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teagramd-public
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: teagramd
+          ports:
+            - name: public-app
+              containerPort: 2447
+              protocol: TCP
+          env:
+            - name: TG_CLIENT_ADDR_TRUST
+              value: proxy-v2
+            - name: TG_CLIENT_ADDR_PROXY_CIDRS
+              value: 127.0.0.1/32
+            - name: TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
+              value: 127.0.0.1:2447
+            - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
+              value: server.teagram.io:443
+            - name: TG_PUBLIC_REGISTRATION
+              value: invite
+            - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
+              value: https://web.teagram.io
+            - name: TG_WEBSOCKET_LISTEN_ADDR
+              value: ""
+            - name: TG_WEBSOCKET_ALLOWED_ORIGINS
+              value: ""
+            - name: TG_REPLICA_COUNT
+              value: "2"
+            - name: TG_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TG_RSA_KEY_FINGERPRINT
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-public-identity
+                  key: TG_RSA_KEY_FINGERPRINT
+        - name: public-haproxy
+          image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+          args:
+            - -f
+            - /usr/local/etc/haproxy/haproxy.cfg
+          ports:
+            - name: public-proxy
+              containerPort: 2446
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - wget -q -O /dev/null http://127.0.0.1:8404/healthz
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: public-proxy
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -ec
+                  - kill -USR1 1; sleep 90
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 99
+            runAsGroup: 99
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: haproxy-config
+              mountPath: /usr/local/etc/haproxy/haproxy.cfg
+              subPath: haproxy.cfg
+              readOnly: true
+      volumes:
+        - name: haproxy-config
+          configMap:
+            name: teagramd-public-haproxy

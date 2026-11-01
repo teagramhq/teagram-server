@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: teagram
+
+resources:
+  - namespace.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - rustfs-service.yaml
+  - rustfs-statefulset.yaml
+  - teagramd-service.yaml
+  - teagramd-statefulset.yaml
+  - teagramd-public-deployment.yaml
+  - rustfs-init-job.yaml
+  - migrations-job.yaml
+  - linklanding-service.yaml
+  - linklanding-deployment.yaml
+  - linkselector-service.yaml
+  - linkselector-deployment.yaml
+  - cloudflared-deployment.yaml
+
+components:
+  - ../components/public-websocket
+
+configMapGenerator:
+  - name: postgres-config
+    files:
+      - postgresql.conf
+  - name: rustfs-policy
+    files:
+      - teagramd-blob.json
+  - name: required-migration-version
+    files:
+      - migration-version
+  - name: db-migrations-job-revision
+    literals:
+      - job-name=db-migrations-unreleased
+  - name: rustfs-init-job-revision
+    literals:
+      - job-name=rustfs-init-unreleased

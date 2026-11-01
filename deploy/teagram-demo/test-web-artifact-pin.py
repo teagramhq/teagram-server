@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import pathlib
 import sys
 from typing import Any
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 
 SCRIPT = pathlib.Path(__file__).with_name("resolve_web_artifact_pin.py")
@@ -109,7 +112,51 @@ def fake_fetch(responses: dict[str, Any]):
     return fetch
 
 
+def check_fetch_retries_transient_errors() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    rate_limit_headers = {"Retry-After": "0"}
+    with (
+        patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            side_effect=[
+                URLError("temporary connection reset"),
+                HTTPError(url, 429, "Too Many Requests", rate_limit_headers, io.BytesIO()),
+                io.BytesIO(b'{"ok":true}'),
+            ],
+        ) as open_url,
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        if MODULE.fetch_json(url) != {"ok": True}:
+            raise SystemExit("transient upstream rate limit did not recover")
+        if open_url.call_count != 3:
+            raise SystemExit("transient upstream errors were not retried")
+        if [call.args[0] for call in sleep.call_args_list] != [1.0, 0.0]:
+            raise SystemExit("transient upstream retry delays were not respected")
+
+
+def check_fetch_errors_are_actionable() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    with patch.object(
+        MODULE.urllib.request,
+        "urlopen",
+        side_effect=HTTPError(url, 404, "Not Found", {}, io.BytesIO()),
+    ) as open_url:
+        try:
+            MODULE.fetch_json(url)
+        except ValueError as error:
+            if url not in str(error) or "HTTP 404 Not Found" not in str(error):
+                raise SystemExit("upstream HTTP failures must identify the URL and status")
+        else:
+            raise SystemExit("upstream 404 unexpectedly passed")
+        if open_url.call_count != 1:
+            raise SystemExit("permanent upstream HTTP failures must not be retried")
+
+
 def main() -> None:
+    check_fetch_retries_transient_errors()
+    check_fetch_errors_are_actionable()
+
     actual_pin = MODULE.validate_pin_document(
         json.loads(MODULE.PIN_PATH.read_text(encoding="utf-8"))
     )

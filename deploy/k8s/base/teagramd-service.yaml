@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: teagramd
+  labels:
+    app.kubernetes.io/name: teagramd
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: teagramd
+  ports:
+    - name: mtproto
+      port: 2443
+      targetPort: mtproto
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teagramd-headless
+  labels:
+    app.kubernetes.io/name: teagramd
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: teagramd
+  ports:
+    - name: mtproto
+      port: 2443
+      targetPort: mtproto

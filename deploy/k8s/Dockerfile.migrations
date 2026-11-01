@@ -1,0 +1,9 @@
+FROM mirror.gcr.io/arigaio/atlas:1.2.0-alpine@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f
+
+WORKDIR /app
+COPY migrations/ /migrations/
+COPY deploy/k8s/atlas.hcl /app/atlas.hcl
+
+ARG TEAGRAMD_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/teagramhq/teagram-server" \
+      org.opencontainers.image.revision="${TEAGRAMD_SOURCE_REVISION}"
