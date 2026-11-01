@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,13 +26,16 @@ const (
 )
 
 var (
-	ErrStickerDocumentInvalid = errors.New("sticker document invalid")
-	ErrStickerFileTooLarge    = errors.New("sticker file too large")
-	ErrStickerSetLimit        = errors.New("sticker set limit exceeded")
-	ErrStickerSetInstallLimit = errors.New("installed sticker set limit exceeded")
-	ErrStickerSetNameOccupied = errors.New("sticker set short name occupied")
-	ErrStickerFileAlreadyUsed = errors.New("sticker file already belongs to a set")
-	ErrStickerSetNotFound     = errors.New("sticker set not found")
+	ErrStickerDocumentInvalid      = errors.New("sticker document invalid")
+	ErrStickerFileTooLarge         = errors.New("sticker file too large")
+	ErrStickerSetLimit             = errors.New("sticker set limit exceeded")
+	ErrStickerSetInstallLimit      = errors.New("installed sticker set limit exceeded")
+	ErrStickerSetNameOccupied      = errors.New("sticker set short name occupied")
+	ErrStickerFileAlreadyUsed      = errors.New("sticker file already belongs to a set")
+	ErrStickerFileBlocked          = errors.New("sticker file content is blocked")
+	ErrStickerSetNotFound          = errors.New("sticker set not found")
+	ErrStickerSetStateConflict     = errors.New("sticker set is already in the requested state")
+	ErrStickerSetAdminInputInvalid = errors.New("invalid sticker set admin input")
 )
 
 // UserStickerSet is an account-created sticker set. Its items are ordered by
@@ -54,18 +58,19 @@ type UserStickerSet struct {
 
 // UserStickerSetItem is one stored document in an account-created set.
 type UserStickerSetItem struct {
-	Position   int
-	FileID     int64
-	AccessHash int64
-	Size       int64
-	Date       time.Time
-	Emoji      string
-	Keywords   string
-	Format     string
-	Width      int
-	Height     int
-	Duration   int64
-	MaskCoords string
+	Position      int
+	FileID        int64
+	AccessHash    int64
+	ContentSHA256 []byte
+	Size          int64
+	Date          time.Time
+	Emoji         string
+	Keywords      string
+	Format        string
+	Width         int
+	Height        int
+	Duration      int64
+	MaskCoords    string
 }
 
 // StickerFileRef identifies a client-supplied file reference that must match
@@ -168,6 +173,9 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	} else if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lock sticker set owner: %w", err)
 	}
+	if err = qtx.LockStickerTakedownInterlock(ctx); err != nil {
+		return UserStickerSet{}, fmt.Errorf("lock sticker takedown interlock: %w", err)
+	}
 	count, err := qtx.UserCreatedStickerSetCount(ctx, set.CreatorID)
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("count sticker sets: %w", err)
@@ -191,6 +199,36 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	}
 	if len(checkedFiles) != len(items) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+	filesByID := make(map[int64]db.File, len(checkedFiles))
+	for _, file := range checkedFiles {
+		filesByID[file.ID] = file
+	}
+	contentHashes := make([][]byte, len(items))
+	for i := range items {
+		if len(items[i].ContentSHA256) == 0 {
+			fileRow, ok := filesByID[items[i].FileID]
+			if !ok {
+				return UserStickerSet{}, ErrStickerDocumentInvalid
+			}
+			data, readErr := s.ReadStickerFileForSet(ctx, fileFromRow(fileRow))
+			if readErr != nil {
+				return UserStickerSet{}, fmt.Errorf("read sticker file %d for content fingerprint: %w", items[i].FileID, readErr)
+			}
+			digest := sha256.Sum256(data)
+			items[i].ContentSHA256 = digest[:]
+		}
+		if len(items[i].ContentSHA256) != sha256.Size {
+			return UserStickerSet{}, ErrStickerDocumentInvalid
+		}
+		contentHashes[i] = items[i].ContentSHA256
+	}
+	blocked, err := qtx.UserStickerBlockedContentExists(ctx, contentHashes)
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("check blocked sticker content: %w", err)
+	}
+	if blocked {
+		return UserStickerSet{}, ErrStickerFileBlocked
 	}
 
 	accessHash, err := newAccessHash()
@@ -222,16 +260,17 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 			maskCoords = []byte(item.MaskCoords)
 		}
 		rows, insertErr := qtx.InsertUserCreatedStickerSetItem(ctx, db.InsertUserCreatedStickerSetItemParams{
-			SetID:      set.ID,
-			Position:   int32(position),
-			FileID:     item.FileID,
-			Emoji:      item.Emoji,
-			Keywords:   item.Keywords,
-			Format:     item.Format,
-			Width:      int32(item.Width),  //nolint:gosec // Dimensions are validated as <=512 before the transaction.
-			Height:     int32(item.Height), //nolint:gosec // Dimensions are validated as <=512 before the transaction.
-			DurationNs: item.Duration,
-			MaskCoords: maskCoords,
+			SetID:         set.ID,
+			Position:      int32(position),
+			FileID:        item.FileID,
+			Emoji:         item.Emoji,
+			Keywords:      item.Keywords,
+			Format:        item.Format,
+			Width:         int32(item.Width),  //nolint:gosec // Dimensions are validated as <=512 before the transaction.
+			Height:        int32(item.Height), //nolint:gosec // Dimensions are validated as <=512 before the transaction.
+			DurationNs:    item.Duration,
+			MaskCoords:    maskCoords,
+			ContentSha256: item.ContentSHA256,
 		})
 		if insertErr != nil {
 			return UserStickerSet{}, fmt.Errorf("insert sticker set item: %w", insertErr)
@@ -259,6 +298,16 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 }
 
 func userStickerSetFromRow(row db.UserCreatedStickerSet) UserStickerSet {
+	return UserStickerSet{
+		ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
+		Title: row.Title, ShortName: row.ShortName, Software: row.Software,
+		Kind: row.Kind, TextColor: row.TextColor, ItemCount: int(row.ItemCount),
+		Hash: int(row.SetHash), IsLive: row.IsLive,
+		CreatedAt: row.CreatedAt.Time,
+	}
+}
+
+func userStickerSetFromLiveRow(row db.LiveUserCreatedStickerSet) UserStickerSet {
 	return UserStickerSet{
 		ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
 		Title: row.Title, ShortName: row.ShortName, Software: row.Software,
@@ -302,7 +351,7 @@ func (s *Store) UserStickerSetByShortName(ctx context.Context, shortName string)
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup user sticker set by name: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetByID requires the exact access hash and a live set.
@@ -314,7 +363,7 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup user sticker set by id: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetByInstalledID returns a live set for an account's install row.
@@ -326,7 +375,7 @@ func (s *Store) UserStickerSetByInstalledID(ctx context.Context, id int64) (User
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup installed user sticker set: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetSummariesByInstalledIDs loads live installed user-set metadata
@@ -348,7 +397,7 @@ func (s *Store) UserStickerSetSummariesByInstalledIDs(ctx context.Context, ids [
 		return nil, fmt.Errorf("lookup installed user sticker sets: %w", err)
 	}
 	for _, row := range rows {
-		set := userStickerSetFromRow(row)
+		set := userStickerSetFromLiveRow(row)
 		result[set.ID] = set
 	}
 	return result, nil

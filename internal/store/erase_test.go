@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strconv"
@@ -130,6 +131,14 @@ func TestErasureRetainsStickerSetFileAfterSetIsNotLive(t *testing.T) {
 			t.Errorf("close set fixture: %v", err)
 		}
 	})
+	var storedDigest []byte
+	if err := conn.QueryRow(ctx, `SELECT content_sha256 FROM user_created_sticker_set_items WHERE set_id = $1 AND file_id = $2`, set.ID, file.ID).Scan(&storedDigest); err != nil {
+		t.Fatalf("read sticker content fingerprint: %v", err)
+	}
+	wantDigest := sha256.Sum256(blobBody[:file.Size])
+	if !bytes.Equal(storedDigest, wantDigest[:]) {
+		t.Fatalf("stored sticker content fingerprint = %x, want %x", storedDigest, wantDigest)
+	}
 	if _, err := conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, set.ID); err != nil {
 		t.Fatalf("take set out of live state: %v", err)
 	}

@@ -757,21 +757,6 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if got := forwardedDocument.ID; got != regularDoc.ID {
 		t.Fatalf("forwarded sticker id = %d, want %d", got, regularDoc.ID)
 	}
-	if !uninstallStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}) {
-		t.Fatal("uninstall regular user sticker set returned false")
-	}
-	if !uninstallStickerSet(t, h, installer.ID, &tg.InputStickerSetShortName{ShortName: "emoji_cats"}) {
-		t.Fatal("uninstall custom emoji set returned false")
-	}
-	clearedAll := getAllStickerSets(t, h, installer.ID, all.Hash)
-	if len(clearedAll.Sets) != 0 || clearedAll.Hash != initialAll.Hash {
-		t.Fatalf("getAllStickers after uninstall = %+v, want empty with initial hash %d", clearedAll, initialAll.Hash)
-	}
-	clearedEmojis := getEmojiStickerSets(t, h, installer.ID, emojis.Hash)
-	if len(clearedEmojis.Sets) != 0 || clearedEmojis.Hash != initialEmoji.Hash {
-		t.Fatalf("getEmojiStickers after uninstall = %+v, want empty with initial hash %d", clearedEmojis, initialEmoji.Hash)
-	}
-
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect for set liveness change: %v", err)
@@ -784,11 +769,58 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if _, err = conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, regular.Set.ID); err != nil {
 		t.Fatalf("disable user set: %v", err)
 	}
+	if _, err := s.UninstallStickerSet(ctx, installer.ID, regular.Set.ID); !errors.Is(err, store.ErrStickerSetNotFound) {
+		t.Fatalf("uninstall of inactive user set returned %v, want ErrStickerSetNotFound", err)
+	}
+	var retainedInstallCount int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM user_sticker_sets WHERE user_id = $1 AND set_id = $2`, installer.ID, regular.Set.ID).Scan(&retainedInstallCount); err != nil || retainedInstallCount != 1 {
+		t.Fatalf("install count while set is inactive = %d, err=%v; want 1", retainedInstallCount, err)
+	}
+	reuploadedFile := storedStickerDocument(t, s, blobs, owner.ID, regularBytes)
+	reuploadBody := dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", createStickerRequest("blocked_reupload", reuploadedFile, false, false))
+	var reuploadRPC mt.RPCError
+	if err := reuploadRPC.Decode(&bin.Buffer{Buf: reuploadBody}); err != nil {
+		var created tg.MessagesStickerSetBox
+		if decodeErr := created.Decode(&bin.Buffer{Buf: reuploadBody}); decodeErr == nil {
+			t.Fatal("owner re-uploaded a file from a taken-down sticker set")
+		}
+		t.Fatalf("decode re-upload rejection: %v", err)
+	}
+	if reuploadRPC.ErrorMessage != "STICKER_DOCUMENT_INVALID" {
+		t.Fatalf("re-upload of taken-down bytes = %q, want STICKER_DOCUMENT_INVALID", reuploadRPC.ErrorMessage)
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, installer.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{
+		Stickerset: &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash},
+	})); got != "STICKERSET_INVALID" {
+		t.Fatalf("getStickerSet for inactive set = %q, want STICKERSET_INVALID", got)
+	}
+	if got := installStickerSet(t, h, receiver.ID, &tg.InputStickerSetShortName{ShortName: "regular_cats"}); got != "STICKERSET_INVALID" {
+		t.Fatalf("installStickerSet for inactive set = %q, want STICKERSET_INVALID", got)
+	}
+	inactiveAll := getAllStickerSets(t, h, installer.ID, all.Hash)
+	if len(inactiveAll.Sets) != 0 || inactiveAll.Hash == all.Hash {
+		t.Fatalf("getAllStickers after takedown = %+v, want removed set and changed hash from %d", inactiveAll, all.Hash)
+	}
 	_, inactiveSetErr := api.GetFileForTest(s, installer.ID, blobs, &tg.UploadGetFileRequest{
 		Location: &tg.InputDocumentFileLocation{ID: regularDoc.ID, AccessHash: regularDoc.AccessHash}, Limit: 1024,
 	})
 	if got := rpcMessage(t, inactiveSetErr); got != "LOCATION_INVALID" {
 		t.Fatalf("download inactive user sticker = %q, want LOCATION_INVALID", got)
+	}
+	for _, recipient := range []struct {
+		name   string
+		userID int64
+		doc    *tg.Document
+	}{
+		{name: "received copy", userID: owner.ID, doc: messageDoc},
+		{name: "forwarded copy", userID: receiver.ID, doc: forwardedDocument},
+	} {
+		_, downloadErr := api.GetFileForTest(s, recipient.userID, blobs, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{ID: recipient.doc.ID, AccessHash: recipient.doc.AccessHash}, Limit: 1024,
+		})
+		if got := rpcMessage(t, downloadErr); got != "LOCATION_INVALID" {
+			t.Errorf("download %s after takedown = %q, want LOCATION_INVALID", recipient.name, got)
+		}
 	}
 	_, inactiveSendErr := api.SendMediaForTest(s, installer.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer: api.InputPeerUser(installer.ID, receiver.ID),
@@ -806,6 +838,44 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	})
 	if inactiveForwardErr == nil {
 		t.Fatal("forwarding an inactive user sticker succeeded")
+	}
+	if _, err = conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = true WHERE id = $1`, regular.Set.ID); err != nil {
+		t.Fatalf("restore user set for re-upload check: %v", err)
+	}
+	restoredSet := getStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}, 0)
+	if restoredSet.Set.ID != regular.Set.ID {
+		t.Fatalf("getStickerSet after restore returned %d, want %d", restoredSet.Set.ID, regular.Set.ID)
+	}
+	restoredAll := getAllStickerSets(t, h, installer.ID, 0)
+	if len(restoredAll.Sets) != 1 || restoredAll.Sets[0].ID != regular.Set.ID {
+		t.Fatalf("getAllStickers after restore = %+v, want the original installed set", restoredAll.Sets)
+	}
+	restoredDownload, err := api.GetFileForTest(s, owner.ID, blobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputDocumentFileLocation{ID: messageDoc.ID, AccessHash: messageDoc.AccessHash}, Limit: 1024,
+	})
+	if err != nil {
+		t.Fatalf("download previously received sticker after restore: %v", err)
+	}
+	if restoredFile, ok := restoredDownload.(*tg.UploadFile); !ok || !bytes.Equal(restoredFile.Bytes, regularBytes) {
+		t.Fatalf("restored download = %T, want original %d-byte document", restoredDownload, len(regularBytes))
+	}
+	restoredFile := storedStickerDocument(t, s, blobs, owner.ID, regularBytes)
+	if created := createStickerSet(t, h, owner.ID, createStickerRequest("restored_reupload", restoredFile, false, false)); created.Set.Count != 1 {
+		t.Fatalf("createStickerSet after restoring source bytes returned count %d, want 1", created.Set.Count)
+	}
+	if !uninstallStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}) {
+		t.Fatal("uninstall regular user sticker set returned false")
+	}
+	if !uninstallStickerSet(t, h, installer.ID, &tg.InputStickerSetShortName{ShortName: "emoji_cats"}) {
+		t.Fatal("uninstall custom emoji set returned false")
+	}
+	clearedAll := getAllStickerSets(t, h, installer.ID, all.Hash)
+	if len(clearedAll.Sets) != 0 || clearedAll.Hash != initialAll.Hash {
+		t.Fatalf("getAllStickers after uninstall = %+v, want empty with initial hash %d", clearedAll, initialAll.Hash)
+	}
+	clearedEmojis := getEmojiStickerSets(t, h, installer.ID, emojis.Hash)
+	if len(clearedEmojis.Sets) != 0 || clearedEmojis.Hash != initialEmoji.Hash {
+		t.Fatalf("getEmojiStickers after uninstall = %+v, want empty with initial hash %d", clearedEmojis, initialEmoji.Hash)
 	}
 }
 

@@ -752,6 +752,9 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 		return nil, nil, resolveErr
 	}
 	changed, err := h.store.UninstallStickerSet(r.Ctx, r.UserID, setID)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
 	if err != nil {
 		h.log.Error("uninstall sticker set", "user_id", r.UserID, "set_id", setID, "err", err)
 		return nil, nil, errInternal
