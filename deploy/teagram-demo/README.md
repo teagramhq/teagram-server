@@ -217,6 +217,11 @@ the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
 and reports its own result. The demo deploy is disabled unless the `demo` GitHub
 environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
 
+When the dev deploy is unavailable, `Deploy demo.` also accepts a manual
+dispatch with an issue key. It deploys only the current `main` SHA after that
+SHA has a successful `CI` push run; the normal demo preflight, database backup,
+candidate checks and rollback still apply.
+
 Before enabling it, configure the `demo` GitHub environment with:
 
 | Name | Kind | Value |
@@ -539,6 +544,12 @@ The installer refuses to enable a timer without that seed command. Check a
 run with `systemctl status teagram-demo-weekly-wipe.service` and
 `journalctl -u teagram-demo-weekly-wipe.service`; manually triggering the
 service is a destructive reset of public demo content.
+After a reviewed fix is deployed, the operations menu can run the service and
+return the current run's verification line:
+
+```sh
+ssh -T teagram-demo 'run <main-sha> weekly-wipe'
+```
 
 ## Monitoring
 
