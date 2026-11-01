@@ -1,6 +1,6 @@
 import {randomBytes} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
+import {appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -429,14 +429,12 @@ async function main() {
         cleanupVerified = true;
       } catch(error) {
         const cleanupError = error instanceof FlowError ? error : new FlowError('fixture-cleanup', 'fixture cleanup failed');
-        if(!failure) failure = cleanupError;
         status = 'failed';
         process.stderr.write(`${cleanupError.stage}: ${cleanupError.message}\n`);
       }
     }
     if(requestedSignal) {
       status = 'failed';
-      failure ||= new FlowError('cancelled', `workflow received ${requestedSignal}`);
     }
     const elapsedMs = Date.now() - startedAt;
     try {

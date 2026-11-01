@@ -57,6 +57,7 @@ async function startTree() {
 
 async function verifyTreeTermination(signal, timeoutBeforeSignal) {
   const {leader, grandchildPid} = await startTree();
+  let cleanupError;
   try {
     const leaderClosed = once(leader, 'close');
     if(timeoutBeforeSignal) await delay(timeoutBeforeSignal);
@@ -71,10 +72,11 @@ async function verifyTreeTermination(signal, timeoutBeforeSignal) {
     try {
       process.kill(-leader.pid, 'SIGKILL');
     } catch(error) {
-      if(error.code !== 'ESRCH') throw error;
+      if(error.code !== 'ESRCH') cleanupError = error;
     }
     await delay(25);
   }
+  if(cleanupError) throw cleanupError;
 }
 
 test('cancellation and timeout terminate surviving process-group descendants', {skip: process.platform === 'win32'}, async (t) => {

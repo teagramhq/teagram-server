@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "playwright test",
-    "lint": "eslint \"test/e2e/**/*.ts\""
+    "lint": "eslint test/e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
