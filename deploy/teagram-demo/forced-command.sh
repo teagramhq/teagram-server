@@ -118,15 +118,10 @@ if [[ "$ACTION" == qa-invite ]]; then
       -d "$RELEASE_DIR/migrations" && ! -L "$RELEASE_DIR/migrations" ]]
   }
 
-  cleanup_qa_release_staging() {
-    if [[ -n "$WORK_DIR" ]]; then
-      rm -rf -- "$WORK_DIR"
-    fi
-  }
-
   ensure_private_dir "$STATE_DIR"
   ensure_private_dir "$RELEASES_DIR"
-  trap cleanup_qa_release_staging EXIT
+  # shellcheck disable=SC2016 # Expand the staging path when EXIT runs.
+  trap '[[ -z "$WORK_DIR" ]] || rm -rf -- "$WORK_DIR"' EXIT
   if [[ -e "$RELEASE_DIR" || -L "$RELEASE_DIR" ]]; then
     verify_release || { echo 'existing reviewed QA snapshot is unsafe or incomplete' >&2; exit 1; }
   else
