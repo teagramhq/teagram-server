@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEnd
 type scalePlan struct {
 	Node                  string      `json:"Node Type"`
 	Relation              string      `json:"Relation Name"`
+	SortKey               []string    `json:"Sort Key"`
 	Cost                  float64     `json:"Total Cost"`
 	Rows                  float64     `json:"Actual Rows"`
 	Loops                 float64     `json:"Actual Loops"`
@@ -63,6 +65,18 @@ func (p scalePlan) containsNode(node string) bool {
 	}
 	for _, child := range p.Plans {
 		if child.containsNode(node) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p scalePlan) sortsOn(key string) bool {
+	if slices.Contains(p.SortKey, key) {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.sortsOn(key) {
 			return true
 		}
 	}
@@ -166,6 +180,9 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	}
 	if plans[0].Plan.containsNode("WindowAgg") {
 		t.Fatal("contacts query uses a WindowAgg to attach the same total to every contact")
+	}
+	if plans[0].Plan.sortsOn("owned_contacts.contact_id") {
+		t.Fatal("contacts query sorts the owned contact IDs before the mutual-edge index probe")
 	}
 	// The full list, count, reverse probes, and photo filter may each read a
 	// contact row, but inbound fan-in must not add to that bound.

@@ -47,7 +47,7 @@ mutual_contacts AS MATERIALIZED (
     FROM user_contacts reverse
     WHERE reverse.contact_id = sqlc.arg(owner_id)::BIGINT
       AND reverse.owner_id = ANY (
-          ARRAY(SELECT contact_id FROM owned_contacts ORDER BY contact_id)
+          ARRAY(SELECT contact_id FROM owned_contacts)
       )
 ),
 visible_photos AS MATERIALIZED (
@@ -76,11 +76,12 @@ SELECT uc.contact_id,
        un.handle AS username,
        u.kind,
        visible_photos.current_file_id AS photo_file_id
-FROM owned_contacts uc
+FROM user_contacts uc
 LEFT JOIN mutual_contacts ON mutual_contacts.contact_id = uc.contact_id
 JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
+WHERE uc.owner_id = sqlc.arg(owner_id)::BIGINT
 ORDER BY uc.contact_id;
 
 -- name: ContactStates :many
