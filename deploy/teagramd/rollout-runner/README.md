@@ -85,6 +85,13 @@ Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
 previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
+The configuration digest treats an empty `TG_ADVERTISE_ADDR` and these
+production Turnstile defaults as equivalent to omission: test mode `false`,
+hostnames empty or `web.teagram.io`, and an empty
+`TG_TURNSTILE_QA_BYPASS_TOKEN_FILE`. Other values remain part of the digest;
+production preflight rejects test mode, non-web hostnames, and the demo QA
+bypass token.
+
 The public WebSocket replicas set `TG_REPLICA_COUNT=3` directly in their
 Compose services. The base socket-trust `teagramd` keeps its `.env` value,
 defaulting to `1`, so the split does not divide its process-local tailnet and

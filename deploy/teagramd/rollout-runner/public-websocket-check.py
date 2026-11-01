@@ -39,6 +39,9 @@ def main() -> int:
     require(base_env.get("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "") == "", "base teagramd must not advertise the public WebSocket listener")
     require(not any(str(port.get("target")) == "2446" for port in base.get("ports", [])), "base teagramd must not publish port 2446")
     require(base_env.get("TG_REPLICA_COUNT") == "1", "base teagramd must retain TG_REPLICA_COUNT=1 for its process-local listener budgets")
+    require(base_env.get("TG_TURNSTILE_TEST_MODE", "false") == "false", "production replicas must not use Turnstile test mode")
+    require(base_env.get("TG_TURNSTILE_HOSTNAMES", "web.teagram.io") in ("", "web.teagram.io"), "production replicas must accept only the web hostname")
+    require(base_env.get("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE", "") == "", "production replicas must not use the demo QA bypass token")
 
     proxy_env = proxy.get("environment") or {}
     require(isinstance(proxy_env, dict), "public HAProxy environment must be an object when present")
@@ -111,8 +114,16 @@ def main() -> int:
             "TG_MEDIA_KEY_DIR", "TG_MEDIA_KEY_CURRENT",
         ):
             require(env.get(key, "") == base_env.get(key, ""), f"{name} must retain the base {key} setting")
-        for key in ("TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"):
-            require(env.get(key, "") == base_env.get(key, ""), f"{name} must inherit {key} from teagramd")
+        turnstile_defaults = {
+            "TG_TURNSTILE_SITE_KEY": "",
+            "TG_TURNSTILE_SECRET_KEY_FILE": "",
+            "TG_TURNSTILE_SIGNIN_ENABLED": "",
+            "TG_TURNSTILE_TEST_MODE": "false",
+            "TG_TURNSTILE_HOSTNAMES": "web.teagram.io",
+            "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE": "",
+        }
+        for key, default in turnstile_defaults.items():
+            require(env.get(key, default) == base_env.get(key, default), f"{name} must inherit {key} from teagramd")
         require(service.get("ports", []) == [], f"{name} must not publish any host ports")
         require(service.get("secrets", []) == base.get("secrets", []), f"{name} must keep the base service secret mounts")
         require(service.get("volumes", []) == base.get("volumes", []), f"{name} must keep the base service data mounts")
