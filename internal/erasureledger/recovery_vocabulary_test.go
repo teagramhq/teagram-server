@@ -130,7 +130,7 @@ func TestAllocatorReservationClassificationIsClosed(t *testing.T) {
 	absolute := []string{
 		"users_id_seq", "files_id_seq", "user_created_sticker_sets_id_seq", "chats_id_seq", "secret_chats_id_seq",
 		"message_fanout_seq", "chat_admin_events_id_seq", "phone_codes_id_seq",
-		"registration_invites_id_seq", "language_catalog_publication_audit_id_seq",
+		"registration_invites_id_seq", "language_catalog_publication_audit_id_seq", "admin_sticker_set_events_id_seq",
 		"browser_acceptance_binding_epoch_seq",
 	}
 	component := []string{

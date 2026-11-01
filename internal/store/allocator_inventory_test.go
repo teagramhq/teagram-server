@@ -234,7 +234,7 @@ func allocatorInventory() []allocatorFact {
 			name: "public.admin_sticker_set_events.id", sequence: "public.admin_sticker_set_events_id_seq",
 			table: "admin_sticker_set_events", column: "id",
 			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
-			colType: "bigint", widthBits: 64, class: classCrossReplica,
+			colType: "bigint", widthBits: 64, class: classInternalOnly,
 			guard: guardSequenceCeiling, wire: "",
 			noReuse: "monotone non-cycling sequence",
 		},
@@ -936,7 +936,7 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 		},
 		classInternalOnly: {
 			"public.phone_codes.id", "public.registration_invites.id",
-			"public.language_catalog_publication_audit.id",
+			"public.language_catalog_publication_audit.id", "public.admin_sticker_set_events.id",
 			"public.profile_photo_state.mutation_revision",
 		},
 	}
