@@ -85,6 +85,12 @@ type blockingFirstQueryUpdatesStore struct {
 	queryCount atomic.Int32
 }
 
+type deadlineAfterFirstPageUpdatesStore struct {
+	*fakeUpdatesStore
+
+	queryCount atomic.Int32
+}
+
 type sharedReplicaUpdatesStore struct {
 	*fakeUpdatesStore
 
@@ -193,6 +199,14 @@ func (s *sharedReplicaUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID
 func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
+		<-ctx.Done()
+		return store.BotMessageEventPage{}, ctx.Err()
+	}
+	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
+}
+
+func (s *deadlineAfterFirstPageUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
+	if s.queryCount.Add(1) == 2 {
 		<-ctx.Done()
 		return store.BotMessageEventPage{}, ctx.Err()
 	}
@@ -1100,14 +1114,81 @@ func TestGetUpdatesAdvancesStoredOffsetAcrossPhotoGaps(t *testing.T) {
 	secondRequest.RemoteAddr = "100.64.1.2:3457"
 	secondResponse := httptest.NewRecorder()
 	handler.ServeHTTP(secondResponse, secondRequest)
-	if st.lastFromPts != 3 {
-		t.Fatalf("second poll scanned from pts %d, want stored gap offset 3", st.lastFromPts)
+	if st.lastFromPts != 4 {
+		t.Fatalf("second poll stopped at pts %d, want the exhausted page after update 3", st.lastFromPts)
 	}
 	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), `"update_id":3`) {
 		t.Fatalf("poll after photo history = (%d, %q), want update 3", secondResponse.Code, secondResponse.Body.String())
 	}
 	if st.offset != 3 {
 		t.Fatalf("offset after returning the unacknowledged update = %d, want 3", st.offset)
+	}
+}
+
+func TestGetUpdatesScansPastMoreThanOnePageOfSkippedEvents(t *testing.T) {
+	events := make([]store.Event, 101)
+	messages := make(map[int64]store.Message, len(events))
+	for i := range events {
+		pts := i + 1
+		events[i] = store.Event{Pts: pts, Type: store.EventNewMessage, LocalID: int64(pts)}
+		messages[int64(pts)] = store.Message{
+			OwnerID: 123456, LocalID: int64(pts), PeerType: store.PeerTypeUser,
+			PeerID: 987, FromID: 987, Text: "photo", FileID: 42,
+		}
+	}
+	messages[101] = store.Message{
+		OwnerID: 123456, LocalID: 101, PeerType: store.PeerTypeUser,
+		PeerID: 987, FromID: 987, Date: time.Unix(1700000000, 0), Text: "after gaps",
+	}
+	st := &fakeUpdatesStore{
+		fakeStore: newFakeStore(),
+		events:    events,
+		messages:  messages,
+		users: map[int64]store.User{
+			987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+		},
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?offset=0&limit=100&timeout=0", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"update_id":101`) || !strings.Contains(response.Body.String(), `"text":"after gaps"`) {
+		t.Fatalf("getUpdates response = (%d, %q), want update 101 after the skipped page", response.Code, response.Body.String())
+	}
+	if st.lastFromPts != 102 {
+		t.Fatalf("scan stopped at pts %d, want the exhausted page after 101", st.lastFromPts)
+	}
+	if st.offset != 101 {
+		t.Fatalf("stored offset = %d, want returned update's inclusive offset 101", st.offset)
+	}
+}
+
+func TestGetUpdatesReturnsWithinTimeoutAndStoresCompletedPageProgress(t *testing.T) {
+	const pageLimit = 100
+	events := make([]store.Event, pageLimit)
+	for i := range events {
+		events[i] = store.Event{Pts: i + 1, Type: store.EventNewMessage, LocalID: int64(i + 1)}
+	}
+	st := &deadlineAfterFirstPageUpdatesStore{
+		fakeUpdatesStore: &fakeUpdatesStore{fakeStore: newFakeStore(), events: events},
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?offset=0&limit=100&timeout=1", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(response, request)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("timed getUpdates took %s, want it to stop at its one-second poll deadline", elapsed)
+	}
+	if response.Code != http.StatusOK || response.Body.String() != "{\"ok\":true,\"result\":[]}\n" {
+		t.Fatalf("timed getUpdates response = (%d, %q), want empty success", response.Code, response.Body.String())
+	}
+	if st.queryCount.Load() != 2 || st.offset != pageLimit+1 {
+		t.Fatalf("timed scan pages/offset = %d/%d, want 2 pages and completed offset %d", st.queryCount.Load(), st.offset, pageLimit+1)
 	}
 }
 

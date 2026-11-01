@@ -2,11 +2,30 @@ package botapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+type deadlinePagingUpdatesStore struct {
+	getUpdatesStore
+
+	calls int
+}
+
+func (s *deadlinePagingUpdatesStore) BotMessageEvents(ctx context.Context, _ int64, fromPts int64, _ int) (store.BotMessageEventPage, error) {
+	s.calls++
+	if s.calls == 1 {
+		return store.BotMessageEventPage{NextOffset: fromPts + maxGetUpdatesLimit}, nil
+	}
+	<-ctx.Done()
+	return store.BotMessageEventPage{}, ctx.Err()
+}
 
 func TestParseGetUpdatesClampsLimitAndTimeout(t *testing.T) {
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/bot123:token/getUpdates", strings.NewReader(`{"limit":0,"timeout":500}`))
@@ -26,6 +45,22 @@ func TestParseGetUpdatesClampsLimitAndTimeout(t *testing.T) {
 	}
 	if params.limit != maxGetUpdatesLimit || params.timeout != 1 {
 		t.Fatalf("upper params = limit %d timeout %d, want %d and 1", params.limit, params.timeout, maxGetUpdatesLimit)
+	}
+}
+
+func TestReadBotUpdatesPreservesProgressWhenPageReadHitsDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	st := &deadlinePagingUpdatesStore{}
+	updates, nextOffset, err := (&handler{}).readBotUpdates(ctx, st, 123456, 0, maxGetUpdatesLimit)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("readBotUpdates error = %v, want deadline exceeded", err)
+	}
+	if len(updates) != 0 || nextOffset != maxGetUpdatesLimit {
+		t.Fatalf("partial scan = %d updates, offset %d, want no updates and preserved offset %d", len(updates), nextOffset, maxGetUpdatesLimit)
+	}
+	if st.calls != 2 {
+		t.Fatalf("page reads = %d, want a follow-up page read bounded by the deadline", st.calls)
 	}
 }
 

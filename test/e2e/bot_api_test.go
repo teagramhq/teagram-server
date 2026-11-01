@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/botapi"
@@ -176,6 +177,114 @@ func TestBotAPIGetUpdates(t *testing.T) {
 	}
 	if offset, err := f.store.BotUpdateOffset(f.ctx, botB.ID, tokenB); err != nil || offset != botBOffset {
 		t.Fatalf("bot B offset after bot A polls = %d, err %v, want unchanged %d", offset, err, botBOffset)
+	}
+
+	const phoneC = "+15551049323"
+	seedSmokeUsers(t, f, phoneC)
+	humanC := newSmokeClient(t, f, "Bot API stock update client", phoneC)
+	runBotAPIStockGetUpdatesSequence(t, f, serverURL, tokenA, botA.ID, humanC)
+}
+
+func testSmokeBotAPIGetUpdatesStockClient(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.photoThumbs = buildSmokePhotoThumbSupervisor(t)
+	})
+	bot, token, err := f.store.CreateBot(f.ctx, "smoke_updates_stock_bot", "Weather Stock")
+	if err != nil {
+		t.Fatalf("create stock-client bot: %v", err)
+	}
+	const phone = "+15551049324"
+	seedSmokeUsers(t, f, phone)
+	human := newSmokeClient(t, f, "Bot API stock update smoke", phone)
+	handler := botapi.NewHandler(f.store, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	serverURL := startSmokeBotAPIServerWithHandler(t, f, handler)
+	startSmokeBotAPINotifyListener(t, f, handler)
+	runBotAPIStockGetUpdatesSequence(t, f, serverURL, token, bot.ID, human)
+}
+
+func runBotAPIStockGetUpdatesSequence(t *testing.T, f *smokeFixture, serverURL, token string, botID int64, human *smokeClient) {
+	t.Helper()
+	stockClient, err := tgbotapi.NewBotAPIWithClient(token, serverURL+"/bot%s/%s", &http.Client{Timeout: 15 * time.Second})
+	if err != nil {
+		t.Fatalf("create stock Bot API client: %v", err)
+	}
+	config := tgbotapi.NewUpdate(0)
+	config.Limit = 100
+	config.Timeout = 1
+	updates := stockClient.GetUpdatesChan(config)
+	t.Cleanup(func() {
+		stockClient.StopReceivingUpdates()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case _, ok := <-updates:
+				if !ok {
+					return
+				}
+			case <-deadline.C:
+				t.Error("stock Bot API update client did not stop")
+				return
+			}
+		}
+	})
+
+	const firstText = "stock client start"
+	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(human.id, botID), Message: firstText, RandomID: 2819005,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("human sends stock-client start: %v", err)
+	}
+	var first tgbotapi.Update
+	select {
+	case first = <-updates:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stock Bot API client did not receive the first human text")
+	}
+	if first.Message == nil || first.Message.Text != firstText {
+		t.Fatalf("stock client first update = %+v, want %q", first, firstText)
+	}
+
+	const replyText = "stock client bot reply"
+	reply := sendBotAPIMessage(t, f.ctx, &http.Client{Timeout: 15 * time.Second}, serverURL, token, human.id, replyText)
+	if reply.Code != http.StatusOK {
+		t.Fatalf("bot reply status = %d, want 200; body %q", reply.Code, reply.Body)
+	}
+	receivedReply := recvOrCtx(t, f.ctx, human.push.newMsg, "stock Bot API reply")
+	replyFrom, replyFromOK := receivedReply.FromID.(*tg.PeerUser)
+	if !replyFromOK || replyFrom.UserID != botID || receivedReply.Out || receivedReply.Message != replyText {
+		t.Fatalf("human received stock Bot API reply = %+v, want incoming bot reply", receivedReply)
+	}
+	if err := sendBotAPIProofPhoto(t, f, human, botID); err != nil {
+		t.Fatalf("human sends photo between stock-client updates: %v", err)
+	}
+
+	const secondText = "stock client text after photo"
+	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(human.id, botID), Message: secondText, RandomID: 2819006,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("human sends text after photo: %v", err)
+	}
+	var second tgbotapi.Update
+	select {
+	case second = <-updates:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stock Bot API client did not receive the human text after the photo")
+	}
+	if second.Message == nil || second.Message.Text != secondText || second.UpdateID <= first.UpdateID {
+		t.Fatalf("stock client second update = %+v, want %q after update %d", second, secondText, first.UpdateID)
+	}
+	select {
+	case extra := <-updates:
+		t.Fatalf("stock Bot API client received an extra or duplicate update: %+v", extra)
+	case <-time.After(1500 * time.Millisecond):
 	}
 }
 
