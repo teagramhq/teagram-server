@@ -165,8 +165,10 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	if plans[0].Plan.containsNode("WindowAgg") {
 		t.Fatal("contacts query uses a WindowAgg to attach the same total to every contact")
 	}
-	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 20 {
-		t.Fatalf("contacts query read %.0f user_contacts rows for 10 owned contacts despite 50,000 outsiders", rowsRead)
+	// The full list, count, reverse probes, and photo filter may each read a
+	// contact row, but inbound fan-in must not add to that bound.
+	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 4*float64(len(rows)) {
+		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts despite 50,000 outsiders", rowsRead, len(rows))
 	}
 }
 
