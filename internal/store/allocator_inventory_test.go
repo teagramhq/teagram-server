@@ -231,6 +231,14 @@ func allocatorInventory() []allocatorFact {
 			noReuse: "monotone non-cycling sequence",
 		},
 		{
+			name: "public.admin_sticker_set_events.id", sequence: "public.admin_sticker_set_events_id_seq",
+			table: "admin_sticker_set_events", column: "id",
+			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
+			colType: "bigint", widthBits: 64, class: classCrossReplica,
+			guard: guardSequenceCeiling, wire: "",
+			noReuse: "monotone non-cycling sequence",
+		},
+		{
 			name: "public.language_catalog_publication_audit.id", sequence: "public.language_catalog_publication_audit_id_seq",
 			table: "language_catalog_publication_audit", column: "id",
 			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
