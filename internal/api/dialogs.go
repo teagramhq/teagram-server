@@ -394,12 +394,16 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 	tlDialogs := make([]tg.DialogClass, 0, len(snapshot.Dialogs))
 	tlMsgs := make([]tg.MessageClass, 0, len(snapshot.Dialogs))
 	selectedMessages := make([]store.Message, 0, len(snapshot.Dialogs))
+	selectedChannelMessages := make([]store.ChannelMessage, 0, len(snapshot.Dialogs))
 	for _, selected := range snapshot.Dialogs {
 		if selected.Message != nil {
 			selectedMessages = append(selectedMessages, *selected.Message)
 		}
+		if selected.ChannelMessage != nil {
+			selectedChannelMessages = append(selectedChannelMessages, *selected.ChannelMessage)
+		}
 	}
-	media, err := h.messageReadMedia(ctx, snapshot.Files, selectedMessages)
+	media, err := h.messageReadMedia(ctx, snapshot.Files, selectedMessages, selectedChannelMessages)
 	if err != nil {
 		return nil, err
 	}

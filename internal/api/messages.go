@@ -929,7 +929,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 			selectedMessages = append(selectedMessages, *result.Message)
 		}
 	}
-	media, err := h.messageReadMedia(r.Ctx, snapshot.Files, selectedMessages)
+	media, err := h.messageReadMedia(r.Ctx, snapshot.Files, selectedMessages, nil)
 	if err != nil {
 		h.log.Error("get messages: hydrate media", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -1001,14 +1001,20 @@ func (h *handlers) renderMessagesReadChats(ctx context.Context, snapshot store.M
 }
 
 // messageReadMedia maps the snapshot's file rows to wire media and separately
-// hydrates live user-set sticker references from the selected messages. The
-// snapshot hydrates files through FilesByIDs, which keeps only rows whose bytes
-// were committed, so an unrenderable file is simply absent here and its message
-// renders plain. No object-store probe: getHistory renders the same rows without
-// one, and a read per media row would let storage availability take quote
-// resolution down while staying outside the upload.getFile download ceilings
-// that already answer a missing body as a server fault.
-func (h *handlers) messageReadMedia(ctx context.Context, files map[int64]store.File, messages []store.Message) (*messageMedia, error) {
+// hydrates live user-set sticker references from the selected message and
+// channel-message rows. The snapshot hydrates files through FilesByIDs, which
+// keeps only rows whose bytes were committed, so an unrenderable file is simply
+// absent here and its message renders plain. No object-store probe: getHistory
+// renders the same rows without one, and a read per media row would let storage
+// availability take quote resolution down while staying outside the
+// upload.getFile download ceilings that already answer a missing body as a
+// server fault.
+func (h *handlers) messageReadMedia(
+	ctx context.Context,
+	files map[int64]store.File,
+	messages []store.Message,
+	channelMessages []store.ChannelMessage,
+) (*messageMedia, error) {
 	media := &messageMedia{
 		files:        make(map[int64]tg.MessageMediaClass, len(files)),
 		userStickers: make(map[int64]tg.MessageMediaClass),
@@ -1018,6 +1024,11 @@ func (h *handlers) messageReadMedia(ctx context.Context, files map[int64]store.F
 	}
 	stickerIDs := make([]int64, 0, len(messages))
 	for _, message := range messages {
+		if message.StickerDocumentID != nil {
+			stickerIDs = append(stickerIDs, *message.StickerDocumentID)
+		}
+	}
+	for _, message := range channelMessages {
 		if message.StickerDocumentID != nil {
 			stickerIDs = append(stickerIDs, *message.StickerDocumentID)
 		}

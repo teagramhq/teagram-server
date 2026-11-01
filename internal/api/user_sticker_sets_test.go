@@ -955,6 +955,78 @@ func TestHistoryKeepsNormalFileMediaSeparateFromStickerMedia(t *testing.T) {
 	assertStickerMessage("getPeerDialogs", peerDialogsResult.Messages[0])
 }
 
+func TestGetPeerDialogsHydratesUserStickerChannelPost(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819031")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, owner.ID, "Sticker channel", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("channel_stickers", file, false, false))
+	_, err = api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(owner.ID, channel.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}},
+		Message: "channel user sticker", RandomID: 902904,
+	})
+	if err != nil {
+		t.Fatalf("send user sticker to channel: %v", err)
+	}
+	posts, err := s.ChannelHistory(ctx, channel.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read channel history: %v", err)
+	}
+	var foundStickerPost bool
+	for _, post := range posts {
+		if post.Message == "channel user sticker" && post.StickerDocumentID != nil && *post.StickerDocumentID == file.ID {
+			foundStickerPost = true
+			break
+		}
+	}
+	if !foundStickerPost {
+		t.Fatalf("channel history = %+v, want sticker document %d", posts, file.ID)
+	}
+
+	result, err := api.GetPeerDialogsForTest(s, owner.ID, &tg.MessagesGetPeerDialogsRequest{
+		Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerChannel(owner.ID, channel.ID)}},
+	})
+	if err != nil {
+		t.Fatalf("get channel peer dialog: %v", err)
+	}
+	peerDialogs, ok := result.(*tg.MessagesPeerDialogs)
+	if !ok {
+		t.Fatalf("getPeerDialogs result = %T, want *tg.MessagesPeerDialogs", result)
+	}
+	if len(peerDialogs.Messages) != 1 {
+		t.Fatalf("getPeerDialogs returned %d messages, want one", len(peerDialogs.Messages))
+	}
+	message, ok := peerDialogs.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("channel top message = %T, want *tg.Message", peerDialogs.Messages[0])
+	}
+	media, ok := message.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("channel top message media = %T, want *tg.MessageMediaDocument", message.Media)
+	}
+	document, ok := media.Document.(*tg.Document)
+	if !ok || document.ID != file.ID || document.MimeType != "application/x-tgsticker" {
+		t.Fatalf("channel top message document = %#v, want user TGS sticker %d", media.Document, file.ID)
+	}
+	for _, attribute := range document.Attributes {
+		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+			return
+		}
+	}
+	t.Fatalf("channel top message document attributes = %+v, want sticker attribute", document.Attributes)
+}
+
 func createStickerRequest(shortName string, file store.File, masks, emojis bool) *tg.StickersCreateStickerSetRequest {
 	return &tg.StickersCreateStickerSetRequest{
 		UserID: &tg.InputUserSelf{}, Title: "Generated stickers", ShortName: shortName,

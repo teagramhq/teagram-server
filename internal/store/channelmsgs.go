@@ -112,7 +112,7 @@ type ChannelMessage struct {
 	// GroupedID is the shared album id; nil means the post is not grouped.
 	GroupedID *int64
 	FileID    *int64
-	// StickerDocumentID is a reserved negative catalogue identity, separate
+	// StickerDocumentID names a catalogue or live user-set sticker separately
 	// from the file-backed media reference.
 	StickerDocumentID *int64
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
@@ -519,8 +519,8 @@ func (s *Store) PostChannelMessageAsWithEntities(
 	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, entities)
 }
 
-// PostChannelStickerAsWithEntities appends a catalogue sticker with the
-// send_stickers check inside the channel post transaction.
+// PostChannelStickerAsWithEntities appends a catalogue or live user-set
+// sticker with the send_stickers check inside the channel post transaction.
 func (s *Store) PostChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
 	entities []PollDescriptionEntity,
