@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -392,8 +393,11 @@ type Config struct {
 // protect signup when SignInEnabled is false.
 type TurnstileConfig struct {
 	SiteKey       string
-	SecretKey     string `json:"-"`
-	SignInEnabled bool   `json:"-"`
+	SecretKey     string   `json:"-"`
+	SignInEnabled bool     `json:"-"`
+	Hostnames     []string `json:"-"`
+	TestMode      bool     `json:"-"`
+	QABypassToken string   `json:"-"`
 }
 
 // Enabled reports whether the signup Siteverify gate is configured.
@@ -1948,14 +1952,27 @@ func loadBlobS3Secret() (string, error) {
 }
 
 var turnstileKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+var turnstileQABypassTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,256}$`)
+var turnstileTestSiteKeys = map[string]struct{}{
+	"1x00000000000000000000AA": {},
+	"2x00000000000000000000AB": {},
+}
+var turnstileTestSecrets = map[string]struct{}{
+	"1x0000000000000000000000000000000AA": {},
+	"2x0000000000000000000000000000000AA": {},
+	"3x0000000000000000000000000000000AA": {},
+}
 
-const turnstileAlwaysPassTestSecret = "1x0000000000000000000000000000000AA"
+const defaultTurnstileHostnames = "web.teagram.io"
 
 func loadTurnstileConfig() (TurnstileConfig, error) {
 	secret := os.Getenv("TG_TURNSTILE_SECRET_KEY")
 	secretFile := os.Getenv("TG_TURNSTILE_SECRET_KEY_FILE")
 	siteKey := strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY"))
+	qaBypassPathRaw := os.Getenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")
+	qaBypassPath := strings.TrimSpace(qaBypassPathRaw)
 	signInEnabled := false
+	testMode := false
 	if raw := os.Getenv("TG_TURNSTILE_SIGNIN_ENABLED"); raw != "" {
 		var err error
 		signInEnabled, err = strconv.ParseBool(raw)
@@ -1963,15 +1980,38 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED must be a boolean")
 		}
 	}
+	if raw := os.Getenv("TG_TURNSTILE_TEST_MODE"); raw != "" {
+		var err error
+		testMode, err = strconv.ParseBool(raw)
+		if err != nil {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE must be a boolean")
+		}
+	}
+	hostnames, err := loadTurnstileHostnames()
+	if err != nil {
+		return TurnstileConfig{}, err
+	}
+	if testMode && hasPublicTeagramHostname(false) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE must not be enabled on public teagram.io hostnames")
+	}
+	if qaBypassPathRaw != "" && qaBypassPath == "" {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must be a non-empty path")
+	}
+	if qaBypassPath != "" && (hasPublicTeagramHostname(true) || !hasDemoTeagramHostname()) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE is allowed only on the demo.teagram.io stack")
+	}
 	if secret != "" && secretFile != "" {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY and TG_TURNSTILE_SECRET_KEY_FILE are both set: use only one")
 	}
 	if secret == "" && secretFile == "" {
+		if qaBypassPath != "" {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE requires Siteverify credentials")
+		}
 		if signInEnabled {
 			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED requires valid TG_TURNSTILE_SITE_KEY and Siteverify credentials")
 		}
 		if siteKey == "" {
-			return TurnstileConfig{SignInEnabled: signInEnabled}, nil
+			return TurnstileConfig{SignInEnabled: signInEnabled, Hostnames: hostnames, TestMode: testMode}, nil
 		}
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY or TG_TURNSTILE_SECRET_KEY_FILE is required when TG_TURNSTILE_SITE_KEY is set")
 	}
@@ -1992,10 +2032,125 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 	if secret == "" || !turnstileKeyPattern.MatchString(secret) {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must contain only letters, digits, '_' or '-' (maximum 256 characters)")
 	}
-	if secret == turnstileAlwaysPassTestSecret {
-		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must not use Cloudflare's always-pass test secret")
+	_, testSiteKey := turnstileTestSiteKeys[siteKey]
+	_, testSecret := turnstileTestSecrets[secret]
+	if testMode {
+		if !testSiteKey || !testSecret {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE requires Cloudflare test site and secret keys; use TG_TURNSTILE_SITE_KEY and TG_TURNSTILE_SECRET_KEY")
+		}
+	} else if testSiteKey || testSecret {
+		return TurnstileConfig{}, errors.New("cloudflare test keys require TG_TURNSTILE_TEST_MODE=true; check TG_TURNSTILE_SITE_KEY and TG_TURNSTILE_SECRET_KEY")
 	}
-	return TurnstileConfig{SiteKey: siteKey, SecretKey: secret, SignInEnabled: signInEnabled}, nil
+	qaBypassToken := ""
+	if qaBypassPath != "" {
+		data, err := os.ReadFile(qaBypassPath) // #nosec G304,G703 -- operator-configured QA secret path.
+		if err != nil {
+			return TurnstileConfig{}, fmt.Errorf("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: read token file: %w", err)
+		}
+		qaBypassToken = strings.TrimSpace(string(data))
+		clear(data)
+		if !turnstileQABypassTokenPattern.MatchString(qaBypassToken) {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must contain 32 to 256 letters, digits, '_' or '-'")
+		}
+		if qaBypassToken == secret {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must not reuse the Siteverify secret")
+		}
+	}
+	return TurnstileConfig{
+		SiteKey:       siteKey,
+		SecretKey:     secret,
+		SignInEnabled: signInEnabled,
+		Hostnames:     hostnames,
+		TestMode:      testMode,
+		QABypassToken: qaBypassToken,
+	}, nil
+}
+
+func loadTurnstileHostnames() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv("TG_TURNSTILE_HOSTNAMES"))
+	if raw == "" {
+		raw = defaultTurnstileHostnames
+	}
+	seen := make(map[string]struct{})
+	hostnames := make([]string, 0)
+	for part := range strings.SplitSeq(raw, ",") {
+		hostname := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(part), "."))
+		if !validTurnstileHostname(hostname) {
+			return nil, errors.New("TG_TURNSTILE_HOSTNAMES must be a comma-separated list of DNS hostnames")
+		}
+		if _, exists := seen[hostname]; exists {
+			continue
+		}
+		seen[hostname] = struct{}{}
+		hostnames = append(hostnames, hostname)
+	}
+	return hostnames, nil
+}
+
+func validTurnstileHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			isLowercaseLetter := character >= 'a' && character <= 'z'
+			isDigit := character >= '0' && character <= '9'
+			if !isLowercaseLetter && !isDigit && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func hasPublicTeagramHostname(productionOnly bool) bool {
+	for _, hostname := range effectivePublicTeagramHostnames() {
+		if hostname == "" || !strings.HasSuffix(hostname, ".teagram.io") && hostname != "teagram.io" {
+			continue
+		}
+		if !productionOnly || hostname != "demo.teagram.io" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDemoTeagramHostname() bool {
+	return slices.Contains(effectivePublicTeagramHostnames(), "demo.teagram.io")
+}
+
+func effectivePublicTeagramHostnames() []string {
+	advertiseAddr := os.Getenv("TG_ADVERTISE_ADDR")
+	if advertiseAddr == "" {
+		advertiseAddr = os.Getenv("TG_LISTEN_ADDR")
+	}
+	values := []string{
+		advertiseAddr,
+		os.Getenv("TG_PUBLIC_LINK_PREFIX"),
+		os.Getenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"),
+	}
+	hostnames := make([]string, 0, len(values))
+	for _, value := range values {
+		hostnames = append(hostnames, configuredHostname(value))
+	}
+	return hostnames
+}
+
+func configuredHostname(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
+		return strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	}
+	if hostname, _, err := net.SplitHostPort(value); err == nil {
+		return strings.ToLower(strings.TrimSuffix(hostname, "."))
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(value, "[]"), "."))
 }
 
 // preAuthLimits resolves the bounds on what an unauthenticated connection may

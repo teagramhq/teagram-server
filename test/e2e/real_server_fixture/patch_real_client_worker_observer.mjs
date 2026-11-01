@@ -213,13 +213,13 @@ export function patchRealClientObserver(webRoot) {
   browser = replaceOnce(browser, publicWaitForSetup, publicWorkerSourceCollection, 'worker source recovery export');
 
   const finalObservation = `    await registry.waitForSetup();
-    const apps = {alice, bob};`;
+    const apps = {alice, bob, ...(guest ? {guest} : {})};`;
   browser = replaceOnce(
     browser,
     finalObservation,
     `    await registry.waitForSetup();
     await registry.collectMtprotoSourceFetches();
-    const apps = {alice, bob};`,
+    const apps = {alice, bob, ...(guest ? {guest} : {})};`,
     'final worker evidence collection'
   );
 

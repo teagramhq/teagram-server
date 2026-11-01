@@ -74,9 +74,13 @@ remain as defense in depth.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
-`prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
-key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
-and mode 0600. Compose mounts that file only into teagramd. It also configures
+`prepare-env.sh` keeps the Turnstile site key in `.env` and writes the Siteverify
+secret to `/var/lib/teagram-demo/secrets/turnstile-secret-key`. The merged demo
+setup and deploy scripts provision a separate random QA bypass token at
+`/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token`; neither token is
+printed. Both files are root-owned, group-readable only by runtime gid 65532,
+and mounted only into teagramd. The demo sets
+`TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 `TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
 older prepared files and rejects a value that would enable client uploads.
@@ -113,6 +117,15 @@ keep the candidate out of HAProxy until production configuration is restored.
 The backend network has no external route or published server port. LXC root
 and containers already attached to that backend are trusted; control of either
 can reach the seed API while the override is active.
+
+For an authorized browser QA run, a test harness can set the demo QA token in
+the web client origin's local storage under the key
+`__teagram_turnstile_qa_bypass_token` before starting guest signup. The client
+uses that test-only path without rendering the widget; there is no user-facing
+setting or UI. Without the token, normal Turnstile verification remains in
+place. The bypass applies only to `auth.signUp`; it does not skip the demo's
+signup IP limit or registration checks. Keep token values out of terminal
+transcripts, CI output, browser recordings, and issue comments.
 
 The demo is budgeted for 2 GiB: teagramd uses `GOMAXPROCS=1`,
 `GOMEMLIMIT=320MiB` and a 448 MiB container cap. PostgreSQL is capped at 320 MiB with
@@ -156,24 +169,28 @@ deploy/teagram-demo/init-demo.sh "$IMAGE_DIGEST"
 unset IMAGE_DIGEST
 ```
 
-The prepared charlie host already has both root-owned secret files, so do not
-rerun `prepare-env.sh` there. Existing `.env` files may omit
+The prepared charlie host already has its `.env` and Siteverify secret, so do
+not rerun `prepare-env.sh` there. The next merged init or deploy script creates
+the QA bypass token once if it is absent. Existing `.env` files may omit
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP`; Compose supplies the approved `true` default
 and validates the resolved value without rewriting the secrets.
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
 then creates root-owned `.env` mode 0600 with the site key, the secret-file
-path and two different random 64-hex runtime secrets. The Turnstile secret is
-stored outside the checkout in a root-owned file with group 65532 and mode
-0440, inside a root-owned mode 0700 directory. Compose file secrets are
-bind-mounted and ignore uid/gid/mode remapping, so the file's runtime group
-must match the non-root server uid/gid 65532. The root-only parent directory
-keeps the host path inaccessible to other host users; only the server
-containers are granted the secret mount. `demo_require_env` safely upgrades a
-prepared root:root 0600 secret file to this mode before validating it. The
-script refuses to replace either secret file. Keep `POSTGRES_PASSWORD` and
-`TG_AUTHKEY_ENC_KEY` unchanged during deploys and weekly resets. Never display
-or copy `.env` or the secret file.
+path and two different random 64-hex runtime secrets. Both the Siteverify
+secret and the generated QA bypass token are stored outside the checkout in
+root-owned files with group 65532 and mode 0440, inside a root-owned mode 0700
+directory. Compose file secrets are bind-mounted and ignore uid/gid/mode
+remapping, so each file's runtime group must match the non-root server uid/gid
+65532. The root-only parent directory keeps the host paths inaccessible to
+other host users; only the server containers are granted the secret mounts.
+`demo_require_env` creates the QA token once when absent, preserves it across
+deploys and weekly resets, and validates its ownership and format. It safely
+upgrades a prepared root:root 0600 Siteverify secret to the runtime-readable
+mode before validation. The setup refuses to replace existing secrets. Keep
+`POSTGRES_PASSWORD` and `TG_AUTHKEY_ENC_KEY` unchanged during deploys and weekly
+resets. Never display `.env`, the Siteverify secret, or the QA token in logs or
+terminal transcripts.
 
 `init-demo.sh` validates that the blob path is on the dedicated size-limited
 filesystem, that the volumes and blob directory are fresh, and that Compose
