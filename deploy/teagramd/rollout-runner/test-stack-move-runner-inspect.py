@@ -33,6 +33,64 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
+    def test_sanitized_layout_differences_report_server_and_postgres_tmpfs_mounts(self) -> None:
+        runner = load_runner()
+        tmpfs_mounts = {
+            "postgres": {
+                "type": "tmpfs",
+                "source": "",
+                "target": "/run/postgres-cache",
+                "read_only": False,
+            },
+            "teagramd": {
+                "type": "tmpfs",
+                "source": "",
+                "target": "/run/server-cache",
+                "read_only": False,
+            },
+        }
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": [
+                    {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql"},
+                    copy.deepcopy(tmpfs_mounts["postgres"]),
+                ]},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": [
+                        {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                        copy.deepcopy(tmpfs_mounts["teagramd"]),
+                    ],
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"]["postgres"]["volumes"][1]["read_only"] = True
+        target_config["services"]["teagramd"]["volumes"][1]["read_only"] = True
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+        differences = runner.sanitized_layout_differences(source, target, target_config)
+        self.assertIn({
+            "service": "postgres",
+            "mount_target": "/run/postgres-cache",
+            "field": "read_only",
+        }, differences)
+        self.assertIn({
+            "service": "teagramd",
+            "mount_target": "/run/server-cache",
+            "field": "read_only",
+        }, differences)
+
     def test_public_profile_addition_accepts_local_blobs_private_override_layout(self) -> None:
         runner = load_runner()
         shared_mounts = [

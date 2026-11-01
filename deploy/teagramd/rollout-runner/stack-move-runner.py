@@ -664,6 +664,52 @@ def ordinary_rollout_layout_changed(
     return layout_changed(source, normalized_target)
 
 
+def _record_sanitized_mount_differences(
+    before: object,
+    after: object,
+    service: str,
+    differences: set[tuple[str, str | None, str]],
+) -> None:
+    if not isinstance(before, list) or not isinstance(after, list):
+        differences.add((service, None, "mounts"))
+        return
+
+    before_by_target: dict[str | None, list[dict[str, object]]] = {}
+    after_by_target: dict[str | None, list[dict[str, object]]] = {}
+    for mount in before:
+        if isinstance(mount, dict):
+            mount_target = mount.get("target")
+            safe_target = mount_target if isinstance(mount_target, str) else None
+            before_by_target.setdefault(safe_target, []).append(mount)
+    for mount in after:
+        if isinstance(mount, dict):
+            mount_target = mount.get("target")
+            safe_target = mount_target if isinstance(mount_target, str) else None
+            after_by_target.setdefault(safe_target, []).append(mount)
+
+    for mount_target in sorted(
+        set(before_by_target) | set(after_by_target),
+        key=lambda item: item or "",
+    ):
+        before_mounts = before_by_target.get(mount_target, [])
+        after_mounts = after_by_target.get(mount_target, [])
+        if len(before_mounts) != len(after_mounts):
+            differences.add((service, mount_target, "mount"))
+            continue
+        before_mounts = sorted(
+            before_mounts,
+            key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
+        )
+        after_mounts = sorted(
+            after_mounts,
+            key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
+        )
+        for before_mount, after_mount in zip(before_mounts, after_mounts):
+            for field in ("type", "source", "read_only", "bind"):
+                if before_mount.get(field) != after_mount.get(field):
+                    differences.add((service, mount_target, field))
+
+
 def sanitized_layout_differences(
     source: dict[str, object],
     target: dict[str, object],
@@ -680,45 +726,21 @@ def sanitized_layout_differences(
     target_services = target.get("persistent_service_mounts")
     if isinstance(source_services, dict) and isinstance(target_services, dict):
         for service in sorted(set(source_services) | set(target_services)):
-            before = source_services.get(service, [])
-            after = target_services.get(service, [])
-            if not isinstance(before, list) or not isinstance(after, list):
-                differences.add((str(service), None, "mounts"))
-                continue
-            before_by_target: dict[str | None, list[dict[str, object]]] = {}
-            after_by_target: dict[str | None, list[dict[str, object]]] = {}
-            for mount in before:
-                if isinstance(mount, dict):
-                    mount_target = mount.get("target")
-                    safe_target = mount_target if isinstance(mount_target, str) else None
-                    before_by_target.setdefault(safe_target, []).append(mount)
-            for mount in after:
-                if isinstance(mount, dict):
-                    mount_target = mount.get("target")
-                    safe_target = mount_target if isinstance(mount_target, str) else None
-                    after_by_target.setdefault(safe_target, []).append(mount)
+            _record_sanitized_mount_differences(
+                source_services.get(service, []),
+                target_services.get(service, []),
+                str(service),
+                differences,
+            )
 
-            for mount_target in sorted(
-                set(before_by_target) | set(after_by_target),
-                key=lambda item: item or "",
-            ):
-                before_mounts = before_by_target.get(mount_target, [])
-                after_mounts = after_by_target.get(mount_target, [])
-                if len(before_mounts) != len(after_mounts):
-                    differences.add((str(service), mount_target, "mount"))
-                    continue
-                before_mounts = sorted(
-                    before_mounts,
-                    key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
-                )
-                after_mounts = sorted(
-                    after_mounts,
-                    key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
-                )
-                for before_mount, after_mount in zip(before_mounts, after_mounts):
-                    for field in ("type", "source", "read_only", "bind"):
-                        if before_mount.get(field) != after_mount.get(field):
-                            differences.add((str(service), mount_target, field))
+    target_server = target.get("server")
+    server_name = target_server if isinstance(target_server, str) else "<server>"
+    _record_sanitized_mount_differences(
+        source.get("server_mounts"), target.get("server_mounts"), server_name, differences,
+    )
+    _record_sanitized_mount_differences(
+        source.get("postgres_mounts"), target.get("postgres_mounts"), "postgres", differences,
+    )
 
     source_volumes = source.get("volumes")
     target_volumes = target.get("volumes")
