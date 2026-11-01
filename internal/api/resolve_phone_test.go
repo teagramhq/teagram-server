@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -231,6 +232,59 @@ func TestResolvePhoneSelf(t *testing.T) {
 	}
 	if u.Phone != "" {
 		t.Error("phone must not be emitted even for self via resolvePhone")
+	}
+}
+
+func TestResolveSelfStatusRecentlyByPhoneAndUsername(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	queries := &contactQueryCapture{}
+	s, _ := openStoreDSNWithOptions(t, store.WithQueryTracer(queries))
+	user, err := s.CreateUser(ctx, "15550000101")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUsername(ctx, user.ID, "selfstatus"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetUserStatus(ctx, user.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, method := range []string{"phone", "username"} {
+		t.Run(method, func(t *testing.T) {
+			queries.reset()
+			var result any
+			var err error
+			switch method {
+			case "phone":
+				result, err = api.ResolvePhoneForTest(s, user.ID, &tg.ContactsResolvePhoneRequest{Phone: user.Phone})
+			case "username":
+				result, err = api.ResolveUsernameForTest(s, user.ID, &tg.ContactsResolveUsernameRequest{Username: "selfstatus"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			peer, ok := result.(*tg.ContactsResolvedPeer)
+			if !ok || len(peer.Users) != 1 {
+				t.Fatalf("resolved peer = %#v, want one user", result)
+			}
+			resolved, ok := peer.Users[0].(*tg.User)
+			if !ok {
+				t.Fatalf("resolved user = %T, want *tg.User", peer.Users[0])
+			}
+			if resolved.Self {
+				t.Error("resolved peer must not be marked as self")
+			}
+			if _, ok := resolved.Status.(*tg.UserStatusRecently); !ok {
+				t.Fatalf("self status via resolve%s = %T, want *tg.UserStatusRecently", method, resolved.Status)
+			}
+			for _, query := range queries.snapshot() {
+				if strings.Contains(query, "-- name: EvaluateLastSeenPrivacyForViewer :many") {
+					t.Fatal("self status resolution issued a last-seen privacy query")
+				}
+			}
+		})
 	}
 }
 

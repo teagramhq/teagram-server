@@ -553,22 +553,27 @@ func (h *handlers) usersToTL(ctx context.Context, users []store.User, viewerID i
 	if err != nil {
 		return nil, err
 	}
-	return h.renderUsersToTL(ctx, users, viewerID, markSelf, states, nil)
+	return h.renderUsersToTL(ctx, users, viewerID, markSelf, states, nil, nil)
 }
 
-// usersToTLWithContactStates renders users when their contact state is already
-// available in the same order as users.
-func (h *handlers) usersToTLWithContactStates(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStates []store.Contact) ([]*tg.User, error) {
+// usersToTLWithContactStates renders users when contact state is ordered and
+// visible profile photo IDs have already been loaded.
+func (h *handlers) usersToTLWithContactStates(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStates []store.Contact, profilePhotoIDs map[int64]int64) ([]*tg.User, error) {
 	if len(contactStates) != len(users) {
 		return nil, fmt.Errorf("render users: got %d contact states for %d users", len(contactStates), len(users))
 	}
-	return h.renderUsersToTL(ctx, users, viewerID, markSelf, nil, contactStates)
+	return h.renderUsersToTL(ctx, users, viewerID, markSelf, nil, contactStates, profilePhotoIDs)
 }
 
-func (h *handlers) renderUsersToTL(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStatesByID map[int64]store.Contact, orderedContactStates []store.Contact) ([]*tg.User, error) {
-	visibility, err := h.lastSeenVisibilityForUsers(ctx, users, viewerID)
-	if err != nil {
-		return nil, err
+func (h *handlers) renderUsersToTL(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStatesByID map[int64]store.Contact, orderedContactStates []store.Contact, profilePhotoIDs map[int64]int64) ([]*tg.User, error) {
+	privacySubjects := lastSeenPrivacySubjects(users, viewerID)
+	visibility := make(map[int64]store.LastSeenVisibility, len(privacySubjects))
+	if len(privacySubjects) > 0 {
+		var err error
+		visibility, err = h.lastSeenVisibilityForUsers(ctx, privacySubjects, viewerID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]*tg.User, len(users))
 	for i, user := range users {
@@ -578,8 +583,16 @@ func (h *handlers) renderUsersToTL(ctx context.Context, users []store.User, view
 		}
 		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, contactState, visibility[user.ID])
 	}
-	if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
-		return nil, err
+	if profilePhotoIDs == nil {
+		if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
+			return nil, err
+		}
+	} else {
+		for i, user := range users {
+			if photoID := profilePhotoIDs[user.ID]; photoID > 0 {
+				out[i].SetPhoto(userProfilePhoto(photoID, h.dcID))
+			}
+		}
 	}
 	return out, nil
 }

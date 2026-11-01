@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEnd
 type scalePlan struct {
 	Node                  string      `json:"Node Type"`
 	Relation              string      `json:"Relation Name"`
+	SortKey               []string    `json:"Sort Key"`
 	Cost                  float64     `json:"Total Cost"`
 	Rows                  float64     `json:"Actual Rows"`
 	Loops                 float64     `json:"Actual Loops"`
@@ -57,6 +59,30 @@ func (p scalePlan) sequentialTables() []string {
 	return tables
 }
 
+func (p scalePlan) containsNode(node string) bool {
+	if p.Node == node {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.containsNode(node) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p scalePlan) sortsOn(key string) bool {
+	if slices.Contains(p.SortKey, key) {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.sortsOn(key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
@@ -76,6 +102,97 @@ func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
 
 	if got, want := plan.rowsReadFrom("dialogs"), float64(42); got != want {
 		t.Fatalf("rows read = %.0f, want %.0f", got, want)
+	}
+}
+
+func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(50099, 1, -1) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 10001) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id) VALUES (2, 1)`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT n, 1 FROM generate_series(10002, 50099) n`,
+		`ANALYZE user_contacts`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed contacts mutual-edge plan: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	rows, total, err := store.ContactsWithUsers(ctx, 1)
+	if err != nil {
+		t.Fatalf("list contacts with users: %v", err)
+	}
+	if len(rows) != 10000 {
+		t.Fatalf("contacts with users = %d rows, want 10000", len(rows))
+	}
+	if total != 10000 {
+		t.Fatalf("contacts with users total = %d, want 10000", total)
+	}
+	for _, row := range rows {
+		wantMutual := row.Contact.UserID == 2
+		if row.Contact.Mutual != wantMutual {
+			t.Errorf("contact %d mutual = %t, want %t", row.Contact.UserID, row.Contact.Mutual, wantMutual)
+		}
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Contact.UserID >= rows[i].Contact.UserID {
+			t.Fatalf("contacts are not in ascending ID order at index %d: %d then %d", i,
+				rows[i-1].Contact.UserID, rows[i].Contact.UserID)
+		}
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contacts with users query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contacts query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contacts with users: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	if plans[0].Plan.containsNode("WindowAgg") {
+		t.Fatal("contacts query uses a WindowAgg to attach the same total to every contact")
+	}
+	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 1.5*float64(len(rows)) {
+		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts", rowsRead, len(rows))
+	}
+	if plans[0].Plan.sortsOn("owned_contacts.contact_id") {
+		t.Fatal("contacts query sorts the owned contact IDs before the mutual-edge index probe")
 	}
 }
 
