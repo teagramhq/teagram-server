@@ -3678,6 +3678,7 @@ prepare_env_addition_fixture env-addition-preflight-failure TG_USER_INVITE_QUOTA
 state=$(cat "$TMP/env-addition-preflight-failure-state-path")
 checkout=$(cat "$TMP/env-addition-preflight-failure-checkout-path")
 root=$(cat "$TMP/env-addition-preflight-failure-root-path")
+baseline_container_id=$(cat "$state/teagramd")
 jq -c '.services.teagramd.environment.UNRELATED="changed"' \
   "$state/target-compose.json" > "$TMP/env-addition-preflight-failure-target-compose.json"
 mv -- "$TMP/env-addition-preflight-failure-target-compose.json" "$state/target-compose.drift.json"
@@ -3687,7 +3688,7 @@ if [ "$status" != 0 ] && \
      "$TMP/env-addition-preflight-failure.stderr" && \
    cmp -s "$checkout/.env" "$TMP/env-addition-preflight-failure-previous.env" && \
    [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
-   [ "$(cat "$state/teagramd")" = "$BASE_ID" ] && \
+   [ "$(cat "$state/teagramd")" = "$baseline_container_id" ] && \
    [ -f "$root.target/preflight-failure.txt" ] && \
    [ ! -e "$root.rollback/rollback-result.txt" ] && \
    ! grep -q 'docker compose up -d$' "$TMP/env-addition-preflight-failure-events"; then
