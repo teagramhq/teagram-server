@@ -2725,7 +2725,7 @@ run_apply() {
   fi
   verify_runtime_sources || return 1
 
-  local layout_report layout_changed layout_diagnostics
+  local layout_report layout_changed layout_diagnostics layout_differences difference
   layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
     --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" \
     --env-file "$ENV_FILE" --override "$OVERRIDE_FILE") || {
@@ -2736,7 +2736,7 @@ run_apply() {
     fail 'target Compose layout comparison is invalid'
     return 1
   }
-  [ "$layout_changed" = false ] || {
+  if [ "$layout_changed" != false ]; then
     layout_diagnostics=$(printf '%s' "$layout_report" | jq -er '
       .layout_diagnostics
       | select(type == "object")
@@ -2749,9 +2749,28 @@ run_apply() {
       | select(all($components[]; test("^(project|server|server_mounts|postgres_mounts|persistent_service_mounts|volumes)$")))
       | "reason=\($reason) components=\($components | join(",")) public_profile=\($public_profile)"
     ') || layout_diagnostics='unavailable'
+    layout_differences=$(printf '%s' "$layout_report" | jq -c '
+      .differences
+      | select(type == "array")
+      | select(all(.[];
+          type == "object"
+          and (.service | type) == "string"
+          and (.mount_target == null or (.mount_target | type) == "string")
+          and (.field | type) == "string"
+        ))
+      | map({service, mount_target, field})[]
+    ') || {
+      fail 'target Compose layout difference report is invalid'
+      return 1
+    }
+    while IFS= read -r difference; do
+      if [ -n "$difference" ]; then
+        printf 'layout_difference=%s\n' "$difference" >&2
+      fi
+    done <<< "$layout_differences"
     fail "Compose project or persistent mounts changed ($layout_diagnostics); use the explicit move-stack action"
     return 1
-  }
+  fi
   TARGET_DATABASE=$(printf '%s' "$layout_report" | jq -er '.target_database | select(type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*$"))') || {
     fail 'target Compose database name is invalid'
     return 1
