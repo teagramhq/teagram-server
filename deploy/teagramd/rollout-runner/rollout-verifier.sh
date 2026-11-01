@@ -1121,7 +1121,11 @@ snapshot_from_json() {
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
-             . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
+             . == "TG_TURNSTILE_SIGNIN_ENABLED=false" or
+             . == "TG_ADVERTISE_ADDR=" or
+             . == "TG_TURNSTILE_TEST_MODE=false" or
+             . == "TG_TURNSTILE_HOSTNAMES=web.teagram.io" or
+             . == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=") | not
           )))
         | sort
       end
@@ -1261,6 +1265,14 @@ snapshot_from_json() {
       | if any($added[]; . == "TG_USER_INVITE_QUOTA") then
           del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_USER_INVITE_QUOTA)
         else . end
+      # These exact values match binary defaults and do not change the running
+      # service when Compose starts passing them explicitly.
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select(
+          ((.key == "TG_ADVERTISE_ADDR" and .value == "") or
+           (.key == "TG_TURNSTILE_TEST_MODE" and .value == "false") or
+           (.key == "TG_TURNSTILE_HOSTNAMES" and .value == "web.teagram.io") or
+           (.key == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE" and .value == "")) | not
+        ))
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] |= del(.logging)
