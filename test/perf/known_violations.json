@@ -1,6 +1,3 @@
 [
-  {"scenario": "messages.getHistory group", "check": "queries", "issue": "MAIN-2577"},
-  {"scenario": "messages.getHistory group", "check": "rows", "issue": "MAIN-2577"},
-  {"scenario": "messages.getHistory group", "check": "timing", "issue": "MAIN-2577"},
   {"scenario": "contacts.getContacts", "check": "timing", "issue": "MAIN-3015"}
 ]

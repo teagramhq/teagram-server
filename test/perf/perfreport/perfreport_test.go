@@ -360,8 +360,7 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"messages.getHistory group": "MAIN-2577",
-		"contacts.getContacts":      "MAIN-3015",
+		"contacts.getContacts": "MAIN-3015",
 	}
 	for scenario, issue := range want {
 		found := false

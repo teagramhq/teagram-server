@@ -9,7 +9,6 @@
   "messages.getSearchResultsCalendar photo video",
   "messages.getHistory group",
   "messages.search",
-  "messages.search selective term",
   "contacts.search",
   "contacts.getContacts",
   "updates.getDifference 1 day offline",

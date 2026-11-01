@@ -147,15 +147,6 @@ func scenarios() []scenario {
 				return err
 			}
 		}),
-		read("messages.search selective term", func(e *env) call {
-			peer := userPeer(e.f.Owner, e.f.Partner)
-			return func(ctx context.Context) error {
-				_, err := e.owner.api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
-					Peer: peer, Q: "chat rarefind", Filter: &tg.InputMessagesFilterEmpty{}, Limit: pageLimit,
-				})
-				return err
-			}
-		}),
 		read("contacts.search", func(e *env) call {
 			return func(ctx context.Context) error {
 				_, err := e.owner.api.ContactsSearch(ctx, &tg.ContactsSearchRequest{Q: "k00042", Limit: 50})

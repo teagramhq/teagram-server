@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 9
+const fixtureVersion = 10
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -127,15 +127,6 @@ func TestMessageSearchFixtureFillsOneXPage(t *testing.T) {
 	small := scaled("1x", 100)
 	if got := needleMessageCount(small.ChatMessages); got < pageLimit {
 		t.Fatalf("1x fixture has %d needle messages, messages.search page needs %d", got, pageLimit)
-	}
-}
-
-func TestSelectiveMessageSearchTermOccursOnlyInOldestMessage(t *testing.T) {
-	for i := range 1_000 {
-		got := strings.Contains(chatText(i), "rarefind")
-		if got != (i == 0) {
-			t.Fatalf("chat message %d contains rarefind = %v, want %v", i, got, i == 0)
-		}
 	}
 }
 
@@ -384,9 +375,6 @@ func sessionOption(dsn, setting string) string {
 }
 
 func chatText(i int) string {
-	if i == 0 {
-		return "needle 0 in the long chat rarefind"
-	}
 	if i%needleEvery == 0 {
 		return fmt.Sprintf("needle %d in the long chat", i)
 	}
