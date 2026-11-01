@@ -230,7 +230,7 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 	if _, err := store.StorePool(s).Exec(ctx, string(readinessMigration)); err != nil {
 		t.Fatalf("apply message-search readiness migration: %v", err)
 	}
-	var existingUnready, emptyUnready bool
+	var existingUnready, emptyUnready, newUnready bool
 	if err := store.StorePool(s).QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM message_search_unready_dialogs
@@ -238,11 +238,16 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 		), EXISTS (
 			SELECT 1 FROM message_search_unready_dialogs
 			WHERE owner_id = $4 AND peer_type = $2 AND peer_id = $5
-		)`, a.ID, int16(store.PeerTypeUser), b.ID, emptyOwner.ID, emptyPeer.ID).Scan(&existingUnready, &emptyUnready); err != nil {
+		), EXISTS (
+			SELECT 1 FROM message_search_unready_dialogs
+			WHERE owner_id = $6 AND peer_type = $2 AND peer_id = $7
+		)`, a.ID, int16(store.PeerTypeUser), b.ID,
+		emptyOwner.ID, emptyPeer.ID, newOwner.ID, newPeer.ID,
+	).Scan(&existingUnready, &emptyUnready, &newUnready); err != nil {
 		t.Fatalf("check migration readiness markers: %v", err)
 	}
-	if !existingUnready || emptyUnready {
-		t.Fatalf("readiness markers existing/empty = %v/%v, want true/false", existingUnready, emptyUnready)
+	if !existingUnready || emptyUnready || newUnready {
+		t.Fatalf("readiness markers existing/empty/new = %v/%v/%v, want true/false/false", existingUnready, emptyUnready, newUnready)
 	}
 	var postings int
 	if err := store.StorePool(s).QueryRow(ctx, `
