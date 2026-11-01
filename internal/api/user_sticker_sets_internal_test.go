@@ -30,7 +30,7 @@ func TestUserStickerSetListSummaryAvoidsItemProjectionAllocations(t *testing.T) 
 	large.Items = items
 
 	summaryAllocs := testing.AllocsPerRun(50, func() {
-		userStickerSetSummarySink = userStickerSetSummaryTL(large, 9, &installedAt)
+		userStickerSetSummarySink = userStickerSetSummaryTL(large, 9, 7, &installedAt)
 	})
 	fullAllocs := testing.AllocsPerRun(50, func() {
 		userStickerSetSummarySink = userStickerSetTL(large, 9, 7, &installedAt).Set
@@ -40,7 +40,7 @@ func TestUserStickerSetListSummaryAvoidsItemProjectionAllocations(t *testing.T) 
 	}
 
 	want := userStickerSetTL(large, 9, 7, &installedAt).Set
-	got := userStickerSetSummaryTL(large, 9, &installedAt)
+	got := userStickerSetSummaryTL(large, 9, 7, &installedAt)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("summary projection = %+v, want full set summary %+v", got, want)
 	}

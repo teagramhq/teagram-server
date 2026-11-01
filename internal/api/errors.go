@@ -119,6 +119,7 @@ var (
 	errStickerDocumentInvalid = rpcErr(400, "STICKER_DOCUMENT_INVALID")
 	errStickerEmojiInvalid    = rpcErr(400, "STICKER_EMOJI_INVALID")
 	errStickerSetTitleInvalid = rpcErr(400, "TITLE_INVALID")
+	errStickerImportDisabled  = rpcErr(400, "STICKER_IMPORT_DISABLED")
 	// errChatLinkExists rejects hiding history while a channel has a public link.
 	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")
 	// errChatAboutNotModified answers an editChatAbout request whose description

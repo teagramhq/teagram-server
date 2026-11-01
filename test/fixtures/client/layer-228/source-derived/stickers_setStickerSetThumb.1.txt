@@ -1,0 +1,5 @@
+# source: gotd/td v0.162.0 TL client method exercised by user_sticker_sets_smoke_test.go
+stickers.setStickerSetThumb#a76a5392
+  flags: # [thumb bit 0, thumb_document_id bit 1]
+  stickerset: inputStickerSetID#9de7a269(id: <N>, access_hash: <N>)
+  thumb_document_id: <N>

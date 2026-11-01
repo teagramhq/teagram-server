@@ -1,0 +1,6 @@
+# source: gotd/td v0.162.0 TL client method exercised by user_sticker_sets_smoke_test.go
+stickers.changeSticker#f5537ebc
+  flags: # [emoji bit 0, keywords bit 2]
+  sticker: inputDocument#1abfb575(id: <N>, access_hash: <N>, file_reference: REDACTED)
+  emoji: "🌟"
+  keywords: "star,glow"

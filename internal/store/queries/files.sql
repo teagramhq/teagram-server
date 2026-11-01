@@ -69,11 +69,34 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
       EXISTS (
           SELECT 1 FROM user_created_sticker_set_items i
           JOIN user_created_sticker_sets s ON s.id = i.set_id
-          WHERE i.file_id = f.id AND s.is_live = true
+          WHERE i.file_id = f.id AND i.is_active = true AND s.is_live = true
+      )
+      OR EXISTS (
+          SELECT 1 FROM user_created_sticker_sets s
+          WHERE s.thumb_file_id = f.id AND s.is_live = true
+      )
+      OR EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = $3 AND m.sticker_document_id = f.id
+            AND m.deleted = false
+            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+          WHERE cm.sticker_document_id = f.id
+            AND cm.deleted = false
+            AND cm.local_id > cp.available_min_id
+            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
       OR (
           NOT EXISTS (
               SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
           )
           AND (
               EXISTS (
@@ -455,10 +478,14 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
-       EXISTS (
-           SELECT 1 FROM user_created_sticker_set_items i
-           WHERE i.file_id = f.id
-       ) AS sticker_set_ref,
+       COALESCE(
+           EXISTS (
+               SELECT 1 FROM user_created_sticker_set_items i
+               WHERE i.file_id = f.id
+           ) OR EXISTS (
+               SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
+           ), false
+       )::bool AS sticker_set_ref,
        coalesce(gallery.found, false) AS gallery_ref,
        coalesce(chat_photo.found, false) AS chat_ref,
        coalesce(channel_photo.found, false) AS channel_photo_ref
@@ -586,6 +613,9 @@ WHERE f.id = sqlc.arg(id)
       WHERE i.file_id = f.id
   )
   AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
   AND NOT EXISTS (
@@ -625,6 +655,9 @@ WHERE f.id = sqlc.arg(id)
   AND NOT EXISTS (
       SELECT 1 FROM user_created_sticker_set_items i
       WHERE i.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id

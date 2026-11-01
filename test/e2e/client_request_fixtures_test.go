@@ -247,7 +247,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 		return false
 	}
 	switch fieldName {
-	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
+	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id", "thumb_document_id":
 		return true
 	default:
 		return false

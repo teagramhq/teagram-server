@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -194,7 +196,7 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 	}
 }
 
-func TestAddStickerToSetRateLimitAppliesWhileEditingIsUnsupported(t *testing.T) {
+func TestAddStickerToSetRateLimitAppliesToInvalidSet(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -208,8 +210,8 @@ func TestAddStickerToSetRateLimitAppliesWhileEditingIsUnsupported(t *testing.T) 
 		Sticker:    tg.InputStickerSetItem{Document: &tg.InputDocument{ID: 1, AccessHash: 1}, Emoji: "🐈"},
 	}
 	for call := 1; call <= 60; call++ {
-		if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.addStickerToSet", req)); got != "INPUT_METHOD_INVALID" {
-			t.Fatalf("addStickerToSet call %d = %q, want INPUT_METHOD_INVALID", call, got)
+		if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.addStickerToSet", req)); got != "STICKERSET_INVALID" {
+			t.Fatalf("addStickerToSet call %d = %q, want STICKERSET_INVALID", call, got)
 		}
 	}
 	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.addStickerToSet", req)); !strings.HasPrefix(got, "FLOOD_WAIT_") {
@@ -784,11 +786,15 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if _, err = conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, regular.Set.ID); err != nil {
 		t.Fatalf("disable user set: %v", err)
 	}
-	_, inactiveSetErr := api.GetFileForTest(s, installer.ID, blobs, &tg.UploadGetFileRequest{
+	inactiveSetDownload, inactiveSetErr := api.GetFileForTest(s, installer.ID, blobs, &tg.UploadGetFileRequest{
 		Location: &tg.InputDocumentFileLocation{ID: regularDoc.ID, AccessHash: regularDoc.AccessHash}, Limit: 1024,
 	})
-	if got := rpcMessage(t, inactiveSetErr); got != "LOCATION_INVALID" {
-		t.Fatalf("download inactive user sticker = %q, want LOCATION_INVALID", got)
+	if inactiveSetErr != nil {
+		t.Fatalf("download sticker from prior message after set deactivation: %v", inactiveSetErr)
+	}
+	inactiveSetFile, ok := inactiveSetDownload.(*tg.UploadFile)
+	if !ok || !bytes.Equal(inactiveSetFile.Bytes, validStickerTGS(t)) {
+		t.Fatalf("download prior message sticker after set deactivation = %T, want original bytes", inactiveSetDownload)
 	}
 	_, inactiveSendErr := api.SendMediaForTest(s, installer.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer: api.InputPeerUser(installer.ID, receiver.ID),
@@ -1147,4 +1153,400 @@ func validStickerTGSSize(t *testing.T, width, height int) []byte {
 		t.Fatalf("close TGS fixture: %v", err)
 	}
 	return body.Bytes()
+}
+
+func TestAddStickerToSetEnforcesCreationCountLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819121")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	files := make([]store.File, store.MaxUserStickerCount+1)
+	for i := range files {
+		files[i] = storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	}
+	request := createStickerRequest("item_limit_set", files[0], false, false)
+	for _, file := range files[1:store.MaxUserStickerCount] {
+		request.Stickers = append(request.Stickers, tg.InputStickerSetItem{
+			Document: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}, Emoji: "⭐",
+		})
+	}
+	created := createStickerSet(t, h, owner.ID, request)
+	if created.Set.Count != store.MaxUserStickerCount {
+		t.Fatalf("created set count = %d, want %d", created.Set.Count, store.MaxUserStickerCount)
+	}
+	ref := &tg.InputStickerSetID{ID: created.Set.ID, AccessHash: created.Set.AccessHash}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: ref,
+		Sticker: tg.InputStickerSetItem{
+			Document: &tg.InputDocument{ID: files[store.MaxUserStickerCount].ID, AccessHash: files[store.MaxUserStickerCount].AccessHash},
+			Emoji:    "⭐",
+		},
+	})); got != "STICKERS_TOO_MUCH" {
+		t.Fatalf("add beyond creation count limit = %q, want STICKERS_TOO_MUCH", got)
+	}
+	after, err := s.UserStickerSetByID(ctx, created.Set.ID, created.Set.AccessHash)
+	if err != nil || after.ItemCount != store.MaxUserStickerCount || after.Hash != created.Set.Hash {
+		t.Fatalf("set after over-limit add = count %d hash %d, err %v; want unchanged count/hash", after.ItemCount, after.Hash, err)
+	}
+}
+
+func TestChangeStickerUpdatesMaskCoordsOnlyForMaskSets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819122")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	regularFile := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	regular := createStickerSet(t, h, owner.ID, createStickerRequest("coords_regular", regularFile, false, false))
+	invalidSticker := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 100, 100))
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash},
+		Sticker: tg.InputStickerSetItem{
+			Document: &tg.InputDocument{ID: invalidSticker.ID, AccessHash: invalidSticker.AccessHash}, Emoji: "⭐",
+		},
+	})); got != "STICKER_PNG_DIMENSIONS" {
+		t.Fatalf("wrong-sized sticker add = %q, want STICKER_PNG_DIMENSIONS", got)
+	}
+	invalidThumb := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 99, 100))
+	thumbRequest := &tg.StickersSetStickerSetThumbRequest{Stickerset: &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}}
+	thumbRequest.SetThumb(&tg.InputDocument{ID: invalidThumb.ID, AccessHash: invalidThumb.AccessHash})
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.setStickerSetThumb", thumbRequest)); got != "STICKER_PNG_DIMENSIONS" {
+		t.Fatalf("wrong-sized set thumbnail = %q, want STICKER_PNG_DIMENSIONS", got)
+	}
+	regularAfterInvalidInputs, err := s.UserStickerSetByID(ctx, regular.Set.ID, regular.Set.AccessHash)
+	if err != nil || regularAfterInvalidInputs.ItemCount != 1 || regularAfterInvalidInputs.Hash != regular.Set.Hash || regularAfterInvalidInputs.Thumbnail != nil {
+		t.Fatalf("regular set after invalid file dimensions = %+v, err %v; want unchanged", regularAfterInvalidInputs, err)
+	}
+	coordinates := tg.MaskCoords{N: 2, X: 0.5, Y: 0.25, Zoom: 1.5}
+	invalid := &tg.StickersChangeStickerRequest{Sticker: &tg.InputDocument{ID: regularFile.ID, AccessHash: regularFile.AccessHash}}
+	invalid.SetMaskCoords(coordinates)
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.changeSticker", invalid)); got != "STICKERSET_INVALID" {
+		t.Fatalf("mask coordinates on regular set = %q, want STICKERSET_INVALID", got)
+	}
+	regularAfter, err := s.UserStickerSetByID(ctx, regular.Set.ID, regular.Set.AccessHash)
+	if err != nil || regularAfter.ItemCount != 1 || regularAfter.Hash != regular.Set.Hash || len(regularAfter.Items) != 1 || regularAfter.Items[0].MaskCoords != "" {
+		t.Fatalf("regular set after invalid coordinates = %+v, err %v; want unchanged", regularAfter, err)
+	}
+
+	maskFile := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	createStickerSet(t, h, owner.ID, createStickerRequest("coords_mask", maskFile, true, false))
+	change := &tg.StickersChangeStickerRequest{Sticker: &tg.InputDocument{ID: maskFile.ID, AccessHash: maskFile.AccessHash}}
+	change.SetMaskCoords(coordinates)
+	updated := stickerSetMutation(t, h, owner.ID, "stickers.changeSticker", change)
+	if len(updated.Documents) != 1 {
+		t.Fatalf("mask change returned %d documents, want one", len(updated.Documents))
+	}
+	document, ok := updated.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("changed mask document = %T, want *tg.Document", updated.Documents[0])
+	}
+	for _, attribute := range document.Attributes {
+		sticker, ok := attribute.(*tg.DocumentAttributeSticker)
+		if !ok {
+			continue
+		}
+		got, hasCoords := sticker.GetMaskCoords()
+		if hasCoords && got == coordinates {
+			return
+		}
+	}
+	t.Fatalf("changed mask attributes = %+v, want coordinates %+v", document.Attributes, coordinates)
+}
+
+func TestOwnerCanEditAndDeleteUserStickerSet(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819101")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	installer, err := s.CreateUser(ctx, "+15551819102")
+	if err != nil {
+		t.Fatalf("create installer: %v", err)
+	}
+	other, err := s.CreateUser(ctx, "+15551819103")
+	if err != nil {
+		t.Fatalf("create other account: %v", err)
+	}
+
+	first := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	second := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	added := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	request := createStickerRequest("editable_set", first, false, false)
+	request.Stickers = append(request.Stickers, tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: second.ID, AccessHash: second.AccessHash}, Emoji: "⭐",
+	})
+	h := fullChannelDispatcher(s)
+	created := createStickerSet(t, h, owner.ID, request)
+	ref := &tg.InputStickerSetID{ID: created.Set.ID, AccessHash: created.Set.AccessHash}
+	if got := installStickerSet(t, h, installer.ID, ref); got != "success" {
+		t.Fatalf("install user sticker set = %q, want success", got)
+	}
+	initialList := getAllStickerSets(t, h, installer.ID, 0)
+	if len(initialList.Sets) != 1 || initialList.Sets[0].ID != created.Set.ID {
+		t.Fatalf("initial installer set list = %+v, want set %d", initialList.Sets, created.Set.ID)
+	}
+	listHash := initialList.Hash
+
+	add := tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}, Emoji: "⭐",
+	}
+	add.SetKeywords("star,shine")
+	updated := stickerSetMutation(t, h, owner.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: ref, Sticker: add,
+	})
+	if updated.Set.Count != 3 || len(updated.Documents) != 3 {
+		t.Fatalf("addStickerToSet returned count %d and %d documents, want 3", updated.Set.Count, len(updated.Documents))
+	}
+	list := getAllStickerSets(t, h, installer.ID, listHash)
+	if list.Hash == listHash || len(list.Sets) != 1 || list.Sets[0].Count != 3 {
+		t.Fatalf("installer list after add = %+v, want changed hash and 3 stickers", list)
+	}
+	listHash = list.Hash
+
+	updated = stickerSetMutation(t, h, owner.ID, "stickers.changeStickerPosition", &tg.StickersChangeStickerPositionRequest{
+		Sticker: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}, Position: 0,
+	})
+	firstDocument, ok := updated.Documents[0].(*tg.Document)
+	if updated.Set.Count != 3 || !ok || firstDocument.ID != added.ID {
+		t.Fatalf("changeStickerPosition result = count %d, first document %#v", updated.Set.Count, updated.Documents[0])
+	}
+	list = getAllStickerSets(t, h, installer.ID, listHash)
+	if list.Hash == listHash {
+		t.Fatalf("installer list hash stayed %d after reordering stickers", listHash)
+	}
+	listHash = list.Hash
+
+	change := &tg.StickersChangeStickerRequest{Sticker: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}}
+	change.SetEmoji("🌟")
+	change.SetKeywords("star,glow")
+	updated = stickerSetMutation(t, h, owner.ID, "stickers.changeSticker", change)
+	if len(updated.Keywords) != 1 || updated.Keywords[0].DocumentID != added.ID || strings.Join(updated.Keywords[0].Keyword, ",") != "star,glow" {
+		t.Fatalf("changeSticker keywords = %+v, want star,glow for %d", updated.Keywords, added.ID)
+	}
+	if list = getAllStickerSets(t, h, installer.ID, listHash); list.Hash == listHash {
+		t.Fatalf("installer list hash stayed %d after changing sticker metadata", listHash)
+	}
+	listHash = list.Hash
+
+	thumb := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 100, 100))
+	setThumb := &tg.StickersSetStickerSetThumbRequest{Stickerset: ref}
+	setThumb.SetThumb(&tg.InputDocument{ID: thumb.ID, AccessHash: thumb.AccessHash})
+	updated = stickerSetMutation(t, h, owner.ID, "stickers.setStickerSetThumb", setThumb)
+	if len(updated.Set.Thumbs) != 1 || updated.Set.ThumbVersion == 0 || updated.Set.ThumbDCID != 2 {
+		t.Fatalf("setStickerSetThumb summary = %+v, want one downloadable 100x100 thumbnail", updated.Set)
+	}
+	if list = getAllStickerSets(t, h, installer.ID, listHash); list.Hash == listHash {
+		t.Fatalf("installer list hash stayed %d after changing the thumbnail", listHash)
+	}
+	listHash = list.Hash
+	erasureCounts, err := s.MediaErasureSummary(ctx, time.Now().Add(time.Hour), 100)
+	if err != nil || erasureCounts.SkippedStickerSetRef != 4 {
+		t.Fatalf("erasure summary with three set items and one thumbnail = %+v, err %v; want 4 sticker-set references", erasureCounts, err)
+	}
+	thumbnail, err := api.GetFileForTest(s, installer.ID, blobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputStickerSetThumb{Stickerset: ref, ThumbVersion: updated.Set.ThumbVersion}, Limit: 1024,
+	})
+	if err != nil {
+		t.Fatalf("download user sticker set thumbnail: %v", err)
+	}
+	thumbnailFile, ok := thumbnail.(*tg.UploadFile)
+	if !ok || !bytes.Equal(thumbnailFile.Bytes, validStickerTGSSize(t, 100, 100)) {
+		t.Fatalf("downloaded sticker set thumbnail = %T, want original TGS bytes", thumbnail)
+	}
+
+	updated = stickerSetMutation(t, h, owner.ID, "stickers.removeStickerFromSet", &tg.StickersRemoveStickerFromSetRequest{
+		Sticker: &tg.InputDocument{ID: second.ID, AccessHash: second.AccessHash},
+	})
+	if updated.Set.Count != 2 || len(updated.Documents) != 2 {
+		t.Fatalf("removeStickerFromSet returned count %d and %d documents, want 2", updated.Set.Count, len(updated.Documents))
+	}
+	if list = getAllStickerSets(t, h, installer.ID, listHash); list.Hash == listHash || len(list.Sets) != 1 || list.Sets[0].Count != 2 {
+		t.Fatalf("installer list after remove = %+v, want changed hash and 2 stickers", list)
+	}
+	listHash = list.Hash
+
+	updated = stickerSetMutation(t, h, owner.ID, "stickers.renameStickerSet", &tg.StickersRenameStickerSetRequest{
+		Stickerset: ref, Title: "Renamed set",
+	})
+	if updated.Set.Title != "Renamed set" {
+		t.Fatalf("renameStickerSet title = %q, want Renamed set", updated.Set.Title)
+	}
+	if list = getAllStickerSets(t, h, installer.ID, listHash); list.Hash == listHash {
+		t.Fatalf("installer list hash stayed %d after renaming the set", listHash)
+	}
+	listHash = list.Hash
+
+	_, err = api.SendMediaForTest(s, installer.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerUser(installer.ID, owner.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}},
+		Message: "sticker sent before set deletion", RandomID: 5518191001,
+	})
+	if err != nil {
+		t.Fatalf("send sticker before deleting set: %v", err)
+	}
+
+	for _, unauthorized := range []struct {
+		name    string
+		method  string
+		request bin.Encoder
+	}{
+		{name: "add", method: "stickers.addStickerToSet", request: &tg.StickersAddStickerToSetRequest{Stickerset: ref, Sticker: tg.InputStickerSetItem{Document: &tg.InputDocument{ID: first.ID, AccessHash: first.AccessHash}, Emoji: "⭐"}}},
+		{name: "remove", method: "stickers.removeStickerFromSet", request: &tg.StickersRemoveStickerFromSetRequest{Sticker: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}}},
+		{name: "position", method: "stickers.changeStickerPosition", request: &tg.StickersChangeStickerPositionRequest{Sticker: &tg.InputDocument{ID: added.ID, AccessHash: added.AccessHash}, Position: 1}},
+		{name: "change", method: "stickers.changeSticker", request: change},
+		{name: "thumb", method: "stickers.setStickerSetThumb", request: setThumb},
+		{name: "rename", method: "stickers.renameStickerSet", request: &tg.StickersRenameStickerSetRequest{Stickerset: ref, Title: "Attacker title"}},
+		{name: "delete", method: "stickers.deleteStickerSet", request: &tg.StickersDeleteStickerSetRequest{Stickerset: ref}},
+	} {
+		if got := stickerRPCError(t, dispatchChatMethod(t, h, other.ID, unauthorized.method, unauthorized.request)); got == "" {
+			t.Fatalf("non-owner %s mutation returned an empty error", unauthorized.name)
+		}
+	}
+	unchanged, err := s.UserStickerSetByID(ctx, created.Set.ID, created.Set.AccessHash)
+	if err != nil || unchanged.Title != "Renamed set" || unchanged.ItemCount != 2 {
+		t.Fatalf("non-owner changed set = %+v, err %v; want title Renamed set and 2 stickers", unchanged, err)
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.deleteStickerSet", &tg.StickersDeleteStickerSetRequest{
+		Stickerset: &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"},
+	})); got != "STICKERSET_INVALID" {
+		t.Fatalf("delete catalogue sticker set = %q, want STICKERSET_INVALID", got)
+	}
+
+	deleted := dispatchChatMethod(t, h, owner.ID, "stickers.deleteStickerSet", &tg.StickersDeleteStickerSetRequest{Stickerset: ref})
+	var deletedResult tg.BoolTrue
+	if err := deletedResult.Decode(&bin.Buffer{Buf: deleted}); err != nil {
+		t.Fatalf("decode deleteStickerSet result: %v", err)
+	}
+	erasureCounts, err = s.MediaErasureSummary(ctx, time.Now().Add(time.Hour), 100)
+	if err != nil || erasureCounts.SkippedStickerSetRef != 4 || erasureCounts.SkippedMessageRef != 0 {
+		t.Fatalf("erasure summary after delete = %+v, err %v; want 4 retained set-item and thumbnail refs", erasureCounts, err)
+	}
+	if _, err := s.UserStickerSetByID(ctx, created.Set.ID, created.Set.AccessHash); !errors.Is(err, store.ErrStickerSetNotFound) {
+		t.Fatalf("deleted set lookup error = %v, want ErrStickerSetNotFound", err)
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, installer.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{Stickerset: ref})); got != "STICKERSET_INVALID" {
+		t.Fatalf("get deleted set by ID = %q, want STICKERSET_INVALID", got)
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, installer.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{
+		Stickerset: &tg.InputStickerSetShortName{ShortName: "editable_set"},
+	})); got != "STICKERSET_INVALID" {
+		t.Fatalf("get deleted set by short name = %q, want STICKERSET_INVALID", got)
+	}
+	deletedList := getAllStickerSets(t, h, installer.ID, listHash)
+	if len(deletedList.Sets) != 0 || deletedList.Hash == listHash {
+		t.Fatalf("installer list after delete = %+v, want empty with changed hash", deletedList)
+	}
+	ownerHistory, err := api.GetHistoryForTest(s, owner.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(owner.ID, installer.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("read message sent before set deletion: %v", err)
+	}
+	messageList, ok := ownerHistory.(*tg.MessagesMessages)
+	if !ok || len(messageList.Messages) == 0 {
+		t.Fatalf("history after set deletion = %T, want sent sticker message", ownerHistory)
+	}
+	sentMessage, ok := messageList.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("sent message after set deletion = %T, want *tg.Message", messageList.Messages[0])
+	}
+	media, ok := sentMessage.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("sent media after set deletion = %T, want sticker document", sentMessage.Media)
+	}
+	sentDocument, ok := media.Document.(*tg.Document)
+	if !ok || sentDocument.ID != added.ID {
+		t.Fatalf("sent document after set deletion = %#v, want document %d", media.Document, added.ID)
+	}
+	oldSticker, err := api.GetFileForTest(s, owner.ID, blobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputDocumentFileLocation{ID: sentDocument.ID, AccessHash: sentDocument.AccessHash}, Limit: 1024,
+	})
+	if err != nil {
+		t.Fatalf("download sticker from message after set deletion: %v", err)
+	}
+	oldStickerFile, ok := oldSticker.(*tg.UploadFile)
+	if !ok || !bytes.Equal(oldStickerFile.Bytes, validStickerTGS(t)) {
+		t.Fatalf("message sticker after set deletion = %T, want original sticker bytes", oldSticker)
+	}
+}
+
+func TestStickerImportOffBlocksAddingButAllowsRemoval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819111")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	first := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	second := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	third := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	on := fullChannelDispatcher(s)
+	initial := createStickerRequest("off_mode_set", first, false, false)
+	initial.Stickers = append(initial.Stickers, tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: third.ID, AccessHash: third.AccessHash}, Emoji: "⭐",
+	})
+	created := createStickerSet(t, on, owner.ID, initial)
+	off := stickerDispatcherWithImportMode(s, config.StickerImportOff)
+	add := tg.InputStickerSetItem{Document: &tg.InputDocument{ID: second.ID, AccessHash: second.AccessHash}, Emoji: "⭐"}
+	if got := stickerRPCError(t, dispatchChatMethod(t, off, owner.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: &tg.InputStickerSetID{ID: created.Set.ID, AccessHash: created.Set.AccessHash}, Sticker: add,
+	})); got != "STICKER_IMPORT_DISABLED" {
+		t.Fatalf("addStickerToSet with imports off = %q, want STICKER_IMPORT_DISABLED", got)
+	}
+	other, err := s.CreateUser(ctx, "+15551819112")
+	if err != nil {
+		t.Fatalf("create non-owner: %v", err)
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, off, other.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: &tg.InputStickerSetID{ID: created.Set.ID, AccessHash: created.Set.AccessHash}, Sticker: add,
+	})); got != "STICKER_IMPORT_DISABLED" {
+		t.Fatalf("non-owner addStickerToSet with imports off = %q, want STICKER_IMPORT_DISABLED", got)
+	}
+	ref := &tg.InputDocument{ID: first.ID, AccessHash: first.AccessHash}
+	updated := stickerSetMutation(t, off, owner.ID, "stickers.removeStickerFromSet", &tg.StickersRemoveStickerFromSetRequest{Sticker: ref})
+	if updated.Set.Count != 1 {
+		t.Fatalf("removeStickerFromSet with imports off left %d stickers, want 1", updated.Set.Count)
+	}
+}
+
+func stickerSetMutation(t *testing.T, h mtproto.Handler, userID int64, method string, request bin.Encoder) *tg.MessagesStickerSet {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, method, request)
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("%s RPC error = %q", method, rpc.ErrorMessage)
+	}
+	var box tg.MessagesStickerSetBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode %s response: %v", method, err)
+	}
+	set, ok := box.StickerSet.(*tg.MessagesStickerSet)
+	if !ok {
+		t.Fatalf("%s response = %T, want *tg.MessagesStickerSet", method, box.StickerSet)
+	}
+	return set
+}
+
+func stickerDispatcherWithImportMode(s *store.Store, mode config.StickerImportMode) mtproto.Handler {
+	return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+		s, 2, &tg.Config{MeURLPrefix: testPublicLinkPrefix}, slog.New(slog.DiscardHandler), false,
+		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
+		config.RateLimitsConfig{}, config.RegistrationClosed, api.NewDialogFilterSync(), nil,
+		config.DefaultUploadPartTTL, "", nil, "", false, config.RecoveryEmailOff,
+		config.DefaultSignUpTermsOfService, nil, mode, 0, config.DefaultUserInviteMinAccountAge, false,
+	)
 }

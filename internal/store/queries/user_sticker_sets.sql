@@ -13,7 +13,9 @@ INSERT INTO user_created_sticker_sets
     (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, access_hash, creator_id, title, short_name, software, kind,
-          text_color, item_count, set_hash, is_live, created_at;
+          text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+          thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+          thumb_version, thumb_document_id;
 
 -- The hash includes the generated set ID and every inserted item, so update it
 -- before the enclosing creation transaction commits.
@@ -46,23 +48,59 @@ WHERE NOT EXISTS (
     FROM user_created_sticker_set_items
     WHERE user_created_sticker_set_items.file_id = files.id
 )
+AND NOT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_sets
+    WHERE user_created_sticker_sets.thumb_file_id = files.id
+)
+ORDER BY requested.request_order;
+
+-- Add may reactivate a previously removed item from the same set, but a live
+-- item, another set's historical item, or any set thumbnail still owns the file.
+-- name: StickerFilesForUserSet :many
+SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date,
+       subtype_rights, media_kind, width, height
+FROM unnest(sqlc.arg(file_ids)::bigint[])
+     WITH ORDINALITY AS requested(file_id, request_order)
+JOIN files ON files.id = requested.file_id
+          AND files.uploader_id = sqlc.arg(uploader_id)
+          AND files.access_hash = (sqlc.arg(access_hashes)::bigint[])[requested.request_order]
+          AND files.stored = true
+          AND files.media_kind = 'document'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_set_items i
+    WHERE i.file_id = files.id
+      AND (i.set_id <> sqlc.arg(set_id) OR i.is_active = true)
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_sets s
+    WHERE s.thumb_file_id = files.id
+)
 ORDER BY requested.request_order;
 
 -- name: UserCreatedStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, item_count, set_hash, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+       thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+       thumb_version, thumb_document_id
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower($1) AND is_live = true;
 
 -- name: UserCreatedStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, item_count, set_hash, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+       thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+       thumb_version, thumb_document_id
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
 -- name: UserCreatedStickerSetByInstalledID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, item_count, set_hash, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+       thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+       thumb_version, thumb_document_id
 FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true;
 
@@ -70,10 +108,49 @@ WHERE id = $1 AND is_live = true;
 -- loaded only by full getStickerSet and media hydration paths.
 -- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, item_count, set_hash, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+       thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+       thumb_version, thumb_document_id
 FROM user_created_sticker_sets
 WHERE id = ANY($1::bigint[]) AND is_live = true
 ORDER BY id;
+
+-- Every mutation takes the set row FOR UPDATE before editing items or metadata.
+-- Messages take it FOR SHARE before accepting a sticker send or forward.
+-- name: LockOwnedLiveUserStickerSet :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, item_count, set_hash, is_live, created_at, thumb_file_id,
+       thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns,
+       thumb_version, thumb_document_id
+FROM user_created_sticker_sets
+WHERE id = sqlc.arg(id) AND creator_id = sqlc.arg(creator_id) AND is_live = true
+FOR UPDATE;
+
+-- A sticker-only edit locates the set through an exact stored document identity.
+-- name: LockOwnedLiveUserStickerSetBySticker :one
+SELECT s.id, s.access_hash, s.creator_id, s.title, s.short_name, s.software, s.kind,
+       s.text_color, s.item_count, s.set_hash, s.is_live, s.created_at,
+       s.thumb_file_id, s.thumb_format, s.thumb_size, s.thumb_width,
+       s.thumb_height, s.thumb_duration_ns, s.thumb_version, s.thumb_document_id
+FROM user_created_sticker_sets s
+JOIN user_created_sticker_set_items i ON i.set_id = s.id AND i.is_active = true
+JOIN files f ON f.id = i.file_id
+WHERE s.creator_id = sqlc.arg(creator_id) AND s.is_live = true
+  AND f.id = sqlc.arg(file_id) AND f.access_hash = sqlc.arg(access_hash)
+FOR UPDATE OF s;
+
+-- API validation needs the set kind before checking optional sticker fields.
+-- The write path repeats this lookup under a row lock before making changes.
+-- name: UserCreatedStickerSetByOwnedSticker :one
+SELECT s.id, s.access_hash, s.creator_id, s.title, s.short_name, s.software, s.kind,
+       s.text_color, s.item_count, s.set_hash, s.is_live, s.created_at,
+       s.thumb_file_id, s.thumb_format, s.thumb_size, s.thumb_width,
+       s.thumb_height, s.thumb_duration_ns, s.thumb_version, s.thumb_document_id
+FROM user_created_sticker_sets s
+JOIN user_created_sticker_set_items i ON i.set_id = s.id AND i.is_active = true
+JOIN files f ON f.id = i.file_id
+WHERE s.creator_id = sqlc.arg(creator_id) AND s.is_live = true
+  AND f.id = sqlc.arg(file_id) AND f.access_hash = sqlc.arg(access_hash);
 
 -- Set items reference files independently of message state. The set's live
 -- state controls serving, but does not decide whether a file remains referenced.
@@ -85,6 +162,7 @@ FROM user_created_sticker_set_items i
 JOIN user_created_sticker_sets s ON s.id = i.set_id
 JOIN files f ON f.id = i.file_id
 WHERE i.set_id = $1 AND s.is_live = true AND f.stored = true
+  AND i.is_active = true
 ORDER BY i.position;
 
 -- name: UserCreatedStickerSetItemsBySetIDs :many
@@ -95,7 +173,19 @@ FROM user_created_sticker_set_items i
 JOIN user_created_sticker_sets s ON s.id = i.set_id
 JOIN files f ON f.id = i.file_id
 WHERE i.set_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
+  AND i.is_active = true
 ORDER BY i.set_id, i.position;
+
+-- Mutation-only item rows include archived entries so positions can be
+-- compacted without deleting file references needed by already-sent messages.
+-- name: UserCreatedStickerSetItemsForMutation :many
+SELECT i.set_id, i.position, i.file_id, f.access_hash, f.size, f.date,
+       i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
+       COALESCE(i.mask_coords::text, '')::varchar AS mask_coords, i.is_active
+FROM user_created_sticker_set_items i
+JOIN files f ON f.id = i.file_id
+WHERE i.set_id = $1 AND f.stored = true
+ORDER BY i.position;
 
 -- name: UserCreatedStickerSetItemsByFileIDs :many
 SELECT s.id AS set_id, s.access_hash AS set_access_hash, s.creator_id,
@@ -106,7 +196,7 @@ SELECT s.id AS set_id, s.access_hash AS set_access_hash, s.creator_id,
 FROM user_created_sticker_set_items i
 JOIN user_created_sticker_sets s ON s.id = i.set_id
 JOIN files f ON f.id = i.file_id
-WHERE i.file_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
+WHERE i.file_id = ANY($1::bigint[]) AND f.stored = true
 ORDER BY i.file_id;
 
 -- name: UserStickerSetShortNameExists :one
@@ -126,19 +216,96 @@ SELECT EXISTS (
     JOIN user_created_sticker_sets s ON s.id = i.set_id
     JOIN files f ON f.id = i.file_id
     WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true AND s.is_live = true
+      AND i.is_active = true
 );
 
 -- name: UserStickerDocumentSetIDs :many
 SELECT i.file_id, i.set_id
 FROM user_created_sticker_set_items i
 JOIN user_created_sticker_sets s ON s.id = i.set_id
-WHERE i.file_id = ANY($1::bigint[]) AND s.is_live = true
+WHERE i.file_id = ANY($1::bigint[]) AND s.is_live = true AND i.is_active = true
 ORDER BY i.set_id, i.file_id;
 
 -- name: LockLiveUserStickerSet :one
 SELECT id FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true
 FOR SHARE;
+
+-- name: UpdateUserCreatedStickerSetItemActive :execrows
+UPDATE user_created_sticker_set_items
+SET is_active = $3
+WHERE set_id = $1 AND file_id = $2;
+
+-- name: ReactivateUserCreatedStickerSetItem :execrows
+UPDATE user_created_sticker_set_items
+SET is_active = true, emoji = $3, keywords = $4, format = $5, width = $6,
+    height = $7, duration_ns = $8, mask_coords = $9
+WHERE set_id = $1 AND file_id = $2 AND is_active = false;
+
+-- name: UpdateUserCreatedStickerSetItemDetails :execrows
+UPDATE user_created_sticker_set_items
+SET emoji = $3, keywords = $4, mask_coords = $5
+WHERE set_id = $1 AND file_id = $2 AND is_active = true;
+
+-- The offset puts every old position beyond the final dense range before
+-- individual assignments, avoiding collisions on the (set_id, position) key.
+-- name: ShiftUserCreatedStickerSetItemPositions :execrows
+UPDATE user_created_sticker_set_items
+SET position = position + sqlc.arg(shift_by)::int
+WHERE set_id = sqlc.arg(set_id);
+
+-- name: SetUserCreatedStickerSetItemPosition :execrows
+UPDATE user_created_sticker_set_items
+SET position = $3
+WHERE set_id = $1 AND file_id = $2;
+
+-- name: UpdateUserCreatedStickerSetCountAndHash :execrows
+UPDATE user_created_sticker_sets
+SET item_count = $2, set_hash = $3
+WHERE id = $1;
+
+-- name: RenameUserCreatedStickerSet :execrows
+UPDATE user_created_sticker_sets
+SET title = $2, set_hash = $3
+WHERE id = $1;
+
+-- name: UpdateUserCreatedStickerSetThumb :execrows
+UPDATE user_created_sticker_sets
+SET thumb_file_id = sqlc.narg(thumb_file_id),
+    thumb_format = sqlc.narg(thumb_format),
+    thumb_size = sqlc.narg(thumb_size),
+    thumb_width = sqlc.narg(thumb_width),
+    thumb_height = sqlc.narg(thumb_height),
+    thumb_duration_ns = sqlc.arg(thumb_duration_ns),
+    thumb_version = sqlc.arg(thumb_version),
+    thumb_document_id = sqlc.arg(thumb_document_id),
+    set_hash = sqlc.arg(set_hash)
+WHERE id = sqlc.arg(id);
+
+-- name: DeleteUserCreatedStickerSet :execrows
+UPDATE user_created_sticker_sets
+SET is_live = false
+WHERE id = $1 AND is_live = true;
+
+-- Deleting a user set also drops each install row; historical item rows remain
+-- as message-media references and keep their uploaded files from erasure.
+-- name: DeleteInstalledUserStickerSet :execrows
+DELETE FROM user_sticker_sets
+WHERE set_id = $1;
+
+-- name: UserCreatedStickerSetThumbnailForDownload :one
+SELECT f.*
+FROM user_created_sticker_sets s
+JOIN files f ON f.id = s.thumb_file_id
+WHERE s.id = sqlc.arg(id) AND s.access_hash = sqlc.arg(access_hash)
+  AND s.thumb_version = sqlc.arg(thumb_version) AND s.is_live = true
+  AND f.stored = true;
+
+-- name: UserCreatedStickerSetItemExists :one
+SELECT EXISTS (
+    SELECT 1 FROM user_created_sticker_set_items
+    WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = true
+);
 
 -- name: InstalledStickerSetCount :one
 SELECT count(*)::bigint
