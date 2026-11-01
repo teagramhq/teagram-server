@@ -113,12 +113,11 @@ SELECT uc.contact_id,
        un.handle AS username,
        u.kind,
        visible_photos.current_file_id AS photo_file_id
-FROM user_contacts uc
-LEFT JOIN mutual_contacts ON mutual_contacts.contact_id = uc.contact_id
+FROM owned_contacts uc
 JOIN users u ON u.id = uc.contact_id
+LEFT JOIN mutual_contacts ON mutual_contacts.contact_id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
-WHERE uc.owner_id = $1::BIGINT
 `
 
 type ContactsWithUsersRow struct {
@@ -135,9 +134,10 @@ type ContactsWithUsersRow struct {
 }
 
 // Load the full contact page, user records, and visible current photos
-// together. Mutual state is limited to the viewer's contact IDs, and photos
-// retain the live gallery, stored-file, media-kind, and block checks. Store
-// restores contact-ID order, so this query avoids sorting the wide result.
+// together. The materialized contact list also feeds the result directly, so
+// the owner's edges are not scanned twice. Mutual state stays bounded to the
+// viewer's contact IDs; photos retain the gallery, storage, media-kind, and
+// block checks. Store restores contact-ID order without sorting the wide row.
 func (q *Queries) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactsWithUsersRow, error) {
 	rows, err := q.db.Query(ctx, contactsWithUsers, ownerID)
 	if err != nil {

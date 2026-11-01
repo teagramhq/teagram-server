@@ -188,13 +188,11 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	if plans[0].Plan.containsNode("WindowAgg") {
 		t.Fatal("contacts query uses a WindowAgg to attach the same total to every contact")
 	}
+	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 1.5*float64(len(rows)) {
+		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts", rowsRead, len(rows))
+	}
 	if plans[0].Plan.sortsOn("owned_contacts.contact_id") {
 		t.Fatal("contacts query sorts the owned contact IDs before the mutual-edge index probe")
-	}
-	// The full list, count, reverse probes, and photo filter may each read a
-	// contact row, but inbound fan-in must not add to that bound.
-	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 4*float64(len(rows)) {
-		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts despite 40,098 inbound edges", rowsRead, len(rows))
 	}
 }
 
