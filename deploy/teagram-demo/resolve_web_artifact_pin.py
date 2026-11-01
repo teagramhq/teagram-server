@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -18,6 +20,9 @@ LIVE_MANIFEST_URL = "https://web.teagram.io/mtproto-target.json"
 PIN_PATH = pathlib.Path(__file__).with_name("web-artifact-pin.json")
 PIN_REPO = "teagramhq/teagram-web"
 PR_VALIDATION_JOB = "Validate private artifact on pull request"
+MAX_FETCH_ATTEMPTS = 3
+MAX_RETRY_DELAY_SECONDS = 30
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
 def fetch_json(url: str) -> Any:
@@ -29,11 +34,63 @@ def fetch_json(url: str) -> Any:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return json.load(response)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
-        raise ValueError("upstream metadata is unavailable") from error
+    for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            last_error: Exception = error
+            retry_after = error.headers.get("Retry-After") if error.headers is not None else None
+            rate_limited = error.code == 403 and (
+                retry_after is not None
+                or (
+                    error.headers is not None
+                    and error.headers.get("X-RateLimit-Remaining") == "0"
+                )
+            )
+            if error.code not in RETRYABLE_HTTP_CODES and not rate_limited:
+                raise ValueError(
+                    f"upstream metadata request failed for {url}: "
+                    f"HTTP {error.code} {error.reason}"
+                ) from error
+            if retry_after is not None:
+                try:
+                    parsed_delay = float(retry_after)
+                    delay = max(0.0, parsed_delay) if math.isfinite(parsed_delay) else 1.0
+                except ValueError:
+                    delay = float(2 ** (attempt - 1))
+            elif rate_limited and error.headers is not None:
+                reset = error.headers.get("X-RateLimit-Reset")
+                try:
+                    reset_at = float(reset) if reset is not None else time.time() + 1
+                    delay = max(0.0, reset_at - time.time()) if math.isfinite(reset_at) else 1.0
+                except ValueError:
+                    delay = 1.0
+            else:
+                delay = float(2 ** (attempt - 1))
+            detail = f"HTTP {error.code} {error.reason}"
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+            last_error = error
+            delay = float(2 ** (attempt - 1))
+            detail = str(error)
+
+        if attempt == MAX_FETCH_ATTEMPTS:
+            raise ValueError(
+                f"upstream metadata request failed for {url} after {attempt} attempts: {detail}"
+            ) from last_error
+        if delay > MAX_RETRY_DELAY_SECONDS:
+            raise ValueError(
+                f"upstream metadata request failed for {url}: {detail}; "
+                f"retry requested after {delay:.0f}s"
+            ) from last_error
+        print(
+            f"Retrying upstream metadata request for {url} after transient error "
+            f"({attempt}/{MAX_FETCH_ATTEMPTS}): {detail}",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
 def validate_pin_document(value: Any) -> dict[str, Any]:
