@@ -250,7 +250,9 @@ func TestUpdateProfilePhotoRateAdmissionBoundsPoolWait(t *testing.T) {
 			t.Errorf("release rate-limit row lock: %v", err)
 		}
 		for range 2 {
-			<-blockersDone
+			if err := <-blockersDone; err != nil {
+				t.Errorf("blocked profile photo update: %v", err)
+			}
 		}
 		t.Fatalf("wait for both store-pool connections to block on the rate row (observed %d): %v", blocked, waitErr)
 	}
