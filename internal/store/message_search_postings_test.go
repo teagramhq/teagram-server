@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -141,6 +142,19 @@ func TestSearchMessagesMatchesLegacyForReadyDialogs(t *testing.T) {
 	a := mustUser(t, s, "+15551260011")
 	b := mustUser(t, s, "+15551260012")
 	c := mustUser(t, s, "+15551260013")
+	var sameIDChat store.Chat
+	for id := int64(1); id <= b.ID; id++ {
+		chat, err := s.CreateChat(ctx, a.ID, fmt.Sprintf("Search peer collision %d", id), []int64{b.ID})
+		if err != nil {
+			t.Fatalf("create cross-type search fixture chat: %v", err)
+		}
+		if chat.ID == b.ID {
+			sameIDChat = chat
+		}
+	}
+	if sameIDChat.ID != b.ID {
+		t.Fatalf("cross-type fixture chat id = %d, want user peer id %d", sameIDChat.ID, b.ID)
+	}
 
 	first := send(t, s, a, b, "red fox crossing", 6011)
 	second := send(t, s, a, b, "red fox sleeping", 6012)
@@ -150,6 +164,12 @@ func TestSearchMessagesMatchesLegacyForReadyDialogs(t *testing.T) {
 	send(t, s, a, b, "fox only", 6016)
 	send(t, s, a, c, "red fox other dialog", 6017)
 	send(t, s, c, b, "red fox other owner", 6018)
+	chatMessage, _ := sendChat(t, s, store.FanOut{
+		ChatID: sameIDChat.ID, FromID: a.ID, Text: "red fox other peer type", RandomID: 6019,
+	})
+	if chatMessage.PeerType != store.PeerTypeChat || chatMessage.PeerID != b.ID {
+		t.Fatalf("cross-type fixture peer = %d/%d, want %d/%d", chatMessage.PeerType, chatMessage.PeerID, store.PeerTypeChat, b.ID)
+	}
 	if _, err := store.StorePool(s).Exec(ctx,
 		`UPDATE messages SET expires_at = statement_timestamp() - interval '1 second' WHERE owner_id = $1 AND local_id = $2`, a.ID, expired.LocalID); err != nil {
 		t.Fatalf("expire message: %v", err)
