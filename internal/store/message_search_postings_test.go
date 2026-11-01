@@ -140,12 +140,16 @@ func TestSearchMessagesMatchesLegacyForReadyDialogs(t *testing.T) {
 	ctx := context.Background()
 	a := mustUser(t, s, "+15551260011")
 	b := mustUser(t, s, "+15551260012")
+	c := mustUser(t, s, "+15551260013")
 
 	first := send(t, s, a, b, "red fox crossing", 6011)
 	second := send(t, s, a, b, "red fox sleeping", 6012)
 	third := send(t, s, a, b, "red bird crossing", 6013)
 	expired := send(t, s, a, b, "red fox expired", 6014)
 	deleted := send(t, s, a, b, "red fox deleted", 6015)
+	send(t, s, a, b, "fox only", 6016)
+	send(t, s, a, c, "red fox other dialog", 6017)
+	send(t, s, c, b, "red fox other owner", 6018)
 	if _, err := store.StorePool(s).Exec(ctx,
 		`UPDATE messages SET expires_at = statement_timestamp() - interval '1 second' WHERE owner_id = $1 AND local_id = $2`, a.ID, expired.LocalID); err != nil {
 		t.Fatalf("expire message: %v", err)
@@ -153,6 +157,8 @@ func TestSearchMessagesMatchesLegacyForReadyDialogs(t *testing.T) {
 	if _, err := s.DeleteMessages(ctx, a.ID, []int64{deleted.LocalID}, false); err != nil {
 		t.Fatalf("soft-delete message: %v", err)
 	}
+	assertMessageSearchLexemeCount(t, s, a.ID, store.PeerTypeUser, b.ID, "fox", 4)
+	assertMessageSearchLexemeCount(t, s, a.ID, store.PeerTypeUser, b.ID, "red", 4)
 
 	for _, tc := range []struct {
 		name    string
@@ -187,6 +193,24 @@ func TestSearchMessagesMatchesLegacyForReadyDialogs(t *testing.T) {
 				t.Fatalf("search ids = %v, want %v", gotIDs, tc.wantIDs)
 			}
 		})
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+		DELETE FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3 AND local_id = $4 AND lexeme = 'fox'`,
+		a.ID, int16(store.PeerTypeUser), b.ID, first.LocalID); err != nil {
+		t.Fatalf("remove matched message's fox search posting: %v", err)
+	}
+	got, err := s.SearchMessages(ctx, a.ID, store.PeerTypeUser, b.ID, "red fox", 0, 10)
+	if err != nil {
+		t.Fatalf("search messages after removing matched postings: %v", err)
+	}
+	gotIDs := make([]int64, len(got))
+	for i, message := range got {
+		gotIDs[i] = message.LocalID
+	}
+	if !slices.Equal(gotIDs, []int64{second.LocalID}) {
+		t.Fatalf("search ids after removing matched postings = %v, want [%d]", gotIDs, second.LocalID)
 	}
 }
 
