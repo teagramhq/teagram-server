@@ -34,6 +34,32 @@ function processExists(pid) {
   }
 }
 
+async function runWithCleanup(operation, cleanup) {
+  let operationFailed = false;
+  let operationError;
+  try {
+    await operation();
+  } catch(error) {
+    operationFailed = true;
+    operationError = error;
+  }
+
+  let cleanupFailed = false;
+  let cleanupError;
+  try {
+    await cleanup();
+  } catch(error) {
+    cleanupFailed = true;
+    cleanupError = error;
+  }
+
+  if(operationFailed && cleanupFailed) {
+    throw new AggregateError([operationError, cleanupError], 'operation and cleanup both failed');
+  }
+  if(operationFailed) throw operationError;
+  if(cleanupFailed) throw cleanupError;
+}
+
 async function startTree() {
   const grandchildCode = [
     "process.on('SIGINT', () => {});",
@@ -57,8 +83,7 @@ async function startTree() {
 
 async function verifyTreeTermination(signal, timeoutBeforeSignal) {
   const {leader, grandchildPid} = await startTree();
-  let cleanupError;
-  try {
+  await runWithCleanup(async () => {
     const leaderClosed = once(leader, 'close');
     if(timeoutBeforeSignal) await delay(timeoutBeforeSignal);
 
@@ -68,16 +93,31 @@ async function verifyTreeTermination(signal, timeoutBeforeSignal) {
     assert.equal(processExists(grandchildPid), true, 'grandchild should outlive its process-group leader after SIGTERM/SIGINT');
     assert.equal(await termination, true, 'termination should escalate the process group after its leader exits');
     assert.equal(processExists(grandchildPid), false, 'surviving grandchild should be gone before cleanup continues');
-  } finally {
+  }, async () => {
+    let cleanupError;
     try {
       process.kill(-leader.pid, 'SIGKILL');
     } catch(error) {
       if(error.code !== 'ESRCH') cleanupError = error;
     }
     await delay(25);
-  }
-  if(cleanupError) throw cleanupError;
+    if(cleanupError) throw cleanupError;
+  });
 }
+
+test('reports cleanup failures alongside operation failures', async () => {
+  const operationError = new Error('test body failed');
+  const cleanupError = new Error('process-group cleanup failed');
+  let failure;
+  try {
+    await runWithCleanup(() => { throw operationError; }, () => { throw cleanupError; });
+  } catch(error) {
+    failure = error;
+  }
+
+  assert(failure instanceof AggregateError);
+  assert.deepEqual(failure.errors, [operationError, cleanupError]);
+});
 
 test('cancellation and timeout terminate surviving process-group descendants', {skip: process.platform === 'win32'}, async (t) => {
   await t.test('workflow cancellation', () => verifyTreeTermination('SIGINT', 0));
