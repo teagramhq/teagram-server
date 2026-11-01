@@ -102,7 +102,9 @@ SELECT uc.contact_id,
            WHERE reverse.owner_id = uc.contact_id
              AND reverse.contact_id = uc.owner_id
        )::BOOLEAN AS mutual,
-       COUNT(*) OVER () AS total,
+       (SELECT COUNT(*)
+        FROM user_contacts count_contacts
+        WHERE count_contacts.owner_id = $1::BIGINT) AS total,
        u.id,
        u.first_name,
        u.last_name,

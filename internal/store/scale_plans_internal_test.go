@@ -57,6 +57,18 @@ func (p scalePlan) sequentialTables() []string {
 	return tables
 }
 
+func (p scalePlan) containsNode(node string) bool {
+	if p.Node == node {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.containsNode(node) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
@@ -79,7 +91,7 @@ func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
 	}
 }
 
-func TestContactsWithUsersBoundsReverseEdgeReadsToOwnedContacts(t *testing.T) {
+func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
@@ -149,6 +161,9 @@ func TestContactsWithUsersBoundsReverseEdgeReadsToOwnedContacts(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatal(err)
+	}
+	if plans[0].Plan.containsNode("WindowAgg") {
+		t.Fatal("contacts query uses a WindowAgg to attach the same total to every contact")
 	}
 	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 20 {
 		t.Fatalf("contacts query read %.0f user_contacts rows for 10 owned contacts despite 50,000 outsiders", rowsRead)
