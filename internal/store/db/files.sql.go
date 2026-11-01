@@ -263,6 +263,10 @@ WHERE f.id = $1
       WHERE cm.file_id = f.id AND cm.deleted = false
   )
   AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
   AND NOT EXISTS (
@@ -312,6 +316,10 @@ WHERE f.id = $1
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
@@ -420,19 +428,31 @@ SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.s
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
-          SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
-            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+          SELECT 1 FROM user_created_sticker_set_items i
+          JOIN user_created_sticker_sets s ON s.id = i.set_id
+          WHERE i.file_id = f.id AND s.is_live = true
       )
-      OR EXISTS (
-          SELECT 1 FROM channel_messages cm
-          JOIN channel_participants cp
-            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
-          WHERE cm.file_id = f.id
-            AND cm.deleted = false
-            AND cm.local_id > cp.available_min_id
-            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      OR (
+          NOT EXISTS (
+              SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+          )
+          AND (
+              EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.owner_id = $3 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+              )
+              OR EXISTS (
+                  SELECT 1 FROM channel_messages cm
+                  JOIN channel_participants cp
+                    ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+                  WHERE cm.file_id = f.id
+                    AND cm.deleted = false
+                    AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+              )
+          )
       )
   )
 `
@@ -443,18 +463,20 @@ type FileForDownloadParams struct {
 	OwnerID    int64
 }
 
-// FileForDownload is the M5 download authorization gate, and it is one query on
-// purpose. Matching (id, access_hash) is wire compatibility and defence in
-// depth; the EXISTS is the boundary. messages is per-owner — one row per
-// entitled account, and one per member on a chat fan-out — so the set of
-// accounts allowed to read a file is already enumerated on disk and needs no
-// separate membership model. Channels are the exception, and the second EXISTS
-// is why: a channel post writes ONE channel_messages row and no per-member row
-// at all, so entitlement there has to be computed from membership rather than
-// read off an enumeration. banned_until is part of that computation — a banned
-// member keeps their channel_participants row, and without the predicate that
-// retained row would be an entitlement instead of a record, making a ban
-// cosmetic for exactly the content worth exfiltrating.
+// FileForDownload is the one-query download authorization gate. Matching (id,
+// access_hash) is wire compatibility and defence in depth. A live user sticker
+// set is a public entitlement; once a file has any set-item reference, the
+// ordinary message entitlement cannot bypass that set's live-state check.
+// messages is per-owner — one row per entitled account, and one per member on a
+// chat fan-out — so the set of accounts allowed to read a file is already
+// enumerated on disk and needs no separate membership model. Channels are the
+// exception, and the channel EXISTS is why: a channel post writes ONE
+// channel_messages row and no per-member row at all, so entitlement there has
+// to be computed from membership rather than read off an enumeration.
+// banned_until is part of that computation — a banned member keeps their
+// channel_participants row, and without the predicate that retained row would
+// be an entitlement instead of a record, making a ban cosmetic for exactly the
+// content worth exfiltrating.
 //
 // Consequences that follow from putting it here rather than in the handler:
 // deleteMessages soft-deletes both sides, so deleting a media message actually
@@ -881,6 +903,10 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
+       EXISTS (
+           SELECT 1 FROM user_created_sticker_set_items i
+           WHERE i.file_id = f.id
+       ) AS sticker_set_ref,
        coalesce(gallery.found, false) AS gallery_ref,
        coalesce(chat_photo.found, false) AS chat_ref,
        coalesce(channel_photo.found, false) AS channel_photo_ref
@@ -924,6 +950,7 @@ type MediaErasureScanRow struct {
 	Aged            bool
 	MessageRef      bool
 	ChannelRef      bool
+	StickerSetRef   bool
 	GalleryRef      bool
 	ChatRef         bool
 	ChannelPhotoRef bool
@@ -998,6 +1025,7 @@ func (q *Queries) MediaErasureScan(ctx context.Context, arg MediaErasureScanPara
 			&i.Aged,
 			&i.MessageRef,
 			&i.ChannelRef,
+			&i.StickerSetRef,
 			&i.GalleryRef,
 			&i.ChatRef,
 			&i.ChannelPhotoRef,

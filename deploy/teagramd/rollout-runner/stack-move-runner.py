@@ -51,6 +51,14 @@ MEDIA_KEY_MOUNT = {
     "read_only": True,
     "bind": {"create_host_path": False},
 }
+LAYOUT_FIELDS = (
+    "project",
+    "server",
+    "server_mounts",
+    "postgres_mounts",
+    "persistent_service_mounts",
+    "volumes",
+)
 SOURCE_LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
 TARGET_LOCAL_BLOB_PATH = "/var/lib/teagramd-blobs"
 MOVE_BLOB_DIR_ENV = "TEAGRAMD_STACK_MOVE_BLOB_DIR"
@@ -495,61 +503,60 @@ def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool
     return not _is_approved_media_key_mount_addition(source, target)
 
 
-def _without_initial_public_profile_mounts(
+def _normalize_initial_public_profile_mounts(
     source: dict[str, object],
     target: dict[str, object],
     target_config: dict[str, object],
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, str]:
     source_services = source.get("persistent_service_mounts")
     target_services = target.get("persistent_service_mounts")
     configured_services = target_config.get("services")
     if not isinstance(source_services, dict) or not isinstance(target_services, dict):
-        return None
+        return None, "invalid_service_mount_inventory"
     if not isinstance(configured_services, dict):
-        return None
+        return None, "invalid_target_services"
 
     additions = set(target_services) - set(source_services)
     if not additions:
-        return target
+        return target, "not_applicable"
     selected_profiles = {
         profile.strip()
         for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
         if profile.strip()
     }
-    if (
-        "public" not in selected_profiles
-        or os.environ.get("ROLLOUT_RUNNER_PUBLIC_WEBSOCKET") != "1"
-    ):
-        return None
+    if "public" not in selected_profiles:
+        return None, "public_profile_not_selected"
+    if os.environ.get("ROLLOUT_RUNNER_PUBLIC_WEBSOCKET") != "1":
+        return None, "public_profile_opt_in_missing"
     if additions != PUBLIC_PROFILE_SERVICES:
-        return None
+        return None, "unexpected_profile_services"
 
     base_service = configured_services.get(TARGET_SERVER)
     if not isinstance(base_service, dict) or base_service.get("profiles"):
-        return None
+        return None, "invalid_base_service_profile"
     try:
         base_mounts = service_mounts(target_config, TARGET_SERVER)
     except MoveError:
-        return None
+        return None, "invalid_base_service_mounts"
 
     for name in ("teagramd-public-1", "teagramd-public-2"):
         service = configured_services.get(name)
         if not isinstance(service, dict) or service.get("profiles") != ["public"]:
-            return None
+            return None, "invalid_public_replica_profile"
         try:
             replica_mounts = service_mounts(target_config, name)
         except MoveError:
-            return None
+            return None, "invalid_public_replica_mounts"
         if replica_mounts != base_mounts or target_services.get(name) != target_services.get(TARGET_SERVER):
-            return None
+            return None, "public_replica_mounts_differ"
 
     proxy_service = configured_services.get("public-haproxy")
     if not isinstance(proxy_service, dict) or proxy_service.get("profiles") != ["public"]:
-        return None
+        return None, "invalid_public_proxy_profile"
     try:
         proxy_mounts = service_mounts(target_config, "public-haproxy")
     except MoveError:
-        return None
+        return None, "invalid_public_proxy_mounts"
     proxy_source = proxy_mounts[0].get("source") if len(proxy_mounts) == 1 else None
     if (
         len(proxy_mounts) != 1
@@ -564,7 +571,7 @@ def _without_initial_public_profile_mounts(
         or proxy_mounts[0].get("bind") not in (None, {}, {"create_host_path": False})
         or target_services.get("public-haproxy") != proxy_mounts
     ):
-        return None
+        return None, "invalid_public_proxy_mount"
 
     # The public topology validator checks these profile services in detail.
     # Exclude only this first validated addition from the data-layout compare;
@@ -572,10 +579,80 @@ def _without_initial_public_profile_mounts(
     normalized = copy.deepcopy(target)
     normalized_services = normalized.get("persistent_service_mounts")
     if not isinstance(normalized_services, dict):
-        return None
+        return None, "invalid_normalized_mount_inventory"
     for name in PUBLIC_PROFILE_SERVICES:
         normalized_services.pop(name, None)
-    return normalized
+    return normalized, "accepted"
+
+
+def _changed_layout_fields(source: dict[str, object], target: dict[str, object]) -> list[str]:
+    return [field for field in LAYOUT_FIELDS if source.get(field) != target.get(field)]
+
+
+def ordinary_rollout_layout_diagnostics(
+    source: dict[str, object],
+    target: dict[str, object],
+    target_config: dict[str, object],
+) -> dict[str, object]:
+    if source == target:
+        return {
+            "changed": False,
+            "reason": "unchanged",
+            "changed_components": [],
+            "public_profile": "not_applicable",
+        }
+    if target_config.get("name") != TARGET_PROJECT:
+        return {
+            "changed": True,
+            "reason": "project_name_mismatch",
+            "changed_components": _changed_layout_fields(source, target),
+            "public_profile": "not_applicable",
+        }
+    services = target_config.get("services")
+    service = services.get(TARGET_SERVER) if isinstance(services, dict) else None
+    environment = service.get("environment") if isinstance(service, dict) else None
+    volumes = service.get("volumes") if isinstance(service, dict) else None
+    if not isinstance(environment, dict) or not isinstance(volumes, list):
+        return {
+            "changed": True,
+            "reason": "invalid_target_server_config",
+            "changed_components": _changed_layout_fields(source, target),
+            "public_profile": "not_checked",
+        }
+    if (
+        environment.get("TG_MEDIA_KEY_DIR") != "/run/teagramd/media-keys"
+        or environment.get("TG_MEDIA_KEY_CURRENT") != "1"
+    ):
+        return {
+            "changed": True,
+            "reason": "media_key_config_mismatch",
+            "changed_components": _changed_layout_fields(source, target),
+            "public_profile": "not_checked",
+        }
+
+    normalized_target, public_profile_status = _normalize_initial_public_profile_mounts(
+        source, target, target_config,
+    )
+    if normalized_target is None:
+        return {
+            "changed": True,
+            "reason": public_profile_status,
+            "changed_components": _changed_layout_fields(source, target),
+            "public_profile": public_profile_status,
+        }
+
+    changed_components = _changed_layout_fields(source, normalized_target)
+    changed = layout_changed(source, normalized_target)
+    if not changed:
+        reason = "approved_layout"
+    else:
+        reason = "persistent_layout_mismatch"
+    return {
+        "changed": changed,
+        "reason": reason,
+        "changed_components": changed_components,
+        "public_profile": public_profile_status,
+    }
 
 
 def ordinary_rollout_layout_changed(
@@ -583,26 +660,7 @@ def ordinary_rollout_layout_changed(
     target: dict[str, object],
     target_config: dict[str, object],
 ) -> bool:
-    if source == target:
-        return False
-    if target_config.get("name") != TARGET_PROJECT:
-        return True
-    services = target_config.get("services")
-    service = services.get(TARGET_SERVER) if isinstance(services, dict) else None
-    environment = service.get("environment") if isinstance(service, dict) else None
-    volumes = service.get("volumes") if isinstance(service, dict) else None
-    if not isinstance(environment, dict) or not isinstance(volumes, list):
-        return True
-    if environment.get("TG_MEDIA_KEY_DIR") != "/run/teagramd/media-keys":
-        return True
-    current_version = environment.get("TG_MEDIA_KEY_CURRENT")
-    if current_version != "1":
-        return True
-
-    normalized_target = _without_initial_public_profile_mounts(source, target, target_config)
-    if normalized_target is None:
-        return True
-    return layout_changed(source, normalized_target)
+    return bool(ordinary_rollout_layout_diagnostics(source, target, target_config)["changed"])
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
@@ -1953,8 +2011,12 @@ def inspect(args: argparse.Namespace) -> None:
         source_layout = layout(source, source_server_name)
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
+        layout_diagnostics = ordinary_rollout_layout_diagnostics(
+            source_layout, target_layout, target,
+        )
         print(json.dumps({
-            "changed": ordinary_rollout_layout_changed(source_layout, target_layout, target),
+            "changed": layout_diagnostics["changed"],
+            "layout_diagnostics": layout_diagnostics,
             "source": source_layout,
             "target": target_layout,
             "source_database": database_name(source),

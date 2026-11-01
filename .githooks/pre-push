@@ -30,9 +30,9 @@ done
 base_ref="${GIT_HOOK_BASE_REF:-}"
 if [[ -z "$base_ref" ]]; then
   base_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
-  if [[ -z "$base_ref" ]] && git rev-parse --verify --quiet origin/main^{commit} >/dev/null; then
+  if [[ -z "$base_ref" ]] && git rev-parse --verify --quiet "origin/main^{commit}" >/dev/null; then
     base_ref=origin/main
-  elif [[ -z "$base_ref" ]] && git rev-parse --verify --quiet main^{commit} >/dev/null; then
+  elif [[ -z "$base_ref" ]] && git rev-parse --verify --quiet "main^{commit}" >/dev/null; then
     base_ref=main
   fi
 fi
@@ -195,11 +195,7 @@ else
     local_sha="${local_shas[$index]}"
     remote_sha="${remote_shas[$index]}"
     [[ "$local_sha" == "$remote_sha" ]] && continue
-    if [[ "$remote_sha" =~ ^0+$ ]]; then
-      commit_range="$base_ref..$local_sha"
-    else
-      commit_range="$remote_sha..$local_sha"
-    fi
+    commit_range="$base_ref..$local_sha"
     gitleaks git --no-banner --log-opts="$commit_range"
   done
 fi
