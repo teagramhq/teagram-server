@@ -393,15 +393,19 @@ func (h *handlers) handleGetPeerDialogs(r *mtproto.Request) (bin.Encoder, error)
 func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialogsSnapshot, viewerID int64) (*tg.MessagesPeerDialogs, error) {
 	tlDialogs := make([]tg.DialogClass, 0, len(snapshot.Dialogs))
 	tlMsgs := make([]tg.MessageClass, 0, len(snapshot.Dialogs))
-	files := make(map[int64]tg.MessageMediaClass, len(snapshot.Files))
-	for id, file := range snapshot.Files {
-		files[id] = h.fileMediaToTL(file)
-	}
 	selectedMessages := make([]store.Message, 0, len(snapshot.Dialogs))
+	selectedChannelMessages := make([]store.ChannelMessage, 0, len(snapshot.Dialogs))
 	for _, selected := range snapshot.Dialogs {
 		if selected.Message != nil {
 			selectedMessages = append(selectedMessages, *selected.Message)
 		}
+		if selected.ChannelMessage != nil {
+			selectedChannelMessages = append(selectedChannelMessages, *selected.ChannelMessage)
+		}
+	}
+	media, err := h.messageReadMedia(ctx, snapshot.Files, selectedMessages, selectedChannelMessages)
+	if err != nil {
+		return nil, err
 	}
 	pollViews, err := h.pollViewsForMessages(ctx, viewerID, selectedMessages)
 	if err != nil {
@@ -459,17 +463,17 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 			}
 			if poll, ok := pollViews[selected.Message.LocalID]; ok {
-				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll)
+				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, media, nil, nil, poll)
 				if pollErr != nil {
 					return nil, pollErr
 				}
 				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
-				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, files, nil, nil, h.dcID))
+				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, media, nil, nil, h.dcID))
 			}
 		case selected.ChannelMessage != nil:
 			channel := snapshot.Channels[d.PeerID]
-			tlMessage, renderErr := h.channelMessageToTL(*selected.ChannelMessage, viewerID, files, !channel.Megagroup, h.dcID)
+			tlMessage, renderErr := h.channelMessageToTL(*selected.ChannelMessage, viewerID, media, !channel.Megagroup, h.dcID)
 			if renderErr != nil {
 				return nil, renderErr
 			}

@@ -895,6 +895,34 @@ type UserContact struct {
 	ContactID int64
 }
 
+type UserCreatedStickerSet struct {
+	ID         int64
+	AccessHash int64
+	CreatorID  int64
+	Title      string
+	ShortName  string
+	Software   string
+	Kind       string
+	TextColor  bool
+	ItemCount  int32
+	SetHash    int32
+	IsLive     bool
+	CreatedAt  pgtype.Timestamptz
+}
+
+type UserCreatedStickerSetItem struct {
+	SetID      int64
+	Position   int32
+	FileID     int64
+	Emoji      string
+	Keywords   string
+	Format     string
+	Width      int32
+	Height     int32
+	DurationNs int64
+	MaskCoords []byte
+}
+
 type UserDialogFilter struct {
 	OwnerID         int64
 	FilterID        int16

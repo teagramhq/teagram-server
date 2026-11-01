@@ -522,6 +522,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.4",
 		"messages_sendMedia.sticker.1",
 		"messages_sendMedia.gif.1",
+		"stickers_createStickerSet.1",
 		"messages_saveGif.1",
 		"messages_saveGif.2",
 		"messages_getSavedGifs.1",

@@ -69,8 +69,8 @@ later task.)
 
 ### Ordered message-search postings
 
-Migrations `20261031000002_message_search_postings.sql` and
-`20261031000003_message_search_postings_readiness.sql` add an ordered lexeme
+Migrations `20261101000001_message_search_postings.sql` and
+`20261101000002_message_search_postings_readiness.sql` add an ordered lexeme
 posting table, per-dialog lexeme counts, and a marker table for dialogs whose
 existing history has not been initialized. The first migration installs and
 commits the message-write triggers; the second takes the readiness snapshot in
