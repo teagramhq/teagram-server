@@ -105,9 +105,9 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 		`INSERT INTO users (id, phone, first_name)
 		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(1, 50099) n`,
 		`INSERT INTO user_contacts (owner_id, contact_id)
-		 SELECT 1, n FROM generate_series(2, 11) n`,
+		 SELECT 1, n FROM generate_series(2, 10001) n`,
 		`INSERT INTO user_contacts (owner_id, contact_id)
-		 SELECT n, 1 FROM generate_series(100, 50099) n`,
+		 SELECT n, 1 FROM generate_series(10002, 50099) n`,
 		`ANALYZE user_contacts`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -130,11 +130,11 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	if err != nil {
 		t.Fatalf("list contacts with users: %v", err)
 	}
-	if len(rows) != 10 {
-		t.Fatalf("contacts with users = %d rows, want 10", len(rows))
+	if len(rows) != 10000 {
+		t.Fatalf("contacts with users = %d rows, want 10000", len(rows))
 	}
-	if rows[0].Total != 10 {
-		t.Fatalf("contacts with users total = %d, want 10", rows[0].Total)
+	if rows[0].Total != 10000 {
+		t.Fatalf("contacts with users total = %d, want 10000", rows[0].Total)
 	}
 	for _, row := range rows {
 		if row.Mutual {
@@ -168,7 +168,7 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	// The full list, count, reverse probes, and photo filter may each read a
 	// contact row, but inbound fan-in must not add to that bound.
 	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 4*float64(len(rows)) {
-		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts despite 50,000 outsiders", rowsRead, len(rows))
+		t.Fatalf("contacts query read %.0f user_contacts rows for %d owned contacts despite 40,098 inbound edges", rowsRead, len(rows))
 	}
 }
 

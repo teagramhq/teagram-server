@@ -96,12 +96,7 @@ WITH visible_photos AS MATERIALIZED (
       )
 )
 SELECT uc.contact_id,
-       EXISTS (
-           SELECT 1
-           FROM user_contacts reverse
-           WHERE reverse.owner_id = uc.contact_id
-             AND reverse.contact_id = uc.owner_id
-       )::BOOLEAN AS mutual,
+       COALESCE(reverse_contact.mutual, false)::BOOLEAN AS mutual,
        (SELECT COUNT(*)
         FROM user_contacts count_contacts
         WHERE count_contacts.owner_id = $1::BIGINT) AS total,
@@ -114,6 +109,13 @@ SELECT uc.contact_id,
        u.kind,
        visible_photos.current_file_id AS photo_file_id
 FROM user_contacts uc
+LEFT JOIN LATERAL (
+    SELECT true AS mutual
+    FROM user_contacts reverse
+    WHERE reverse.contact_id = uc.owner_id
+      AND reverse.owner_id = uc.contact_id
+    LIMIT 1
+) AS reverse_contact ON true
 JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
