@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,13 +26,16 @@ const (
 )
 
 var (
-	ErrStickerDocumentInvalid = errors.New("sticker document invalid")
-	ErrStickerFileTooLarge    = errors.New("sticker file too large")
-	ErrStickerSetLimit        = errors.New("sticker set limit exceeded")
-	ErrStickerSetInstallLimit = errors.New("installed sticker set limit exceeded")
-	ErrStickerSetNameOccupied = errors.New("sticker set short name occupied")
-	ErrStickerFileAlreadyUsed = errors.New("sticker file already belongs to a set")
-	ErrStickerSetNotFound     = errors.New("sticker set not found")
+	ErrStickerDocumentInvalid      = errors.New("sticker document invalid")
+	ErrStickerFileTooLarge         = errors.New("sticker file too large")
+	ErrStickerSetLimit             = errors.New("sticker set limit exceeded")
+	ErrStickerSetInstallLimit      = errors.New("installed sticker set limit exceeded")
+	ErrStickerSetNameOccupied      = errors.New("sticker set short name occupied")
+	ErrStickerFileAlreadyUsed      = errors.New("sticker file already belongs to a set")
+	ErrStickerFileBlocked          = errors.New("sticker file content is blocked")
+	ErrStickerSetNotFound          = errors.New("sticker set not found")
+	ErrStickerSetStateConflict     = errors.New("sticker set is already in the requested state")
+	ErrStickerSetAdminInputInvalid = errors.New("invalid sticker set admin input")
 )
 
 // UserStickerSet is an account-created sticker set. Its items are ordered by
@@ -66,6 +70,17 @@ type UserStickerSetItem struct {
 	Height     int
 	Duration   int64
 	MaskCoords string
+}
+
+// StickerFileFingerprint is an opaque proof that the store read and hashed one
+// stored sticker file. It is accepted only by the Store that produced it.
+type StickerFileFingerprint struct {
+	store      *Store
+	fileID     int64
+	accessHash int64
+	size       int64
+	digest     [sha256.Size]byte
+	valid      bool
 }
 
 // StickerFileRef identifies a client-supplied file reference that must match
@@ -111,6 +126,23 @@ func (s *Store) StickerFilesForSet(ctx context.Context, ownerID int64, refs []St
 // ReadStickerFileForSet reads bytes only after StickerFilesForSet preflights
 // the full request. The blob key is always derived from the stored row.
 func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, error) {
+	return s.readStickerFileForSet(ctx, file)
+}
+
+// ReadStickerFileForSetWithFingerprint returns the validation bytes and a
+// store-derived fingerprint from the same blob read.
+func (s *Store) ReadStickerFileForSetWithFingerprint(ctx context.Context, file File) ([]byte, StickerFileFingerprint, error) {
+	data, err := s.readStickerFileForSet(ctx, file)
+	if err != nil {
+		return nil, StickerFileFingerprint{}, err
+	}
+	return data, StickerFileFingerprint{
+		store: s, fileID: file.ID, accessHash: file.AccessHash, size: file.Size,
+		digest: sha256.Sum256(data), valid: true,
+	}, nil
+}
+
+func (s *Store) readStickerFileForSet(ctx context.Context, file File) ([]byte, error) {
 	if file.ID <= 0 || !file.Stored || file.Size <= 0 || s.withoutBlobStore {
 		return nil, ErrStickerDocumentInvalid
 	}
@@ -127,10 +159,11 @@ func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, e
 	return data, nil
 }
 
-// CreateUserStickerSet uses the M17 file-reference interlock before adding any
-// set item. The per-owner row serializes the account limit; file locks are
-// acquired in ascending order and are the final lock class in this write.
-func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem) (UserStickerSet, error) {
+// CreateUserStickerSet accepts only fingerprints produced by this store's
+// validation reads, then locks the owner row, takedown interlock, and file
+// references in ascending order before revalidating files and publishing the
+// set. Callers cannot supply their own content hashes.
+func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem, fingerprints []StickerFileFingerprint) (UserStickerSet, error) {
 	maxItems := MaxUserStickerCount
 	if set.Kind == "emojis" {
 		maxItems = MaxUserEmojiCount
@@ -156,6 +189,19 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	if len(ascendingUnique(fileIDs)) != len(fileIDs) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
+	if len(fingerprints) != len(items) {
+		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+	contentHashes := make([][]byte, len(items))
+	fingerprints = append([]StickerFileFingerprint(nil), fingerprints...)
+	for i, item := range items {
+		fingerprint := fingerprints[i]
+		if !fingerprint.valid || fingerprint.store != s || fingerprint.fileID != item.FileID ||
+			fingerprint.accessHash != item.AccessHash || fingerprint.size != item.Size {
+			return UserStickerSet{}, ErrStickerDocumentInvalid
+		}
+		contentHashes[i] = fingerprint.digest[:]
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -167,6 +213,9 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	} else if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lock sticker set owner: %w", err)
+	}
+	if err = qtx.LockStickerTakedownInterlock(ctx); err != nil {
+		return UserStickerSet{}, fmt.Errorf("lock sticker takedown interlock: %w", err)
 	}
 	count, err := qtx.UserCreatedStickerSetCount(ctx, set.CreatorID)
 	if err != nil {
@@ -191,6 +240,20 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	}
 	if len(checkedFiles) != len(items) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+	for i, file := range checkedFiles {
+		fingerprint := fingerprints[i]
+		if file.ID != fingerprint.fileID || file.AccessHash != fingerprint.accessHash ||
+			file.Size != fingerprint.size || !file.Stored || file.UploaderID != set.CreatorID {
+			return UserStickerSet{}, ErrStickerDocumentInvalid
+		}
+	}
+	blocked, err := qtx.UserStickerBlockedContentExists(ctx, contentHashes)
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("check blocked sticker content: %w", err)
+	}
+	if blocked {
+		return UserStickerSet{}, ErrStickerFileBlocked
 	}
 
 	accessHash, err := newAccessHash()
@@ -222,16 +285,17 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 			maskCoords = []byte(item.MaskCoords)
 		}
 		rows, insertErr := qtx.InsertUserCreatedStickerSetItem(ctx, db.InsertUserCreatedStickerSetItemParams{
-			SetID:      set.ID,
-			Position:   int32(position),
-			FileID:     item.FileID,
-			Emoji:      item.Emoji,
-			Keywords:   item.Keywords,
-			Format:     item.Format,
-			Width:      int32(item.Width),  //nolint:gosec // Dimensions are validated as <=512 before the transaction.
-			Height:     int32(item.Height), //nolint:gosec // Dimensions are validated as <=512 before the transaction.
-			DurationNs: item.Duration,
-			MaskCoords: maskCoords,
+			SetID:         set.ID,
+			Position:      int32(position),
+			FileID:        item.FileID,
+			Emoji:         item.Emoji,
+			Keywords:      item.Keywords,
+			Format:        item.Format,
+			Width:         int32(item.Width),  //nolint:gosec // Dimensions are validated as <=512 before the transaction.
+			Height:        int32(item.Height), //nolint:gosec // Dimensions are validated as <=512 before the transaction.
+			DurationNs:    item.Duration,
+			MaskCoords:    maskCoords,
+			ContentSha256: contentHashes[position],
 		})
 		if insertErr != nil {
 			return UserStickerSet{}, fmt.Errorf("insert sticker set item: %w", insertErr)
@@ -259,6 +323,16 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 }
 
 func userStickerSetFromRow(row db.UserCreatedStickerSet) UserStickerSet {
+	return UserStickerSet{
+		ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
+		Title: row.Title, ShortName: row.ShortName, Software: row.Software,
+		Kind: row.Kind, TextColor: row.TextColor, ItemCount: int(row.ItemCount),
+		Hash: int(row.SetHash), IsLive: row.IsLive,
+		CreatedAt: row.CreatedAt.Time,
+	}
+}
+
+func userStickerSetFromLiveRow(row db.LiveUserCreatedStickerSet) UserStickerSet {
 	return UserStickerSet{
 		ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
 		Title: row.Title, ShortName: row.ShortName, Software: row.Software,
@@ -302,7 +376,7 @@ func (s *Store) UserStickerSetByShortName(ctx context.Context, shortName string)
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup user sticker set by name: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetByID requires the exact access hash and a live set.
@@ -314,7 +388,7 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup user sticker set by id: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetByInstalledID returns a live set for an account's install row.
@@ -326,7 +400,7 @@ func (s *Store) UserStickerSetByInstalledID(ctx context.Context, id int64) (User
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lookup installed user sticker set: %w", err)
 	}
-	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+	return s.userStickerSetWithItems(ctx, userStickerSetFromLiveRow(row))
 }
 
 // UserStickerSetSummariesByInstalledIDs loads live installed user-set metadata
@@ -348,7 +422,7 @@ func (s *Store) UserStickerSetSummariesByInstalledIDs(ctx context.Context, ids [
 		return nil, fmt.Errorf("lookup installed user sticker sets: %w", err)
 	}
 	for _, row := range rows {
-		set := userStickerSetFromRow(row)
+		set := userStickerSetFromLiveRow(row)
 		result[set.ID] = set
 	}
 	return result, nil

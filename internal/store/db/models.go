@@ -17,6 +17,17 @@ type AdminSession struct {
 	LastActivity     pgtype.Timestamptz
 }
 
+type AdminStickerSetEvent struct {
+	ID                 int64
+	Action             string
+	SetID              int64
+	SetTitle           string
+	SetShortName       string
+	Reason             string
+	SessionFingerprint []byte
+	CreatedAt          pgtype.Timestamptz
+}
+
 type AuthKey struct {
 	ID               int64
 	KeyValue         []byte
@@ -523,6 +534,21 @@ type LanguageCatalogVersion struct {
 	PublishedAt    pgtype.Timestamptz
 }
 
+type LiveUserCreatedStickerSet struct {
+	ID         int64
+	AccessHash int64
+	CreatorID  int64
+	Title      string
+	ShortName  string
+	Software   string
+	Kind       string
+	TextColor  bool
+	ItemCount  int32
+	SetHash    int32
+	IsLive     bool
+	CreatedAt  pgtype.Timestamptz
+}
+
 type Message struct {
 	OwnerID           int64
 	LocalID           int64
@@ -889,16 +915,17 @@ type UserCreatedStickerSet struct {
 }
 
 type UserCreatedStickerSetItem struct {
-	SetID      int64
-	Position   int32
-	FileID     int64
-	Emoji      string
-	Keywords   string
-	Format     string
-	Width      int32
-	Height     int32
-	DurationNs int64
-	MaskCoords []byte
+	SetID         int64
+	Position      int32
+	FileID        int64
+	Emoji         string
+	Keywords      string
+	Format        string
+	Width         int32
+	Height        int32
+	DurationNs    int64
+	MaskCoords    []byte
+	ContentSha256 []byte
 }
 
 type UserDialogFilter struct {

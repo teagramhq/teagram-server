@@ -444,6 +444,9 @@ func AdminRouter(cfg LoginHandlerConfig, registry *mtproto.SessionRegistry) http
 	}
 	registerProtected("GET /admin/metrics", HandlerWithSnapshotCache(metricsCache))
 	registerProtected("GET /admin/dashboard", DashboardHandlerWithSnapshotCache(metricsCache, cfg.TokenHash))
+	registerProtected("GET /admin/sticker-sets", adminStickerSetsGET(cfg))
+	registerProtected("POST /admin/sticker-sets/takedown", adminStickerSetAction(cfg, "takedown"))
+	registerProtected("POST /admin/sticker-sets/restore", adminStickerSetAction(cfg, "restore"))
 	registerProtected("GET /admin/events", EventsHandlerWithAuth(cfg.Events, AdminMiddlewareConfig{
 		Store:     cfg.Store,
 		TokenHash: cfg.TokenHash,

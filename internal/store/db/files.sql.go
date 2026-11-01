@@ -429,8 +429,8 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
           SELECT 1 FROM user_created_sticker_set_items i
-          JOIN user_created_sticker_sets s ON s.id = i.set_id
-          WHERE i.file_id = f.id AND s.is_live = true
+          JOIN live_user_created_sticker_sets s ON s.id = i.set_id
+          WHERE i.file_id = f.id
       )
       OR (
           NOT EXISTS (
