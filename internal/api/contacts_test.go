@@ -590,6 +590,123 @@ func TestContactsGetContactsIncludesCurrentProfilePhoto(t *testing.T) {
 	}
 }
 
+func TestContactsGetContactsHidesIneligibleCurrentProfilePhoto(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		prepare           func(*testing.T, *galleryFixture)
+		requiredPredicate string
+	}{
+		{
+			name: "owner blocked viewer",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				f.block(t, f.owner, f.viewer)
+			},
+		},
+		{
+			name:              "file is not stored",
+			requiredPredicate: "f.stored = true",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				// The file metadata constraint disallows photo-kind rows unless
+				// stored=true, so use a pending allocation and pin the SQL guard.
+				pending, err := f.s.AllocateFile(context.Background(), f.owner, 10, "image/jpeg",
+					"avatar.jpg", api.TestMaxUserStorageBytes)
+				if err != nil {
+					t.Fatalf("allocate unstored profile photo: %v", err)
+				}
+				f.addEntry(t, f.owner, pending.ID)
+				f.selectCurrentPhoto(t, f.owner, pending.ID)
+			},
+		},
+		{
+			name:              "stored file is not a photo",
+			requiredPredicate: "f.media_kind = 'photo'",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				document, err := f.s.AllocateFile(context.Background(), f.owner, 10, "application/octet-stream",
+					"avatar.bin", api.TestMaxUserStorageBytes)
+				if err != nil {
+					t.Fatalf("allocate profile document: %v", err)
+				}
+				if err := f.s.MarkFileStored(context.Background(), document.ID); err != nil {
+					t.Fatalf("mark profile document stored: %v", err)
+				}
+				f.addEntry(t, f.owner, document.ID)
+				f.selectCurrentPhoto(t, f.owner, document.ID)
+			},
+		},
+		{
+			name: "gallery photo is not current",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				tag, err := f.writer().Exec(context.Background(), `
+UPDATE profile_photo_state
+SET current_file_id = NULL
+WHERE user_id = $1 AND current_file_id = $2`, f.owner, f.photoID)
+				if err != nil {
+					t.Fatalf("clear current profile photo: %v", err)
+				}
+				if tag.RowsAffected() != 1 {
+					t.Fatalf("clear current profile photo affected %d rows, want 1", tag.RowsAffected())
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			queries := &contactQueryCapture{}
+			s, dsn := openStoreDSNWithOptions(t, store.WithQueryTracer(queries))
+			f := newGalleryFixtureWithStore(t, s, dsn, "+15551970931", "+15551970932")
+			f.selectCurrentPhoto(t, f.owner, f.photoID)
+			if changed, err := s.AddContact(ctx, f.viewer, f.owner); err != nil || !changed {
+				t.Fatalf("add photo owner as contact: changed=%v err=%v", changed, err)
+			}
+			tc.prepare(t, f)
+
+			queries.reset()
+			result, err := api.GetContactsForTest(s, f.viewer, &tg.ContactsGetContactsRequest{})
+			if err != nil {
+				t.Fatalf("get contacts: %v", err)
+			}
+			full, ok := result.(*tg.ContactsContacts)
+			if !ok || len(full.Users) != 1 {
+				t.Fatalf("contacts response = %#v, want one contact user", result)
+			}
+			user, ok := full.Users[0].(*tg.User)
+			if !ok || user.ID != f.owner {
+				t.Fatalf("contact user = %#v, want owner %d", full.Users[0], f.owner)
+			}
+			photo, hasPhoto := user.GetPhoto()
+			if profile, ok := photo.(*tg.UserProfilePhoto); ok {
+				t.Fatalf("contact profile photo = %+v, want no UserProfilePhoto", profile)
+			}
+			if hasPhoto {
+				t.Fatalf("contact photo = %T, want no photo", photo)
+			}
+			if tc.requiredPredicate != "" {
+				found := false
+				for _, query := range queries.snapshot() {
+					if strings.Contains(query, "-- name: ContactsWithUsers :many") {
+						found = true
+						if !strings.Contains(query, tc.requiredPredicate) {
+							t.Fatalf("contacts hydration query is missing gate %q", tc.requiredPredicate)
+						}
+						break
+					}
+				}
+				if !found {
+					t.Fatal("contacts hydration query was not issued")
+				}
+			}
+		})
+	}
+}
+
 func TestContactsGetContactsReusesLoadedContactState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
