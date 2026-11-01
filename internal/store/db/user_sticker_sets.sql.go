@@ -381,9 +381,11 @@ const lockStickerTakedownInterlock = `-- name: LockStickerTakedownInterlock :exe
 SELECT pg_advisory_xact_lock(1145132116, 237731251)
 `
 
-// The content fingerprint check and a takedown's hash publication share this
-// transaction-scoped advisory lock. Sticker-set creation takes it before its
-// final hash check, so a concurrent takedown cannot miss an in-flight upload.
+// Lock order for sticker-set writes is owner users FOR UPDATE, this interlock,
+// set-row locks, then file-reference locks in ascending file ID order. A path
+// may omit a class but must not acquire an earlier class after a later one.
+// Fingerprinting is done before opening the transaction; this lock serializes
+// the final blocked-content check with takedown hash publication.
 func (q *Queries) LockStickerTakedownInterlock(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, lockStickerTakedownInterlock)
 	return err

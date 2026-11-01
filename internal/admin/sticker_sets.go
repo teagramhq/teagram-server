@@ -263,7 +263,9 @@ func adminStickerSetAction(cfg LoginHandlerConfig, action string) http.HandlerFu
 			case errors.Is(err, store.ErrStickerSetStateConflict):
 				http.Error(w, "sticker set is already in that state", http.StatusConflict)
 			case errors.Is(err, store.ErrStickerDocumentInvalid):
-				http.Error(w, "sticker set files are unavailable", http.StatusConflict)
+				message := "sticker set " + ref.String() + " files are unavailable"
+				adminStickerSetLog(cfg).Error(message, "action", action, "set_ref", ref.String(), "err", err)
+				http.Error(w, message, http.StatusConflict)
 			default:
 				adminStickerSetLog(cfg).Error("change user sticker set state", "action", action, "err", err)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -298,7 +300,7 @@ func parseAdminStickerSetRef(form map[string][]string) (store.StickerSetAdminRef
 	idValues := form["id"]
 	shortNameValues := form["short_name"]
 	if len(idValues) > 1 || len(shortNameValues) > 1 {
-		return store.StickerSetAdminRef{}, false
+		return nil, false
 	}
 	idText := ""
 	if len(idValues) == 1 {
@@ -309,19 +311,21 @@ func parseAdminStickerSetRef(form map[string][]string) (store.StickerSetAdminRef
 		shortName = strings.TrimSpace(shortNameValues[0])
 	}
 	if idText != "" && shortName != "" {
-		return store.StickerSetAdminRef{}, false
+		return nil, false
 	}
 	if idText != "" {
 		id, err := strconv.ParseInt(idText, 10, 64)
 		if err != nil || id <= 0 {
-			return store.StickerSetAdminRef{}, false
+			return nil, false
 		}
-		return store.StickerSetAdminRef{ID: id}, true
+		ref, err := store.StickerSetAdminRefByID(id)
+		return ref, err == nil
 	}
 	if shortName == "" || len(shortName) > 64 {
-		return store.StickerSetAdminRef{}, false
+		return nil, false
 	}
-	return store.StickerSetAdminRef{ShortName: shortName}, true
+	ref, err := store.StickerSetAdminRefByShortName(shortName)
+	return ref, err == nil
 }
 
 func adminStickerSetNotice(value string) string {

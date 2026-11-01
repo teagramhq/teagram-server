@@ -58,19 +58,18 @@ type UserStickerSet struct {
 
 // UserStickerSetItem is one stored document in an account-created set.
 type UserStickerSetItem struct {
-	Position      int
-	FileID        int64
-	AccessHash    int64
-	ContentSHA256 []byte
-	Size          int64
-	Date          time.Time
-	Emoji         string
-	Keywords      string
-	Format        string
-	Width         int
-	Height        int
-	Duration      int64
-	MaskCoords    string
+	Position   int
+	FileID     int64
+	AccessHash int64
+	Size       int64
+	Date       time.Time
+	Emoji      string
+	Keywords   string
+	Format     string
+	Width      int
+	Height     int
+	Duration   int64
+	MaskCoords string
 }
 
 // StickerFileRef identifies a client-supplied file reference that must match
@@ -132,9 +131,10 @@ func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, e
 	return data, nil
 }
 
-// CreateUserStickerSet uses the M17 file-reference interlock before adding any
-// set item. The per-owner row serializes the account limit; file locks are
-// acquired in ascending order and are the final lock class in this write.
+// CreateUserStickerSet reads and fingerprints the referenced blobs before its
+// write transaction. The transaction then locks the owner row, takedown
+// interlock, and file references in ascending order before revalidating files
+// and publishing the set.
 func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem) (UserStickerSet, error) {
 	maxItems := MaxUserStickerCount
 	if set.Kind == "emojis" {
@@ -160,6 +160,33 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	}
 	if len(ascendingUnique(fileIDs)) != len(fileIDs) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+
+	preflightFiles, err := s.q.StickerFilesForOwner(ctx, db.StickerFilesForOwnerParams{
+		FileIds: fileIDs, UploaderID: set.CreatorID, AccessHashes: accessHashes,
+	})
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("preflight sticker file references: %w", err)
+	}
+	if len(preflightFiles) != len(items) {
+		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+	contentHashes := make([][]byte, len(items))
+	for i, item := range items {
+		fileRow := preflightFiles[i]
+		if fileRow.ID != item.FileID || fileRow.AccessHash != item.AccessHash || fileRow.Size != item.Size {
+			return UserStickerSet{}, ErrStickerDocumentInvalid
+		}
+		data, readErr := s.ReadStickerFileForSet(ctx, fileFromRow(fileRow))
+		if readErr != nil {
+			wrappedErr := fmt.Errorf("read sticker file %d for content fingerprint: %w", item.FileID, readErr)
+			if errors.Is(readErr, blob.ErrNotFound) || errors.Is(readErr, ErrStickerDocumentInvalid) {
+				return UserStickerSet{}, fmt.Errorf("%w: %w", ErrStickerDocumentInvalid, wrappedErr)
+			}
+			return UserStickerSet{}, wrappedErr
+		}
+		digest := sha256.Sum256(data)
+		contentHashes[i] = digest[:]
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -200,28 +227,12 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	if len(checkedFiles) != len(items) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
-	filesByID := make(map[int64]db.File, len(checkedFiles))
-	for _, file := range checkedFiles {
-		filesByID[file.ID] = file
-	}
-	contentHashes := make([][]byte, len(items))
-	for i := range items {
-		if len(items[i].ContentSHA256) == 0 {
-			fileRow, ok := filesByID[items[i].FileID]
-			if !ok {
-				return UserStickerSet{}, ErrStickerDocumentInvalid
-			}
-			data, readErr := s.ReadStickerFileForSet(ctx, fileFromRow(fileRow))
-			if readErr != nil {
-				return UserStickerSet{}, fmt.Errorf("read sticker file %d for content fingerprint: %w", items[i].FileID, readErr)
-			}
-			digest := sha256.Sum256(data)
-			items[i].ContentSHA256 = digest[:]
-		}
-		if len(items[i].ContentSHA256) != sha256.Size {
+	for i, file := range checkedFiles {
+		preflight := preflightFiles[i]
+		if file.ID != preflight.ID || file.AccessHash != preflight.AccessHash ||
+			file.Size != preflight.Size || file.Stored != preflight.Stored || file.UploaderID != preflight.UploaderID {
 			return UserStickerSet{}, ErrStickerDocumentInvalid
 		}
-		contentHashes[i] = items[i].ContentSHA256
 	}
 	blocked, err := qtx.UserStickerBlockedContentExists(ctx, contentHashes)
 	if err != nil {
@@ -270,7 +281,7 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 			Height:        int32(item.Height), //nolint:gosec // Dimensions are validated as <=512 before the transaction.
 			DurationNs:    item.Duration,
 			MaskCoords:    maskCoords,
-			ContentSha256: item.ContentSHA256,
+			ContentSha256: contentHashes[position],
 		})
 		if insertErr != nil {
 			return UserStickerSet{}, fmt.Errorf("insert sticker set item: %w", insertErr)

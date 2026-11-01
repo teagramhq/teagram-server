@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -345,9 +344,8 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 			}
 			return nil, nil, errStickerDocumentInvalid
 		}
-		contentSHA256 := sha256.Sum256(data)
 		items = append(items, store.UserStickerSetItem{
-			FileID: file.ID, AccessHash: file.AccessHash, ContentSHA256: contentSHA256[:], Size: file.Size, Date: file.Date,
+			FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size, Date: file.Date,
 			Emoji: input.Emoji, Keywords: keywordsByPosition[position], Format: string(metadata.Format),
 			Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskCoordsByPosition[position],
 		})

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -40,9 +41,35 @@ type AdminStickerSetEvent struct {
 }
 
 // StickerSetAdminRef selects one set by its database ID or short name.
-type StickerSetAdminRef struct {
-	ID        int64
-	ShortName string
+type StickerSetAdminRef interface {
+	stickerSetAdminRef()
+	String() string
+}
+
+type stickerSetAdminRefID struct{ id int64 }
+
+func (stickerSetAdminRefID) stickerSetAdminRef() {}
+func (ref stickerSetAdminRefID) String() string  { return fmt.Sprintf("id:%d", ref.id) }
+
+type stickerSetAdminRefShortName struct{ shortName string }
+
+func (stickerSetAdminRefShortName) stickerSetAdminRef() {}
+func (ref stickerSetAdminRefShortName) String() string  { return "short_name:" + ref.shortName }
+
+// StickerSetAdminRefByID builds a reference to a sticker set by database ID.
+func StickerSetAdminRefByID(id int64) (StickerSetAdminRef, error) {
+	if id <= 0 {
+		return nil, ErrStickerSetAdminInputInvalid
+	}
+	return stickerSetAdminRefID{id: id}, nil
+}
+
+// StickerSetAdminRefByShortName builds a reference to a sticker set by short name.
+func StickerSetAdminRefByShortName(shortName string) (StickerSetAdminRef, error) {
+	if shortName == "" || len(shortName) > 64 {
+		return nil, ErrStickerSetAdminInputInvalid
+	}
+	return stickerSetAdminRefShortName{shortName: shortName}, nil
 }
 
 type stickerSetContentFingerprint struct {
@@ -142,10 +169,13 @@ func (s *Store) setUserStickerSetLive(
 	}
 
 	var row db.UserCreatedStickerSet
-	if ref.ID != 0 {
-		row, err = qtx.AdminLockUserStickerSetByID(ctx, ref.ID)
-	} else {
-		row, err = qtx.AdminLockUserStickerSetByShortName(ctx, ref.ShortName)
+	switch setRef := ref.(type) {
+	case stickerSetAdminRefID:
+		row, err = qtx.AdminLockUserStickerSetByID(ctx, setRef.id)
+	case stickerSetAdminRefShortName:
+		row, err = qtx.AdminLockUserStickerSetByShortName(ctx, setRef.shortName)
+	default:
+		return ErrStickerSetAdminInputInvalid
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrStickerSetNotFound
@@ -211,10 +241,13 @@ func (s *Store) stickerSetTakedownFingerprints(
 ) (db.UserCreatedStickerSet, []stickerSetContentFingerprint, error) {
 	var row db.UserCreatedStickerSet
 	var err error
-	if ref.ID != 0 {
-		row, err = s.q.AdminReadUserStickerSetByID(ctx, ref.ID)
-	} else {
-		row, err = s.q.AdminReadUserStickerSetByShortName(ctx, ref.ShortName)
+	switch setRef := ref.(type) {
+	case stickerSetAdminRefID:
+		row, err = s.q.AdminReadUserStickerSetByID(ctx, setRef.id)
+	case stickerSetAdminRefShortName:
+		row, err = s.q.AdminReadUserStickerSetByShortName(ctx, setRef.shortName)
+	default:
+		return db.UserCreatedStickerSet{}, nil, ErrStickerSetAdminInputInvalid
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return db.UserCreatedStickerSet{}, nil, ErrStickerSetNotFound
@@ -237,7 +270,11 @@ func (s *Store) stickerSetTakedownFingerprints(
 		file := File{ID: item.FileID, AccessHash: item.AccessHash, Size: item.Size, Stored: item.Stored}
 		data, readErr := s.ReadStickerFileForSet(ctx, file)
 		if readErr != nil {
-			return db.UserCreatedStickerSet{}, nil, fmt.Errorf("read file %d while taking down sticker set %d: %w", item.FileID, row.ID, readErr)
+			wrappedErr := fmt.Errorf("read file %d while taking down sticker set %d: %w", item.FileID, row.ID, readErr)
+			if errors.Is(readErr, blob.ErrNotFound) || errors.Is(readErr, ErrStickerDocumentInvalid) {
+				return db.UserCreatedStickerSet{}, nil, fmt.Errorf("%w: %w", ErrStickerDocumentInvalid, wrappedErr)
+			}
+			return db.UserCreatedStickerSet{}, nil, wrappedErr
 		}
 		fingerprints[i] = stickerSetContentFingerprint{
 			fileID: item.FileID, accessHash: item.AccessHash, size: item.Size, stored: item.Stored,
@@ -248,7 +285,14 @@ func (s *Store) stickerSetTakedownFingerprints(
 }
 
 func validStickerSetAdminRef(ref StickerSetAdminRef) bool {
-	return (ref.ID > 0 && ref.ShortName == "") || (ref.ID == 0 && ref.ShortName != "" && len(ref.ShortName) <= 64)
+	switch setRef := ref.(type) {
+	case stickerSetAdminRefID:
+		return setRef.id > 0
+	case stickerSetAdminRefShortName:
+		return setRef.shortName != "" && len(setRef.shortName) <= 64
+	default:
+		return false
+	}
 }
 
 func validStickerSetAuditReason(reason string) bool {
