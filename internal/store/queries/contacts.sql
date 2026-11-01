@@ -36,7 +36,8 @@ ORDER BY uc.contact_id;
 -- name: ContactsWithUsers :many
 -- Load the full contact page, user records, and visible current photos
 -- together. Mutual state is limited to the viewer's contact IDs, and photos
--- retain the live gallery, stored-file, media-kind, and block checks.
+-- retain the live gallery, stored-file, media-kind, and block checks. Store
+-- restores contact-ID order, so this query avoids sorting the wide result.
 WITH owned_contacts AS MATERIALIZED (
     SELECT contact_id
     FROM user_contacts
@@ -68,7 +69,6 @@ visible_photos AS MATERIALIZED (
 SELECT uc.contact_id,
        (mutual_contacts.contact_id IS NOT NULL)::BOOLEAN AS mutual,
        (SELECT COUNT(*) FROM owned_contacts) AS total,
-       u.id,
        u.first_name,
        u.last_name,
        u.is_online,
@@ -81,8 +81,7 @@ LEFT JOIN mutual_contacts ON mutual_contacts.contact_id = uc.contact_id
 JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
-WHERE uc.owner_id = sqlc.arg(owner_id)::BIGINT
-ORDER BY uc.contact_id;
+WHERE uc.owner_id = sqlc.arg(owner_id)::BIGINT;
 
 -- name: ContactStates :many
 -- Use a join for the reciprocal edge so the bounded selected contacts drive

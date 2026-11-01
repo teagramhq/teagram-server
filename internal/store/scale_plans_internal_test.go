@@ -117,7 +117,7 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 	for _, sql := range []string{
 		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
 		`INSERT INTO users (id, phone, first_name)
-		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(1, 50099) n`,
+		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(50099, 1, -1) n`,
 		`INSERT INTO user_contacts (owner_id, contact_id)
 		 SELECT 1, n FROM generate_series(2, 10001) n`,
 		`INSERT INTO user_contacts (owner_id, contact_id) VALUES (2, 1)`,
@@ -141,20 +141,27 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 		t.Fatal(err)
 	}
 	defer traced.Close()
-	rows, err := db.New(traced).ContactsWithUsers(ctx, 1)
+	store := &Store{pool: traced, q: db.New(traced)}
+	rows, total, err := store.ContactsWithUsers(ctx, 1)
 	if err != nil {
 		t.Fatalf("list contacts with users: %v", err)
 	}
 	if len(rows) != 10000 {
 		t.Fatalf("contacts with users = %d rows, want 10000", len(rows))
 	}
-	if rows[0].Total != 10000 {
-		t.Fatalf("contacts with users total = %d, want 10000", rows[0].Total)
+	if total != 10000 {
+		t.Fatalf("contacts with users total = %d, want 10000", total)
 	}
 	for _, row := range rows {
-		wantMutual := row.ContactID == 2
-		if row.Mutual != wantMutual {
-			t.Errorf("contact %d mutual = %t, want %t", row.ContactID, row.Mutual, wantMutual)
+		wantMutual := row.Contact.UserID == 2
+		if row.Contact.Mutual != wantMutual {
+			t.Errorf("contact %d mutual = %t, want %t", row.Contact.UserID, row.Contact.Mutual, wantMutual)
+		}
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Contact.UserID >= rows[i].Contact.UserID {
+			t.Fatalf("contacts are not in ascending ID order at index %d: %d then %d", i,
+				rows[i-1].Contact.UserID, rows[i].Contact.UserID)
 		}
 	}
 

@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -277,9 +279,9 @@ func (s *Store) Contacts(ctx context.Context, ownerID int64) ([]Contact, int, er
 }
 
 // ContactsWithUsers loads a full contact page, user records, and visible
-// current profile photos in one query. It is intended for full-list responses;
-// hash-only checks should use Contacts so they do not hydrate users
-// unnecessarily.
+// current profile photos in one query. Results are ordered by contact ID for
+// deterministic contacts hashes. Hash-only checks should use Contacts so they
+// do not hydrate users unnecessarily.
 func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactWithUser, int, error) {
 	rows, err := s.q.ContactsWithUsers(ctx, ownerID)
 	if err != nil {
@@ -301,7 +303,7 @@ func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]Contact
 		contacts[i] = ContactWithUser{
 			Contact: Contact{UserID: row.ContactID, Mutual: row.Mutual},
 			User: UserFromDB(db.UserByIDRow{
-				ID:         row.ID,
+				ID:         row.ContactID,
 				FirstName:  row.FirstName,
 				LastName:   row.LastName,
 				IsOnline:   row.IsOnline,
@@ -312,6 +314,9 @@ func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]Contact
 			PhotoID: photoID,
 		}
 	}
+	slices.SortFunc(contacts, func(a, b ContactWithUser) int {
+		return cmp.Compare(a.Contact.UserID, b.Contact.UserID)
+	})
 	return contacts, total, nil
 }
 
