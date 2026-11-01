@@ -79,6 +79,82 @@ func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
 	}
 }
 
+func TestContactsWithUsersBoundsReverseEdgeReadsToOwnedContacts(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(1, 50099) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 11) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT n, 1 FROM generate_series(100, 50099) n`,
+		`ANALYZE user_contacts`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed contacts mutual-edge plan: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	rows, err := db.New(traced).ContactsWithUsers(ctx, 1)
+	if err != nil {
+		t.Fatalf("list contacts with users: %v", err)
+	}
+	if len(rows) != 10 {
+		t.Fatalf("contacts with users = %d rows, want 10", len(rows))
+	}
+	if rows[0].Total != 10 {
+		t.Fatalf("contacts with users total = %d, want 10", rows[0].Total)
+	}
+	for _, row := range rows {
+		if row.Mutual {
+			t.Errorf("outsider %d was marked mutual", row.ContactID)
+		}
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contacts with users query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contacts query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contacts with users: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	if rowsRead := plans[0].Plan.rowsReadFrom("user_contacts"); rowsRead > 20 {
+		t.Fatalf("contacts query read %.0f user_contacts rows for 10 owned contacts despite 50,000 outsiders", rowsRead)
+	}
+}
+
 func (p scalePlan) recordRelations(seen map[string]bool) {
 	if p.Relation != "" {
 		seen[p.Relation] = true

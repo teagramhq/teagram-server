@@ -75,11 +75,7 @@ func (q *Queries) ContactStates(ctx context.Context, arg ContactStatesParams) ([
 }
 
 const contactsWithUsers = `-- name: ContactsWithUsers :many
-WITH mutual_contacts AS MATERIALIZED (
-    SELECT reverse.owner_id
-    FROM user_contacts reverse
-    WHERE reverse.contact_id = $1::BIGINT
-), visible_photos AS MATERIALIZED (
+WITH visible_photos AS MATERIALIZED (
     SELECT s.user_id, s.current_file_id
     FROM profile_photo_state s
     JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
@@ -100,7 +96,12 @@ WITH mutual_contacts AS MATERIALIZED (
       )
 )
 SELECT uc.contact_id,
-       (mutual_contacts.owner_id IS NOT NULL)::BOOLEAN AS mutual,
+       EXISTS (
+           SELECT 1
+           FROM user_contacts reverse
+           WHERE reverse.owner_id = uc.contact_id
+             AND reverse.contact_id = uc.owner_id
+       )::BOOLEAN AS mutual,
        COUNT(*) OVER () AS total,
        u.id,
        u.first_name,
@@ -113,7 +114,6 @@ SELECT uc.contact_id,
 FROM user_contacts uc
 JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
-LEFT JOIN mutual_contacts ON mutual_contacts.owner_id = uc.contact_id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
 WHERE uc.owner_id = $1::BIGINT
 ORDER BY uc.contact_id
@@ -134,8 +134,8 @@ type ContactsWithUsersRow struct {
 }
 
 // Load the full contact page, user records, and visible current photos
-// together. Incoming edges use the reverse contact index, and photos retain
-// the live gallery, stored-file, media-kind, and block checks.
+// together. Mutual state probes the reverse edge per returned contact, and
+// photos retain the live gallery, stored-file, media-kind, and block checks.
 func (q *Queries) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactsWithUsersRow, error) {
 	rows, err := q.db.Query(ctx, contactsWithUsers, ownerID)
 	if err != nil {
