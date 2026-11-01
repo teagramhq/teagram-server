@@ -54,12 +54,31 @@ env:
   PERF_HISTORY: ${{ github.workspace }}/.perf-history
 
 jobs:
+  ops-gate-pr-during-main:
+    name: 'ops: gate-pr-during-main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Defer pull request checks while main CI is active
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/gate-pr-checks-during-main.sh
+
   # Main always looks up and refills the snapshot cache, even when its public
   # release already exists. V2 adds seed provenance; v1 caches predate that
   # metadata and cannot be published safely. PRs prefer v2, reuse v1 for
   # measurement only, and seed when both miss.
   test-perf-fixture-snapshot:
     name: 'test: perf-fixture-snapshot'
+    needs: ops-gate-pr-during-main
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 150
@@ -261,8 +280,10 @@ jobs:
   # the server's CI.
   test-rpc-performance:
     name: 'test: rpc-performance'
-    needs: test-perf-fixture-snapshot
-    if: ${{ !cancelled() && needs.test-perf-fixture-snapshot.result != 'failure' }}
+    needs:
+      - ops-gate-pr-during-main
+      - test-perf-fixture-snapshot
+    if: ${{ !cancelled() && needs.ops-gate-pr-during-main.result == 'success' && needs.test-perf-fixture-snapshot.result != 'failure' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 150
     permissions:
