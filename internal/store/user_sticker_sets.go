@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -22,6 +23,7 @@ const (
 	MaxUserStickerCount          = 120
 	MaxUserEmojiCount            = 200
 	MaxStoredStickerBytes        = 512 << 10
+	minUserStickerSetSearchRunes = 3
 )
 
 var (
@@ -325,9 +327,11 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 }
 
 // UserStickerSetSearchCandidates returns at most 50 live identities matching
-// the query. Callers must bulk-resolve them before exposing any metadata.
+// queries long enough to produce trigrams. Shorter queries are rejected to
+// avoid scanning every live set. Callers must bulk-resolve candidates before
+// exposing any metadata.
 func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
-	if query == "" {
+	if utf8.RuneCountInString(query) < minUserStickerSetSearchRunes {
 		return []UserStickerSetSearchCandidate{}, nil
 	}
 	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, escapeStickerSetSearchQuery(query))
