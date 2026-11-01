@@ -30,8 +30,8 @@ func TestUserStickerSetSearchCandidatesCapsBroadMatches(t *testing.T) {
 	}
 	for i := range 60 {
 		_, err := s.pool.Exec(ctx, `
-			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
-			VALUES ($1, $2, 'broad sticker match', $3, 'regular')
+			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+			VALUES ($1, $2, 'broad sticker match', $3, 'regular', 1)
 		`, int64(8_000_000+i), owner.ID, fmt.Sprintf("broad_set_%02d", i))
 		if err != nil {
 			t.Fatalf("insert matching set %d: %v", i, err)
@@ -65,8 +65,8 @@ func TestUserStickerSetSearchTreatsLikeWildcardsLiterally(t *testing.T) {
 	}
 	for i, title := range []string{"100% cats", "100 cats"} {
 		_, err := s.pool.Exec(ctx, `
-			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
-			VALUES ($1, $2, $3, $4, 'regular')
+			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+			VALUES ($1, $2, $3, $4, 'regular', 1)
 		`, int64(9_000_000+i), owner.ID, title, fmt.Sprintf("literal_percent_%d", i))
 		if err != nil {
 			t.Fatalf("insert percent set %d: %v", i, err)
@@ -101,16 +101,16 @@ func TestUserStickerSetSearchUsesSubstringIndexes(t *testing.T) {
 	}
 	const searchFixtureSets = 100_000
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
 		SELECT 20_000_000 + sample.n, $1, 'common sticker set ' || sample.n,
-		       'sticker_set_' || sample.n, 'regular'
+		       'sticker_set_' || sample.n, 'regular', 1
 		FROM generate_series(1, $2::bigint) AS sample(n)
 	`, owner.ID, searchFixtureSets); err != nil {
 		t.Fatalf("seed %d sticker sets: %v", searchFixtureSets, err)
 	}
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
-		VALUES (21_000_001, $1, 'rare needle title', 'needle_set', 'regular')
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		VALUES (21_000_001, $1, 'rare needle title', 'needle_set', 'regular', 1)
 	`, owner.ID); err != nil {
 		t.Fatalf("seed selective sticker-set match: %v", err)
 	}

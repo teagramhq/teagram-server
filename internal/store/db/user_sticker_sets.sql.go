@@ -522,6 +522,43 @@ func (q *Queries) UserCreatedStickerSetItemsBySetIDs(ctx context.Context, dollar
 	return items, nil
 }
 
+const userCreatedStickerSetSearchCandidates = `-- name: UserCreatedStickerSetSearchCandidates :many
+SELECT id, access_hash
+FROM user_created_sticker_sets
+WHERE is_live = true
+  AND (lower(title) LIKE '%' || lower($1) || '%' ESCAPE E'\\'
+       OR lower(short_name) LIKE '%' || lower($1) || '%' ESCAPE E'\\')
+ORDER BY id
+LIMIT 50
+`
+
+type UserCreatedStickerSetSearchCandidatesRow struct {
+	ID         int64
+	AccessHash int64
+}
+
+// Search bounds candidates and uses trigram indexes for literal substring
+// matches. The caller must bulk-resolve each candidate with its exact hash.
+func (q *Queries) UserCreatedStickerSetSearchCandidates(ctx context.Context, lower string) ([]UserCreatedStickerSetSearchCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetSearchCandidates, lower)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSetSearchCandidatesRow
+	for rows.Next() {
+		var i UserCreatedStickerSetSearchCandidatesRow
+		if err := rows.Scan(&i.ID, &i.AccessHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userCreatedStickerSetsByInstalledIDs = `-- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
        text_color, item_count, set_hash, is_live, created_at
@@ -554,6 +591,104 @@ func (q *Queries) UserCreatedStickerSetsByInstalledIDs(ctx context.Context, doll
 			&i.SetHash,
 			&i.IsLive,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const userCreatedStickerSetsBySearchCandidates = `-- name: UserCreatedStickerSetsBySearchCandidates :many
+WITH candidates AS (
+    SELECT ids.set_id AS id, candidate_accesses.access_hash
+    FROM unnest($1::bigint[]) WITH ORDINALITY AS ids(set_id, ord)
+    JOIN unnest($2::bigint[]) WITH ORDINALITY AS candidate_accesses(access_hash, ord) USING (ord)
+)
+SELECT s.id, s.access_hash, s.creator_id, s.title, s.short_name, s.software,
+       s.kind, s.text_color, s.item_count, s.set_hash, s.is_live, s.created_at,
+       i.position, i.file_id, f.access_hash AS item_access_hash, f.size, f.date,
+       i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
+       COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
+FROM candidates c
+JOIN user_created_sticker_sets s
+  ON s.id = c.id AND s.access_hash = c.access_hash AND s.is_live = true
+JOIN user_created_sticker_set_items i ON i.set_id = s.id
+JOIN files f ON f.id = i.file_id AND f.stored = true
+ORDER BY s.id, i.position
+`
+
+type UserCreatedStickerSetsBySearchCandidatesParams struct {
+	SetIds       []int64
+	AccessHashes []int64
+}
+
+type UserCreatedStickerSetsBySearchCandidatesRow struct {
+	ID             int64
+	AccessHash     int64
+	CreatorID      int64
+	Title          string
+	ShortName      string
+	Software       string
+	Kind           string
+	TextColor      bool
+	ItemCount      int32
+	SetHash        int32
+	IsLive         bool
+	CreatedAt      pgtype.Timestamptz
+	Position       int32
+	FileID         int64
+	ItemAccessHash int64
+	Size           int64
+	Date           pgtype.Timestamptz
+	Emoji          string
+	Keywords       string
+	Format         string
+	Width          int32
+	Height         int32
+	DurationNs     int64
+	MaskCoords     string
+}
+
+// Bulk resolution preserves the exact candidate access hash and live-set
+// checks, then loads all stored item metadata in one bounded query.
+func (q *Queries) UserCreatedStickerSetsBySearchCandidates(ctx context.Context, arg UserCreatedStickerSetsBySearchCandidatesParams) ([]UserCreatedStickerSetsBySearchCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetsBySearchCandidates, arg.SetIds, arg.AccessHashes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSetsBySearchCandidatesRow
+	for rows.Next() {
+		var i UserCreatedStickerSetsBySearchCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccessHash,
+			&i.CreatorID,
+			&i.Title,
+			&i.ShortName,
+			&i.Software,
+			&i.Kind,
+			&i.TextColor,
+			&i.ItemCount,
+			&i.SetHash,
+			&i.IsLive,
+			&i.CreatedAt,
+			&i.Position,
+			&i.FileID,
+			&i.ItemAccessHash,
+			&i.Size,
+			&i.Date,
+			&i.Emoji,
+			&i.Keywords,
+			&i.Format,
+			&i.Width,
+			&i.Height,
+			&i.DurationNs,
+			&i.MaskCoords,
 		); err != nil {
 			return nil, err
 		}
