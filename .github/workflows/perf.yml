@@ -42,10 +42,11 @@ on:
 permissions:
   contents: read
 
-# PR updates supersede older checks; main keeps its runs.
+# PR performance checks share the main CI queue and wait for its fan-out.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && 'CI-main' || format('RPC performance-run-{0}', github.run_id) }}
+  queue: max
+  cancel-in-progress: false
 
 env:
   PERF_PG_CONTAINER: perf-pg

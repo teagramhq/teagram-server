@@ -185,6 +185,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
+            r"(?m)^concurrency:\n  group: CI-main\n  queue: max\n  cancel-in-progress: false$",
+        )
+        self.assertRegex(
+            workflow,
             r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
             r"^      - name: Check out pinned web companion\n"
             r"        uses: [^\n]+\n"
