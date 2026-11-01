@@ -3672,7 +3672,8 @@ else
   fail 'named .env addition must deploy through apply'
 fi
 
-prepare_env_addition_fixture env-addition-preflight-failure TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
+prepare_env_addition_fixture env-addition-preflight-failure TG_USER_INVITE_QUOTA '' \
+  'TG_USER_INVITE_QUOTA=5' TG_USER_INVITE_QUOTA=5 \
   target-local-carry-forward-env-addition-preflight-drift
 state=$(cat "$TMP/env-addition-preflight-failure-state-path")
 checkout=$(cat "$TMP/env-addition-preflight-failure-checkout-path")
