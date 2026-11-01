@@ -1,4 +1,4 @@
-h1:Qxyxx1hj5pjcZkFcDL5w+nNSJyqJRw33zerd6g1k1VI=
+h1:OzTVBFf2KNjsx29037xF7gXJxkVsBoNDC6jh6Xg0iu0=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -153,3 +153,5 @@ h1:Qxyxx1hj5pjcZkFcDL5w+nNSJyqJRw33zerd6g1k1VI=
 20261101000001_user_sticker_set_edits.sql h1:G79oI0Ktoe6xk9KqmvV0cSnwScOMfyiDbXMT6wG+aDo=
 20261101000002_validate_user_sticker_set_thumbs.sql h1:4NmxW5HKefdsxk/39SvzTX+IkQtR4ijiSp1T8Z0RdtM=
 20261101000003_user_sticker_set_thumb_file_idx.sql h1:pseGHdV0lBVL7gPaq4gitoA08Aet1P3wH+eyS03x9wA=
+20261101000004_messages_sticker_document_idx.sql h1:seIApHLzjDaP5AfejRNLVCcfh+X5jPyoQKj9H8T1yiY=
+20261101000005_channel_sticker_document_idx.sql h1:7Cc6soPkwLJYi3LI6HMsn6jVZrPZqcXPOANOgfMZty8=
