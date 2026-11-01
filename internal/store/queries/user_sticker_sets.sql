@@ -176,16 +176,36 @@ WHERE i.set_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
   AND i.is_active = true
 ORDER BY i.set_id, i.position;
 
--- Mutation-only item rows include archived entries so positions can be
--- compacted without deleting file references needed by already-sent messages.
+-- Mutation rows are limited to the active set, which is capped at 200 items.
 -- name: UserCreatedStickerSetItemsForMutation :many
 SELECT i.set_id, i.position, i.file_id, f.access_hash, f.size, f.date,
        i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
        COALESCE(i.mask_coords::text, '')::varchar AS mask_coords, i.is_active
 FROM user_created_sticker_set_items i
 JOIN files f ON f.id = i.file_id
-WHERE i.set_id = $1 AND f.stored = true
+WHERE i.set_id = $1 AND f.stored = true AND i.is_active = true
 ORDER BY i.position;
+
+-- Archived rows left by the previous dense-position scheme can occupy the
+-- small active/temporary range. This bounded lookup lets the first edit move
+-- only those rows out of the reserved range without reading lifetime history.
+-- name: UserCreatedStickerSetArchivedItemsInPositionRange :many
+SELECT file_id
+FROM user_created_sticker_set_items
+WHERE set_id = sqlc.arg(set_id) AND is_active = false
+  AND position <= sqlc.arg(max_position)
+ORDER BY position;
+
+-- name: UserCreatedStickerSetMaxPosition :one
+SELECT COALESCE(MAX(position)::bigint, 0)::bigint
+FROM user_created_sticker_set_items
+WHERE set_id = $1;
+
+-- name: UserCreatedStickerSetItemExistsInSet :one
+SELECT EXISTS (
+    SELECT 1 FROM user_created_sticker_set_items
+    WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id)
+);
 
 -- name: UserCreatedStickerSetItemsByFileIDs :many
 SELECT s.id AS set_id, s.access_hash AS set_access_hash, s.creator_id,
@@ -231,28 +251,29 @@ SELECT id FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true
 FOR SHARE;
 
--- name: UpdateUserCreatedStickerSetItemActive :execrows
+-- name: ArchiveUserCreatedStickerSetItem :execrows
 UPDATE user_created_sticker_set_items
-SET is_active = $3
-WHERE set_id = $1 AND file_id = $2;
+SET is_active = false, position = sqlc.arg(position)
+WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = true;
 
 -- name: ReactivateUserCreatedStickerSetItem :execrows
 UPDATE user_created_sticker_set_items
-SET is_active = true, emoji = $3, keywords = $4, format = $5, width = $6,
-    height = $7, duration_ns = $8, mask_coords = $9
-WHERE set_id = $1 AND file_id = $2 AND is_active = false;
+SET is_active = true, position = sqlc.arg(position), emoji = sqlc.arg(emoji),
+    keywords = sqlc.arg(keywords), format = sqlc.arg(format), width = sqlc.arg(width),
+    height = sqlc.arg(height), duration_ns = sqlc.arg(duration_ns), mask_coords = sqlc.arg(mask_coords)
+WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = false;
 
 -- name: UpdateUserCreatedStickerSetItemDetails :execrows
 UPDATE user_created_sticker_set_items
 SET emoji = $3, keywords = $4, mask_coords = $5
 WHERE set_id = $1 AND file_id = $2 AND is_active = true;
 
--- The offset puts every old position beyond the final dense range before
--- individual assignments, avoiding collisions on the (set_id, position) key.
+-- Active rows are at most 200 and use positions 0..199. Inactive legacy rows
+-- in the active and temporary ranges are moved to the archive tail first.
 -- name: ShiftUserCreatedStickerSetItemPositions :execrows
 UPDATE user_created_sticker_set_items
 SET position = position + sqlc.arg(shift_by)::int
-WHERE set_id = sqlc.arg(set_id);
+WHERE set_id = sqlc.arg(set_id) AND is_active = true;
 
 -- name: SetUserCreatedStickerSetItemPosition :execrows
 UPDATE user_created_sticker_set_items
@@ -284,7 +305,14 @@ WHERE id = sqlc.arg(id);
 
 -- name: DeleteUserCreatedStickerSet :execrows
 UPDATE user_created_sticker_sets
-SET is_live = false
+SET is_live = false,
+    thumb_file_id = NULL,
+    thumb_format = NULL,
+    thumb_size = NULL,
+    thumb_width = NULL,
+    thumb_height = NULL,
+    thumb_duration_ns = 0,
+    thumb_document_id = 0
 WHERE id = $1 AND is_live = true;
 
 -- Deleting a user set also drops each install row; historical item rows remain

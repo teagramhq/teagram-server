@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const archiveUserCreatedStickerSetItem = `-- name: ArchiveUserCreatedStickerSetItem :execrows
+UPDATE user_created_sticker_set_items
+SET is_active = false, position = $1
+WHERE set_id = $2 AND file_id = $3 AND is_active = true
+`
+
+type ArchiveUserCreatedStickerSetItemParams struct {
+	Position int32
+	SetID    int64
+	FileID   int64
+}
+
+func (q *Queries) ArchiveUserCreatedStickerSetItem(ctx context.Context, arg ArchiveUserCreatedStickerSetItemParams) (int64, error) {
+	result, err := q.db.Exec(ctx, archiveUserCreatedStickerSetItem, arg.Position, arg.SetID, arg.FileID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createUserCreatedStickerSet = `-- name: CreateUserCreatedStickerSet :one
 INSERT INTO user_created_sticker_sets
     (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)
@@ -86,7 +106,14 @@ func (q *Queries) DeleteInstalledUserStickerSet(ctx context.Context, setID int64
 
 const deleteUserCreatedStickerSet = `-- name: DeleteUserCreatedStickerSet :execrows
 UPDATE user_created_sticker_sets
-SET is_live = false
+SET is_live = false,
+    thumb_file_id = NULL,
+    thumb_format = NULL,
+    thumb_size = NULL,
+    thumb_width = NULL,
+    thumb_height = NULL,
+    thumb_duration_ns = 0,
+    thumb_document_id = 0
 WHERE id = $1 AND is_live = true
 `
 
@@ -271,14 +298,14 @@ func (q *Queries) LockUserStickerSetOwner(ctx context.Context, id int64) (int64,
 
 const reactivateUserCreatedStickerSetItem = `-- name: ReactivateUserCreatedStickerSetItem :execrows
 UPDATE user_created_sticker_set_items
-SET is_active = true, emoji = $3, keywords = $4, format = $5, width = $6,
-    height = $7, duration_ns = $8, mask_coords = $9
-WHERE set_id = $1 AND file_id = $2 AND is_active = false
+SET is_active = true, position = $1, emoji = $2,
+    keywords = $3, format = $4, width = $5,
+    height = $6, duration_ns = $7, mask_coords = $8
+WHERE set_id = $9 AND file_id = $10 AND is_active = false
 `
 
 type ReactivateUserCreatedStickerSetItemParams struct {
-	SetID      int64
-	FileID     int64
+	Position   int32
 	Emoji      string
 	Keywords   string
 	Format     string
@@ -286,12 +313,13 @@ type ReactivateUserCreatedStickerSetItemParams struct {
 	Height     int32
 	DurationNs int64
 	MaskCoords []byte
+	SetID      int64
+	FileID     int64
 }
 
 func (q *Queries) ReactivateUserCreatedStickerSetItem(ctx context.Context, arg ReactivateUserCreatedStickerSetItemParams) (int64, error) {
 	result, err := q.db.Exec(ctx, reactivateUserCreatedStickerSetItem,
-		arg.SetID,
-		arg.FileID,
+		arg.Position,
 		arg.Emoji,
 		arg.Keywords,
 		arg.Format,
@@ -299,6 +327,8 @@ func (q *Queries) ReactivateUserCreatedStickerSetItem(ctx context.Context, arg R
 		arg.Height,
 		arg.DurationNs,
 		arg.MaskCoords,
+		arg.SetID,
+		arg.FileID,
 	)
 	if err != nil {
 		return 0, err
@@ -349,7 +379,7 @@ func (q *Queries) SetUserCreatedStickerSetItemPosition(ctx context.Context, arg 
 const shiftUserCreatedStickerSetItemPositions = `-- name: ShiftUserCreatedStickerSetItemPositions :execrows
 UPDATE user_created_sticker_set_items
 SET position = position + $1::int
-WHERE set_id = $2
+WHERE set_id = $2 AND is_active = true
 `
 
 type ShiftUserCreatedStickerSetItemPositionsParams struct {
@@ -357,8 +387,8 @@ type ShiftUserCreatedStickerSetItemPositionsParams struct {
 	SetID   int64
 }
 
-// The offset puts every old position beyond the final dense range before
-// individual assignments, avoiding collisions on the (set_id, position) key.
+// Active rows are at most 200 and use positions 0..199. Inactive legacy rows
+// in the active and temporary ranges are moved to the archive tail first.
 func (q *Queries) ShiftUserCreatedStickerSetItemPositions(ctx context.Context, arg ShiftUserCreatedStickerSetItemPositionsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, shiftUserCreatedStickerSetItemPositions, arg.ShiftBy, arg.SetID)
 	if err != nil {
@@ -544,26 +574,6 @@ func (q *Queries) UpdateUserCreatedStickerSetHash(ctx context.Context, arg Updat
 	return result.RowsAffected(), nil
 }
 
-const updateUserCreatedStickerSetItemActive = `-- name: UpdateUserCreatedStickerSetItemActive :execrows
-UPDATE user_created_sticker_set_items
-SET is_active = $3
-WHERE set_id = $1 AND file_id = $2
-`
-
-type UpdateUserCreatedStickerSetItemActiveParams struct {
-	SetID    int64
-	FileID   int64
-	IsActive bool
-}
-
-func (q *Queries) UpdateUserCreatedStickerSetItemActive(ctx context.Context, arg UpdateUserCreatedStickerSetItemActiveParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateUserCreatedStickerSetItemActive, arg.SetID, arg.FileID, arg.IsActive)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const updateUserCreatedStickerSetItemDetails = `-- name: UpdateUserCreatedStickerSetItemDetails :execrows
 UPDATE user_created_sticker_set_items
 SET emoji = $3, keywords = $4, mask_coords = $5
@@ -636,6 +646,42 @@ func (q *Queries) UpdateUserCreatedStickerSetThumb(ctx context.Context, arg Upda
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const userCreatedStickerSetArchivedItemsInPositionRange = `-- name: UserCreatedStickerSetArchivedItemsInPositionRange :many
+SELECT file_id
+FROM user_created_sticker_set_items
+WHERE set_id = $1 AND is_active = false
+  AND position <= $2
+ORDER BY position
+`
+
+type UserCreatedStickerSetArchivedItemsInPositionRangeParams struct {
+	SetID       int64
+	MaxPosition int32
+}
+
+// Archived rows left by the previous dense-position scheme can occupy the
+// small active/temporary range. This bounded lookup lets the first edit move
+// only those rows out of the reserved range without reading lifetime history.
+func (q *Queries) UserCreatedStickerSetArchivedItemsInPositionRange(ctx context.Context, arg UserCreatedStickerSetArchivedItemsInPositionRangeParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetArchivedItemsInPositionRange, arg.SetID, arg.MaxPosition)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var file_id int64
+		if err := rows.Scan(&file_id); err != nil {
+			return nil, err
+		}
+		items = append(items, file_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const userCreatedStickerSetByID = `-- name: UserCreatedStickerSetByID :one
@@ -829,6 +875,25 @@ type UserCreatedStickerSetItemExistsParams struct {
 
 func (q *Queries) UserCreatedStickerSetItemExists(ctx context.Context, arg UserCreatedStickerSetItemExistsParams) (bool, error) {
 	row := q.db.QueryRow(ctx, userCreatedStickerSetItemExists, arg.SetID, arg.FileID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userCreatedStickerSetItemExistsInSet = `-- name: UserCreatedStickerSetItemExistsInSet :one
+SELECT EXISTS (
+    SELECT 1 FROM user_created_sticker_set_items
+    WHERE set_id = $1 AND file_id = $2
+)
+`
+
+type UserCreatedStickerSetItemExistsInSetParams struct {
+	SetID  int64
+	FileID int64
+}
+
+func (q *Queries) UserCreatedStickerSetItemExistsInSet(ctx context.Context, arg UserCreatedStickerSetItemExistsInSetParams) (bool, error) {
+	row := q.db.QueryRow(ctx, userCreatedStickerSetItemExistsInSet, arg.SetID, arg.FileID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
@@ -1047,7 +1112,7 @@ SELECT i.set_id, i.position, i.file_id, f.access_hash, f.size, f.date,
        COALESCE(i.mask_coords::text, '')::varchar AS mask_coords, i.is_active
 FROM user_created_sticker_set_items i
 JOIN files f ON f.id = i.file_id
-WHERE i.set_id = $1 AND f.stored = true
+WHERE i.set_id = $1 AND f.stored = true AND i.is_active = true
 ORDER BY i.position
 `
 
@@ -1068,8 +1133,7 @@ type UserCreatedStickerSetItemsForMutationRow struct {
 	IsActive   bool
 }
 
-// Mutation-only item rows include archived entries so positions can be
-// compacted without deleting file references needed by already-sent messages.
+// Mutation rows are limited to the active set, which is capped at 200 items.
 func (q *Queries) UserCreatedStickerSetItemsForMutation(ctx context.Context, setID int64) ([]UserCreatedStickerSetItemsForMutationRow, error) {
 	rows, err := q.db.Query(ctx, userCreatedStickerSetItemsForMutation, setID)
 	if err != nil {
@@ -1103,6 +1167,19 @@ func (q *Queries) UserCreatedStickerSetItemsForMutation(ctx context.Context, set
 		return nil, err
 	}
 	return items, nil
+}
+
+const userCreatedStickerSetMaxPosition = `-- name: UserCreatedStickerSetMaxPosition :one
+SELECT COALESCE(MAX(position)::bigint, 0)::bigint
+FROM user_created_sticker_set_items
+WHERE set_id = $1
+`
+
+func (q *Queries) UserCreatedStickerSetMaxPosition(ctx context.Context, setID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, userCreatedStickerSetMaxPosition, setID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const userCreatedStickerSetThumbnailForDownload = `-- name: UserCreatedStickerSetThumbnailForDownload :one

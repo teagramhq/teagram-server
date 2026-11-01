@@ -1266,7 +1266,8 @@ func TestOwnerCanEditAndDeleteUserStickerSet(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := testBlobs(t)
-	s := openStickerStore(t, blobs)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
 	owner, err := s.CreateUser(ctx, "+15551819101")
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
@@ -1424,6 +1425,57 @@ func TestOwnerCanEditAndDeleteUserStickerSet(t *testing.T) {
 		t.Fatalf("delete catalogue sticker set = %q, want STICKERSET_INVALID", got)
 	}
 
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to seed legacy sticker positions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close legacy sticker position connection: %v", err)
+		}
+	})
+	if result, updateErr := conn.Exec(ctx, `
+		UPDATE user_created_sticker_set_items SET position = 250
+		WHERE set_id = $1 AND file_id = $2 AND is_active = false`, created.Set.ID, second.ID); updateErr != nil || result.RowsAffected() != 1 {
+		t.Fatalf("seed legacy archived sticker position: result %v, err %v", result, updateErr)
+	}
+	archivedBefore, err := s.UserStickerSetsByFileIDs(ctx, []int64{second.ID})
+	if err != nil {
+		t.Fatalf("load removed sticker reference before more edits: %v", err)
+	}
+	archivedPosition := archivedBefore[second.ID].Item.Position
+	if archivedPosition != 250 {
+		t.Fatalf("legacy archived sticker position = %d, want 250", archivedPosition)
+	}
+	extra := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	extraItem := tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: extra.ID, AccessHash: extra.AccessHash}, Emoji: "⭐",
+	}
+	if got := stickerSetMutation(t, h, owner.ID, "stickers.addStickerToSet", &tg.StickersAddStickerToSetRequest{
+		Stickerset: ref, Sticker: extraItem,
+	}).Set.Count; got != 3 {
+		t.Fatalf("add after removal returned %d stickers, want 3", got)
+	}
+	archivedAfterAdd, err := s.UserStickerSetsByFileIDs(ctx, []int64{second.ID})
+	if err != nil {
+		t.Fatalf("reload legacy sticker reference after add: %v", err)
+	}
+	if got := archivedAfterAdd[second.ID].Item.Position; got < 401 {
+		t.Fatalf("legacy archived sticker position = %d after add, want it moved out of the active/temporary range", got)
+	}
+	if got := stickerSetMutation(t, h, owner.ID, "stickers.removeStickerFromSet", &tg.StickersRemoveStickerFromSetRequest{
+		Sticker: &tg.InputDocument{ID: extra.ID, AccessHash: extra.AccessHash},
+	}).Set.Count; got != 2 {
+		t.Fatalf("remove after add returned %d stickers, want 2", got)
+	}
+	archivedAfter, err := s.UserStickerSetsByFileIDs(ctx, []int64{second.ID})
+	if err != nil {
+		t.Fatalf("reload removed sticker reference after more edits: %v", err)
+	}
+	if got := archivedAfter[second.ID].Item.Position; got != archivedAfterAdd[second.ID].Item.Position {
+		t.Fatalf("removed sticker history position changed from %d to %d after active-set edits", archivedAfterAdd[second.ID].Item.Position, got)
+	}
+
 	deleted := dispatchChatMethod(t, h, owner.ID, "stickers.deleteStickerSet", &tg.StickersDeleteStickerSetRequest{Stickerset: ref})
 	var deletedResult tg.BoolTrue
 	if err := deletedResult.Decode(&bin.Buffer{Buf: deleted}); err != nil {
@@ -1431,7 +1483,7 @@ func TestOwnerCanEditAndDeleteUserStickerSet(t *testing.T) {
 	}
 	erasureCounts, err = s.MediaErasureSummary(ctx, time.Now().Add(time.Hour), 100)
 	if err != nil || erasureCounts.SkippedStickerSetRef != 4 || erasureCounts.SkippedMessageRef != 0 {
-		t.Fatalf("erasure summary after delete = %+v, err %v; want 4 retained set-item and thumbnail refs", erasureCounts, err)
+		t.Fatalf("erasure summary after delete = %+v, err %v; want 4 retained item refs and no thumbnail ref", erasureCounts, err)
 	}
 	if _, err := s.UserStickerSetByID(ctx, created.Set.ID, created.Set.AccessHash); !errors.Is(err, store.ErrStickerSetNotFound) {
 		t.Fatalf("deleted set lookup error = %v, want ErrStickerSetNotFound", err)

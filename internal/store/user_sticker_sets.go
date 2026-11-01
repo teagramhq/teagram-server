@@ -22,6 +22,8 @@ const (
 	MaxUserStickerCount          = 120
 	MaxUserEmojiCount            = 200
 	MaxStoredStickerBytes        = 512 << 10
+	userStickerSetPositionOffset = MaxUserEmojiCount + 1
+	userStickerSetArchiveFloor   = 2*MaxUserEmojiCount + 1
 )
 
 var (
@@ -365,15 +367,17 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 	if len(files) != 1 || files[0].Size != item.Size {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
-	var removedItem bool
-	for _, existing := range mutationRows {
-		if existing.FileID == item.FileID {
-			if existing.IsActive {
-				return UserStickerSet{}, ErrStickerFileAlreadyUsed
-			}
-			removedItem = true
-			break
-		}
+	removedItem, err := qtx.UserCreatedStickerSetItemExistsInSet(ctx, db.UserCreatedStickerSetItemExistsInSetParams{
+		SetID: set.ID, FileID: item.FileID,
+	})
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("check sticker set item history before add: %w", err)
+	}
+	if err = archiveLegacyStickerPositions(ctx, qtx, set.ID); err != nil {
+		return UserStickerSet{}, err
+	}
+	if err = shiftActiveStickerPositions(ctx, qtx, set.ID, len(activeIDs)); err != nil {
+		return UserStickerSet{}, err
 	}
 	maskCoords := []byte(nil)
 	if item.MaskCoords != "" {
@@ -381,7 +385,9 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 	}
 	if removedItem {
 		rows, updateErr := qtx.ReactivateUserCreatedStickerSetItem(ctx, db.ReactivateUserCreatedStickerSetItemParams{
-			SetID: set.ID, FileID: item.FileID, Emoji: item.Emoji, Keywords: item.Keywords,
+			SetID: set.ID, FileID: item.FileID,
+			Position: int32(len(activeIDs)), //nolint:gosec // Active item count is below the 200-item cap.
+			Emoji:    item.Emoji, Keywords: item.Keywords,
 			Format:     item.Format,
 			Width:      int32(item.Width),  //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
 			Height:     int32(item.Height), //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
@@ -394,12 +400,9 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 			return UserStickerSet{}, fmt.Errorf("reactivate removed sticker set item: updated %d rows, want 1", rows)
 		}
 	} else {
-		if len(mutationRows) >= int(^uint32(0)>>1) {
-			return UserStickerSet{}, ErrStickerSetLimit
-		}
 		rows, insertErr := qtx.InsertUserCreatedStickerSetItem(ctx, db.InsertUserCreatedStickerSetItemParams{
 			SetID:    set.ID,
-			Position: int32(len(mutationRows)), //nolint:gosec // The length is checked against MaxInt32 immediately above.
+			Position: int32(len(activeIDs)), //nolint:gosec // The active count is bounded by MaxUserEmojiCount.
 			FileID:   item.FileID,
 			Emoji:    item.Emoji, Keywords: item.Keywords, Format: item.Format,
 			Width:      int32(item.Width),  //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
@@ -414,12 +417,8 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 			return UserStickerSet{}, ErrStickerFileAlreadyUsed
 		}
 	}
-	mutationRows, err = qtx.UserCreatedStickerSetItemsForMutation(ctx, set.ID)
-	if err != nil {
-		return UserStickerSet{}, fmt.Errorf("load sticker set items after add: %w", err)
-	}
 	activeIDs = append(activeIDs, item.FileID)
-	if err = compactUserStickerSetItemPositions(ctx, qtx, set.ID, activeIDs, mutationRows); err != nil {
+	if err = setActiveStickerPositions(ctx, qtx, set.ID, activeIDs); err != nil {
 		return UserStickerSet{}, err
 	}
 	set, err = activeUserStickerSet(ctx, qtx, row)
@@ -461,8 +460,15 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 	if index < 0 {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
-	rows, err := qtx.UpdateUserCreatedStickerSetItemActive(ctx, db.UpdateUserCreatedStickerSetItemActiveParams{
-		SetID: set.ID, FileID: fileID, IsActive: false,
+	if err = archiveLegacyStickerPositions(ctx, qtx, set.ID); err != nil {
+		return UserStickerSet{}, err
+	}
+	archivePosition, err := nextStickerArchivePosition(ctx, qtx, set.ID)
+	if err != nil {
+		return UserStickerSet{}, err
+	}
+	rows, err := qtx.ArchiveUserCreatedStickerSetItem(ctx, db.ArchiveUserCreatedStickerSetItemParams{
+		SetID: set.ID, FileID: fileID, Position: archivePosition,
 	})
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("remove sticker set item: %w", err)
@@ -471,11 +477,10 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 		return UserStickerSet{}, fmt.Errorf("remove sticker set item: updated %d rows, want 1", rows)
 	}
 	activeIDs = append(activeIDs[:index], activeIDs[index+1:]...)
-	mutationRows, err = qtx.UserCreatedStickerSetItemsForMutation(ctx, set.ID)
-	if err != nil {
-		return UserStickerSet{}, fmt.Errorf("load sticker set items after remove: %w", err)
+	if err = shiftActiveStickerPositions(ctx, qtx, set.ID, len(activeIDs)); err != nil {
+		return UserStickerSet{}, err
 	}
-	if err = compactUserStickerSetItemPositions(ctx, qtx, set.ID, activeIDs, mutationRows); err != nil {
+	if err = setActiveStickerPositions(ctx, qtx, set.ID, activeIDs); err != nil {
 		return UserStickerSet{}, err
 	}
 	set, err = activeUserStickerSet(ctx, qtx, row)
@@ -522,7 +527,13 @@ func (s *Store) ChangeUserStickerSetItemPosition(ctx context.Context, ownerID, f
 		activeIDs = append(activeIDs, 0)
 		copy(activeIDs[position+1:], activeIDs[position:])
 		activeIDs[position] = fileID
-		if err = compactUserStickerSetItemPositions(ctx, qtx, set.ID, activeIDs, mutationRows); err != nil {
+		if err = archiveLegacyStickerPositions(ctx, qtx, set.ID); err != nil {
+			return UserStickerSet{}, err
+		}
+		if err = shiftActiveStickerPositions(ctx, qtx, set.ID, len(mutationRows)); err != nil {
+			return UserStickerSet{}, err
+		}
+		if err = setActiveStickerPositions(ctx, qtx, set.ID, activeIDs); err != nil {
 			return UserStickerSet{}, err
 		}
 	}
@@ -923,67 +934,84 @@ func userStickerSetItemFromMutation(row db.UserCreatedStickerSetItemsForMutation
 	}
 }
 
-func compactUserStickerSetItemPositions(
-	ctx context.Context,
-	qtx *db.Queries,
-	setID int64,
-	activeIDs []int64,
-	rows []db.UserCreatedStickerSetItemsForMutationRow,
-) error {
-	if len(rows) == 0 {
-		return errors.New("cannot compact an empty sticker set")
-	}
-	ordered := make([]int64, 0, len(rows))
-	seen := make(map[int64]struct{}, len(rows))
-	for _, id := range activeIDs {
-		index := mutationStickerItemIndex(rows, id)
-		if index < 0 || !rows[index].IsActive {
-			return fmt.Errorf("active sticker order contains missing item %d", id)
-		}
-		if _, ok := seen[id]; ok {
-			return fmt.Errorf("active sticker order repeats item %d", id)
-		}
-		seen[id] = struct{}{}
-		ordered = append(ordered, id)
-	}
-	for _, row := range rows {
-		if row.IsActive {
-			if _, ok := seen[row.FileID]; !ok {
-				return fmt.Errorf("active sticker order omits item %d", row.FileID)
-			}
-			continue
-		}
-		ordered = append(ordered, row.FileID)
-	}
-	var maxPosition int64
-	for _, row := range rows {
-		if int64(row.Position) > maxPosition {
-			maxPosition = int64(row.Position)
-		}
-	}
-	shift := maxPosition + int64(len(rows)) + 1
-	if maxPosition+shift > int64(1<<31-1) {
-		return errors.New("sticker set position range exhausted")
-	}
-	shifted, err := qtx.ShiftUserCreatedStickerSetItemPositions(ctx, db.ShiftUserCreatedStickerSetItemPositionsParams{
-		ShiftBy: int32(shift), //nolint:gosec // The signed 32-bit position range is checked immediately above.
-		SetID:   setID,
+func archiveLegacyStickerPositions(ctx context.Context, qtx *db.Queries, setID int64) error {
+	rows, err := qtx.UserCreatedStickerSetArchivedItemsInPositionRange(ctx, db.UserCreatedStickerSetArchivedItemsInPositionRangeParams{
+		SetID: setID, MaxPosition: userStickerSetPositionOffset + MaxUserEmojiCount - 1,
 	})
 	if err != nil {
-		return fmt.Errorf("move sticker set items to temporary positions: %w", err)
+		return fmt.Errorf("load legacy archived sticker positions: %w", err)
 	}
-	if shifted != int64(len(rows)) {
-		return fmt.Errorf("move sticker set items: shifted %d rows, want %d", shifted, len(rows))
+	if len(rows) == 0 {
+		return nil
 	}
-	for position, fileID := range ordered {
+	maxPosition, err := qtx.UserCreatedStickerSetMaxPosition(ctx, setID)
+	if err != nil {
+		return fmt.Errorf("find last archived sticker position: %w", err)
+	}
+	next := max(maxPosition+1, int64(userStickerSetArchiveFloor))
+	last := next + int64(len(rows)) - 1
+	if last > int64(1<<31-1) {
+		return errors.New("sticker set position range exhausted")
+	}
+	for _, fileID := range rows {
 		updated, updateErr := qtx.SetUserCreatedStickerSetItemPosition(ctx, db.SetUserCreatedStickerSetItemPositionParams{
-			SetID: setID, FileID: fileID, Position: int32(position),
+			SetID: setID, FileID: fileID,
+			Position: int32(next), //nolint:gosec // The signed 32-bit range is checked above.
 		})
 		if updateErr != nil {
-			return fmt.Errorf("set sticker set item position: %w", updateErr)
+			return fmt.Errorf("archive legacy sticker item position: %w", updateErr)
 		}
 		if updated != 1 {
-			return fmt.Errorf("set sticker set item position: updated %d rows, want 1", updated)
+			return fmt.Errorf("archive legacy sticker item position: updated %d rows, want 1", updated)
+		}
+		next++
+	}
+	return nil
+}
+
+func nextStickerArchivePosition(ctx context.Context, qtx *db.Queries, setID int64) (int32, error) {
+	maxPosition, err := qtx.UserCreatedStickerSetMaxPosition(ctx, setID)
+	if err != nil {
+		return 0, fmt.Errorf("find last archived sticker position: %w", err)
+	}
+	next := max(maxPosition+1, int64(userStickerSetArchiveFloor))
+	if next > int64(1<<31-1) {
+		return 0, errors.New("sticker set position range exhausted")
+	}
+	return int32(next), nil
+}
+
+func shiftActiveStickerPositions(ctx context.Context, qtx *db.Queries, setID int64, activeCount int) error {
+	shifted, err := qtx.ShiftUserCreatedStickerSetItemPositions(ctx, db.ShiftUserCreatedStickerSetItemPositionsParams{
+		ShiftBy: userStickerSetPositionOffset, SetID: setID,
+	})
+	if err != nil {
+		return fmt.Errorf("move active sticker items to temporary positions: %w", err)
+	}
+	if shifted != int64(activeCount) {
+		return fmt.Errorf("move active sticker items: shifted %d rows, want %d", shifted, activeCount)
+	}
+	return nil
+}
+
+func setActiveStickerPositions(ctx context.Context, qtx *db.Queries, setID int64, activeIDs []int64) error {
+	if len(activeIDs) > MaxUserEmojiCount {
+		return fmt.Errorf("active sticker order has %d items, maximum is %d", len(activeIDs), MaxUserEmojiCount)
+	}
+	seen := make(map[int64]struct{}, len(activeIDs))
+	for position, fileID := range activeIDs {
+		if _, ok := seen[fileID]; ok {
+			return fmt.Errorf("active sticker order repeats item %d", fileID)
+		}
+		seen[fileID] = struct{}{}
+		updated, err := qtx.SetUserCreatedStickerSetItemPosition(ctx, db.SetUserCreatedStickerSetItemPositionParams{
+			SetID: setID, FileID: fileID, Position: int32(position),
+		})
+		if err != nil {
+			return fmt.Errorf("set active sticker item position: %w", err)
+		}
+		if updated != 1 {
+			return fmt.Errorf("set active sticker item position: updated %d rows, want 1", updated)
 		}
 	}
 	return nil
