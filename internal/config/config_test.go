@@ -197,6 +197,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
 		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
 	}
+	if cfg.RateLimits.CreateStickerSet.Limit != 3 {
+		t.Errorf("CreateStickerSet limit = %d, want 3", cfg.RateLimits.CreateStickerSet.Limit)
+	}
+	if cfg.RateLimits.CreateStickerSet.Window != time.Minute {
+		t.Errorf("CreateStickerSet window = %v, want 1m", cfg.RateLimits.CreateStickerSet.Window)
+	}
 }
 
 func TestLoadUploadsDisabledSetting(t *testing.T) {
@@ -1977,6 +1983,17 @@ func TestLoadNewRateLimits(t *testing.T) {
 	if cfg.RateLimits.UpdateProfile.Window != 2*time.Hour {
 		t.Errorf("UpdateProfile window = %v, want 2h", cfg.RateLimits.UpdateProfile.Window)
 	}
+	t.Setenv("TG_RATE_LIMIT_CREATE_STICKER_SET", "4")
+	t.Setenv("TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW", "5m")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.CreateStickerSet.Limit != 4 || cfg.RateLimits.CreateStickerSet.Window != 5*time.Minute {
+		t.Errorf("CreateStickerSet limit/window = %d/%v, want 4/5m", cfg.RateLimits.CreateStickerSet.Limit, cfg.RateLimits.CreateStickerSet.Window)
+	}
+	t.Setenv("TG_RATE_LIMIT_CREATE_STICKER_SET", "")
+	t.Setenv("TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW", "")
 
 	// The two secret-chat lifecycle surfaces override independently: the request
 	// bound is row production, the discard bound is cleanup headroom, and an
