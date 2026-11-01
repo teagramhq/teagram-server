@@ -22,6 +22,8 @@ const (
 	maxGetUpdatesTimeout   = 50
 	maxOpenGetUpdates      = 128
 	getUpdatesWriteTimeout = 60 * time.Second
+	// Keep one bounded query window after long-poll expiry for updates committed during the wait.
+	getUpdatesFinalScanTimeout = 5 * time.Second
 )
 
 const getUpdatesConflictBody = "{\"ok\":false,\"error_code\":409,\"description\":\"Conflict: terminated by other getUpdates request\"}\n"
@@ -299,6 +301,7 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	}
 	readCtx, cancelRead := context.WithTimeout(poll.ctx, readTimeout)
 	defer cancelRead()
+	timedOut := false
 	var updates []botAPIUpdate
 	var nextOffset int64
 	var readErr error
@@ -346,7 +349,7 @@ pollLoop:
 		if nextOffset > effectiveOffset {
 			effectiveOffset = nextOffset
 		}
-		if len(updates) != 0 || params.timeout == 0 || readCtx.Err() != nil {
+		if len(updates) != 0 || params.timeout == 0 {
 			break
 		}
 		select {
@@ -369,7 +372,48 @@ pollLoop:
 			if r.Context().Err() != nil || poll.ctx.Err() != nil {
 				return
 			}
+			timedOut = true
 			break pollLoop
+		}
+	}
+	if timedOut && len(updates) == 0 {
+		if poll.wasSuperseded() {
+			h.updatePollConflict(w, botID, method)
+			return
+		}
+		if err := st.CheckBotUpdatePoll(poll.ctx, botID, token, claimed.Generation); err != nil {
+			if errors.Is(err, store.ErrBotPollSuperseded) || poll.wasSuperseded() {
+				h.updatePollConflict(w, botID, method)
+				return
+			}
+			if errors.Is(err, store.ErrBotTokenNotFound) {
+				h.unauthorized(w, botID, method)
+				return
+			}
+			if r.Context().Err() != nil {
+				return
+			}
+			h.log.Error("Bot API update poll ownership check failed", "bot_id", botID, "method", method, "err", err)
+			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+			return
+		}
+		finalReadCtx, cancelFinalRead := context.WithTimeout(poll.ctx, getUpdatesFinalScanTimeout)
+		updates, nextOffset, readErr = h.readBotUpdates(finalReadCtx, st, botID, effectiveOffset, params.limit)
+		cancelFinalRead()
+		if nextOffset > effectiveOffset {
+			effectiveOffset = nextOffset
+		}
+		if readErr != nil && !errors.Is(readErr, context.DeadlineExceeded) {
+			if poll.wasSuperseded() {
+				h.updatePollConflict(w, botID, method)
+				return
+			}
+			if r.Context().Err() != nil {
+				return
+			}
+			h.log.Error("Bot API update log read failed", "bot_id", botID, "method", method, "err", readErr)
+			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+			return
 		}
 	}
 	if poll.wasSuperseded() {

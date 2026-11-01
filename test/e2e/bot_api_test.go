@@ -399,11 +399,12 @@ func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 	observedStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
 	handler := botapi.NewHandler(observedStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	serverURL := startSmokeBotAPIServerWithHandler(t, f, handler)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second}
+	const timeout = 5
 	started := time.Now()
 	result := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, serverURL, token, 0, 1)
+		response, err := doBotAPIGetUpdates(f.ctx, client, serverURL, token, 0, timeout)
 		result <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
@@ -426,14 +427,14 @@ func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 			t.Fatalf("missed-notify poll request failed: %v", asyncResult.err)
 		}
 		response = asyncResult.response
-	case <-time.After(4 * time.Second):
+	case <-time.After(12 * time.Second):
 		t.Fatal("getUpdates did not return after timeout re-read")
 	}
 	updates := decodeBotAPIUpdates(t, response)
 	if response.Code != http.StatusOK || len(updates) != 1 || updates[0].Message.Text != "arrives after missed notify" {
 		t.Fatalf("missed-notify response = (%d, %+v), want the committed text", response.Code, updates)
 	}
-	if elapsed := time.Since(started); elapsed < 800*time.Millisecond {
+	if elapsed := time.Since(started); elapsed < time.Duration(timeout)*time.Second-200*time.Millisecond {
 		t.Fatalf("missed-notify poll returned after %v, want it to wait for timeout", elapsed)
 	}
 }
