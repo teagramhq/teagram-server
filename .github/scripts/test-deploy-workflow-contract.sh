@@ -558,6 +558,8 @@ check_contract() {
 
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
+  [[ "$(demo_query '.run-name')" == "$expected_run_name" ]] ||
+    fail 'direct demo deploy runs must include the issue key in the name for failure routing'
   [[ "$(demo_query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'the demo workflow must support automatic and direct deployments'
   [[ "$(demo_query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||

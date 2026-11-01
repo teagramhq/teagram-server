@@ -1,5 +1,7 @@
 name: Deploy demo.
 
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
+
 # Keep the public demo deployment result separate from the server Deploy.
 # This workflow consumes the exact tested SHA and CI run selected by Deploy.
 on:
