@@ -31,6 +31,32 @@ func (q *Queries) ArchiveUserCreatedStickerSetItem(ctx context.Context, arg Arch
 	return result.RowsAffected(), nil
 }
 
+const clearRemovedUserStickerSetThumbDocument = `-- name: ClearRemovedUserStickerSetThumbDocument :execrows
+UPDATE user_created_sticker_sets
+SET thumb_document_id = 0,
+    thumb_version = $1
+WHERE id = $2
+  AND thumb_document_id = $3
+  AND kind = 'emojis'
+  AND is_live = true
+`
+
+type ClearRemovedUserStickerSetThumbDocumentParams struct {
+	ThumbVersion    int32
+	ID              int64
+	ThumbDocumentID int64
+}
+
+// A removed item cannot remain the custom emoji set's selected thumbnail.
+// The set row is already locked by the enclosing mutation transaction.
+func (q *Queries) ClearRemovedUserStickerSetThumbDocument(ctx context.Context, arg ClearRemovedUserStickerSetThumbDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearRemovedUserStickerSetThumbDocument, arg.ThumbVersion, arg.ID, arg.ThumbDocumentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createUserCreatedStickerSet = `-- name: CreateUserCreatedStickerSet :one
 INSERT INTO user_created_sticker_sets
     (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)

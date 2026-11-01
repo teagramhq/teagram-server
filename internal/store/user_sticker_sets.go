@@ -448,6 +448,7 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 		return UserStickerSet{}, err
 	}
 	set := userStickerSetFromRow(row)
+	clearThumbDocument := set.Kind == "emojis" && set.ThumbDocumentID == fileID
 	mutationRows, err := qtx.UserCreatedStickerSetItemsForMutation(ctx, set.ID)
 	if err != nil {
 		return UserStickerSet{}, fmt.Errorf("load sticker set items before remove: %w", err)
@@ -459,6 +460,13 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 	index := stickerItemIDIndex(activeIDs, fileID)
 	if index < 0 {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
+	}
+	nextThumbVersion := set.ThumbVersion
+	if clearThumbDocument {
+		if nextThumbVersion >= int(^uint32(0)>>1) {
+			return UserStickerSet{}, errors.New("sticker set thumbnail version exhausted")
+		}
+		nextThumbVersion++
 	}
 	if err = archiveLegacyStickerPositions(ctx, qtx, set.ID); err != nil {
 		return UserStickerSet{}, err
@@ -476,6 +484,18 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 	if rows != 1 {
 		return UserStickerSet{}, fmt.Errorf("remove sticker set item: updated %d rows, want 1", rows)
 	}
+	if clearThumbDocument {
+		updated, updateErr := qtx.ClearRemovedUserStickerSetThumbDocument(ctx, db.ClearRemovedUserStickerSetThumbDocumentParams{
+			ID: set.ID, ThumbDocumentID: fileID,
+			ThumbVersion: int32(nextThumbVersion), //nolint:gosec // The old version is bounded before incrementing.
+		})
+		if updateErr != nil {
+			return UserStickerSet{}, fmt.Errorf("clear removed emoji set thumbnail: %w", updateErr)
+		}
+		if updated != 1 {
+			return UserStickerSet{}, fmt.Errorf("clear removed emoji set thumbnail: updated %d rows, want 1", updated)
+		}
+	}
 	activeIDs = append(activeIDs[:index], activeIDs[index+1:]...)
 	if err = shiftActiveStickerPositions(ctx, qtx, set.ID, len(activeIDs)); err != nil {
 		return UserStickerSet{}, err
@@ -486,6 +506,10 @@ func (s *Store) RemoveUserStickerSetItem(ctx context.Context, ownerID, fileID, a
 	set, err = activeUserStickerSet(ctx, qtx, row)
 	if err != nil {
 		return UserStickerSet{}, err
+	}
+	if clearThumbDocument {
+		set.ThumbDocumentID = 0
+		set.ThumbVersion = nextThumbVersion
 	}
 	if err = updateUserStickerSetCountAndHash(ctx, qtx, &set); err != nil {
 		return UserStickerSet{}, err

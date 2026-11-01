@@ -286,6 +286,17 @@ UPDATE user_created_sticker_sets
 SET item_count = $2, set_hash = $3
 WHERE id = $1;
 
+-- A removed item cannot remain the custom emoji set's selected thumbnail.
+-- The set row is already locked by the enclosing mutation transaction.
+-- name: ClearRemovedUserStickerSetThumbDocument :execrows
+UPDATE user_created_sticker_sets
+SET thumb_document_id = 0,
+    thumb_version = sqlc.arg(thumb_version)
+WHERE id = sqlc.arg(id)
+  AND thumb_document_id = sqlc.arg(thumb_document_id)
+  AND kind = 'emojis'
+  AND is_live = true;
+
 -- name: RenameUserCreatedStickerSet :execrows
 UPDATE user_created_sticker_sets
 SET title = $2, set_hash = $3
