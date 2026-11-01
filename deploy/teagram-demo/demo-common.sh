@@ -21,6 +21,8 @@ DEMO_AUTHORITY_DIR="$DEMO_REPO_ROOT/.state/blob-mode"
 # shellcheck disable=SC2034
 DEMO_SEED_SECRET_DIR="/var/lib/teagram-demo/secrets"
 # shellcheck disable=SC2034
+DEMO_TURNSTILE_QA_BYPASS_FILE="$DEMO_SEED_SECRET_DIR/turnstile-qa-bypass-token"
+# shellcheck disable=SC2034
 DEMO_SEED_PASSWORD_FILE="$DEMO_SEED_SECRET_DIR/seed-owner-password"
 # shellcheck disable=SC2034
 DEMO_SEED_ACCOUNT_DIR="$DEMO_SEED_SECRET_DIR/demo-accounts"
@@ -52,8 +54,8 @@ demo_fail() {
 }
 
 demo_prepare_edge_config_permissions() {
-  local config_dir="$DEMO_SCRIPT_DIR/nginx-config"
-  local config_file="$config_dir/nginx.conf"
+  local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
+  local config_file="${2:-$config_dir/nginx.conf}"
   [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
     demo_fail 'edge configuration directory is missing or unsafe'
     return 1
@@ -62,12 +64,20 @@ demo_prepare_edge_config_permissions() {
     demo_fail 'edge configuration file is missing or unsafe'
     return 1
   }
-  chmod 0755 "$config_dir" || {
+  chmod 0755 -- "$config_dir" || {
     demo_fail 'edge configuration directory permissions could not be prepared'
     return 1
   }
-  chmod 0644 "$config_file" || {
+  [[ "$(stat -c '%a' "$config_dir")" == 755 ]] || {
+    demo_fail 'edge configuration directory permissions could not be verified'
+    return 1
+  }
+  chmod 0644 -- "$config_file" || {
     demo_fail 'edge configuration file permissions could not be prepared'
+    return 1
+  }
+  [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
+    demo_fail 'edge configuration file permissions could not be verified'
     return 1
   }
 }
@@ -252,45 +262,87 @@ demo_require_root() {
   [[ "$EUID" -eq 0 ]] || demo_fail 'must run as root on the demo LXC'
 }
 
-demo_prepare_turnstile_secret_access() {
+demo_prepare_runtime_secret_access() {
   local secret_file="${1:-$DEMO_SEED_SECRET_DIR/turnstile-secret-key}"
   local secret_dir state
   secret_dir=$(dirname -- "$secret_file")
 
   [[ "$EUID" -eq 0 ]] || {
-    demo_fail 'must run as root to prepare the Turnstile secret mount'
+    demo_fail 'must run as root to prepare a runtime secret mount'
     return 1
   }
   [[ -d "$secret_dir" && ! -L "$secret_dir" &&
     "$(stat -c '%u:%g:%a' "$secret_dir")" == '0:0:700' ]] || {
-    demo_fail 'Turnstile secret directory must be root-owned mode 0700'
+    demo_fail 'runtime secret directory must be root-owned mode 0700'
     return 1
   }
   [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c '%u' "$secret_file")" == 0 ]] || {
-    demo_fail 'Turnstile secret must be a regular root-owned file'
+    demo_fail 'runtime secret must be a regular root-owned file'
     return 1
   }
   state=$(stat -c '%u:%g:%a' "$secret_file") || {
-    demo_fail 'Turnstile secret metadata could not be read'
+    demo_fail 'runtime secret metadata could not be read'
     return 1
   }
   case "$state" in
     0:0:600)
       chgrp 65532 -- "$secret_file" || {
-        demo_fail 'Turnstile secret runtime group could not be set'
+        demo_fail 'runtime secret group could not be set'
         return 1
       }
       ;;
     0:65532:600|0:65532:440) ;;
     *)
-      demo_fail 'Turnstile secret must be root-owned and inaccessible outside runtime gid 65532'
+      demo_fail 'runtime secret must be root-owned and inaccessible outside runtime gid 65532'
       return 1
       ;;
   esac
   chmod 0440 -- "$secret_file" || {
-    demo_fail 'Turnstile secret runtime read mode could not be set'
+    demo_fail 'runtime secret read mode could not be set'
     return 1
   }
+}
+
+demo_ensure_qa_bypass_token() {
+  local temporary
+  [[ "$EUID" -eq 0 ]] || {
+    demo_fail 'must run as root to provision the demo QA bypass token'
+    return 1
+  }
+  [[ -d "$DEMO_SEED_SECRET_DIR" && ! -L "$DEMO_SEED_SECRET_DIR" &&
+    "$(stat -c '%u:%g:%a' "$DEMO_SEED_SECRET_DIR")" == '0:0:700' ]] || {
+    demo_fail 'demo secret directory must be root-owned mode 0700 before QA token provisioning'
+    return 1
+  }
+  if [[ -e "$DEMO_TURNSTILE_QA_BYPASS_FILE" || -L "$DEMO_TURNSTILE_QA_BYPASS_FILE" ]]; then
+    demo_prepare_runtime_secret_access "$DEMO_TURNSTILE_QA_BYPASS_FILE"
+    return $?
+  fi
+
+  temporary=$(mktemp "$DEMO_SEED_SECRET_DIR/.turnstile-qa-bypass-token.XXXXXXXX") || {
+    demo_fail 'could not create a temporary demo QA bypass token file'
+    return 1
+  }
+  if ! openssl rand -hex 32 > "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'could not generate the demo QA bypass token'
+    return 1
+  fi
+  if ! chown root:65532 "$temporary" || ! chmod 0440 "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'could not secure the demo QA bypass token file'
+    return 1
+  fi
+  if ! ln -- "$temporary" "$DEMO_TURNSTILE_QA_BYPASS_FILE"; then
+    rm -f -- "$temporary"
+    if [[ -e "$DEMO_TURNSTILE_QA_BYPASS_FILE" || -L "$DEMO_TURNSTILE_QA_BYPASS_FILE" ]]; then
+      demo_prepare_runtime_secret_access "$DEMO_TURNSTILE_QA_BYPASS_FILE"
+      return $?
+    fi
+    demo_fail 'could not install the demo QA bypass token'
+    return 1
+  fi
+  rm -f -- "$temporary"
 }
 
 demo_require_env() {
@@ -299,7 +351,8 @@ demo_require_env() {
     return 1
   }
   python3 "$DEMO_SCRIPT_DIR/update-websocket-origins.py" "$DEMO_ENV_FILE" || return 1
-  demo_prepare_turnstile_secret_access || return 1
+  demo_prepare_runtime_secret_access || return 1
+  demo_ensure_qa_bypass_token || return 1
   python3 "$DEMO_SCRIPT_DIR/validate-env.py" "$DEMO_ENV_FILE" || return 1
 }
 
@@ -512,6 +565,7 @@ demo_prepare_client_config_dir() {
 
 demo_reload_edge() {
   local -a edge_ids=()
+  demo_prepare_edge_config_permissions || return 1
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
     demo_fail 'running edge proxy is missing or ambiguous'
@@ -661,6 +715,7 @@ demo_compose_with_file() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -678,6 +733,7 @@ demo_validation_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
@@ -690,6 +746,7 @@ demo_compose_input() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -702,6 +759,7 @@ demo_bootstrap_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -716,6 +774,7 @@ demo_seed_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -729,6 +788,7 @@ demo_seed_compose_input() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -763,6 +823,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_REGISTRATION == "open"
     and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+    and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false" or .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
+    and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED
     and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
     and .services.teagramd.environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
     and .services["teagramd-next"].environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
@@ -783,6 +845,9 @@ demo_render_config() {
     and .services.teagramd.environment.NO_PROXY == "localhost,127.0.0.1,postgres,teagramd,teagramd-next"
     and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY != ""
     and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
+    and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
+    and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io"
+    and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
     and (.services.teagramd.networks | keys) == ["backend"]
     and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
     and .services["teagramd-next"].networks.backend.ipv4_address == "198.18.130.251"
@@ -800,6 +865,7 @@ demo_render_config() {
     and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
     and (.services.edge.networks | keys | sort) == ["backend", "edge"]
     and .secrets.teagram_demo_turnstile.file == "/var/lib/teagram-demo/secrets/turnstile-secret-key"
+    and .secrets.teagram_demo_turnstile_qa_bypass.file == "/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token"
     and .volumes.tgblobs.driver == "local"
     and .volumes.tgblobs.driver_opts.type == "none"
     and .volumes.tgblobs.driver_opts.o == "bind"

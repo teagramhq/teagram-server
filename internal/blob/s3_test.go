@@ -80,7 +80,7 @@ func TestStoreConformance(t *testing.T) {
 		},
 		"s3": func(t *testing.T) conformanceBackend {
 			t.Helper()
-			store := newMinioStore(t)
+			store := newRustFSStore(t)
 			return conformanceBackend{
 				store: store,
 				seed: func(key string, body []byte) error {
@@ -213,96 +213,105 @@ func TestStoreConformance(t *testing.T) {
 	}
 }
 
-func TestMinioHarnessDoesNotReuseContainer(t *testing.T) {
+func TestRustFSHarnessDoesNotReuseContainer(t *testing.T) {
 	t.Parallel()
 
 	// A fixed-name reusable container can belong to another test process and
 	// carry its image, credentials, or lifecycle state. Each harness must own a
 	// fresh endpoint instead.
-	first := newMinioHarness(t).endpoint
-	second := newMinioHarness(t).endpoint
+	first := newRustFSHarness(t).endpoint
+	second := newRustFSHarness(t).endpoint
 	if first == second {
-		t.Fatalf("MinIO harness reused endpoint %q across independent setups", first)
+		t.Fatalf("RustFS harness reused endpoint %q across independent setups", first)
 	}
 }
 
-func TestMinioHarnessCleanupFailureDoesNotFailTest(t *testing.T) {
+func TestRustFSHarnessCleanupFailureDoesNotFailTest(t *testing.T) {
 	t.Parallel()
 
-	harness := newMinioHarness(t)
+	harness := newRustFSHarness(t)
 	if err := harness.container.Terminate(context.Background()); err != nil {
-		t.Fatalf("pre-cleanup MinIO container termination: %v", err)
+		t.Fatalf("pre-cleanup RustFS container termination: %v", err)
 	}
 }
 
-type minioHarness struct {
+type rustfsHarness struct {
 	endpoint  string
 	namespace string
 	container testcontainers.Container
 }
 
-func newMinioStore(tb testing.TB) *blob.S3 {
+const (
+	rustFSAccessKey = "rustfs-test-access-key"
+	rustFSAuthValue = "rustfs-test-secret-key"
+)
+
+func newRustFSStore(tb testing.TB) *blob.S3 {
 	tb.Helper()
-	harness := newMinioHarness(tb)
+	harness := newRustFSHarness(tb)
 	prefix := "conformance/" + harness.namespace + "/" + strings.NewReplacer("/", "-", "_", "-").Replace(tb.Name()) + "/"
 	store, err := blob.NewS3(blob.S3Config{
 		Endpoint:          harness.endpoint,
 		Bucket:            "blob-conformance",
 		Prefix:            prefix,
 		Region:            "us-east-1",
-		AccessKeyID:       "minioadmin",
-		SecretAccessKey:   "minioadmin",
+		AccessKeyID:       rustFSAccessKey,
+		SecretAccessKey:   rustFSAuthValue,
 		AllowInsecureHTTP: true,
 		OperationTimeout:  10 * time.Second,
 		MaxAttempts:       3,
 	})
 	if err != nil {
-		tb.Fatalf("new MinIO store: %v", err)
+		tb.Fatalf("new RustFS store: %v", err)
 	}
 	return store
 }
 
-func newMinioHarness(tb testing.TB) *minioHarness {
+func newRustFSHarness(tb testing.TB) *rustfsHarness {
 	tb.Helper()
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		Image:        "quay.io/minio/minio:latest",
+		Image:        "mirror.gcr.io/rustfs/rustfs:1.0.1",
 		ExposedPorts: []string{"9000/tcp"},
 		Env: map[string]string{
-			"MINIO_ROOT_USER":     "minioadmin",
-			"MINIO_ROOT_PASSWORD": "minioadmin",
+			"RUSTFS_ACCESS_KEY":       rustFSAccessKey,
+			"RUSTFS_SECRET_KEY":       rustFSAuthValue,
+			"RUSTFS_ADDRESS":          ":9000",
+			"RUSTFS_CONSOLE_ENABLE":   "false",
+			"RUSTFS_OBS_LOGGER_LEVEL": "error",
+			"RUSTFS_VOLUMES":          "/data",
 		},
-		Cmd:        []string{"server", "/data"},
-		WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp"),
+		Cmd:        []string{"/data"},
+		WaitingFor: wait.ForHTTP("/health/ready").WithPort("9000/tcp"),
 		Started:    true,
 	})
 	if err != nil {
 		if container != nil {
-			logMinioFailure(tb, container, "")
+			logRustFSFailure(tb, container, "")
 			if cleanupErr := container.Terminate(context.Background()); cleanupErr != nil {
-				tb.Logf("MinIO cleanup after startup failure: %v", cleanupErr)
+				tb.Logf("RustFS cleanup after startup failure: %v", cleanupErr)
 			}
 		}
-		tb.Fatalf("start MinIO container: %v", err)
+		tb.Fatalf("start RustFS container: %v", err)
 	}
 
-	harness := &minioHarness{container: container}
+	harness := &rustfsHarness{container: container}
 	tb.Cleanup(func() {
 		if tb.Failed() {
-			logMinioFailure(tb, harness.container, harness.endpoint)
+			logRustFSFailure(tb, harness.container, harness.endpoint)
 		}
 		if err := harness.container.Terminate(context.Background()); err != nil {
-			tb.Logf("terminate MinIO container %s: %v", harness.container.GetContainerID(), err)
+			tb.Logf("terminate RustFS container %s: %v", harness.container.GetContainerID(), err)
 		}
 	})
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		tb.Fatalf("get MinIO host: %v", err)
+		tb.Fatalf("get RustFS host: %v", err)
 	}
 	port, err := container.MappedPort(ctx, "9000/tcp")
 	if err != nil {
-		tb.Fatalf("get MinIO port: %v", err)
+		tb.Fatalf("get RustFS port: %v", err)
 	}
 	harness.endpoint = "http://" + net.JoinHostPort(host, port.Port())
 	harness.namespace = "run-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -312,89 +321,90 @@ func newMinioHarness(tb testing.TB) *minioHarness {
 		Bucket:            "blob-conformance",
 		Prefix:            "conformance/",
 		Region:            "us-east-1",
-		AccessKeyID:       "minioadmin",
-		SecretAccessKey:   "minioadmin",
+		AccessKeyID:       rustFSAccessKey,
+		SecretAccessKey:   rustFSAuthValue,
 		AllowInsecureHTTP: true,
 		OperationTimeout:  10 * time.Second,
 		MaxAttempts:       3,
 	})
 	if err != nil {
-		tb.Fatalf("new MinIO admin store: %v", err)
+		tb.Fatalf("new RustFS admin store: %v", err)
 	}
 	if err := blob.CreateBucketForTest(ctx, admin); err != nil {
-		tb.Fatalf("create MinIO bucket: %v", err)
+		tb.Fatalf("create RustFS bucket: %v", err)
 	}
 	return harness
 }
 
-func logMinioFailure(tb testing.TB, container testcontainers.Container, endpoint string) {
+func logRustFSFailure(tb testing.TB, container testcontainers.Container, endpoint string) {
 	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	state, err := container.State(ctx)
 	if err != nil {
-		tb.Logf("MinIO failure cause: unable to inspect container: %v", err)
+		tb.Logf("RustFS failure cause: unable to inspect container: %v", err)
 	} else {
-		cause := "MinIO was running; the S3 operation failed after readiness"
+		cause := "RustFS was running; the S3 operation failed after readiness"
 		switch {
 		case state.OOMKilled:
-			cause = "MinIO container was killed by the OOM killer"
+			cause = "RustFS container was killed by the OOM killer"
 		case state.Status != "running":
-			cause = "MinIO container stopped before the S3 operation completed"
+			cause = "RustFS container stopped before the S3 operation completed"
 		case state.Error != "":
-			cause = "MinIO container reported a runtime error"
+			cause = "RustFS container reported a runtime error"
 		}
-		tb.Logf("MinIO failure cause: %s (status=%s exit_code=%d oom_killed=%t error=%q)",
-			cause, state.Status, state.ExitCode, state.OOMKilled, redactMinioDiagnostic(state.Error))
+		tb.Logf("RustFS failure cause: %s (status=%s exit_code=%d oom_killed=%t error=%q)",
+			cause, state.Status, state.ExitCode, state.OOMKilled, redactRustFSDiagnostic(state.Error))
 	}
 
 	if endpoint != "" {
-		logMinioHealth(tb, ctx, endpoint)
+		logRustFSHealth(tb, ctx, endpoint)
 	}
 	logs, err := container.Logs(ctx)
 	if err != nil {
-		tb.Logf("MinIO failure diagnostics: unable to read container logs: %v", err)
+		tb.Logf("RustFS failure diagnostics: unable to read container logs: %v", err)
 		return
 	}
 	data, readErr := io.ReadAll(io.LimitReader(logs, 16*1024))
 	closeErr := logs.Close()
 	if readErr != nil {
-		tb.Logf("MinIO failure diagnostics: unable to read complete container logs: %v", readErr)
+		tb.Logf("RustFS failure diagnostics: unable to read complete container logs: %v", readErr)
 	}
 	if closeErr != nil {
-		tb.Logf("MinIO failure diagnostics: unable to close container logs: %v", closeErr)
+		tb.Logf("RustFS failure diagnostics: unable to close container logs: %v", closeErr)
 	}
 	if len(data) > 0 {
-		tb.Logf("MinIO container logs:\n%s", redactMinioDiagnostic(string(data)))
+		tb.Logf("RustFS container logs:\n%s", redactRustFSDiagnostic(string(data)))
 	}
 }
 
-func logMinioHealth(tb testing.TB, ctx context.Context, endpoint string) {
+func logRustFSHealth(tb testing.TB, ctx context.Context, endpoint string) {
 	tb.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/minio/health/ready", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health/ready", nil)
 	if err != nil {
-		tb.Logf("MinIO failure cause: health probe could not be created")
+		tb.Logf("RustFS failure cause: health probe could not be created")
 		return
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		tb.Logf("MinIO failure cause: readiness probe was unavailable (%T)", err)
+		tb.Logf("RustFS failure cause: readiness probe was unavailable (%T)", err)
 		return
 	}
 	if closeErr := resp.Body.Close(); closeErr != nil {
-		tb.Logf("MinIO failure diagnostics: readiness probe body close failed: %v", closeErr)
+		tb.Logf("RustFS failure diagnostics: readiness probe body close failed: %v", closeErr)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		tb.Logf("MinIO failure cause: readiness probe returned HTTP %s", resp.Status)
+		tb.Logf("RustFS failure cause: readiness probe returned HTTP %s", resp.Status)
 		return
 	}
-	tb.Logf("MinIO failure diagnostics: readiness probe returned HTTP %s while the container was running", resp.Status)
+	tb.Logf("RustFS failure diagnostics: readiness probe returned HTTP %s while the container was running", resp.Status)
 }
 
-func redactMinioDiagnostic(value string) string {
-	return strings.ReplaceAll(value, "minioadmin", "<redacted>")
+func redactRustFSDiagnostic(value string) string {
+	value = strings.ReplaceAll(value, rustFSAccessKey, "<redacted>")
+	return strings.ReplaceAll(value, rustFSAuthValue, "<redacted>")
 }
 
 func writeS3Error(w http.ResponseWriter, status int, code string) {

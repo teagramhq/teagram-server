@@ -101,6 +101,12 @@ bounded HAProxy healthcheck and logs. The runner checks HAProxy health, the
 loopback-only publish, both replica environments and listener readiness after
 startup.
 
+The `public` profile may add only `public-haproxy`, `teagramd-public-1`, and
+`teagramd-public-2` to an existing layout. Each replica must reuse the current
+`teagramd` mounts exactly, and HAProxy may mount only its reviewed config file
+read-only. The ordinary layout preflight still rejects changed existing mounts,
+new data volumes, and any other added service mount before the backup gate.
+
 If a deployed route must be reverted, free the public proxy's loopback 2446
 publish before reverting. Read the current deployed SHA, then run the reviewed
 teardown operation from that same commit:
@@ -223,14 +229,19 @@ reviewed artifact and content pin before rollout.
 
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
-database, building, or stopping a container. The only additional layout change
-allowed during an ordinary rollout is the initial exact read-only bind from
-`/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
-`teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
-mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
-application checkout. The runner pins the host path and key version after that
-first rollout; later changes remain blocked. Any project, volume, or other
-mount change fails closed and asks for the explicit `move-stack` action.
+database, building, or stopping a container. The initial exact read-only bind
+from `/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
+`teagramd` service remains an approved addition. It requires
+`TG_MEDIA_KEY_CURRENT=1` and a matching mode-0600 key file owned by uid/gid
+65532 in a mode-0700 directory outside the application checkout. The runner
+pins the host path and key version after that first rollout; later changes
+remain blocked. The initial public WebSocket profile is the one service-only
+exception and requires both `COMPOSE_PROFILES=public` and
+`ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1`. Its two replicas must keep the exact
+`teagramd` mounts and HAProxy must have only the reviewed read-only config bind.
+The public topology preflight validates those services before they start. Any
+other project, volume, or mount change fails closed and asks for the explicit
+`move-stack` action.
 `deploy-main.sh` continues to call `apply`, so a main-branch deployment that
 contains the project rename exits before changing the running stack until the
 move action is run. The normal readiness and rollback gates still apply when

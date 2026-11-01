@@ -94,6 +94,8 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Per-account download limit window |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Aggregate `upload.getFile` calls across replicas per window; `0` disables the limit |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW` | `1s` | Aggregate download limit window |
+| `TG_RATE_LIMIT_CREATE_STICKER_SET` | `3` | Per-account `stickers.createStickerSet` calls per window; `0` disables the limit |
+| `TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW` | `1m` | Per-account sticker-set creation limit window |
 | `TG_ADMIN_LISTEN_ADDR` | unset | Optional admin HTTP listener |
 
 `TG_RPC_DEADLINE=0` fails startup; it does not disable the deadline. The complete variable and rate-limit inventory is in [docs/clients.md](docs/clients.md).
@@ -125,7 +127,6 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 | [docs/security.md](docs/security.md) | Security model and controls |
 | [docs/public-websocket-threat-model.md](docs/public-websocket-threat-model.md) | Public WebSocket ingress, authentication, and abuse controls |
 | [deploy/teagram-demo/README.md#stack-data-retention-threat-model](deploy/teagram-demo/README.md#stack-data-retention-threat-model) | Demo data, deployment backup access, retention and deletion |
-| [docs/mixed-trust-compose.md](docs/mixed-trust-compose.md) | Optional mixed-trust Compose topology |
 | [docs/migrations.md](docs/migrations.md) | Atlas migration workflow |
 | [docs/testing.md](docs/testing.md) | Test harness and local test workflow |
 | [ROADMAP.md](ROADMAP.md) | Current capabilities, deployment status, and parked work |

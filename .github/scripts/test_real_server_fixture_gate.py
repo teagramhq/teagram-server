@@ -178,6 +178,21 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_real_client_browser_checkout_uses_declared_revision(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (
+            repo_root / ".github" / "workflows" / "real-client-browser-flow.yml"
+        ).read_text(encoding="utf-8")
+        self.assertRegex(
+            workflow,
+            r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
+            r"^      - name: Check out pinned web companion\n"
+            r"        uses: [^\n]+\n"
+            r"        with:\n"
+            r"          repository: teagramhq/teagram-web\n"
+            r"          ref: \$\{\{ env\.REAL_CLIENT_WEB_REVISION \}\}$",
+        )
+
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -214,11 +229,12 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # Image publishers run after their build and CI gates; the recovery
-        # dispatcher and demo publisher are main-push-only. The main-priority
-        # job is skipped on PRs and checked separately.
+        # Publishers run after their build and CI gates; the demo pin is
+        # advisory and the main-priority job is skipped on PRs. The recovery
+        # dispatcher and both image publishers are outside the PR CI aggregate.
         excluded_jobs = {
             "ci",
+            "check-demo-web-pin",
             "publish-demo-image",
             "publish-k8s-images",
             "ops-dispatch-pr-ci-recovery",
@@ -262,9 +278,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
         expected_dependencies = expected_lanes | {"ops-prioritize-main"}
         self.assertEqual(
-            needed_lanes[:5],
+            needed_lanes[:6],
             [
                 "ops-prioritize-main",
+                "check-security",
                 "test-go",
                 "check-sticker-license",
                 "test-photo-worker",
@@ -362,7 +379,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         fixtures = (scripts / "run-real-server-fixture-gate.sh").read_text(encoding="utf-8")
         self.assertIn("fixture_test_prefix='^TestRealServerFixture'", remaining)
         self.assertIn(
-            'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
+            'go test -race -count=1 -timeout 30m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
             remaining,
         )
         self.assertIn(

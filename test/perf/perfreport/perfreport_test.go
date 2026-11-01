@@ -243,6 +243,24 @@ func TestEvaluateWaivesKnownTimingChecksOnlyForNamedScenario(t *testing.T) {
 	}
 }
 
+func TestEvaluateMarksPassingTimingWaiverStale(t *testing.T) {
+	name := "updates.getDifference 30 days offline"
+	waiver := perfreport.Waiver{Scenario: name, Check: perfreport.CheckTiming, Issue: "MAIN-2580"}
+	head := rounds(pair(name, perfreport.Read,
+		result(2, 3, 5, 100), result(2.5, 4, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{Head: head, Waivers: []perfreport.Waiver{waiver}})
+	if len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
+		t.Fatalf("passing timing waiver produced failures: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
+	}
+	if len(v.Stale) != 1 || v.Stale[0] != waiver {
+		t.Fatalf("stale waivers = %+v, want %+v", v.Stale, waiver)
+	}
+	md := perfreport.Markdown(v)
+	if !strings.Contains(md, "`updates.getDifference 30 days offline` timing (MAIN-2580) no longer fails; remove its entry from known_violations.json") {
+		t.Fatalf("markdown = %s", md)
+	}
+}
+
 func TestEvaluateSlowerThanBaseNeedsNoiseBandAndTwoMilliseconds(t *testing.T) {
 	base := rounds(pair("h", perfreport.Read, result(10, 12, 5, 100), result(10, 12, 5, 100))...)
 	history := calibrated("h", perfreport.Calibration, 10, 1)
@@ -332,7 +350,7 @@ func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
 	}
 }
 
-func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
+func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 	raw, err := os.ReadFile("../known_violations.json")
 	if err != nil {
 		t.Fatal(err)
@@ -342,11 +360,8 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"messages.getHistory group":             "MAIN-2577",
-		"messages.search":                       "MAIN-2578",
-		"contacts.getContacts":                  "MAIN-2579",
-		"updates.getDifference 1 day offline":   "MAIN-2580",
-		"updates.getDifference 30 days offline": "MAIN-2580",
+		"messages.search":      "MAIN-2578",
+		"contacts.getContacts": "MAIN-3015",
 	}
 	for scenario, issue := range want {
 		found := false
@@ -360,10 +375,34 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 			t.Errorf("known_violations.json has no timing waiver for %s (%s)", scenario, issue)
 		}
 	}
+	for _, removed := range []struct {
+		scenario string
+		check    string
+	}{
+		{scenario: "messages.getHistory oldest page", check: perfreport.CheckRows},
+		{scenario: "messages.getHistory oldest page", check: perfreport.CheckSeqScan},
+		{scenario: "messages.getHistory group", check: perfreport.CheckSeqScan},
+	} {
+		for _, waiver := range waivers {
+			if waiver.Scenario == removed.scenario && waiver.Check == removed.check {
+				t.Errorf("known_violations.json still has resolved %s waiver for %s", removed.check, removed.scenario)
+			}
+		}
+	}
 	for _, scenario := range []string{"contacts.search", "messages.getDialogs"} {
 		for _, waiver := range waivers {
 			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming {
 				t.Errorf("known_violations.json still has a timing waiver for %s (%s)", scenario, waiver.Issue)
+			}
+		}
+	}
+	for _, scenario := range []string{
+		"updates.getDifference 1 day offline",
+		"updates.getDifference 30 days offline",
+	} {
+		for _, waiver := range waivers {
+			if waiver.Scenario == scenario {
+				t.Errorf("known_violations.json still has a %s waiver for %s (%s)", waiver.Check, scenario, waiver.Issue)
 			}
 		}
 	}

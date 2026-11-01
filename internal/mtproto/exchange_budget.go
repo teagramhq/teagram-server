@@ -37,9 +37,9 @@ type ExchangeLimits struct {
 	GlobalBurst       int
 }
 
-// DefaultExchangeLimits returns the production key-exchange budgets. Both
-// listener families start with a per-network bound; config may disable the
-// tailnet bound through its explicit tailnet override.
+// DefaultExchangeLimits returns the production key-exchange budgets. The
+// public listener starts with a per-network bound; tailnet starts without one
+// and can be bounded through its explicit tailnet override.
 func DefaultExchangeLimits() ExchangeLimits {
 	return ExchangeLimits{
 		PerConnection: defaultKeyExchangesPerConnection,
@@ -48,7 +48,7 @@ func DefaultExchangeLimits() ExchangeLimits {
 			Window: defaultKeyExchangeNetworkWindow,
 		},
 		TailnetPerNetwork: store.RateLimitConfig{
-			Limit:  defaultKeyExchangesPerNetwork,
+			Limit:  0,
 			Window: defaultKeyExchangeNetworkWindow,
 		},
 		GlobalRate:  defaultKeyExchangeRate,

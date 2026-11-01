@@ -184,7 +184,7 @@ run_branch() {
     TG_PERF_FIXTURE_VERSION="${FIXTURE_VERSION:-}" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
-    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v ||
+    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance|CallWithGetDialogsProfileRestoresEnvironment|GetDialogsProfilingUsesEveryMeasuredSample)$' -test.count=1 -test.timeout 30m -test.v ||
     fatal "run the $branch RPC performance harness"
   echo "::endgroup::"
 }

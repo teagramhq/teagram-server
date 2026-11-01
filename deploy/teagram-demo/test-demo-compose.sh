@@ -38,6 +38,7 @@ compose=(
 )
 TG_UPLOADS_DISABLED=false env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_UPLOAD_MAX_BYTES -u TG_RATE_LIMIT_UPLOAD_BYTES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
@@ -86,6 +87,10 @@ jq -e \
   and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
+  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
@@ -112,7 +117,16 @@ jq -e \
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
+  and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
+  and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io"
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_TEST_MODE == "false"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and any(.services.teagramd.secrets[]; .source == "teagram_demo_turnstile_qa_bypass" and .target == "/run/secrets/teagram_demo_turnstile_qa_bypass")
+  and any(.services["teagramd-next"].secrets[]; .source == "teagram_demo_turnstile_qa_bypass" and .target == "/run/secrets/teagram_demo_turnstile_qa_bypass")
   and .secrets.teagram_demo_turnstile.file == $secretFile
+  and .secrets.teagram_demo_turnstile_qa_bypass.file == "/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token"
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
   and .services.postgres.networks.backend.ipv4_address == "198.18.130.3"
@@ -144,6 +158,21 @@ EDGE_CONFIG_FIXTURE="$TMP_DIR/restrictive-checkout/deploy/teagram-demo"
 DEMO_SCRIPT_DIR="$EDGE_CONFIG_FIXTURE" demo_prepare_edge_config_permissions
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 644 ]]
+
+cp -- "$TMP_DIR/demo.env" "$TMP_DIR/demo-signin.env"
+printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' >> "$TMP_DIR/demo-signin.env"
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  docker compose --env-file "$TMP_DIR/demo-signin.env" \
+    --project-directory "$REPO_ROOT" --project-name teagram-demo \
+    --file "$SCRIPT_DIR/compose.yaml" config --format json > "$TMP_DIR/signin.json"
+jq -e '
+  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
+  and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+' "$TMP_DIR/signin.json" >/dev/null
 
 (
   demo_compose() {
@@ -426,6 +455,7 @@ PY
 )
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
   "${compose[@]}" config --format json > "$TMP_DIR/validation.json"
@@ -436,6 +466,7 @@ jq -e '
 ' "$TMP_DIR/validation.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.bootstrap.yaml" \
   --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/bootstrap.json"
@@ -453,15 +484,22 @@ jq -e '
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/bootstrap.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
 jq -e '
@@ -476,19 +514,26 @@ jq -e '
   and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" --profile seed --file "$SCRIPT_DIR/compose.seed.yaml" \
   config --format json > "$TMP_DIR/seed-profile.json"
@@ -518,6 +563,7 @@ jq -e '
 ' "$TMP_DIR/seed-profile.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" --profile activity config --format json > "$TMP_DIR/activity-profile.json"
 jq -e '
@@ -1420,6 +1466,21 @@ if CLEANUP_FUNCTION="$CLEANUP_FUNCTION" COMPOSE_CALLS="$COMPOSE_CALLS" \
 fi
 grep -Fxq 'stop edge haproxy' "$COMPOSE_CALLS"
 [[ ! -e "$TMP_WORK_DIR" ]]
+
+EDGE_CONFIG_PERMISSION_DIR="$TMP_DIR/edge-config-permissions"
+mkdir -p "$EDGE_CONFIG_PERMISSION_DIR"
+EDGE_CONFIG_PERMISSION_FILE="$EDGE_CONFIG_PERMISSION_DIR/nginx.conf"
+printf '%s\n' 'worker_processes 1;' > "$EDGE_CONFIG_PERMISSION_FILE"
+chmod 0700 "$EDGE_CONFIG_PERMISSION_DIR"
+chmod 0600 "$EDGE_CONFIG_PERMISSION_FILE"
+demo_prepare_edge_config_permissions "$EDGE_CONFIG_PERMISSION_DIR" "$EDGE_CONFIG_PERMISSION_FILE"
+[[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_DIR")" == 755 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_FILE")" == 644 ]]
+
+python3 "$SCRIPT_DIR/test-validate-env.py"
+python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
+bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
+python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
 if systemctl --system show-environment >/dev/null 2>&1; then
   if [[ "$EUID" -eq 0 ]]; then
     "$SCRIPT_DIR/test-activity-credential-handoff.sh"

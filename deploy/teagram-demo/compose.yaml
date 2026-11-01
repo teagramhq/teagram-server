@@ -23,9 +23,11 @@ x-teagramd: &teagramd
     TG_ADVERTISE_DEMO_GUEST_SIGN_UP: ${TG_ADVERTISE_DEMO_GUEST_SIGN_UP:-true}
     TG_WEBSOCKET_LISTEN_ADDR: ${TG_WEBSOCKET_LISTEN_ADDR:-:2446}
     TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:-https://web.teagram.io}
+    TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: "20"
     TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-false}
     TG_LOG_AUTH_KEY_UNBINDS: "true"
     TG_REGISTRATION: ${TG_REGISTRATION:-open}
+    TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
     TG_STICKER_IMPORT: "off"
     TG_MAX_FILE_BYTES: ${TG_MAX_FILE_BYTES:-16777216}
     TG_MAX_USER_STORAGE_BYTES: ${TG_MAX_USER_STORAGE_BYTES:-268435456}
@@ -43,6 +45,9 @@ x-teagramd: &teagramd
     TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
     TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
     TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
+    TG_TURNSTILE_TEST_MODE: "false"
+    TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
     TG_BLOB_DIR: /var/lib/teagramd-blobs
     GOMAXPROCS: "1"
     GOMEMLIMIT: 320MiB
@@ -53,6 +58,7 @@ x-teagramd: &teagramd
     - .state/blob-mode:/run/teagramd/blob-mode:ro
   secrets:
     - teagram_demo_turnstile
+    - teagram_demo_turnstile_qa_bypass
   depends_on:
     migrate:
       condition: service_completed_successfully
@@ -332,6 +338,8 @@ volumes:
 secrets:
   teagram_demo_turnstile:
     file: ${TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE:?set TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE in deploy/teagram-demo/.env}
+  teagram_demo_turnstile_qa_bypass:
+    file: /var/lib/teagram-demo/secrets/turnstile-qa-bypass-token
 
 networks:
   backend:

@@ -192,7 +192,15 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, exclude := range []bool{false, true} {
-			if _, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+			if offset == 0 {
+				if _, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+					OwnerID: 42, ExcludePinned: exclude, Lim: 5,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if _, err := q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
 				OwnerID: 42, OffsetID: offset, ExcludePinned: exclude, Lim: 5,
 			}); err != nil {
 				t.Fatal(err)
@@ -340,7 +348,7 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 	}
 	defer traced.Close()
 	q := db.New(traced)
-	page, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+	page, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
 		OwnerID: 1, Lim: 100,
 	})
 	if err != nil {
@@ -399,7 +407,7 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 				t.Fatalf("dialog query sequentially scans dialogs: %s", raw)
 			}
 		}
-		if strings.Contains(query.SQL, "DialogsForOwnerWithPins") {
+		if strings.Contains(query.SQL, "DialogsFirstPageWithPins") {
 			if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 100 {
 				t.Fatalf("dialog page reads %.0f rows for 100 returned dialogs", rows)
 			}
@@ -407,6 +415,91 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 		}
 		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
 			t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
+		}
+	}
+}
+
+// A pooled connection switches a prepared statement to its generic plan after
+// five executions, so the dialog page queries must stay bounded there too.
+func TestDialogPagesWithPinsGenericPlansReadOnlyThePage(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, pgtest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+generic-dialogs' || n, 'Generic ' || n FROM generate_series(1, 5000) n`,
+		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		 SELECT 1, 1, n, n FROM generate_series(2, 5000) n`,
+		`ANALYZE dialogs`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed generic dialog plan: %v", err)
+		}
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(pgtest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	q := db.New(traced)
+	if _, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{OwnerID: 1, Lim: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{OwnerID: 1, OffsetID: 4000, Lim: 20}); err != nil {
+		t.Fatal(err)
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("dialog page query count = %d, want 2", len(queries))
+	}
+	firstSQL, cursorSQL := queries[0].SQL, queries[1].SQL
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatal(err)
+	}
+	for _, page := range []struct {
+		name, sql, args string
+	}{
+		{"first", firstSQL, "(1, false, 20)"},
+		{"first excluding pinned", firstSQL, "(1, true, 20)"},
+		{"cursor", cursorSQL, "(1, 4000, 0, 0, false, 20)"},
+		{"cursor tie", cursorSQL, "(1, 4000, 1, 3999, true, 20)"},
+	} {
+		statement := "generic_dialogs_" + strings.ReplaceAll(page.name, " ", "_")
+		if _, err := conn.Exec(ctx, "PREPARE "+statement+" AS "+page.sql); err != nil {
+			t.Fatalf("prepare %s page: %v", page.name, err)
+		}
+		var raw []byte
+		if err := conn.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE "+statement+page.args,
+			pgx.QueryExecModeSimpleProtocol).Scan(&raw); err != nil {
+			t.Fatalf("explain %s page: %v", page.name, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatal(err)
+		}
+		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 40 {
+			t.Fatalf("%s page generic plan reads %.0f dialog rows for 20 returned: %s", page.name, rows, raw)
 		}
 	}
 }
@@ -482,6 +575,91 @@ func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
 	}
 	if rows := plans[0].Plan.rowsReadFrom("user_contacts"); rows > float64(2*len(ids)) {
 		t.Fatalf("contact-state query reads %.0f contact rows for %d selected users", rows, len(ids))
+	}
+}
+
+func TestLastSeenPrivacyForViewerUsesContactIDsAtLargeUserScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, query := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-user-scale' || n, 'Scale ' || n FROM generate_series(1, 115002) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 5001) n`,
+		`ANALYZE users`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatalf("seed contact privacy plan: %v", err)
+		}
+	}
+
+	contactRows, err := db.New(pool).ListContacts(ctx, 1)
+	if err != nil {
+		t.Fatalf("list contact edges: %v", err)
+	}
+	if len(contactRows) != 5000 {
+		t.Fatalf("contact edges = %d, want 5000", len(contactRows))
+	}
+	ids := make([]int64, len(contactRows))
+	for i, row := range contactRows {
+		ids[i] = row.ContactID
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	privacyRows, err := db.New(traced).EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
+		ViewerID: 1,
+		OwnerIds: ids,
+	})
+	if err != nil {
+		t.Fatalf("evaluate contact privacy: %v", err)
+	}
+	if len(privacyRows) != 5000 {
+		t.Fatalf("contact privacy rows = %d, want 5000", len(privacyRows))
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contact privacy query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contact privacy query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contact privacy query: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "users" {
+			t.Fatalf("contact privacy query sequentially scans users for caller contact ids: %s", raw)
+		}
+	}
+	if rows := plans[0].Plan.rowsReadFrom("users"); rows > 5001 {
+		t.Fatalf("contact privacy query reads %.0f users for 5000 contact ids", rows)
 	}
 }
 

@@ -1,0 +1,38 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_createStickerSet.1.txt",
+  "method": "stickers.createStickerSet",
+  "request": {
+    "type": "stickers.createStickerSet",
+    "flags": 104,
+    "fields": {
+      "emojis": true,
+      "text_color": true,
+      "user_id": {
+        "type": "inputUserSelf",
+        "fields": {}
+      },
+      "title": "Smoke emoji set",
+      "short_name": "smoke_custom_emoji",
+      "stickers": [
+        {
+          "type": "inputStickerSetItem",
+          "flags": 0,
+          "fields": {
+            "document": {
+              "type": "inputDocument",
+              "fields": {
+                "id": "<N>",
+                "access_hash": "<N>",
+                "file_reference": "REDACTED"
+              }
+            },
+            "emoji": "⭐"
+          }
+        }
+      ],
+      "software": "teagram-smoke"
+    }
+  }
+}

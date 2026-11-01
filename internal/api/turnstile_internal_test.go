@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -288,5 +290,83 @@ func TestTurnstileVerifierRefusesRedirectsWithoutForwardingCredentials(t *testin
 	}
 	if got := forwarded.Load(); got != 0 {
 		t.Fatalf("credentials were forwarded to redirect target %d times, want 0", got)
+	}
+}
+
+func TestTurnstileVerifierUsesConfiguredHostnameAllowlist(t *testing.T) {
+	t.Setenv("TG_TURNSTILE_HOSTNAMES", "LOCALHOST, qa.stack.test.")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"QA.STACK.TEST."}`)
+	}))
+	defer server.Close()
+
+	verifier := newTurnstileVerifier("private-secret")
+	verifier.endpoint = server.URL
+	if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+		t.Fatalf("Verify with configured hostname: %v", err)
+	}
+}
+
+func TestTurnstileVerifierAcceptsDemoAndWebHostnames(t *testing.T) {
+	for _, hostname := range []string{"web.teagram.io", "demo.teagram.io"} {
+		t.Run(hostname, func(t *testing.T) {
+			t.Setenv("TG_TURNSTILE_HOSTNAMES", "web.teagram.io,demo.teagram.io")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"`+hostname+`"}`)
+			}))
+			defer server.Close()
+
+			verifier := newTurnstileVerifier("private-secret")
+			verifier.endpoint = server.URL
+			if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+				t.Fatalf("Verify with configured hostname %q: %v", hostname, err)
+			}
+		})
+	}
+}
+
+func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing.T) {
+	const bypassToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeTurnstileBody(t, w, `{"success":false}`)
+	}))
+	defer server.Close()
+
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, logger)
+	verifier.endpoint = server.URL
+	if err := verifier.Verify(context.Background(), bypassToken, "signup", ""); err != nil {
+		t.Fatalf("Verify with QA bypass: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("QA bypass made %d Siteverify requests, want 0", got)
+	}
+	if !strings.Contains(logOutput.String(), "turnstile QA bypass used") {
+		t.Fatalf("QA bypass use was not logged: %q", logOutput.String())
+	}
+	if strings.Contains(logOutput.String(), bypassToken) {
+		t.Fatalf("QA bypass token appeared in logs: %q", logOutput.String())
+	}
+}
+
+func TestTurnstileVerifierDoesNotApplyQABypassToSignin(t *testing.T) {
+	const bypassToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeTurnstileBody(t, w, `{"success":true,"action":"signin","hostname":"web.teagram.io"}`)
+	}))
+	defer server.Close()
+
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, nil)
+	verifier.endpoint = server.URL
+	if err := verifier.Verify(context.Background(), bypassToken, "signin", ""); err != nil {
+		t.Fatalf("Verify signin with QA token through Siteverify: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("signin used %d Siteverify requests, want 1 (QA bypass only applies to signup)", got)
 	}
 }

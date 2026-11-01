@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
-	echo "mixed-trust validation requires its disposable GitHub-hosted daemon" >&2
+	echo "public WebSocket smoke requires its disposable GitHub-hosted daemon" >&2
 	exit 2
 fi
 
@@ -13,14 +13,10 @@ cd "$repo_root"
 unset TEAGRAM_TURNSTILE_SITE_KEY TEAGRAM_TURNSTILE_SECRET_KEY_FILE TG_TURNSTILE_SIGNIN_ENABLED
 
 work_dir=$(mktemp -d)
-umask 077
 trap 'rm -rf "$work_dir"' EXIT
+umask 077
 env_file="$work_dir/.env"
-project="main1286-proof-${GITHUB_RUN_ID:-local}-$$"
-legacy_tcp_pid=
-legacy_ws_pid=
-proxy_tcp_pid=
-proxy_ws_pid=
+project="public-websocket-proof-${GITHUB_RUN_ID:-local}-$$"
 public_ws_pid_a=
 public_ws_pid_b=
 public_smoke_started=0
@@ -34,7 +30,7 @@ if [ "${#existing_network_ids[@]}" -eq 0 ]; then
 fi
 docker network inspect "${existing_network_ids[@]}" > "$work_dir/networks.json"
 ip -j route show > "$work_dir/routes.json"
-mapfile -t mixed_network_values < <(python3 - "$work_dir/networks.json" "$work_dir/routes.json" <<'PY'
+python3 - "$work_dir/networks.json" "$work_dir/routes.json" <<'PY'
 import ipaddress
 import json
 import sys
@@ -51,37 +47,17 @@ for route in routes:
     destination = route.get("dst")
     if destination and destination != "default":
         try:
-            route_network = ipaddress.ip_network(destination, strict=False)
-            if route_network.prefixlen > 0:
-                occupied.append(route_network)
+            occupied.append(ipaddress.ip_network(destination, strict=False))
         except ValueError:
             pass
-
-pool = ipaddress.ip_network("198.18.0.0/15")
-public_networks = (ipaddress.ip_network("198.18.131.0/24"), ipaddress.ip_network("198.18.132.0/24"))
-if any(public.overlaps(existing) for public in public_networks for existing in occupied):
-    raise SystemExit("fixed public-WebSocket test subnets overlap an existing network or host route")
-occupied.extend(public_networks)
-for offset in range(pool.num_addresses // 256):
-    candidate = ipaddress.ip_network((int(pool.network_address) + offset * 256, 24))
-    if not any(candidate.overlaps(existing) for existing in occupied):
-        print(candidate)
-        print(candidate.network_address + 10)
-        print(candidate.network_address + 21)
-        print(candidate.network_address + 22)
-        break
-else:
-    raise SystemExit("no non-overlapping /24 test subnet is available in 198.18.0.0/15")
+for reserved in (ipaddress.ip_network("198.18.131.0/24"), ipaddress.ip_network("198.18.132.0/24")):
+    if any(reserved.overlaps(existing) for existing in occupied):
+        raise SystemExit(f"public-WebSocket test subnet {reserved} overlaps an existing network or host route")
 PY
-)
-if [ "${#mixed_network_values[@]}" -ne 4 ]; then
-	echo "could not select a non-overlapping mixed-trust subnet" >&2
-	exit 1
-fi
 
 docker ps --format '{{.Ports}}' > "$work_dir/docker-ports.txt"
 ss -H -ltn > "$work_dir/listening-ports.txt"
-mapfile -t mixed_ports < <(python3 - "$work_dir/docker-ports.txt" "$work_dir/listening-ports.txt" <<'PY'
+mapfile -t test_ports < <(python3 - "$work_dir/docker-ports.txt" "$work_dir/listening-ports.txt" <<'PY'
 import re
 import sys
 
@@ -94,16 +70,16 @@ for match in re.finditer(r"(?:\]|:)(\d+)\s", listeners):
     used.add(int(match.group(1)))
 
 for base in range(39000, 50000):
-    selected = [base, base + 1, base + 10, base + 11, base + 12, base + 13]
+    selected = [base, base + 1]
     if not used.intersection(selected):
         print("\n".join(map(str, selected)))
         break
 else:
-    raise SystemExit("no non-overlapping host ports are available in 39000-50010")
+    raise SystemExit("no non-overlapping host ports are available in 39000-50000")
 PY
 )
-if [ "${#mixed_ports[@]}" -ne 6 ]; then
-	echo "could not select non-overlapping mixed-trust host ports" >&2
+if [ "${#test_ports[@]}" -ne 2 ]; then
+	echo "could not select non-overlapping public WebSocket host ports" >&2
 	exit 1
 fi
 
@@ -114,63 +90,41 @@ TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_AUTHKEY_ENC_KEY=
 TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/enc_key.hex
-TG_REPLICA_ID=legacy
+TG_REPLICA_ID=base
 TG_REPLICA_COUNT=3
-TG_ADVERTISE_ADDR=127.0.0.1:${mixed_ports[2]}
+TG_ADVERTISE_ADDR=
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
+TEAGRAM_TURNSTILE_SITE_KEY=
+TEAGRAM_TURNSTILE_SECRET_KEY_FILE=
+TG_TURNSTILE_SIGNIN_ENABLED=false
 TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446
 TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443
 TG_PUBLIC_REGISTRATION=invite
 TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
-TG_PUBLIC_HAPROXY_HOST_PORT=${mixed_ports[4]}
-TG_MIXED_TRUST_SUBNET=${mixed_network_values[0]}
-TG_MIXED_TRUST_PROXY_IP=${mixed_network_values[1]}
-TG_MIXED_TRUST_REPLICA_1_IP=${mixed_network_values[2]}
-TG_MIXED_TRUST_REPLICA_2_IP=${mixed_network_values[3]}
-TG_MIXED_TRUST_LEGACY_TCP_PORT=${mixed_ports[0]}
-TG_MIXED_TRUST_LEGACY_WS_PORT=${mixed_ports[1]}
-TG_MIXED_TRUST_TEMP_TCP_PORT=${mixed_ports[2]}
-TG_MIXED_TRUST_TEMP_WS_PORT=${mixed_ports[3]}
+TG_PUBLIC_HAPROXY_HOST_PORT=${test_ports[0]}
 EOF
 chmod 600 "$env_file"
 
-# Preserve CI's generated credentials while applying the local blob override
-# before validation-specific environment and port changes.
 compose_base() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.local-blobs.yml \
-		-f docker-compose.mixed-trust.validation.yml "$@"
-}
-
-compose_mixed() {
-	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.local-blobs.yml \
-		-f docker-compose.mixed-trust.validation.yml -f docker-compose.mixed-trust.yml \
-		-f docker-compose.mixed-trust.local-validation.yml "$@"
-}
-
-compose_probe() {
-	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.local-blobs.yml \
-		-f docker-compose.mixed-trust.validation.yml -f docker-compose.mixed-trust.yml \
-		-f docker-compose.mixed-trust.local-validation.yml \
-		-f docker-compose.mixed-trust.probe.yml "$@"
+		-f docker-compose.yml -f docker-compose.local-blobs.yml "$@"
 }
 
 compose_public() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		--profile public -f docker-compose.yml -f docker-compose.local-blobs.yml \
-		-f docker-compose.mixed-trust.validation.yml \
 		-f docker-compose.public-websocket.local-validation.yml "$@"
 }
 
-compose_for_service() {
-	service=$1
-	shift
-	case "$service" in
-		teagramd-proxy-*) compose_mixed "$@" ;;
-		*) compose_base "$@" ;;
-	esac
+public_advertise_override="$work_dir/public-advertise-override.yml"
+cat > "$public_advertise_override" <<'YAML'
+services:
+  teagramd:
+    environment:
+      TG_ADVERTISE_ADDR: tailnet.example.test:2443
+YAML
+compose_public_with_advertise_override() {
+	compose_public -f "$public_advertise_override" "$@"
 }
 
 stop_probe() {
@@ -202,18 +156,13 @@ cleanup() {
 		done
 	fi
 	docker rm -f "$test_haproxy_name" "$test_echo_name" >/dev/null 2>&1 || true
-	stop_probe "$legacy_tcp_pid"
-	stop_probe "$legacy_ws_pid"
-	stop_probe "$proxy_tcp_pid"
-	stop_probe "$proxy_ws_pid"
 	stop_probe "$public_ws_pid_a"
 	stop_probe "$public_ws_pid_b"
-	compose_mixed down --volumes --remove-orphans >/dev/null 2>&1 || true
+	compose_public down --volumes --remove-orphans >/dev/null 2>&1 || true
 	rm -rf "$work_dir"
 	exit "$status"
 }
 trap cleanup EXIT
-
 if [ "$(stat -c '%a' "$env_file")" != 600 ]; then
 	echo "disposable Compose environment must be mode 0600" >&2
 	exit 1
@@ -226,18 +175,32 @@ fi
 compose_default_json="$work_dir/default-compose.json"
 docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 	-f docker-compose.yml config --format json > "$compose_default_json"
-compose_base config --format json > "$work_dir/legacy-compose.json"
+compose_base config --format json > "$work_dir/base-compose.json"
 compose_public config --format json > "$work_dir/public-compose.json"
 python3 -B deploy/teagramd/rollout-runner/public-websocket-check.py \
 	--haproxy-config deploy/teagramd/haproxy-public-websocket.cfg \
-	--host-port "${mixed_ports[4]}" \
+	--host-port "${test_ports[0]}" \
 	< "$work_dir/public-compose.json"
+compose_public_with_advertise_override config --format json > "$work_dir/public-override-compose.json"
+public_advertise_addr=$(jq -er '.services.teagramd.environment.TG_ADVERTISE_ADDR' \
+	"$work_dir/public-override-compose.json")
+TG_ADVERTISE_ADDR="$public_advertise_addr" compose_public_with_advertise_override \
+	config --format json > "$work_dir/public-override-resolved-compose.json"
+python3 -B deploy/teagramd/rollout-runner/public-websocket-check.py \
+	--haproxy-config deploy/teagramd/haproxy-public-websocket.cfg \
+	--host-port "${test_ports[0]}" \
+	< "$work_dir/public-override-resolved-compose.json"
+jq -e --arg advertise_addr "$public_advertise_addr" '
+	(.services.teagramd.environment.TG_ADVERTISE_ADDR == $advertise_addr)
+	and (.services["teagramd-public-1"].environment.TG_ADVERTISE_ADDR == $advertise_addr)
+	and (.services["teagramd-public-2"].environment.TG_ADVERTISE_ADDR == $advertise_addr)
+' "$work_dir/public-override-resolved-compose.json" >/dev/null
 
-python3 - "$compose_default_json" "$work_dir/legacy-compose.json" "$work_dir/public-compose.json" "${mixed_ports[4]}" <<'PY'
+python3 - "$compose_default_json" "$work_dir/base-compose.json" "$work_dir/public-compose.json" "${test_ports[0]}" <<'PY'
 import json
 import sys
 
-default, legacy, public = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
+default, base_config, public = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
 assert "tcp-proxy" not in default["services"]
 assert "teagramd-proxy-1" not in default["services"]
 assert "teagramd-proxy-2" not in default["services"]
@@ -254,26 +217,20 @@ assert any(
     and str(port.get("target")) == "2443"
     for port in default["services"]["teagramd"]["ports"]
 )
-assert legacy["services"]["teagramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
-assert legacy["services"]["teagramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
-assert legacy["services"]["teagramd"]["environment"]["TG_REGISTRATION"] == "open"
-assert legacy["services"]["teagramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
-assert not any(key.startswith("TG_BLOB_S3_") for key in legacy["services"]["teagramd"]["environment"])
-assert legacy["services"]["teagramd"].get("secrets") == [
-    {"source": "teagramd_turnstile", "target": "teagramd-turnstile"}
-]
-assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SITE_KEY"] == ""
-assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SECRET_KEY_FILE"] == ""
-assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SIGNIN_ENABLED"] == "false"
-assert legacy["secrets"]["teagramd_turnstile"]["file"] == "/dev/null"
+base = base_config["services"]["teagramd"]
+assert base["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
+assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert base["environment"]["TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"] == ""
+assert not any(key.startswith("TG_BLOB_S3_") for key in base["environment"])
 services = public["services"]
-base = services["teagramd"]
+public_base = services["teagramd"]
 proxy = services["public-haproxy"]
 assert public["networks"]["public-ingress"].get("internal", False) is False
-assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
-assert base["environment"]["TG_REPLICA_COUNT"] == "1"
-assert base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
-assert not any(str(port.get("target")) == "2446" for port in base.get("ports", []))
+assert public_base["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
+assert public_base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert public_base["environment"]["TG_REPLICA_COUNT"] == "1"
+assert public_base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
+assert not public_base.get("ports")
 assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]
 assert proxy["networks"]["public-ingress"]["ipv4_address"] == "198.18.131.10"
 assert proxy["networks"]["public-backend"]["ipv4_address"] == "198.18.132.10"
@@ -305,7 +262,7 @@ ingress_members = {name for name, service in services.items() if "public-ingress
 assert ingress_members == {"public-haproxy"}
 for name in ("teagramd-public-1", "teagramd-public-2"):
     env = services[name]["environment"]
-    assert env["TG_BLOB_DIR"] == base["environment"]["TG_BLOB_DIR"]
+    assert env["TG_BLOB_DIR"] == public_base["environment"]["TG_BLOB_DIR"]
     for key in (
         "TG_BLOB_S3_ENDPOINT", "TG_BLOB_S3_BUCKET", "TG_BLOB_S3_PREFIX",
         "TG_BLOB_S3_REGION", "TG_BLOB_S3_ACCESS_KEY_ID",
@@ -314,11 +271,10 @@ for name in ("teagramd-public-1", "teagramd-public-2"):
         "TG_MEDIA_KEY_DIR", "TG_MEDIA_KEY_CURRENT",
     ):
         assert env.get(key, "") == ""
-    assert services[name].get("secrets") == base.get("secrets")
+    assert services[name].get("secrets") == public_base.get("secrets")
     for key in ("TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"):
-        assert env[key] == base["environment"][key]
-print("default Compose stays direct; validation legacy is socket-trust")
-print("public Compose isolates the invite-only public listeners behind the pinned proxy-v2 frontend")
+        assert env[key] == public_base["environment"][key]
+print("default Compose stays direct; public Compose isolates invite-only WebSocket listeners behind the pinned proxy-v2 frontend")
 PY
 
 python3 - deploy/teagramd/haproxy-public-websocket.cfg <<'PY'
@@ -354,136 +310,28 @@ fi
 printf 'TG_RSA_KEY_FINGERPRINT=%s\n' "$fingerprint" >> "$env_file"
 
 compose_base create teagramd >/dev/null
-legacy_container=$(compose_base ps -aq teagramd | head -1)
-key_volume=$(docker inspect "$legacy_container" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
+base_container=$(compose_base ps -aq teagramd | head -1)
+key_volume=$(docker inspect "$base_container" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
 if [ -z "$key_volume" ]; then
-	echo "legacy service has no test-owned key volume" >&2
+	echo "base service has no test-owned key volume" >&2
 	exit 1
 fi
 docker run --rm --user 65532:65532 -v "$key_volume:/key" \
 	mirror.gcr.io/library/busybox:1.37 sh -ec \
 	'umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" > /key/enc_key.hex; chmod 600 /key/enc_key.hex'
 
-compose_mixed config --format json > "$work_dir/mixed-compose.json"
-python3 - "$work_dir/mixed-compose.json" "${mixed_network_values[0]}" "${mixed_network_values[1]}" "${mixed_ports[2]}" "${mixed_ports[3]}" <<'PY'
-import json
-import sys
-
-config = json.load(open(sys.argv[1], encoding="utf-8"))
-subnet, proxy_ip, temp_tcp_port, temp_ws_port = sys.argv[2:]
-services = config["services"]
-legacy = services["teagramd"]
-proxy1 = services["teagramd-proxy-1"]
-proxy2 = services["teagramd-proxy-2"]
-proxy = services["tcp-proxy"]
-assert legacy["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
-assert legacy["environment"]["TG_REPLICA_COUNT"] == "3"
-for service in (proxy1, proxy2):
-    assert service["environment"]["TG_CLIENT_ADDR_TRUST"] == "proxy-v2"
-    assert service["environment"]["TG_CLIENT_ADDR_PROXY_CIDRS"] == f"{proxy_ip}/32"
-    assert service.get("ports", []) == []
-    assert service["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
-    assert service["environment"]["TG_RSA_KEY_FINGERPRINT"]
-    assert service["environment"]["TG_ADVERTISE_ADDR"] == f"127.0.0.1:{temp_tcp_port}"
-    assert service["environment"]["TG_BLOB_DIR"] == "/var/lib/teagramd-blobs"
-    assert service["environment"]["TG_BLOB_S3_ENDPOINT"] == ""
-    assert set(service.get("depends_on", {})) == {"migrate", "tcp-proxy"}
-    assert not service.get("secrets")
-    assert any(
-        mount["type"] == "bind"
-        and mount["target"] == "/run/teagramd/blob-mode"
-        and mount["read_only"] is True
-        for mount in service["volumes"]
-    )
-    assert any(
-        mount["target"] == "/var/lib/teagramd-blobs"
-        and mount["source"] == "tgblobs"
-        and mount.get("read_only", False) is False
-        for mount in service["volumes"]
-    )
-assert proxy["healthcheck"]["test"][-1] == "http://127.0.0.1:8404/healthz"
-assert all(port.get("host_ip") == "127.0.0.1" for port in proxy["ports"])
-assert {str(port.get("published")) for port in proxy["ports"]} == {temp_tcp_port, temp_ws_port}
-assert config["networks"]["mixed-trust"]["ipam"]["config"][0]["subnet"] == subnet
-for replica in (proxy1, proxy2):
-    volume_targets = {mount["target"]: mount["source"] for mount in replica["volumes"]}
-    assert volume_targets["/var/lib/teagramd"] == "tgkey"
-    assert volume_targets["/var/lib/teagramd-blobs"] == "tgblobs"
-print("mixed Compose keeps exact trust modes, shared identity volumes, private app ports, and loopback-only temporary ports")
-PY
-
-python3 - deploy/teagramd/haproxy-mixed-trust.cfg <<'PY'
-import sys
-
-path = sys.argv[1]
-content = open(path, encoding="utf-8").read()
-sections = {}
-current = None
-for line in content.splitlines():
-    value = line.strip()
-    if value in {"global", "defaults"}:
-        current = value
-        sections[current] = []
-    elif value.startswith(("resolvers ", "frontend ", "backend ")):
-        current = value.split()[1]
-        sections[current] = []
-    elif value:
-        sections.setdefault(current, []).append(value)
-
-assert "mode tcp" in sections["defaults"]
-for frontend in ("mtproto", "websocket"):
-    assert "mode http" not in sections[frontend]
-assert "bind 127.0.0.1:8404" in sections["health"]
-assert ":2445" not in content
-targets = []
-for line in content.splitlines():
-    fields = line.split()
-    if fields and fields[0] == "server-template":
-        assert "check" in fields and "send-proxy-v2" in fields
-        targets.append(fields[3])
-assert set(targets) == {"teagramd-proxy:2443", "teagramd-proxy:2444"}
-print("HAProxy uses TCP passthrough, exact proxy-v2 replacement targets, and private readiness")
-PY
-compose_mixed run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
-
-compose_base up -d
-wait_listening() {
-	service=$1
-	for _ in $(seq 60); do
-		# Drain Compose's output under pipefail; grep -q can close the pipe early.
-		if compose_for_service "$service" logs "$service" 2>&1 | grep -F 'msg=listening' >/dev/null; then
-			cid=$(compose_for_service "$service" ps -q "$service")
-			if [ -n "$cid" ] && [ "$(docker inspect "$cid" --format '{{.State.Status}}')" = running ]; then
-				return 0
-			fi
-		fi
-		sleep 1
-	done
-	compose_for_service "$service" ps -a
-	compose_for_service "$service" logs "$service"
-	echo "$service did not reach application readiness" >&2
-	return 1
-}
-
-wait_listening teagramd
-legacy_container_before=$(compose_base ps -q teagramd)
-legacy_config="$work_dir/legacy-client-config.json"
-compose_base run --rm --no-deps -T teagramd client-config > "$legacy_config"
-
-probe_binary="$work_dir/mixed-trust-probe"
-# The probe is bind-mounted into the static teagramd image; match the probe
-# image's CGO-disabled build. The restrictive umask still needs this executable
-# to be accessible to validation containers running as uid 65532.
-CGO_ENABLED=0 go build -o "$probe_binary" ./cmd/mixed-trust-probe
+probe_binary="$work_dir/public-websocket-probe"
+CGO_ENABLED=0 go build -o "$probe_binary" ./cmd/public-websocket-probe
 chmod 755 "$probe_binary"
 
 start_hold() {
 	local transport_name=$1
 	local address=$2
 	local log_file=$3
-	shift 3
+	local config_path=$4
+	shift 4
 	"$probe_binary" hold --transport "$transport_name" --address "$address" \
-		--config "$legacy_config" "$@" > "$log_file" 2>&1 &
+		--config "$config_path" "$@" > "$log_file" 2>&1 &
 	started_hold_pid=$!
 }
 
@@ -502,7 +350,7 @@ wait_hold() {
 		sleep 1
 	done
 	cat "$log_file" >&2
-	echo "real application stream did not become ready" >&2
+	echo "public WebSocket client did not become ready" >&2
 	return 1
 }
 
@@ -531,112 +379,6 @@ wait_for_heartbeat_after() {
 	printf '%s did not complete a post-start application RPC heartbeat\n' "$stream_name" >&2
 	return 1
 }
-
-start_hold tcp "127.0.0.1:${mixed_ports[0]}" "$work_dir/legacy-tcp.log"
-legacy_tcp_pid=$started_hold_pid
-wait_hold "$legacy_tcp_pid" "$work_dir/legacy-tcp.log"
-start_hold websocket "127.0.0.1:${mixed_ports[1]}" "$work_dir/legacy-ws.log" --origin https://web.example.test
-legacy_ws_pid=$started_hold_pid
-wait_hold "$legacy_ws_pid" "$work_dir/legacy-ws.log"
-
-proxy_config_1="$work_dir/proxy-1-client-config.json"
-proxy_config_2="$work_dir/proxy-2-client-config.json"
-compose_mixed run --rm --no-deps -T teagramd-proxy-1 client-config > "$proxy_config_1"
-compose_mixed run --rm --no-deps -T teagramd-proxy-2 client-config > "$proxy_config_2"
-python3 - "$legacy_config" "$proxy_config_1" "$proxy_config_2" "${mixed_ports[2]}" <<'PY'
-import json
-import sys
-
-legacy, first, second = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
-for replica in (first, second):
-    assert replica["mtproto"]["endpoint"] == f"127.0.0.1:{sys.argv[4]}"
-    assert replica["mtproto"]["dc_id"] == legacy["mtproto"]["dc_id"]
-    assert replica["mtproto"]["rsa_spki"] == legacy["mtproto"]["rsa_spki"]
-print("both proxy replicas advertise the canonical endpoint and the legacy RSA identity")
-PY
-
-expect_identity_refusal() {
-	name=$1
-	match=$2
-	shift 2
-	output="$work_dir/$name.log"
-	if docker run --rm --network none --read-only -v "$key_volume:/var/lib/teagramd:ro" \
-		-e TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-		-e TG_POSTGRES_DSN=postgres://postgres:localdev@localhost:5432/teagram?sslmode=disable \
-		-e TG_RSA_KEY_FINGERPRINT="$fingerprint" -e TG_REPLICA_ID=readiness-probe \
-		-e TG_AUTHKEY_ENC_KEY= -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/enc_key.hex \
-		-e TG_CLIENT_ADDR_TRUST=proxy-v2 -e TG_CLIENT_ADDR_PROXY_CIDRS="${mixed_network_values[1]}/32" \
-		"$@" teagramd:local > "$output" 2>&1; then
-		echo "$name unexpectedly reached server startup" >&2
-		cat "$output" >&2
-		return 1
-	fi
-	if ! grep -Fq "$match" "$output"; then
-		echo "$name failed for a reason other than the missing identity material" >&2
-		cat "$output" >&2
-		return 1
-	fi
-	printf '%s refused as required\n' "$name"
-}
-
-expect_identity_refusal missing-rsa 'server_key_missing.pem' -e TG_RSA_KEY_PATH=/var/lib/teagramd/server_key_missing.pem
-expect_identity_refusal missing-encryption-key 'TG_AUTHKEY_ENC_KEY_FILE' -e TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/missing_enc_key.hex
-
-compose_mixed up -d --no-deps tcp-proxy
-compose_mixed up -d --no-deps teagramd-proxy-1 teagramd-proxy-2
-for service in teagramd-proxy-1 teagramd-proxy-2; do
-	wait_listening "$service"
-	compose_mixed logs "$service" | grep -F 'auth-key master key loaded from file' >/dev/null
-done
-
-proxy_container=$(compose_mixed ps -q tcp-proxy)
-for _ in $(seq 45); do
-	proxy_health=$(docker inspect "$proxy_container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}')
-	if [ "$proxy_health" = healthy ]; then
-		break
-	fi
-	sleep 1
-done
-if [ "$proxy_health" != healthy ]; then
-	compose_mixed ps -a
-	compose_mixed logs tcp-proxy teagramd-proxy-1 teagramd-proxy-2
-	echo "temporary HAProxy did not become healthy" >&2
-	exit 1
-fi
-
-legacy_container_after=$(compose_mixed ps -q teagramd)
-if [ "$legacy_container_before" != "$legacy_container_after" ]; then
-	echo "starting the replacement topology recreated the legacy listener" >&2
-	exit 1
-fi
-
-start_hold tcp "127.0.0.1:${mixed_ports[2]}" "$work_dir/proxy-tcp.log"
-proxy_tcp_pid=$started_hold_pid
-wait_hold "$proxy_tcp_pid" "$work_dir/proxy-tcp.log"
-start_hold websocket "127.0.0.1:${mixed_ports[3]}" "$work_dir/proxy-ws.log" --origin https://web.example.test
-proxy_ws_pid=$started_hold_pid
-wait_hold "$proxy_ws_pid" "$work_dir/proxy-ws.log"
-
-legacy_tcp_heartbeats=$(heartbeat_count "$work_dir/legacy-tcp.log")
-legacy_ws_heartbeats=$(heartbeat_count "$work_dir/legacy-ws.log")
-proxy_tcp_heartbeats=$(heartbeat_count "$work_dir/proxy-tcp.log")
-proxy_ws_heartbeats=$(heartbeat_count "$work_dir/proxy-ws.log")
-
-"$probe_binary" origin --address "127.0.0.1:${mixed_ports[3]}" --origin https://evil.example --status 403
-compose_probe --profile validation build mixed-trust-probe
-compose_probe --profile validation run --rm --no-deps mixed-trust-probe forged --address teagramd-proxy-1:2443
-
-wait_for_heartbeat_after "$legacy_tcp_pid" "$work_dir/legacy-tcp.log" "$legacy_tcp_heartbeats" "legacy TCP"
-wait_for_heartbeat_after "$legacy_ws_pid" "$work_dir/legacy-ws.log" "$legacy_ws_heartbeats" "legacy WebSocket"
-wait_for_heartbeat_after "$proxy_tcp_pid" "$work_dir/proxy-tcp.log" "$proxy_tcp_heartbeats" "proxy TCP"
-wait_for_heartbeat_after "$proxy_ws_pid" "$work_dir/proxy-ws.log" "$proxy_ws_heartbeats" "proxy WebSocket"
-
-for pid in "$legacy_tcp_pid" "$legacy_ws_pid" "$proxy_tcp_pid" "$proxy_ws_pid"; do
-	if ! kill -0 "$pid" 2>/dev/null; then
-		echo "an established real application stream exited during topology startup" >&2
-			exit 1
-	fi
-done
 
 public_smoke_started=1
 compose_public up -d teagramd-public-1 teagramd-public-2 public-haproxy
@@ -673,12 +415,10 @@ fi
 public_config="$work_dir/public-client-config.json"
 # Reuse the running replica; `run` would request its already-assigned static IP.
 compose_public exec -T teagramd-public-1 /usr/local/bin/teagramd client-config > "$public_config"
-start_hold websocket "127.0.0.1:${mixed_ports[4]}" "$work_dir/public-ws-a.log" \
-	--config "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.113.10
+start_hold websocket "127.0.0.1:${test_ports[0]}" "$work_dir/public-ws-a.log" "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.113.10
 public_ws_pid_a=$started_hold_pid
 wait_hold "$public_ws_pid_a" "$work_dir/public-ws-a.log"
-start_hold websocket "127.0.0.1:${mixed_ports[4]}" "$work_dir/public-ws-b.log" \
-	--config "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.114.10
+start_hold websocket "127.0.0.1:${test_ports[0]}" "$work_dir/public-ws-b.log" "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.114.10
 public_ws_pid_b=$started_hold_pid
 wait_hold "$public_ws_pid_b" "$work_dir/public-ws-b.log"
 public_ws_heartbeats_a=$(heartbeat_count "$work_dir/public-ws-a.log")
@@ -724,17 +464,17 @@ public_replica_id=$(compose_public ps -q teagramd-public-1)
 public_replica_ip=$(docker inspect "$public_replica_id" | jq -er --arg network "$default_network" '.[0].NetworkSettings.Networks[$network].IPAddress')
 docker run --rm --network "$default_network" --read-only --cap-drop ALL \
 	--security-opt no-new-privileges --user 65532:65532 \
-	-v "$probe_binary:/mixed-trust-probe:ro" --entrypoint /mixed-trust-probe teagramd:local \
+	-v "$probe_binary:/public-websocket-probe:ro" --entrypoint /public-websocket-probe teagramd:local \
 	forged --address "$public_replica_ip:2446"
 
-"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test --status 400
-"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test \
+"$probe_binary" origin --address "127.0.0.1:${test_ports[0]}" --origin https://web.example.test --status 400
+"$probe_binary" origin --address "127.0.0.1:${test_ports[0]}" --origin https://web.example.test \
 	--cf-connecting-ip '198.51.100.10, 198.51.100.11' --status 400
-"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test \
+"$probe_binary" origin --address "127.0.0.1:${test_ports[0]}" --origin https://web.example.test \
 	--cf-connecting-ip invalid-address --status 400
-"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://evil.example \
+"$probe_binary" origin --address "127.0.0.1:${test_ports[0]}" --origin https://evil.example \
 	--cf-connecting-ip 203.0.115.10 --status 403
-"$probe_binary" public-signup --address "127.0.0.1:${mixed_ports[4]}" --config "$public_config" \
+"$probe_binary" public-signup --address "127.0.0.1:${test_ports[0]}" --config "$public_config" \
 	--cf-connecting-ip 203.0.116.10
 
 public_haproxy_logs=$(compose_public logs --no-color public-haproxy)
@@ -780,7 +520,7 @@ docker run --rm --network none --read-only --cap-drop ALL \
 	"$haproxy_image" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
 docker run --detach --name "$test_echo_name" --network "$backend_network" --ip 198.18.132.23 \
 	--read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
-	-v "$probe_binary:/mixed-trust-probe:ro" --entrypoint /mixed-trust-probe teagramd:local \
+	-v "$probe_binary:/public-websocket-probe:ro" --entrypoint /public-websocket-probe teagramd:local \
 	proxy-v2-echo --listen :2446 --requests 2 >/dev/null
 for _ in $(seq 30); do
 	if docker logs "$test_echo_name" 2>&1 | grep -F 'proxy-v2-echo-ready' >/dev/null; then
@@ -794,7 +534,7 @@ if ! docker logs "$test_echo_name" 2>&1 | grep -F 'proxy-v2-echo-ready' >/dev/nu
 	exit 1
 fi
 docker run --detach --name "$test_haproxy_name" --network "$ingress_network" --ip 198.18.131.11 \
-	--publish "127.0.0.1:${mixed_ports[5]}:2446" --read-only --cap-drop ALL \
+	--publish "127.0.0.1:${test_ports[1]}:2446" --read-only --cap-drop ALL \
 	--security-opt no-new-privileges --memory 96m --cpus 0.25 --pids-limit 64 \
 	-v "$work_dir/haproxy-attribution.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
 	"$haproxy_image" -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null
@@ -809,7 +549,7 @@ if ! docker logs "$test_haproxy_name" 2>&1 | grep -F 'Loading success.' >/dev/nu
 	echo "attribution HAProxy did not load its configuration" >&2
 	exit 1
 fi
-"$probe_binary" keepalive-attribution --address "127.0.0.1:${mixed_ports[5]}" \
+"$probe_binary" keepalive-attribution --address "127.0.0.1:${test_ports[1]}" \
 	--first-ip 203.0.113.101 --second-ip 203.0.114.102
 docker wait "$test_echo_name" >/dev/null
 echo_attribution=$(docker logs "$test_echo_name" 2>&1 | sed -n 's/^proxy-v2-attribution=//p')
@@ -818,4 +558,4 @@ if [ "$echo_attribution" != "203.0.113.101,203.0.114.102" ]; then
 	echo "keepalive requests reached backend with PROXY-v2 addresses $echo_attribution" >&2
 	exit 1
 fi
-echo "legacy and proxy listeners passed; public header validation, invite policy over open ordinary registration, observed peer, separate buckets, and keepalive attribution passed"
+echo "public WebSocket ingress validation, invite policy, peer attribution, rate limits, and keepalive attribution passed"

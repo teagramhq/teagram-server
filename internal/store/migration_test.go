@@ -498,6 +498,99 @@ func TestOwnerDialogCountsBackfillExistingDialogs(t *testing.T) {
 	}
 }
 
+func TestOwnerDialogUnreadTotalsBackfillExistingUsers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15551263996")
+	otherOwner := mustUser(t, s, "+15551263997")
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	})
+
+	if _, err := conn.Exec(ctx, `
+		DROP TRIGGER dialogs_initialize_owner_count_before_write ON public.dialogs;
+		DROP TRIGGER dialogs_track_owner_count ON public.dialogs;
+		DROP FUNCTION public.initialize_owner_dialog_count_before_write();
+		DROP FUNCTION public.track_owner_dialog_count();
+		DROP TRIGGER users_initialize_owner_dialog_count ON public.users;
+		DROP FUNCTION public.initialize_owner_dialog_count_for_user();
+		DROP FUNCTION public.apply_owner_dialog_totals_delta(BIGINT, BIGINT, BIGINT);
+		DROP FUNCTION public.apply_owner_dialog_count_delta(BIGINT, BIGINT);
+		DROP TABLE public.owner_dialog_counts;
+	`); err != nil {
+		t.Fatalf("remove current owner dialog count schema: %v", err)
+	}
+
+	for _, filename := range []string{
+		"20261026000003_owner_dialog_counts.sql",
+		"20261026000004_backfill_owner_dialog_counts.sql",
+		"20261026000005_owner_dialog_counts_for_users.sql",
+		"20261026000006_backfill_zero_dialog_counts.sql",
+	} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", filename))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filename, err)
+		}
+		if _, err := conn.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", filename, err)
+		}
+	}
+
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO public.dialogs (owner_id, peer_type, peer_id, top_message, unread_count)
+		VALUES ($1, 1, 830001, 0, 4), ($1, 2, 830002, 0, 3), ($2, 1, 830003, 0, 5)
+	`, owner.ID, otherOwner.ID); err != nil {
+		t.Fatalf("seed pre-existing unread dialogs: %v", err)
+	}
+
+	for _, filename := range []string{
+		"20261030000001_owner_dialog_unread_totals.sql",
+		"20261030000002_backfill_owner_dialog_unread_totals.sql",
+		"20261030000003_drop_owner_dialog_unread_totals_backfill.sql",
+	} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", filename))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filename, err)
+		}
+		if _, err := conn.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", filename, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		ownerID int64
+		want    int
+	}{{owner.ID, 7}, {otherOwner.ID, 5}} {
+		state, err := s.StateWithoutChannelUnread(ctx, tc.ownerID)
+		if err != nil {
+			t.Fatalf("read migrated update state for owner %d: %v", tc.ownerID, err)
+		}
+		if state.UnreadCount != tc.want {
+			t.Errorf("owner %d migrated unread count = %d, want %d", tc.ownerID, state.UnreadCount, tc.want)
+		}
+
+		var cached int64
+		if err := conn.QueryRow(ctx, `
+			SELECT dialog_unread_total
+			FROM public.owner_dialog_counts
+			WHERE owner_id = $1 AND dialog_unread_initialized
+		`, tc.ownerID).Scan(&cached); err != nil {
+			t.Fatalf("read initialized unread total for owner %d: %v", tc.ownerID, err)
+		}
+		if cached != int64(tc.want) {
+			t.Errorf("owner %d cached unread total = %d, want %d", tc.ownerID, cached, tc.want)
+		}
+	}
+}
+
 func TestDialogCountBackfillsReleaseLocksPerOwner(t *testing.T) {
 	for _, filename := range []string{
 		"20261026000004_backfill_owner_dialog_counts.sql",
@@ -732,17 +825,7 @@ func TestServerAdministrationMigrationClosesNonEmptyDatabase(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	conn, err := pgx.Connect(ctx, pgtest.DSNFrom(name))
 	if err != nil {
@@ -809,17 +892,7 @@ func TestServerAdministrationMigrationSerializesLegacyInsert(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	legacyConn, err := pgx.Connect(ctx, dsn)
@@ -960,17 +1033,7 @@ func TestServerAdministrationMigrationRejectsQueuedLegacyInsert(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	legacyConn, err := pgx.Connect(ctx, dsn)
@@ -1340,18 +1403,7 @@ func TestOpenRejectsPartBlobMigrationMissing(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create db: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx := context.Background()
-		conn, err := pgx.Connect(ctx, pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
-		if _, err := conn.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	conn, err := pgx.Connect(ctx, dsn)

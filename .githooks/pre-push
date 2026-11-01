@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+warn_missing_tool() {
+  printf 'warning: pre-push: %s is missing; skipping %s\n' "$1" "$2" >&2
+}
+
+contains() {
+  local needle="$1"
+  shift
+  for value in "$@"; do
+    [[ "$value" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+local_shas=()
+remote_shas=()
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [[ -n "${local_sha:-}" ]] || continue
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  local_shas+=("$local_sha")
+  remote_shas+=("${remote_sha:-}")
+done
+((${#local_shas[@]})) || exit 0
+
+base_ref="${GIT_HOOK_BASE_REF:-}"
+if [[ -z "$base_ref" ]]; then
+  base_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+  if [[ -z "$base_ref" ]] && git rev-parse --verify --quiet "origin/main^{commit}" >/dev/null; then
+    base_ref=origin/main
+  elif [[ -z "$base_ref" ]] && git rev-parse --verify --quiet "main^{commit}" >/dev/null; then
+    base_ref=main
+  fi
+fi
+if [[ -z "$base_ref" ]] || ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  printf 'warning: pre-push: base branch is unavailable; skipping local checks\n' >&2
+  exit 0
+fi
+
+tmp_diff="$(mktemp)"
+trap 'rm -f -- "$tmp_diff"' EXIT
+head_sha="$(git rev-parse HEAD)"
+sql_queries_changed=false
+migrations_changed=false
+go_changed=false
+go_package_dirs=()
+shell_files=()
+workflow_files=()
+
+for index in "${!local_shas[@]}"; do
+  local_sha="${local_shas[$index]}"
+  if ! git diff --no-renames --name-only -z "$base_ref...$local_sha" -- > "$tmp_diff"; then
+    printf 'error: pre-push: could not compare %s with %s\n' "$local_sha" "$base_ref" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      *.go)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: Go lint requires the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        go_changed=true
+        if [[ "$path" == */* ]]; then
+          package_dir="${path%/*}"
+        else
+          package_dir=.
+        fi
+        if [[ -d "$package_dir" ]]; then
+          has_go_source=false
+          for source in "$package_dir"/*.go; do
+            if [[ -f "$source" ]]; then
+              has_go_source=true
+              break
+            fi
+          done
+          if [[ "$has_go_source" == true ]] && ! contains "$package_dir" "${go_package_dirs[@]}"; then
+            go_package_dirs+=("$package_dir")
+          fi
+        fi
+        ;;
+      internal/store/queries/*.sql) sql_queries_changed=true ;;
+      migrations/*)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: migration checks require the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        migrations_changed=true
+        ;;
+      *.sh|.githooks/pre-commit|.githooks/pre-push|.githooks/commit-msg)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: shell lint requires the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        if [[ -f "$path" ]] && ! contains "$path" "${shell_files[@]}"; then
+          shell_files+=("$path")
+        fi
+        ;;
+      .github/workflows/*.yml|.github/workflows/*.yaml)
+        [[ "$local_sha" == "$head_sha" ]] || {
+          printf 'error: pre-push: workflow lint requires the pushed commit to be checked out at HEAD\n' >&2
+          exit 1
+        }
+        if [[ -f "$path" ]] && ! contains "$path" "${workflow_files[@]}"; then
+          workflow_files+=("$path")
+        fi
+        ;;
+    esac
+    if [[ "$path" == internal/store/queries/*.sql ]]; then
+      [[ "$local_sha" == "$head_sha" ]] || {
+        printf 'error: pre-push: SQL checks require the pushed commit to be checked out at HEAD\n' >&2
+        exit 1
+      }
+    fi
+  done < "$tmp_diff"
+done
+
+if [[ "$go_changed" == true && ${#go_package_dirs[@]} -gt 0 ]]; then
+  if ! command -v golangci-lint >/dev/null 2>&1; then
+    warn_missing_tool golangci-lint 'Go linting'
+  else
+    for package_dir in "${go_package_dirs[@]}"; do
+      (
+        cd "$package_dir"
+        golangci-lint run --config "$repo_root/.golangci.yml" --new-from-rev="$base_ref" .
+      )
+    done
+  fi
+fi
+
+sqlfluff_available=false
+if [[ -x .venv-sqlfluff/bin/sqlfluff && -x .venv-sqlfluff/bin/python ]]; then
+  sqlfluff_available=true
+fi
+
+if [[ "$sql_queries_changed" == true ]]; then
+  if [[ "$sqlfluff_available" == false ]]; then
+    warn_missing_tool .venv-sqlfluff/bin/sqlfluff 'SQL linting'
+  elif ! command -v make >/dev/null 2>&1; then
+    warn_missing_tool make 'SQL linting'
+  else
+    make lint-sql
+  fi
+fi
+
+if [[ "$migrations_changed" == true ]]; then
+  if [[ "$sqlfluff_available" == true ]]; then
+    .venv-sqlfluff/bin/python .github/scripts/sql_lint.py \
+      --base "$base_ref" \
+      --head "$head_sha" \
+      --sqlfluff .venv-sqlfluff/bin/sqlfluff
+  elif [[ "$sql_queries_changed" == false ]]; then
+    warn_missing_tool .venv-sqlfluff/bin/sqlfluff 'changed migration SQL linting'
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn_missing_tool docker 'migration checks'
+  elif ! command -v atlas >/dev/null 2>&1; then
+    warn_missing_tool atlas 'migration checks'
+  elif ! command -v python3 >/dev/null 2>&1; then
+    warn_missing_tool python3 'migration checks'
+  else
+    MIGRATIONS_BASE_REF="$base_ref" \
+      POSTGRES_IMAGE="${POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66}" \
+      ATLAS_APPLY_IMAGE="${ATLAS_APPLY_IMAGE:-mirror.gcr.io/arigaio/atlas:1.2.0-alpine}" \
+      ATLAS_LINT_BIN="${ATLAS_LINT_BIN:-$(command -v atlas)}" \
+      bash .github/scripts/test-migrations.sh
+  fi
+fi
+
+if ((${#shell_files[@]})); then
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    warn_missing_tool shellcheck 'shell linting'
+  else
+    shellcheck "${shell_files[@]}"
+  fi
+fi
+
+if ((${#workflow_files[@]})); then
+  if ! command -v actionlint >/dev/null 2>&1; then
+    warn_missing_tool actionlint 'workflow linting'
+  else
+    actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' "${workflow_files[@]}"
+  fi
+fi
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  warn_missing_tool gitleaks 'pushed commit secret scanning'
+else
+  for index in "${!local_shas[@]}"; do
+    local_sha="${local_shas[$index]}"
+    remote_sha="${remote_shas[$index]}"
+    [[ "$local_sha" == "$remote_sha" ]] && continue
+    commit_range="$base_ref..$local_sha"
+    gitleaks git --no-banner --log-opts="$commit_range"
+  done
+fi
