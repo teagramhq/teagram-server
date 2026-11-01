@@ -1026,9 +1026,13 @@ turnstile_legacy_snapshot=$(snapshot_from_json \
   "$turnstile_legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 turnstile_disabled_compose=$(jq -c '
   .services.teagramd.environment += {
+    TG_ADVERTISE_ADDR:"",
     TG_TURNSTILE_SITE_KEY:"",
     TG_TURNSTILE_SECRET_KEY_FILE:"",
-    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+    TG_TURNSTILE_SIGNIN_ENABLED:"false",
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
   }
   | .services.teagramd.secrets = [{
       source:"teagramd_turnstile",
@@ -1038,9 +1042,13 @@ turnstile_disabled_compose=$(jq -c '
 ' <<< "$COMPOSE_JSON")
 turnstile_disabled_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c '
   .Config.Env += [
+    "TG_ADVERTISE_ADDR=",
     "TG_TURNSTILE_SITE_KEY=",
     "TG_TURNSTILE_SECRET_KEY_FILE=",
-    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+    "TG_TURNSTILE_SIGNIN_ENABLED=false",
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
   ]
   | .Mounts += [{
       Type:"bind",
@@ -1057,6 +1065,23 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.mounts_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.mounts_sha256' <<< "$turnstile_disabled_snapshot")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
+
+assert_non_default_environment_remains_pinned() {
+  local key=$1 value=$2 compose inspect snapshot
+  compose=$(jq -c --arg key "$key" --arg value "$value" \
+    '.services.teagramd.environment[$key]=$value' <<< "$turnstile_disabled_compose")
+  inspect=$(printf '%s' "$turnstile_disabled_inspect" | jq -c --arg key "$key" --arg value "$value" \
+    '.Config.Env += [$key + "=" + $value]')
+  snapshot=$(snapshot_from_json \
+    "$inspect" "$compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+  [ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.config_sha256' <<< "$snapshot")" ]
+  [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.container_env_sha256' <<< "$snapshot")" ]
+}
+assert_non_default_environment_remains_pinned TG_ADVERTISE_ADDR api.example.test:443
+assert_non_default_environment_remains_pinned TG_TURNSTILE_TEST_MODE true
+assert_non_default_environment_remains_pinned TG_TURNSTILE_HOSTNAMES qa.example.test
+assert_non_default_environment_remains_pinned TG_TURNSTILE_QA_BYPASS_TOKEN_FILE /run/secrets/qa-bypass
+printf '%s\n' 'PASS non-default advertise and Turnstile settings remain pinned in rollout snapshots'
 
 turnstile_local_compose=$(jq -c '
   .services.teagramd.environment += {

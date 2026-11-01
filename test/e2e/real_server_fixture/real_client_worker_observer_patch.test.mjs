@@ -215,6 +215,7 @@ test('the patched poll content check ignores an exiting duplicate option row', a
   const {browser} = patchBrowserForTest(t, globals);
   const questionLocator = {waitFor: async() => {}, count: async() => 1};
   const poll = {
+    last() { return this; },
     first() { return this; },
     waitFor: async() => {},
     count: async() => 1,
@@ -246,6 +247,45 @@ test('the patched poll content check ignores an exiting duplicate option row', a
 
   const resolvedPoll = await browser.waitForPollMessage(page, question, 'poll_exiting_option', 250, 56);
   await browser.assertPollContent(resolvedPoll, {question, description: '', stage: 'poll_exiting_option'});
+});
+
+test('the patched poll locator selects the latest copy for a confirmed message ID', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const question = 'browser-ci-poll-latest-message';
+  const {browser} = patchBrowserForTest(t);
+  let selectedSelector;
+  let latestCopySelected = false;
+  const latestCopy = {
+    first() { return this; },
+    waitFor: async() => {},
+    count: async() => 1,
+    getByText(text) {
+      assert.equal(text, question);
+      return {waitFor: async() => {}};
+    },
+  };
+  const candidates = {
+    first() { return this; },
+    waitFor: async() => {},
+    count: async() => 2,
+    last() {
+      latestCopySelected = true;
+      return latestCopy;
+    },
+  };
+  const page = {
+    locator(selector) {
+      selectedSelector = selector;
+      return candidates;
+    },
+    waitForFunction: async() => {},
+  };
+
+  const poll = await browser.waitForPollMessage(page, question, 'poll_latest_copy', 250, 56);
+
+  assert.equal(selectedSelector, '#column-center .bubble[data-mid="56"]');
+  assert.equal(latestCopySelected, true);
+  assert.equal(poll, latestCopy);
 });
 
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {
