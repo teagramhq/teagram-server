@@ -577,6 +577,54 @@ func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 	}
 }
 
+func TestInstalledCatalogueEmojiSetAppearsOnlyInEmojiStickerList(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551819031")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	initialAll := getAllStickerSets(t, h, owner.ID, 0)
+	initialEmojis := getEmojiStickerSets(t, h, owner.ID, 0)
+	if len(initialAll.Sets) != 0 || len(initialEmojis.Sets) != 0 {
+		t.Fatalf("initial installed sets = %d stickers and %d emoji sets, want empty", len(initialAll.Sets), len(initialEmojis.Sets))
+	}
+
+	emojiRef := &tg.InputStickerSetShortName{ShortName: "twemoji_custom_emojis"}
+	if got := installStickerSet(t, h, owner.ID, emojiRef); got != "success" {
+		t.Fatalf("install catalogue emoji set = %q, want success", got)
+	}
+	emojis := getEmojiStickerSets(t, h, owner.ID, 0)
+	if len(emojis.Sets) != 1 {
+		t.Fatalf("getEmojiStickers after catalogue emoji install = %+v, want one set", emojis)
+	}
+	if set := emojis.Sets[0]; set.ShortName != emojiRef.ShortName || !set.GetEmojis() || set.Count != 73 {
+		t.Fatalf("installed catalogue emoji set = %+v, want %q with 73 emoji documents", set, emojiRef.ShortName)
+	}
+	if emojis.Hash == initialEmojis.Hash {
+		t.Fatalf("getEmojiStickers hash stayed %d after catalogue emoji install", emojis.Hash)
+	}
+	allAfterEmojiInstall := getAllStickerSets(t, h, owner.ID, 0)
+	if len(allAfterEmojiInstall.Sets) != 0 || allAfterEmojiInstall.Hash != initialAll.Hash {
+		t.Fatalf("getAllStickers after catalogue emoji install = %+v, want unchanged empty sticker list", allAfterEmojiInstall)
+	}
+
+	stickerRef := &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}
+	if got := installStickerSet(t, h, owner.ID, stickerRef); got != "success" {
+		t.Fatalf("install catalogue sticker set = %q, want success", got)
+	}
+	all := getAllStickerSets(t, h, owner.ID, 0)
+	if len(all.Sets) != 1 || all.Sets[0].ShortName != stickerRef.ShortName || all.Sets[0].GetEmojis() {
+		t.Fatalf("getAllStickers after catalogue installs = %+v, want only %q", all, stickerRef.ShortName)
+	}
+	emojis = getEmojiStickerSets(t, h, owner.ID, 0)
+	if len(emojis.Sets) != 1 || emojis.Sets[0].ShortName != emojiRef.ShortName {
+		t.Fatalf("getEmojiStickers after both catalogue installs = %+v, want only %q", emojis, emojiRef.ShortName)
+	}
+}
+
 func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

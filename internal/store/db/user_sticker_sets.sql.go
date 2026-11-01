@@ -968,7 +968,8 @@ SELECT s.id AS set_id, s.access_hash AS set_access_hash, s.creator_id,
        s.title, s.short_name, s.software, s.kind, s.text_color, s.is_live,
        s.created_at, i.position, i.file_id, f.access_hash AS file_access_hash,
        f.size, f.date, i.emoji, i.keywords, i.format, i.width, i.height,
-       i.duration_ns, COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
+       i.duration_ns, COALESCE(i.mask_coords::text, '')::varchar AS mask_coords,
+       i.is_active
 FROM user_created_sticker_set_items i
 JOIN user_created_sticker_sets s ON s.id = i.set_id
 JOIN files f ON f.id = i.file_id
@@ -999,6 +1000,7 @@ type UserCreatedStickerSetItemsByFileIDsRow struct {
 	Height         int32
 	DurationNs     int64
 	MaskCoords     string
+	IsActive       bool
 }
 
 func (q *Queries) UserCreatedStickerSetItemsByFileIDs(ctx context.Context, dollar_1 []int64) ([]UserCreatedStickerSetItemsByFileIDsRow, error) {
@@ -1033,6 +1035,7 @@ func (q *Queries) UserCreatedStickerSetItemsByFileIDs(ctx context.Context, dolla
 			&i.Height,
 			&i.DurationNs,
 			&i.MaskCoords,
+			&i.IsActive,
 		); err != nil {
 			return nil, err
 		}

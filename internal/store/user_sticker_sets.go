@@ -1208,6 +1208,7 @@ func (s *Store) UserStickerSetsByFileIDs(ctx context.Context, fileIDs []int64) (
 				Format: row.Format, Width: int(row.Width), Height: int(row.Height),
 				Duration: row.DurationNs, MaskCoords: row.MaskCoords,
 			},
+			IsActive: row.IsActive,
 		}
 	}
 	return result, nil
@@ -1215,8 +1216,9 @@ func (s *Store) UserStickerSetsByFileIDs(ctx context.Context, fileIDs []int64) (
 
 // UserStickerDocument combines the public set identity and one media record.
 type UserStickerDocument struct {
-	Set  UserStickerSet
-	Item UserStickerSetItem
+	Set      UserStickerSet
+	Item     UserStickerSetItem
+	IsActive bool
 }
 
 // UserStickerDocumentExists matches a stored document only while a live set
