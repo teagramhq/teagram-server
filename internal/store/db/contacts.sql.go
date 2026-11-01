@@ -75,11 +75,7 @@ func (q *Queries) ContactStates(ctx context.Context, arg ContactStatesParams) ([
 }
 
 const contactsWithUsers = `-- name: ContactsWithUsers :many
-WITH contact_rows AS MATERIALIZED (
-    SELECT uc.contact_id, COUNT(*) OVER () AS total
-    FROM user_contacts uc
-    WHERE uc.owner_id = $1::BIGINT
-), mutual_contacts AS MATERIALIZED (
+WITH mutual_contacts AS MATERIALIZED (
     SELECT reverse.owner_id
     FROM user_contacts reverse
     WHERE reverse.contact_id = $1::BIGINT
@@ -88,7 +84,12 @@ WITH contact_rows AS MATERIALIZED (
     FROM profile_photo_state s
     JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
     JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
-    WHERE s.user_id = ANY(ARRAY(SELECT contact_id FROM contact_rows))
+    WHERE EXISTS (
+        SELECT 1
+        FROM user_contacts owned
+        WHERE owned.owner_id = $1::BIGINT
+          AND owned.contact_id = s.user_id
+    )
       AND s.current_file_id IS NOT NULL
       AND f.stored = true
       AND f.media_kind = 'photo'
@@ -98,9 +99,9 @@ WITH contact_rows AS MATERIALIZED (
             AND bu.blocked_id = $1::BIGINT
       )
 )
-SELECT contact_rows.contact_id,
+SELECT uc.contact_id,
        (mutual_contacts.owner_id IS NOT NULL)::BOOLEAN AS mutual,
-       contact_rows.total,
+       COUNT(*) OVER () AS total,
        u.id,
        u.first_name,
        u.last_name,
@@ -109,12 +110,13 @@ SELECT contact_rows.contact_id,
        un.handle AS username,
        u.kind,
        visible_photos.current_file_id AS photo_file_id
-FROM contact_rows
-JOIN users u ON u.id = contact_rows.contact_id
+FROM user_contacts uc
+JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
-LEFT JOIN mutual_contacts ON mutual_contacts.owner_id = contact_rows.contact_id
+LEFT JOIN mutual_contacts ON mutual_contacts.owner_id = uc.contact_id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
-ORDER BY contact_rows.contact_id
+WHERE uc.owner_id = $1::BIGINT
+ORDER BY uc.contact_id
 `
 
 type ContactsWithUsersRow struct {
