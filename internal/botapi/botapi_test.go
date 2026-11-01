@@ -53,7 +53,8 @@ type fakeUpdatesStore struct {
 	*fakeStore
 
 	offset         int64
-	pollGeneration int64
+	offsetErr      error
+	pollGeneration store.BotPollGeneration
 	events         []store.Event
 	messages       map[int64]store.Message
 	users          map[int64]store.User
@@ -62,6 +63,16 @@ type fakeUpdatesStore struct {
 	messageLookups int
 	senderLookups  int
 }
+
+type botAPIGetUpdatesStoreContract interface {
+	BotUpdateOffset(context.Context, int64, string) (int64, error)
+	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
+	CheckBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration) error
+	FinishBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration, int64) (int64, error)
+	BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error)
+}
+
+var _ botAPIGetUpdatesStoreContract = (botapi.Store)(nil)
 
 type firstQueryUpdatesStore struct {
 	*fakeUpdatesStore
@@ -95,7 +106,7 @@ type sharedReplicaUpdatesStore struct {
 	*fakeUpdatesStore
 
 	mu          sync.Mutex
-	generation  int64
+	generation  store.BotPollGeneration
 	offset      int64
 	events      []store.BotMessageEvent
 	querySignal chan struct{}
@@ -172,7 +183,7 @@ func (s *delayedFirstClaimUpdatesStore) StartBotUpdatePoll(ctx context.Context, 
 	return poll, err
 }
 
-func (s *sharedReplicaUpdatesStore) CheckBotUpdatePoll(_ context.Context, _ int64, _ string, generation int64) error {
+func (s *sharedReplicaUpdatesStore) CheckBotUpdatePoll(_ context.Context, _ int64, _ string, generation store.BotPollGeneration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if generation != s.generation {
@@ -181,7 +192,7 @@ func (s *sharedReplicaUpdatesStore) CheckBotUpdatePoll(_ context.Context, _ int6
 	return nil
 }
 
-func (s *sharedReplicaUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation, offset int64) (int64, error) {
+func (s *sharedReplicaUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation store.BotPollGeneration, offset int64) (int64, error) {
 	if botID != 123456 || s.lookupErrs[token] != nil {
 		return 0, store.ErrBotTokenNotFound
 	}
@@ -214,6 +225,9 @@ func (s *deadlineAfterFirstPageUpdatesStore) BotMessageEvents(ctx context.Contex
 }
 
 func (s *fakeUpdatesStore) BotUpdateOffset(_ context.Context, botID int64, token string) (int64, error) {
+	if s.offsetErr != nil {
+		return 0, s.offsetErr
+	}
 	if botID != 123456 || s.lookupErrs[token] != nil {
 		return 0, store.ErrBotTokenNotFound
 	}
@@ -228,7 +242,7 @@ func (s *fakeUpdatesStore) StartBotUpdatePoll(_ context.Context, botID int64, to
 	return store.BotUpdatePoll{Offset: s.offset, Generation: s.pollGeneration}, nil
 }
 
-func (s *fakeUpdatesStore) CheckBotUpdatePoll(_ context.Context, botID int64, token string, generation int64) error {
+func (s *fakeUpdatesStore) CheckBotUpdatePoll(_ context.Context, botID int64, token string, generation store.BotPollGeneration) error {
 	if botID != 123456 || s.lookupErrs[token] != nil {
 		return store.ErrBotTokenNotFound
 	}
@@ -238,7 +252,7 @@ func (s *fakeUpdatesStore) CheckBotUpdatePoll(_ context.Context, botID int64, to
 	return nil
 }
 
-func (s *fakeUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation, offset int64) (int64, error) {
+func (s *fakeUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation store.BotPollGeneration, offset int64) (int64, error) {
 	if err := s.CheckBotUpdatePoll(context.Background(), botID, token, generation); err != nil {
 		return 0, err
 	}
@@ -329,6 +343,26 @@ func (*blockingLookupStore) Notify(context.Context, string, string) error {
 	return nil
 }
 
+func (*blockingLookupStore) BotUpdateOffset(context.Context, int64, string) (int64, error) {
+	return 0, store.ErrBotTokenNotFound
+}
+
+func (*blockingLookupStore) StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error) {
+	return store.BotUpdatePoll{}, store.ErrBotTokenNotFound
+}
+
+func (*blockingLookupStore) CheckBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration) error {
+	return store.ErrBotTokenNotFound
+}
+
+func (*blockingLookupStore) FinishBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration, int64) (int64, error) {
+	return 0, store.ErrBotTokenNotFound
+}
+
+func (*blockingLookupStore) BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error) {
+	return store.BotMessageEventPage{}, store.ErrBotTokenNotFound
+}
+
 func (s *fakeStore) BotIDByToken(_ context.Context, token string) (int64, error) {
 	s.lookupCount++
 	if err := s.lookupErrs[token]; err != nil {
@@ -373,6 +407,26 @@ func (s *fakeStore) Notify(_ context.Context, channel, payload string) error {
 	s.notifyChannel = channel
 	s.notifyPayload = payload
 	return nil
+}
+
+func (*fakeStore) BotUpdateOffset(context.Context, int64, string) (int64, error) {
+	return 0, store.ErrBotTokenNotFound
+}
+
+func (*fakeStore) StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error) {
+	return store.BotUpdatePoll{}, store.ErrBotTokenNotFound
+}
+
+func (*fakeStore) CheckBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration) error {
+	return store.ErrBotTokenNotFound
+}
+
+func (*fakeStore) FinishBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration, int64) (int64, error) {
+	return 0, store.ErrBotTokenNotFound
+}
+
+func (*fakeStore) BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error) {
+	return store.BotMessageEventPage{}, store.ErrBotTokenNotFound
 }
 
 func newFakeStore() *fakeStore {
@@ -949,6 +1003,41 @@ func TestBotAPIWithoutBotTokenRejectsSessionOnlyRequest(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", response.Code)
+	}
+}
+
+func TestGetUpdatesLogsAllowedUpdatesParseError(t *testing.T) {
+	st := &fakeUpdatesStore{fakeStore: newFakeStore()}
+	var logs bytes.Buffer
+	handler := botapi.NewHandler(st, slog.New(slog.NewTextHandler(&logs, nil)), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?allowed_updates=%5B%22message%22%2C%22callback_query%22%5D", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+	if !strings.Contains(logs.String(), "getUpdates only supports message updates") {
+		t.Fatalf("request log = %q, want the allowed_updates parse reason", logs.String())
+	}
+}
+
+func TestGetUpdatesLogsOffsetLookupError(t *testing.T) {
+	lookupErr := errors.New("database unavailable")
+	st := &fakeUpdatesStore{fakeStore: newFakeStore(), offsetErr: lookupErr}
+	var logs bytes.Buffer
+	handler := botapi.NewHandler(st, slog.New(slog.NewTextHandler(&logs, nil)), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?timeout=0", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.Code)
+	}
+	if !strings.Contains(logs.String(), lookupErr.Error()) {
+		t.Fatalf("request log = %q, want offset lookup cause", logs.String())
 	}
 }
 

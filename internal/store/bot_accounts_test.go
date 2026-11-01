@@ -210,6 +210,77 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	}
 }
 
+func TestBotMessageEventsSkipsExpiredAndPollCopyText(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open inspection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	bot, _, err := st.CreateBot(ctx, "updates_filter_bot", "Filter")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	human, err := st.CreateUser(ctx, "15551234569")
+	if err != nil {
+		t.Fatalf("create human: %v", err)
+	}
+
+	expiredMessage, _, expiredPts, duplicate, err := st.SendMessage(ctx, human.ID, bot.ID, "expired text", 93101, 0, 0)
+	if err != nil || duplicate {
+		t.Fatalf("send expired text: duplicate=%v err=%v", duplicate, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE messages
+		SET expires_at = statement_timestamp() - interval '1 second'
+		WHERE owner_id = $1 AND local_id = $2
+	`, bot.ID, expiredMessage.PeerLocalID); err != nil {
+		t.Fatalf("expire bot message copy: %v", err)
+	}
+
+	pollCopyMessage, _, pollCopyPts, duplicate, err := st.SendMessage(ctx, human.ID, bot.ID, "poll copy text", 93102, 0, 0)
+	if err != nil || duplicate {
+		t.Fatalf("send poll-copy text: duplicate=%v err=%v", duplicate, err)
+	}
+	const pollID int64 = 93102
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO polls (id, creator_id, source_local_id, question)
+		VALUES ($1, $2, $3, $4)
+	`, pollID, human.ID, pollCopyMessage.LocalID, []byte("poll question")); err != nil {
+		t.Fatalf("insert poll: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO poll_message_copies (owner_id, local_id, poll_id)
+		VALUES ($1, $2, $3)
+	`, bot.ID, pollCopyMessage.PeerLocalID, pollID); err != nil {
+		t.Fatalf("insert poll message copy: %v", err)
+	}
+
+	page, err := st.BotMessageEvents(ctx, bot.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("read bot message events: %v", err)
+	}
+	if len(page.Events) != 0 {
+		t.Fatalf("bot events = %+v, want expired and poll-copy text excluded", page.Events)
+	}
+	wantOffset := int64(max(expiredPts, pollCopyPts) + 1)
+	if page.NextOffset != wantOffset {
+		t.Fatalf("scan offset = %d, want %d after both excluded events", page.NextOffset, wantOffset)
+	}
+}
+
 func TestBotUpdatePhotoHistoryAdvancesScanOffset(t *testing.T) {
 	t.Parallel()
 	s := open(t)

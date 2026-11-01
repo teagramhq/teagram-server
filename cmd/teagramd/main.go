@@ -64,6 +64,15 @@ const adminShutdownTimeout = 5 * time.Second
 
 const botAPIShutdownTimeout = 5 * time.Second
 
+type botUpdateNotifier interface {
+	NotifyUpdates(int64)
+}
+
+func deliverWithBotAPINotify(ctx context.Context, notifier botUpdateNotifier, deliver func(context.Context, int64), ownerID int64) {
+	notifier.NotifyUpdates(ownerID)
+	deliver(ctx, ownerID)
+}
+
 type publicWebSocketListener struct {
 	listener       net.Listener
 	handler        mtproto.Handler
@@ -1076,7 +1085,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	// before the store pool closes (defer registered after st.Close, runs first).
 	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, stickerSets, notifyMetrics)
 	var botAPIHandler http.Handler
-	var botAPIUpdateNotifier interface{ NotifyUpdates(int64) }
+	var botAPIUpdateNotifier botUpdateNotifier
 	if cfg.BotAPIListenAddr != "" {
 		handler := botapi.NewHandler(st, log, cfg.RateLimits.MessageSend)
 		botAPIHandler = handler
@@ -1085,8 +1094,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	deliverUpdates := updater.Deliver
 	if botAPIUpdateNotifier != nil {
 		deliverUpdates = func(ctx context.Context, ownerID int64) {
-			botAPIUpdateNotifier.NotifyUpdates(ownerID)
-			updater.Deliver(ctx, ownerID)
+			deliverWithBotAPINotify(ctx, botAPIUpdateNotifier, updater.Deliver, ownerID)
 		}
 	}
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)

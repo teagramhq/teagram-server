@@ -29,10 +29,6 @@ const (
 const getUpdatesConflictBody = "{\"ok\":false,\"error_code\":409,\"description\":\"Conflict: terminated by other getUpdates request\"}\n"
 
 type getUpdatesStore interface {
-	BotUpdateOffset(context.Context, int64, string) (int64, error)
-	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
-	CheckBotUpdatePoll(context.Context, int64, string, int64) error
-	FinishBotUpdatePoll(context.Context, int64, string, int64, int64) (int64, error)
 	BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error)
 }
 
@@ -243,19 +239,14 @@ func (h *handler) NotifyUpdates(ownerID int64) {
 }
 
 func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64, method, token string, params getUpdatesParams) {
-	st, ok := h.store.(getUpdatesStore)
-	if !ok {
-		h.log.Error("Bot API update store unavailable", "bot_id", botID, "method", method)
-		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-		return
-	}
+	st := h.store
 	_, err := st.BotUpdateOffset(r.Context(), botID, token)
 	if errors.Is(err, store.ErrBotTokenNotFound) {
 		h.unauthorized(w, botID, method)
 		return
 	}
 	if err != nil {
-		h.log.Error("Bot API update offset lookup failed", "bot_id", botID, "method", method)
+		h.log.Error("Bot API update offset lookup failed", "bot_id", botID, "method", method, "err", err)
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 		return
 	}
@@ -450,6 +441,11 @@ pollLoop:
 }
 
 func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID, offset int64, limit int) ([]botAPIUpdate, int64, error) {
+	if limit < 1 {
+		limit = 1
+	} else if limit > maxGetUpdatesLimit {
+		limit = maxGetUpdatesLimit
+	}
 	updates := make([]botAPIUpdate, 0, limit)
 	scanOffset := offset
 	safeOffset := func() int64 {
@@ -481,6 +477,9 @@ func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID,
 func (h *handler) hydrateBotUpdates(botID int64, events []store.BotMessageEvent, offset int64, limit int) []botAPIUpdate {
 	updates := make([]botAPIUpdate, 0, len(events))
 	for _, event := range events {
+		if len(updates) >= limit {
+			break
+		}
 		if event.Type != store.EventNewMessage || event.Pts < offset {
 			continue
 		}
@@ -505,9 +504,6 @@ func (h *handler) hydrateBotUpdates(botID int64, events []store.BotMessageEvent,
 				Text:      message.Text,
 			},
 		})
-		if len(updates) == limit {
-			break
-		}
 	}
 	return updates
 }

@@ -13,9 +13,40 @@ import (
 )
 
 type deadlinePagingUpdatesStore struct {
-	getUpdatesStore
-
 	calls int
+}
+
+type eventPageUpdatesStore struct {
+	page store.BotMessageEventPage
+}
+
+func (s *eventPageUpdatesStore) BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error) {
+	return s.page, nil
+}
+
+func TestReadBotUpdatesTreatsZeroLimitAsOne(t *testing.T) {
+	const botID, senderID int64 = 123456, 42
+	events := make([]store.BotMessageEvent, 3)
+	for i := range events {
+		pts := int64(i + 1)
+		localID := int64(i + 10)
+		events[i] = store.BotMessageEvent{
+			Pts: pts, Type: store.EventNewMessage, LocalID: localID,
+			Message: store.Message{
+				OwnerID: botID, LocalID: localID, PeerType: store.PeerTypeUser,
+				PeerID: senderID, FromID: senderID, Date: time.Unix(1700000000, 0), Text: "message",
+			},
+			Sender: store.User{ID: senderID, Kind: store.UserKindHuman},
+		}
+	}
+	st := &eventPageUpdatesStore{page: store.BotMessageEventPage{Events: events, NextOffset: 4}}
+	updates, _, err := (&handler{}).readBotUpdates(context.Background(), st, botID, 0, 0)
+	if err != nil {
+		t.Fatalf("read bot updates: %v", err)
+	}
+	if len(updates) != 1 || updates[0].UpdateID != 1 {
+		t.Fatalf("updates = %+v, want one update at pts 1 for a zero-value limit", updates)
+	}
 }
 
 func (s *deadlinePagingUpdatesStore) BotMessageEvents(ctx context.Context, _ int64, fromPts int64, _ int) (store.BotMessageEventPage, error) {

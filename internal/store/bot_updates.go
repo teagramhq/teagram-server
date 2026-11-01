@@ -14,10 +14,14 @@ import (
 
 const maxBotUpdateLimit = 100
 
+// BotPollGeneration identifies the per-bot getUpdates poll that currently owns
+// the shared offset.
+type BotPollGeneration int64
+
 // BotUpdatePoll is the shared offset and generation claimed by one getUpdates poll.
 type BotUpdatePoll struct {
 	Offset     int64
-	Generation int64
+	Generation BotPollGeneration
 }
 
 // BotMessageEvent is a retained incoming text message with its author joined
@@ -74,13 +78,13 @@ func (s *Store) StartBotUpdatePoll(ctx context.Context, botID int64, token strin
 	case err != nil:
 		return BotUpdatePoll{}, fmt.Errorf("start bot update poll: %w", err)
 	default:
-		return BotUpdatePoll{Offset: row.UpdateOffset, Generation: row.PollGeneration}, nil
+		return BotUpdatePoll{Offset: row.UpdateOffset, Generation: BotPollGeneration(row.PollGeneration)}, nil
 	}
 }
 
 // CheckBotUpdatePoll returns ErrBotPollSuperseded unless the token still owns
 // generation. It also treats token revocation and rotation as unauthorized.
-func (s *Store) CheckBotUpdatePoll(ctx context.Context, botID int64, token string, generation int64) error {
+func (s *Store) CheckBotUpdatePoll(ctx context.Context, botID int64, token string, generation BotPollGeneration) error {
 	wantHash, ok := botTokenHashForID(botID, token)
 	if !ok {
 		return ErrBotTokenNotFound
@@ -96,7 +100,7 @@ func (s *Store) CheckBotUpdatePoll(ctx context.Context, botID int64, token strin
 	if subtle.ConstantTimeCompare(wantHash, row.TokenHash) != 1 {
 		return ErrBotTokenNotFound
 	}
-	if row.PollGeneration != generation {
+	if row.PollGeneration != int64(generation) {
 		return ErrBotPollSuperseded
 	}
 	return nil
@@ -104,7 +108,7 @@ func (s *Store) CheckBotUpdatePoll(ctx context.Context, botID int64, token strin
 
 // FinishBotUpdatePoll conditionally confirms the requested offset only while
 // the caller still owns the active token's current poll generation.
-func (s *Store) FinishBotUpdatePoll(ctx context.Context, botID int64, token string, generation, offset int64) (int64, error) {
+func (s *Store) FinishBotUpdatePoll(ctx context.Context, botID int64, token string, generation BotPollGeneration, offset int64) (int64, error) {
 	if offset < 0 {
 		return 0, errors.New("bot update offset cannot be negative")
 	}
@@ -114,7 +118,7 @@ func (s *Store) FinishBotUpdatePoll(ctx context.Context, botID int64, token stri
 	}
 
 	stored, err := s.q.FinishBotUpdatePoll(ctx, db.FinishBotUpdatePollParams{
-		UserID: botID, TokenHash: wantHash, PollGeneration: generation, NextOffset: offset,
+		UserID: botID, TokenHash: wantHash, PollGeneration: int64(generation), NextOffset: offset,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

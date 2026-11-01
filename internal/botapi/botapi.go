@@ -57,6 +57,11 @@ type Store interface {
 	CheckRateLimit(context.Context, int64, string, store.RateLimitConfig) (*store.RateLimitResult, error)
 	SendBotMessage(context.Context, int64, int64, string, int64) (store.Message, int, int, error)
 	Notify(context.Context, string, string) error
+	BotUpdateOffset(context.Context, int64, string) (int64, error)
+	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
+	CheckBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration) error
+	FinishBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration, int64) (int64, error)
+	BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error)
 }
 
 type handler struct {
@@ -229,7 +234,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if endpointMethod == "getUpdates" {
 		params, err := parseGetUpdatesRequest(r, body)
 		if err != nil {
-			h.log.Info("Bot API request", "bot_id", botID, "method", method)
+			h.log.Info("Bot API request", "bot_id", botID, "method", method, "err", err)
 			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
 			return
 		}
