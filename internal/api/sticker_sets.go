@@ -770,7 +770,7 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 	for _, item := range installed {
 		if item.ID < 0 {
 			set, ok := catalog.byID[item.ID]
-			if !ok {
+			if !ok || set.set.GetEmojis() {
 				continue
 			}
 			sets = append(sets, set.responseSet(&item.InstalledAt))
