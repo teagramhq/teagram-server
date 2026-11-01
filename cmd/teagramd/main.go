@@ -64,6 +64,15 @@ const adminShutdownTimeout = 5 * time.Second
 
 const botAPIShutdownTimeout = 5 * time.Second
 
+type botUpdateNotifier interface {
+	NotifyUpdates(int64)
+}
+
+func deliverWithBotAPINotify(ctx context.Context, notifier botUpdateNotifier, deliver func(context.Context, int64), ownerID int64) {
+	notifier.NotifyUpdates(ownerID)
+	deliver(ctx, ownerID)
+}
+
 type publicWebSocketListener struct {
 	listener       net.Listener
 	handler        mtproto.Handler
@@ -1075,9 +1084,22 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	// each user's pending updates to their live conns in this process. Drained
 	// before the store pool closes (defer registered after st.Close, runs first).
 	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, stickerSets, notifyMetrics)
+	var botAPIHandler http.Handler
+	var botAPIUpdateNotifier botUpdateNotifier
+	if cfg.BotAPIListenAddr != "" {
+		handler := botapi.NewHandler(st, log, cfg.RateLimits.MessageSend)
+		botAPIHandler = handler
+		botAPIUpdateNotifier = handler
+	}
+	deliverUpdates := updater.Deliver
+	if botAPIUpdateNotifier != nil {
+		deliverUpdates = func(ctx context.Context, ownerID int64) {
+			deliverWithBotAPINotify(ctx, botAPIUpdateNotifier, updater.Deliver, ownerID)
+		}
+	}
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
-	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log, notifyMetrics)
+	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(serviceCtx, cfg.PostgresDSN, deliverUpdates, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log, notifyMetrics)
 	if err != nil {
 		return err
 	}
@@ -1158,7 +1180,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 
 	if cfg.BotAPIListenAddr != "" {
-		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log, cfg.RateLimits.MessageSend)
+		botAPIServer := botapi.NewServerWithHandler(cfg.BotAPIListenAddr, botAPIHandler, log)
 		var botAPILC net.ListenConfig
 		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPIListenAddr)
 		if err != nil {

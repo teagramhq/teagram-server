@@ -57,6 +57,11 @@ type Store interface {
 	CheckRateLimit(context.Context, int64, string, store.RateLimitConfig) (*store.RateLimitResult, error)
 	SendBotMessage(context.Context, int64, int64, string, int64) (store.Message, int, int, error)
 	Notify(context.Context, string, string) error
+	BotUpdateOffset(context.Context, int64, string) (int64, error)
+	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
+	CheckBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration) error
+	FinishBotUpdatePoll(context.Context, int64, string, store.BotPollGeneration, int64) (int64, error)
+	BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error)
 }
 
 type handler struct {
@@ -97,7 +102,7 @@ type botAPIChat struct {
 }
 
 // NewHandler builds the independent HTTP router for Bot API requests.
-func NewHandler(st Store, logger *slog.Logger, messageSendRateLimit store.RateLimitConfig) http.Handler {
+func NewHandler(st Store, logger *slog.Logger, messageSendRateLimit store.RateLimitConfig) *handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -111,13 +116,20 @@ func NewHandler(st Store, logger *slog.Logger, messageSendRateLimit store.RateLi
 
 // NewServer creates an HTTP server dedicated to the Bot API listener.
 func NewServer(addr string, st Store, logger *slog.Logger, messageSendRateLimit store.RateLimitConfig) *http.Server {
+	return NewServerWithHandler(addr, NewHandler(st, logger, messageSendRateLimit), logger)
+}
+
+// NewServerWithHandler creates a Bot API HTTP server around a shared handler.
+// The shared handler also receives update-log wakeups from the store listener.
+func NewServerWithHandler(addr string, h http.Handler, logger *slog.Logger) *http.Server {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &http.Server{
 		Addr:              addr,
-		Handler:           NewHandler(st, logger, messageSendRateLimit),
+		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      getUpdatesWriteTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          log.New(errorLogWriter{logger: logger}, "", 0),
 	}
@@ -194,7 +206,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.write(w, http.StatusNotFound, []byte(notFoundBody), botID, method)
 		return
 	}
-	if endpointMethod != "getMe" && endpointMethod != "sendMessage" {
+	if endpointMethod != "getMe" && endpointMethod != "sendMessage" && endpointMethod != "getUpdates" {
 		h.log.Info("Bot API request", "bot_id", botID, "method", method)
 		h.write(w, http.StatusNotFound, []byte(notFoundBody), botID, method)
 		return
@@ -217,6 +229,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.sendMessage(w, r, botID, method, chatID, text)
+		return
+	}
+	if endpointMethod == "getUpdates" {
+		params, err := parseGetUpdatesRequest(r, body)
+		if err != nil {
+			h.log.Info("Bot API request", "bot_id", botID, "method", method, "err", err)
+			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
+			return
+		}
+		h.getUpdates(w, r, botID, method, token, params)
 		return
 	}
 
@@ -543,6 +565,7 @@ type authLimiter struct {
 	mu       sync.Mutex
 	buckets  map[string]authBucket
 	overflow authBucket
+	polls    map[int64]*updatePoll
 }
 
 func newAuthLimiter() *authLimiter {

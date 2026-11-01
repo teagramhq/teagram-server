@@ -6,6 +6,7 @@ require (
 	github.com/Oudwins/tailwind-merge-go v0.2.3
 	github.com/a-h/templ v0.3.1020
 	github.com/coder/websocket v1.8.15
+	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/gotd/log v0.1.0
 	github.com/gotd/td v0.162.0
 	github.com/jackc/pgx/v5 v5.11.0
