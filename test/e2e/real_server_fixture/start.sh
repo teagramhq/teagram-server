@@ -739,7 +739,7 @@ docker run --detach --name "$BROWSER" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--memory 3g --memory-swap 3g --cpus 2 --pids-limit 256 --ulimit core=0 \
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001 \
 	--tmpfs /home/pwuser:rw,noexec,nosuid,nodev,size=64m,uid=1001,gid=1001 \
-	--tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=128m,uid=1001,gid=1001 \
+	--tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=512m,uid=1001,gid=1001 \
 	--env HOME=/tmp --env TMPDIR=/tmp \
 	--env http_proxy= --env https_proxy= --env HTTP_PROXY= --env HTTPS_PROXY= \
 	--env ALL_PROXY= --env all_proxy= --env NO_PROXY= --env no_proxy= \

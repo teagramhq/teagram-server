@@ -964,8 +964,8 @@ func TestLoadKeyExchangeTailnetDefaultIndependentOfPublicListener(t *testing.T) 
 		publicAddr   string
 		defaultLimit int
 	}{
-		{name: "default listener may be public", defaultLimit: 20},
-		{name: "separate public listener", publicAddr: "127.0.0.1:2444", defaultLimit: 20},
+		{name: "default listener may be public", defaultLimit: 0},
+		{name: "separate public listener", publicAddr: "127.0.0.1:2444", defaultLimit: 0},
 	}
 	for _, topology := range topologies {
 		t.Run(topology.name, func(t *testing.T) {

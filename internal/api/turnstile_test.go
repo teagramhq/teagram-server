@@ -21,6 +21,7 @@ type fakeTurnstileVerifier struct {
 	actions     []string
 	verifyCalls int
 	failure     error
+	allowReplay bool
 }
 
 func (f *fakeTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
@@ -30,7 +31,7 @@ func (f *fakeTurnstileVerifier) Verify(_ context.Context, token, action, remoteI
 	if f.failure != nil {
 		return f.failure
 	}
-	if f.seen[token] {
+	if f.seen[token] && !f.allowReplay {
 		return errors.New("rejected")
 	}
 	f.seen[token] = true
@@ -135,6 +136,26 @@ func TestSignUpTurnstileCapacityRefusalReturnsFloodWaitBeforeIPCharge(t *testing
 	_, err := runner.SignUpWithToken(request, "valid-token", false)
 	if got := signUpRPCMessage(err); got != "PHONE_CODE_INVALID" {
 		t.Fatalf("retry after capacity refusal = %q, want PHONE_CODE_INVALID (proves no IP charge)", got)
+	}
+}
+
+func TestSignUpAcceptedQABypassStillChargesIPLimit(t *testing.T) {
+	s := openStore(t)
+	keyID := [8]byte{0x71, 0x51, 0x59, 0x26, 0x53, 0x58, 0x97, 0x93}
+	runner, _ := newLoggedSignUpRunner(t, s, keyID, config.RegistrationOpen, store.RateLimitConfig{Limit: 1, Window: time.Minute})
+	verifier := &fakeTurnstileVerifier{seen: make(map[string]bool), allowReplay: true}
+	runner.SetTurnstileVerifierForTest("site-key", verifier)
+	request := signUpRequest("captchauser", "missing-code", "First", "Last")
+	qaBypassToken := strings.Repeat("q", 32)
+
+	if _, err := runner.SignUpWithToken(request, qaBypassToken, false); signUpRPCMessage(err) != "PHONE_CODE_INVALID" {
+		t.Fatalf("first accepted QA bypass result = %q, want PHONE_CODE_INVALID after charging the IP limit", signUpRPCMessage(err))
+	}
+	if _, err := runner.SignUpWithToken(request, qaBypassToken, false); !isFloodWait(err) {
+		t.Fatalf("second accepted QA bypass error = %v, want FLOOD_WAIT from the same IP limit", err)
+	}
+	if verifier.verifyCalls != 2 {
+		t.Fatalf("reusable QA token made %d verifier calls, want 2", verifier.verifyCalls)
 	}
 }
 

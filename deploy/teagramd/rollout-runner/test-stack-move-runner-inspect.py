@@ -90,9 +90,17 @@ class InspectComposeSelectionTest(unittest.TestCase):
             "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
         }, clear=True):
             self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+            diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
+            self.assertEqual(diagnostics["reason"], "approved_layout")
+            self.assertEqual(diagnostics["public_profile"], "accepted")
+            self.assertEqual(diagnostics["changed_components"], [])
 
             unprofiled = copy.deepcopy(target_config)
             unprofiled["services"]["teagramd-public-1"]["profiles"] = []
+            unprofiled_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(unprofiled, "teagramd"), unprofiled,
+            )
+            self.assertEqual(unprofiled_diagnostics["reason"], "invalid_public_replica_profile")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(unprofiled, "teagramd"), unprofiled,
@@ -103,6 +111,11 @@ class InspectComposeSelectionTest(unittest.TestCase):
             changed_replica_mount["services"]["teagramd-public-1"]["volumes"].append(
                 {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
             )
+            replica_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
+            )
+            self.assertEqual(replica_diagnostics["reason"], "public_replica_mounts_differ")
+            self.assertEqual(replica_diagnostics["changed_components"], ["persistent_service_mounts"])
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
@@ -113,6 +126,10 @@ class InspectComposeSelectionTest(unittest.TestCase):
             added_proxy_mount["services"]["public-haproxy"]["volumes"].append(
                 {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
             )
+            proxy_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
+            )
+            self.assertEqual(proxy_diagnostics["reason"], "invalid_public_proxy_mount")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
@@ -121,6 +138,11 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
             added_volume = copy.deepcopy(target_config)
             added_volume["volumes"]["newdata"] = {"name": "teagram_newdata"}
+            volume_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(added_volume, "teagramd"), added_volume,
+            )
+            self.assertEqual(volume_diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(volume_diagnostics["changed_components"], ["volumes"])
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_volume, "teagramd"), added_volume,
@@ -143,6 +165,13 @@ class InspectComposeSelectionTest(unittest.TestCase):
             {"ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1"},
         ):
             with mock.patch.dict(os.environ, environment, clear=True):
+                diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
+                expected_reason = (
+                    "public_profile_opt_in_missing"
+                    if environment.get("COMPOSE_PROFILES")
+                    else "public_profile_not_selected"
+                )
+                self.assertEqual(diagnostics["reason"], expected_reason)
                 self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
 
     def test_only_additive_read_only_media_key_mount_is_a_safe_layout_change(self) -> None:
@@ -683,6 +712,11 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
             result = json.loads(output.getvalue())
             self.assertFalse(result["changed"])
+            self.assertEqual(result["layout_diagnostics"]["reason"], "approved_layout")
+            self.assertEqual(
+                result["layout_diagnostics"]["changed_components"],
+                ["server_mounts", "persistent_service_mounts"],
+            )
             self.assertEqual(result["source"]["volumes"], result["target"]["volumes"])
             self.assertNotEqual(result["source"]["server_mounts"], result["target"]["server_mounts"])
             print("PASS Compose inspect permits the reviewed read-only media-key mount addition")

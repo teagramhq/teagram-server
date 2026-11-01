@@ -30,6 +30,11 @@ class ValidateEnvTurnstileTests(unittest.TestCase):
         self.secret = mock.patch.object(VALIDATOR, "read_turnstile_secret", return_value="fixture-secret")
         self.secret.start()
         self.addCleanup(self.secret.stop)
+        self.qa_bypass_token = mock.patch.object(
+            VALIDATOR, "read_qa_bypass_token", return_value="fixture-qa-bypass-token"
+        )
+        self.qa_bypass_token.start()
+        self.addCleanup(self.qa_bypass_token.stop)
 
     def validate(self, values: dict[str, str]) -> None:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

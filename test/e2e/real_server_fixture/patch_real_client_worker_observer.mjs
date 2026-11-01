@@ -212,14 +212,22 @@ export function patchRealClientObserver(webRoot) {
     async readPollSendObservation(observer) {`;
   browser = replaceOnce(browser, publicWaitForSetup, publicWorkerSourceCollection, 'worker source recovery export');
 
-  const finalObservation = `    await registry.waitForSetup();
-    const apps = {alice, bob};`;
+  const finalObservation = [
+    `    await registry.waitForSetup();
+    const apps = {alice, bob, ...(guest ? {guest} : {})};`,
+    `    await registry.waitForSetup();
+    const apps = {alice, bob};`
+  ].find((candidate) => browser.includes(candidate));
+  if(!finalObservation) {
+    throw new Error('pinned web runner has no supported final worker evidence insertion point');
+  }
   browser = replaceOnce(
     browser,
     finalObservation,
-    `    await registry.waitForSetup();
-    await registry.collectMtprotoSourceFetches();
-    const apps = {alice, bob};`,
+    finalObservation.replace(
+      '    const apps =',
+      '    await registry.collectMtprotoSourceFetches();\n    const apps ='
+    ),
     'final worker evidence collection'
   );
 
