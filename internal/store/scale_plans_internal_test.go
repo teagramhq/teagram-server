@@ -106,6 +106,7 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 		 SELECT n, '+contact-mutual-scale' || n, 'Scale ' || n FROM generate_series(1, 50099) n`,
 		`INSERT INTO user_contacts (owner_id, contact_id)
 		 SELECT 1, n FROM generate_series(2, 10001) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id) VALUES (2, 1)`,
 		`INSERT INTO user_contacts (owner_id, contact_id)
 		 SELECT n, 1 FROM generate_series(10002, 50099) n`,
 		`ANALYZE user_contacts`,
@@ -137,8 +138,9 @@ func TestContactsWithUsersAvoidsWindowAggAndBoundsReverseEdgeReads(t *testing.T)
 		t.Fatalf("contacts with users total = %d, want 10000", rows[0].Total)
 	}
 	for _, row := range rows {
-		if row.Mutual {
-			t.Errorf("outsider %d was marked mutual", row.ContactID)
+		wantMutual := row.ContactID == 2
+		if row.Mutual != wantMutual {
+			t.Errorf("contact %d mutual = %t, want %t", row.ContactID, row.Mutual, wantMutual)
 		}
 	}
 

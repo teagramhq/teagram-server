@@ -35,20 +35,28 @@ ORDER BY uc.contact_id;
 
 -- name: ContactsWithUsers :many
 -- Load the full contact page, user records, and visible current photos
--- together. Mutual state probes the reverse edge per returned contact, and
--- photos retain the live gallery, stored-file, media-kind, and block checks.
-WITH visible_photos AS MATERIALIZED (
+-- together. Mutual state is limited to the viewer's contact IDs, and photos
+-- retain the live gallery, stored-file, media-kind, and block checks.
+WITH owned_contacts AS MATERIALIZED (
+    SELECT contact_id
+    FROM user_contacts
+    WHERE owner_id = sqlc.arg(owner_id)::BIGINT
+),
+mutual_contacts AS MATERIALIZED (
+    SELECT reverse.owner_id AS contact_id
+    FROM user_contacts reverse
+    WHERE reverse.contact_id = sqlc.arg(owner_id)::BIGINT
+      AND reverse.owner_id = ANY (
+          ARRAY(SELECT contact_id FROM owned_contacts ORDER BY contact_id)
+      )
+),
+visible_photos AS MATERIALIZED (
     SELECT s.user_id, s.current_file_id
-    FROM profile_photo_state s
+    FROM owned_contacts owned
+    JOIN profile_photo_state s ON s.user_id = owned.contact_id
     JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
     JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
-    WHERE EXISTS (
-        SELECT 1
-        FROM user_contacts owned
-        WHERE owned.owner_id = sqlc.arg(owner_id)::BIGINT
-          AND owned.contact_id = s.user_id
-    )
-      AND s.current_file_id IS NOT NULL
+    WHERE s.current_file_id IS NOT NULL
       AND f.stored = true
       AND f.media_kind = 'photo'
       AND NOT EXISTS (
@@ -58,10 +66,8 @@ WITH visible_photos AS MATERIALIZED (
       )
 )
 SELECT uc.contact_id,
-       COALESCE(reverse_contact.mutual, false)::BOOLEAN AS mutual,
-       (SELECT COUNT(*)
-        FROM user_contacts count_contacts
-        WHERE count_contacts.owner_id = sqlc.arg(owner_id)::BIGINT) AS total,
+       (mutual_contacts.contact_id IS NOT NULL)::BOOLEAN AS mutual,
+       (SELECT COUNT(*) FROM owned_contacts) AS total,
        u.id,
        u.first_name,
        u.last_name,
@@ -70,18 +76,11 @@ SELECT uc.contact_id,
        un.handle AS username,
        u.kind,
        visible_photos.current_file_id AS photo_file_id
-FROM user_contacts uc
-LEFT JOIN LATERAL (
-    SELECT true AS mutual
-    FROM user_contacts reverse
-    WHERE reverse.contact_id = uc.owner_id
-      AND reverse.owner_id = uc.contact_id
-    LIMIT 1
-) AS reverse_contact ON true
+FROM owned_contacts uc
+LEFT JOIN mutual_contacts ON mutual_contacts.contact_id = uc.contact_id
 JOIN users u ON u.id = uc.contact_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 LEFT JOIN visible_photos ON visible_photos.user_id = u.id
-WHERE uc.owner_id = sqlc.arg(owner_id)::BIGINT
 ORDER BY uc.contact_id;
 
 -- name: ContactStates :many
