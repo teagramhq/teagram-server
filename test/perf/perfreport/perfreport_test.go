@@ -360,7 +360,6 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"messages.search":      "MAIN-2578",
 		"contacts.getContacts": "MAIN-3015",
 	}
 	for scenario, issue := range want {
@@ -389,7 +388,7 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 			}
 		}
 	}
-	for _, scenario := range []string{"contacts.search", "messages.getDialogs"} {
+	for _, scenario := range []string{"contacts.search", "messages.getDialogs", "messages.search"} {
 		for _, waiver := range waivers {
 			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming {
 				t.Errorf("known_violations.json still has a timing waiver for %s (%s)", scenario, waiver.Issue)

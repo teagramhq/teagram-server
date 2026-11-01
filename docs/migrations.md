@@ -67,6 +67,33 @@ The test harness (`internal/pgtest`) and production both apply these same
 migrations to reach the current schema. (Wiring pgtest to apply them lands in a
 later task.)
 
+### Ordered message-search postings
+
+Migrations `20261101000001_message_search_postings.sql` and
+`20261101000002_message_search_postings_readiness.sql` add an ordered lexeme
+posting table, per-dialog lexeme counts, and a marker table for dialogs whose
+existing history has not been initialized. The first migration installs and
+commits the message-write triggers; the second takes the readiness snapshot in
+a separate transaction so its full-table read does not extend the lock needed
+to install those triggers. Message inserts, text edits, soft deletes, and hard
+deletes keep postings and counts in sync transactionally. The migrations do
+not copy historical lexemes into the postings table. Existing dialogs with
+messages remain on the original `messages.search` query until the separate
+history initializer runs; dialogs with no messages are ready immediately, and
+new dialogs use postings from their first message. Ready-dialog searches use
+the per-dialog counts to walk postings for the least frequent query lexeme. The
+initializer must build counts from the same history before clearing a dialog's
+unready marker.
+
+Reverting the application leaves these additive tables, index, and triggers in
+place. The old search query ignores the postings, so its results remain
+unchanged; the database triggers still maintain postings on message writes.
+Application rollback alone does not stop collection or erase existing rows.
+
+The lexemes are sensitive message-derived data. Their access, retention,
+erasure, and rollback boundaries are documented in the
+[message-search postings threat model](security.md#threat-model-private-message-search-postings).
+
 Browser acceptance binding evidence is an additive, unenrolled expansion.
 Its versioned read API, owner-only enrollment transaction, retention and rollback
 contract are documented in [browser-acceptance-binding-evidence.md](browser-acceptance-binding-evidence.md).
