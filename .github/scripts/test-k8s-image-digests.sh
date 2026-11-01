@@ -18,6 +18,7 @@ revision_expression="$(yq -r '.env.K8S_IMAGE_REVISION' .github/workflows/ci.yml)
 publish_step="$(yq -r '.jobs."publish-k8s-images".steps[] | select(.name == "Publish immutable commit tags and capture digests") | .run' .github/workflows/ci.yml)"
 [[ "$publish_step" == *'.github/scripts/publish-k8s-image-digests.sh'* ]] ||
   fail 'the publisher must use the tested digest capture script'
+# shellcheck disable=SC2016 # Match the literal expression in the workflow source.
 [[ "$(yq -r '.jobs."publish-k8s-images".steps[] | select(.name == "Upload immutable image digests") | .with.name' .github/workflows/ci.yml)" == 'k8s-image-digests-${{ env.K8S_IMAGE_REVISION }}' ]] ||
   fail 'the digest artifact must be named for the image source revision'
 
