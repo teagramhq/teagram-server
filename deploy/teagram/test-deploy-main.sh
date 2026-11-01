@@ -84,6 +84,26 @@ mkdir -p "$tmp/work/deploy/teagramd/rollout-runner" "$tmp/work/deploy/link-edge"
 cp "$public_checker" "$tmp/work/deploy/teagramd/rollout-runner/public-websocket-check.py"
 cp "$public_haproxy_config" "$tmp/work/deploy/teagramd/haproxy-public-websocket.cfg"
 python3 "$public_checker" --haproxy-config "$public_haproxy_config" < "$public_compose_fixture" >/dev/null
+if jq '.services.teagramd.environment.TG_TURNSTILE_TEST_MODE="true"' "$public_compose_fixture" | \
+  python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted Turnstile test mode on production' >&2
+  exit 1
+fi
+if jq '.services.teagramd.environment.TG_TURNSTILE_HOSTNAMES="web.teagram.io,demo.teagram.io"' "$public_compose_fixture" | \
+  python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted a non-production Turnstile hostname' >&2
+  exit 1
+fi
+if jq '.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="/run/secrets/qa-bypass"' "$public_compose_fixture" | \
+  python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted the demo QA bypass token on production' >&2
+  exit 1
+fi
+if jq '.services["teagramd-public-1"].environment.TG_TURNSTILE_TEST_MODE="true"' "$public_compose_fixture" | \
+  python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted Turnstile settings that differ from teagramd' >&2
+  exit 1
+fi
 if jq --arg source "$tmp/override/deploy/teagramd/haproxy-public-websocket.cfg" '
   .services["public-haproxy"].volumes |= map(
     if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .source = $source else . end

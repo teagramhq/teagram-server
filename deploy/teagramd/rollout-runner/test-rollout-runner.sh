@@ -488,15 +488,17 @@ if [ "${1:-}" = inspect ]; then
       fi
       turnstile_env=$(jq -c '
         (.services.teagramd // .services.telegramd).environment as $env
-        | if ($env | has("TG_TURNSTILE_SITE_KEY")) then [
+        | (if ($env | has("TG_TURNSTILE_SITE_KEY")) then [
             "TG_TURNSTILE_SITE_KEY=" + $env.TG_TURNSTILE_SITE_KEY,
             "TG_TURNSTILE_SECRET_KEY_FILE=" + $env.TG_TURNSTILE_SECRET_KEY_FILE,
             "TG_TURNSTILE_SIGNIN_ENABLED=" + $env.TG_TURNSTILE_SIGNIN_ENABLED
-          ] else [] end
+          ] else [] end) +
+          (["TG_ADVERTISE_ADDR", "TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE"]
+           | map(select($env | has(.)) | . as $key | $key + "=" + ($env[$key] | tostring)))
       ' "$turnstile_compose")
       if [ "$(jq -er 'length' <<< "$turnstile_env")" -gt 0 ]; then
         env_json=$(jq -c --argjson turnstile "$turnstile_env" '
-          map(select(type != "string" or ((split("=")[0]) as $key | (["TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"] | index($key) == null)))) + $turnstile
+          map(select(type != "string" or ((split("=")[0]) as $key | (["TG_ADVERTISE_ADDR", "TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED", "TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE"] | index($key) == null)))) + $turnstile
         ' <<< "$env_json")
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
@@ -4629,6 +4631,50 @@ if [ "$status" = 0 ] && \
 else
   show_fixture_failure welcome-channel-addition "$status"
   fail 'ordinary apply should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture turnstile-production-defaults \
+  turnstile-production-defaults "$E58_LOCAL_COMPOSE_TARGET_SHA"
+seed_live_turnstile_defaults turnstile-production-defaults
+state=$(cat "$TMP/turnstile-production-defaults-state-path")
+jq -c '.services.teagramd.environment += {
+  TG_ADVERTISE_ADDR:"",
+  TG_TURNSTILE_TEST_MODE:"false",
+  TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
+}' "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+root=$(cat "$TMP/turnstile-production-defaults-root-path")
+status=$(run_fixture turnstile-production-defaults built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/turnstile-production-defaults.stdout"; then
+  pass 'ordinary apply accepts behavior-preserving production Turnstile and advertise defaults'
+else
+  show_fixture_failure turnstile-production-defaults "$status"
+  fail 'production Turnstile and advertise defaults must preserve rollout equivalence'
+fi
+
+prepare_target_local_apply_fixture turnstile-production-test-mode \
+  turnstile-production-test-mode "$E58_LOCAL_COMPOSE_TARGET_SHA"
+seed_live_turnstile_defaults turnstile-production-test-mode
+state=$(cat "$TMP/turnstile-production-test-mode-state-path")
+jq -c '.services.teagramd.environment += {
+  TG_TURNSTILE_TEST_MODE:"true",
+  TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
+}' "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+root=$(cat "$TMP/turnstile-production-test-mode-root-path")
+status=$(run_fixture turnstile-production-test-mode built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q 'resolved Compose Turnstile mapping is incomplete or unsafe' "$TMP/turnstile-production-test-mode.stderr" && \
+   ! grep -q '^docker compose up -d$' "$TMP/turnstile-production-test-mode-events"; then
+  pass 'production rollout rejects Turnstile test mode before replacement'
+else
+  show_fixture_failure turnstile-production-test-mode "$status"
+  fail 'production Turnstile test mode must be rejected before target startup'
 fi
 
 prepare_target_local_apply_fixture welcome-channel-addition-rollback \
