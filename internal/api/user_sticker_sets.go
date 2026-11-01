@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"math"
 	"regexp"
 	"strings"
@@ -87,34 +86,10 @@ func installedStickerSetDate(installed []store.InstalledStickerSet, id int64) *t
 	return nil
 }
 
-func userStickerSetHash(set store.UserStickerSet) int {
-	h := crc32.NewIEEE()
-	_, _ = h.Write([]byte(set.Title))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(set.ShortName))
-	_, _ = h.Write([]byte(set.Kind))
-	var id [8]byte
-	binary.BigEndian.PutUint64(id[:], uint64(set.ID)) //nolint:gosec // IDs are positive BIGSERIAL values.
-	_, _ = h.Write(id[:])
-	for _, item := range set.Items {
-		binary.BigEndian.PutUint64(id[:], uint64(item.FileID)) //nolint:gosec // File IDs are positive BIGSERIAL values.
-		_, _ = h.Write(id[:])
-		binary.BigEndian.PutUint64(id[:], uint64(item.AccessHash)) //nolint:gosec // Access hashes are opaque 64-bit values.
-		_, _ = h.Write(id[:])
-		_, _ = h.Write([]byte(item.Emoji))
-		_, _ = h.Write([]byte(item.Format))
-	}
-	value := int(h.Sum32() & 0x7fffffff)
-	if value == 0 {
-		return 1
-	}
-	return value
-}
-
 func userStickerSetSummaryTL(set store.UserStickerSet, ownerID int64, installedAt *time.Time) tg.StickerSet {
 	result := tg.StickerSet{
 		ID: set.ID, AccessHash: set.AccessHash, Title: set.Title,
-		ShortName: set.ShortName, Count: len(set.Items), Hash: userStickerSetHash(set),
+		ShortName: set.ShortName, Count: set.ItemCount, Hash: set.Hash,
 		Masks: set.Kind == "mask", Emojis: set.Kind == "emojis", TextColor: set.TextColor,
 		Creator: set.CreatorID == ownerID,
 	}

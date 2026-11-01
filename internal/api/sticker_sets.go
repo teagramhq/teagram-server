@@ -611,7 +611,7 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 	var setHash int
 	var setID int64
 	if userSet != nil {
-		setHash = userStickerSetHash(*userSet)
+		setHash = userSet.Hash
 		setID = userSet.ID
 	} else {
 		setHash = set.set.Hash
@@ -661,7 +661,7 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 			userSetIDs = append(userSetIDs, item.ID)
 		}
 	}
-	userSets, err := h.store.UserStickerSetsByInstalledIDs(r.Ctx, userSetIDs)
+	userSets, err := h.store.UserStickerSetSummariesByInstalledIDs(r.Ctx, userSetIDs)
 	if err != nil {
 		h.log.Error("load installed user sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal

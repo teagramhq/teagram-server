@@ -19,6 +19,8 @@ CREATE TABLE user_created_sticker_sets (
     software    TEXT NOT NULL DEFAULT '' CHECK (octet_length(software) <= 256),
     kind        TEXT NOT NULL CHECK (kind IN ('regular', 'mask', 'emojis')),
     text_color  BOOL NOT NULL DEFAULT false,
+    item_count  INT NOT NULL CHECK (item_count BETWEEN 1 AND 200),
+    set_hash    INT NOT NULL DEFAULT 1 CHECK (set_hash BETWEEN 1 AND 2147483647),
     is_live     BOOL NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );

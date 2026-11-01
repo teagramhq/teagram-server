@@ -882,6 +882,8 @@ type UserCreatedStickerSet struct {
 	Software   string
 	Kind       string
 	TextColor  bool
+	ItemCount  int32
+	SetHash    int32
 	IsLive     bool
 	CreatedAt  pgtype.Timestamptz
 }

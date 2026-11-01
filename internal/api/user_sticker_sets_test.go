@@ -425,8 +425,8 @@ func TestUserStickerSetCreationAndInstallLimits(t *testing.T) {
 		}
 	})
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
-		SELECT 7000000000000 + n, $1, 'Seeded', 'seed_' || n::text, 'regular'
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		SELECT 7000000000000 + n, $1, 'Seeded', 'seed_' || n::text, 'regular', 1
 		FROM generate_series(1, $2) n`, owner.ID, store.MaxUserStickerSetsPerAccount); err != nil {
 		t.Fatalf("seed created-set limit: %v", err)
 	}
@@ -486,10 +486,10 @@ func TestSuggestStickerSetChecksCandidatesInOneQuery(t *testing.T) {
 		}
 	})
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
 		SELECT 7000000000000 + n, $1, 'Occupied',
 		       upper('wild_cats' || CASE WHEN n = 0 THEN '' ELSE '_' || n::text END),
-		       'regular'
+		       'regular', 1
 		FROM generate_series(0, 998) AS n`, owner.ID); err != nil {
 		t.Fatalf("seed occupied names: %v", err)
 	}
@@ -538,9 +538,9 @@ func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 	})
 	if _, err := conn.Exec(ctx, `
 		WITH seeded AS (
-			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count, set_hash)
 			SELECT 7000000000000 + n, $1, 'Batch set', 'batch_' || n::text,
-			       CASE WHEN n <= $2 / 2 THEN 'regular' ELSE 'emojis' END
+			       CASE WHEN n <= $2 / 2 THEN 'regular' ELSE 'emojis' END, 12, n::int
 			FROM generate_series(1, $2) AS n
 			RETURNING id
 		)
@@ -563,8 +563,13 @@ func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 			if len(sets.Sets) != test.want {
 				t.Fatalf("returned %d sets, want %d", len(sets.Sets), test.want)
 			}
-			if n := tracer.n.Load(); n != 3 {
-				t.Fatalf("getter made %d database queries at the %d-set install cap, want 3", n, store.MaxInstalledStickerSets)
+			for _, set := range sets.Sets {
+				if set.Count != 12 || set.Hash != int(set.ID) {
+					t.Fatalf("summary for set %d has count %d and hash %d, want count 12 and stored hash %d", set.ID, set.Count, set.Hash, set.ID)
+				}
+			}
+			if n := tracer.n.Load(); n != 2 {
+				t.Fatalf("getter made %d database queries at the %d-set install cap, want 2", n, store.MaxInstalledStickerSets)
 			}
 		})
 	}
@@ -636,9 +641,15 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if len(all.Sets) != 1 || all.Sets[0].ID != regular.Set.ID || all.Hash == initialAll.Hash {
 		t.Fatalf("getAllStickers after install = %+v, want regular set and changed hash", all)
 	}
+	if all.Sets[0].Count != regular.Set.Count || all.Sets[0].Hash != regular.Set.Hash {
+		t.Fatalf("getAllStickers summary = count %d hash %d, want created set count %d hash %d", all.Sets[0].Count, all.Sets[0].Hash, regular.Set.Count, regular.Set.Hash)
+	}
 	emojis := getEmojiStickerSets(t, h, installer.ID, initialEmoji.Hash)
 	if len(emojis.Sets) != 1 || emojis.Sets[0].ID != emoji.Set.ID || emojis.Hash == initialEmoji.Hash {
 		t.Fatalf("getEmojiStickers after install = %+v, want custom emoji set and changed hash", emojis)
+	}
+	if emojis.Sets[0].Count != emoji.Set.Count || emojis.Sets[0].Hash != emoji.Set.Hash {
+		t.Fatalf("getEmojiStickers summary = count %d hash %d, want created set count %d hash %d", emojis.Sets[0].Count, emojis.Sets[0].Hash, emoji.Set.Count, emoji.Set.Hash)
 	}
 	if got := getStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}, 0).Set.Creator; got {
 		t.Fatal("non-owner getStickerSet set the creator flag")

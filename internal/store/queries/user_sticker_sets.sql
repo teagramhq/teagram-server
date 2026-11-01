@@ -10,10 +10,17 @@ WHERE creator_id = $1;
 
 -- name: CreateUserCreatedStickerSet :one
 INSERT INTO user_created_sticker_sets
-    (access_hash, creator_id, title, short_name, software, kind, text_color)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, access_hash, creator_id, title, short_name, software, kind,
-          text_color, is_live, created_at;
+          text_color, item_count, set_hash, is_live, created_at;
+
+-- The hash includes the generated set ID and every inserted item, so update it
+-- before the enclosing creation transaction commits.
+-- name: UpdateUserCreatedStickerSetHash :execrows
+UPDATE user_created_sticker_sets
+SET set_hash = $2
+WHERE id = $1;
 
 -- name: InsertUserCreatedStickerSetItem :execrows
 INSERT INTO user_created_sticker_set_items
@@ -43,27 +50,27 @@ ORDER BY requested.request_order;
 
 -- name: UserCreatedStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower($1) AND is_live = true;
 
 -- name: UserCreatedStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
 -- name: UserCreatedStickerSetByInstalledID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true;
 
--- The installed-set getters resolve every positive id together, then fetch
--- all their ordered items in one query to keep the 200-set cap bounded.
+-- The installed-set list getters need only summary metadata; set item rows are
+-- loaded only by full getStickerSet and media hydration paths.
 -- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = ANY($1::bigint[]) AND is_live = true
 ORDER BY id;

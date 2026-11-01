@@ -13,10 +13,10 @@ import (
 
 const createUserCreatedStickerSet = `-- name: CreateUserCreatedStickerSet :one
 INSERT INTO user_created_sticker_sets
-    (access_hash, creator_id, title, short_name, software, kind, text_color)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, access_hash, creator_id, title, short_name, software, kind,
-          text_color, is_live, created_at
+          text_color, item_count, set_hash, is_live, created_at
 `
 
 type CreateUserCreatedStickerSetParams struct {
@@ -27,6 +27,7 @@ type CreateUserCreatedStickerSetParams struct {
 	Software   string
 	Kind       string
 	TextColor  bool
+	ItemCount  int32
 }
 
 func (q *Queries) CreateUserCreatedStickerSet(ctx context.Context, arg CreateUserCreatedStickerSetParams) (UserCreatedStickerSet, error) {
@@ -38,6 +39,7 @@ func (q *Queries) CreateUserCreatedStickerSet(ctx context.Context, arg CreateUse
 		arg.Software,
 		arg.Kind,
 		arg.TextColor,
+		arg.ItemCount,
 	)
 	var i UserCreatedStickerSet
 	err := row.Scan(
@@ -49,6 +51,8 @@ func (q *Queries) CreateUserCreatedStickerSet(ctx context.Context, arg CreateUse
 		&i.Software,
 		&i.Kind,
 		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
 		&i.IsLive,
 		&i.CreatedAt,
 	)
@@ -193,9 +197,30 @@ func (q *Queries) StickerFilesForOwner(ctx context.Context, arg StickerFilesForO
 	return items, nil
 }
 
+const updateUserCreatedStickerSetHash = `-- name: UpdateUserCreatedStickerSetHash :execrows
+UPDATE user_created_sticker_sets
+SET set_hash = $2
+WHERE id = $1
+`
+
+type UpdateUserCreatedStickerSetHashParams struct {
+	ID      int64
+	SetHash int32
+}
+
+// The hash includes the generated set ID and every inserted item, so update it
+// before the enclosing creation transaction commits.
+func (q *Queries) UpdateUserCreatedStickerSetHash(ctx context.Context, arg UpdateUserCreatedStickerSetHashParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserCreatedStickerSetHash, arg.ID, arg.SetHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const userCreatedStickerSetByID = `-- name: UserCreatedStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true
 `
@@ -217,6 +242,8 @@ func (q *Queries) UserCreatedStickerSetByID(ctx context.Context, arg UserCreated
 		&i.Software,
 		&i.Kind,
 		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
 		&i.IsLive,
 		&i.CreatedAt,
 	)
@@ -225,7 +252,7 @@ func (q *Queries) UserCreatedStickerSetByID(ctx context.Context, arg UserCreated
 
 const userCreatedStickerSetByInstalledID = `-- name: UserCreatedStickerSetByInstalledID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true
 `
@@ -242,6 +269,8 @@ func (q *Queries) UserCreatedStickerSetByInstalledID(ctx context.Context, id int
 		&i.Software,
 		&i.Kind,
 		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
 		&i.IsLive,
 		&i.CreatedAt,
 	)
@@ -250,7 +279,7 @@ func (q *Queries) UserCreatedStickerSetByInstalledID(ctx context.Context, id int
 
 const userCreatedStickerSetByShortName = `-- name: UserCreatedStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower($1) AND is_live = true
 `
@@ -267,6 +296,8 @@ func (q *Queries) UserCreatedStickerSetByShortName(ctx context.Context, lower st
 		&i.Software,
 		&i.Kind,
 		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
 		&i.IsLive,
 		&i.CreatedAt,
 	)
@@ -493,14 +524,14 @@ func (q *Queries) UserCreatedStickerSetItemsBySetIDs(ctx context.Context, dollar
 
 const userCreatedStickerSetsByInstalledIDs = `-- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = ANY($1::bigint[]) AND is_live = true
 ORDER BY id
 `
 
-// The installed-set getters resolve every positive id together, then fetch
-// all their ordered items in one query to keep the 200-set cap bounded.
+// The installed-set list getters need only summary metadata; set item rows are
+// loaded only by full getStickerSet and media hydration paths.
 func (q *Queries) UserCreatedStickerSetsByInstalledIDs(ctx context.Context, dollar_1 []int64) ([]UserCreatedStickerSet, error) {
 	rows, err := q.db.Query(ctx, userCreatedStickerSetsByInstalledIDs, dollar_1)
 	if err != nil {
@@ -519,6 +550,8 @@ func (q *Queries) UserCreatedStickerSetsByInstalledIDs(ctx context.Context, doll
 			&i.Software,
 			&i.Kind,
 			&i.TextColor,
+			&i.ItemCount,
+			&i.SetHash,
 			&i.IsLive,
 			&i.CreatedAt,
 		); err != nil {
