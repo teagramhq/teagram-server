@@ -526,6 +526,13 @@ func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
 				cloned.Stickerset = &refCopy
 			}
 			document.Attributes[i] = &cloned
+		case *tg.DocumentAttributeCustomEmoji:
+			cloned := *value
+			if ref, ok := value.Stickerset.(*tg.InputStickerSetID); ok {
+				refCopy := *ref
+				cloned.Stickerset = &refCopy
+			}
+			document.Attributes[i] = &cloned
 		case *tg.DocumentAttributeFilename:
 			cloned := *value
 			document.Attributes[i] = &cloned
