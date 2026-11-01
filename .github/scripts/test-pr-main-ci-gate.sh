@@ -12,6 +12,8 @@ fail() {
   exit 1
 }
 
+# This mock is invoked by the gate scripts in child Bash processes.
+# shellcheck disable=SC2329
 gh() {
   if [[ "$1" == api ]]; then
     local path="$2"
