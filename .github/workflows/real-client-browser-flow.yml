@@ -9,9 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: CI-main
-  queue: max
-  cancel-in-progress: false
+  group: real-client-browser-flow-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   real-client-browser-flow:

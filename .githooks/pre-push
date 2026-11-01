@@ -184,7 +184,7 @@ if ((${#workflow_files[@]})); then
   if ! command -v actionlint >/dev/null 2>&1; then
     warn_missing_tool actionlint 'workflow linting'
   else
-    actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown|unexpected key "queue" for "concurrency" section' "${workflow_files[@]}"
+    actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' "${workflow_files[@]}"
   fi
 fi
 

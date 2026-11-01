@@ -54,13 +54,13 @@ printf '%s\n' "$cancel_step" | bash -n
 [[ "$(query '.jobs."ops-prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'the priority job must expose cancelled run ids for recovery'
 
-dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs[]')"
+dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs | sort | join(",")')"
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".name')" == 'ops: dispatch-pr-ci-recovery' ]] ||
   fail 'the recovery dispatch job must use the ops stage naming contract'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
   fail 'the recovery dispatch job must have only Actions write permission'
-[[ "$dispatch_needs" == 'ops-prioritize-main' ]] ||
-  fail 'the recovery dispatch must not wait for the main lint lane before evaluating its PR skip guard'
+[[ "$dispatch_needs" == 'ci,ops-prioritize-main' ]] ||
+  fail 'cancelled PR recovery must wait until main CI finishes'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
 dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"

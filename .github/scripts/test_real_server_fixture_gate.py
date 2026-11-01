@@ -185,7 +185,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
-            r"(?m)^concurrency:\n  group: CI-main\n  queue: max\n  cancel-in-progress: false$",
+            r"(?m)^concurrency:\n  group: real-client-browser-flow-pr-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true$",
         )
         self.assertRegex(
             workflow,
