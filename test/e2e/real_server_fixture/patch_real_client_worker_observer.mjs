@@ -30,6 +30,11 @@ export function patchRealClientObserver(webRoot) {
     'active poll option selector');
 
   browser = replaceOnce(browser,
+    'if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`);',
+    'if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`).last();',
+    'latest confirmed poll message target');
+
+  browser = replaceOnce(browser,
     `function getPollOptionClickTarget(poll, answerText) {
   return poll.locator('[data-poll-option-idx]')
   .filter({hasText: answerText})
