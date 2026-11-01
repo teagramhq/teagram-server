@@ -24,6 +24,73 @@ export function patchRealClientObserver(webRoot) {
     throw new Error('pinned web observer is already patched');
   }
 
+  browser = replaceOnce(browser,
+    "const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';",
+    "const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';\nconst ACTIVE_POLL_OPTION_SELECTOR = '[data-poll-option-idx]:not(.fade-2-exit-active):not(.fade-2-exit-to)';",
+    'active poll option selector');
+
+  browser = replaceOnce(browser,
+    `function getPollOptionClickTarget(poll, answerText) {
+  return poll.locator('[data-poll-option-idx]')
+  .filter({hasText: answerText})
+  .locator(':scope > div')
+  .first();
+}`,
+    `function getPollOptionClickTarget(poll, answerText) {
+  return poll.locator(ACTIVE_POLL_OPTION_SELECTOR)
+  .filter({hasText: answerText})
+  .locator(':scope > div')
+  .first();
+}`,
+    'active poll click target');
+
+  browser = replaceOnce(browser,
+    "const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')] : [];",
+    "const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')]\n    .filter((element) => !element.classList.contains('fade-2-exit-active') && !element.classList.contains('fade-2-exit-to')) : [];",
+    'active poll results diagnostics');
+
+  browser = replaceOnce(browser,
+    `    if(message.querySelectorAll('[data-poll-option-idx]').length !== 2) return false;
+    return expectedAnswers.every((answerText) => [...message.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1);`,
+    `    const options = [...message.querySelectorAll('[data-poll-option-idx]')]
+    .filter((element) => !element.classList.contains('fade-2-exit-active') && !element.classList.contains('fade-2-exit-to'));
+    if(options.length !== 2) return false;
+    return expectedAnswers.every((answerText) => options.filter((option) => [...option.querySelectorAll('*')]
+    .some((node) => node.children.length === 0 && node.textContent?.trim() === answerText)).length === 1);`,
+    'active poll message predicate');
+
+  browser = replaceOnce(browser,
+    "const answers = poll.locator('[data-poll-option-idx]');",
+    'const answers = poll.locator(ACTIVE_POLL_OPTION_SELECTOR);',
+    'active poll content assertion');
+  browser = replaceOnce(browser,
+    "if(await poll.getByText(answerText, {exact: true}).count() !== 1) {",
+    'if(await answers.filter({hasText: answerText}).count() !== 1) {',
+    'active poll answer assertion');
+
+  browser = replaceOnce(browser,
+    "const options = [...poll.querySelectorAll('[data-poll-option-idx]')];",
+    "const options = [...poll.querySelectorAll('[data-poll-option-idx]')]\n    .filter((element) => !element.classList.contains('fade-2-exit-active') && !element.classList.contains('fade-2-exit-to'));",
+    'active poll content diagnostics');
+  browser = replaceOnce(browser,
+    'answerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, false)),',
+    'answerTextCounts: expectedAnswers.map((answerText) => options.reduce((count, option) => count + countText(option, answerText, false), 0)),',
+    'active poll answer text diagnostics');
+  browser = replaceOnce(browser,
+    'visibleAnswerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, true)),',
+    'visibleAnswerTextCounts: expectedAnswers.map((answerText) => options.reduce((count, option) => count + countText(option, answerText, true), 0)),',
+    'active poll visible answer diagnostics');
+
+  browser = replaceOnce(browser,
+    "const selectedAnswer = poll.locator('[data-poll-option-idx]').filter({hasText: POLL_ANSWER_ONE});",
+    'const selectedAnswer = poll.locator(ACTIVE_POLL_OPTION_SELECTOR).filter({hasText: POLL_ANSWER_ONE});',
+    'active selected poll answer');
+  browser = replaceOnce(browser,
+    'getPollOptionClickTarget, getPollResultIndicator,',
+    'getPollOptionClickTarget, getPollResultIndicator, assertPollContent,',
+    'poll content assertion export');
+
   const directMessageWaiter = `async function waitForDirectMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
   currentStage = stage;
   await startGroupMessageTrace(page, stage);
@@ -212,14 +279,22 @@ export function patchRealClientObserver(webRoot) {
     async readPollSendObservation(observer) {`;
   browser = replaceOnce(browser, publicWaitForSetup, publicWorkerSourceCollection, 'worker source recovery export');
 
-  const finalObservation = `    await registry.waitForSetup();
-    const apps = {alice, bob, ...(guest ? {guest} : {})};`;
+  const finalObservation = [
+    `    await registry.waitForSetup();
+    const apps = {alice, bob, ...(guest ? {guest} : {})};`,
+    `    await registry.waitForSetup();
+    const apps = {alice, bob};`
+  ].find((candidate) => browser.includes(candidate));
+  if(!finalObservation) {
+    throw new Error('pinned web runner has no supported final worker evidence insertion point');
+  }
   browser = replaceOnce(
     browser,
     finalObservation,
-    `    await registry.waitForSetup();
-    await registry.collectMtprotoSourceFetches();
-    const apps = {alice, bob, ...(guest ? {guest} : {})};`,
+    finalObservation.replace(
+      '    const apps =',
+      '    await registry.collectMtprotoSourceFetches();\n    const apps ='
+    ),
     'final worker evidence collection'
   );
 

@@ -14,7 +14,7 @@ try {
   if(error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
 }
 
-function loadBrowserModule(browserPath, observation) {
+function loadBrowserModule(browserPath, observation, globals = {}) {
   const module = {exports: {}};
   const requireFromBrowser = createRequire(browserPath);
   const browserRequire = (name) => {
@@ -29,11 +29,12 @@ function loadBrowserModule(browserPath, observation) {
     process,
     require: browserRequire,
     setTimeout,
+    ...globals,
   }, {filename: browserPath});
   return module.exports;
 }
 
-function patchBrowserForTest(t) {
+function patchBrowserForTest(t, globals) {
   const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
   assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
   const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
@@ -47,7 +48,7 @@ function patchBrowserForTest(t) {
   patchRealClientObserver(webRoot);
   const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
   const browserPath = join(scripts, 'browser.cjs');
-  const browser = loadBrowserModule(browserPath, observation);
+  const browser = loadBrowserModule(browserPath, observation, globals);
   return {browser, browserPath, observation};
 }
 
@@ -177,6 +178,74 @@ test('the patched direct-message assertion rejects two bubble elements with one 
     {messageId: '8', sendState: 'sent'},
     {messageId: '8', sendState: 'sent'},
   ]);
+});
+
+test('the patched poll content check ignores an exiting duplicate option row', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const question = 'browser-ci-poll-exiting-option-question';
+  const option = (text, classes = []) => {
+    const textNode = {children: [], textContent: text};
+    return {
+      textContent: text,
+      classList: {contains: (name) => classes.includes(name)},
+      getBoundingClientRect: () => ({width: 240, height: 32}),
+      querySelectorAll: (selector) => selector === '*' ? [textNode] : [],
+    };
+  };
+  const options = [
+    option('browser-ci-poll-answer-one'),
+    option('browser-ci-poll-answer-two'),
+    option('browser-ci-poll-answer-one', ['fade-2-exit-active', 'fade-2-exit-to']),
+  ];
+  const questionNode = {children: [], textContent: question};
+  const message = {
+    dataset: {mid: '56'},
+    textContent: `${question} ${options.map(({textContent}) => textContent).join(' ')}`,
+    getBoundingClientRect: () => ({width: 420, height: 180}),
+    querySelectorAll(selector) {
+      if(selector === '[data-poll-option-idx]') return options;
+      if(selector === '*') return [questionNode, ...options.flatMap((item) => item.querySelectorAll('*'))];
+      return [];
+    },
+  };
+  const globals = {
+    document: {querySelectorAll: (selector) => selector === '#column-center .bubble' ? [message] : []},
+    window: {getComputedStyle: () => ({display: 'block', visibility: 'visible', opacity: '1'})},
+  };
+  const {browser} = patchBrowserForTest(t, globals);
+  const questionLocator = {waitFor: async() => {}, count: async() => 1};
+  const poll = {
+    first() { return this; },
+    waitFor: async() => {},
+    count: async() => 1,
+    getByText(text) {
+      return text === question ? questionLocator : {count: async() => 0};
+    },
+    async evaluate(callback, args) {
+      return callback(message, args);
+    },
+    locator(selector) {
+      const active = selector.includes(':not(.fade-2-exit-active)')
+        ? options.filter((item) => !item.classList.contains('fade-2-exit-active') && !item.classList.contains('fade-2-exit-to'))
+        : options;
+      return {
+        count: async() => active.length,
+        filter({hasText}) {
+          const matches = active.filter((item) => item.textContent.includes(hasText));
+          return {count: async() => matches.length};
+        },
+      };
+    },
+  };
+  const page = {
+    locator: () => poll,
+    async waitForFunction(predicate, args) {
+      if(!predicate(args)) throw new Error('predicate timed out');
+    },
+  };
+
+  const resolvedPoll = await browser.waitForPollMessage(page, question, 'poll_exiting_option', 250, 56);
+  await browser.assertPollContent(resolvedPoll, {question, description: '', stage: 'poll_exiting_option'});
 });
 
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {

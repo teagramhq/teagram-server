@@ -201,7 +201,7 @@ class PrePushHookTests(unittest.TestCase):
         self.assertEqual([tool for tool, _, _ in calls], ["gitleaks"], calls)
         self.assertIn(f"--log-opts=main..{docs_sha}", calls[0][2])
 
-    def test_deleted_ref_skips_checks_and_existing_ref_scans_new_commits(self) -> None:
+    def test_deleted_ref_skips_checks_and_existing_ref_scans_branch_commits(self) -> None:
         deleted = self.run_hook(local_sha=ZERO_SHA, remote_sha=self.feature_sha)
 
         self.assertEqual(deleted.returncode, 0, deleted.stdout)
@@ -217,7 +217,42 @@ class PrePushHookTests(unittest.TestCase):
         self.assertEqual(updated.returncode, 0, updated.stdout)
         gitleaks_calls = [args for tool, _, args in self.calls() if tool == "gitleaks"]
         self.assertEqual(len(gitleaks_calls), 1, self.calls())
-        self.assertIn(f"--log-opts={self.feature_sha}..{next_sha}", gitleaks_calls[0])
+        self.assertIn(f"--log-opts=main..{next_sha}", gitleaks_calls[0])
+
+    def test_merge_of_base_skips_base_commits_and_scans_branch_side(self) -> None:
+        (self.repo / "branch-secret.txt").write_text(
+            "branch-only test fixture\n", encoding="utf-8"
+        )
+        self.git("add", "branch-secret.txt")
+        self.git("commit", "--quiet", "-m", "test: add branch-only fixture")
+        branch_secret_sha = self.git("rev-parse", "HEAD").strip()
+
+        self.git("checkout", "--quiet", "main")
+        (self.repo / "base-fixture.txt").write_text(
+            "accepted historical fixture\n", encoding="utf-8"
+        )
+        self.git("add", "base-fixture.txt")
+        self.git("commit", "--quiet", "-m", "test: add accepted base fixture")
+        base_fixture_sha = self.git("rev-parse", "HEAD").strip()
+
+        self.git("checkout", "--quiet", "feature")
+        self.git("merge", "--quiet", "--no-edit", "main")
+        merge_sha = self.git("rev-parse", "HEAD").strip()
+
+        result = self.run_hook(local_sha=merge_sha, remote_sha=self.feature_sha)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        gitleaks_calls = [args for tool, _, args in self.calls() if tool == "gitleaks"]
+        self.assertEqual(len(gitleaks_calls), 1, self.calls())
+        log_opts = next(
+            arg for arg in gitleaks_calls[0].split() if arg.startswith("--log-opts=")
+        )
+        self.assertEqual(log_opts, f"--log-opts=main..{merge_sha}")
+        scanned_commits = set(
+            self.git("rev-list", log_opts.removeprefix("--log-opts=")).splitlines()
+        )
+        self.assertIn(branch_secret_sha, scanned_commits)
+        self.assertNotIn(base_fixture_sha, scanned_commits)
 
     def test_failing_checks_block_the_push(self) -> None:
         for tool in ("golangci-lint", "make", "python", "bash", "gitleaks"):

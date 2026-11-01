@@ -94,6 +94,8 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Per-account download limit window |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Aggregate `upload.getFile` calls across replicas per window; `0` disables the limit |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW` | `1s` | Aggregate download limit window |
+| `TG_RATE_LIMIT_CREATE_STICKER_SET` | `3` | Per-account `stickers.createStickerSet` calls per window; `0` disables the limit |
+| `TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW` | `1m` | Per-account sticker-set creation limit window |
 | `TG_ADMIN_LISTEN_ADDR` | unset | Optional admin HTTP listener |
 
 `TG_RPC_DEADLINE=0` fails startup; it does not disable the deadline. The complete variable and rate-limit inventory is in [docs/clients.md](docs/clients.md).

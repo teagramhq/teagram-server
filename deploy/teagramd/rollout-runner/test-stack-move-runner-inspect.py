@@ -33,7 +33,242 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
-    def test_public_profile_addition_is_rejected_as_layout_change(self) -> None:
+    def test_sanitized_layout_differences_report_server_and_postgres_tmpfs_mounts(self) -> None:
+        runner = load_runner()
+        tmpfs_mounts = {
+            "postgres": {
+                "type": "tmpfs",
+                "source": "",
+                "target": "/run/postgres-cache",
+                "read_only": False,
+            },
+            "teagramd": {
+                "type": "tmpfs",
+                "source": "",
+                "target": "/run/server-cache",
+                "read_only": False,
+            },
+        }
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": [
+                    {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql"},
+                    copy.deepcopy(tmpfs_mounts["postgres"]),
+                ]},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": [
+                        {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                        copy.deepcopy(tmpfs_mounts["teagramd"]),
+                    ],
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"]["postgres"]["volumes"][1]["read_only"] = True
+        target_config["services"]["teagramd"]["volumes"][1]["read_only"] = True
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+        differences = runner.sanitized_layout_differences(source, target, target_config)
+        self.assertIn({
+            "service": "postgres",
+            "mount_target": "/run/postgres-cache",
+            "field": "read_only",
+        }, differences)
+        self.assertIn({
+            "service": "teagramd",
+            "mount_target": "/run/server-cache",
+            "field": "read_only",
+        }, differences)
+
+    def test_sanitized_layout_differences_report_postgres_tmpfs_option_names(self) -> None:
+        runner = load_runner()
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": [
+                    {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql"},
+                    {
+                        "type": "tmpfs",
+                        "target": "/run/postgres-cache",
+                        "tmpfs": {"size": 65536, "mode": 0o700},
+                    },
+                ]},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": [
+                        {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                    ],
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"]["postgres"]["volumes"][1]["tmpfs"]["size"] = 131072
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+        differences = runner.sanitized_layout_differences(source, target, target_config)
+        self.assertIn({
+            "service": "postgres",
+            "mount_target": "/run/postgres-cache",
+            "field": "tmpfs.size",
+        }, differences)
+        self.assertNotIn("65536", json.dumps(differences))
+        self.assertNotIn("131072", json.dumps(differences))
+
+    def test_public_profile_addition_accepts_local_blobs_private_override_layout(self) -> None:
+        runner = load_runner()
+        shared_mounts = [
+            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
+            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+            {
+                "type": "bind",
+                "source": "/opt/teagram/.state/blob-mode",
+                "target": "/run/teagramd/blob-mode",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
+        ]
+        private_media_mount = {
+            "type": "bind",
+            "source": "/etc/teagramd/media-keys",
+            "target": "/run/teagramd/media-keys",
+            "read_only": True,
+            "bind": {},
+        }
+        postgres_mounts = [
+            {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/18/docker", "read_only": False},
+            {
+                "type": "bind",
+                "source": "/opt/teagram/deploy/postgres/postgresql.conf",
+                "target": "/etc/postgresql/postgresql.conf",
+                "read_only": True,
+                "bind": {},
+            },
+        ]
+        target_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": copy.deepcopy(postgres_mounts)},
+                "teagramd": {
+                    "environment": {
+                        "TG_BLOB_DIR": "/var/lib/teagramd-blobs",
+                        "TG_BLOB_S3_ENDPOINT": None,
+                        "TG_MEDIA_KEY_DIR": None,
+                        "TG_MEDIA_KEY_CURRENT": None,
+                    },
+                    "volumes": [*copy.deepcopy(shared_mounts), copy.deepcopy(private_media_mount)],
+                },
+                "public-haproxy": {
+                    "profiles": ["public"],
+                    "volumes": [{
+                        "type": "bind",
+                        "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+                        "target": "/usr/local/etc/haproxy/haproxy.cfg",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }],
+                },
+                "teagramd-public-1": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(shared_mounts),
+                },
+                "teagramd-public-2": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(shared_mounts),
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+                "tgblobs": {"name": "teagram_tgblobs"},
+            },
+        }
+        source_config = copy.deepcopy(target_config)
+        for name in ("public-haproxy", "teagramd-public-1", "teagramd-public-2"):
+            source_config["services"].pop(name)
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+        with mock.patch.dict(os.environ, {
+            "COMPOSE_PROFILES": "public",
+            "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
+        }, clear=True):
+            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
+            configured_media_keys = copy.deepcopy(target_config)
+            configured_media_keys["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_DIR"
+            ] = "/run/teagramd/media-keys"
+            configured_media_keys["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_CURRENT"
+            ] = "1"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(configured_media_keys, "teagramd"), configured_media_keys,
+                )
+            )
+
+            changed_project = copy.deepcopy(target_config)
+            changed_project["name"] = "another-project"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_project, "teagramd"), changed_project,
+                )
+            )
+
+            changed_persistent_mount = copy.deepcopy(target_config)
+            changed_persistent_mount["services"]["teagramd"]["volumes"][0]["source"] = "other-key"
+            changed_persistent_mount["services"]["teagramd"]["environment"][
+                "TG_MEDIA_KEY_DIR"
+            ] = "secret-env-value-sentinel"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_persistent_mount, "teagramd"), changed_persistent_mount,
+                )
+            )
+            differences = runner.sanitized_layout_differences(
+                source, runner.layout(changed_persistent_mount, "teagramd"), changed_persistent_mount,
+            )
+            self.assertIn({
+                "service": "teagramd",
+                "mount_target": "/var/lib/teagramd",
+                "field": "source",
+            }, differences)
+            self.assertIn({
+                "service": "teagramd",
+                "mount_target": "/run/teagramd/media-keys",
+                "field": "media_key_environment",
+            }, differences)
+            self.assertNotIn("secret-env-value-sentinel", json.dumps(differences))
+
+            changed_volume = copy.deepcopy(target_config)
+            changed_volume["volumes"]["tgkey"]["name"] = "teagram_other_tgkey"
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_volume, "teagramd"), changed_volume,
+                )
+            )
+
+    def test_public_profile_addition_reuses_existing_data_mounts(self) -> None:
         runner = load_runner()
         server_mounts = [
             {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
@@ -89,18 +324,18 @@ class InspectComposeSelectionTest(unittest.TestCase):
             "COMPOSE_PROFILES": "public",
             "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
         }, clear=True):
-            self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
             diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
-            self.assertEqual(diagnostics["reason"], "persistent_layout_mismatch")
-            self.assertEqual(diagnostics["public_profile"], "not_applicable")
-            self.assertEqual(diagnostics["changed_components"], ["persistent_service_mounts"])
+            self.assertEqual(diagnostics["reason"], "approved_layout")
+            self.assertEqual(diagnostics["public_profile"], "accepted")
+            self.assertEqual(diagnostics["changed_components"], [])
 
             unprofiled = copy.deepcopy(target_config)
             unprofiled["services"]["teagramd-public-1"]["profiles"] = []
             unprofiled_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(unprofiled, "teagramd"), unprofiled,
             )
-            self.assertEqual(unprofiled_diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(unprofiled_diagnostics["reason"], "invalid_public_replica_profile")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(unprofiled, "teagramd"), unprofiled,
@@ -114,7 +349,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             replica_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
             )
-            self.assertEqual(replica_diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(replica_diagnostics["reason"], "public_replica_mounts_differ")
             self.assertEqual(replica_diagnostics["changed_components"], ["persistent_service_mounts"])
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
@@ -129,7 +364,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             proxy_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
             )
-            self.assertEqual(proxy_diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(proxy_diagnostics["reason"], "invalid_public_proxy_mount")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
@@ -142,10 +377,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
                 source, runner.layout(added_volume, "teagramd"), added_volume,
             )
             self.assertEqual(volume_diagnostics["reason"], "persistent_layout_mismatch")
-            self.assertEqual(
-                volume_diagnostics["changed_components"],
-                ["persistent_service_mounts", "volumes"],
-            )
+            self.assertEqual(volume_diagnostics["changed_components"], ["volumes"])
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_volume, "teagramd"), added_volume,
@@ -169,8 +401,12 @@ class InspectComposeSelectionTest(unittest.TestCase):
         ):
             with mock.patch.dict(os.environ, environment, clear=True):
                 diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
-                self.assertEqual(diagnostics["reason"], "persistent_layout_mismatch")
-                self.assertEqual(diagnostics["public_profile"], "not_applicable")
+                expected_reason = (
+                    "public_profile_opt_in_missing"
+                    if environment.get("COMPOSE_PROFILES")
+                    else "public_profile_not_selected"
+                )
+                self.assertEqual(diagnostics["reason"], expected_reason)
                 self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
 
     def test_only_additive_read_only_media_key_mount_is_a_safe_layout_change(self) -> None:

@@ -427,7 +427,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			if message.StickerDocumentID == nil || *message.StickerDocumentID != stickerDocumentID {
 				return nil, nil, nil, errMediaInvalid
 			}
-			valid, catalogErr := h.validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+			valid, catalogErr := h.validStickerRetryIdentity(r.Ctx, stickerInput.ID, stickerInput.AccessHash)
 			if catalogErr != nil {
 				h.log.Error("channel sticker retry catalogue", "user_id", r.UserID, "channel_id", toID, "err", catalogErr)
 				return nil, nil, nil, errInternal
@@ -501,7 +501,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				if existing.StickerDocumentID == nil || *existing.StickerDocumentID != stickerDocumentID {
 					return nil, nil, nil, errMediaInvalid
 				}
-				valid, catalogErr := h.validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+				valid, catalogErr := h.validStickerRetryIdentity(r.Ctx, stickerInput.ID, stickerInput.AccessHash)
 				if catalogErr != nil {
 					h.log.Error("sticker retry catalogue", "user_id", r.UserID, "err", catalogErr)
 					return nil, nil, nil, errInternal
@@ -578,7 +578,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	case isPhoto:
 		mediaRights = []string{"send_photos"}
 	case isSticker:
-		valid, catalogErr := h.resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash)
+		valid, catalogErr := h.resolveStickerDocument(r.Ctx, stickerInput.ID, stickerInput.AccessHash)
 		if catalogErr != nil {
 			h.log.Error("resolve sticker catalogue document", "user_id", r.UserID, "err", catalogErr)
 			return nil, nil, nil, errInternal

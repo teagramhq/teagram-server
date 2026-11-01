@@ -19,7 +19,7 @@ func TestChannelMessageToTLRedactsTombstonePollAndFile(t *testing.T) {
 		Deleted:   true,
 		FileID:    &fileID,
 		Poll:      &store.Poll{Question: []byte("deleted poll question")},
-	}, 11, map[int64]tg.MessageMediaClass{fileID: &tg.MessageMediaDocument{Document: &tg.Document{ID: fileID, AccessHash: 99, MimeType: "secret/type"}}}, false)
+	}, 11, &messageMedia{files: map[int64]tg.MessageMediaClass{fileID: &tg.MessageMediaDocument{Document: &tg.Document{ID: fileID, AccessHash: 99, MimeType: "secret/type"}}}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
