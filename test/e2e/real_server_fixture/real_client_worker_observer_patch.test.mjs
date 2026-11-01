@@ -196,14 +196,18 @@ test('the patched poll content check ignores an exiting duplicate option row', a
     option('browser-ci-poll-answer-one'),
     option('browser-ci-poll-answer-two'),
     option('browser-ci-poll-answer-one', ['fade-2-exit-active', 'fade-2-exit-to']),
+    option('browser-ci-poll-answer-two', ['fade-2-exit-to']),
   ];
+  const activeOptions = (selector) => options.filter((item) =>
+    (!selector.includes(':not(.fade-2-exit-active)') || !item.classList.contains('fade-2-exit-active')) &&
+    (!selector.includes(':not(.fade-2-exit-to)') || !item.classList.contains('fade-2-exit-to')));
   const questionNode = {children: [], textContent: question};
   const message = {
     dataset: {mid: '56'},
     textContent: `${question} ${options.map(({textContent}) => textContent).join(' ')}`,
     getBoundingClientRect: () => ({width: 420, height: 180}),
     querySelectorAll(selector) {
-      if(selector === '[data-poll-option-idx]') return options;
+      if(selector.startsWith('[data-poll-option-idx]')) return activeOptions(selector);
       if(selector === '*') return [questionNode, ...options.flatMap((item) => item.querySelectorAll('*'))];
       return [];
     },
@@ -225,11 +229,12 @@ test('the patched poll content check ignores an exiting duplicate option row', a
       return callback(message, args);
     },
     locator(selector) {
-      const active = selector.includes(':not(.fade-2-exit-active)')
-        ? options.filter((item) => !item.classList.contains('fade-2-exit-active') && !item.classList.contains('fade-2-exit-to'))
-        : options;
+      const active = activeOptions(selector);
       return {
         count: async() => active.length,
+        getByText(text) {
+          return {count: async() => active.filter((item) => item.textContent === text).length};
+        },
         filter({hasText}) {
           const matches = active.filter((item) => item.textContent.includes(hasText));
           return {count: async() => matches.length};
