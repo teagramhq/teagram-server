@@ -8,12 +8,11 @@ on:
 permissions:
   contents: read
 
-# Keep main CI and resource-heavy PR checks in one queue so new PR fan-out
-# cannot starve the deploy candidate.
+# Main keeps one running and the newest pending check; PR updates supersede
+# older checks for that PR without holding up main.
 concurrency:
-  group: ${{ github.workflow }}-main
-  queue: max
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Testcontainers rewrites Docker Hub pulls through Google's public mirror.
 env:
@@ -96,8 +95,8 @@ jobs:
     name: 'ops: dispatch-pr-ci-recovery'
     needs:
       - ops-prioritize-main
-    # Evaluate the PR-only skip before main prioritization can cancel a queued
-    # PR run. Main fan-out jobs share the priority dependency and unlock here.
+      - ci
+    # Requeue cancelled PR work after main CI has had the runners it needs.
     if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1156,12 +1155,12 @@ jobs:
 
       - name: Lint deployment, performance, and real-client workflows
         run: |
-          actionlint -ignore 'label "ubuntu-26.04" is unknown|unexpected key "queue" for "concurrency" section' \
+          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy.yml \
             .github/workflows/deploy-demo.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown|unexpected key "queue" for "concurrency" section' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract

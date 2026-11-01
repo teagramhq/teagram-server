@@ -80,13 +80,13 @@ done <<< "$dependency_dirs"
   fail 'main pushes must continue to run the performance workflow'
 [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
   fail 'manual performance dispatch must remain available'
-expected_concurrency_group="\${{ github.event_name == 'pull_request' && 'CI-main' || format('RPC performance-run-{0}', github.run_id) }}"
+expected_concurrency_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}"
 [[ "$(query '.concurrency.group')" == "$expected_concurrency_group" ]] ||
-  fail 'pull request performance runs must share the main CI concurrency group'
-[[ "$(query '.concurrency.queue')" == 'max' ]] ||
-  fail 'queued performance runs must not replace main CI or other waiting checks'
-[[ "$(query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
-  fail 'performance runs must not cancel main CI or other checks'
+  fail 'performance runs must coalesce updates per pull request and keep main isolated'
+[[ "$(query '.concurrency."cancel-in-progress"')" == "\${{ github.event_name == 'pull_request' }}" ]] ||
+  fail 'only updates to the same pull request may cancel a performance run'
+[[ "$(query '.concurrency.queue // ""')" == '' ]] ||
+  fail 'performance updates must coalesce instead of filling a FIFO queue'
 
 [[ "$(query '.jobs."test-rpc-performance".timeout-minutes')" == '150' ]] ||
   fail 'the performance job must allow a cache-miss fixture seed to finish'
