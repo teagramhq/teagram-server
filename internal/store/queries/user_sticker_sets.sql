@@ -174,12 +174,24 @@ FROM user_created_sticker_sets
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
 
+-- name: AdminReadUserStickerSetByID :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, item_count, set_hash, is_live, created_at
+FROM user_created_sticker_sets
+WHERE id = sqlc.arg(id);
+
 -- name: AdminLockUserStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
        text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower(sqlc.arg(short_name))
 FOR UPDATE;
+
+-- name: AdminReadUserStickerSetByShortName :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, item_count, set_hash, is_live, created_at
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower(sqlc.arg(short_name));
 
 -- name: AdminSetUserStickerSetLive :execrows
 UPDATE user_created_sticker_sets

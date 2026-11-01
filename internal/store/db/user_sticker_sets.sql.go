@@ -67,6 +67,60 @@ func (q *Queries) AdminLockUserStickerSetByShortName(ctx context.Context, shortN
 	return i, err
 }
 
+const adminReadUserStickerSetByID = `-- name: AdminReadUserStickerSetByID :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, item_count, set_hash, is_live, created_at
+FROM user_created_sticker_sets
+WHERE id = $1
+`
+
+func (q *Queries) AdminReadUserStickerSetByID(ctx context.Context, id int64) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminReadUserStickerSetByID, id)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const adminReadUserStickerSetByShortName = `-- name: AdminReadUserStickerSetByShortName :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, item_count, set_hash, is_live, created_at
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower($1)
+`
+
+func (q *Queries) AdminReadUserStickerSetByShortName(ctx context.Context, shortName string) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminReadUserStickerSetByShortName, shortName)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const adminSetUserStickerSetLive = `-- name: AdminSetUserStickerSetLive :execrows
 UPDATE user_created_sticker_sets
 SET is_live = $1
