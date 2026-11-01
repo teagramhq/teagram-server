@@ -3,8 +3,11 @@ package api
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -116,16 +119,10 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 		h.log.Error("load featured sticker sets", "err", err)
 		return nil, errInternal
 	}
-	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
+	installedAt, err := h.featuredStickerSetInstalledAt(r, catalog)
 	if err != nil {
 		h.log.Error("load featured sticker set state", "user_id", r.UserID, "err", err)
 		return nil, errInternal
-	}
-	installedAt := make(map[int64]time.Time, len(installed))
-	for _, item := range installed {
-		if _, ok := catalog.byID[item.ID]; ok {
-			installedAt[item.ID] = item.InstalledAt
-		}
 	}
 	if len(catalog.featured) == 0 {
 		return nil, errInternal
@@ -134,20 +131,10 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 	if req.Hash != 0 && req.Hash == hash {
 		return &tg.MessagesFeaturedStickersNotModified{}, nil
 	}
-	coveredSets := make([]tg.StickerSetCoveredClass, 0, len(catalog.featured))
-	for _, set := range catalog.featured {
-		documents := set.responseDocuments(h.dcID)
-		if len(documents) == 0 {
-			return nil, errInternal
-		}
-		var setInstalledAt *time.Time
-		if value, ok := installedAt[set.set.ID]; ok {
-			setInstalledAt = &value
-		}
-		coveredSets = append(coveredSets, &tg.StickerSetCovered{
-			Set:   set.responseSet(setInstalledAt),
-			Cover: documents[0],
-		})
+	coveredSets, err := stickerSetCoveredResults(catalog.featured, h.dcID, installedAt)
+	if err != nil {
+		h.log.Error("build featured sticker set response", "err", err)
+		return nil, errInternal
 	}
 	return &tg.MessagesFeaturedStickers{
 		Hash:   hash,
@@ -155,6 +142,186 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 		Sets:   coveredSets,
 		Unread: []int64{},
 	}, nil
+}
+
+func (h *handlers) handleGetOldFeaturedStickers(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetOldFeaturedStickersRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load old featured sticker sets", "err", err)
+		return nil, errInternal
+	}
+	if len(catalog.featured) == 0 {
+		return nil, errInternal
+	}
+	installedAt, err := h.featuredStickerSetInstalledAt(r, catalog)
+	if err != nil {
+		h.log.Error("load old featured sticker set state", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	hash := featuredStickerSetsHashList(catalog.featured, installedAt)
+	if req.Hash != 0 && req.Hash == hash {
+		return &tg.MessagesFeaturedStickersNotModified{}, nil
+	}
+	page := paginateFeaturedStickerSets(catalog.featured, req.Offset, req.Limit)
+	coveredSets, err := stickerSetCoveredResults(page, h.dcID, installedAt)
+	if err != nil {
+		h.log.Error("build old featured sticker set response", "err", err)
+		return nil, errInternal
+	}
+	return &tg.MessagesFeaturedStickers{
+		Hash:   hash,
+		Count:  len(catalog.featured),
+		Sets:   coveredSets,
+		Unread: []int64{},
+	}, nil
+}
+
+func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesSearchStickerSetsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Q == "" {
+		return &tg.MessagesFoundStickerSets{Hash: 0, Sets: []tg.StickerSetCoveredClass{}}, nil
+	}
+	if utf8.RuneCountInString(req.Q) > maxSearchQueryLen {
+		return nil, errMessageTooLong
+	}
+	// Sticker-set search enumerates live sets across accounts. Charge it to the
+	// shared messages-search budget before loading the catalogue or user rows.
+	if err := h.checkRateLimit(r, "messages_search", h.rateLimitSearchMessages); err != nil {
+		return nil, err
+	}
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load sticker sets for search", "err", err)
+		return nil, errInternal
+	}
+	query := strings.ToLower(req.Q)
+	matches := make([]*builtInStickerSet, 0, len(catalog.featured))
+	if !req.ExcludeFeatured {
+		for _, set := range catalog.featured {
+			if strings.Contains(strings.ToLower(set.set.Title), query) || strings.Contains(strings.ToLower(set.set.ShortName), query) {
+				matches = append(matches, set)
+			}
+		}
+	}
+	coveredSets, err := stickerSetCoveredResults(matches, h.dcID, nil)
+	if err != nil {
+		h.log.Error("build sticker set search response", "err", err)
+		return nil, errInternal
+	}
+
+	// Search is an enumeration surface. The bulk resolver rechecks each exact
+	// access hash and live state before exposing set metadata or item covers.
+	userSetCount := 0
+	candidates, err := h.store.UserStickerSetSearchCandidates(r.Ctx, req.Q)
+	if err != nil {
+		h.log.Error("search user sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	userSets, err := h.store.UserStickerSetsBySearchCandidates(r.Ctx, candidates)
+	if err != nil {
+		h.log.Error("resolve user sticker set search candidates", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, set := range userSets {
+		if !set.IsLive || len(set.Items) == 0 ||
+			(!strings.Contains(strings.ToLower(set.Title), query) && !strings.Contains(strings.ToLower(set.ShortName), query)) {
+			continue
+		}
+		coveredSets = append(coveredSets, &tg.StickerSetCovered{
+			Set: userStickerSetSummaryTL(set, r.UserID, nil), Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
+		})
+		userSetCount++
+	}
+	hash := featuredStickerSetsHashList(matches, nil)
+	if userSetCount > 0 {
+		hash, err = searchStickerSetsHashList(coveredSets)
+		if err != nil {
+			h.log.Error("hash sticker set search response", "err", err)
+			return nil, errInternal
+		}
+	}
+	if req.Hash != 0 && req.Hash == hash {
+		return &tg.MessagesFoundStickerSetsNotModified{}, nil
+	}
+	return &tg.MessagesFoundStickerSets{Hash: hash, Sets: coveredSets}, nil
+}
+
+func searchStickerSetsHashList(sets []tg.StickerSetCoveredClass) (int64, error) {
+	if len(sets) == 0 {
+		return 1, nil
+	}
+	input := make([]byte, 0, len(sets)*32)
+	var long [8]byte
+	for _, result := range sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered == nil || covered.Cover == nil {
+			return 0, fmt.Errorf("unexpected sticker set search result %T", result)
+		}
+		cover, ok := covered.Cover.(*tg.Document)
+		if !ok || cover == nil {
+			return 0, fmt.Errorf("unexpected sticker set search cover %T", covered.Cover)
+		}
+		for _, value := range [...]int64{covered.Set.ID, covered.Set.AccessHash, int64(covered.Set.Hash), cover.ID} {
+			binary.BigEndian.PutUint64(long[:], uint64(value)) //nolint:gosec // IDs, access hashes, and set hashes are opaque serialized 64-bit values.
+			input = append(input, long[:]...)
+		}
+	}
+	hash := int64(crc32.ChecksumIEEE(input) & 0x7fffffff)
+	if hash == 0 {
+		return 1, nil
+	}
+	return hash, nil
+}
+
+func (h *handlers) featuredStickerSetInstalledAt(r *mtproto.Request, catalog *stickerSetCatalog) (map[int64]time.Time, error) {
+	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	installedAt := make(map[int64]time.Time, len(installed))
+	for _, item := range installed {
+		if _, ok := catalog.byID[item.ID]; ok {
+			installedAt[item.ID] = item.InstalledAt
+		}
+	}
+	return installedAt, nil
+}
+
+func stickerSetCoveredResults(sets []*builtInStickerSet, dcID int, installedAt map[int64]time.Time) ([]tg.StickerSetCoveredClass, error) {
+	result := make([]tg.StickerSetCoveredClass, 0, len(sets))
+	for _, set := range sets {
+		documents := set.responseDocuments(dcID)
+		if len(documents) == 0 {
+			return nil, fmt.Errorf("sticker set %q has no cover document", set.set.ShortName)
+		}
+		var setInstalledAt *time.Time
+		if value, ok := installedAt[set.set.ID]; ok {
+			setInstalledAt = &value
+		}
+		result = append(result, &tg.StickerSetCovered{Set: set.responseSet(setInstalledAt), Cover: documents[0]})
+	}
+	return result, nil
+}
+
+func paginateFeaturedStickerSets(sets []*builtInStickerSet, offset, limit int) []*builtInStickerSet {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || offset >= len(sets) {
+		return []*builtInStickerSet{}
+	}
+	end := len(sets)
+	if limit < end-offset {
+		end = offset + limit
+	}
+	return sets[offset:end]
 }
 
 func featuredStickerSetsHashList(sets []*builtInStickerSet, installedAt map[int64]time.Time) int64 {

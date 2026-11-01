@@ -580,6 +580,8 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetRecentStickersRequestTypeID, h.handleGetRecentStickers)
 	register(d, tg.MessagesGetFavedStickersRequestTypeID, h.handleGetFavedStickers)
 	register(d, tg.MessagesGetFeaturedStickersRequestTypeID, h.handleGetFeaturedStickers)
+	register(d, tg.MessagesGetOldFeaturedStickersRequestTypeID, h.handleGetOldFeaturedStickers)
+	register(d, tg.MessagesSearchStickerSetsRequestTypeID, h.handleSearchStickerSets)
 	register(d, tg.MessagesGetEmojiStickersRequestTypeID, h.handleGetEmojiStickers)
 	register(d, tg.MessagesGetFeaturedEmojiStickersRequestTypeID, h.handleGetFeaturedEmojiStickers)
 	register(d, tg.MessagesSaveGifRequestTypeID, h.handleSaveGif)

@@ -1,0 +1,6 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.searchStickerSets#35705b8a
+  flags: 0 [INT],
+  q: "TWEMOJI" [STRING],
+  hash: 0 [LONG],
+},
