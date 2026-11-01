@@ -8,9 +8,10 @@ on:
 permissions:
   contents: read
 
-# Main pushes keep one running and the newest pending check; PR updates supersede older checks.
+# Main keeps one running and the newest pending check; PR updates supersede
+# older checks for that PR without holding up main.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main-priority-v2') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Testcontainers rewrites Docker Hub pulls through Google's public mirror.
@@ -22,81 +23,40 @@ env:
 jobs:
   ops-prioritize-main:
     name: 'ops: prioritize-main'
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
-      cancelled_pr_run_targets: ${{ steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets }}
+      cancelled_pr_run_targets: ${{ steps.cancel-pr-checks.outputs.cancelled_pr_run_targets }}
     permissions:
+      contents: read
       actions: write
 
     steps:
-      - name: Cancel queued pull request CI runs
-        id: cancel-queued-pr-runs
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cancel active pull request checks for main
+        id: cancel-pr-checks
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cancelled_pr_run_targets=""
-          publish_cancelled_pr_run_targets() {
-            printf 'cancelled_pr_run_targets=%s\n' "${cancelled_pr_run_targets% }" >> "$GITHUB_OUTPUT"
-          }
+        run: bash .github/scripts/cancel-pr-checks-for-main.sh
 
-          if ! runs="$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" \
-            --jq '.workflow_runs[]? | [.id, .created_at] | @tsv' 2>/dev/null)"; then
-            echo "::warning::Could not list queued pull request CI runs; continuing without cancellation."
-            publish_cancelled_pr_run_targets
-            exit 0
-          fi
-          if [[ -z "$runs" ]]; then
-            echo "No queued pull request CI runs."
-            publish_cancelled_pr_run_targets
-            exit 0
-          fi
-          while IFS=$'\t' read -r run_id run_created_at; do
-            [[ -n "$run_id" ]] || continue
-            [[ "$run_id" =~ ^[0-9]+$ ]] || {
-              echo "::warning::Ignoring invalid pull request workflow run id."
-              continue
-            }
-            [[ "$run_created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$ ]] || {
-              echo "::warning::Ignoring pull request CI run ${run_id} with an invalid creation timestamp."
-              continue
-            }
-            if ! run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status' 2>/dev/null)"; then
-              echo "::warning::Could not check pull request CI run ${run_id}; continuing."
-              continue
-            fi
-            if [[ "$run_status" != queued ]]; then
-              echo "Leaving pull request CI run ${run_id} in status ${run_status}."
-              continue
-            fi
-            if ! started_jobs="$(gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
-              --jq '.jobs[]? | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped")) | .id' 2>/dev/null)"; then
-              echo "::warning::Could not check jobs for pull request CI run ${run_id}; leaving it alone."
-              continue
-            fi
-            if [[ -n "$started_jobs" ]]; then
-              echo "Leaving pull request CI run ${run_id}; it has started jobs."
-              continue
-            fi
-            if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
-              cancelled_pr_run_targets+="${run_id}:${run_created_at} "
-            else
-              echo "::warning::Could not cancel queued pull request CI run ${run_id}; it may have started or been superseded."
-            fi
-          done <<< "$runs"
-          publish_cancelled_pr_run_targets
+      - name: Defer pull request CI while main CI is active
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/gate-pr-checks-during-main.sh
 
   ops-dispatch-pr-ci-recovery:
     name: 'ops: dispatch-pr-ci-recovery'
     needs:
       - ops-prioritize-main
-    # Evaluate the PR-only skip before main prioritization can cancel a queued
-    # PR run. Main fan-out jobs share the priority dependency and unlock here.
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
+      - ci
+    # Requeue cancelled PR work after main CI has had the runners it needs.
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -107,12 +67,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED_PR_RUN_TARGETS: ${{ needs.ops-prioritize-main.outputs.cancelled_pr_run_targets }}
+          MAIN_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! gh workflow run recover-cancelled-pr-ci.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
-            -f issue=MAIN-2765 \
+            -f issue=MAIN-3126 \
+            -f "main_run_id=$MAIN_RUN_ID" \
             -f "cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS"; then
             echo "::warning::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_TARGETS"
           fi
@@ -1177,8 +1139,8 @@ jobs:
 
       - name: Check workflow contract script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
-          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
 
       - name: Check deploy script syntax
         run: |

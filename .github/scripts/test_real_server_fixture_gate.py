@@ -185,6 +185,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
+            r"(?m)^concurrency:\n  group: real-client-browser-flow-pr-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true$",
+        )
+        self.assertRegex(
+            workflow,
+            r"(?ms)^  ops-gate-pr-during-main:\n.*?^        run: bash \.github/scripts/gate-pr-checks-during-main\.sh\n.*?^  real-client-browser-flow:\n    name: real-client-browser-flow\n    needs: ops-gate-pr-during-main$",
+        )
+        self.assertRegex(
+            workflow,
             r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
             r"^      - name: Check out pinned web companion\n"
             r"        uses: [^\n]+\n"

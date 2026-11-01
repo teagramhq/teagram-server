@@ -13,8 +13,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ops-gate-pr-during-main:
+    name: 'ops: gate-pr-during-main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Defer pull request checks while main CI is active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/gate-pr-checks-during-main.sh
+
   real-client-browser-flow:
     name: real-client-browser-flow
+    needs: ops-gate-pr-during-main
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
