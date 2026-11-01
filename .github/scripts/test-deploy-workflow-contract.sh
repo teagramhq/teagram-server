@@ -401,6 +401,8 @@ check_demo_manual_request() (
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual") | .run' > "$tmp/manual.sh"
+  # The output path is scoped to this subshell and consumed by the extracted workflow step.
+  # shellcheck disable=SC2030,SC2031
   export GITHUB_OUTPUT="$tmp/output"
   : > "$GITHUB_OUTPUT"
   GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 bash -euo pipefail "$tmp/manual.sh"
