@@ -12,6 +12,8 @@ REMOTE=$SCRIPT_DIR/remote.sh
 INSTALLER=$REPO_ROOT/deploy/teagram-demo/ops/install-qa-invite-command.sh
 ROLLBACK_TEST=$SCRIPT_DIR/test-qa-invite-rollback.sh
 ROLLBACK=$SCRIPT_DIR/rollback.sh
+CONTRACT_TMP=$(mktemp -d)
+trap 'rm -rf -- "$CONTRACT_TMP"' EXIT
 
 fail() {
   printf 'qa-invite contract: %s\n' "$1" >&2
@@ -37,7 +39,31 @@ grep -Fq 'TG_USER_INVITE_MIN_ACCOUNT_AGE: 0' "$COMPOSE" || fail 'new operator ac
 grep -Fq 'TG_PUBLIC_REGISTRATION: invite' "$COMPOSE" || fail 'WebSocket registration must use invite mode'
 grep -Fq 'TG_TURNSTILE_SIGNIN_ENABLED: "false"' "$COMPOSE" || fail 'Turnstile must be disabled and reported absent'
 grep -Fq 'TEAGRAM_QA_INVITE_IMAGE_REF' "$COMPOSE" || fail 'server image must be selected by immutable digest'
+grep -Fq 'RELEASES_DIR=$STATE_DIR/releases' "$FORCED_COMMAND" || fail 'reviewed Compose snapshots must be retained under QA state'
+grep -Fq 'QA_INVITE_REPO_ROOT="$RELEASE_DIR"' "$FORCED_COMMAND" || fail 'remote operations must use the persistent reviewed snapshot'
+grep -Fq 'mktemp -d "$RELEASES_DIR/.${SHA}.XXXXXXXX"' "$FORCED_COMMAND" || fail 'release snapshots must be staged on the state filesystem'
+grep -Fq 'mv -T -- "$WORK_DIR" "$RELEASE_DIR"' "$FORCED_COMMAND" || fail 'release snapshots must be published atomically'
+! grep -Fq 'mktemp -d /tmp/teagram-qa-invite.' "$FORCED_COMMAND" || fail 'reviewed Compose snapshots must not be extracted under /tmp'
+test_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+test_state_dir=/opt/teagram-demo/.state/qa-invite
+test_project_dir=$test_state_dir/releases/$test_sha/deploy/qa-invite
+cat > "$CONTRACT_TMP/qa-invite.env" <<ENV
+POSTGRES_PASSWORD=0000000000000000000000000000000000000000000000000000000000000000
+TG_AUTHKEY_ENC_KEY=1111111111111111111111111111111111111111111111111111111111111111
+TEAGRAM_QA_INVITE_IMAGE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70
+TEAGRAM_QA_INVITE_STATE_DIR=$test_state_dir
+ENV
+docker compose --project-name teagram-qa-invite --project-directory "$test_project_dir" \
+  --env-file "$CONTRACT_TMP/qa-invite.env" --file "$COMPOSE" config --format json > "$CONTRACT_TMP/compose.json" ||
+  fail 'could not render QA Compose bind sources'
+jq -e --arg state "$test_state_dir" '
+  [.services[] | .volumes[]? | select(.type == "bind") | .source] as $sources
+  | ($sources | length == 5)
+    and all($sources[]; startswith($state + "/") and (startswith("/tmp/") | not))
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'a QA bind source is missing, outside persistent state, or under /tmp'
 grep -Fq 'compose down --remove-orphans' "$REMOTE" || fail 'down must remove only QA project containers'
+grep -Fq -- '--project-directory "$REPO_ROOT/deploy/qa-invite"' "$REMOTE" || fail 'Compose must resolve bind sources from the persistent release'
 grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/rollback.sh"' "$REMOTE" || fail 'up rollback helper is not loaded'
 grep -Fq 'compose down --remove-orphans' "$ROLLBACK" || fail 'rollback must stop QA project containers'
 ! grep -Eq 'compose down .*--volumes|compose down .* -v' "$REMOTE" || fail 'down must preserve isolated state'

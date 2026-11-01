@@ -109,4 +109,6 @@ database volume and generated secrets remain available for a later `up`. If a
 new image fails its checks, the deployment script restores the previous image
 and a validated database dump; inspect the emitted backup path before retrying.
 The project state is under `/opt/teagram-demo/.state/qa-invite`, with dumps in
-its `backups/` directory. Do not remove this state while the QA issue is active.
+its `backups/` directory. Reviewed Compose snapshots are retained in
+`releases/<main-sha>` so bind-mounted configuration remains available after a
+Docker or LXC restart. Do not remove this state while the QA issue is active.

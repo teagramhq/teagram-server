@@ -83,22 +83,81 @@ if [[ "$ACTION" == qa-invite ]]; then
     echo "$SHA is not on origin/main; refusing" >&2
     exit 1
   }
-  WORK_DIR=$(mktemp -d /tmp/teagram-qa-invite.XXXXXXXX)
-  trap 'rm -rf -- "$WORK_DIR"' EXIT
-  git -C "$REPO" archive --format=tar "$SHA" deploy/qa-invite migrations |
-    tar -xf - -C "$WORK_DIR" || {
-      echo 'could not extract the reviewed QA invite project' >&2
+  STATE_DIR=$REPO/.state/qa-invite
+  RELEASES_DIR=$STATE_DIR/releases
+  RELEASE_DIR=$RELEASES_DIR/$SHA
+  WORK_DIR=''
+
+  ensure_private_dir() {
+    local path=$1
+    [[ ! -L "$path" ]] || { echo "unsafe QA state path: $path" >&2; return 1; }
+    if [[ -e "$path" ]]; then
+      [[ -d "$path" && "$(stat -c '%u:%a' "$path")" == '0:700' ]] || {
+        echo "QA state directory has unsafe ownership or mode: $path" >&2
+        return 1
+      }
+    else
+      install -d -o root -g root -m 0700 "$path"
+      [[ -d "$path" && ! -L "$path" && "$(stat -c '%u:%a' "$path")" == '0:700' ]] || {
+        echo "could not create a private QA state directory: $path" >&2
+        return 1
+      }
+    fi
+  }
+
+  verify_release() {
+    [[ -d "$RELEASE_DIR" && ! -L "$RELEASE_DIR" &&
+      "$(stat -c '%u:%a' "$RELEASE_DIR")" == '0:700' &&
+      -d "$RELEASE_DIR/deploy" && ! -L "$RELEASE_DIR/deploy" &&
+      -d "$RELEASE_DIR/deploy/qa-invite" && ! -L "$RELEASE_DIR/deploy/qa-invite" &&
+      -f "$RELEASE_DIR/deploy/qa-invite/compose.yaml" && ! -L "$RELEASE_DIR/deploy/qa-invite/compose.yaml" &&
+      -f "$RELEASE_DIR/deploy/qa-invite/remote.sh" && ! -L "$RELEASE_DIR/deploy/qa-invite/remote.sh" &&
+      -f "$RELEASE_DIR/deploy/qa-invite/postgresql.conf" && ! -L "$RELEASE_DIR/deploy/qa-invite/postgresql.conf" &&
+      -f "$RELEASE_DIR/deploy/qa-invite/nginx.conf" && ! -L "$RELEASE_DIR/deploy/qa-invite/nginx.conf" &&
+      -f "$RELEASE_DIR/deploy/qa-invite/haproxy.cfg" && ! -L "$RELEASE_DIR/deploy/qa-invite/haproxy.cfg" &&
+      -d "$RELEASE_DIR/migrations" && ! -L "$RELEASE_DIR/migrations" ]]
+  }
+
+  cleanup_qa_release_staging() {
+    if [[ -n "$WORK_DIR" ]]; then
+      rm -rf -- "$WORK_DIR"
+    fi
+  }
+
+  ensure_private_dir "$STATE_DIR"
+  ensure_private_dir "$RELEASES_DIR"
+  trap cleanup_qa_release_staging EXIT
+  if [[ -e "$RELEASE_DIR" || -L "$RELEASE_DIR" ]]; then
+    verify_release || { echo 'existing reviewed QA snapshot is unsafe or incomplete' >&2; exit 1; }
+  else
+    WORK_DIR=$(mktemp -d "$RELEASES_DIR/.${SHA}.XXXXXXXX")
+    git -C "$REPO" archive --format=tar "$SHA" deploy/qa-invite migrations |
+      tar -xf - -C "$WORK_DIR" || {
+        echo 'could not extract the reviewed QA invite project' >&2
+        exit 1
+      }
+    chown root:root "$WORK_DIR"
+    chmod 0700 "$WORK_DIR"
+    [[ ! -e "$RELEASE_DIR" && ! -L "$RELEASE_DIR" ]] || {
+      echo 'reviewed QA snapshot path appeared during extraction' >&2
       exit 1
     }
+    mv -T -- "$WORK_DIR" "$RELEASE_DIR" || {
+      echo 'could not atomically publish the reviewed QA snapshot' >&2
+      exit 1
+    }
+    WORK_DIR=''
+    verify_release || { echo 'published reviewed QA snapshot is incomplete' >&2; exit 1; }
+  fi
   args=("$QA_ACTION")
   case "$QA_ACTION" in
     up) args+=("$SHA" "$QA_IMAGE_DIGEST") ;;
     create-account) args+=("$QA_ACCOUNT_NAME") ;;
   esac
   env -i PATH="$PATH" HOME=/root \
-    QA_INVITE_REPO_ROOT="$WORK_DIR" \
-    QA_INVITE_STATE_DIR="$REPO/.state/qa-invite" \
-    bash "$WORK_DIR/deploy/qa-invite/remote.sh" "${args[@]}"
+    QA_INVITE_REPO_ROOT="$RELEASE_DIR" \
+    QA_INVITE_STATE_DIR="$STATE_DIR" \
+    bash "$RELEASE_DIR/deploy/qa-invite/remote.sh" "${args[@]}"
   exit "$?"
 fi
 
