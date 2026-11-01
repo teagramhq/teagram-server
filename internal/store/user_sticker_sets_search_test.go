@@ -114,8 +114,23 @@ func TestUserStickerSetSearchUsesSubstringIndexes(t *testing.T) {
 	`, owner.ID); err != nil {
 		t.Fatalf("seed selective sticker-set match: %v", err)
 	}
+	var encodedSetID int64
+	if err := s.pool.QueryRow(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		VALUES (21_000_002, $1, 'unrelated title', 'prefix_a_b_suffix', 'regular', 1)
+		RETURNING id
+	`, owner.ID).Scan(&encodedSetID); err != nil {
+		t.Fatalf("seed literal-short-substring match: %v", err)
+	}
 	if _, err := s.pool.Exec(ctx, `ANALYZE user_created_sticker_sets`); err != nil {
 		t.Fatalf("analyze sticker-set fixtures: %v", err)
+	}
+	candidates, err := s.UserStickerSetSearchCandidates(ctx, "a_b")
+	if err != nil {
+		t.Fatalf("search literal short substring: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != encodedSetID {
+		t.Fatalf("literal short-substring search returned %+v, want only set %d", candidates, encodedSetID)
 	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -160,7 +175,46 @@ func TestUserStickerSetSearchUsesSubstringIndexes(t *testing.T) {
 			t.Errorf("search plan does not use %s:\n%s", index, plan.String())
 		}
 	}
-	candidates, err := s.UserStickerSetSearchCandidates(ctx, "sticker")
+	rows, err = conn.Query(ctx, `
+		EXPLAIN (COSTS OFF)
+		SELECT id
+		FROM user_created_sticker_sets
+		WHERE is_live = true
+		  AND (
+		      public.user_sticker_set_search_key(lower(title))
+		          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+		      OR public.user_sticker_set_search_key(lower(short_name))
+		          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+		  )
+		  AND (strpos(lower(title), lower($1)) > 0 OR strpos(lower(short_name), lower($1)) > 0)
+		ORDER BY id
+		LIMIT 50
+	`, "a_b")
+	if err != nil {
+		t.Fatalf("explain literal short-substring search: %v", err)
+	}
+	plan.Reset()
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("read literal short-substring query plan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate literal short-substring query plan: %v", err)
+	}
+	rows.Close()
+	for _, index := range []string{
+		"user_created_sticker_sets_live_title_literal_trgm_idx",
+		"user_created_sticker_sets_live_short_name_literal_trgm_idx",
+	} {
+		if !strings.Contains(plan.String(), index) {
+			t.Errorf("literal short-substring search plan does not use %s:\n%s", index, plan.String())
+		}
+	}
+	candidates, err = s.UserStickerSetSearchCandidates(ctx, "sticker")
 	if err != nil {
 		t.Fatalf("search at fixture volume: %v", err)
 	}

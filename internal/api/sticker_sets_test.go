@@ -581,9 +581,15 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 		t.Fatalf("create owner: %v", err)
 	}
 	h := fullChannelDispatcher(s)
-	for _, shortName := range []string{"bulk_cats", "bulk_dogs", "bulkcats", "a_b"} {
+	for _, shortName := range []string{
+		"bulk_cats", "bulk_dogs", "bulkcats", "a_b", "prefix_a_b_suffix", "title_only",
+	} {
 		file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
-		createStickerSet(t, h, owner.ID, createStickerRequest(shortName, file, false, false))
+		request := createStickerRequest(shortName, file, false, false)
+		if shortName == "title_only" {
+			request.Title = "Contains a_b"
+		}
+		createStickerSet(t, h, owner.ID, request)
 	}
 
 	tracer.n.Store(0)
@@ -615,18 +621,28 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 	tracer.n.Store(0)
 	shortNameResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "a_b", ExcludeFeatured: true})
 	shortNameMatch, ok := shortNameResult.(*tg.MessagesFoundStickerSets)
-	if !ok || len(shortNameMatch.Sets) != 1 {
-		t.Fatalf("exact short-name search = %T with %d sets, want the a_b set", shortNameResult, foundStickerSetsCount(shortNameResult))
+	if !ok || len(shortNameMatch.Sets) != 3 {
+		t.Fatalf("substring short-name search = %T with %d sets, want all three matches", shortNameResult, foundStickerSetsCount(shortNameResult))
 	}
-	covered, ok := shortNameMatch.Sets[0].(*tg.StickerSetCovered)
-	if !ok || covered.Set.ShortName != "a_b" {
-		t.Fatalf("exact short-name search returned %T, want the a_b set", shortNameMatch.Sets[0])
+	matchedShortNames := make(map[string]bool, len(shortNameMatch.Sets))
+	for _, result := range shortNameMatch.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered.Cover == nil {
+			t.Errorf("substring search result = %T (%v), want a covered set", result, result)
+			continue
+		}
+		matchedShortNames[covered.Set.ShortName] = true
+	}
+	for _, shortName := range []string{"a_b", "prefix_a_b_suffix", "title_only"} {
+		if !matchedShortNames[shortName] {
+			t.Errorf("substring search omitted matching set %q", shortName)
+		}
 	}
 	if got := tracer.n.Load(); got != 2 {
-		t.Fatalf("exact short-name search used %d database queries, want one indexed lookup and one bulk resolution", got)
+		t.Fatalf("substring search used %d database queries, want one indexed lookup and one bulk resolution", got)
 	}
 
-	for _, query := range []string{"q", "qz", "猫", "!!!"} {
+	for _, query := range []string{"q", "qz", "猫"} {
 		tracer.n.Store(0)
 		searchResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: query, ExcludeFeatured: true})
 		found, ok := searchResult.(*tg.MessagesFoundStickerSets)
@@ -636,6 +652,16 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 		if got := tracer.n.Load(); got != 0 {
 			t.Errorf("search for %q used %d database queries, want none", query, got)
 		}
+	}
+
+	tracer.n.Store(0)
+	searchResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "!!!", ExcludeFeatured: true})
+	found, ok := searchResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(found.Sets) != 0 {
+		t.Errorf("search for %q = %T with %d sets, want an empty result", "!!!", searchResult, foundStickerSetsCount(searchResult))
+	}
+	if got := tracer.n.Load(); got != 1 {
+		t.Errorf("search for %q used %d database queries, want one indexed candidate lookup", "!!!", got)
 	}
 }
 

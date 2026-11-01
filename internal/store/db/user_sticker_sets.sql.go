@@ -537,9 +537,8 @@ type UserCreatedStickerSetSearchCandidatesRow struct {
 	AccessHash int64
 }
 
-// This candidate search is used for literal patterns with trigram terms. The
-// store handles other valid short-name searches through the unique equality
-// index and rejects remaining patterns rather than scanning live sets.
+// This candidate search handles literal patterns with a word run that
+// produces pg_trgm terms. The encoded query below handles other patterns.
 // The caller must bulk-resolve each candidate with its exact hash.
 func (q *Queries) UserCreatedStickerSetSearchCandidates(ctx context.Context, lower string) ([]UserCreatedStickerSetSearchCandidatesRow, error) {
 	rows, err := q.db.Query(ctx, userCreatedStickerSetSearchCandidates, lower)
@@ -550,6 +549,49 @@ func (q *Queries) UserCreatedStickerSetSearchCandidates(ctx context.Context, low
 	var items []UserCreatedStickerSetSearchCandidatesRow
 	for rows.Next() {
 		var i UserCreatedStickerSetSearchCandidatesRow
+		if err := rows.Scan(&i.ID, &i.AccessHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const userCreatedStickerSetSearchCandidatesByEncodedSubstring = `-- name: UserCreatedStickerSetSearchCandidatesByEncodedSubstring :many
+SELECT id, access_hash
+FROM user_created_sticker_sets
+WHERE is_live = true
+  AND (
+      public.user_sticker_set_search_key(lower(title))
+          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+      OR public.user_sticker_set_search_key(lower(short_name))
+          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+  )
+  AND (strpos(lower(title), lower($1)) > 0 OR strpos(lower(short_name), lower($1)) > 0)
+ORDER BY id
+LIMIT 50
+`
+
+type UserCreatedStickerSetSearchCandidatesByEncodedSubstringRow struct {
+	ID         int64
+	AccessHash int64
+}
+
+// Encode code points as fixed-width alphanumeric hex so pg_trgm can index
+// substrings containing separators, which do not produce word trigrams in
+// the source. strpos keeps the indexed candidate match exact.
+func (q *Queries) UserCreatedStickerSetSearchCandidatesByEncodedSubstring(ctx context.Context, lower string) ([]UserCreatedStickerSetSearchCandidatesByEncodedSubstringRow, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetSearchCandidatesByEncodedSubstring, lower)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSetSearchCandidatesByEncodedSubstringRow
+	for rows.Next() {
+		var i UserCreatedStickerSetSearchCandidatesByEncodedSubstringRow
 		if err := rows.Scan(&i.ID, &i.AccessHash); err != nil {
 			return nil, err
 		}

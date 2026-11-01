@@ -60,9 +60,8 @@ SELECT id, access_hash, creator_id, title, short_name, software, kind,
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
--- This candidate search is used for literal patterns with trigram terms. The
--- store handles other valid short-name searches through the unique equality
--- index and rejects remaining patterns rather than scanning live sets.
+-- This candidate search handles literal patterns with a word run that
+-- produces pg_trgm terms. The encoded query below handles other patterns.
 -- The caller must bulk-resolve each candidate with its exact hash.
 -- name: UserCreatedStickerSetSearchCandidates :many
 SELECT id, access_hash
@@ -70,6 +69,23 @@ FROM user_created_sticker_sets
 WHERE is_live = true
   AND (lower(title) LIKE '%' || lower($1) || '%' ESCAPE E'\\'
        OR lower(short_name) LIKE '%' || lower($1) || '%' ESCAPE E'\\')
+ORDER BY id
+LIMIT 50;
+
+-- Encode code points as fixed-width alphanumeric hex so pg_trgm can index
+-- substrings containing separators, which do not produce word trigrams in
+-- the source. strpos keeps the indexed candidate match exact.
+-- name: UserCreatedStickerSetSearchCandidatesByEncodedSubstring :many
+SELECT id, access_hash
+FROM user_created_sticker_sets
+WHERE is_live = true
+  AND (
+      public.user_sticker_set_search_key(lower(title))
+          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+      OR public.user_sticker_set_search_key(lower(short_name))
+          LIKE '%' || public.user_sticker_set_search_key(lower($1)) || '%'
+  )
+  AND (strpos(lower(title), lower($1)) > 0 OR strpos(lower(short_name), lower($1)) > 0)
 ORDER BY id
 LIMIT 50;
 
