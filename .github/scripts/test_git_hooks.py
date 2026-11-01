@@ -62,6 +62,7 @@ class PrePushHookTests(unittest.TestCase):
         self.write_tool("gitleaks")
         self.write_tool("sqlfluff")
         self.write_tool("python")
+        self.write_tool("actionlint")
         sqlfluff_dir = self.repo / ".venv-sqlfluff/bin"
         (sqlfluff_dir / "sqlfluff").symlink_to(self.tools / "sqlfluff")
         (sqlfluff_dir / "python").symlink_to(self.tools / "python")
@@ -200,6 +201,22 @@ class PrePushHookTests(unittest.TestCase):
         calls = self.calls()
         self.assertEqual([tool for tool, _, _ in calls], ["gitleaks"], calls)
         self.assertIn(f"--log-opts=main..{docs_sha}", calls[0][2])
+
+    def test_workflow_changes_run_actionlint_with_queue_schema_ignore(self) -> None:
+        workflow = self.repo / ".github/workflows/ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: CI\non: pull_request\n", encoding="utf-8")
+        self.git("add", ".github/workflows/ci.yml")
+        self.git("commit", "--quiet", "-m", "ci(test): change workflow")
+
+        result = self.run_hook(local_sha=self.git("rev-parse", "HEAD").strip())
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        actionlint_calls = [args for tool, _, args in self.calls() if tool == "actionlint"]
+        self.assertEqual(len(actionlint_calls), 1, self.calls())
+        self.assertIn(
+            'unexpected key "queue" for "concurrency" section', actionlint_calls[0]
+        )
 
     def test_deleted_ref_skips_checks_and_existing_ref_scans_branch_commits(self) -> None:
         deleted = self.run_hook(local_sha=ZERO_SHA, remote_sha=self.feature_sha)
