@@ -8,7 +8,7 @@ import (
 	"hash/crc32"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -327,11 +327,11 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 }
 
 // UserStickerSetSearchCandidates returns at most 50 live identities matching
-// queries long enough to produce trigrams. Shorter queries are rejected to
-// avoid scanning every live set. Callers must bulk-resolve candidates before
-// exposing any metadata.
+// queries containing a run long enough to produce trigrams. Other queries are
+// rejected to avoid scanning every live set. Callers must bulk-resolve
+// candidates before exposing any metadata.
 func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
-	if utf8.RuneCountInString(query) < minUserStickerSetSearchRunes {
+	if !hasUserStickerSetSearchTrigram(query) {
 		return []UserStickerSetSearchCandidate{}, nil
 	}
 	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, escapeStickerSetSearchQuery(query))
@@ -343,6 +343,21 @@ func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string
 		result = append(result, UserStickerSetSearchCandidate{ID: row.ID, AccessHash: row.AccessHash})
 	}
 	return result, nil
+}
+
+func hasUserStickerSetSearchTrigram(query string) bool {
+	wordRunes := 0
+	for _, r := range query {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			wordRunes++
+			if wordRunes >= minUserStickerSetSearchRunes {
+				return true
+			}
+			continue
+		}
+		wordRunes = 0
+	}
+	return false
 }
 
 // UserStickerSetsBySearchCandidates rechecks each candidate's exact access

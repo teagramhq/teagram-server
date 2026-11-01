@@ -62,8 +62,9 @@ WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
 -- Search bounds candidates and uses trigram indexes for literal substring
 -- matches. The caller must bulk-resolve each candidate with its exact hash.
--- The store rejects queries shorter than three Unicode characters, because
--- their substring patterns cannot provide a trigram for index pruning.
+-- The store rejects queries without three consecutive Unicode letters or
+-- digits, because their substring patterns cannot provide a trigram for
+-- index pruning.
 -- name: UserCreatedStickerSetSearchCandidates :many
 SELECT id, access_hash
 FROM user_created_sticker_sets

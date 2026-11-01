@@ -612,15 +612,15 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 		t.Fatalf("literal underscore search used %d database queries, want one search and one bulk resolution", got)
 	}
 
-	for _, query := range []string{"q", "qz", "猫"} {
+	for _, query := range []string{"q", "qz", "猫", "!!!"} {
 		tracer.n.Store(0)
-		shortResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: query, ExcludeFeatured: true})
-		short, ok := shortResult.(*tg.MessagesFoundStickerSets)
-		if !ok || len(short.Sets) != 0 {
-			t.Errorf("short search for %q = %T with %d sets, want an empty result", query, shortResult, foundStickerSetsCount(shortResult))
+		searchResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: query, ExcludeFeatured: true})
+		found, ok := searchResult.(*tg.MessagesFoundStickerSets)
+		if !ok || len(found.Sets) != 0 {
+			t.Errorf("search for %q = %T with %d sets, want an empty result", query, searchResult, foundStickerSetsCount(searchResult))
 		}
 		if got := tracer.n.Load(); got != 0 {
-			t.Errorf("short search for %q used %d database queries, want none", query, got)
+			t.Errorf("search for %q used %d database queries, want none", query, got)
 		}
 	}
 }
