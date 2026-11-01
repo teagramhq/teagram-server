@@ -32,7 +32,7 @@ func (h *handlers) handleGetCustomEmojiDocuments(r *mtproto.Request) (bin.Encode
 
 	documents := make([]tg.DocumentClass, 0, len(req.DocumentID))
 	for _, id := range req.DocumentID {
-		if customEmoji, ok := userDocuments[id]; ok && customEmoji.Set.Kind == "emojis" {
+		if customEmoji, ok := userDocuments[id]; ok && customEmoji.Set.IsLive && customEmoji.Set.Kind == "emojis" && customEmoji.IsActive {
 			documents = append(documents, userStickerDocumentTL(customEmoji.Set, customEmoji.Item, h.dcID))
 			continue
 		}

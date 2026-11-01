@@ -1,0 +1,7 @@
+# source: gotd/td v0.162.0 TL client method exercised by user_sticker_sets_smoke_test.go
+stickers.addStickerToSet#8653febe
+  stickerset: inputStickerSetID#9de7a269(id: <N>, access_hash: <N>)
+  sticker: inputStickerSetItem#32da9e9c
+    flags: #
+    document: inputDocument#1abfb575(id: <N>, access_hash: <N>, file_reference: REDACTED)
+    emoji: "⭐"

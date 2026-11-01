@@ -15,6 +15,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/stickervalidation"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -86,7 +87,7 @@ func installedStickerSetDate(installed []store.InstalledStickerSet, id int64) *t
 	return nil
 }
 
-func userStickerSetSummaryTL(set store.UserStickerSet, ownerID int64, installedAt *time.Time) tg.StickerSet {
+func userStickerSetSummaryTL(set store.UserStickerSet, ownerID int64, dcID int, installedAt *time.Time) tg.StickerSet {
 	result := tg.StickerSet{
 		ID: set.ID, AccessHash: set.AccessHash, Title: set.Title,
 		ShortName: set.ShortName, Count: set.ItemCount, Hash: set.Hash,
@@ -96,13 +97,23 @@ func userStickerSetSummaryTL(set store.UserStickerSet, ownerID int64, installedA
 	if installedAt != nil {
 		result.SetInstalledDate(int(installedAt.Unix()))
 	}
+	if set.Thumbnail != nil {
+		result.SetThumbs([]tg.PhotoSizeClass{&tg.PhotoSize{
+			Type: "s", W: set.Thumbnail.Width, H: set.Thumbnail.Height, Size: int(set.Thumbnail.Size),
+		}})
+		result.SetThumbDCID(dcID)
+		result.SetThumbVersion(set.ThumbVersion)
+	}
+	if set.ThumbDocumentID != 0 {
+		result.SetThumbDocumentID(set.ThumbDocumentID)
+	}
 	result.SetFlags()
 	return result
 }
 
 func userStickerSetTL(set store.UserStickerSet, ownerID int64, dcID int, installedAt *time.Time) *tg.MessagesStickerSet {
 	result := &tg.MessagesStickerSet{
-		Set:       userStickerSetSummaryTL(set, ownerID, installedAt),
+		Set:       userStickerSetSummaryTL(set, ownerID, dcID, installedAt),
 		Packs:     make([]tg.StickerPack, 0, len(set.Items)),
 		Keywords:  make([]tg.StickerKeyword, 0, len(set.Items)),
 		Documents: make([]tg.DocumentClass, 0, len(set.Items)),
@@ -393,20 +404,395 @@ func validUserStickerKeywords(keywords string) bool {
 	return true
 }
 
-// handleAddStickerToSetUnsupported keeps the mutation entry point rate limited
-// while set editing remains outside this feature's scope.
-func (h *handlers) handleAddStickerToSetUnsupported(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+func (h *handlers) checkStickerSetMutation(r *mtproto.Request) error {
+	if r.UserID == 0 {
+		return errAuthKeyUnreg
+	}
+	return h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit)
+}
+
+func (h *handlers) ownedUserStickerSet(r *mtproto.Request, ref tg.InputStickerSetClass) (store.UserStickerSet, error) {
+	set, err := h.userStickerSetByRef(r, ref)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return store.UserStickerSet{}, errStickerSetInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve user sticker set for mutation", "user_id", r.UserID, "err", err)
+		return store.UserStickerSet{}, errInternal
+	}
+	if set.CreatorID != r.UserID {
+		return store.UserStickerSet{}, errStickerSetInvalid
+	}
+	return set, nil
+}
+
+func userStickerDocumentRef(input tg.InputDocumentClass) (store.StickerFileRef, bool) {
+	document, ok := input.(*tg.InputDocument)
+	if !ok || document == nil || document.ID <= 0 || document.AccessHash == 0 {
+		return store.StickerFileRef{}, false
+	}
+	return store.StickerFileRef{ID: document.ID, AccessHash: document.AccessHash}, true
+}
+
+func stickerTargetForSet(kind string) (stickervalidation.Target, int, bool) {
+	switch kind {
+	case "regular":
+		return stickervalidation.TargetSticker, store.MaxUserStickerCount, true
+	case "mask":
+		return stickervalidation.TargetMaskSticker, store.MaxUserStickerCount, true
+	case "emojis":
+		return stickervalidation.TargetCustomEmoji, store.MaxUserEmojiCount, true
+	default:
+		return "", 0, false
+	}
+}
+
+func (h *handlers) handleAddStickerToSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersAddStickerToSetRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
-	if r.UserID == 0 {
-		return nil, nil, errAuthKeyUnreg
-	}
-	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
+	if err := h.checkStickerSetMutation(r); err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, errMethodNotImpl
+	if h.stickerImportMode == config.StickerImportOff {
+		return nil, nil, errStickerImportDisabled
+	}
+	set, err := h.ownedUserStickerSet(r, req.Stickerset)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, maxItems, ok := stickerTargetForSet(set.Kind)
+	if !ok {
+		return nil, nil, errStickerSetInvalid
+	}
+	if set.ItemCount >= maxItems {
+		return nil, nil, errStickersTooMuch
+	}
+	ref, ok := userStickerDocumentRef(req.Sticker.Document)
+	if !ok {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if !validUserStickerEmoji(req.Sticker.Emoji) {
+		return nil, nil, errStickerEmojiInvalid
+	}
+	keywords, _ := req.Sticker.GetKeywords()
+	if !validUserStickerKeywords(keywords) || (set.Kind == "mask" && keywords != "") {
+		return nil, nil, errStickerSetInvalid
+	}
+	maskCoords := ""
+	coords, hasCoords := req.Sticker.GetMaskCoords()
+	if hasCoords {
+		if set.Kind != "mask" || !validMaskCoords(coords) {
+			return nil, nil, errStickerSetInvalid
+		}
+		encoded, marshalErr := json.Marshal(coords)
+		if marshalErr != nil {
+			return nil, nil, errStickerSetInvalid
+		}
+		maskCoords = string(encoded)
+	}
+	files, err := h.store.StickerFilesForUserSet(r.Ctx, r.UserID, set.ID, []store.StickerFileRef{ref})
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve stored sticker file for add", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	if len(files) != 1 || files[0].Size <= 0 {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if files[0].Size > store.MaxStoredStickerBytes {
+		return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+	}
+	data, err := h.store.ReadStickerFileForSet(r.Ctx, files[0])
+	if errors.Is(err, store.ErrStickerFileTooLarge) {
+		return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("read stored sticker bytes for add", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	metadata, err := stickervalidation.Validate(data, target)
+	if err != nil {
+		if validationErr, ok := errors.AsType[*stickervalidation.ValidationError](err); ok {
+			return nil, nil, rpcErr(400, validationErr.Reason)
+		}
+		return nil, nil, errStickerDocumentInvalid
+	}
+	updated, err := h.store.AddUserStickerSetItem(r.Ctx, r.UserID, set.ID, store.UserStickerSetItem{
+		FileID: files[0].ID, AccessHash: files[0].AccessHash, Size: files[0].Size, Date: files[0].Date,
+		Emoji: req.Sticker.Emoji, Keywords: keywords, Format: string(metadata.Format),
+		Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskCoords,
+	})
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if errors.Is(err, store.ErrStickerSetLimit) {
+		return nil, nil, errStickersTooMuch
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) || errors.Is(err, store.ErrStickerFileAlreadyUsed) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("add sticker to user set", "user_id", r.UserID, "set_id", set.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(updated, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleRemoveStickerFromSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersRemoveStickerFromSetRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	ref, ok := userStickerDocumentRef(req.Sticker)
+	if !ok {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	set, err := h.store.RemoveUserStickerSetItem(r.Ctx, r.UserID, ref.ID, ref.AccessHash)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if errors.Is(err, store.ErrStickerSetEmpty) {
+		return nil, nil, errStickersEmpty
+	}
+	if err != nil {
+		h.log.Error("remove sticker from user set", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(set, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleChangeStickerPosition(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersChangeStickerPositionRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	ref, ok := userStickerDocumentRef(req.Sticker)
+	if !ok {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	set, err := h.store.ChangeUserStickerSetItemPosition(r.Ctx, r.UserID, ref.ID, ref.AccessHash, req.Position)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("change user sticker position", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(set, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleChangeSticker(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersChangeStickerRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	ref, ok := userStickerDocumentRef(req.Sticker)
+	if !ok {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	set, err := h.store.UserStickerSetByOwnedSticker(r.Ctx, r.UserID, ref.ID, ref.AccessHash)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve user sticker set for change", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	emoji, hasEmoji := req.GetEmoji()
+	keywords, hasKeywords := req.GetKeywords()
+	coords, hasCoords := req.GetMaskCoords()
+	if !hasEmoji && !hasKeywords && !hasCoords {
+		return nil, nil, errStickerSetInvalid
+	}
+	if hasEmoji && !validUserStickerEmoji(emoji) {
+		return nil, nil, errStickerEmojiInvalid
+	}
+	if hasKeywords && (!validUserStickerKeywords(keywords) || (set.Kind == "mask" && keywords != "")) {
+		return nil, nil, errStickerSetInvalid
+	}
+	var maskCoords *string
+	if hasCoords {
+		if set.Kind != "mask" || !validMaskCoords(coords) {
+			return nil, nil, errStickerSetInvalid
+		}
+		encoded, marshalErr := json.Marshal(coords)
+		if marshalErr != nil {
+			return nil, nil, errStickerSetInvalid
+		}
+		value := string(encoded)
+		maskCoords = &value
+	}
+	var emojiUpdate, keywordsUpdate *string
+	if hasEmoji {
+		emojiUpdate = &emoji
+	}
+	if hasKeywords {
+		keywordsUpdate = &keywords
+	}
+	updated, err := h.store.ChangeUserStickerSetItem(r.Ctx, r.UserID, ref.ID, ref.AccessHash, store.UserStickerSetItemUpdate{
+		Emoji: emojiUpdate, Keywords: keywordsUpdate, MaskCoords: maskCoords,
+	})
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("change user sticker metadata", "user_id", r.UserID, "file_id", ref.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(updated, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleSetStickerSetThumb(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersSetStickerSetThumbRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	set, err := h.ownedUserStickerSet(r, req.Stickerset)
+	if err != nil {
+		return nil, nil, err
+	}
+	thumbInput, hasThumb := req.GetThumb()
+	thumbDocumentID, hasThumbDocumentID := req.GetThumbDocumentID()
+	var thumbnail *store.UserStickerSetThumbnail
+	if set.Kind == "emojis" {
+		if hasThumb {
+			return nil, nil, errStickerSetInvalid
+		}
+		if !hasThumbDocumentID {
+			thumbDocumentID = 0
+		}
+	} else {
+		if hasThumbDocumentID {
+			return nil, nil, errStickerSetInvalid
+		}
+		thumbDocumentID = 0
+		if hasThumb {
+			ref, ok := userStickerDocumentRef(thumbInput)
+			if !ok {
+				return nil, nil, errStickerDocumentInvalid
+			}
+			files, fileErr := h.store.StickerFilesForSet(r.Ctx, r.UserID, []store.StickerFileRef{ref})
+			if errors.Is(fileErr, store.ErrStickerDocumentInvalid) {
+				return nil, nil, errStickerDocumentInvalid
+			}
+			if fileErr != nil {
+				h.log.Error("resolve sticker set thumbnail", "user_id", r.UserID, "file_id", ref.ID, "err", fileErr)
+				return nil, nil, errInternal
+			}
+			if len(files) != 1 || files[0].Size <= 0 {
+				return nil, nil, errStickerDocumentInvalid
+			}
+			data, readErr := h.store.ReadStickerFileForSet(r.Ctx, files[0])
+			if errors.Is(readErr, store.ErrStickerFileTooLarge) {
+				return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+			}
+			if errors.Is(readErr, store.ErrStickerDocumentInvalid) {
+				return nil, nil, errStickerDocumentInvalid
+			}
+			if readErr != nil {
+				h.log.Error("read sticker set thumbnail", "user_id", r.UserID, "file_id", ref.ID, "err", readErr)
+				return nil, nil, errInternal
+			}
+			metadata, validateErr := stickervalidation.Validate(data, stickervalidation.TargetSetThumbnail)
+			if validateErr != nil {
+				if validationErr, ok := errors.AsType[*stickervalidation.ValidationError](validateErr); ok {
+					return nil, nil, rpcErr(400, validationErr.Reason)
+				}
+				return nil, nil, errStickerDocumentInvalid
+			}
+			thumbnail = &store.UserStickerSetThumbnail{
+				FileID: files[0].ID, AccessHash: files[0].AccessHash, Size: files[0].Size, Format: string(metadata.Format),
+				Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration),
+			}
+		}
+	}
+	updated, err := h.store.SetUserStickerSetThumb(r.Ctx, r.UserID, set.ID, thumbnail, thumbDocumentID)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("set user sticker thumbnail", "user_id", r.UserID, "set_id", set.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(updated, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleRenameStickerSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersRenameStickerSetRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	if !validStickerSetTitle(req.Title) {
+		return nil, nil, errStickerSetTitleInvalid
+	}
+	set, err := h.ownedUserStickerSet(r, req.Stickerset)
+	if err != nil {
+		return nil, nil, err
+	}
+	updated, err := h.store.RenameUserStickerSet(r.Ctx, r.UserID, set.ID, req.Title)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	}
+	if err != nil {
+		h.log.Error("rename user sticker set", "user_id", r.UserID, "set_id", set.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return userStickerSetResponse(updated, r.UserID, h.dcID, nil), nil, nil
+}
+
+func (h *handlers) handleDeleteStickerSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	var req tg.StickersDeleteStickerSetRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkStickerSetMutation(r); err != nil {
+		return nil, nil, err
+	}
+	set, err := h.ownedUserStickerSet(r, req.Stickerset)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err = h.store.DeleteUserStickerSet(r.Ctx, r.UserID, set.ID); errors.Is(err, store.ErrStickerSetNotFound) {
+		return nil, nil, errStickerSetInvalid
+	} else if err != nil {
+		h.log.Error("delete user sticker set", "user_id", r.UserID, "set_id", set.ID, "err", err)
+		return nil, nil, errInternal
+	}
+	return &tg.BoolTrue{}, nil, nil
 }
 
 func validStickerSetTitle(title string) bool {

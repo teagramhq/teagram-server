@@ -1,0 +1,4 @@
+# source: gotd/td v0.162.0 TL client method exercised by user_sticker_sets_smoke_test.go
+stickers.renameStickerSet#124b1c00
+  stickerset: inputStickerSetID#9de7a269(id: <N>, access_hash: <N>)
+  title: "Edited smoke set"

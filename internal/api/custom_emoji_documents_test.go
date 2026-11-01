@@ -42,6 +42,12 @@ func TestGetCustomEmojiDocumentsReturnsOnlyLiveCustomEmojiSetMembers(t *testing.
 	if !ok {
 		t.Fatalf("inactive custom emoji set document = %T, want *tg.Document", inactiveSet.Documents[0])
 	}
+	removedFile := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 100, 100))
+	removedSet := createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("removed_emoji_docs", removedFile, false, true))
+	removedDocument, ok := removedSet.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("removed custom emoji set document = %T, want *tg.Document", removedSet.Documents[0])
+	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect to sticker test database: %v", err)
@@ -49,6 +55,10 @@ func TestGetCustomEmojiDocumentsReturnsOnlyLiveCustomEmojiSetMembers(t *testing.
 	if _, err := conn.Exec(ctx, "UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1", inactiveSet.Set.ID); err != nil {
 		closeErr := conn.Close(ctx)
 		t.Fatalf("mark custom emoji set inactive: %v", errors.Join(err, closeErr))
+	}
+	if _, err := conn.Exec(ctx, "UPDATE user_created_sticker_set_items SET is_active = false WHERE set_id = $1", removedSet.Set.ID); err != nil {
+		closeErr := conn.Close(ctx)
+		t.Fatalf("mark custom emoji item removed: %v", errors.Join(err, closeErr))
 	}
 	if err := conn.Close(ctx); err != nil {
 		t.Fatalf("close sticker test database connection: %v", err)
@@ -67,7 +77,7 @@ func TestGetCustomEmojiDocumentsReturnsOnlyLiveCustomEmojiSetMembers(t *testing.
 	}
 
 	body := dispatchChatMethod(t, fullChannelDispatcher(s), requester.ID, "messages.getCustomEmojiDocuments", &tg.MessagesGetCustomEmojiDocumentsRequest{
-		DocumentID: []int64{emojiDocument.ID, inactiveDocument.ID, regularDocument.ID, attachment.ID, 919999},
+		DocumentID: []int64{emojiDocument.ID, inactiveDocument.ID, removedDocument.ID, regularDocument.ID, attachment.ID, 919999},
 	})
 	var documents tg.DocumentClassVector
 	if err := documents.Decode(&bin.Buffer{Buf: body}); err != nil {
