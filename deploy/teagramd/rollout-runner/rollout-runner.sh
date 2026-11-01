@@ -2749,18 +2749,21 @@ run_apply() {
       | select(all($components[]; test("^(project|server|server_mounts|postgres_mounts|persistent_service_mounts|volumes)$")))
       | "reason=\($reason) components=\($components | join(",")) public_profile=\($public_profile)"
     ') || layout_diagnostics='unavailable'
-    layout_differences=$(printf '%s' "$layout_report" | jq -c '
+    layout_differences=$(printf '%s' "$layout_report" | jq -ce '
       .differences
-      | select(type == "array")
+      | select(type == "array" and length > 0)
       | select(all(.[];
           type == "object"
+          and keys == ["field", "mount_target", "service"]
           and (.service | type) == "string"
-          and (.mount_target == null or (.mount_target | type) == "string")
+          and (.service | length) > 0
+          and (.mount_target == null or ((.mount_target | type) == "string" and (.mount_target | length) > 0))
           and (.field | type) == "string"
+          and (.field | length) > 0
         ))
       | map({service, mount_target, field})[]
     ') || {
-      fail 'target Compose layout difference report is invalid'
+      fail 'target Compose layout difference report is missing, malformed, or empty'
       return 1
     }
     while IFS= read -r difference; do
