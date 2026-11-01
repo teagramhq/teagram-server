@@ -214,3 +214,25 @@ schema operation; dropping the postings table does not erase source messages or
 backup copies. See the
 [migration behavior](migrations.md#ordered-message-search-postings) for the
 additive schema details.
+
+# Threat model: Turnstile test mode and demo QA bypass
+
+## Assets and boundaries
+
+Turnstile protects signup admission from automated abuse. Its secret key and
+the demo QA token are server-side credentials; the site key is public. Signup
+registration mode, invite rules, and per-IP limits remain separate server-side
+controls.
+
+## Abuse cases and controls
+
+| Abuse case | Control and remaining risk |
+|---|---|
+| A real credential is accidentally used in local or CI test mode | Test mode accepts only Cloudflare's official test pairs and rejects a real Siteverify secret. It also refuses every advertised `*.teagram.io` hostname, including the public web and demo stacks. |
+| A caller tries to use the QA token for sign-in or another action | The verifier compares the token only for the `signup` action. Other actions continue through Siteverify, and the raw token is excluded from log fields. |
+| A leaked QA token creates demo accounts without solving the widget | The bypass is enabled only by a configured file on `demo.teagram.io`, stays inside the protected server secret mount, and does not skip registration rules or the signup IP limit. A token holder can still use the demo signup allowance until its rate limit resets. |
+| A client removes or forges challenge UI | The server still requires a valid Siteverify response or the exact demo QA token. Registration and per-IP limits are enforced server-side. |
+
+Test mode does not open registration or disable signup limits. The demo QA token
+is scoped to public demo account creation and is not a production recovery or
+operator credential.

@@ -178,6 +178,21 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_real_client_browser_checkout_uses_declared_revision(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (
+            repo_root / ".github" / "workflows" / "real-client-browser-flow.yml"
+        ).read_text(encoding="utf-8")
+        self.assertRegex(
+            workflow,
+            r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
+            r"^      - name: Check out pinned web companion\n"
+            r"        uses: [^\n]+\n"
+            r"        with:\n"
+            r"          repository: teagramhq/teagram-web\n"
+            r"          ref: \$\{\{ env\.REAL_CLIENT_WEB_REVISION \}\}$",
+        )
+
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -214,12 +229,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # The publisher and recovery dispatcher are main-push-only. The
+        # The publisher and recovery dispatcher are main-push-only. The demo
+        # pin is advisory and must not gate the production CI aggregate. The
         # main-priority job is skipped on PRs and checked separately. MAIN-2918
         # is deleting the other three lanes.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
+            "check-demo-web-pin",
             "ops-dispatch-pr-ci-recovery",
             "ops-prioritize-main",
             "mirror-rustfs-qualification-images",
@@ -261,9 +278,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
         expected_dependencies = expected_lanes | {"ops-prioritize-main"}
         self.assertEqual(
-            needed_lanes[:5],
+            needed_lanes[:6],
             [
                 "ops-prioritize-main",
+                "check-security",
                 "test-go",
                 "check-sticker-license",
                 "test-photo-worker",

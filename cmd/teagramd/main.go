@@ -1004,7 +1004,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	dialogFilterSync := api.NewDialogFilterSync()
 	var turnstileVerifier api.SignUpTurnstileVerifier
 	if cfg.Turnstile.Enabled() {
-		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
+		turnstileVerifier = api.NewTurnstileVerifierWithConfig(
+			cfg.Turnstile.SecretKey, cfg.Turnstile.Hostnames, cfg.Turnstile.QABypassToken, log,
+		)
 	}
 	newHandler := func(registrationMode config.RegistrationMode, turnstileEnabled, turnstileSignInEnabled bool) mtproto.Handler {
 		turnstileSiteKey := ""

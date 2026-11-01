@@ -58,7 +58,7 @@ check_ci_contract() {
     ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
     ci_fail 'only pull request updates may cancel in-progress CI runs'
-  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
   [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,ops-prioritize-main,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
@@ -69,8 +69,16 @@ check_ci_contract() {
   ci_needs="$(ci_query '.jobs.ci.needs | join(",")')"
   [[ "$ci_needs" != *'restore-readiness'* && "$ci_needs" != *'rustfs-transition-qualification'* && "$ci_needs" != *'mirror-rustfs-qualification-images'* ]] ||
     ci_fail 'removed rollout qualification jobs must stay out of the required gate'
-  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'check-demo-web-pin'* ]] ||
-    ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'check-demo-web-pin'* ]] ||
+    ci_fail 'the required CI gate must not wait for the demo web artifact check'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".continue-on-error')" == "\${{ github.event_name == 'push' }}" ]] ||
+    ci_fail 'a demo web pin failure must not fail main push CI'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".outputs.result')" == '${{ steps.pin_result.outputs.result }}' ]] ||
+    ci_fail 'the demo pin job must expose its raw status to the publisher'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "pin_result").if')" == '${{ always() }}' ]] ||
+    ci_fail 'the demo pin job must record its result after failures'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "pin_result").env.PIN_JOB_STATUS')" == '${{ job.status }}' ]] ||
+    ci_fail 'the publisher result must preserve the raw pin job status'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
@@ -84,15 +92,16 @@ check_ci_contract() {
     ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
   [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
     ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
-  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT')" == '${{ needs.check-demo-web-pin.result }}' ]] ||
-    ci_fail 'the required CI gate must receive the pinned demo web artifact result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT // ""')" == '' ]] ||
+    ci_fail 'the required CI gate must not receive the demo web pin result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
     ci_fail 'the required CI gate must receive the migrations result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_GIT_HOOKS_RESULT')" == '${{ needs.test-git-hooks.result }}' ]] ||
     ci_fail 'the required CI gate must receive the git-hooks result'
-  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
-    grep -Fq '"$CHECK_DEMO_WEB_PIN_RESULT" != "success"' ||
-    ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  if ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq 'CHECK_DEMO_WEB_PIN_RESULT'; then
+    ci_fail 'the required CI gate must not inspect the demo web pin result'
+  fi
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed migrations lane'
@@ -804,6 +813,7 @@ self_test() {
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'
+    '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'
     '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.tags) = "ghcr.io/teagramhq/teagram-server-demo:latest"'
