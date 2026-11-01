@@ -1950,8 +1950,14 @@ jobs:
             test "$revision" = "$GITHUB_SHA"
             tag="$image:sha-$GITHUB_SHA"
             docker image tag "$image:ci" "$tag"
-            digest=$(docker image push --quiet "$tag")
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker image push "$tag"
+            digest=$(docker image inspect "$tag" \
+              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s|^$image@||p" | head -n 1)
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "no registry digest for $tag after push (got: '$digest')" >&2
+              exit 1
+            fi
             printf '%s{"name":"%s","reference":"%s@%s"}' \
               "$separator" "$image" "$image" "$digest" >> "$digest_file"
             separator=,
