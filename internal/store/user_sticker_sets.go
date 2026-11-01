@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -326,13 +327,27 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
 }
 
-// UserStickerSetSearchCandidates returns at most 50 live identities matching
-// queries containing a run long enough to produce trigrams. Other queries are
-// rejected to avoid scanning every live set. Callers must bulk-resolve
-// candidates before exposing any metadata.
+// UserStickerSetSearchCandidates uses trigram-backed substring search for
+// queries with an indexable run. Other queries of at least three characters
+// may resolve an exact valid short name through its unique index; all remaining
+// queries return no candidates. Callers must bulk-resolve candidates before
+// exposing any metadata.
 func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
-	if !hasUserStickerSetSearchTrigram(query) {
+	if utf8.RuneCountInString(query) < minUserStickerSetSearchRunes {
 		return []UserStickerSetSearchCandidate{}, nil
+	}
+	if !hasUserStickerSetSearchTrigram(query) {
+		if !isExactUserStickerSetShortNameSearch(query) {
+			return []UserStickerSetSearchCandidate{}, nil
+		}
+		row, err := s.q.UserCreatedStickerSetByShortName(ctx, query)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return []UserStickerSetSearchCandidate{}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("search user sticker set by exact short name: %w", err)
+		}
+		return []UserStickerSetSearchCandidate{{ID: row.ID, AccessHash: row.AccessHash}}, nil
 	}
 	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, escapeStickerSetSearchQuery(query))
 	if err != nil {
@@ -358,6 +373,23 @@ func hasUserStickerSetSearchTrigram(query string) bool {
 		wordRunes = 0
 	}
 	return false
+}
+
+func isExactUserStickerSetShortNameSearch(query string) bool {
+	if len(query) > 64 || len(query) < minUserStickerSetSearchRunes || !isASCIIStickerSetNameLetter(query[0]) {
+		return false
+	}
+	for i := 1; i < len(query); i++ {
+		char := query[i]
+		if !isASCIIStickerSetNameLetter(char) && (char < '0' || char > '9') && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIStickerSetNameLetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
 }
 
 // UserStickerSetsBySearchCandidates rechecks each candidate's exact access

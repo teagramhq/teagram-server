@@ -581,7 +581,7 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 		t.Fatalf("create owner: %v", err)
 	}
 	h := fullChannelDispatcher(s)
-	for _, shortName := range []string{"bulk_cats", "bulk_dogs", "bulkcats"} {
+	for _, shortName := range []string{"bulk_cats", "bulk_dogs", "bulkcats", "a_b"} {
 		file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
 		createStickerSet(t, h, owner.ID, createStickerRequest(shortName, file, false, false))
 	}
@@ -610,6 +610,20 @@ func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 	}
 	if got := tracer.n.Load(); got != 2 {
 		t.Fatalf("literal underscore search used %d database queries, want one search and one bulk resolution", got)
+	}
+
+	tracer.n.Store(0)
+	shortNameResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "a_b", ExcludeFeatured: true})
+	shortNameMatch, ok := shortNameResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(shortNameMatch.Sets) != 1 {
+		t.Fatalf("exact short-name search = %T with %d sets, want the a_b set", shortNameResult, foundStickerSetsCount(shortNameResult))
+	}
+	covered, ok := shortNameMatch.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "a_b" {
+		t.Fatalf("exact short-name search returned %T, want the a_b set", shortNameMatch.Sets[0])
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("exact short-name search used %d database queries, want one indexed lookup and one bulk resolution", got)
 	}
 
 	for _, query := range []string{"q", "qz", "猫", "!!!"} {

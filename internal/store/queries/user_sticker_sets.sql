@@ -60,11 +60,10 @@ SELECT id, access_hash, creator_id, title, short_name, software, kind,
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
--- Search bounds candidates and uses trigram indexes for literal substring
--- matches. The caller must bulk-resolve each candidate with its exact hash.
--- The store rejects queries without three consecutive Unicode letters or
--- digits, because their substring patterns cannot provide a trigram for
--- index pruning.
+-- This candidate search is used for literal patterns with trigram terms. The
+-- store handles other valid short-name searches through the unique equality
+-- index and rejects remaining patterns rather than scanning live sets.
+-- The caller must bulk-resolve each candidate with its exact hash.
 -- name: UserCreatedStickerSetSearchCandidates :many
 SELECT id, access_hash
 FROM user_created_sticker_sets

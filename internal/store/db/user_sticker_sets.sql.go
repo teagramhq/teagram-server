@@ -537,11 +537,10 @@ type UserCreatedStickerSetSearchCandidatesRow struct {
 	AccessHash int64
 }
 
-// Search bounds candidates and uses trigram indexes for literal substring
-// matches. The caller must bulk-resolve each candidate with its exact hash.
-// The store rejects queries without three consecutive Unicode letters or
-// digits, because their substring patterns cannot provide a trigram for
-// index pruning.
+// This candidate search is used for literal patterns with trigram terms. The
+// store handles other valid short-name searches through the unique equality
+// index and rejects remaining patterns rather than scanning live sets.
+// The caller must bulk-resolve each candidate with its exact hash.
 func (q *Queries) UserCreatedStickerSetSearchCandidates(ctx context.Context, lower string) ([]UserCreatedStickerSetSearchCandidatesRow, error) {
 	rows, err := q.db.Query(ctx, userCreatedStickerSetSearchCandidates, lower)
 	if err != nil {
