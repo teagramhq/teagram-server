@@ -1,0 +1,236 @@
+name: Deploy qa-invite.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operation to run against the isolated QA invite stack
+        required: true
+        type: choice
+        options:
+          - up
+          - down
+          - status
+          - create-account
+      account_name:
+        description: Required for create-account (for example qa_inviter_1)
+        required: false
+        type: string
+      issue:
+        description: Multica issue key for the CI router
+        required: true
+        default: MAIN-3023
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: deploy-qa-invite
+  cancel-in-progress: false
+
+jobs:
+  qa-invite:
+    name: 'deploy: qa-invite'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    environment: demo
+
+    steps:
+      - name: Check out the selected main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate operation and deployment settings
+        id: input
+        env:
+          REQUESTED_ACTION: ${{ inputs.action }}
+          ACCOUNT_NAME: ${{ inputs.account_name }}
+          ISSUE_KEY: ${{ inputs.issue }}
+          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
+          QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main ]] || {
+            echo "::error::Deploy qa-invite may run only from main"
+            exit 1
+          }
+          [[ "$ISSUE_KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]
+          [[ "$REQUESTED_ACTION" =~ ^(up|down|status|create-account)$ ]]
+          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
+          if [[ "$REQUESTED_ACTION" == create-account ]]; then
+            [[ "$ACCOUNT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
+            ACCOUNT_NAME=${ACCOUNT_NAME,,}
+            [[ "$QA_ACCOUNTS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+            [[ "$QA_ACCOUNTS_PORT" =~ ^[0-9]{1,5}$ ]]
+            (( 10#$QA_ACCOUNTS_PORT >= 1 && 10#$QA_ACCOUNTS_PORT <= 65535 ))
+          fi
+          printf 'action=%s\naccount_name=%s\n' "$REQUESTED_ACTION" "$ACCOUNT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the tested main image digest
+        id: image
+        if: ${{ steps.input.outputs.action == 'up' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100")
+          run_id=$(jq -er --arg sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | sort_by(.run_number) | last | .id' <<<"$runs")
+          [[ "$run_id" =~ ^[0-9]+$ ]]
+          artifact_dir="$RUNNER_TEMP/qa-invite-image"
+          install -d -m 0700 "$artifact_dir"
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --name "demo-image-digest-$SOURCE_SHA" --dir "$artifact_dir"
+          [[ -f "$artifact_dir/demo-image-digest.txt" && ! -L "$artifact_dir/demo-image-digest.txt" ]]
+          digest=$(<"$artifact_dir/demo-image-digest.txt")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: ${{ vars.DEMO_DEPLOY_HOST }}
+
+      - name: Install the restricted deployment keys
+        env:
+          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
+          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
+          QA_ACCOUNTS_SSH_KEY: ${{ steps.input.outputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
+          QA_ACCOUNTS_KNOWN_HOSTS: ${{ steps.input.outputs.action == 'create-account' && vars.QA_ACCOUNTS_KNOWN_HOSTS || '' }}
+        run: |
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" ]] || {
+            echo "::error::Demo deployment credentials are not configured"
+            exit 1
+          }
+          install -d -m 0700 "$RUNNER_TEMP/ssh-qa-invite"
+          (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_demo")
+          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"
+          if [[ "${{ steps.input.outputs.action }}" == create-account ]]; then
+            [[ -n "$QA_ACCOUNTS_SSH_KEY" && -n "$QA_ACCOUNTS_KNOWN_HOSTS" ]] || {
+              echo "::error::QA account-writer credentials are not configured"
+              exit 1
+            }
+            (umask 077 && printf '%s\n' "$QA_ACCOUNTS_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_qa")
+            printf '%s\n' "$QA_ACCOUNTS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts"
+          fi
+
+      - name: Check the LXC endpoint before account writes
+        if: ${{ steps.input.outputs.action == 'create-account' }}
+        env:
+          QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
+          QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+        run: |
+          ssh -T -p "$QA_ACCOUNTS_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_qa" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts" \
+            "qa@$QA_ACCOUNTS_HOST" health </dev/null | grep -Fxq 'qa-account-writer=ready' || {
+              echo "::error::QA account writer key is missing or the restricted writer rejected preflight"
+              exit 1
+            }
+
+      - name: Create an operator account and store its credential on QA
+        id: create_account
+        if: ${{ steps.input.outputs.action == 'create-account' }}
+        env:
+          ACCOUNT_NAME: ${{ steps.input.outputs.account_name }}
+          QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
+          QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          password_file="$RUNNER_TEMP/qa-invite-account-password"
+          record_file="$RUNNER_TEMP/qa-invite-account-record"
+          store_result_file="$RUNNER_TEMP/qa-invite-account-store-result"
+          result_file="$RUNNER_TEMP/qa-invite-create-result"
+          error_file="$RUNNER_TEMP/qa-invite-create-error"
+          trap 'rm -f -- "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"' EXIT
+          umask 077
+          openssl rand -hex 32 > "$password_file"
+          password=$(<"$password_file")
+          printf '::add-mask::%s\n' "$password"
+          printf '%s\t%s\n' "$ACCOUNT_NAME" "$password" > "$record_file"
+          unset password
+          if ! ssh -T -p "$QA_ACCOUNTS_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_qa" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts" \
+            "qa@$QA_ACCOUNTS_HOST" store < "$record_file" > "$store_result_file"; then
+            echo "::error::Could not confirm QA credential storage; retain the QA record and reconcile before retrying"
+            exit 1
+          fi
+          if ! grep -Fxq "stored=${ACCOUNT_NAME,,}" "$store_result_file"; then
+            echo "::error::QA credential storage confirmation was invalid; reconcile before retrying"
+            exit 1
+          fi
+          if ! ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "root@$DEMO_DEPLOY_HOST" "qa-invite $SOURCE_SHA create-account $ACCOUNT_NAME" \
+            < "$password_file" > "$result_file" 2> "$error_file"; then
+            echo "::error::Operator account result is unknown; its QA credential was retained for reconciliation"
+            exit 1
+          fi
+          if ! grep -Fxq "account-created=${ACCOUNT_NAME,,}" "$result_file"; then
+            echo "::error::Operator account confirmation was invalid; its QA credential was retained for reconciliation"
+            exit 1
+          fi
+          rm -f -- "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"
+          for path in "$password_file" "$record_file" "$store_result_file" "$result_file" "$error_file"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || {
+              echo "::error::Could not verify removal of temporary account credential data"
+              exit 1
+            }
+          done
+          printf 'account_name=%s\n' "${ACCOUNT_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Run the reviewed QA invite operation
+        if: ${{ steps.input.outputs.action != 'create-account' }}
+        shell: bash
+        env:
+          REQUESTED_ACTION: ${{ steps.input.outputs.action }}
+          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          SOURCE_SHA: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$REQUESTED_ACTION" == up ]]; then
+            [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            remote_command="qa-invite $SOURCE_SHA up $IMAGE_DIGEST"
+          else
+            remote_command="qa-invite $SOURCE_SHA $REQUESTED_ACTION"
+          fi
+          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "root@$DEMO_DEPLOY_HOST" "$remote_command" </dev/null | tee "$RUNNER_TEMP/qa-invite-operation-result"
+          cat "$RUNNER_TEMP/qa-invite-operation-result" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove deployment keys
+        if: always()
+        run: |
+          ssh_dir="$RUNNER_TEMP/ssh-qa-invite"
+          rm -rf -- "$ssh_dir"
+          [[ ! -e "$ssh_dir" && ! -L "$ssh_dir" ]] || {
+            echo "::error::Could not verify removal of temporary deployment keys"
+            exit 1
+          }
+
+      - name: Report operator account creation
+        if: ${{ success() && steps.create_account.outputs.account_name != '' }}
+        env:
+          ACCOUNT_NAME: ${{ steps.create_account.outputs.account_name }}
+        run: printf 'operator-account-created=%s credential-stored=qa-user-file\n' "$ACCOUNT_NAME" >> "$GITHUB_STEP_SUMMARY"

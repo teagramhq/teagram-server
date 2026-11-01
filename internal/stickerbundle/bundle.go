@@ -26,6 +26,12 @@ const (
 	maxTGSSize         = 64 << 10
 )
 
+// PackKindStickers and PackKindEmojis identify the set type in a bundle manifest.
+const (
+	PackKindStickers = "stickers"
+	PackKindEmojis   = "emojis"
+)
+
 var allowedLicenses = map[string]struct{}{
 	"CC0-1.0":      {},
 	"CC-BY-4.0":    {},
@@ -42,13 +48,14 @@ type Bundle struct {
 	Packs []Pack
 }
 
-// Pack is one installable, static sticker set from a generated bundle.
+// Pack is one installable sticker or custom emoji set from a generated bundle.
 type Pack struct {
 	ShortName   string
 	Title       string
 	Source      string
 	License     string
 	Attribution string
+	Kind        string
 	Format      string
 	Stickers    []Sticker
 }
@@ -75,6 +82,7 @@ type manifestPack struct {
 	Source      string            `json:"source"`
 	License     string            `json:"license"`
 	Attribution string            `json:"attribution"`
+	Kind        string            `json:"kind,omitempty"`
 	Format      string            `json:"format,omitempty"`
 	Stickers    []manifestSticker `json:"stickers"`
 }
@@ -180,7 +188,14 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 		Source:      raw.Source,
 		License:     raw.License,
 		Attribution: raw.Attribution,
+		Kind:        raw.Kind,
 		Format:      raw.Format,
+	}
+	if pack.Kind == "" {
+		pack.Kind = PackKindStickers
+	}
+	if pack.Kind != PackKindStickers && pack.Kind != PackKindEmojis {
+		return Pack{}, fmt.Errorf("sticker bundle pack %q has unsupported kind %q", pack.ShortName, pack.Kind)
 	}
 	if pack.Format == "" {
 		pack.Format = "webp"
