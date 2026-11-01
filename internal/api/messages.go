@@ -261,7 +261,7 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 //
 // A batch with no media skips the query and returns an empty map, so no call
 // site needs a nil check or a branch of its own.
-func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]tg.MessageMediaClass, error) {
+func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (*messageMedia, error) {
 	var ids []int64
 	var stickerIDs []int64
 	for _, m := range msgs {
@@ -272,21 +272,22 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 			stickerIDs = append(stickerIDs, *m.StickerDocumentID)
 		}
 	}
-	media, err := h.fileMedia(ctx, ids)
+	fileMedia, err := h.fileMedia(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	if err = h.addUserStickerMedia(ctx, media, stickerIDs); err != nil {
+	stickerMedia := make(map[int64]tg.MessageMediaClass)
+	if err = h.addUserStickerMedia(ctx, stickerMedia, stickerIDs); err != nil {
 		return nil, err
 	}
-	return media, nil
+	return &messageMedia{files: fileMedia, userStickers: stickerMedia}, nil
 }
 
 // loadChannelFiles is loadFiles for channel posts. It is a separate collector
 // for the sentinel alone: channel_messages.file_id is a nullable column, where
 // messages.file_id uses 0 for "no media". A tombstone names no file, so its
 // reference is not hydrated even when the files row still exists.
-func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]tg.MessageMediaClass, error) {
+func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (*messageMedia, error) {
 	var ids []int64
 	var stickerIDs []int64
 	for _, m := range msgs {
@@ -297,14 +298,15 @@ func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMes
 			stickerIDs = append(stickerIDs, *m.StickerDocumentID)
 		}
 	}
-	media, err := h.fileMedia(ctx, ids)
+	fileMedia, err := h.fileMedia(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	if err = h.addUserStickerMedia(ctx, media, stickerIDs); err != nil {
+	stickerMedia := make(map[int64]tg.MessageMediaClass)
+	if err = h.addUserStickerMedia(ctx, stickerMedia, stickerIDs); err != nil {
 		return nil, err
 	}
-	return media, nil
+	return &messageMedia{files: fileMedia, userStickers: stickerMedia}, nil
 }
 
 // fileMedia hydrates file ids into wire media, by stored kind: a photo row
@@ -770,7 +772,7 @@ func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, err
 }
 
 // handleGetHistory serves messages.getHistory, selecting ordinal pages from
-// newest-first history with offset_id and add_offset.
+// newest-first history with offset_id or offset_date and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetHistoryRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -921,7 +923,17 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get messages snapshot", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	files := h.messageReadFileMedia(snapshot.Files)
+	selectedMessages := make([]store.Message, 0, len(snapshot.Results))
+	for _, result := range snapshot.Results {
+		if result.Message != nil {
+			selectedMessages = append(selectedMessages, *result.Message)
+		}
+	}
+	media, err := h.messageReadMedia(r.Ctx, snapshot.Files, selectedMessages, nil)
+	if err != nil {
+		h.log.Error("get messages: hydrate media", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	users, err := renderMessagesReadUsers(r.Ctx, snapshot, r.UserID, h)
 	if err != nil {
 		h.log.Error("get messages: render users", "user_id", r.UserID, "err", err)
@@ -941,14 +953,14 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		message := *result.Message
 		createUsers := snapshot.CreateUsersByLocalID[message.LocalID]
 		if poll, ok := snapshot.Polls[message.LocalID]; ok {
-			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID], poll)
+			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, media, nil, snapshot.ReactionsByLocalID[message.LocalID], poll)
 			if renderErr != nil {
 				h.log.Error("render get message poll", "user_id", r.UserID, "local_id", message.LocalID, "err", renderErr)
 				return nil, errInternal
 			}
 			tlMessages[i] = tlMessage
 		} else {
-			tlMessages[i] = h.messageToTL(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID], h.dcID)
+			tlMessages[i] = h.messageToTL(message, createUsers, media, nil, snapshot.ReactionsByLocalID[message.LocalID], h.dcID)
 		}
 	}
 	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
@@ -988,19 +1000,43 @@ func (h *handlers) renderMessagesReadChats(ctx context.Context, snapshot store.M
 	return chats, nil
 }
 
-// messageReadFileMedia maps the snapshot's file rows to wire media, photos and
-// documents alike. The snapshot hydrates through FilesByIDs, which keeps only
-// rows whose bytes were committed, so an unrenderable file is simply
+// messageReadMedia maps the snapshot's file rows to wire media and separately
+// hydrates live user-set sticker references from the selected message and
+// channel-message rows. The snapshot hydrates files through FilesByIDs, which
+// keeps only rows whose bytes were committed, so an unrenderable file is simply
 // absent here and its message renders plain. No object-store probe: getHistory
 // renders the same rows without one, and a read per media row would let storage
-// availability take quote resolution down while staying outside the upload.getFile
-// download ceilings that already answer a missing body as a server fault.
-func (h *handlers) messageReadFileMedia(files map[int64]store.File) map[int64]tg.MessageMediaClass {
-	media := make(map[int64]tg.MessageMediaClass, len(files))
-	for id, file := range files {
-		media[id] = h.fileMediaToTL(file)
+// availability take quote resolution down while staying outside the
+// upload.getFile download ceilings that already answer a missing body as a
+// server fault.
+func (h *handlers) messageReadMedia(
+	ctx context.Context,
+	files map[int64]store.File,
+	messages []store.Message,
+	channelMessages []store.ChannelMessage,
+) (*messageMedia, error) {
+	media := &messageMedia{
+		files:        make(map[int64]tg.MessageMediaClass, len(files)),
+		userStickers: make(map[int64]tg.MessageMediaClass),
 	}
-	return media
+	for id, file := range files {
+		media.files[id] = h.fileMediaToTL(file)
+	}
+	stickerIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		if message.StickerDocumentID != nil {
+			stickerIDs = append(stickerIDs, *message.StickerDocumentID)
+		}
+	}
+	for _, message := range channelMessages {
+		if message.StickerDocumentID != nil {
+			stickerIDs = append(stickerIDs, *message.StickerDocumentID)
+		}
+	}
+	if err := h.addUserStickerMedia(ctx, media.userStickers, stickerIDs); err != nil {
+		return nil, err
+	}
+	return media, nil
 }
 
 // chatHistory renders one page of a chat's history from the membership and
@@ -2609,7 +2645,7 @@ func (h *handlers) chatSearch(
 	r *mtproto.Request,
 	chatID int64,
 	msgs []store.Message,
-	files map[int64]tg.MessageMediaClass,
+	files *messageMedia,
 	count int,
 	mediaSearch bool,
 ) (bin.Encoder, error) {

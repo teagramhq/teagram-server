@@ -40,6 +40,11 @@ class ReconnectDiagnosticsTest(unittest.TestCase):
             / "reconnect-diagnostic.yml"
         )
         workflow = workflow_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "  test-reconnect-diagnostic:\n"
+            "    name: 'test: reconnect-diagnostic'\n",
+            workflow,
+        )
         diagnostic_step = workflow.split(
             "      - name: Run bounded reconnect diagnostic\n", maxsplit=1
         )[1].split("\n      - name:", maxsplit=1)[0]

@@ -22,7 +22,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: dacbd2c686a4fb3262e805a4b225ee766e6ac786
+      REAL_CLIENT_WEB_REVISION: e347bb4f6a95467be10bcaf094c5e0eaecda8a00
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: teagramhq/teagram-web
-          ref: dacbd2c686a4fb3262e805a4b225ee766e6ac786
+          ref: ${{ env.REAL_CLIENT_WEB_REVISION }}
           path: web-source
           persist-credentials: false
 
@@ -63,6 +63,13 @@ jobs:
 
       - name: Test artifact response policy
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
+
+      - name: Test real-client worker source observation
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs
+
+      # Keep the web app revision fixed; overlay runner-side evidence checks.
+      - name: Patch pinned real-client runner evidence
+        run: node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
 
       - name: Install pinned web dependencies
         working-directory: web-source

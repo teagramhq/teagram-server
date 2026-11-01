@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -177,16 +178,31 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_real_client_browser_checkout_uses_declared_revision(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (
+            repo_root / ".github" / "workflows" / "real-client-browser-flow.yml"
+        ).read_text(encoding="utf-8")
+        self.assertRegex(
+            workflow,
+            r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
+            r"^      - name: Check out pinned web companion\n"
+            r"        uses: [^\n]+\n"
+            r"        with:\n"
+            r"          repository: teagramhq/teagram-web\n"
+            r"          ref: \$\{\{ env\.REAL_CLIENT_WEB_REVISION \}\}$",
+        )
+
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        ci_job = re.search(r"(?ms)^  ci-main:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        ci_job = re.search(r"(?ms)^  test-go:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(ci_job, "CI workflow has no ci-main job")
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(ci_job, "CI workflow has no test-go job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         self.assertRegex(
             ci_job.group("body"),
             r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
@@ -199,21 +215,162 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_required_ci_check_gates_all_required_lanes(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs_block = re.search(r"(?ms)^jobs:\n(?P<body>.*)\Z", workflow)
         ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        self.assertIsNotNone(jobs_block, "CI workflow has no jobs")
         self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
         body = ci_job.group("body")
         self.assertRegex(body, r"(?m)^    name: ci$")
-        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
-        self.assertRegex(
-            body,
-            r"(?ms)^    needs:\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
+        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) &&")
+        self.assertIn("needs.ops-prioritize-main.result == 'success'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'failure'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'cancelled'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", body)
+        self.assertIn("github.event_name == 'pull_request'", body)
+        self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
+
+        # The publisher and recovery dispatcher are main-push-only. The demo
+        # pin is advisory and must not gate the production CI aggregate. The
+        # main-priority job is skipped on PRs and checked separately. MAIN-2918
+        # is deleting the other three lanes.
+        excluded_jobs = {
+            "ci",
+            "publish-demo-image",
+            "check-demo-web-pin",
+            "ops-dispatch-pr-ci-recovery",
+            "ops-prioritize-main",
+            "mirror-rustfs-qualification-images",
+            "restore-readiness",
+            "rustfs-transition-qualification",
+        }
+        workflow_jobs = set(
+            re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
         )
-        self.assertIn("${{ needs.ci-main.result }}", body)
-        self.assertIn("${{ needs.sticker-bundle.result }}", body)
-        self.assertIn("${{ needs.photothumb-runtime.result }}", body)
-        self.assertIn("${{ needs.real-server-fixtures.result }}", body)
-        self.assertIn('"$STICKER_BUNDLE_RESULT" != "success"', body)
-        self.assertIn('"$PHOTOTHUMB_RUNTIME_RESULT" != "success"', body)
+        expected_lanes = workflow_jobs - excluded_jobs
+        matrix_names = {
+            "build-browser-acceptance-image": "build: browser-acceptance-image (${{ matrix.arch }})",
+            "test-photo-worker": "test: photo-worker (${{ matrix.arch }})",
+        }
+        retired_jobs = {
+            "mirror-rustfs-qualification-images",
+            "restore-readiness",
+            "rustfs-transition-qualification",
+        }
+        for job_id in sorted(workflow_jobs - {"ci", *retired_jobs}):
+            job = re.search(
+                rf"(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job, f"CI workflow has no {job_id} job")
+            name = re.search(r"(?m)^    name: ['\"]?(.*?)['\"]?$", job.group("body"))
+            self.assertIsNotNone(name, f"CI job {job_id} has no explicit display name")
+            if job_id in matrix_names:
+                expected_name = matrix_names[job_id]
+            else:
+                stage, _, subject = job_id.partition("-")
+                expected_name = f"{stage}: {subject}"
+            self.assertEqual(name.group(1), expected_name, f"CI job {job_id} violates stage naming")
+
+        needs = re.search(
+            r"(?ms)^    needs:\n(?P<entries>(?:      - [A-Za-z0-9_-]+\n)+)", body
+        )
+        self.assertIsNotNone(needs, "CI aggregate has no explicit needs list")
+        needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
+        expected_dependencies = expected_lanes | {"ops-prioritize-main"}
+        self.assertEqual(
+            needed_lanes[:6],
+            [
+                "ops-prioritize-main",
+                "check-security",
+                "test-go",
+                "check-sticker-license",
+                "test-photo-worker",
+                "test-real-server-fixtures",
+            ],
+        )
+        self.assertEqual(len(needed_lanes), len(set(needed_lanes)), "CI aggregate repeats a lane")
+        self.assertEqual(
+            set(needed_lanes), expected_dependencies, "CI aggregate must need every retained PR lane"
+        )
+
+        result_env_entries = re.findall(
+            r"(?m)^          ([A-Z][A-Z0-9_]*_RESULT): \$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}$",
+            body,
+        )
+        result_envs = {lane: env_name for env_name, lane in result_env_entries}
+        self.assertEqual(len(result_env_entries), len(result_envs), "CI aggregate repeats a result mapping")
+        self.assertEqual(
+            set(result_envs), expected_dependencies, "CI aggregate must read every lane result"
+        )
+
+        lane_results = re.search(
+            r"(?ms)^          lane_results=\(\n(?P<entries>.*?)^          \)", body
+        )
+        self.assertIsNotNone(lane_results, "CI aggregate has no per-lane result output")
+        result_output_entries = re.findall(
+            r'(?m)^[ \t]*"([A-Za-z0-9_-]+)=\$([A-Z][A-Z0-9_]*_RESULT)"$',
+            lane_results.group("entries"),
+        )
+        result_output = {lane: env_name for lane, env_name in result_output_entries}
+        self.assertEqual(len(result_output_entries), len(result_output), "CI aggregate repeats a result output")
+        self.assertEqual(result_output, result_envs, "CI aggregate must report every lane result")
+
+        result_guard = re.search(
+            r'(?ms)^          if \[\[ (?P<condition>'
+            r'"\$MAIN_PRIORITY_RESULT" != "\$expected_priority_result" \|\|.*?) \]\]; then$',
+            body,
+        )
+        self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
+        expected_guard = '"$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || '
+        expected_guard += " || ".join(
+            f'"${result_envs[lane]}" != "success"'
+            for lane in needed_lanes
+            if lane != "ops-prioritize-main"
+        )
+        self.assertEqual(
+            " ".join(result_guard.group("condition").split()),
+            expected_guard,
+            "CI aggregate must fail unless every retained PR lane and main-priority check pass",
+        )
+
+        run_script = re.search(r"(?ms)^        run: \|\n(?P<script>.*)\Z", body)
+        self.assertIsNotNone(run_script, "CI aggregate has no executable result gate")
+        shell_script = textwrap.dedent(run_script.group("script"))
+        environment = os.environ.copy()
+        environment["GITHUB_EVENT_NAME"] = "pull_request"
+        environment.update(
+            {
+                env_name: "success"
+                for lane, env_name in result_envs.items()
+                if lane != "ops-prioritize-main"
+            }
+        )
+        environment[result_envs["ops-prioritize-main"]] = "skipped"
+        success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        failed_lane = next(lane for lane in needed_lanes if lane != "ops-prioritize-main")
+        environment[result_envs[failed_lane]] = "failure"
+        failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failure.returncode,
+            0,
+            "CI aggregate returned success when a required lane failed: "
+            + failure.stdout
+            + failure.stderr,
+        )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -222,7 +379,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         fixtures = (scripts / "run-real-server-fixture-gate.sh").read_text(encoding="utf-8")
         self.assertIn("fixture_test_prefix='^TestRealServerFixture'", remaining)
         self.assertIn(
-            'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
+            'go test -race -count=1 -timeout 30m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
             remaining,
         )
         self.assertIn(
@@ -248,10 +405,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
             encoding="utf-8"
         )
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         body = fixture_job.group("body")
         download_step = body.find("- name: Download Go modules")
         fixture_test_step = body.find(
@@ -272,10 +429,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
             repo_root / "test" / "e2e" / "real_server_fixture" / "start.sh"
         ).read_text(encoding="utf-8")
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         self.assertIn('PREFIX="teagram-fixture-$RUN_ID"', start_script)
         self.assertIn('DATABASE="$PREFIX"database', start_script)
         diagnostics = fixture_job.group("body").split(

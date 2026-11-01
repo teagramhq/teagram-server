@@ -4,14 +4,43 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+type contactQueryCapture struct {
+	mu         sync.Mutex
+	statements []string
+}
+
+func (q *contactQueryCapture) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	q.mu.Lock()
+	q.statements = append(q.statements, data.SQL)
+	q.mu.Unlock()
+	return ctx
+}
+
+func (*contactQueryCapture) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (q *contactQueryCapture) reset() {
+	q.mu.Lock()
+	q.statements = nil
+	q.mu.Unlock()
+}
+
+func (q *contactQueryCapture) snapshot() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.Clone(q.statements)
+}
 
 func TestContactsGetStatusesRequiresAuthentication(t *testing.T) {
 	t.Parallel()
@@ -462,6 +491,40 @@ func TestContactsGetContactsAndIDsUseSortedOwnerScopedHash(t *testing.T) {
 	reverseDeleted, ok := afterReverseDelete.(*tg.ContactsContacts)
 	if !ok || len(reverseDeleted.Contacts) != 2 || reverseDeleted.Contacts[0].Mutual {
 		t.Fatalf("A contacts after B deletes reverse edge = %#v, want B no longer mutual", afterReverseDelete)
+	}
+}
+
+func TestContactsGetContactsReusesLoadedContactState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	queries := &contactQueryCapture{}
+	s, _ := openStoreDSNWithOptions(t, store.WithQueryTracer(queries))
+	owner := contactUser(t, s, "+15551970901", "stateowner", "Owner", "Name")
+	target := contactUser(t, s, "+15551970902", "statetarget", "Target", "Name")
+	if changed, err := s.AddContact(ctx, owner.ID, target.ID); err != nil || !changed {
+		t.Fatalf("add owner contact: changed=%v err=%v", changed, err)
+	}
+	if changed, err := s.AddContact(ctx, target.ID, owner.ID); err != nil || !changed {
+		t.Fatalf("add reverse contact: changed=%v err=%v", changed, err)
+	}
+
+	queries.reset()
+	result, err := api.GetContactsForTest(s, owner.ID, &tg.ContactsGetContactsRequest{})
+	if err != nil {
+		t.Fatalf("get contacts: %v", err)
+	}
+	full, ok := result.(*tg.ContactsContacts)
+	if !ok || len(full.Users) != 1 {
+		t.Fatalf("contacts response = %#v, want one user", result)
+	}
+	user, ok := full.Users[0].(*tg.User)
+	if !ok || !user.Contact || !user.MutualContact {
+		t.Fatalf("contact user = %#v, want contact and mutual flags", full.Users[0])
+	}
+	for _, statement := range queries.snapshot() {
+		if strings.Contains(statement, "-- name: ContactStates :many") {
+			t.Fatal("contacts response reloaded contact state already returned by ListContacts")
+		}
 	}
 }
 

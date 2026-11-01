@@ -147,7 +147,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
   "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
   demo_compose up -d edge
-  python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
+  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
   echo "demo install resumed and seeded at $SHA"
   exit 0
 fi
@@ -244,5 +244,5 @@ PUBLIC_SERVICES_MAY_BE_RUNNING=1
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 demo_compose up -d edge
-python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
+python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

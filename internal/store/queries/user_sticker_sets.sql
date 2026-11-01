@@ -10,10 +10,17 @@ WHERE creator_id = $1;
 
 -- name: CreateUserCreatedStickerSet :one
 INSERT INTO user_created_sticker_sets
-    (access_hash, creator_id, title, short_name, software, kind, text_color)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (access_hash, creator_id, title, short_name, software, kind, text_color, item_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, access_hash, creator_id, title, short_name, software, kind,
-          text_color, is_live, created_at;
+          text_color, item_count, set_hash, is_live, created_at;
+
+-- The hash includes the generated set ID and every inserted item, so update it
+-- before the enclosing creation transaction commits.
+-- name: UpdateUserCreatedStickerSetHash :execrows
+UPDATE user_created_sticker_sets
+SET set_hash = $2
+WHERE id = $1;
 
 -- name: InsertUserCreatedStickerSetItem :execrows
 INSERT INTO user_created_sticker_set_items
@@ -43,58 +50,27 @@ ORDER BY requested.request_order;
 
 -- name: UserCreatedStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower($1) AND is_live = true;
 
 -- name: UserCreatedStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
--- Search bounds candidates and uses trigram indexes for literal substring
--- matches. The caller must bulk-resolve each candidate with its exact hash.
--- name: UserCreatedStickerSetSearchCandidates :many
-SELECT id, access_hash
-FROM user_created_sticker_sets
-WHERE is_live = true
-  AND (lower(title) LIKE '%' || lower($1) || '%' ESCAPE E'\\'
-       OR lower(short_name) LIKE '%' || lower($1) || '%' ESCAPE E'\\')
-ORDER BY id
-LIMIT 50;
-
--- Bulk resolution preserves the exact candidate access hash and live-set
--- checks, then loads all stored item metadata in one bounded query.
--- name: UserCreatedStickerSetsBySearchCandidates :many
-WITH candidates AS (
-    SELECT ids.set_id AS id, candidate_accesses.access_hash
-    FROM unnest(sqlc.arg(set_ids)::bigint[]) WITH ORDINALITY AS ids(set_id, ord)
-    JOIN unnest(sqlc.arg(access_hashes)::bigint[]) WITH ORDINALITY AS candidate_accesses(access_hash, ord) USING (ord)
-)
-SELECT s.id, s.access_hash, s.creator_id, s.title, s.short_name, s.software,
-       s.kind, s.text_color, s.is_live, s.created_at,
-       i.position, i.file_id, f.access_hash AS item_access_hash, f.size, f.date,
-       i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
-       COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
-FROM candidates c
-JOIN user_created_sticker_sets s
-  ON s.id = c.id AND s.access_hash = c.access_hash AND s.is_live = true
-JOIN user_created_sticker_set_items i ON i.set_id = s.id
-JOIN files f ON f.id = i.file_id AND f.stored = true
-ORDER BY s.id, i.position;
-
 -- name: UserCreatedStickerSetByInstalledID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true;
 
--- The installed-set getters resolve every positive id together, then fetch
--- all their ordered items in one query to keep the 200-set cap bounded.
+-- The installed-set list getters need only summary metadata; set item rows are
+-- loaded only by full getStickerSet and media hydration paths.
 -- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
-       text_color, is_live, created_at
+       text_color, item_count, set_hash, is_live, created_at
 FROM user_created_sticker_sets
 WHERE id = ANY($1::bigint[]) AND is_live = true
 ORDER BY id;

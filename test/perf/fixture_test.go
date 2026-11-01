@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 5
+const fixtureVersion = 7
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -58,6 +58,10 @@ const (
 	needleEvery  = 1000
 )
 
+// Difference measurements hold in-window event volume constant across fixture
+// sizes so row reads measure database scale, not response volume.
+const differenceEventsPerDay = 20
+
 var fixtures = []spec{
 	scaled("1x", 100),
 	scaled("100x", shrink()),
@@ -76,14 +80,16 @@ func shrink() int {
 
 func scaled(name string, divisor int) spec {
 	return spec{
-		Name:          name,
-		Contacts:      min(contactCap, max(groupMembers, 10_000/divisor)),
-		Dialogs:       5_000 / divisor,
+		Name:     name,
+		Contacts: min(contactCap, max(groupMembers, 10_000/divisor)),
+		// Both fixtures need a full getDialogs page so the scale comparison
+		// measures account size rather than a different response length.
+		Dialogs:       max(pageLimit, 5_000/divisor),
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
 		GroupMessages: 200_000 / divisor,
 		GroupPhotos:   max(2, 200/divisor),
-		DayEvents:     2_000 / divisor,
+		DayEvents:     differenceEventsPerDay,
 	}
 }
 
@@ -106,6 +112,22 @@ func TestFixtureContactsStayWithinAccountBounds(t *testing.T) {
 		if fixture.Contacts > contactCap {
 			t.Errorf("%s contacts = %d, performance store limit = %d", fixture.Name, fixture.Contacts, contactCap)
 		}
+	}
+}
+
+func TestDialogsFixtureFillsGetDialogsPage(t *testing.T) {
+	for _, fixture := range fixtures {
+		if fixture.Dialogs < pageLimit {
+			t.Errorf("%s fixture has %d dialogs, getDialogs page needs %d", fixture.Name, fixture.Dialogs, pageLimit)
+		}
+	}
+}
+
+func TestDifferenceFixtureEventsStayConstantAcrossScale(t *testing.T) {
+	small := scaled("1x", 100)
+	large := scaled("100x", 1)
+	if small.DayEvents != differenceEventsPerDay || large.DayEvents != differenceEventsPerDay {
+		t.Fatalf("difference day events = %d at 1x and %d at 100x, want %d at both scales", small.DayEvents, large.DayEvents, differenceEventsPerDay)
 	}
 }
 
@@ -171,11 +193,13 @@ func TestContactCapIncludesSeededContacts(t *testing.T) {
 
 func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fixture.json")
-	if err := os.WriteFile(path, []byte(`{"version":4}`), 0o600); err != nil {
+	oldVersion := fixtureVersion - 1
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"version":%d}`, oldVersion)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 4, want 5") {
-		t.Fatalf("loadFixture error = %v, want fixture version 4 mismatch", err)
+	want := fmt.Sprintf("fixture version %d, want %d", oldVersion, fixtureVersion)
+	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("loadFixture error = %v, want %s", err, want)
 	}
 }
 

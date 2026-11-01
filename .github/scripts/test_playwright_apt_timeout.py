@@ -16,7 +16,7 @@ class PlaywrightAptTimeoutTests(unittest.TestCase):
     def test_e2e_admin_budget_allows_both_cold_apt_attempts(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         job_match = re.search(
-            r"(?ms)^  e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(job_match, "e2e-admin job is missing")
         job = job_match.group(1)

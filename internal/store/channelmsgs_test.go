@@ -232,8 +232,28 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	for i := int64(1); i <= 30; i++ {
 		post(t, s, ch, author.ID, "post", i)
 	}
+	for localID := int64(1); localID <= 31; localID++ {
+		date := time.Unix(1_700_000_000+(localID-1)*60, 0).UTC()
+		if _, err := store.StorePool(s).Exec(ctx,
+			`UPDATE channel_messages SET date = $1 WHERE channel_id = $2 AND local_id = $3`, date, ch, localID); err != nil {
+			t.Fatalf("set date for channel post %d: %v", localID, err)
+		}
+	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, time.Unix(1_700_001_140, 0).Unix(), -10, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history around date: %v", err)
+	}
+	if count != 31 || len(history) != 10 {
+		t.Fatalf("history around date count=%d rows=%d, want 31 and 10", count, len(history))
+	}
+	for i, msg := range history {
+		if want := int64(29 - i); msg.LocalID != want {
+			t.Fatalf("history around date row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history at offset 20: %v", err)
 	}
@@ -249,7 +269,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 1, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 1, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after offset 20: %v", err)
 	}
@@ -265,7 +285,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, -10, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, -10, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history around offset 20: %v", err)
 	}
@@ -284,7 +304,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	if err := store.SetChannelPostDeleted(ctx, s, ch, 2); err != nil {
 		t.Fatalf("delete channel post: %v", err)
 	}
-	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
+	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after delete: %v", err)
 	}
@@ -307,7 +327,7 @@ func TestChannelHistoryCountWithoutActiveCreateServiceEntry(t *testing.T) {
 		t.Fatalf("delete channel creation entry: %v", err)
 	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("channel history: %v", err)
 	}
@@ -889,5 +909,60 @@ func TestSearchChannelPostsScopedToOneChannel(t *testing.T) {
 	}
 	if len(hits) != 0 {
 		t.Fatalf("miss = %+v, want none", hits)
+	}
+}
+
+func TestChannelHistoryByDateIncludesTTLChangeServiceMessage(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551280991")
+	ch := mustChannel(t, s, author.ID, "history TTL service row")
+
+	for i := int64(1); i <= 10; i++ {
+		post(t, s, ch.ID, author.ID, "before TTL", i)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		UPDATE channel_messages SET date = to_timestamp(local_id::double precision)
+		WHERE channel_id = $1
+	`, ch.ID); err != nil {
+		t.Fatalf("set deterministic pre-TTL message dates: %v", err)
+	}
+
+	_, service, _, changed, err := s.SetChannelHistoryTTL(ctx, ch.ID, author.ID, 86400, store.RateLimitConfig{})
+	if err != nil || !changed {
+		t.Fatalf("set channel history TTL: changed=%v err=%v", changed, err)
+	}
+	if service.TTLPeriod != 86400 || service.Action != store.ChannelMessageActionSetMessagesTTL {
+		t.Fatalf("TTL change service message = %+v, want 1-day TTL service row", service)
+	}
+	var noExpiry bool
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT expires_at IS NULL FROM channel_messages
+		WHERE channel_id = $1 AND local_id = $2
+	`, ch.ID, service.LocalID).Scan(&noExpiry); err != nil {
+		t.Fatalf("read TTL change service expiry: %v", err)
+	}
+	if !noExpiry {
+		t.Fatal("TTL change service message has an expiry, want NULL")
+	}
+
+	for _, tc := range []struct {
+		name       string
+		offsetDate int64
+		addOffset  int64
+		wantID     int64
+	}{
+		{name: "tail fallback", offsetDate: service.Date.Add(time.Second).Unix(), wantID: service.LocalID},
+		{name: "positive offset", offsetDate: service.Date.Add(time.Second).Unix(), addOffset: 1, wantID: service.LocalID - 1},
+		{name: "negative offset", offsetDate: service.Date.Unix(), addOffset: -1, wantID: service.LocalID},
+	} {
+		rows, _, err := s.ChannelHistoryWithOffset(ctx, ch.ID, author.ID, 0, tc.offsetDate, tc.addOffset, 0, 0, 1)
+		if err != nil {
+			t.Fatalf("%s history page: %v", tc.name, err)
+		}
+		if len(rows) != 1 || rows[0].LocalID != tc.wantID {
+			t.Errorf("%s history page = %+v, want local_id %d", tc.name, rows, tc.wantID)
+		}
 	}
 }

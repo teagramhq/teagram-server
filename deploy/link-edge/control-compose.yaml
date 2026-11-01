@@ -9,6 +9,9 @@ services:
         EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:?required}
     image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linklanding:control
     command: ["-listen-address", "0.0.0.0", "-port", "8082"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?required}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     networks:
       - private-edge
       - landing-publish
@@ -35,6 +38,9 @@ services:
     image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linklanding:control
     pull_policy: never
     command: ["-listen-address", "0.0.0.0", "-port", "8080"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?required}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     networks:
       - web-edge
     read_only: true
@@ -59,6 +65,9 @@ services:
         EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:?required}
         EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:?required}
     image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linkselector:control
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?required}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     command:
       - "-listen-address"
       - "0.0.0.0"

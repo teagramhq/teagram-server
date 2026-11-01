@@ -31,15 +31,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: deploy teagram-server
+  deploy-server:
+    name: 'deploy: server (prod)'
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: production
-    outputs:
-      sha: ${{ steps.target.outputs.sha }}
-      ci_run_id: ${{ steps.target.outputs.ci_run_id }}
     permissions:
       contents: read
       actions: read
@@ -83,6 +80,7 @@ jobs:
           echo "deploying $sha from CI run $ci_run_id"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+          printf '{"deploy_sha":"%s","ci_run_id":"%s"}\n' "$sha" "$ci_run_id" > "$RUNNER_TEMP/demo-deploy-target.json"
 
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
@@ -115,95 +113,10 @@ jobs:
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
 
-  deploy-demo:
-    name: deploy public demo
-    needs: deploy
-    if: ${{ needs.deploy.result == 'success' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    environment: demo
-    permissions:
-      actions: read
-      contents: read
-
-    steps:
-      - name: Check the demo deployment gate
-        id: demo-gate
-        env:
-          TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-        run: |
-          if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" != 'true' ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment is disabled"
-          elif [[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Resolve the tested image digest
-        id: demo-image
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
-          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
-        run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-image"
-          mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-image-digest-$DEPLOY_SHA" --dir "$artifact_dir"
-          [[ -f "$artifact_dir/demo-image-digest.txt" && ! -L "$artifact_dir/demo-image-digest.txt" ]]
-          digest=$(<"$artifact_dir/demo-image-digest.txt")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Join the tailnet
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+      - name: Upload the demo deployment target
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci-deploy
-          ping: ${{ vars.DEMO_DEPLOY_HOST }}
-
-      - name: Install the demo deploy key
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
-          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" && -n "$DEMO_DEPLOY_PORT" ]]
-          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
-          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
-          install -d -m 700 "$RUNNER_TEMP/ssh-demo"
-          (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-demo/id_deploy")
-          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
-
-      - name: Deploy the tested commit after the dev deploy
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
-          DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
-
-      - name: Remove the demo deploy key
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' }}
-        run: rm -rf "$RUNNER_TEMP/ssh-demo"
+          name: demo-deploy-target-${{ github.run_id }}
+          path: ${{ runner.temp }}/demo-deploy-target.json
+          if-no-files-found: error

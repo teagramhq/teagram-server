@@ -52,6 +52,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
 | `TG_MEDIA_KEY_DIR` | *(unset)* | Directory of versioned media keys (`<version>.key`); both media key settings must be set together |
 | `TG_MEDIA_KEY_CURRENT` | *(unset)* | Version used for newly written encrypted S3 objects; old versions remain readable while their key files stay available |
+| `TG_UPLOADS_DISABLED` | `false` | Set to `true` to reject client RPCs that upload file bytes with the stable `UPLOADS_DISABLED` error; existing media downloads continue to work, and the demo's private seed overlay enables its API only while public ingress is stopped |
 | `TEAGRAM_MEDIA_KEY_SOURCE_DIR` | `/etc/teagramd/media-keys` | Host directory bind-mounted read-only into the default Compose server; provision outside the repository |
 | `TG_DC_ID`          | `2`              | DC id this server advertises as `ThisDC`    |
 | `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables this bound, and a negative or non-integer value fails startup |
@@ -59,6 +60,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per client network (`/32` for IPv4 or `/64` for IPv6) per fixed window, shared through Postgres; `0` disables this bound |
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Fixed window for the per-network discovery bound; it must be positive while that bound is enabled |
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
+| `TG_LOG_AUTH_KEY_UNBINDS` | `false` | Structured unbind diagnostics with operation, reason, outcome, auth-key ID, and user ID. Demo enables it for troubleshooting; no key bytes, tokens, or credentials are logged. See the [demo log access and retention model](../deploy/teagram-demo/README.md#auth-key-unbind-diagnostic-logs). A non-boolean value fails startup |
 | `TG_SESSION_IP` | `false` | Store session IPs and return them in `account.getAuthorizations`. Unset means no session IP stored by default; a non-boolean value fails startup |
 | `TG_SESSION_DEVICE_LABELS` | `true` | Store and return device model, platform, OS version, API ID, and app version for sessions. A non-boolean value fails startup |
 | `TG_RATE_LIMIT_SEND_CODE_IP` | `10` | `auth.sendCode` calls per client network per window; `0` disables this counter |
@@ -83,6 +85,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
 | `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
 | `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
+| `TG_TURNSTILE_HOSTNAMES` | `web.teagram.io` | Comma-separated DNS hostnames accepted in successful Siteverify responses; the demo sets `web.teagram.io,demo.teagram.io` |
+| `TG_TURNSTILE_TEST_MODE` | `false` | Local/CI-only mode. Allows the gate to stay off or accepts Cloudflare's official test key pairs; rejects real secrets and advertised `*.teagram.io` hosts |
+| `TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` | *(unset)* | Optional demo-only signup bypass token file. Allowed only when the configured deployment hostname is `demo.teagram.io`; never set it on production |
 | `TG_TURNSTILE_SIGNIN_ENABLED` | `false` | Also challenge username sign-in at `auth.sendCode`; requires a valid site key and Siteverify secret |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
@@ -184,15 +189,31 @@ accounts can sign in through either listener.
 
 Turnstile is disabled by default. Set a site key and a Siteverify secret to
 challenge each `auth.signUp`; users complete a Cloudflare challenge and Cloudflare
-processes its token.
-The server requires the `signup` action and `web.teagram.io` hostname before
-charging the sign-up IP limit. Set `TG_TURNSTILE_SIGNIN_ENABLED=true` to also
-challenge username sign-in at `auth.sendCode`; this switch defaults to `false`,
-and other RPCs remain ungated. Behind `TG_CLIENT_ADDR_TRUST=proxy-v2`, the
-server also sends the client IP to Cloudflare for verification. Verification
-failures ask the client to retry with a fresh challenge. Startup rejects
-Cloudflare's always-pass test secret, and configured credentials require the
-public site key so the server can return the challenge error.
+processes its token. The server requires the `signup` action and a hostname from
+`TG_TURNSTILE_HOSTNAMES` in a successful Siteverify response before charging the
+sign-up IP limit. The hostname defaults to `web.teagram.io`; the demo deployment
+allows both `web.teagram.io` and `demo.teagram.io` so either supported client
+origin can complete verification.
+
+`TG_TURNSTILE_TEST_MODE=true` is for local and CI stacks. With credentials
+unset, Turnstile stays disabled and registration policy is unchanged. With
+credentials set, startup accepts only Cloudflare's official test sitekey and
+secret pairs and rejects any advertised `*.teagram.io` hostname. Cloudflare's
+[always-pass and always-block test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
+exercise successful and rejected challenge paths without live credentials.
+The base `docker-compose.yml` keeps test mode off and defaults the hostname
+allowlist to `web.teagram.io` for public deployments. The root `.env.example`
+opts local Compose into test mode explicitly and overrides the allowlist to
+`localhost,127.0.0.1`.
+
+The demo can set `TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` to a root-provisioned
+token file. A matching token bypasses Siteverify only for `auth.signUp`, is
+compared in constant time, and is never logged. The signup IP limit and all
+other registration checks still apply. Configuration rejects the token on any
+stack other than `demo.teagram.io`. Set `TG_TURNSTILE_SIGNIN_ENABLED=true` to
+also challenge username sign-in at `auth.sendCode`; this switch defaults to
+`false`, and other RPCs remain ungated. Behind `TG_CLIENT_ADDR_TRUST=proxy-v2`,
+the server also sends the client IP to Cloudflare for verification.
 
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;

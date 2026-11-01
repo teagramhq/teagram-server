@@ -38,6 +38,38 @@ unreadable; removing a version before its objects are migrated has the same
 effect. Do not retire a version until an inventory confirms no live objects
 depend on it.
 
+## Key rotation
+
+`blob-key-rotate` requires encrypted blob-mode authority and always writes with
+`TG_MEDIA_KEY_CURRENT`. Its default mode rewraps each referenced object's DEK
+under the current version and copies the authenticated chunk bytes unchanged.
+Use `--rewrite` after a wrapping-key leak, with a fresh media key version
+already selected as current; it assigns every referenced object a new DEK and
+rewrites its chunks. Both modes include assembled files and live upload parts,
+verify each replacement by authenticated read-back, and keep a private progress
+journal so an interrupted run can resume.
+
+Run it from the deployment checkout through the one-shot migration profile:
+
+```sh
+docker compose --profile migration run --rm blob-key-rotate
+```
+
+The image includes `blob-key-rotate`; the service reads the encrypted authority
+and media keys read-only and persists its journal under
+`/run/teagramd/reports/blob-key-rotation.jsonl` in the dedicated Compose volume
+`teagram_blob_key_rotate_reports`. Find the volume's host mountpoint with
+`docker volume inspect --format '{{ .Mountpoint }}' teagram_blob_key_rotate_reports`
+to read the journal. Optional flags are
+`--target-version N`, `--rewrite`, and `--progress PATH`. If omitted, the target
+is the configured current version and the journal uses that default path.
+
+Run `blob-inventory` after rotation. Remove an old `<version>.key` only when
+the inventory reports that version retirable, and run the rotation again after
+any writer that still used the old current version has switched. A concurrent
+old-version upload appears in the next inventory and is handled by another
+rotation pass.
+
 ## Object-store access and tampering
 
 For each `Put`, the server generates a fresh random data key and salt. It wraps
@@ -102,6 +134,6 @@ since existing plaintext objects will fail envelope authentication on read.
 The envelope does not hide object sizes or access patterns, protect plaintext
 inside the server, provide end-to-end encryption, prevent deletion or
 same-key rollback, or replace protected key and media backups. The default
-RustFS HTTP path relies on the private Docker network. Rotation of media keys
-and migration of the accepted plaintext corpus remain separate operational
-work.
+RustFS HTTP path relies on the private Docker network. Running key rotation on
+a live host and migrating the accepted plaintext corpus remain separate
+operational work.

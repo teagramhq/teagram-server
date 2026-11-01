@@ -130,17 +130,19 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*tg.InputStickerSetItem)
+		want   string
 	}{
-		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }},
-		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }},
-		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }},
+		{name: "empty emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = "" }, want: "STICKER_EMOJI_INVALID"},
+		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }, want: "STICKER_EMOJI_INVALID"},
+		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }, want: "STICKERSET_INVALID"},
+		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }, want: "STICKERSET_INVALID"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
 			request := createStickerRequest("too_long_"+strings.ReplaceAll(test.name, " ", "_"), file, false, false)
 			test.mutate(&request.Stickers[0])
-			if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != "STICKERSET_INVALID" {
-				t.Fatalf("invalid %s = %q, want STICKERSET_INVALID", test.name, got)
+			if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != test.want {
+				t.Fatalf("invalid %s = %q, want %s", test.name, got, test.want)
 			}
 		})
 	}
@@ -171,6 +173,7 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 		keywords   string
 		constraint string
 	}{
+		{name: "empty emoji", emoji: "", constraint: "user_created_sticker_set_items_emoji_limit"},
 		{name: "emoji", emoji: strings.Repeat("x", 21), constraint: "user_created_sticker_set_items_emoji_limit"},
 		{name: "keyword bytes", emoji: "⭐", keywords: strings.Repeat("k", 65), constraint: "user_created_sticker_set_items_keywords_limit"},
 		{name: "keyword count", emoji: "⭐", keywords: strings.Join(tooManyTerms, ","), constraint: "user_created_sticker_set_items_keywords_limit"},
@@ -181,11 +184,11 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 			    (set_id, position, file_id, emoji, keywords, format, width, height)
 			VALUES ($1, $2, $3, $4, $5, 'TGS', 1, 1)`,
 			created.Set.ID, int32(i+1), file.ID, test.emoji, test.keywords); err == nil {
-			t.Errorf("database accepted oversized %s", test.name)
+			t.Errorf("database accepted invalid %s", test.name)
 		} else {
 			var pgErr *pgconn.PgError
 			if !errors.As(err, &pgErr) || pgErr.ConstraintName != test.constraint {
-				t.Errorf("database rejected oversized %s with %v, want constraint %s", test.name, err, test.constraint)
+				t.Errorf("database rejected invalid %s with %v, want constraint %s", test.name, err, test.constraint)
 			}
 		}
 	}
@@ -422,8 +425,8 @@ func TestUserStickerSetCreationAndInstallLimits(t *testing.T) {
 		}
 	})
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
-		SELECT 7000000000000 + n, $1, 'Seeded', 'seed_' || n::text, 'regular'
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		SELECT 7000000000000 + n, $1, 'Seeded', 'seed_' || n::text, 'regular', 1
 		FROM generate_series(1, $2) n`, owner.ID, store.MaxUserStickerSetsPerAccount); err != nil {
 		t.Fatalf("seed created-set limit: %v", err)
 	}
@@ -483,10 +486,10 @@ func TestSuggestStickerSetChecksCandidatesInOneQuery(t *testing.T) {
 		}
 	})
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
 		SELECT 7000000000000 + n, $1, 'Occupied',
 		       upper('wild_cats' || CASE WHEN n = 0 THEN '' ELSE '_' || n::text END),
-		       'regular'
+		       'regular', 1
 		FROM generate_series(0, 998) AS n`, owner.ID); err != nil {
 		t.Fatalf("seed occupied names: %v", err)
 	}
@@ -535,9 +538,9 @@ func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 	})
 	if _, err := conn.Exec(ctx, `
 		WITH seeded AS (
-			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count, set_hash)
 			SELECT 7000000000000 + n, $1, 'Batch set', 'batch_' || n::text,
-			       CASE WHEN n <= $2 / 2 THEN 'regular' ELSE 'emojis' END
+			       CASE WHEN n <= $2 / 2 THEN 'regular' ELSE 'emojis' END, 12, n::int
 			FROM generate_series(1, $2) AS n
 			RETURNING id
 		)
@@ -560,8 +563,13 @@ func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 			if len(sets.Sets) != test.want {
 				t.Fatalf("returned %d sets, want %d", len(sets.Sets), test.want)
 			}
-			if n := tracer.n.Load(); n != 3 {
-				t.Fatalf("getter made %d database queries at the %d-set install cap, want 3", n, store.MaxInstalledStickerSets)
+			for _, set := range sets.Sets {
+				if set.Count != 12 || set.Hash != int(set.ID) {
+					t.Fatalf("summary for set %d has count %d and hash %d, want count 12 and stored hash %d", set.ID, set.Count, set.Hash, set.ID)
+				}
+			}
+			if n := tracer.n.Load(); n != 2 {
+				t.Fatalf("getter made %d database queries at the %d-set install cap, want 2", n, store.MaxInstalledStickerSets)
 			}
 		})
 	}
@@ -633,9 +641,15 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if len(all.Sets) != 1 || all.Sets[0].ID != regular.Set.ID || all.Hash == initialAll.Hash {
 		t.Fatalf("getAllStickers after install = %+v, want regular set and changed hash", all)
 	}
+	if all.Sets[0].Count != regular.Set.Count || all.Sets[0].Hash != regular.Set.Hash {
+		t.Fatalf("getAllStickers summary = count %d hash %d, want created set count %d hash %d", all.Sets[0].Count, all.Sets[0].Hash, regular.Set.Count, regular.Set.Hash)
+	}
 	emojis := getEmojiStickerSets(t, h, installer.ID, initialEmoji.Hash)
 	if len(emojis.Sets) != 1 || emojis.Sets[0].ID != emoji.Set.ID || emojis.Hash == initialEmoji.Hash {
 		t.Fatalf("getEmojiStickers after install = %+v, want custom emoji set and changed hash", emojis)
+	}
+	if emojis.Sets[0].Count != emoji.Set.Count || emojis.Sets[0].Hash != emoji.Set.Hash {
+		t.Fatalf("getEmojiStickers summary = count %d hash %d, want created set count %d hash %d", emojis.Sets[0].Count, emojis.Sets[0].Hash, emoji.Set.Count, emoji.Set.Hash)
 	}
 	if got := getStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}, 0).Set.Creator; got {
 		t.Fatal("non-owner getStickerSet set the creator flag")
@@ -793,6 +807,235 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if inactiveForwardErr == nil {
 		t.Fatal("forwarding an inactive user sticker succeeded")
 	}
+}
+
+func TestHistoryKeepsNormalFileMediaSeparateFromStickerMedia(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819029")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551819030")
+	if err != nil {
+		t.Fatalf("create recipient: %v", err)
+	}
+
+	const uploadID = int64(902901)
+	saveParts(t, s, owner.ID, uploadID, validStickerTGS(t))
+	normalSend, err := api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerUser(owner.ID, recipient.ID),
+		Media:   uploadedDocument(uploadID, 1, "same-file.tgs", "application/octet-stream"),
+		Message: "normal document", RandomID: 902902,
+	})
+	if err != nil {
+		t.Fatalf("send normal document: %v", err)
+	}
+	normalDocument := documentOf(t, normalSend)
+	files, err := s.FilesByIDs(ctx, []int64{normalDocument.ID})
+	if err != nil {
+		t.Fatalf("load uploaded file: %v", err)
+	}
+	file, ok := files[normalDocument.ID]
+	if !ok {
+		t.Fatalf("uploaded file %d is missing", normalDocument.ID)
+	}
+	createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("same_file", file, false, false))
+
+	_, err = api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerUser(owner.ID, recipient.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}},
+		Message: "sticker message", RandomID: 902903,
+	})
+	if err != nil {
+		t.Fatalf("send sticker message: %v", err)
+	}
+
+	history, err := api.GetHistoryForTest(s, recipient.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(recipient.ID, owner.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("get history: %v", err)
+	}
+	result, ok := history.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("history = %T, want *tg.MessagesMessages", history)
+	}
+	mediaByText := make(map[string]*tg.Document, len(result.Messages))
+	for _, class := range result.Messages {
+		message, ok := class.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaDocument)
+		if !ok {
+			t.Fatalf("%q media = %T, want *tg.MessageMediaDocument", message.Message, message.Media)
+		}
+		document, ok := media.Document.(*tg.Document)
+		if !ok {
+			t.Fatalf("%q document = %T, want *tg.Document", message.Message, media.Document)
+		}
+		mediaByText[message.Message] = document
+	}
+
+	if got := mediaByText["normal document"]; got == nil || got.MimeType != "application/octet-stream" {
+		t.Fatalf("normal document media = %+v, want original generic document", got)
+	}
+	sticker := mediaByText["sticker message"]
+	if sticker == nil || sticker.MimeType != "application/x-tgsticker" {
+		t.Fatalf("sticker media = %+v, want TGS sticker document", sticker)
+	}
+	hasStickerAttribute := false
+	for _, attribute := range sticker.Attributes {
+		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+			hasStickerAttribute = true
+			break
+		}
+	}
+	if !hasStickerAttribute {
+		t.Fatalf("sticker attributes = %+v, want sticker attribute", sticker.Attributes)
+	}
+
+	assertStickerMessage := func(path string, class tg.MessageClass) {
+		t.Helper()
+		message, ok := class.(*tg.Message)
+		if !ok {
+			t.Fatalf("%s message = %T, want *tg.Message", path, class)
+		}
+		media, ok := message.Media.(*tg.MessageMediaDocument)
+		if !ok {
+			t.Fatalf("%s media = %T, want *tg.MessageMediaDocument", path, message.Media)
+		}
+		document, ok := media.Document.(*tg.Document)
+		if !ok || document.MimeType != "application/x-tgsticker" {
+			t.Fatalf("%s document = %#v, want TGS sticker document", path, media.Document)
+		}
+		for _, attribute := range document.Attributes {
+			if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+				return
+			}
+		}
+		t.Fatalf("%s document attributes = %+v, want sticker attribute", path, document.Attributes)
+	}
+
+	recipientHistory, err := s.History(ctx, recipient.ID, store.PeerTypeUser, owner.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read recipient history: %v", err)
+	}
+	var stickerLocalID int64
+	for _, message := range recipientHistory {
+		if message.Text == "sticker message" {
+			stickerLocalID = message.LocalID
+			break
+		}
+	}
+	if stickerLocalID == 0 {
+		t.Fatal("sticker message missing from recipient history")
+	}
+
+	byID, err := api.GetMessagesForTest(s, recipient.ID, &tg.MessagesGetMessagesRequest{
+		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: int(stickerLocalID)}},
+	})
+	if err != nil {
+		t.Fatalf("get sticker message by id: %v", err)
+	}
+	byIDResult, ok := byID.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getMessages result = %T, want *tg.MessagesMessages", byID)
+	}
+	if len(byIDResult.Messages) != 1 {
+		t.Fatalf("getMessages returned %d messages, want one", len(byIDResult.Messages))
+	}
+	assertStickerMessage("getMessages", byIDResult.Messages[0])
+
+	peerDialogs, err := api.GetPeerDialogsForTest(s, recipient.ID, &tg.MessagesGetPeerDialogsRequest{
+		Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerUser(recipient.ID, owner.ID)}},
+	})
+	if err != nil {
+		t.Fatalf("get peer dialogs with sticker message: %v", err)
+	}
+	peerDialogsResult, ok := peerDialogs.(*tg.MessagesPeerDialogs)
+	if !ok {
+		t.Fatalf("getPeerDialogs result = %T, want *tg.MessagesPeerDialogs", peerDialogs)
+	}
+	if len(peerDialogsResult.Messages) != 1 {
+		t.Fatalf("getPeerDialogs returned %d messages, want one", len(peerDialogsResult.Messages))
+	}
+	assertStickerMessage("getPeerDialogs", peerDialogsResult.Messages[0])
+}
+
+func TestGetPeerDialogsHydratesUserStickerChannelPost(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819031")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, owner.ID, "Sticker channel", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("channel_stickers", file, false, false))
+	_, err = api.SendMediaForTest(s, owner.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(owner.ID, channel.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}},
+		Message: "channel user sticker", RandomID: 902904,
+	})
+	if err != nil {
+		t.Fatalf("send user sticker to channel: %v", err)
+	}
+	posts, err := s.ChannelHistory(ctx, channel.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read channel history: %v", err)
+	}
+	var foundStickerPost bool
+	for _, post := range posts {
+		if post.Message == "channel user sticker" && post.StickerDocumentID != nil && *post.StickerDocumentID == file.ID {
+			foundStickerPost = true
+			break
+		}
+	}
+	if !foundStickerPost {
+		t.Fatalf("channel history = %+v, want sticker document %d", posts, file.ID)
+	}
+
+	result, err := api.GetPeerDialogsForTest(s, owner.ID, &tg.MessagesGetPeerDialogsRequest{
+		Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerChannel(owner.ID, channel.ID)}},
+	})
+	if err != nil {
+		t.Fatalf("get channel peer dialog: %v", err)
+	}
+	peerDialogs, ok := result.(*tg.MessagesPeerDialogs)
+	if !ok {
+		t.Fatalf("getPeerDialogs result = %T, want *tg.MessagesPeerDialogs", result)
+	}
+	if len(peerDialogs.Messages) != 1 {
+		t.Fatalf("getPeerDialogs returned %d messages, want one", len(peerDialogs.Messages))
+	}
+	message, ok := peerDialogs.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("channel top message = %T, want *tg.Message", peerDialogs.Messages[0])
+	}
+	media, ok := message.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("channel top message media = %T, want *tg.MessageMediaDocument", message.Media)
+	}
+	document, ok := media.Document.(*tg.Document)
+	if !ok || document.ID != file.ID || document.MimeType != "application/x-tgsticker" {
+		t.Fatalf("channel top message document = %#v, want user TGS sticker %d", media.Document, file.ID)
+	}
+	for _, attribute := range document.Attributes {
+		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+			return
+		}
+	}
+	t.Fatalf("channel top message document attributes = %+v, want sticker attribute", document.Attributes)
 }
 
 func createStickerRequest(shortName string, file store.File, masks, emojis bool) *tg.StickersCreateStickerSetRequest {

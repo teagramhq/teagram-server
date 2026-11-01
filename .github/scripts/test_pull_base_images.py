@@ -197,23 +197,28 @@ class PullBaseImagesTests(unittest.TestCase):
 
     def test_testcontainers_jobs_preload_postgres_with_retry(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        command = (
-            "run: bash .github/scripts/pull-base-images.sh "
-            "--image mirror.gcr.io/postgres:18-alpine"
+        command = re.compile(
+            r"run: (?:>- )?bash \.github/scripts/pull-base-images\.sh "
+            r"--image mirror\.gcr\.io/postgres:18-alpine"
         )
-        for job_name in ("ci-main", "smoke", "e2e-admin", "real-server-fixtures"):
+        for job_name in ("test-go", "test-smoke", "test-e2e-admin", "test-real-server-fixtures"):
             with self.subTest(job=job_name):
                 job = re.search(
                     rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
                     workflow,
                 )
                 self.assertIsNotNone(job, f"{job_name} job is missing")
-                self.assertIn(command, job.group(1))
+                self.assertRegex(" ".join(job.group(1).split()), command)
+
+    def test_ci_does_not_reference_deleted_minio_test_dockerfile(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn("Dockerfile.minio-test", workflow)
+        self.assertNotIn("Build MinIO image for tests", workflow)
 
     def test_compose_job_preloads_images_through_the_fallback_helper(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(job, "compose job is missing")
         body = job.group(1)

@@ -417,7 +417,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
 		beforeDelivery, turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
 		recoveryEmailMode, suppressChannelPostDelivery, config.DefaultSignUpTermsOfService,
-		nil, 0, config.StickerImportOn, 0, config.DefaultUserInviteMinAccountAge, photoThumbs...,
+		nil, 0, config.StickerImportOn, 0, config.DefaultUserInviteMinAccountAge, false, photoThumbs...,
 	)
 }
 
@@ -435,6 +435,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	stickerImportMode config.StickerImportMode,
 	userInviteQuota int,
 	userInviteMinAccountAge time.Duration,
+	uploadsDisabled bool,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
@@ -454,7 +455,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
-		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge,
+		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge, uploadsDisabled,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {

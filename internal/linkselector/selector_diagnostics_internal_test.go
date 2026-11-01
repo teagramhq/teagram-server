@@ -283,6 +283,8 @@ func TestSelectorCompletionDiagnostics(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+			t.Setenv("TG_INVITE_DESKTOP_URL", "")
 			logger, logs, validator := newDiagnosticLogger()
 			handler, err := NewHandler("http://SENTINEL_ORIGIN.invalid:8080", "http://SENTINEL_LANDING.invalid:8081", logger)
 			if err != nil {

@@ -38,7 +38,7 @@ require_literal "$source_root/.github/workflows/ci.yml" \
 # selector and ensure its result gate rejects any fixture test event.
 fixture_test_prefix='^TestRealServerFixture'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"'
+  'go test -race -count=1 -timeout 30m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
@@ -48,12 +48,12 @@ require_literal "$script_dir/run-real-server-fixture-gate.sh" \
 require_literal "$script_dir/run-real-server-fixture-gate.sh" \
   'report_smoke_failure_diagnostics "$status" real-server-fixture "$json_file" || true'
 
-ci_main_workflow=$(sed -n '/^  ci-main:/,/^  real-server-fixtures:/p' \
+ci_main_workflow=$(sed -n '/^  test-go:/,/^  test-real-server-fixtures:/p' \
   "$source_root/.github/workflows/ci.yml")
 ci_main_timeout=$(sed -nE 's/^    timeout-minutes: ([0-9]+)$/\1/p' \
   <<<"$ci_main_workflow")
 if [[ ! "$ci_main_timeout" =~ ^[0-9]+$ ]] || (( ci_main_timeout < 50 )); then
-  printf 'ci-main timeout must cover preparation, E2E, and diagnostics (got %s)\n' \
+  printf 'test-go timeout must cover preparation, E2E, and diagnostics (got %s)\n' \
     "${ci_main_timeout:-missing}" >&2
   exit 1
 fi
@@ -64,7 +64,7 @@ if [[ "$ci_main_phase_steps" != $'build\nlabel-check' ]] \
     <<<"$ci_main_workflow" \
   || ! grep -Fq -- 'run: bash .github/scripts/ci-main-phase.sh label-check' \
     <<<"$ci_main_workflow"; then
-  printf 'ci-main phase steps are missing, ambiguous, or out of order\n' >&2
+  printf 'test-go phase steps are missing, ambiguous, or out of order\n' >&2
   exit 1
 fi
 ci_main_phase_script="$source_root/.github/scripts/ci-main-phase.sh"
@@ -89,7 +89,7 @@ if ! grep -Fq -- 'test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"' \
     <<<"$ci_main_provenance_step" \
   || ! grep -Fq -- 'revision=$(docker image inspect "$image" --format '\''{{ index .Config.Labels "org.opencontainers.image.revision" }}'\'')' \
     <<<"$ci_main_provenance_step"; then
-  printf 'ci-main provenance verification step was not preserved\n' >&2
+  printf 'test-go provenance verification step was not preserved\n' >&2
   exit 1
 fi
 
@@ -629,7 +629,7 @@ assert_case() {
     printf 'E2E wrapper changed go test exit status in verifier case: %s\n' "$name" >&2
     exit 1
   fi
-  expected_args=$'test\n-race\n-count=1\n-timeout\n20m\n-json\n-skip\n'"$fixture_test_prefix"$'\n'"$SMOKE_E2E_PACKAGE"
+  expected_args=$'test\n-race\n-count=1\n-timeout\n30m\n-json\n-skip\n'"$fixture_test_prefix"$'\n'"$SMOKE_E2E_PACKAGE"
   if [[ "$(cat "$mock_args")" != "$expected_args" ]]; then
     printf 'E2E invocation flags or package selection changed: %s\n' "$name" >&2
     exit 1
@@ -1331,7 +1331,7 @@ timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 
 timeout_full_test='TestMessagingReconnectPushGap'
 timeout_fixture_test='TestRealServerFixture/ArtifactAttachment'
 timeout_full=$(json_event output "$timeout_full_test" $'panic: test timed out after 15m0s\n')
-timeout_e2e=$(json_event output "$timeout_full_test" $'panic: test timed out after 20m0s\n')
+timeout_e2e=$(json_event output "$timeout_full_test" $'panic: test timed out after 30m0s\n')
 timeout_fixture=$(json_event output "$timeout_fixture_test" $'panic: test timed out after 25m0s\n')
 
 smoke_timeout_stream="$timeout_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
@@ -2297,6 +2297,10 @@ mkdir -p "$busybox_mock_bin" "$busybox_reader_crash_bin" "$runner_temp"
 cat >"$busybox_mock_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -eu
+if [[ "${1:-}" == pull ]]; then
+  [[ "${2:-}" == mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a ]] || exit 95
+  exit 0
+fi
 [[ "${1:-}" == run ]] || exit 99
 printf '%s\n' "$@" >"${FAKE_DOCKER_ARGS_FILE:?}"
 phase_dir=''

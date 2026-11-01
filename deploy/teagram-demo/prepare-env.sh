@@ -6,6 +6,8 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENV_FILE="$SCRIPT_DIR/.env"
 SECRET_DIR="/var/lib/teagram-demo/secrets"
 SECRET_FILE="$SECRET_DIR/turnstile-secret-key"
+# shellcheck source=deploy/teagram-demo/demo-common.sh
+source "$SCRIPT_DIR/demo-common.sh"
 
 if [[ "$EUID" -ne 0 ]]; then
   echo 'prepare-env.sh must run as root on the demo LXC' >&2
@@ -57,6 +59,7 @@ trap cleanup EXIT
   exit 1
 }
 install -d -o root -g root -m 0700 "$SECRET_DIR"
+demo_ensure_qa_bypass_token
 secret_temporary=$(mktemp "$SECRET_DIR/turnstile-secret-key.XXXXXXXX")
 printf '%s\n' "$turnstile_secret_key" > "$secret_temporary"
 chown root:65532 "$secret_temporary"
@@ -68,11 +71,12 @@ TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
-TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_REGISTRATION=open
 TG_LOG_LOGIN_CODES=false
 TG_MAX_FILE_BYTES=16777216
 TG_MAX_USER_STORAGE_BYTES=268435456
+TG_UPLOADS_DISABLED=true
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=$turnstile_site_key
 TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=$SECRET_FILE
@@ -89,4 +93,4 @@ unset postgres_password authkey_encryption_key turnstile_site_key turnstile_secr
 trap - EXIT
 cleanup
 python3 "$SCRIPT_DIR/validate-env.py" "$ENV_FILE"
-echo 'created deploy/teagram-demo/.env and runtime-readable Turnstile secret file under its root-only directory; secrets are not displayed'
+echo 'created deploy/teagram-demo/.env and runtime-readable Turnstile secret and QA bypass files under its root-only directory; secrets are not displayed'

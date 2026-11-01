@@ -19,6 +19,9 @@ const maxProfilePhotoGalleryEntries = 20
 // receipt, quota charge, file publication and current-photo transition as one
 // operation; this handler only supplies the validated byte assembly.
 func (h *handlers) handleUploadProfilePhoto(r *mtproto.Request) (bin.Encoder, error) {
+	if h.uploadsDisabled {
+		return nil, errUploadsDisabled
+	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}

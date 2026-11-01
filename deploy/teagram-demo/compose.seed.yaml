@@ -1,17 +1,21 @@
 # Temporary API-seed configuration. The caller starts only teagramd with this
 # overlay while edge and HAProxy are stopped, then recreates teagramd from the
 # production Compose file before either public path starts.
+# Signin and signup Turnstile remain disabled only for this private seed overlay.
 # Seeding opens many MTProto sessions from one host, so its key-exchange budget
 # is raised only for this private overlay.
 services:
   teagramd:
     environment:
+      TG_UPLOADS_DISABLED: "false"
       TG_CLIENT_ADDR_TRUST: socket
       TG_CLIENT_ADDR_PROXY_CIDRS: ""
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
       TG_TURNSTILE_SITE_KEY: ""
       TG_TURNSTILE_SECRET_KEY_FILE: ""
+      TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
+      TG_TURNSTILE_SIGNIN_ENABLED: "false"
       TG_RATE_LIMIT_SIGN_UP_IP: "32"
       TG_RATE_LIMIT_SIGN_UP_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND_CODE_IP: "256"
@@ -20,6 +24,7 @@ services:
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
       TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: "256"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND: "0"
     depends_on: !override
@@ -27,12 +32,15 @@ services:
         condition: service_completed_successfully
   teagramd-next:
     environment:
+      TG_UPLOADS_DISABLED: "false"
       TG_CLIENT_ADDR_TRUST: socket
       TG_CLIENT_ADDR_PROXY_CIDRS: ""
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
       TG_TURNSTILE_SITE_KEY: ""
       TG_TURNSTILE_SECRET_KEY_FILE: ""
+      TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
+      TG_TURNSTILE_SIGNIN_ENABLED: "false"
       TG_RATE_LIMIT_SIGN_UP_IP: "32"
       TG_RATE_LIMIT_SIGN_UP_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND_CODE_IP: "256"
@@ -41,6 +49,7 @@ services:
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
       TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: "256"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND: "0"
     depends_on: !override

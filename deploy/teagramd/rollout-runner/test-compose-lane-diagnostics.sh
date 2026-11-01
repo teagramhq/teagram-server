@@ -81,7 +81,7 @@ done
 # The compose job's Tear down step, read from the workflow so the test covers
 # what CI runs.
 teardown=$(awk '
-  /^  compose:$/ { job = 1; next }
+  /^  test-compose:$/ { job = 1; next }
   job && /^  [^ ]/ { exit }
   job && /^      - name: Tear down$/ { step = 1; next }
   step && /^        run: \|$/ { body = 1; next }

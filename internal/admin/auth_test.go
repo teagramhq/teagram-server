@@ -93,6 +93,25 @@ func TestLoginGET_serves_form(t *testing.T) {
 	}
 }
 
+func TestAdminListenerRejectsBotAPIToken(t *testing.T) {
+	t.Parallel()
+	h := newTestRouter(t, nil, authTestTokenHash())
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/metrics", nil)
+	req.Header.Set("Authorization", "Bearer 123456:bot-api-secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequestWithContext(ctx, http.MethodGet, "/bot123456:bot-api-secret/getMe", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("Bot API path status = %d, want 401", rec.Code)
+	}
+}
+
 func TestLoginGET_sets_csrf_cookie(t *testing.T) {
 	t.Parallel()
 	st := newAuthTestStore(t)

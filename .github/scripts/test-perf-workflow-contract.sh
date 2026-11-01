@@ -81,90 +81,98 @@ done <<< "$dependency_dirs"
 [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
   fail 'manual performance dispatch must remain available'
 
-[[ "$(query '.jobs."rpc-performance".timeout-minutes')" == '150' ]] ||
+[[ "$(query '.jobs."test-rpc-performance".timeout-minutes')" == '150' ]] ||
   fail 'the performance job must allow a cache-miss fixture seed to finish'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore fixtures") | .if')" == "$expected_restore_if" ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".name')" == 'test: perf-fixture-snapshot' ]] ||
+  fail 'the snapshot job must use the test stage naming contract'
+[[ "$(query '.jobs."publish-perf-fixture".name')" == 'publish: perf-fixture' ]] ||
+  fail 'the publisher job must use the publish stage naming contract'
+[[ "$(query '.jobs."check-perf-fixture-release".name')" == 'check: perf-fixture-release' ]] ||
+  fail 'the release verifier must use the check stage naming contract'
+[[ "$(query '.jobs."test-rpc-performance".name')" == 'test: rpc-performance' ]] ||
+  fail 'the RPC job must use the test stage naming contract'
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Restore fixtures") | .if')" == "$expected_restore_if" ]] ||
   fail 'cached fixtures must be restored only when the snapshot cache hits'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Seed fixtures from this branch") | .if')" == "$expected_seed_if" ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Seed fixtures from this branch") | .if')" == "$expected_seed_if" ]] ||
   fail 'the current branch must seed fixtures when the snapshot cache misses'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Seed fixtures from this branch") | .run')" == 'bash .github/scripts/perf-run.sh seed' ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Seed fixtures from this branch") | .run')" == 'bash .github/scripts/perf-run.sh seed' ]] ||
   fail 'a cache miss must use the normal fixture seeder'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Measure base and head") | .env.FIXTURE_VERSION')" == "$expected_fixture_version" ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Measure base and head") | .env.FIXTURE_VERSION')" == "$expected_fixture_version" ]] ||
   fail 'performance reports must identify the fixture seeder version'
 
-missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name == "No snapshot for this fixture") | .name')"
+missing_snapshot_step="$(query '.jobs."test-rpc-performance".steps[] | select(.name == "No snapshot for this fixture") | .name')"
 [[ -z "$missing_snapshot_step" ]] || fail 'a missing main snapshot must not be a standalone failure'
 
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
   fail 'the snapshot lookup key must include fixture and server setup helpers'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.path')" == '.perf-cache' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.path')" == '.perf-cache' ]] ||
   fail 'the snapshot lookup must use the same cache path as its save'
-snapshot_lookup_if="$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .if')"
+snapshot_lookup_if="$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .if')"
 [[ -z "$snapshot_lookup_if" || "$snapshot_lookup_if" == 'null' ]] ||
   fail 'snapshot lookup must run when a matching public release already exists'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
   fail 'the snapshot save key must match the fixture and server setup helpers'
 snapshot_cache_miss_if="steps.snapshot.outputs.cache-hit != 'true'"
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.uses == "actions/setup-go@v7.0.0") | .if')" == "$snapshot_cache_miss_if" ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.uses == "actions/setup-go@v7.0.0") | .if')" == "$snapshot_cache_miss_if" ]] ||
   fail 'release-exists plus cache-miss must install Go and refill the cache'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.uses == "ariga/setup-atlas@v0.3") | .if')" == "$snapshot_cache_miss_if" ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.uses == "ariga/setup-atlas@v0.3") | .if')" == "$snapshot_cache_miss_if" ]] ||
   fail 'release-exists plus cache-miss must install Atlas and refill the cache'
 for step in 'Start Postgres' 'Seed fixtures' 'Record snapshot metadata' 'Store the snapshot'; do
-  [[ "$(query ".jobs.\"fixture-snapshot\".steps[] | select(.name == \"$step\") | .if")" == "$snapshot_cache_miss_if" ]] ||
+  [[ "$(query ".jobs.\"test-perf-fixture-snapshot\".steps[] | select(.name == \"$step\") | .if")" == "$snapshot_cache_miss_if" ]] ||
     fail "release-exists plus cache-miss must still refill the cache at $step"
 done
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains(".perf-cache/.fixture-metadata.json")')" == 'true' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains(".perf-cache/.fixture-metadata.json")')" == 'true' ]] ||
   fail 'the seed provenance must be recorded in the fixture cache'
 # Inspect the literal GitHub expression in the workflow text.
 # shellcheck disable=SC2016
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains("--arg server_commit \"$GITHUB_SHA\"")')" == 'true' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains("--arg server_commit \"$GITHUB_SHA\"")')" == 'true' ]] ||
   fail 'the snapshot metadata must record the seeding commit'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.path')" == '.perf-cache' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.path')" == '.perf-cache' ]] ||
   fail 'the snapshot save must match the lookup cache path'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Restore the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
   fail 'the RPC job restore key must include fixture and server setup helpers'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore the snapshot") | .with.path')" == '.perf-cache' ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Restore the snapshot") | .with.path')" == '.perf-cache' ]] ||
   fail 'the RPC job must use the same snapshot cache path'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore legacy cache for PR measurements") | .with.key')" == "$expected_legacy_fixture_key" ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Restore legacy cache for PR measurements") | .with.key')" == "$expected_legacy_fixture_key" ]] ||
   fail 'PR measurements must retain access to the existing v1 snapshot cache'
-[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore legacy cache for PR measurements") | .if')" == "github.event_name == 'pull_request' && steps.snapshot.outputs.cache-hit != 'true'" ]] ||
+[[ "$(query '.jobs."test-rpc-performance".steps[] | select(.name == "Restore legacy cache for PR measurements") | .if')" == "github.event_name == 'pull_request' && steps.snapshot.outputs.cache-hit != 'true'" ]] ||
   fail 'only PR measurements may fall back to a legacy snapshot cache'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Require snapshot seed metadata") | .name')" == 'Require snapshot seed metadata' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Require snapshot seed metadata") | .name')" == 'Require snapshot seed metadata' ]] ||
   fail 'the publisher must fail closed when cached seed provenance is missing'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Restore the fixture snapshot") | .with.path')" == '.perf-cache' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Restore the fixture snapshot") | .with.path')" == '.perf-cache' ]] ||
   fail 'the publisher must use the same snapshot cache path'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Restore the fixture snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Restore the fixture snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
   fail 'the publisher must restore the provenance-aware snapshot cache'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Build release assets and manifest") | .run | contains("--metadata .perf-cache/.fixture-metadata.json")')" == 'true' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Build release assets and manifest") | .run | contains("--metadata .perf-cache/.fixture-metadata.json")')" == 'true' ]] ||
   fail 'the release manifest must use the cached seed provenance'
-[[ -z "$(query '.jobs."publish-fixture".steps[] | select(.name == "Recover metadata for an older snapshot cache") | .name')" ]] ||
+[[ -z "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Recover metadata for an older snapshot cache") | .name')" ]] ||
   fail 'the publisher must not fabricate the seed commit for a legacy cache'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Check for an existing fixture release") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".steps[] | select(.name == "Check for an existing fixture release") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
   fail 'snapshot preparation must find published releases and drafts by tag'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Recheck release after acquiring the publisher slot") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Recheck release after acquiring the publisher slot") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
   fail 'the serialized publisher must recheck draft releases before uploading'
-[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Publish complete fixture release") | .run | contains("perf_fixture_release.py publish")')" == 'true' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Publish complete fixture release") | .run | contains("perf_fixture_release.py publish")')" == 'true' ]] ||
   fail 'release creation, resumable upload, verification, and publication must use the tested publisher'
-publish_if="$(query '.jobs."publish-fixture".if')"
-[[ "$publish_if" == *"needs.fixture-snapshot.outputs.release_exists != 'true'"* &&
-   "$publish_if" == *"needs.fixture-snapshot.outputs.release_draft == 'true'"* ]] ||
+publish_if="$(query '.jobs."publish-perf-fixture".if')"
+[[ "$publish_if" == *"needs.test-perf-fixture-snapshot.outputs.release_exists != 'true'"* &&
+   "$publish_if" == *"needs.test-perf-fixture-snapshot.outputs.release_draft == 'true'"* ]] ||
   fail 'a published release must remain unchanged while a cache miss refills the snapshot'
-[[ "$(query '.jobs."fixture-snapshot".permissions.contents')" == 'read' ]] ||
+[[ "$(query '.jobs."test-perf-fixture-snapshot".permissions.contents')" == 'read' ]] ||
   fail 'snapshot preparation must keep read-only release permissions'
-[[ "$(query '.jobs."publish-fixture".permissions.contents')" == 'write' ]] ||
+[[ "$(query '.jobs."publish-perf-fixture".permissions.contents')" == 'write' ]] ||
   fail 'only the publisher job may write release contents'
-[[ "$(query '.jobs."verify-fixture-release".needs[0]')" == 'fixture-snapshot' ]] ||
+[[ "$(query '.jobs."check-perf-fixture-release".needs[0]')" == 'test-perf-fixture-snapshot' ]] ||
   fail 'public release verification must wait for the fixture snapshot lookup'
-[[ "$(query '.jobs."verify-fixture-release".needs[1]')" == 'publish-fixture' ]] ||
+[[ "$(query '.jobs."check-perf-fixture-release".needs[1]')" == 'publish-perf-fixture' ]] ||
   fail 'public release verification must wait for the publisher when it runs'
-[[ "$(query '.jobs."verify-fixture-release".permissions.contents')" == 'read' ]] ||
+[[ "$(query '.jobs."check-perf-fixture-release".permissions.contents')" == 'read' ]] ||
   fail 'public release verification must not have permission to modify releases'
-verify_if="$(query '.jobs."verify-fixture-release".if')"
-[[ "$verify_if" == *'always()'* && "$verify_if" == *"needs.publish-fixture.result == 'skipped'"* ]] ||
+verify_if="$(query '.jobs."check-perf-fixture-release".if')"
+[[ "$verify_if" == *'always()'* && "$verify_if" == *"needs.publish-perf-fixture.result == 'skipped'"* ]] ||
   fail 'public release verification must still run when an existing published release skips the publisher'
-[[ "$(query '.jobs."verify-fixture-release".steps[] | select(.name == "Verify anonymous fixture asset downloads") | .run | contains("verify_perf_fixture_release.py")')" == 'true' ]] ||
+[[ "$(query '.jobs."check-perf-fixture-release".steps[] | select(.name == "Verify anonymous fixture asset downloads") | .run | contains("verify_perf_fixture_release.py")')" == 'true' ]] ||
   fail 'each eligible main run must verify release downloads anonymously'
-[[ -z "$(query '.jobs."publish-fixture".steps[] | select(.name == "Verify anonymous asset downloads") | .name')" ]] ||
+[[ -z "$(query '.jobs."publish-perf-fixture".steps[] | select(.name == "Verify anonymous asset downloads") | .name')" ]] ||
   fail 'anonymous verification must remain independent of release publication'
 
 release_publisher="$(<.github/scripts/perf_fixture_release.py)"
@@ -188,7 +196,7 @@ expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner
   fail 'a cache-miss fixture seed must fit within the 150-minute performance job budget'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
-[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
+[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance|CallWithGetDialogsProfileRestoresEnvironment|GetDialogsProfilingUsesEveryMeasuredSample)$"* ]] ||
   fail 'the performance harness selection must run the stale fixture version regression test'
 postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -p 5432 -U postgres -q"* ]] ||
@@ -197,5 +205,39 @@ postgres_contents="$(<"$postgres")"
   fail 'fixture snapshots must omit ACLs that depend on cluster-global roles'
 [[ "$runner_contents" == *"pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner --no-acl"* ]] ||
   fail 'fixture restores must not require cluster-global roles from the snapshot'
+
+mock_dir="$(mktemp -d)"
+trap 'rm -rf "$mock_dir"' EXIT
+cat >"$mock_dir/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == exec ]] || exit 64
+shift
+[[ -n "${1:-}" ]] || exit 64
+shift
+command="${1:-}"
+shift || true
+case "$command" in
+  psql)
+    sql=""
+    for arg in "$@"; do sql="$arg"; done
+    printf 'psql\t%s\n' "$sql" >>"${PERF_DOCKER_EVENTS:?}"
+    ;;
+  pg_restore|vacuumdb)
+    printf '%s\t%s\n' "$command" "$*" >>"${PERF_DOCKER_EVENTS:?}"
+    ;;
+  *) exit 64 ;;
+esac
+MOCK_DOCKER
+chmod +x "$mock_dir/docker"
+events="$mock_dir/events"
+PERF_DOCKER_EVENTS="$events" PATH="$mock_dir:$PATH" \
+  PERF_PG_CONTAINER=perf-pg PERF_PG_URL=postgres://postgres:perf@localhost:5432/ \
+  PERF_CACHE="$mock_dir/cache" RUNNER_TEMP="$mock_dir" \
+  bash "$runner" restore
+role_line="$(grep -n $'^psql\t.*CREATE ROLE browser_acceptance_probe NOLOGIN' "$events" | head -n1 | cut -d: -f1 || true)"
+restore_line="$(grep -n $'^pg_restore\t' "$events" | head -n1 | cut -d: -f1 || true)"
+[[ -n "$role_line" && -n "$restore_line" && "$role_line" -lt "$restore_line" ]] ||
+  fail 'fixture restore must provision the cached dump role before pg_restore'
 
 printf 'RPC performance workflow contract holds\n'

@@ -34,6 +34,14 @@ func replySnippet(s string) string {
 	return trunc
 }
 
+// messageMedia keeps each message reference namespace separate. FileID names a
+// stored file, while StickerDocumentID names a user-set or catalogue sticker;
+// the same positive id can be present in both namespaces.
+type messageMedia struct {
+	files        map[int64]tg.MessageMediaClass
+	userStickers map[int64]tg.MessageMediaClass
+}
+
 // messageToTL maps a stored message to the wire message. The peer follows
 // peer_type; from is always PeerUser, since the author of a chat message is a
 // user either way. ids are cast to the wire int space. EditDate populates its
@@ -42,14 +50,20 @@ func replySnippet(s string) string {
 // A row carrying an action renders as tg.MessageService instead. createUsers is
 // the participant list for a ChatActionCreate row and nil for everything else:
 // the mapper stays pure, so the one action that needs a member set is handed it
-// rather than fetching it. files is the same pattern for media, keyed by file
-// id; a row whose file id is absent from it renders as a plain message.
+// rather than fetching it. media carries separate file and sticker maps so
+// overlapping ids cannot change which reference a row renders.
 // reactions, when non-nil, populates the message's Reactions field.
-func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
-	return messageToTLWithStickerCatalog(m, createUsers, files, replyTexts, reactions, nil, dcIDs...)
+func messageToTL(m store.Message, createUsers []int64, media *messageMedia, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
+	return messageToTLWithStickerCatalog(m, createUsers, media, replyTexts, reactions, nil, dcIDs...)
 }
 
-func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, stickerSets *stickerSetCatalog, dcIDs ...int) tg.MessageClass {
+func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, media *messageMedia, replyTexts map[int32]string, reactions []store.Reaction, stickerSets *stickerSetCatalog, dcIDs ...int) tg.MessageClass {
+	var files map[int64]tg.MessageMediaClass
+	var userStickers map[int64]tg.MessageMediaClass
+	if media != nil {
+		files = media.files
+		userStickers = media.userStickers
+	}
 	if m.Action != store.ChatActionNone {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -98,8 +112,8 @@ func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, files m
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := files[*m.StickerDocumentID]; ok {
-			msg.SetMedia(media)
+		if sticker, ok := userStickers[*m.StickerDocumentID]; ok {
+			msg.SetMedia(sticker)
 		} else if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
@@ -130,8 +144,8 @@ func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, files m
 	return msg
 }
 
-func (h *handlers) messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
-	return messageToTLWithStickerCatalog(m, createUsers, files, replyTexts, reactions, h.stickerSets, dcIDs...)
+func (h *handlers) messageToTL(m store.Message, createUsers []int64, media *messageMedia, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
+	return messageToTLWithStickerCatalog(m, createUsers, media, replyTexts, reactions, h.stickerSets, dcIDs...)
 }
 
 // reactionsToTL is the single wire projection of stored reactions, shared by
@@ -190,14 +204,20 @@ func channelReactionsToTL(reactions []store.ChannelReactionCount, canSeeList boo
 // rather than one per member, so Out is derived from the viewer here instead of
 // being read off the row, and the peer is always the channel.
 //
-// files is keyed by file id exactly as messageToTL's is, but the "no media"
-// sentinel differs and the trap is worth naming:
-// channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
-	return channelMessageToTLWithStickerCatalog(m, viewerID, files, broadcast, nil, dcIDs...)
+// media uses separate file and sticker maps like messageToTL. The "no media"
+// sentinel differs and the trap is worth naming: channel_messages.file_id is
+// NULL for no media, while messages.file_id is 0.
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, media *messageMedia, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
+	return channelMessageToTLWithStickerCatalog(m, viewerID, media, broadcast, nil, dcIDs...)
 }
 
-func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, stickerSets *stickerSetCatalog, dcIDs ...int) (tg.MessageClass, error) {
+func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64, media *messageMedia, broadcast bool, stickerSets *stickerSetCatalog, dcIDs ...int) (tg.MessageClass, error) {
+	var files map[int64]tg.MessageMediaClass
+	var userStickers map[int64]tg.MessageMediaClass
+	if media != nil {
+		files = media.files
+		userStickers = media.userStickers
+	}
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -280,8 +300,8 @@ func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := files[*m.StickerDocumentID]; ok {
-			msg.SetMedia(media)
+		if sticker, ok := userStickers[*m.StickerDocumentID]; ok {
+			msg.SetMedia(sticker)
 		} else if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
@@ -305,8 +325,8 @@ func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64
 	return msg, nil
 }
 
-func (h *handlers) channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
-	return channelMessageToTLWithStickerCatalog(m, viewerID, files, broadcast, h.stickerSets, dcIDs...)
+func (h *handlers) channelMessageToTL(m store.ChannelMessage, viewerID int64, media *messageMedia, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
+	return channelMessageToTLWithStickerCatalog(m, viewerID, media, broadcast, h.stickerSets, dcIDs...)
 }
 
 // documentToTL names a stored file on the wire. It echoes only the supported
@@ -533,13 +553,30 @@ func (h *handlers) usersToTL(ctx context.Context, users []store.User, viewerID i
 	if err != nil {
 		return nil, err
 	}
+	return h.renderUsersToTL(ctx, users, viewerID, markSelf, states, nil)
+}
+
+// usersToTLWithContactStates renders users when their contact state is already
+// available in the same order as users.
+func (h *handlers) usersToTLWithContactStates(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStates []store.Contact) ([]*tg.User, error) {
+	if len(contactStates) != len(users) {
+		return nil, fmt.Errorf("render users: got %d contact states for %d users", len(contactStates), len(users))
+	}
+	return h.renderUsersToTL(ctx, users, viewerID, markSelf, nil, contactStates)
+}
+
+func (h *handlers) renderUsersToTL(ctx context.Context, users []store.User, viewerID int64, markSelf bool, contactStatesByID map[int64]store.Contact, orderedContactStates []store.Contact) ([]*tg.User, error) {
 	visibility, err := h.lastSeenVisibilityForUsers(ctx, users, viewerID)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]*tg.User, len(users))
 	for i, user := range users {
-		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, states[user.ID], visibility[user.ID])
+		contactState := contactStatesByID[user.ID]
+		if orderedContactStates != nil {
+			contactState = orderedContactStates[i]
+		}
+		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, contactState, visibility[user.ID])
 	}
 	if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
 		return nil, err
@@ -789,7 +826,7 @@ func (h *handlers) batchMessages(ctx context.Context, userID int64, events []sto
 // the channel ids it references. A nil update (message vanished, or an empty
 // read marker) is skipped by the caller.
 // msgs and files are the batch's pre-loaded rows and their media.
-func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files map[int64]tg.MessageMediaClass, pollViews map[int64]store.Poll) (tg.UpdateClass, []int64, []int64, []int64, error) {
+func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files *messageMedia, pollViews map[int64]store.Poll) (tg.UpdateClass, []int64, []int64, []int64, error) {
 	switch ev.Type {
 	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]
@@ -1001,9 +1038,13 @@ func (h *handlers) renderUsers(ctx context.Context, users map[int64]store.User, 
 	for _, id := range visibleIDs {
 		visibleUsers = append(visibleUsers, users[id])
 	}
-	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
-	if err != nil {
-		return nil, err
+	privacySubjects := lastSeenPrivacySubjects(visibleUsers, viewerID)
+	visibility := make(map[int64]store.LastSeenVisibility, len(privacySubjects))
+	if len(privacySubjects) > 0 {
+		visibility, err = h.lastSeenVisibilityForUsers(ctx, privacySubjects, viewerID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]tg.UserClass, 0, len(users))
 	for id, u := range users {
@@ -1230,7 +1271,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // the update and the user ids it references. Delete events need no message-row
 // hydration; new and edit events for current tombstones are suppressed. A nil
 // update is also returned when a new/edit message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.UpdateClass, []int64, error) {
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files *messageMedia, broadcast bool) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
 	case store.ChannelEventMetadataRefresh:
 		return &tg.UpdateChannel{ChannelID: channelID}, nil, nil

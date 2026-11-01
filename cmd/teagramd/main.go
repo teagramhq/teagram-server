@@ -32,6 +32,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/blobmode"
 	"github.com/teagramhq/teagram-server/internal/blobscan"
+	"github.com/teagramhq/teagram-server/internal/botapi"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/fleet"
@@ -60,6 +61,8 @@ const blobModeDirectory = "/run/teagramd/blob-mode"
 // adminShutdownTimeout bounds how long the admin server waits for in-flight
 // requests to finish before it gives up.
 const adminShutdownTimeout = 5 * time.Second
+
+const botAPIShutdownTimeout = 5 * time.Second
 
 type publicWebSocketListener struct {
 	listener       net.Listener
@@ -857,7 +860,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 
-	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log), store.WithBlobStore(blobs),
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log),
+		store.WithAuthKeyUnbindLogging(cfg.LogAuthKeyUnbinds), store.WithBlobStore(blobs),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithSessionIP(cfg.SessionIP),
@@ -1000,7 +1004,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	dialogFilterSync := api.NewDialogFilterSync()
 	var turnstileVerifier api.SignUpTurnstileVerifier
 	if cfg.Turnstile.Enabled() {
-		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
+		turnstileVerifier = api.NewTurnstileVerifierWithConfig(
+			cfg.Turnstile.SecretKey, cfg.Turnstile.Hostnames, cfg.Turnstile.QABypassToken, log,
+		)
 	}
 	newHandler := func(registrationMode config.RegistrationMode, turnstileEnabled, turnstileSignInEnabled bool) mtproto.Handler {
 		turnstileSiteKey := ""
@@ -1014,7 +1020,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -1147,6 +1153,29 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			defer cancel()
 			if err := adminSrv.Shutdown(shutdownCtx); err != nil {
 				log.Error("admin server shutdown", "err", err)
+			}
+		}()
+	}
+
+	if cfg.BotAPIListenAddr != "" {
+		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log, cfg.RateLimits.MessageSend)
+		var botAPILC net.ListenConfig
+		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPIListenAddr)
+		if err != nil {
+			return fmt.Errorf("bot API listen: %w", err)
+		}
+		botAPILn = botapi.LimitConnectionsPerIP(botAPILn, botapi.DefaultMaxConnectionsPerIP)
+		log.Info("Bot API server listening", "addr", cfg.BotAPIListenAddr)
+		go func() {
+			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("Bot API server", "err", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
+			defer cancel()
+			if err := botAPIServer.Shutdown(shutdownCtx); err != nil {
+				log.Error("Bot API server shutdown", "err", err)
 			}
 		}()
 	}

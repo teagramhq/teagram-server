@@ -392,7 +392,7 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 			userSetIDs = append(userSetIDs, item.ID)
 		}
 	}
-	userSets, err := h.store.UserStickerSetsByInstalledIDs(r.Ctx, userSetIDs)
+	userSets, err := h.store.UserStickerSetSummariesByInstalledIDs(r.Ctx, userSetIDs)
 	if err != nil {
 		h.log.Error("load installed emoji sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal

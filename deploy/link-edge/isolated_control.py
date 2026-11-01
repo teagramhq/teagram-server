@@ -349,6 +349,8 @@ class LinkEdgeControl:
                 "EDGE_IMAGE_SOURCE": IMAGE_SOURCE,
                 "EDGE_IMAGE_REVISION": "",
                 "LINK_EDGE_CONTROL_PROJECT": self.project,
+                "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+                "TG_INVITE_DESKTOP_URL": "",
             }
         )
         self.revision = ""
@@ -493,9 +495,14 @@ class LinkEdgeControl:
             raise ControlFailure("compose_policy_failed")
         if not isinstance(networks, dict) or set(networks) != {"web-edge", "private-edge", "landing-publish"}:
             raise ControlFailure("compose_policy_failed")
-        for service in services.values():
+        expected_invite_environment = {
+            "TG_INVITE_WEB_SIGNUP_URL": self.env.get("TG_INVITE_WEB_SIGNUP_URL"),
+            "TG_INVITE_DESKTOP_URL": self.env.get("TG_INVITE_DESKTOP_URL", ""),
+        }
+        for name, service in services.items():
             if not isinstance(service, dict):
                 raise ControlFailure("compose_policy_failed")
+            expected_environment = expected_invite_environment if name in {"linklanding", "selector", "web"} else {}
             if (
                 service.get("read_only") is not True
                 or service.get("cap_drop") != ["ALL"]
@@ -505,7 +512,7 @@ class LinkEdgeControl:
                 or service.get("volumes")
                 or service.get("secrets")
                 or service.get("env_file")
-                or service.get("environment")
+                or service.get("environment", {}) != expected_environment
             ):
                 raise ControlFailure("compose_policy_failed")
         if any(service.get("ports") for service in services.values()):

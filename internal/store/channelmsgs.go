@@ -112,7 +112,7 @@ type ChannelMessage struct {
 	// GroupedID is the shared album id; nil means the post is not grouped.
 	GroupedID *int64
 	FileID    *int64
-	// StickerDocumentID is a reserved negative catalogue identity, separate
+	// StickerDocumentID names a catalogue or live user-set sticker separately
 	// from the file-backed media reference.
 	StickerDocumentID *int64
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
@@ -519,8 +519,8 @@ func (s *Store) PostChannelMessageAsWithEntities(
 	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, entities)
 }
 
-// PostChannelStickerAsWithEntities appends a catalogue sticker with the
-// send_stickers check inside the channel post transaction.
+// PostChannelStickerAsWithEntities appends a catalogue or live user-set
+// sticker with the send_stickers check inside the channel post transaction.
 func (s *Store) PostChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
 	entities []PollDescriptionEntity,
@@ -1383,11 +1383,11 @@ func (s *Store) ChannelHistory(ctx context.Context, channelID int64, offsetID in
 }
 
 // ChannelHistoryWithOffset returns one Telegram-style history page and the
-// number of active entries above the caller's history floor. Offset position is
-// computed within that visible history; maxID and minID filter the slice.
+// number of active entries above the caller's history floor. Offset ID/date is
+// resolved within that visible history; maxID and minID filter the slice.
 func (s *Store) ChannelHistoryWithOffset(
 	ctx context.Context,
-	channelID, ownerID, offsetID, addOffset, maxID, minID int64,
+	channelID, ownerID, offsetID, offsetDate, addOffset, maxID, minID int64,
 	limit int,
 ) ([]ChannelMessage, int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -1400,15 +1400,51 @@ func (s *Store) ChannelHistoryWithOffset(
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 
-	count, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
+	countRow, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
 		ChannelID: channelID,
 		OwnerID:   ownerID,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, ErrNotMember
+	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("count channel history: %w", err)
 	}
+	postCount, err := channelPostUnreadSummaryCount(
+		countRow.Entitled,
+		countRow.StatusExists,
+		countRow.SummaryVersion,
+		countRow.SummaryReady,
+		countRow.TotalLive,
+		0,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count channel history posts: %w", err)
+	}
+	if countRow.ExpiredPostCount > postCount {
+		return nil, 0, fmt.Errorf("%w: expired posts exceed live summary", ErrChannelPostSummaryCorrupt)
+	}
+	count := postCount - countRow.ExpiredPostCount + countRow.ServiceCount
 	var msgs []ChannelMessage
-	if offsetID > 0 && addOffset < 0 {
+	switch {
+	case offsetID == 0 && offsetDate != 0:
+		rows, e := qtx.ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+			ChannelID:  channelID,
+			OwnerID:    ownerID,
+			OffsetDate: offsetDate,
+			AddOffset:  addOffset,
+			MaxID:      maxID,
+			MinID:      minID,
+			Lim:        int32(limit), //nolint:gosec // limit is validated and capped by the API
+		})
+		if e != nil {
+			return nil, 0, fmt.Errorf("channel history page: %w", e)
+		}
+		msgs = make([]ChannelMessage, len(rows))
+		for i, row := range rows {
+			msgs[i] = channelMessageFromFields(channelMsgFields(row))
+		}
+	case offsetID > 0 && addOffset < 0:
 		rows, e := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
 			ChannelID: channelID,
 			OwnerID:   ownerID,
@@ -1425,7 +1461,7 @@ func (s *Store) ChannelHistoryWithOffset(
 		for i, row := range rows {
 			msgs[i] = channelMessageFromFields(channelMsgFields(row))
 		}
-	} else {
+	default:
 		rows, e := qtx.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
 			ChannelID: channelID,
 			OwnerID:   ownerID,

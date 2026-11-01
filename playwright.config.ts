@@ -14,13 +14,27 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:2444',
     trace: 'retain-on-failure',
   },
-  webServer: {
-    command: 'go run -tags e2e_admin_server ./test/e2e/adminserver',
-    env: { TG_ADMIN_E2E_TOKEN: 'e2e-secret-token' },
-    url: 'http://127.0.0.1:2444/admin/login',
-    stdout: 'pipe',
-    stderr: 'pipe',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  webServer: [
+    {
+      command: 'go run -tags e2e_admin_server ./test/e2e/adminserver',
+      env: { TG_ADMIN_E2E_TOKEN: 'e2e-secret-token' },
+      url: 'http://127.0.0.1:2444/admin/login',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+    },
+    {
+      command: 'go run ./cmd/linklanding -listen-address 127.0.0.1 -port 2446',
+      env: {
+        TG_INVITE_WEB_SIGNUP_URL: 'https://signup.example.test/create?source=invite',
+        TG_INVITE_DESKTOP_URL: '',
+      },
+      url: 'http://127.0.0.1:2446/invite',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+    },
+  ],
 });

@@ -27,6 +27,12 @@ does not represent an account session and the probe performs no login RPC, but
 the current server does not expire it after 60 seconds. Avoid ad hoc repeated
 production probes; the workflow runs it once per deployment.
 
+The optional `--expect-user-invite-quota N` mode uses the same discovery and
+tailnet endpoint to call `help.getAppConfig` once. It verifies the advertised
+registration mode, invite-enabled flag, and exact quota. It also creates one
+unbound auth-key row as described above; it sends no account credentials or
+login RPC.
+
 ## Privilege boundary
 
 The workflow runs after successful CI on `main` or manual dispatch, in the

@@ -90,6 +90,9 @@ func (h *handlers) channelDialogs(ctx context.Context, userID int64, excludePinn
 // handleGetDialogs serves messages.getDialogs: the caller's conversation list
 // with each dialog's top message and the referenced peer users.
 func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
+	profile := startGetDialogsProfiler()
+	defer profile.finish()
+
 	var req tg.MessagesGetDialogsRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
@@ -107,6 +110,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			return nil, err
 		}
 	}
+	profile.mark("request validation and rate limit")
 
 	limit := req.Limit
 	if limit <= 0 {
@@ -124,6 +128,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("dialog page query")
 
 	tlDialogs := make([]tg.DialogClass, 0, len(dialogs))
 	// Top messages are collected first and mapped after the loop, so the whole
@@ -141,6 +146,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs top messages", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("top message query")
 	for _, d := range dialogs {
 		dialog := &tg.Dialog{
 			Peer:            peerToTL(d.PeerType, d.PeerID),
@@ -187,17 +193,20 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			dialog.TopMessage = 0
 		}
 	}
+	profile.mark("dialog and peer assembly")
 
 	files, err := h.loadFiles(r.Ctx, tops)
 	if err != nil {
 		h.log.Error("get dialogs files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("top message files")
 	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, tops)
 	if err != nil {
 		h.log.Error("get dialogs polls", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("top message polls")
 	tlMsgs := make([]tg.MessageClass, 0, len(tops))
 	for i, m := range tops {
 		if poll, ok := pollViews[m.LocalID]; ok {
@@ -211,6 +220,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			tlMsgs = append(tlMsgs, h.messageToTL(m, topCreateUsers[i], files, nil, nil, h.dcID))
 		}
 	}
+	profile.mark("top message rendering")
 
 	// Channels write no dialogs row — they keep one message row per channel, not
 	// one per member — so the caller's channels are prepended to the paged rows
@@ -232,15 +242,18 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			h.log.Error("get dialogs channels", "user_id", r.UserID, "err", cerr)
 			return nil, errInternal
 		}
+		profile.mark("channel dialog query and hydration")
 		if cerr = h.attachChannelPollViewsAcross(r.Ctx, r.UserID, channelTops); cerr != nil {
 			h.log.Error("get dialogs channel polls", "user_id", r.UserID, "err", cerr)
 			return nil, errInternal
 		}
+		profile.mark("channel poll hydration")
 		channelFiles, ferr := h.loadChannelFiles(r.Ctx, channelTops)
 		if ferr != nil {
 			h.log.Error("get dialogs channel files", "user_id", r.UserID, "err", ferr)
 			return nil, errInternal
 		}
+		profile.mark("channel file hydration")
 		channelPeers, channelDialogs = peers, ds
 		tlDialogs = append(channelDialogs, tlDialogs...)
 		channelMsgs := make([]tg.MessageClass, 0, len(channelTops)+len(tlMsgs))
@@ -256,25 +269,30 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			}
 		}
 		tlMsgs = append(channelMsgs, tlMsgs...)
+		profile.mark("channel message rendering")
 	}
 	if err := h.attachDialogDrafts(r.Ctx, r.UserID, tlDialogs); err != nil {
 		h.log.Error("get dialogs drafts", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("draft attachment")
 	if err := h.attachDialogUnreadMarks(r.Ctx, r.UserID, tlDialogs); err != nil {
 		h.log.Error("get dialogs unread marks", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("unread mark attachment")
 	if err := h.attachDialogNotifySettings(r.Ctx, r.UserID, tlDialogs, channelPeers); err != nil {
 		h.log.Error("get dialogs notify settings", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("notification settings attachment")
 
 	users, err := h.loadUsers(r.Ctx, peerIDs, r.UserID)
 	if err != nil {
 		h.log.Error("get dialogs users", "err", err)
 		return nil, errInternal
 	}
+	profile.mark("user loading and rendering")
 	// No membership check on the list itself: a dialog row exists only because a
 	// fan-out wrote it for this owner, so an attacker-chosen id never reaches here.
 	// A removed member keeps their dialog row by design, which is why the viewer is
@@ -289,6 +307,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs chats", "err", err)
 		return nil, errInternal
 	}
+	profile.mark("chat loading")
 	chats = append(chats, channelPeers...)
 	// Read the exact total on every page so short and full pages issue the same
 	// statements. The maintained count makes this lookup independent of list size.
@@ -297,6 +316,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs count", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	profile.mark("dialog count query")
 	if len(dialogs) < limit {
 		return &tg.MessagesDialogs{Dialogs: tlDialogs, Messages: tlMsgs, Users: users, Chats: chats}, nil
 	}
@@ -373,15 +393,19 @@ func (h *handlers) handleGetPeerDialogs(r *mtproto.Request) (bin.Encoder, error)
 func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialogsSnapshot, viewerID int64) (*tg.MessagesPeerDialogs, error) {
 	tlDialogs := make([]tg.DialogClass, 0, len(snapshot.Dialogs))
 	tlMsgs := make([]tg.MessageClass, 0, len(snapshot.Dialogs))
-	files := make(map[int64]tg.MessageMediaClass, len(snapshot.Files))
-	for id, file := range snapshot.Files {
-		files[id] = h.fileMediaToTL(file)
-	}
 	selectedMessages := make([]store.Message, 0, len(snapshot.Dialogs))
+	selectedChannelMessages := make([]store.ChannelMessage, 0, len(snapshot.Dialogs))
 	for _, selected := range snapshot.Dialogs {
 		if selected.Message != nil {
 			selectedMessages = append(selectedMessages, *selected.Message)
 		}
+		if selected.ChannelMessage != nil {
+			selectedChannelMessages = append(selectedChannelMessages, *selected.ChannelMessage)
+		}
+	}
+	media, err := h.messageReadMedia(ctx, snapshot.Files, selectedMessages, selectedChannelMessages)
+	if err != nil {
+		return nil, err
 	}
 	pollViews, err := h.pollViewsForMessages(ctx, viewerID, selectedMessages)
 	if err != nil {
@@ -439,17 +463,17 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 			}
 			if poll, ok := pollViews[selected.Message.LocalID]; ok {
-				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll)
+				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, media, nil, nil, poll)
 				if pollErr != nil {
 					return nil, pollErr
 				}
 				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
-				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, files, nil, nil, h.dcID))
+				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, media, nil, nil, h.dcID))
 			}
 		case selected.ChannelMessage != nil:
 			channel := snapshot.Channels[d.PeerID]
-			tlMessage, renderErr := h.channelMessageToTL(*selected.ChannelMessage, viewerID, files, !channel.Megagroup, h.dcID)
+			tlMessage, renderErr := h.channelMessageToTL(*selected.ChannelMessage, viewerID, media, !channel.Megagroup, h.dcID)
 			if renderErr != nil {
 				return nil, renderErr
 			}

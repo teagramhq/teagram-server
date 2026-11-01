@@ -27,10 +27,12 @@ const (
 )
 
 var (
-	ErrBotAccount         = errors.New("bot account")
-	ErrBotTokenNotFound   = errors.New("bot token not found")
-	ErrBotUsernameInvalid = errors.New("bot username invalid")
-	botUsernameRE         = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{1,31}$`)
+	ErrBotAccount            = errors.New("bot account")
+	ErrBotTokenNotFound      = errors.New("bot token not found")
+	ErrBotUsernameInvalid    = errors.New("bot username invalid")
+	ErrBotRecipientForbidden = errors.New("bot recipient is not eligible")
+	ErrBotBlockedByUser      = errors.New("user blocked bot")
+	botUsernameRE            = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{1,31}$`)
 )
 
 // BotAccount is the public profile created by an operator.

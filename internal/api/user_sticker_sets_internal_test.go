@@ -16,7 +16,7 @@ func TestUserStickerSetListSummaryAvoidsItemProjectionAllocations(t *testing.T) 
 	installedAt := time.Unix(1_720_000_000, 0)
 	set := store.UserStickerSet{
 		ID: 42, AccessHash: 73, CreatorID: 9, Title: "Stars", ShortName: "stars",
-		Kind: "emojis", TextColor: true,
+		Kind: "emojis", TextColor: true, ItemCount: 200, Hash: 123,
 	}
 	items := make([]store.UserStickerSetItem, 200)
 	for i := range items {

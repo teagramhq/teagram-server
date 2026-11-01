@@ -61,6 +61,11 @@ update. The installer keeps a changed prior file at
 is root-only mode 0700. Older commits without the tracked file leave the
 installed command in place.
 
+The `run` verb is a root dispatch, not a general Git script runner. It accepts
+only `target-failure-report` and `rollout-evidence`; an older `main` SHA cannot
+reactivate a removed operation. Any new operation must be added to the
+dispatcher allowlist and its forced-command fixture tests.
+
 There is no staging LXC. The preview gate is `deploy/teagram/test-deploy-main.sh`
 plus the forced-command fixture suite in CI; these verify the installed bytes,
 permissions, and rollback copy without applying changes to the live host. To
@@ -70,14 +75,6 @@ prefix printed by the deploy and run as root on the LXC:
 ```sh
 install -o root -g root -m 0700 /root/teagram-ops-before-<7-char-sha> /usr/local/sbin/teagram-ops
 ```
-
-After a successful deploy, `ssh teagram run <deployed-sha> replay-check
-<target-sha>` replays the target's runner verifier against the live container.
-The target SHA must be on `origin/main` and match the live image revision. The
-readiness evidence stays in a root-owned mode-0700 directory under `/tmp`; the
-verifier's transient private directory under `/root` is removed after the
-validated readiness files are copied. The command prints the `/tmp` evidence
-directory with its result.
 
 For a failed target rollout, the read-only `target-failure-report` operation
 prints the validated failure marker, readiness counters and schema gate summary
@@ -103,24 +100,6 @@ successful CI push run), or from a checkout of `main`:
 ```sh
 ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh
 ```
-
-## Read-only Compose preflight replay
-
-After `preflight-replay` is merged to `main`, compare a reviewed PR head with
-the live baseline using the forced ops command:
-
-```sh
-ssh teagram run <merge-sha> preflight-replay <pr-head-sha>
-```
-
-The command follows the running `teagramd` container's Compose file label and
-uses the live `.env` and override in private temporary checkouts to build
-redacted snapshots. It then loads the PR head's verifier and runs its
-comparison as uid 65534 in a minimal chroot containing the snapshots, the PR
-scripts and required shell tools; the chroot has no host paths, Docker socket,
-or credentials. The host requires a `chroot` command that can set the uid and
-gid for its child. The command prints only `field<TAB>result` rows. Every row
-must be `pass`; for PR #870, post the rows on MAIN-2563.
 
 `teagramd` uses the host's BusyBox syslog socket, with `tag=teagramd`. The
 deploy installs `deploy/teagram/syslog.conf` as `/etc/conf.d/syslog` before

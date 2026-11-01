@@ -11,6 +11,205 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const channelHistoryUsersForViewer = `-- name: ChannelHistoryUsersForViewer :many
+WITH candidate_ids AS MATERIALIZED (
+    SELECT candidate.id, candidate.ordinality
+    FROM UNNEST($2::bigint[]) WITH ORDINALITY AS candidate(id, ordinality)
+), entitled_ids AS MATERIALIZED (
+    SELECT $1::bigint AS id
+    WHERE $1::bigint = ANY($2::bigint[])
+    UNION
+    SELECT dialog.peer_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = $1::bigint
+      AND dialog.peer_type = 1
+      AND dialog.peer_id = ANY($2::bigint[])
+    UNION
+    SELECT dialog.owner_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = ANY($2::bigint[])
+      AND dialog.peer_type = 1
+      AND dialog.peer_id = $1::bigint
+    UNION
+    SELECT peer.user_id
+    FROM chat_participants AS viewer
+    JOIN chat_participants AS peer ON viewer.chat_id = peer.chat_id
+    WHERE viewer.user_id = $1::bigint
+      AND peer.user_id = ANY($2::bigint[])
+    UNION
+    SELECT member.user_id
+    FROM channel_participants AS viewer
+    JOIN channel_participants AS member ON viewer.channel_id = member.channel_id
+    WHERE viewer.user_id = $1::bigint
+      AND member.user_id = ANY($2::bigint[])
+      AND (viewer.banned_until IS NULL OR viewer.banned_until <= now())
+      AND (member.banned_until IS NULL OR member.banned_until <= now())
+)
+SELECT u.id,
+       u.phone,
+       u.first_name,
+       u.last_name,
+       u.created_at,
+       u.is_online,
+       u.last_seen_at,
+       un.handle AS username,
+       u.kind,
+       (entitled.id IS NOT NULL)::boolean AS entitled,
+       (viewer_contact.contact_id IS NOT NULL)::boolean AS has_contact,
+       COALESCE(reverse_contact.owner_id IS NOT NULL, false)::boolean AS mutual_contact,
+       COALESCE(owner_rule.base_rule, 'everybody')::text AS owner_base_rule,
+       EXISTS (
+           SELECT 1 FROM blocked_users blocked
+           WHERE blocked.blocker_id = u.id
+             AND blocked.blocked_id = $1::bigint
+       ) AS owner_blocked,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users rule_user
+           WHERE rule_user.owner_id = u.id
+             AND rule_user.privacy_key = 'status_timestamp'
+             AND rule_user.user_id = $1::bigint
+             AND rule_user.entry_type = 'disallow'
+       ) AS owner_disallowed,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users rule_user
+           WHERE rule_user.owner_id = u.id
+             AND rule_user.privacy_key = 'status_timestamp'
+             AND rule_user.user_id = $1::bigint
+             AND rule_user.entry_type = 'allow'
+       ) AS owner_allowed,
+       EXISTS (
+           SELECT 1 FROM user_contacts contact
+           WHERE contact.owner_id = u.id
+             AND contact.contact_id = $1::bigint
+       ) AS owner_contact,
+       COALESCE((
+           EXISTS (
+               SELECT 1 FROM blocked_users blocked
+               WHERE blocked.blocker_id = $1::bigint
+                 AND blocked.blocked_id = u.id
+           )
+           OR EXISTS (
+               SELECT 1 FROM user_privacy_rules viewer_rule
+               WHERE viewer_rule.owner_id = $1::bigint
+                 AND viewer_rule.privacy_key = 'status_timestamp'
+                 AND (
+                     EXISTS (
+                         SELECT 1 FROM user_privacy_rule_users rule_user
+                         WHERE rule_user.owner_id = $1::bigint
+                           AND rule_user.privacy_key = 'status_timestamp'
+                           AND rule_user.user_id = u.id
+                           AND rule_user.entry_type = 'disallow'
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1 FROM user_privacy_rule_users rule_user
+                             WHERE rule_user.owner_id = $1::bigint
+                               AND rule_user.privacy_key = 'status_timestamp'
+                               AND rule_user.user_id = u.id
+                               AND rule_user.entry_type = 'allow'
+                         )
+                         AND (
+                             viewer_rule.base_rule = 'nobody'
+                             OR (
+                                 viewer_rule.base_rule = 'contacts'
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM user_contacts contact
+                                     WHERE contact.owner_id = $1::bigint
+                                       AND contact.contact_id = u.id
+                                 )
+                             )
+                         )
+                     )
+                 )
+           )
+       ), false)::boolean AS viewer_hides_from_owner
+FROM candidate_ids AS candidate
+JOIN users AS u ON u.id = candidate.id
+LEFT JOIN usernames AS un
+  ON un.owner_type = 'user'
+ AND un.owner_id = u.id
+LEFT JOIN entitled_ids AS entitled ON entitled.id = u.id
+LEFT JOIN user_contacts AS viewer_contact
+  ON viewer_contact.owner_id = $1::bigint
+ AND viewer_contact.contact_id = u.id
+LEFT JOIN user_contacts AS reverse_contact
+  ON reverse_contact.owner_id = u.id
+ AND reverse_contact.contact_id = $1::bigint
+LEFT JOIN user_privacy_rules AS owner_rule
+  ON owner_rule.owner_id = u.id
+ AND owner_rule.privacy_key = 'status_timestamp'
+ORDER BY candidate.ordinality
+`
+
+type ChannelHistoryUsersForViewerParams struct {
+	ViewerID int64
+	Ids      []int64
+}
+
+type ChannelHistoryUsersForViewerRow struct {
+	ID                   int64
+	Phone                *string
+	FirstName            string
+	LastName             string
+	CreatedAt            pgtype.Timestamptz
+	IsOnline             bool
+	LastSeenAt           pgtype.Timestamptz
+	Username             *string
+	Kind                 string
+	Entitled             bool
+	HasContact           bool
+	MutualContact        bool
+	OwnerBaseRule        string
+	OwnerBlocked         bool
+	OwnerDisallowed      bool
+	OwnerAllowed         bool
+	OwnerContact         bool
+	ViewerHidesFromOwner bool
+}
+
+// Channel history always returns the same profile query shape regardless of
+// the number of distinct authors in its page. Entitlement, contacts and last
+// seen privacy are evaluated together so a page written by the viewer does
+// not skip statements that a page by many members needs.
+func (q *Queries) ChannelHistoryUsersForViewer(ctx context.Context, arg ChannelHistoryUsersForViewerParams) ([]ChannelHistoryUsersForViewerRow, error) {
+	rows, err := q.db.Query(ctx, channelHistoryUsersForViewer, arg.ViewerID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelHistoryUsersForViewerRow
+	for rows.Next() {
+		var i ChannelHistoryUsersForViewerRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Phone,
+			&i.FirstName,
+			&i.LastName,
+			&i.CreatedAt,
+			&i.IsOnline,
+			&i.LastSeenAt,
+			&i.Username,
+			&i.Kind,
+			&i.Entitled,
+			&i.HasContact,
+			&i.MutualContact,
+			&i.OwnerBaseRule,
+			&i.OwnerBlocked,
+			&i.OwnerDisallowed,
+			&i.OwnerAllowed,
+			&i.OwnerContact,
+			&i.ViewerHidesFromOwner,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createUsernameUser = `-- name: CreateUsernameUser :one
 INSERT INTO users (phone, login_mode, first_name, last_name)
 VALUES (NULL, 'username', $1, $2)

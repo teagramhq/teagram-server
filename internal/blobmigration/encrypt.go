@@ -76,6 +76,7 @@ func (s plaintextOnlyStore) Walk(ctx context.Context, fn func(blob.Entry) error)
 type progressHeader struct {
 	Type          string `json:"type"`
 	Schema        string `json:"schema"`
+	Mode          string `json:"mode,omitempty"`
 	Writes        string `json:"writes"`
 	KeyVersion    uint32 `json:"key_version"`
 	ReferencesSHA string `json:"references_sha256"`
@@ -88,6 +89,7 @@ type progressEvent struct {
 	ID           string `json:"id,omitempty"`
 	LogicalBytes int64  `json:"logical_bytes,omitempty"`
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	TargetSalt   string `json:"target_salt,omitempty"`
 	State        string `json:"state,omitempty"`
 }
 
@@ -96,6 +98,7 @@ type progressObject struct {
 	ID           string
 	LogicalBytes int64
 	SourceSHA256 string
+	TargetSalt   string
 	State        string
 }
 
@@ -770,8 +773,10 @@ func openProgress(path string, expected progressHeader, requireExisting bool) (*
 	if err := json.Unmarshal(lines[0], &header); err != nil || header.Type != "header" {
 		return closeProgressError(journal, errors.New("progress journal header is invalid"))
 	}
-	if header.Type != expected.Type || header.Schema != expected.Schema || header.Writes != expected.Writes ||
-		header.KeyVersion != expected.KeyVersion || !validDigest(header.ReferencesSHA) {
+	if header.Type != expected.Type || header.Schema != expected.Schema || header.Mode != expected.Mode || header.Writes != expected.Writes ||
+		header.KeyVersion != expected.KeyVersion ||
+		(expected.ReferencesSHA == "" && header.ReferencesSHA != "") ||
+		(expected.ReferencesSHA != "" && !validDigest(header.ReferencesSHA)) {
 		return closeProgressError(journal, errors.New("progress journal does not match the current write mode or media key"))
 	}
 	journal.header = header
@@ -785,7 +790,7 @@ func openProgress(path string, expected progressHeader, requireExisting bool) (*
 		}
 		journal.objects[event.Key] = progressObject{
 			Kind: event.Kind, ID: event.ID, LogicalBytes: event.LogicalBytes,
-			SourceSHA256: event.SourceSHA256, State: event.State,
+			SourceSHA256: event.SourceSHA256, TargetSalt: event.TargetSalt, State: event.State,
 		}
 	}
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
@@ -804,7 +809,17 @@ func closeProgressError(journal *progressJournal, err error) (*progressJournal, 
 func validateProgressEvent(event progressEvent) error {
 	if err := blob.ValidateKey(event.Key); err != nil ||
 		(event.Kind != "file" && event.Kind != "part") || event.ID == "" ||
-		event.LogicalBytes < 0 || !validDigest(event.SourceSHA256) ||
+		event.LogicalBytes < 0 {
+		return errors.New("progress journal contains an invalid object record")
+	}
+	if event.TargetSalt != "" {
+		if event.SourceSHA256 != "" || !validSaltID(event.TargetSalt) ||
+			(event.State != "prepared" && event.State != "verified") {
+			return errors.New("progress journal contains an invalid object record")
+		}
+		return nil
+	}
+	if !validDigest(event.SourceSHA256) ||
 		(event.State != "started" && event.State != "verified" && event.State != "cleaned") {
 		return errors.New("progress journal contains an invalid object record")
 	}
@@ -817,6 +832,14 @@ func validDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil && strings.ToLower(value) == value
+}
+
+func validSaltID(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 func (j *progressJournal) writeHeader() error {
@@ -845,6 +868,28 @@ func (j *progressJournal) record(ref blobinventory.Reference, sourceDigest, stat
 	j.objects[ref.Key] = progressObject{
 		Kind: ref.Kind, ID: ref.ID, LogicalBytes: ref.LogicalBytes,
 		SourceSHA256: sourceDigest, State: state,
+	}
+	return nil
+}
+
+func (j *progressJournal) recordRotation(ref blobinventory.Reference, targetSalt, state string) error {
+	event := progressEvent{
+		Type: "object", Key: ref.Key, Kind: ref.Kind, ID: ref.ID,
+		LogicalBytes: ref.LogicalBytes, TargetSalt: targetSalt, State: state,
+	}
+	if err := validateProgressEvent(event); err != nil {
+		return err
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode rotation progress event: %w", err)
+	}
+	if err := j.writeLine(data); err != nil {
+		return err
+	}
+	j.objects[ref.Key] = progressObject{
+		Kind: ref.Kind, ID: ref.ID, LogicalBytes: ref.LogicalBytes,
+		TargetSalt: targetSalt, State: state,
 	}
 	return nil
 }

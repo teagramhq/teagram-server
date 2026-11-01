@@ -41,10 +41,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: teagram
       PGDATA: /var/lib/postgresql/18/docker
-    # Match the reviewed 2-vCPU / 4-GiB LXC settings. The mixed-trust overlay
-    # runs three teagramd processes with 8 pool connections plus 1 LISTEN
-    # connection each (27 total), then 1 migration, 1 maintenance, and 10 for
-    # administration and operational headroom: 39, rounded up to 40.
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     # An open port is not readiness: Postgres accepts connections during its own
     # init and then drops them. migrate waits on this instead of racing it.
@@ -236,6 +232,47 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  # One-time encrypted-media key rotation. The authority is read-only: this
+  # operator rewraps objects but never publishes or changes blob-mode authority.
+  blob-key-rotate:
+    image: teagramd:local
+    entrypoint: ["/usr/local/bin/blob-key-rotate"]
+    user: "0:0"
+    read_only: true
+    environment:
+      TG_POSTGRES_DSN: *dsn
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
+      <<: [*blob-s3, *media-keys]
+    secrets:
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
+    volumes:
+      - tgkey:/var/lib/teagramd:ro
+      - type: bind
+        source: ./.state/blob-mode
+        target: /run/teagramd/blob-mode
+        read_only: true
+        bind:
+          create_host_path: false
+      - blob_key_rotate_reports:/run/teagramd/reports
+      - type: bind
+        source: ${TEAGRAM_MEDIA_KEY_SOURCE_DIR:-/etc/teagramd/media-keys}
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind:
+          create_host_path: false
+    profiles: ["migration"]
+    networks:
+      - default
+      - rustfs_private
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+
   teagramd:
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done
@@ -273,6 +310,9 @@ services:
       # key; serving never generates an RSA identity or a pinned master key.
       TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      # Profile replicas must inherit an operator override applied to the base
+      # service after Compose resolves `extends`.
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
       # Interpolated, not hardcoded: the default is the tgkey volume, and an
       # operator who sets the variable in .env gets their path instead. Point it
       # outside /var/lib/teagramd or /var/lib/teagramd-blobs and the server
@@ -286,23 +326,27 @@ services:
       # while creating the first account through auth.signUp, then change it
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
-      # The separately bound public WebSocket endpoint is disabled by default
-      # and keeps sign-up closed unless its own policy is configured.
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}
-      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: ${TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:-}
+      TG_TURNSTILE_TEST_MODE: ${TG_TURNSTILE_TEST_MODE:-false}
+      TG_TURNSTILE_HOSTNAMES: "${TG_TURNSTILE_HOSTNAMES:-web.teagram.io}"
+      # User-issued invites stay disabled unless the operator sets a quota.
+      TG_USER_INVITE_QUOTA: ${TG_USER_INVITE_QUOTA:-}
+      # Public WebSocket traffic is served by the isolated proxy-trust replica
+      # below. The socket-trust listener never binds or advertises that route.
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ""
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: ""
       TG_PUBLIC_REGISTRATION: ${TG_PUBLIC_REGISTRATION:-closed}
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
       TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
-      # Keep the Compose deployment count aligned across the legacy listener
-      # and any explicitly enabled replacement replicas. The default remains
-      # the existing single-replica behavior.
+      # Keep the base socket-trust listener at its own process-local budget.
+      # Public replicas set their count independently below.
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
       # Public auth Turnstile is optional on this stack. Only the app-facing
       # site key and mounted-file path enter the container; the host secret
       # source path stays on the Compose side.
       TG_TURNSTILE_SITE_KEY: ${TEAGRAM_TURNSTILE_SITE_KEY:-}
       TG_TURNSTILE_SECRET_KEY_FILE: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:+/run/secrets/teagramd-turnstile}
+      TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
       TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
@@ -326,9 +370,7 @@ services:
       # DNAT rule the host firewall never sees, so "2443:2443" would hand this
       # server to the whole network the laptop is on.
       - "127.0.0.1:2443:2443"
-      # The public WebSocket listener is reached through the host-side tunnel.
-      - "127.0.0.1:2446:2446"
-    # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
+    # TG_LISTEN_ADDR stays unset. TG_ADVERTISE_ADDR stays empty unless configured.
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
     # which is right for this stack: the only client is on the host and arrives
@@ -365,6 +407,105 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  # The public tunnel uses its own listener and database-backed per-network
+  # budgets. Only HAProxy is attached to public-ingress; the replica accepts
+  # PROXY v2 only from HAProxy's fixed address on public-backend.
+  teagramd-public-1:
+    extends:
+      service: teagramd
+    profiles: [public]
+    environment:
+      TG_CLIENT_ADDR_TRUST: proxy-v2
+      TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
+      TG_REPLICA_ID: public-1
+      TG_REPLICA_COUNT: "3"
+      TG_WEBSOCKET_LISTEN_ADDR: ""
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ""
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: ${TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:-}
+    ports: !override []
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+      public-haproxy:
+        condition: service_started
+    networks:
+      default: {}
+      rustfs_private: {}
+      public-backend:
+        aliases:
+          - teagramd-public
+        ipv4_address: 198.18.132.21
+
+  teagramd-public-2:
+    extends:
+      service: teagramd
+    profiles: [public]
+    environment:
+      TG_CLIENT_ADDR_TRUST: proxy-v2
+      TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-}
+      TG_REPLICA_ID: public-2
+      TG_REPLICA_COUNT: "3"
+      TG_WEBSOCKET_LISTEN_ADDR: ""
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ""
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: ${TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:-}
+    ports: !override []
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+      public-haproxy:
+        condition: service_started
+    networks:
+      default: {}
+      rustfs_private: {}
+      public-backend:
+        aliases:
+          - teagramd-public
+        ipv4_address: 198.18.132.22
+
+  public-haproxy:
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    profiles: [public]
+    restart: unless-stopped
+    stop_grace_period: 120s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "127.0.0.1:2446:2446"
+    volumes:
+      - ./deploy/teagramd/haproxy-public-websocket.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      teagramd:
+        condition: service_started
+    networks:
+      public-ingress:
+        ipv4_address: 198.18.131.10
+      public-backend:
+        ipv4_address: 198.18.132.10
+
 volumes:
   pgdata:
   tgkey:
@@ -372,6 +513,9 @@ volumes:
   # default S3 render mounts it read-only; the local overlay writes it.
   tgblobs:
   rustfsdata:
+  blob_key_rotate_reports:
+    name: teagram_blob_key_rotate_reports
+    driver: local
 
 networks:
   # `internal` blocks external routing from attached containers. The isolated
@@ -383,6 +527,24 @@ networks:
     enable_ipv6: false
     driver_opts:
       com.docker.network.bridge.gateway_mode_ipv4: isolated
+  public-ingress:
+    driver: bridge
+    # Host-side cloudflared reaches HAProxy through its loopback-published
+    # port. An internal bridge prevents Docker from installing that mapping.
+    internal: false
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 198.18.131.0/24
+          gateway: 198.18.131.1
+  public-backend:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 198.18.132.0/24
+          gateway: 198.18.132.1
 
 secrets:
   rustfs_root_access_key:

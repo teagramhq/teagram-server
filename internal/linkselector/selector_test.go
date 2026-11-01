@@ -89,6 +89,46 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 	}
 }
 
+func TestInvitePathUsesLandingAndDropsQuery(t *testing.T) {
+	var webRequests, landingRequests []observedRequest
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests = append(webRequests, observeRequest(t, r))
+		writeTestResponse(t, w, webBody)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(recordingLanding(t, &landingRequests))
+	t.Cleanup(landing.Close)
+	var logs bytes.Buffer
+	handler := newSelector(t, web.URL, landing.URL, slog.New(slog.NewJSONHandler(&logs, nil)))
+	request := rawRequest(http.MethodGet, "/invite?tracking=query-marker", "")
+	request.Header.Set("Referer", "https://links.example.test/invite#referrer-marker")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Create account on Teagram Web") {
+		t.Fatalf("invite route response = %d %q, want invite landing page; landing requests=%+v logs=%s", response.Code, response.Body.String(), landingRequests, logs.String())
+	}
+	if strings.Contains(response.Body.String(), "query-marker") {
+		t.Errorf("invite response echoed query data")
+	}
+	if len(landingRequests) != 1 || landingRequests[0].requestURI != "/invite" {
+		t.Errorf("landing requests = %+v, want only /invite without query", landingRequests)
+	}
+	if len(webRequests) != 0 {
+		t.Errorf("invite route reached Web: %+v", webRequests)
+	}
+	for _, marker := range []string{"query-marker", "referrer-marker"} {
+		if strings.Contains(logs.String(), marker) {
+			t.Errorf("selector logs contain request marker %q: %s", marker, logs.String())
+		}
+	}
+	if got := response.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
 func TestRetiredWebVersionAliasReturnsNotFound(t *testing.T) {
 	var webRequests, landingRequests []observedRequest
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -471,6 +511,8 @@ func TestCanceledUpstreamOperationReturnsFixedFailure(t *testing.T) {
 }
 
 func TestNewHandlerRejectsUpstreamsWithRequestData(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	for _, badURL := range []string{"", "/relative", "ftp://web.example", "http://user:pass@web.example", "http://web.example/base", "http://web.example/?secret=1", "http://web.example/#fragment"} {
 		if _, err := linkselector.NewHandler(badURL, "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("NewHandler accepted unsafe Web upstream %q", badURL)
@@ -482,6 +524,8 @@ func TestNewHandlerRejectsUpstreamsWithRequestData(t *testing.T) {
 }
 
 func TestSelectorSmokeHappyPath(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'")
 		writeTestResponse(t, w, "smoke-web-resource")
@@ -502,10 +546,16 @@ func TestSelectorSmokeHappyPath(t *testing.T) {
 	if landingResponse.Code != http.StatusOK || landingResponse.Body.String() != landingBody {
 		t.Fatalf("landing smoke response = %d %q", landingResponse.Code, landingResponse.Body.String())
 	}
+	inviteResponse := serveTarget(handler, http.MethodGet, "/invite", "")
+	if inviteResponse.Code != http.StatusOK || !strings.Contains(inviteResponse.Body.String(), "Create account on Teagram Web") {
+		t.Fatalf("invite smoke response = %d %q", inviteResponse.Code, inviteResponse.Body.String())
+	}
 }
 
 func newSelector(t *testing.T, webURL, landingURL string, logger *slog.Logger) http.Handler {
 	t.Helper()
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	handler, err := linkselector.NewHandler(webURL, landingURL, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -515,6 +565,8 @@ func newSelector(t *testing.T, webURL, landingURL string, logger *slog.Logger) h
 
 func recordingLanding(t *testing.T, requests *[]observedRequest) http.Handler {
 	t.Helper()
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	landing := linklanding.NewHandler(slog.New(slog.DiscardHandler))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requests != nil {

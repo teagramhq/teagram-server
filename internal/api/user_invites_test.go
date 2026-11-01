@@ -395,7 +395,7 @@ func newUserInviteTestHandler(s *store.Store, mode config.RegistrationMode, quot
 		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{}, mode, api.NewDialogFilterSync(), nil, config.DefaultUploadPartTTL,
 		"", nil, "", false, config.RecoveryEmailOff, config.DefaultSignUpTermsOfService,
-		nil, config.StickerImportOn, quota, minAge,
+		nil, config.StickerImportOn, quota, minAge, false,
 	)
 }
 

@@ -9,6 +9,8 @@ run_phase_command() {
   local phase="$1" image
   case "$phase" in
     build)
+      export TG_INVITE_WEB_SIGNUP_URL=https://web.example.invalid/signup
+      export TG_INVITE_DESKTOP_URL=
       env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
       ;;
     label-check)

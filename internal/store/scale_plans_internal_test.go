@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,7 +192,15 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, exclude := range []bool{false, true} {
-			if _, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+			if offset == 0 {
+				if _, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
+					OwnerID: 42, ExcludePinned: exclude, Lim: 5,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if _, err := q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{
 				OwnerID: 42, OffsetID: offset, ExcludePinned: exclude, Lim: 5,
 			}); err != nil {
 				t.Fatal(err)
@@ -339,7 +348,7 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 	}
 	defer traced.Close()
 	q := db.New(traced)
-	page, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+	page, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{
 		OwnerID: 1, Lim: 100,
 	})
 	if err != nil {
@@ -398,7 +407,7 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 				t.Fatalf("dialog query sequentially scans dialogs: %s", raw)
 			}
 		}
-		if strings.Contains(query.SQL, "DialogsForOwnerWithPins") {
+		if strings.Contains(query.SQL, "DialogsFirstPageWithPins") {
 			if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 100 {
 				t.Fatalf("dialog page reads %.0f rows for 100 returned dialogs", rows)
 			}
@@ -406,6 +415,91 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 		}
 		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
 			t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
+		}
+	}
+}
+
+// A pooled connection switches a prepared statement to its generic plan after
+// five executions, so the dialog page queries must stay bounded there too.
+func TestDialogPagesWithPinsGenericPlansReadOnlyThePage(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, pgtest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+generic-dialogs' || n, 'Generic ' || n FROM generate_series(1, 5000) n`,
+		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		 SELECT 1, 1, n, n FROM generate_series(2, 5000) n`,
+		`ANALYZE dialogs`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed generic dialog plan: %v", err)
+		}
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(pgtest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	q := db.New(traced)
+	if _, err := q.DialogsFirstPageWithPins(ctx, db.DialogsFirstPageWithPinsParams{OwnerID: 1, Lim: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.DialogsCursorPageWithPins(ctx, db.DialogsCursorPageWithPinsParams{OwnerID: 1, OffsetID: 4000, Lim: 20}); err != nil {
+		t.Fatal(err)
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("dialog page query count = %d, want 2", len(queries))
+	}
+	firstSQL, cursorSQL := queries[0].SQL, queries[1].SQL
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatal(err)
+	}
+	for _, page := range []struct {
+		name, sql, args string
+	}{
+		{"first", firstSQL, "(1, false, 20)"},
+		{"first excluding pinned", firstSQL, "(1, true, 20)"},
+		{"cursor", cursorSQL, "(1, 4000, 0, 0, false, 20)"},
+		{"cursor tie", cursorSQL, "(1, 4000, 1, 3999, true, 20)"},
+	} {
+		statement := "generic_dialogs_" + strings.ReplaceAll(page.name, " ", "_")
+		if _, err := conn.Exec(ctx, "PREPARE "+statement+" AS "+page.sql); err != nil {
+			t.Fatalf("prepare %s page: %v", page.name, err)
+		}
+		var raw []byte
+		if err := conn.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE "+statement+page.args,
+			pgx.QueryExecModeSimpleProtocol).Scan(&raw); err != nil {
+			t.Fatalf("explain %s page: %v", page.name, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatal(err)
+		}
+		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 40 {
+			t.Fatalf("%s page generic plan reads %.0f dialog rows for 20 returned: %s", page.name, rows, raw)
 		}
 	}
 }
@@ -481,6 +575,91 @@ func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
 	}
 	if rows := plans[0].Plan.rowsReadFrom("user_contacts"); rows > float64(2*len(ids)) {
 		t.Fatalf("contact-state query reads %.0f contact rows for %d selected users", rows, len(ids))
+	}
+}
+
+func TestLastSeenPrivacyForViewerUsesContactIDsAtLargeUserScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, query := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-user-scale' || n, 'Scale ' || n FROM generate_series(1, 115002) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 5001) n`,
+		`ANALYZE users`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatalf("seed contact privacy plan: %v", err)
+		}
+	}
+
+	contactRows, err := db.New(pool).ListContacts(ctx, 1)
+	if err != nil {
+		t.Fatalf("list contact edges: %v", err)
+	}
+	if len(contactRows) != 5000 {
+		t.Fatalf("contact edges = %d, want 5000", len(contactRows))
+	}
+	ids := make([]int64, len(contactRows))
+	for i, row := range contactRows {
+		ids[i] = row.ContactID
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	privacyRows, err := db.New(traced).EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
+		ViewerID: 1,
+		OwnerIds: ids,
+	})
+	if err != nil {
+		t.Fatalf("evaluate contact privacy: %v", err)
+	}
+	if len(privacyRows) != 5000 {
+		t.Fatalf("contact privacy rows = %d, want 5000", len(privacyRows))
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contact privacy query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contact privacy query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contact privacy query: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "users" {
+			t.Fatalf("contact privacy query sequentially scans users for caller contact ids: %s", raw)
+		}
+	}
+	if rows := plans[0].Plan.rowsReadFrom("users"); rows > 5001 {
+		t.Fatalf("contact privacy query reads %.0f users for 5000 contact ids", rows)
 	}
 }
 
@@ -624,6 +803,445 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 	if readRows > pageSize+10 {
 		t.Fatalf("date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, pageSize+10)
 	}
+}
+
+func TestHistoryPageByDateAroundReadsMiddleWindow(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-date-middle-owner', 'Owner'), (2, '+history-date-middle-peer', 'Peer')`,
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, date, message, out)
+			 SELECT 1, n, 1, 2, 1, to_timestamp(n), 'history date message', true FROM generate_series(1, 20000) n`,
+		`ANALYZE messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed middle date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+		OwnerID: 1, PeerType: 1, PeerID: 2, OffsetDate: 10001, AddOffset: -pageSize / 2, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("history page by date around: %v", err)
+	}
+	if len(rows) != pageSize || rows[0].LocalID != 10050 || rows[len(rows)-1].LocalID != 9951 {
+		t.Fatalf("middle date history page = %d rows from %d to %d, want %d rows from 10050 to 9951", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("date history page issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain middle date history page: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode middle date history page plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("middle date history page explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFrom("messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("middle date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
+func TestChannelHistoryPageByDateReadsOnlyItsWindow(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-date-plan-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel date history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id) VALUES (1, 1)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'channel history date plan message'
+		 FROM generate_series(1, 20000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed channel date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	assertReadBound := func(label string) {
+		t.Helper()
+		recorded.mu.Lock()
+		queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+		recorded.mu.Unlock()
+		if len(queries) != 1 {
+			t.Fatalf("%s issued %d statements, want 1", label, len(queries))
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain %s: %v", label, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode %s plan: %v", label, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("%s explain returned %d plans, want 1", label, len(plans))
+		}
+		readRows := plans[0].Plan.rowsReadFrom("channel_messages")
+		if readRows > 2*pageSize+10 {
+			t.Fatalf("%s read %.0f channel rows for a %d-row page, want at most %d", label, readRows, pageSize, 2*pageSize+10)
+		}
+	}
+	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 10000, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date: %v", err)
+	}
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page returned %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 9999 || rows[len(rows)-1].LocalID != 9900 {
+		t.Fatalf("channel date history page starts at %d and ends at %d, want 9999 to 9900", rows[0].LocalID, rows[len(rows)-1].LocalID)
+	}
+
+	assertReadBound("channel date history page")
+
+	if _, err := pool.Exec(ctx, `UPDATE channel_participants SET available_min_id = 19800 WHERE channel_id = 1 AND user_id = 1`); err != nil {
+		t.Fatalf("set channel date history floor: %v", err)
+	}
+	recorded.mu.Lock()
+	recorded.queries = nil
+	recorded.mu.Unlock()
+	rows, err = db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 10000, AddOffset: -pageSize, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date with hidden pre-history: %v", err)
+	}
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page with hidden pre-history returned %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 19900 || rows[len(rows)-1].LocalID != 19801 {
+		t.Fatalf("channel date history page with hidden pre-history starts at %d and ends at %d, want 19900 to 19801", rows[0].LocalID, rows[len(rows)-1].LocalID)
+	}
+	assertReadBound("channel date history page with hidden pre-history")
+}
+
+func TestChannelHistoryPageByDateReadsOnlyItsWindowWithExpiredBacklog(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-date-expired-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel date expired history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id, available_min_id) VALUES (1, 1, 25000)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'channel history hidden post'
+		 FROM generate_series(1, 25000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel history post', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(25001, 29000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'live channel history post'
+		 FROM generate_series(29001, 30000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed expired channel date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 20000, AddOffset: -pageSize, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date with expired backlog: %v", err)
+	}
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page with expired backlog returned %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 29100 || rows[len(rows)-1].LocalID != 29001 {
+		t.Fatalf("channel date history page with expired backlog starts at %d and ends at %d, want 29100 to 29001", rows[0].LocalID, rows[len(rows)-1].LocalID)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("expired backlog date history issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain expired backlog date history: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode expired backlog date history plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expired backlog date history explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFrom("channel_messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("expired backlog date history read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
+func TestChannelHistoryPageByDateShiftSkipsExpiredRows(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-date-shift-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel date shifted history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id) VALUES (1, 1)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'live channel history post'
+		 FROM generate_series(1, 1000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel history post', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(1001, 5000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, statement_timestamp() - interval '1 day', 'live channel history post', 604800,
+		        statement_timestamp() + interval '6 days'
+		 FROM generate_series(5001, 7000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed shifted expired channel date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 1000, AddOffset: -pageSize - 1, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date with shifted expired backlog: %v", err)
+	}
+	if len(rows) != pageSize || rows[0].LocalID != 5100 || rows[len(rows)-1].LocalID != 5001 {
+		t.Fatalf("shifted channel date history page = %d rows from %d to %d, want 100 rows from 5100 to 5001", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("shifted expired backlog date history issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain shifted expired backlog date history: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode shifted expired backlog date history plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("shifted expired backlog date history explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFrom("channel_messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("shifted expired backlog date history read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
+func TestChannelHistoryPageByDateBoundsOlderOffsetsAndExpiredTail(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-older-offset-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel older offset history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id) VALUES (1, 1)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'live older channel post'
+		 FROM generate_series(1, 1000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel post before anchor', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(1001, 5000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, statement_timestamp() - interval '1 day', 'live channel post before tail', 604800,
+		        statement_timestamp() + interval '6 days'
+		 FROM generate_series(5001, 6999) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 VALUES (1, 7000, 1, statement_timestamp(), 'latest live channel post', 604800,
+		         statement_timestamp() + interval '7 days')`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel tail post', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(7001, 11000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed older-offset expired channel date history: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	runPage := func(label string, offsetDate, addOffset int64, firstID, lastID int64) {
+		t.Helper()
+		recorded.mu.Lock()
+		recorded.queries = nil
+		recorded.mu.Unlock()
+		rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+			ChannelID: 1, OwnerID: 1, OffsetDate: offsetDate, AddOffset: addOffset, Lim: pageSize,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if len(rows) != pageSize || rows[0].LocalID != firstID || rows[len(rows)-1].LocalID != lastID {
+			t.Fatalf("%s returned %d rows from %d to %d, want %d rows from %d to %d", label, len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize, firstID, lastID)
+		}
+
+		recorded.mu.Lock()
+		queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+		recorded.mu.Unlock()
+		if len(queries) != 1 {
+			t.Fatalf("%s issued %d statements, want 1", label, len(queries))
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain %s: %v", label, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode %s plan: %v", label, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("%s explain returned %d plans, want 1", label, len(plans))
+		}
+		readRows := plans[0].Plan.rowsReadFrom("channel_messages")
+		if readRows > 2*pageSize+10 {
+			t.Fatalf("%s read %.0f channel rows for a %d-row page, want at most %d", label, readRows, pageSize, 2*pageSize+10)
+		}
+	}
+
+	now := time.Now()
+	runPage("positive offset skips expired backlog", now.Add(-48*time.Hour).Unix(), pageSize, 900, 801)
+	runPage("positive offset includes nearest older TTL post", now.Add(-12*time.Hour).Unix(), 1, 6998, 6899)
+	runPage("negative shift beyond the date anchor uses visible tail", now.Add(-12*time.Hour).Unix(), -pageSize-1, 7000, 6901)
+	runPage("date miss uses visible tail", now.Add(time.Hour).Unix(), -pageSize-1, 7000, 6901)
 }
 
 func scaleQueryError[T any](_ T, err error) error { return err }

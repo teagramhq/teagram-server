@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"strings"
 	"time"
 
@@ -43,16 +45,11 @@ type UserStickerSet struct {
 	Software   string
 	Kind       string
 	TextColor  bool
+	ItemCount  int
+	Hash       int
 	IsLive     bool
 	CreatedAt  time.Time
 	Items      []UserStickerSetItem
-}
-
-// UserStickerSetSearchCandidate is a live-set identity that must be resolved
-// with its access hash before returning it to a caller.
-type UserStickerSetSearchCandidate struct {
-	ID         int64
-	AccessHash int64
 }
 
 // UserStickerSetItem is one stored document in an account-created set.
@@ -208,6 +205,7 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		Software:   set.Software,
 		Kind:       set.Kind,
 		TextColor:  set.TextColor,
+		ItemCount:  int32(len(items)), //nolint:gosec // Sticker sets are capped at 200 items.
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -244,6 +242,16 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		item.Position = position
 		set.Items = append(set.Items, item)
 	}
+	set.Hash = userStickerSetHash(set)
+	updated, err := qtx.UpdateUserCreatedStickerSetHash(ctx, db.UpdateUserCreatedStickerSetHashParams{
+		ID: set.ID, SetHash: int32(set.Hash), //nolint:gosec // Sticker hashes are constrained to positive signed 31-bit values.
+	})
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("update user sticker set hash: %w", err)
+	}
+	if updated != 1 {
+		return UserStickerSet{}, fmt.Errorf("update user sticker set hash: updated %d rows, want 1", updated)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return UserStickerSet{}, fmt.Errorf("commit user sticker set: %w", err)
 	}
@@ -254,9 +262,34 @@ func userStickerSetFromRow(row db.UserCreatedStickerSet) UserStickerSet {
 	return UserStickerSet{
 		ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
 		Title: row.Title, ShortName: row.ShortName, Software: row.Software,
-		Kind: row.Kind, TextColor: row.TextColor, IsLive: row.IsLive,
+		Kind: row.Kind, TextColor: row.TextColor, ItemCount: int(row.ItemCount),
+		Hash: int(row.SetHash), IsLive: row.IsLive,
 		CreatedAt: row.CreatedAt.Time,
 	}
+}
+
+func userStickerSetHash(set UserStickerSet) int {
+	h := crc32.NewIEEE()
+	_, _ = h.Write([]byte(set.Title))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(set.ShortName))
+	_, _ = h.Write([]byte(set.Kind))
+	var id [8]byte
+	binary.BigEndian.PutUint64(id[:], uint64(set.ID)) //nolint:gosec // IDs are positive BIGSERIAL values.
+	_, _ = h.Write(id[:])
+	for _, item := range set.Items {
+		binary.BigEndian.PutUint64(id[:], uint64(item.FileID)) //nolint:gosec // File IDs are positive BIGSERIAL values.
+		_, _ = h.Write(id[:])
+		binary.BigEndian.PutUint64(id[:], uint64(item.AccessHash)) //nolint:gosec // Access hashes are opaque 64-bit values.
+		_, _ = h.Write(id[:])
+		_, _ = h.Write([]byte(item.Emoji))
+		_, _ = h.Write([]byte(item.Format))
+	}
+	value := int(h.Sum32() & 0x7fffffff)
+	if value == 0 {
+		return 1
+	}
+	return value
 }
 
 // UserStickerSetByShortName resolves a live set using the shared case-folded
@@ -284,66 +317,6 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
 }
 
-// UserStickerSetSearchCandidates returns at most 50 live identities matching
-// the query. Callers must bulk-resolve them before exposing any metadata.
-func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
-	if query == "" {
-		return []UserStickerSetSearchCandidate{}, nil
-	}
-	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, escapeStickerSetSearchQuery(query))
-	if err != nil {
-		return nil, fmt.Errorf("search user sticker set candidates: %w", err)
-	}
-	result := make([]UserStickerSetSearchCandidate, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, UserStickerSetSearchCandidate{ID: row.ID, AccessHash: row.AccessHash})
-	}
-	return result, nil
-}
-
-// UserStickerSetsBySearchCandidates rechecks each candidate's exact access
-// hash and live state while loading its ordered item metadata in one query.
-func (s *Store) UserStickerSetsBySearchCandidates(ctx context.Context, candidates []UserStickerSetSearchCandidate) ([]UserStickerSet, error) {
-	if len(candidates) == 0 {
-		return []UserStickerSet{}, nil
-	}
-	setIDs := make([]int64, 0, len(candidates))
-	accessHashes := make([]int64, 0, len(candidates))
-	for _, candidate := range candidates {
-		setIDs = append(setIDs, candidate.ID)
-		accessHashes = append(accessHashes, candidate.AccessHash)
-	}
-	rows, err := s.q.UserCreatedStickerSetsBySearchCandidates(ctx, db.UserCreatedStickerSetsBySearchCandidatesParams{
-		SetIds: setIDs, AccessHashes: accessHashes,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("resolve user sticker set search candidates: %w", err)
-	}
-	result := make([]UserStickerSet, 0, len(candidates))
-	for _, row := range rows {
-		if len(result) == 0 || result[len(result)-1].ID != row.ID {
-			result = append(result, UserStickerSet{
-				ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
-				Title: row.Title, ShortName: row.ShortName, Software: row.Software,
-				Kind: row.Kind, TextColor: row.TextColor, IsLive: row.IsLive,
-				CreatedAt: row.CreatedAt.Time, Items: []UserStickerSetItem{},
-			})
-		}
-		set := &result[len(result)-1]
-		set.Items = append(set.Items, UserStickerSetItem{
-			Position: int(row.Position), FileID: row.FileID, AccessHash: row.ItemAccessHash,
-			Size: row.Size, Date: row.Date.Time, Emoji: row.Emoji, Keywords: row.Keywords,
-			Format: row.Format, Width: int(row.Width), Height: int(row.Height),
-			Duration: row.DurationNs, MaskCoords: row.MaskCoords,
-		})
-	}
-	return result, nil
-}
-
-func escapeStickerSetSearchQuery(query string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
-}
-
 // UserStickerSetByInstalledID returns a live set for an account's install row.
 func (s *Store) UserStickerSetByInstalledID(ctx context.Context, id int64) (UserStickerSet, error) {
 	row, err := s.q.UserCreatedStickerSetByInstalledID(ctx, id)
@@ -356,9 +329,9 @@ func (s *Store) UserStickerSetByInstalledID(ctx context.Context, id int64) (User
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
 }
 
-// UserStickerSetsByInstalledIDs loads live installed user sets and their
-// ordered items in two bounded queries, independent of the number of IDs.
-func (s *Store) UserStickerSetsByInstalledIDs(ctx context.Context, ids []int64) (map[int64]UserStickerSet, error) {
+// UserStickerSetSummariesByInstalledIDs loads live installed user-set metadata
+// in one bounded query without reading any item rows.
+func (s *Store) UserStickerSetSummariesByInstalledIDs(ctx context.Context, ids []int64) (map[int64]UserStickerSet, error) {
 	positiveIDs := make([]int64, 0, len(ids))
 	for _, id := range ascendingUnique(ids) {
 		if id > 0 {
@@ -374,30 +347,9 @@ func (s *Store) UserStickerSetsByInstalledIDs(ctx context.Context, ids []int64) 
 	if err != nil {
 		return nil, fmt.Errorf("lookup installed user sticker sets: %w", err)
 	}
-	setIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		set := userStickerSetFromRow(row)
-		set.Items = []UserStickerSetItem{}
 		result[set.ID] = set
-		setIDs = append(setIDs, set.ID)
-	}
-	if len(setIDs) == 0 {
-		return result, nil
-	}
-
-	itemRows, err := s.q.UserCreatedStickerSetItemsBySetIDs(ctx, setIDs)
-	if err != nil {
-		return nil, fmt.Errorf("load installed user sticker set items: %w", err)
-	}
-	for _, row := range itemRows {
-		set := result[row.SetID]
-		set.Items = append(set.Items, UserStickerSetItem{
-			Position: int(row.Position), FileID: row.FileID, AccessHash: row.AccessHash,
-			Size: row.Size, Date: row.Date.Time, Emoji: row.Emoji, Keywords: row.Keywords,
-			Format: row.Format, Width: int(row.Width), Height: int(row.Height),
-			Duration: row.DurationNs, MaskCoords: row.MaskCoords,
-		})
-		result[row.SetID] = set
 	}
 	return result, nil
 }

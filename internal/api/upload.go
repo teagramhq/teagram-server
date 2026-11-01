@@ -20,6 +20,9 @@ func (h *handlers) maxFileParts() int {
 // in-flight upload under the caller's account, bounded by the per-file and
 // per-user caps the store enforces inside its transaction.
 func (h *handlers) handleSaveFilePart(r *mtproto.Request) (bin.Encoder, error) {
+	if h.uploadsDisabled {
+		return nil, errUploadsDisabled
+	}
 	var req tg.UploadSaveFilePartRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
@@ -44,6 +47,9 @@ func (h *handlers) handleSaveFilePart(r *mtproto.Request) (bin.Encoder, error) {
 // The store also checks the accumulated bytes in every save transaction, so a
 // client that changes its declared total between calls cannot exceed the cap.
 func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error) {
+	if h.uploadsDisabled {
+		return nil, errUploadsDisabled
+	}
 	var req tg.UploadSaveBigFilePartRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl

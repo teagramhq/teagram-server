@@ -11,6 +11,7 @@ on:
       - 'internal/config/**'
       - 'internal/discovery/**'
       - 'internal/keycrypt/**'
+      - 'internal/linklanding/**'
       - 'internal/mtproto/**'
       - 'internal/peerhash/**'
       - 'internal/pgtest/**'
@@ -57,7 +58,8 @@ jobs:
   # release already exists. V2 adds seed provenance; v1 caches predate that
   # metadata and cannot be published safely. PRs prefer v2, reuse v1 for
   # measurement only, and seed when both miss.
-  fixture-snapshot:
+  test-perf-fixture-snapshot:
+    name: 'test: perf-fixture-snapshot'
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 150
@@ -155,11 +157,12 @@ jobs:
             echo "Fixture snapshot setup or storage failed before measurement. Check the failed workflow step for its cause."
           } >>"$GITHUB_STEP_SUMMARY"
 
-  publish-fixture:
-    needs: fixture-snapshot
+  publish-perf-fixture:
+    name: 'publish: perf-fixture'
+    needs: test-perf-fixture-snapshot
     if: >-
       github.ref == 'refs/heads/main' &&
-      (needs.fixture-snapshot.outputs.release_exists != 'true' || needs.fixture-snapshot.outputs.release_draft == 'true')
+      (needs.test-perf-fixture-snapshot.outputs.release_exists != 'true' || needs.test-perf-fixture-snapshot.outputs.release_draft == 'true')
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     concurrency:
@@ -228,15 +231,16 @@ jobs:
 
   # Keep verification independent of publication so every main run can retry
   # anonymous downloads against an already-published release.
-  verify-fixture-release:
+  check-perf-fixture-release:
+    name: 'check: perf-fixture-release'
     needs:
-      - fixture-snapshot
-      - publish-fixture
+      - test-perf-fixture-snapshot
+      - publish-perf-fixture
     if: >-
       always() &&
       github.ref == 'refs/heads/main' &&
-      needs.fixture-snapshot.result == 'success' &&
-      (needs.publish-fixture.result == 'success' || needs.publish-fixture.result == 'skipped')
+      needs.test-perf-fixture-snapshot.result == 'success' &&
+      (needs.publish-perf-fixture.result == 'success' || needs.publish-perf-fixture.result == 'skipped')
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -253,11 +257,12 @@ jobs:
           python3 -B .github/scripts/verify_perf_fixture_release.py
           "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/perf-fixture-$FIXTURE_VERSION"
 
-  # Runs beside ci-main and finishes well inside it, so it adds no time to
+  # Runs beside test-go and finishes well inside it, so it adds no time to
   # the server's CI.
-  rpc-performance:
-    needs: fixture-snapshot
-    if: ${{ !cancelled() && needs.fixture-snapshot.result != 'failure' }}
+  test-rpc-performance:
+    name: 'test: rpc-performance'
+    needs: test-perf-fixture-snapshot
+    if: ${{ !cancelled() && needs.test-perf-fixture-snapshot.result != 'failure' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 150
     permissions:

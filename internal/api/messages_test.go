@@ -717,6 +717,123 @@ func TestHandleGetHistoryUsesOffsetDate(t *testing.T) {
 	}
 }
 
+func TestHandleGetHistoryUsesOffsetDateForAroundPage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	caller, err := s.CreateUser(ctx, "+15551292071")
+	if err != nil {
+		t.Fatalf("caller: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551292072")
+	if err != nil {
+		t.Fatalf("peer: %v", err)
+	}
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for message dates: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close message-date connection: %v", err)
+		}
+	})
+
+	messageIDs := make([]int, 7)
+	for i := range messageIDs {
+		message, _, _, _, err := s.SendMessage(ctx, caller.ID, peer.ID, fmt.Sprintf("message-%d", i+1), int64(1071+i), 0, 0)
+		if err != nil {
+			t.Fatalf("send message %d: %v", i+1, err)
+		}
+		messageIDs[i] = int(message.LocalID)
+		date := time.Unix(1_700_000_000+int64(i*60), 0).UTC()
+		if _, err := dbConn.Exec(ctx,
+			`UPDATE messages SET date = $1 WHERE owner_id = $2 AND local_id = $3`, date, caller.ID, message.LocalID); err != nil {
+			t.Fatalf("set date for message %d: %v", i+1, err)
+		}
+	}
+
+	enc, err := api.GetHistoryForTest(s, caller.ID, &tg.MessagesGetHistoryRequest{
+		Peer:       api.InputPeerUser(caller.ID, peer.ID),
+		OffsetDate: int(time.Unix(1_700_000_180, 0).Unix()),
+		AddOffset:  -3,
+		Limit:      5,
+	})
+	if err != nil {
+		t.Fatalf("getHistory: %v", err)
+	}
+	history, ok := enc.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getHistory result = %T, want *tg.MessagesMessages", enc)
+	}
+	wantIDs := []int{messageIDs[5], messageIDs[4], messageIDs[3], messageIDs[2], messageIDs[1]}
+	if len(history.Messages) != len(wantIDs) {
+		t.Fatalf("history length = %d, want %d", len(history.Messages), len(wantIDs))
+	}
+	for i, wantID := range wantIDs {
+		message, ok := history.Messages[i].(*tg.Message)
+		if !ok || message.ID != wantID {
+			t.Errorf("history message %d = %T/%v, want id %d", i, history.Messages[i], history.Messages[i], wantID)
+		}
+	}
+}
+
+func TestHandleGetHistoryUsesOffsetDateForBasicChat(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	users, chat := chatWith(t, s, "+15551292073", "+15551292074")
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for message dates: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close message-date connection: %v", err)
+		}
+	})
+
+	messageIDs := make([]int, 7)
+	for i := range messageIDs {
+		message, _, _, err := s.SendChatMessage(ctx, store.FanOut{
+			ChatID: chat.ID, FromID: users[0].ID, Text: fmt.Sprintf("message-%d", i+1), RandomID: int64(1081 + i),
+		})
+		if err != nil {
+			t.Fatalf("send chat message %d: %v", i+1, err)
+		}
+		messageIDs[i] = int(message.LocalID)
+		date := time.Unix(1_700_000_000+int64(i*60), 0).UTC()
+		if _, err := dbConn.Exec(ctx,
+			`UPDATE messages SET date = $1 WHERE owner_id = $2 AND local_id = $3`, date, users[0].ID, message.LocalID); err != nil {
+			t.Fatalf("set date for chat message %d: %v", i+1, err)
+		}
+	}
+
+	enc, err := api.GetHistoryForTest(s, users[0].ID, &tg.MessagesGetHistoryRequest{
+		Peer:       &tg.InputPeerChat{ChatID: chat.ID},
+		OffsetDate: int(time.Unix(1_700_000_180, 0).Unix()),
+		AddOffset:  -3,
+		Limit:      5,
+	})
+	if err != nil {
+		t.Fatalf("getHistory: %v", err)
+	}
+	history, ok := enc.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getHistory result = %T, want *tg.MessagesMessages", enc)
+	}
+	wantIDs := []int{messageIDs[5], messageIDs[4], messageIDs[3], messageIDs[2], messageIDs[1]}
+	if len(history.Messages) != len(wantIDs) {
+		t.Fatalf("history length = %d, want %d", len(history.Messages), len(wantIDs))
+	}
+	for i, wantID := range wantIDs {
+		message, ok := history.Messages[i].(*tg.Message)
+		if !ok || message.ID != wantID {
+			t.Errorf("history message %d = %T/%v, want id %d", i, history.Messages[i], history.Messages[i], wantID)
+		}
+	}
+}
+
 func TestHandleGetHistoryKeepsMembershipAndHydrationInOneSnapshot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

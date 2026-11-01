@@ -617,9 +617,11 @@ type NotifySettingsDifferenceCursor struct {
 }
 
 type OwnerDialogCount struct {
-	OwnerID     int64
-	DialogCount int64
-	Initialized bool
+	OwnerID                 int64
+	DialogCount             int64
+	Initialized             bool
+	DialogUnreadTotal       int64
+	DialogUnreadInitialized bool
 }
 
 type PeerSettingsBarDismissal struct {
@@ -880,6 +882,8 @@ type UserCreatedStickerSet struct {
 	Software   string
 	Kind       string
 	TextColor  bool
+	ItemCount  int32
+	SetHash    int32
 	IsLive     bool
 	CreatedAt  pgtype.Timestamptz
 }

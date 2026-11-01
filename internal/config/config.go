@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,9 @@ type Config struct {
 	// AdminListenAddr is the address the admin HTTP server binds to.
 	// Empty disables the admin server entirely.
 	AdminListenAddr string
+	// BotAPIListenAddr is the loopback or tailnet-only Bot API HTTP listener.
+	// Empty disables the listener.
+	BotAPIListenAddr string
 	// AdminOrigin is the fixed Origin accepted by admin login and logout.
 	// It is configured explicitly or derived from AdminListenAddr at startup.
 	AdminOrigin string
@@ -152,6 +156,9 @@ type Config struct {
 	// process output, and the code alone signs in any account that has no
 	// 2FA cloud password — one with a password still needs the SRP step.
 	LogLoginCodes bool
+	// LogAuthKeyUnbinds opts into logging the operation, reason, outcome, and
+	// identifiers when the server clears an auth-key binding. It defaults off.
+	LogAuthKeyUnbinds bool
 	// SessionIP controls whether client addresses are stored on authorization
 	// rows and returned by account.getAuthorizations. It defaults off.
 	SessionIP bool
@@ -177,6 +184,9 @@ type Config struct {
 	// quota per account, not a live one, and it is the number that decides
 	// whether one account can fill the disk.
 	MaxUserStorageBytes int64
+	// UploadsDisabled refuses client RPCs that accept or assemble uploaded file
+	// bytes. It defaults off so existing deployments keep their current behavior.
+	UploadsDisabled bool
 	// UploadPartTTL is how long an unassembled upload part is kept before the
 	// sweeper deletes it. Short on purpose: a real client uploads and sends
 	// within minutes, and the TTL is the term that makes worst-case retained
@@ -383,8 +393,11 @@ type Config struct {
 // protect signup when SignInEnabled is false.
 type TurnstileConfig struct {
 	SiteKey       string
-	SecretKey     string `json:"-"`
-	SignInEnabled bool   `json:"-"`
+	SecretKey     string   `json:"-"`
+	SignInEnabled bool     `json:"-"`
+	Hostnames     []string `json:"-"`
+	TestMode      bool     `json:"-"`
+	QABypassToken string   `json:"-"`
 }
 
 // Enabled reports whether the signup Siteverify gate is configured.
@@ -922,6 +935,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
 		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
+		BotAPIListenAddr:              os.Getenv("TG_BOT_API_LISTEN_ADDR"),
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
 		ReplicaCount:                  1,
@@ -972,6 +986,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		SignUpTermsOfService:    envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
 		RecoveryEmailMode:       recoveryEmailMode,
 		SessionDeviceLabels:     true,
+	}
+	if value := os.Getenv("TG_UPLOADS_DISABLED"); value != "" {
+		disabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, errors.New("TG_UPLOADS_DISABLED must be a boolean")
+		}
+		cfg.UploadsDisabled = disabled
 	}
 	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
 		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)
@@ -1242,6 +1263,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_LOG_LOGIN_CODES must be a boolean")
 		}
 		cfg.LogLoginCodes = on
+	}
+	if v := os.Getenv("TG_LOG_AUTH_KEY_UNBINDS"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, errors.New("TG_LOG_AUTH_KEY_UNBINDS must be a boolean")
+		}
+		cfg.LogAuthKeyUnbinds = on
 	}
 	if v := os.Getenv("TG_SESSION_IP"); v != "" {
 		on, err := strconv.ParseBool(v)
@@ -1738,6 +1766,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if adminErr != nil {
 		return Config{}, adminErr
 	}
+	if err := validateBotAPI(&cfg); err != nil {
+		return Config{}, err
+	}
 	cfg.AdminTokenHash = os.Getenv("TG_ADMIN_TOKEN_HASH")
 	if blobS3Configured() {
 		blobS3, err := loadBlobS3Config()
@@ -1942,14 +1973,27 @@ func loadBlobS3Secret() (string, error) {
 }
 
 var turnstileKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+var turnstileQABypassTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,256}$`)
+var turnstileTestSiteKeys = map[string]struct{}{
+	"1x00000000000000000000AA": {},
+	"2x00000000000000000000AB": {},
+}
+var turnstileTestSecrets = map[string]struct{}{
+	"1x0000000000000000000000000000000AA": {},
+	"2x0000000000000000000000000000000AA": {},
+	"3x0000000000000000000000000000000AA": {},
+}
 
-const turnstileAlwaysPassTestSecret = "1x0000000000000000000000000000000AA"
+const defaultTurnstileHostnames = "web.teagram.io"
 
 func loadTurnstileConfig() (TurnstileConfig, error) {
 	secret := os.Getenv("TG_TURNSTILE_SECRET_KEY")
 	secretFile := os.Getenv("TG_TURNSTILE_SECRET_KEY_FILE")
 	siteKey := strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY"))
+	qaBypassPathRaw := os.Getenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")
+	qaBypassPath := strings.TrimSpace(qaBypassPathRaw)
 	signInEnabled := false
+	testMode := false
 	if raw := os.Getenv("TG_TURNSTILE_SIGNIN_ENABLED"); raw != "" {
 		var err error
 		signInEnabled, err = strconv.ParseBool(raw)
@@ -1957,15 +2001,38 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED must be a boolean")
 		}
 	}
+	if raw := os.Getenv("TG_TURNSTILE_TEST_MODE"); raw != "" {
+		var err error
+		testMode, err = strconv.ParseBool(raw)
+		if err != nil {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE must be a boolean")
+		}
+	}
+	hostnames, err := loadTurnstileHostnames()
+	if err != nil {
+		return TurnstileConfig{}, err
+	}
+	if testMode && hasPublicTeagramHostname(false) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE must not be enabled on public teagram.io hostnames")
+	}
+	if qaBypassPathRaw != "" && qaBypassPath == "" {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must be a non-empty path")
+	}
+	if qaBypassPath != "" && (hasPublicTeagramHostname(true) || !hasDemoTeagramHostname()) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE is allowed only on the demo.teagram.io stack")
+	}
 	if secret != "" && secretFile != "" {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY and TG_TURNSTILE_SECRET_KEY_FILE are both set: use only one")
 	}
 	if secret == "" && secretFile == "" {
+		if qaBypassPath != "" {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE requires Siteverify credentials")
+		}
 		if signInEnabled {
 			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED requires valid TG_TURNSTILE_SITE_KEY and Siteverify credentials")
 		}
 		if siteKey == "" {
-			return TurnstileConfig{SignInEnabled: signInEnabled}, nil
+			return TurnstileConfig{SignInEnabled: signInEnabled, Hostnames: hostnames, TestMode: testMode}, nil
 		}
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY or TG_TURNSTILE_SECRET_KEY_FILE is required when TG_TURNSTILE_SITE_KEY is set")
 	}
@@ -1986,10 +2053,125 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 	if secret == "" || !turnstileKeyPattern.MatchString(secret) {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must contain only letters, digits, '_' or '-' (maximum 256 characters)")
 	}
-	if secret == turnstileAlwaysPassTestSecret {
-		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must not use Cloudflare's always-pass test secret")
+	_, testSiteKey := turnstileTestSiteKeys[siteKey]
+	_, testSecret := turnstileTestSecrets[secret]
+	if testMode {
+		if !testSiteKey || !testSecret {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_TEST_MODE requires Cloudflare test site and secret keys; use TG_TURNSTILE_SITE_KEY and TG_TURNSTILE_SECRET_KEY")
+		}
+	} else if testSiteKey || testSecret {
+		return TurnstileConfig{}, errors.New("cloudflare test keys require TG_TURNSTILE_TEST_MODE=true; check TG_TURNSTILE_SITE_KEY and TG_TURNSTILE_SECRET_KEY")
 	}
-	return TurnstileConfig{SiteKey: siteKey, SecretKey: secret, SignInEnabled: signInEnabled}, nil
+	qaBypassToken := ""
+	if qaBypassPath != "" {
+		data, err := os.ReadFile(qaBypassPath) // #nosec G304,G703 -- operator-configured QA secret path.
+		if err != nil {
+			return TurnstileConfig{}, fmt.Errorf("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: read token file: %w", err)
+		}
+		qaBypassToken = strings.TrimSpace(string(data))
+		clear(data)
+		if !turnstileQABypassTokenPattern.MatchString(qaBypassToken) {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must contain 32 to 256 letters, digits, '_' or '-'")
+		}
+		if qaBypassToken == secret {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE must not reuse the Siteverify secret")
+		}
+	}
+	return TurnstileConfig{
+		SiteKey:       siteKey,
+		SecretKey:     secret,
+		SignInEnabled: signInEnabled,
+		Hostnames:     hostnames,
+		TestMode:      testMode,
+		QABypassToken: qaBypassToken,
+	}, nil
+}
+
+func loadTurnstileHostnames() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv("TG_TURNSTILE_HOSTNAMES"))
+	if raw == "" {
+		raw = defaultTurnstileHostnames
+	}
+	seen := make(map[string]struct{})
+	hostnames := make([]string, 0)
+	for part := range strings.SplitSeq(raw, ",") {
+		hostname := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(part), "."))
+		if !validTurnstileHostname(hostname) {
+			return nil, errors.New("TG_TURNSTILE_HOSTNAMES must be a comma-separated list of DNS hostnames")
+		}
+		if _, exists := seen[hostname]; exists {
+			continue
+		}
+		seen[hostname] = struct{}{}
+		hostnames = append(hostnames, hostname)
+	}
+	return hostnames, nil
+}
+
+func validTurnstileHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			isLowercaseLetter := character >= 'a' && character <= 'z'
+			isDigit := character >= '0' && character <= '9'
+			if !isLowercaseLetter && !isDigit && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func hasPublicTeagramHostname(productionOnly bool) bool {
+	for _, hostname := range effectivePublicTeagramHostnames() {
+		if hostname == "" || !strings.HasSuffix(hostname, ".teagram.io") && hostname != "teagram.io" {
+			continue
+		}
+		if !productionOnly || hostname != "demo.teagram.io" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDemoTeagramHostname() bool {
+	return slices.Contains(effectivePublicTeagramHostnames(), "demo.teagram.io")
+}
+
+func effectivePublicTeagramHostnames() []string {
+	advertiseAddr := os.Getenv("TG_ADVERTISE_ADDR")
+	if advertiseAddr == "" {
+		advertiseAddr = os.Getenv("TG_LISTEN_ADDR")
+	}
+	values := []string{
+		advertiseAddr,
+		os.Getenv("TG_PUBLIC_LINK_PREFIX"),
+		os.Getenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"),
+	}
+	hostnames := make([]string, 0, len(values))
+	for _, value := range values {
+		hostnames = append(hostnames, configuredHostname(value))
+	}
+	return hostnames
+}
+
+func configuredHostname(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
+		return strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	}
+	if hostname, _, err := net.SplitHostPort(value); err == nil {
+		return strings.ToLower(strings.TrimSuffix(hostname, "."))
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(value, "[]"), "."))
 }
 
 // preAuthLimits resolves the bounds on what an unauthenticated connection may
@@ -2581,6 +2763,11 @@ var adminHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var replicaIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+var (
+	botAPICGNATPrefix   = netip.MustParsePrefix("100.64.0.0/10")
+	botAPITailnetPrefix = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+)
+
 func validateReplicaID(replicaID string) error {
 	if replicaID != "" && !replicaIDRe.MatchString(replicaID) {
 		return errors.New("TG_REPLICA_ID must be 1-64 characters from [A-Za-z0-9._-]")
@@ -2631,6 +2818,65 @@ func validateAdmin(cfg *Config) error {
 		return fmt.Errorf("TG_ADMIN_ORIGIN %w", err)
 	}
 	return nil
+}
+
+func validateBotAPI(cfg *Config) error {
+	addr := cfg.BotAPIListenAddr
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return errors.New("TG_BOT_API_LISTEN_ADDR must be an explicit loopback or tailnet IP literal with a port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("TG_BOT_API_LISTEN_ADDR must use a port from 1 to 65535")
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || ip.Zone() != "" {
+		return errors.New("TG_BOT_API_LISTEN_ADDR host must be an unscoped IP literal")
+	}
+	ip = ip.Unmap()
+	if !ip.IsLoopback() && !botAPICGNATPrefix.Contains(ip) && !botAPITailnetPrefix.Contains(ip) {
+		return errors.New("TG_BOT_API_LISTEN_ADDR host must be loopback, in 100.64.0.0/10, or in fd7a:115c:a1e0::/48")
+	}
+
+	for _, other := range []string{
+		cfg.ListenAddr,
+		cfg.WebSocketListenAddr,
+		cfg.PublicWebSocketListenAddr,
+		cfg.AdminListenAddr,
+	} {
+		if other != "" && botAPIAddressConflicts(ip, portNumber, other) {
+			return errors.New("TG_BOT_API_LISTEN_ADDR must not overlap another listener address")
+		}
+	}
+	return nil
+}
+
+func botAPIAddressConflicts(botIP netip.Addr, botPort int, other string) bool {
+	if other == "" {
+		return false
+	}
+	otherHost, otherPort, err := net.SplitHostPort(other)
+	if err != nil {
+		return false
+	}
+	otherPortNumber, err := strconv.Atoi(otherPort)
+	if err != nil || otherPortNumber != botPort {
+		return false
+	}
+	if otherHost == "" {
+		return true
+	}
+	otherIP, err := netip.ParseAddr(otherHost)
+	if err != nil {
+		// A same-port hostname can resolve to the Bot API address at bind time.
+		return true
+	}
+	otherIP = otherIP.Unmap()
+	return otherIP.IsUnspecified() || otherIP == botIP
 }
 
 func validateAdminOrigin(origin string) error {

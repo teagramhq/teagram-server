@@ -23,6 +23,7 @@ func FloodWaitError(seconds int) *tgerr.Error {
 var (
 	// errInputRequestInvalid rejects a request that cannot be handled as sent.
 	errInputRequestInvalid = rpcErr(400, "INPUT_REQUEST_INVALID")
+	errUploadsDisabled     = rpcErr(400, "UPLOADS_DISABLED")
 	// User invite errors are stable custom RPC errors documented with the
 	// teagram.* methods in docs/clients.md.
 	errUserInviteRegistrationClosed = rpcErr(400, "USER_INVITE_REGISTRATION_CLOSED")
@@ -116,6 +117,7 @@ var (
 	errShortNameInvalid       = rpcErr(400, "SHORT_NAME_INVALID")
 	errShortNameOccupied      = rpcErr(400, "SHORT_NAME_OCCUPIED")
 	errStickerDocumentInvalid = rpcErr(400, "STICKER_DOCUMENT_INVALID")
+	errStickerEmojiInvalid    = rpcErr(400, "STICKER_EMOJI_INVALID")
 	errStickerSetTitleInvalid = rpcErr(400, "TITLE_INVALID")
 	// errChatLinkExists rejects hiding history while a channel has a public link.
 	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")

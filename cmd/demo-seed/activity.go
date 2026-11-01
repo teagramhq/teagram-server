@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -322,8 +323,15 @@ func validateActivitySessionFile(path string) (bool, error) {
 }
 
 func runActivitySession(ctx context.Context, cfg apiConfig, options seedOptions, account accountSpec, password, sessionPath string, login bool, limiter activityRateLimiter) error {
-	client := newTelegramClientWithStorage(cfg, &session.FileStorage{Path: sessionPath})
-	err := client.Run(ctx, func(runCtx context.Context) error {
+	return runActivitySessionUsingRunner(ctx, cfg, options, account, password, sessionPath, login, limiter, runTelegramClient)
+}
+
+func runActivitySessionUsingRunner(ctx context.Context, cfg apiConfig, options seedOptions, account accountSpec, password, sessionPath string, login bool, limiter activityRateLimiter, runner telegramClientRunner) error {
+	clientOptions, err := accountClientOptions(cfg, options.endpoint, &session.FileStorage{Path: sessionPath})
+	if err != nil {
+		return fmt.Errorf("resolve activity endpoint: %w", err)
+	}
+	err = runner(ctx, clientOptions, func(runCtx context.Context, client *telegram.Client) error {
 		api := client.API()
 		if login {
 			passwordCopy := password

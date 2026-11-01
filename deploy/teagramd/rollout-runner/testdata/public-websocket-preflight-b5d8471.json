@@ -1,0 +1,82 @@
+{
+  "source": {
+    "live_base_commit": "b5d84718a4a2c0c059acb07d3875e3b212fa06d4",
+    "route_config_commit": "715e2641b06721cd34994f31d3ba3c3829905449",
+    "pull_request": 882,
+    "note": "Opaque normalized snapshot values; no live environment values or digests are stored."
+  },
+  "expected_rows": [
+    "config_sha256",
+    "env_sha256",
+    "override_sha256",
+    "stop_grace_period",
+    "compose_logging_policy",
+    "compose_log_login_codes",
+    "media_key_source",
+    "media_key_current",
+    "compose_public_ws_2446",
+    "exposure_public_ws_2446",
+    "compose_replica_count",
+    "compose_client_addr_trust"
+  ],
+  "live_pair": {
+    "baseline": {
+      "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stop_grace_period": "2m0s",
+      "compose_logging_policy": "syslog-v1",
+      "compose_log_login_codes": "false",
+      "media_key_source": "/fixture/media-keys",
+      "media_key_current": "1",
+      "compose_public_ws_2446": "true",
+      "exposure_public_ws_2446": "true",
+      "compose_replica_count": "1",
+      "compose_client_addr_trust": "socket"
+    },
+    "preflight": {
+      "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stop_grace_period": "2m0s",
+      "compose_logging_policy": "syslog-v1",
+      "compose_log_login_codes": "false",
+      "media_key_source": "/fixture/media-keys",
+      "media_key_current": "1",
+      "compose_public_ws_2446": "false",
+      "exposure_public_ws_2446": "true",
+      "compose_replica_count": "1",
+      "compose_client_addr_trust": "socket"
+    }
+  },
+  "public_pair": {
+    "baseline": {
+      "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stop_grace_period": "2m0s",
+      "compose_logging_policy": "syslog-v1",
+      "compose_log_login_codes": "false",
+      "media_key_source": "/fixture/media-keys",
+      "media_key_current": "1",
+      "compose_public_ws_2446": "true",
+      "exposure_public_ws_2446": "true",
+      "compose_replica_count": "1",
+      "compose_client_addr_trust": "socket"
+    },
+    "preflight": {
+      "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stop_grace_period": "2m0s",
+      "compose_logging_policy": "syslog-v1",
+      "compose_log_login_codes": "false",
+      "media_key_source": "/fixture/media-keys",
+      "media_key_current": "1",
+      "compose_public_ws_2446": "false",
+      "exposure_public_ws_2446": "true",
+      "compose_replica_count": "1",
+      "compose_client_addr_trust": "socket"
+    }
+  }
+}

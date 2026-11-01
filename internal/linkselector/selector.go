@@ -3,6 +3,7 @@ package linkselector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +22,7 @@ const (
 	upstreamTimeout       = 15 * time.Second
 	upstreamDialTimeout   = 5 * time.Second
 	maxLandingBodyBytes   = 4096
+	maxInviteLandingBytes = 16 << 10
 	maxWebBodyBytes       = 32 << 20 // Bound the staged response size per request.
 	maxStagedWebBodyBytes = 64 << 20 // Bound bodies held for downstream Web clients.
 	landingUnavailable    = `<!doctype html><html lang="en"><body><main>Temporarily unavailable</main></body></html>`
@@ -60,6 +62,7 @@ var (
 type selector struct {
 	webURL           *url.URL
 	landingURL       *url.URL
+	inviteTargets    linklanding.InviteTargets
 	client           *http.Client
 	logger           *slog.Logger
 	stagedWebBodies  *semaphore.Weighted
@@ -77,6 +80,10 @@ type requestOutcome struct {
 // NewHandler builds a selector that forwards only allowlisted Web paths and
 // sends every other request to the isolated landing service.
 func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.Handler, error) {
+	inviteTargets, err := linklanding.InviteTargetsFromEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("configure invite landing targets: %w", err)
+	}
 	webURL, err := parseUpstream(webUpstream)
 	if err != nil {
 		return nil, errors.New("invalid Web upstream")
@@ -114,6 +121,7 @@ func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.
 	return &selector{
 		webURL:           webURL,
 		landingURL:       landingURL,
+		inviteTargets:    inviteTargets,
 		client:           client,
 		logger:           logger,
 		stagedWebBodies:  semaphore.NewWeighted(maxStagedWebBodyBytes),
@@ -185,13 +193,17 @@ func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, p
 		writeUnavailable(w, landingErrorStatus)
 		return requestOutcome{failed: true, reason: classifyRequestError(incoming.Context(), err)}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxLandingBodyBytes+1))
+	maxBodyBytes := maxLandingBodyBytes
+	if path == linklanding.InviteLandingPath {
+		maxBodyBytes = maxInviteLandingBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(maxBodyBytes+1)))
 	closeErr := response.Body.Close()
 	if err != nil {
 		writeUnavailable(w, landingErrorStatus)
 		return requestOutcome{failed: true, reason: classifyBodyReadError(incoming.Context(), err), upstreamStatus: response.StatusCode}
 	}
-	if len(body) > maxLandingBodyBytes {
+	if len(body) > maxBodyBytes {
 		writeUnavailable(w, landingErrorStatus)
 		return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
 	}
@@ -199,13 +211,17 @@ func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, p
 		writeUnavailable(w, landingErrorStatus)
 		return requestOutcome{failed: true, reason: reasonBodyClose, upstreamStatus: response.StatusCode}
 	}
-	fixedBody, ok := linklanding.StaticBodyForStatus(response.StatusCode)
+	fixedBody, ok := linklanding.StaticBodyForStatusAndPath(response.StatusCode, path, s.inviteTargets)
 	if !ok {
 		writeUnavailable(w, landingErrorStatus)
 		return requestOutcome{failed: true, reason: reasonUpstreamStatusUnknown, upstreamStatus: response.StatusCode}
 	}
 
-	linklanding.SetSecurityHeaders(w.Header(), fixedBody)
+	if response.StatusCode == http.StatusOK && path == linklanding.InviteLandingPath {
+		linklanding.SetInviteSecurityHeaders(w.Header(), fixedBody)
+	} else {
+		linklanding.SetSecurityHeaders(w.Header(), fixedBody)
+	}
 	if response.StatusCode == http.StatusMethodNotAllowed {
 		for _, allow := range response.Header.Values("Allow") {
 			w.Header().Add("Allow", allow)
@@ -400,6 +416,9 @@ func classifyTarget(method, requestURI string) requestTarget {
 	}
 	if isAdminPath(rawPath) {
 		return requestTarget{class: defaultRouteClass, landingPath: "/admin"}
+	}
+	if rawPath == linklanding.InviteLandingPath {
+		return requestTarget{class: inviteRouteClass, landingPath: linklanding.InviteLandingPath}
 	}
 	if class, ok := linkClass(rawPath); ok {
 		return requestTarget{class: class, landingPath: canonicalLandingPath(class)}

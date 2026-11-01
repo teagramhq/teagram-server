@@ -14,6 +14,7 @@ func TestRouteConflictingUsernamesAreReserved(t *testing.T) {
 		"hls_stream", "HlS_StReAm",
 		"hls_quality_file", "HlS_QuAlItY_FiLe",
 		"backgrounds", "BaCkGrOuNdS",
+		"invite", "Invite",
 	} {
 		if !isReservedUsername(username) {
 			t.Errorf("isReservedUsername(%q) = false, want true", username)

@@ -40,6 +40,10 @@ func main() {
 }
 
 func serve(listenHost string, port int, logger *slog.Logger) error {
+	targets, err := linklanding.InviteTargetsFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("configure invite landing targets: %w", err)
+	}
 	address, err := addressFor(listenHost, port)
 	if err != nil {
 		return err
@@ -51,7 +55,7 @@ func serve(listenHost string, port int, logger *slog.Logger) error {
 	}
 	server := &http.Server{
 		Addr:                         address,
-		Handler:                      linklanding.NewHandler(logger),
+		Handler:                      linklanding.NewHandlerWithTargets(logger, targets),
 		DisableGeneralOptionsHandler: true,
 		ReadHeaderTimeout:            5 * time.Second,
 		MaxHeaderBytes:               8192,

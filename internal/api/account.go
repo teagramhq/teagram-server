@@ -195,6 +195,7 @@ var reservedUsernames = map[string]bool{
 	"download":         true,
 	"hls":              true,
 	"hls_quality_file": true,
+	"invite":           true,
 	"hls_stream":       true,
 	"ping":             true,
 	"rtmp":             true,

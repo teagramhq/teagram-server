@@ -7725,7 +7725,13 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
         parent = manifest["parent"]
         stage = "wait_for_parent"
         while True:
-            manifest = load_manifest(manifest_path)
+            try:
+                manifest = load_manifest(manifest_path)
+            except DrillFailure:
+                if time.monotonic() < manifest["work_deadline"]:
+                    # Keep the last validated snapshot while the parent is active.
+                    time.sleep(0.2)
+                    continue
             parent_alive = process_start_ticks(parent["pid"]) == parent["start_ticks"]
             if manifest.get("parent_done") or not parent_alive:
                 break

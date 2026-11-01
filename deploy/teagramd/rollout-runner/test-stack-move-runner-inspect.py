@@ -33,6 +33,147 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
+    def test_public_profile_addition_reuses_existing_data_mounts(self) -> None:
+        runner = load_runner()
+        server_mounts = [
+            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
+            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+        ]
+        postgres_mounts = [
+            {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/18/docker", "read_only": False},
+        ]
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": copy.deepcopy(postgres_mounts)},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": copy.deepcopy(server_mounts),
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+                "tgblobs": {"name": "teagram_tgblobs"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"].update({
+            "public-haproxy": {
+                "profiles": ["public"],
+                "volumes": [{
+                    "type": "bind",
+                    "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+                    "target": "/usr/local/etc/haproxy/haproxy.cfg",
+                    "read_only": True,
+                    "bind": {"create_host_path": False},
+                }],
+            },
+            "teagramd-public-1": {
+                "profiles": ["public"],
+                "volumes": copy.deepcopy(server_mounts),
+            },
+            "teagramd-public-2": {
+                "profiles": ["public"],
+                "volumes": copy.deepcopy(server_mounts),
+            },
+        })
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+
+        with mock.patch.dict(os.environ, {
+            "COMPOSE_PROFILES": "public",
+            "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
+        }, clear=True):
+            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+            diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
+            self.assertEqual(diagnostics["reason"], "approved_layout")
+            self.assertEqual(diagnostics["public_profile"], "accepted")
+            self.assertEqual(diagnostics["changed_components"], [])
+
+            unprofiled = copy.deepcopy(target_config)
+            unprofiled["services"]["teagramd-public-1"]["profiles"] = []
+            unprofiled_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(unprofiled, "teagramd"), unprofiled,
+            )
+            self.assertEqual(unprofiled_diagnostics["reason"], "invalid_public_replica_profile")
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(unprofiled, "teagramd"), unprofiled,
+                )
+            )
+
+            changed_replica_mount = copy.deepcopy(target_config)
+            changed_replica_mount["services"]["teagramd-public-1"]["volumes"].append(
+                {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
+            )
+            replica_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
+            )
+            self.assertEqual(replica_diagnostics["reason"], "public_replica_mounts_differ")
+            self.assertEqual(replica_diagnostics["changed_components"], ["persistent_service_mounts"])
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
+                )
+            )
+
+            added_proxy_mount = copy.deepcopy(target_config)
+            added_proxy_mount["services"]["public-haproxy"]["volumes"].append(
+                {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
+            )
+            proxy_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
+            )
+            self.assertEqual(proxy_diagnostics["reason"], "invalid_public_proxy_mount")
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
+                )
+            )
+
+            added_volume = copy.deepcopy(target_config)
+            added_volume["volumes"]["newdata"] = {"name": "teagram_newdata"}
+            volume_diagnostics = runner.ordinary_rollout_layout_diagnostics(
+                source, runner.layout(added_volume, "teagramd"), added_volume,
+            )
+            self.assertEqual(volume_diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(volume_diagnostics["changed_components"], ["volumes"])
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(added_volume, "teagramd"), added_volume,
+                )
+            )
+
+            extra_service = copy.deepcopy(target_config)
+            extra_service["services"]["unexpected"] = {
+                "profiles": ["public"],
+                "volumes": [{"type": "volume", "source": "newdata", "target": "/data"}],
+            }
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(extra_service, "teagramd"), extra_service,
+                )
+            )
+
+        for environment in (
+            {"COMPOSE_PROFILES": "public"},
+            {"ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1"},
+        ):
+            with mock.patch.dict(os.environ, environment, clear=True):
+                diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
+                expected_reason = (
+                    "public_profile_opt_in_missing"
+                    if environment.get("COMPOSE_PROFILES")
+                    else "public_profile_not_selected"
+                )
+                self.assertEqual(diagnostics["reason"], expected_reason)
+                self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
     def test_only_additive_read_only_media_key_mount_is_a_safe_layout_change(self) -> None:
         runner = load_runner()
         key_mount = {
@@ -571,6 +712,11 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
             result = json.loads(output.getvalue())
             self.assertFalse(result["changed"])
+            self.assertEqual(result["layout_diagnostics"]["reason"], "approved_layout")
+            self.assertEqual(
+                result["layout_diagnostics"]["changed_components"],
+                ["server_mounts", "persistent_service_mounts"],
+            )
             self.assertEqual(result["source"]["volumes"], result["target"]["volumes"])
             self.assertNotEqual(result["source"]["server_mounts"], result["target"]["server_mounts"])
             print("PASS Compose inspect permits the reviewed read-only media-key mount addition")
@@ -746,6 +892,20 @@ class MoveSecretMigrationTest(unittest.TestCase):
             runner.inspect_target_contract(
                 target_config, source_service["environment"]["TG_BLOB_DIR"],
             )
+            unsafe_report_volume = copy.deepcopy(target_config)
+            unsafe_report_volume["volumes"][runner.TARGET_REPORT_VOLUME]["driver_opts"] = {
+                "type": "none", "o": "bind", "device": "/root",
+            }
+            with self.assertRaisesRegex(runner.MoveError, "Docker-managed local storage"):
+                runner.inspect_target_contract(
+                    unsafe_report_volume, source_service["environment"]["TG_BLOB_DIR"],
+                )
+            unreviewed_volume = copy.deepcopy(target_config)
+            unreviewed_volume["volumes"]["unreviewed"] = {"name": "teagram_unreviewed"}
+            with self.assertRaisesRegex(runner.MoveError, "named volumes do not match"):
+                runner.inspect_target_contract(
+                    unreviewed_volume, source_service["environment"]["TG_BLOB_DIR"],
+                )
             self.assertEqual(
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
                 staged_secret.resolve(),

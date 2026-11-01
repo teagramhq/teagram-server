@@ -1,0 +1,164 @@
+name: Recover cancelled PR CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      cancelled_pr_run_targets:
+        description: Space-separated workflow run IDs and creation timestamps cancelled to prioritize main CI
+        required: true
+        type: string
+      issue:
+        description: Multica issue key that requested this recovery
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ops-rerun-cancelled-pr-ci:
+    name: 'ops: rerun-cancelled-pr-ci'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 210
+    permissions:
+      actions: write
+      pull-requests: read
+
+    steps:
+      - name: Wait for cancellation cleanup and re-run PR CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANCELLED_PR_RUN_TARGETS: ${{ inputs.cancelled_pr_run_targets }}
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          set -euo pipefail
+          # Cancellation cleanup can take longer than the 2h12m main-run queue
+          # delay observed during this incident; allow up to three hours.
+          max_status_checks=181
+          read -r -a cancelled_pr_run_targets <<< "$CANCELLED_PR_RUN_TARGETS"
+          declare -A outstanding_pr_run_ids=()
+          oldest_created_at=""
+          for run_target in "${cancelled_pr_run_targets[@]}"; do
+            if [[ ! "$run_target" =~ ^([0-9]+):([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z)$ ]]; then
+              echo "::warning::Ignoring invalid cancelled pull request CI run target."
+              continue
+            fi
+            run_id="${BASH_REMATCH[1]}"
+            run_created_at="${BASH_REMATCH[2]%Z}"
+            run_created_at="${run_created_at%%.*}Z"
+            outstanding_pr_run_ids["$run_id"]="$run_created_at"
+            if [[ -z "$oldest_created_at" || "$run_created_at" < "$oldest_created_at" ]]; then
+              oldest_created_at="$run_created_at"
+            fi
+          done
+
+          if ((${#outstanding_pr_run_ids[@]} == 0)); then
+            echo "No valid cancelled pull request CI runs to recover."
+            exit 0
+          fi
+
+          for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
+            if ! runs="$(gh api --paginate \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f event=pull_request \
+              -f "created=>=$oldest_created_at" \
+              -F per_page=100 \
+              --jq '.workflow_runs[] | [.id, .status, (.conclusion // ""), .head_sha, ([.pull_requests // [] | .[] | .number] | join(","))] | @tsv' 2>/dev/null)"; then
+              echo "::warning::Could not list pull request CI run statuses; retrying."
+              runs=""
+            fi
+
+            while IFS=$'\t' read -r run_id run_status run_conclusion run_head_sha run_pr_numbers; do
+              [[ "$run_id" =~ ^[0-9]+$ ]] || continue
+              [[ -n "${outstanding_pr_run_ids[$run_id]+present}" && "$run_status" == completed ]] || continue
+              if [[ "$run_conclusion" != cancelled ]]; then
+                unset "outstanding_pr_run_ids[$run_id]"
+                echo "Pull request CI run ${run_id} completed with ${run_conclusion}; no rerun is needed."
+                continue
+              fi
+
+              if ! failed_job_count="$(gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+                --jq '[.jobs[]? | select(.name != "ci" and .conclusion == "failure")] | length' \
+                | awk '{ total += $1 } END { print total + 0 }')"; then
+                echo "::warning::Could not inspect jobs for cancelled pull request CI run ${run_id}; retrying."
+                continue
+              fi
+              if [[ ! "$failed_job_count" =~ ^[0-9]+$ ]]; then
+                echo "::warning::Could not validate failed job count for cancelled pull request CI run ${run_id}; retrying."
+                continue
+              fi
+              if (( failed_job_count > 0 )); then
+                unset "outstanding_pr_run_ids[$run_id]"
+                echo "Skipping cancelled pull request CI run ${run_id}: it has ${failed_job_count} failed CI job(s), so the router already handled fail-fast."
+                continue
+              fi
+
+              if [[ ! "$run_head_sha" =~ ^[[:xdigit:]]{40}$ || -z "$run_pr_numbers" ]]; then
+                unset "outstanding_pr_run_ids[$run_id]"
+                echo "::warning::Skipping cancelled pull request CI run ${run_id}: its head SHA or pull request number is unavailable; rerun it manually if its check remains cancelled. Issue: $ISSUE"
+                continue
+              fi
+
+              IFS=',' read -r -a pull_request_numbers <<< "$run_pr_numbers"
+              should_rerun=true
+              pull_request_lookup_failed=false
+              stale_pull_request_number=""
+              stale_pull_request_state=""
+              stale_pull_request_head_sha=""
+              for pull_request_number in "${pull_request_numbers[@]}"; do
+                if [[ ! "$pull_request_number" =~ ^[0-9]+$ ]]; then
+                  echo "::warning::Could not validate pull request number for cancelled CI run ${run_id}; retrying."
+                  pull_request_lookup_failed=true
+                  break
+                fi
+                if ! pull_request_state_and_head="$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/pulls/${pull_request_number}" \
+                  --jq '[.state, .head.sha] | @tsv' 2>/dev/null)"; then
+                  echo "::warning::Could not check pull request #${pull_request_number} before re-running CI run ${run_id}; retrying."
+                  pull_request_lookup_failed=true
+                  break
+                fi
+                IFS=$'\t' read -r pull_request_state pull_request_head_sha <<< "$pull_request_state_and_head"
+                if [[ "$pull_request_state" != open && "$pull_request_state" != closed ]] || [[ ! "$pull_request_head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
+                  echo "::warning::Could not validate pull request #${pull_request_number} state or head before re-running CI run ${run_id}; retrying."
+                  pull_request_lookup_failed=true
+                  break
+                fi
+                if [[ "$pull_request_state" != open || "$pull_request_head_sha" != "$run_head_sha" ]]; then
+                  should_rerun=false
+                  stale_pull_request_number="$pull_request_number"
+                  stale_pull_request_state="$pull_request_state"
+                  stale_pull_request_head_sha="$pull_request_head_sha"
+                  break
+                fi
+              done
+
+              if [[ "$pull_request_lookup_failed" == true ]]; then
+                continue
+              fi
+
+              unset "outstanding_pr_run_ids[$run_id]"
+              if [[ "$should_rerun" != true ]]; then
+                echo "Skipping cancelled pull request CI run ${run_id}: PR #${stale_pull_request_number} is ${stale_pull_request_state} at ${stale_pull_request_head_sha}, not the cancelled run head ${run_head_sha}."
+                continue
+              fi
+
+              if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
+                echo "::warning::Could not re-run cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled. Issue: $ISSUE"
+              fi
+            done <<< "$runs"
+
+            if ((${#outstanding_pr_run_ids[@]} == 0)); then
+              break
+            fi
+            if (( status_check_attempt < max_status_checks )); then
+              sleep 60
+            fi
+          done
+
+          if ((${#outstanding_pr_run_ids[@]} > 0)); then
+            outstanding_run_ids="$(printf '%s\n' "${!outstanding_pr_run_ids[@]}" | LC_ALL=C sort | paste -sd ' ' -)"
+            echo "::warning::Could not confirm cancelled pull request CI runs after ${max_status_checks} status checks: ${outstanding_run_ids}; rerun them manually if their checks remain cancelled. Issue: $ISSUE"
+          fi

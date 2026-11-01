@@ -67,11 +67,12 @@ WHERE d.owner_id = sqlc.arg(owner_id)::bigint
   AND d.peer_type = sqlc.arg(peer_type)::smallint
   AND d.peer_id = sqlc.arg(peer_id)::bigint;
 
--- DialogsForOwnerWithPins uses a stable (top_message, peer_type, peer_id) cursor
--- so equal top messages, including empty dialogs at zero, can be paged. It
--- marks only currently visible pins. Removed group members keep their dialog
--- row, but their stale pin neither hides the row nor remains client-visible.
--- name: DialogsForOwnerWithPins :many
+-- DialogsFirstPageWithPins returns the newest dialog page. It marks only
+-- currently visible pins. Removed group members keep their dialog row, but
+-- their stale pin neither hides the row nor remains client-visible. The first
+-- page and cursor pages are separate statements so a cached generic plan never
+-- has to keep a parameter-dependent OR that defeats the page index.
+-- name: DialogsFirstPageWithPins :many
 SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
        d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
        (EXISTS (
@@ -84,11 +85,40 @@ SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
         ))) AS pinned
 FROM dialogs d
 WHERE d.owner_id = sqlc.arg(owner_id)
+  AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT (
+        EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))
+  ))
+ORDER BY d.top_message DESC, d.peer_type, d.peer_id
+LIMIT sqlc.arg(lim)::int;
+
+-- DialogsCursorPageWithPins continues DialogsFirstPageWithPins with a stable
+-- (top_message, peer_type, peer_id) cursor so equal top messages, including
+-- empty dialogs at zero, can be paged. The top_message bound keeps the cursor
+-- an index range in generic plans.
+-- name: DialogsCursorPageWithPins :many
+SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
+       d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
+       (EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))) AS pinned
+FROM dialogs d
+WHERE d.owner_id = sqlc.arg(owner_id)
+  AND d.top_message <= sqlc.arg(offset_id)::bigint
   AND (
-        (sqlc.arg(offset_id)::bigint = 0 AND sqlc.arg(offset_peer_type)::smallint = 0)
-        OR d.top_message < sqlc.arg(offset_id)::bigint
-        OR (d.top_message = sqlc.arg(offset_id)::bigint
-            AND sqlc.arg(offset_peer_type)::smallint <> 0
+        d.top_message < sqlc.arg(offset_id)::bigint
+        OR (sqlc.arg(offset_peer_type)::smallint <> 0
             AND (d.peer_type, d.peer_id) > (sqlc.arg(offset_peer_type)::smallint, sqlc.arg(offset_peer_id)::bigint))
   )
   AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT (

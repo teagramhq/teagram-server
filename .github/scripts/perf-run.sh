@@ -99,7 +99,7 @@ restore() {
   # pg_dump stores ACLs but not cluster roles. Provision the role referenced
   # by the fixture migrations before pg_restore replays those ACLs.
   if [ "$(psql_admin -c "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'browser_acceptance_probe')")" != t ]; then
-    psql_admin -c "CREATE ROLE browser_acceptance_probe"
+    psql_admin -c "CREATE ROLE browser_acceptance_probe NOLOGIN"
   fi
   psql_admin -c "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
   for f in "${fixtures[@]}"; do
@@ -184,7 +184,7 @@ run_branch() {
     TG_PERF_FIXTURE_VERSION="${FIXTURE_VERSION:-}" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
-    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v ||
+    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance|CallWithGetDialogsProfileRestoresEnvironment|GetDialogsProfilingUsesEveryMeasuredSample)$' -test.count=1 -test.timeout 30m -test.v ||
     fatal "run the $branch RPC performance harness"
   echo "::endgroup::"
 }

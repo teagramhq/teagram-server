@@ -154,6 +154,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py") cat "$MOCK_TARGET_RUNTIME_DIR/qualify-rustfs-transition.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/stack-move-runner.py") cat "$MOCK_TARGET_RUNTIME_DIR/stack-move-runner.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/public-websocket-check.py") cat "$MOCK_TARGET_RUNTIME_DIR/public-websocket-check.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
@@ -231,7 +232,7 @@ printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
 if { [ "$script_name" = stack-move-runner.py ] || [ "$script_name" = stack-move-runner.pinned ]; } && \
    [ "${2:-}" = inspect ]; then
   if [ "${MOCK_SCENARIO:-}" = project-layout-changed ]; then
-    printf '%s\n' '{"changed":true}'
+    printf '%s\n' '{"changed":true,"layout_diagnostics":{"reason":"persistent_layout_mismatch","changed_components":["server_mounts","volumes"],"public_profile":"not_applicable"}}'
   else
     printf '%s\n' '{"changed":false,"source_database":"teagram","target_database":"teagram"}'
   fi
@@ -947,7 +948,8 @@ make_fixture() {
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" \
+    "$checkout/deploy/teagramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -957,7 +959,7 @@ make_fixture() {
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$target_runtime/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -1071,7 +1073,8 @@ make_real_git_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py \
+    deploy/teagramd/rollout-runner/public-websocket-check.py; do
     mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ] && [ "$tracked_path" = deploy/teagramd/rollout-runner/stack-move-runner.py ]; then
       mode=100644
@@ -1108,7 +1111,7 @@ make_real_git_fixture() {
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
@@ -1190,7 +1193,8 @@ make_fixed_target_transition_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
     deploy/teagramd/rollout-runner/qualify-rustfs-transition.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py \
+    deploy/teagramd/rollout-runner/public-websocket-check.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ]; then
       # The immutable target predates the renamed runtime path; use the
@@ -1219,7 +1223,7 @@ make_fixed_target_transition_fixture() {
 
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   printf '%s\n' "$baseline_sha" > "$state/head"
   printf '%s\n' "$runtime_source_sha" > "$state/origin"
@@ -2162,7 +2166,7 @@ status=$(run_fixture project-layout-change built 0 '' 2 '' '' apply)
 root=$(cat "$TMP/project-layout-change-root-path")
 state=$(cat "$TMP/project-layout-change-state-path")
 if [ "$status" != 0 ] && \
-   grep -q 'Compose project or persistent mounts changed; use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
+   grep -q 'Compose project or persistent mounts changed (reason=persistent_layout_mismatch components=server_mounts,volumes public_profile=not_applicable); use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
    grep -q '^python3 stack-move-runner.py inspect$' "$TMP/project-layout-change-events" && \
    ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose (build|up)|^git .* (merge|reset)' "$TMP/project-layout-change-events" && \
    [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
@@ -3719,6 +3723,36 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
 else
   show_fixture_failure tailnet-exchange-limit-addition-rollback "$status"
   fail 'tailnet limit addition rollback must restore the previous environment'
+fi
+
+prepare_env_addition_fixture invite-quota-addition-rollback \
+  TG_USER_INVITE_QUOTA '' TG_USER_INVITE_QUOTA=5 TG_USER_INVITE_QUOTA=5 \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+  TG_USER_INVITE_QUOTA=
+state=$(cat "$TMP/invite-quota-addition-rollback-state-path")
+checkout=$(cat "$TMP/invite-quota-addition-rollback-checkout-path")
+root=$(cat "$TMP/invite-quota-addition-rollback-root-path")
+jq -c '.services.teagramd.environment.TG_USER_INVITE_QUOTA=""' \
+  "$state/base-compose.json" > "$TMP/invite-quota-addition-rollback-base-compose.json"
+mv -- "$TMP/invite-quota-addition-rollback-base-compose.json" "$state/base-compose.json"
+printf '%s\n' TG_USER_INVITE_QUOTA= \
+  > "$TMP/invite-quota-addition-rollback-baseline-env-extra"
+record_live_render "$state"
+previous_env_sha=$(sha256sum "$TMP/invite-quota-addition-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture invite-quota-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+     "$TMP/invite-quota-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_USER_INVITE_QUOTA ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
+   [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   grep -q $'rollback\tenv_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'invite quota addition rollback restores the prior .env and empty Compose default'
+else
+  show_fixture_failure invite-quota-addition-rollback "$status"
+  fail 'invite quota addition rollback must restore the previous environment'
 fi
 
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \

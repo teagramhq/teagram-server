@@ -235,7 +235,17 @@ func (s *Store) SetPendingUser(ctx context.Context, id, userID int64) error {
 
 // StagePendingUser marks the auth key as half-authorized and returns the
 // database-clock start time and remaining lease for this fresh login window.
-func (s *Store) StagePendingUser(ctx context.Context, id, userID int64, lifetime time.Duration) (time.Time, time.Duration, error) {
+func (s *Store) StagePendingUser(ctx context.Context, id, userID int64, lifetime time.Duration) (startedAt time.Time, remaining time.Duration, err error) {
+	outcome := "failed"
+	defer func() {
+		if err == nil {
+			outcome = "pending"
+		} else if errors.Is(err, ErrAuthKeyNotFound) {
+			outcome = "not_found"
+		}
+		s.logAuthKeyUnbind("auth.signIn", "password_challenge", outcome, id, userID)
+	}()
+
 	staged, err := s.q.SetPendingUser(ctx, db.SetPendingUserParams{
 		ID:             id,
 		UserID:         &userID,
@@ -400,7 +410,19 @@ func (s *Store) DeleteAuthKey(ctx context.Context, id int64) error {
 // ResetAuthorization unbinds keyID only while it belongs to ownerID. It clears
 // SRP challenges in the same transaction and returns false for missing or
 // already-unbound keys.
-func (s *Store) ResetAuthorization(ctx context.Context, ownerID, keyID int64) (bool, error) {
+func (s *Store) ResetAuthorization(ctx context.Context, ownerID, keyID int64) (revoked bool, err error) {
+	outcome := "failed"
+	defer func() {
+		if err == nil {
+			if revoked {
+				outcome = "cleared"
+			} else {
+				outcome = "no_change"
+			}
+		}
+		s.logAuthKeyUnbind("account.resetAuthorization", "client_reset", outcome, keyID, ownerID)
+	}()
+
 	if ownerID <= 0 {
 		return false, ErrAuthKeyUnauthorized
 	}
@@ -433,6 +455,18 @@ func (s *Store) ResetAuthorization(ctx context.Context, ownerID, keyID int64) (b
 // LogOutAuthKey unbinds keyID, clears its SRP challenges, and returns the
 // binding that was removed. A missing key is a successful no-op.
 func (s *Store) LogOutAuthKey(ctx context.Context, keyID int64) (userID int64, found bool, err error) {
+	outcome := "failed"
+	defer func() {
+		if err == nil {
+			if found && userID != 0 {
+				outcome = "cleared"
+			} else {
+				outcome = "no_change"
+			}
+		}
+		s.logAuthKeyUnbind("auth.logOut", "client_logout", outcome, keyID, userID)
+	}()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("log out auth key: begin transaction: %w", err)
@@ -598,6 +632,9 @@ func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]Au
 			return revoked, err
 		}
 		if len(batchRevoked) > 0 {
+			for _, key := range batchRevoked {
+				s.logAuthKeyUnbind("authorization_ttl_sweep", "authorization_ttl_expired", "cleared", key.ID, key.UserID)
+			}
 			notifyCtx, cancel := NotificationContext(ctx)
 			for _, key := range batchRevoked {
 				if err := s.Notify(notifyCtx, ChannelEvict, EvictPayload(key.UserID, key.ID)); err != nil {
@@ -680,7 +717,19 @@ func rollbackNeverBoundAuthKeySweepBatch(tx pgx.Tx, operationErr error) error {
 // the reset takes effect. It returns only keys that were bound to the owner,
 // for callers that need to evict their live connections, and only after the
 // unbind has committed.
-func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID int64) ([]int64, error) {
+func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID int64) (removedBound []int64, err error) {
+	outcome := "failed"
+	loggedTargets := false
+	defer func() {
+		if loggedTargets {
+			return
+		}
+		if err == nil {
+			outcome = "no_change"
+		}
+		s.logAuthKeyUnbind("auth.resetAuthorizations", "client_reset_all", outcome, callerKeyID, ownerID)
+	}()
+
 	if ownerID <= 0 || callerKeyID == 0 {
 		return nil, ErrAuthKeyUnauthorized
 	}
@@ -715,7 +764,7 @@ func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID in
 	if err != nil {
 		return nil, fmt.Errorf("reset authorizations: unbind other keys: %w", err)
 	}
-	removedBound := make([]int64, 0, len(rows))
+	removedBound = make([]int64, 0, len(rows))
 	targetIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		targetIDs = append(targetIDs, row.ID)
@@ -732,6 +781,12 @@ func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID in
 	}
 	if err := commitAuthKeyRevocation(ctx, tx, "reset authorizations"); err != nil {
 		return nil, err
+	}
+	if len(rows) > 0 {
+		for _, row := range rows {
+			s.logAuthKeyUnbind("auth.resetAuthorizations", "client_reset_all", "cleared", row.ID, ownerID)
+		}
+		loggedTargets = true
 	}
 	return removedBound, nil
 }

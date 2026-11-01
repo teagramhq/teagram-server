@@ -502,21 +502,21 @@ func TestProfileUploadConcurrentIdenticalUploadsOneCharge(t *testing.T) {
 			t.Fatal("concurrent identical uploads did not both return")
 		}
 	}
-	first, duplicate := results[0], results[1]
-	if duplicate.File.ID < first.File.ID {
-		first, duplicate = duplicate, first
+	winner, duplicate := results[0], results[1]
+	if winner.Replayed == duplicate.Replayed {
+		t.Fatalf("concurrent identical upload replay flags = %t and %t, want exactly one replay", winner.Replayed, duplicate.Replayed)
 	}
-	if first.File.ID != duplicate.File.ID {
-		t.Fatalf("one key returned file ids %d and %d", first.File.ID, duplicate.File.ID)
+	if winner.Replayed {
+		winner, duplicate = duplicate, winner
 	}
-	if first.File.AccessHash != duplicate.File.AccessHash {
+	if winner.File.ID != duplicate.File.ID {
+		t.Fatalf("one key returned file ids %d and %d", winner.File.ID, duplicate.File.ID)
+	}
+	if winner.File.AccessHash != duplicate.File.AccessHash {
 		t.Fatal("one key returned two access hashes")
 	}
-	if !duplicate.Replayed {
-		t.Fatal("the losing upload was not answered from the receipt")
-	}
-	if first.File.Width != 20 || first.File.Height != 10 || !first.File.Stored {
-		t.Fatalf("the winner reports %+v, want the validated stored photo", first.File)
+	if winner.File.Width != 20 || winner.File.Height != 10 || !winner.File.Stored {
+		t.Fatalf("the winner reports %+v, want the validated stored photo", winner.File)
 	}
 
 	snap := profileSnapshot(t, ctx, f.dsn, f.owner, 7)
@@ -535,8 +535,8 @@ func TestProfileUploadConcurrentIdenticalUploadsOneCharge(t *testing.T) {
 	if snap.receiptRows != 1 || snap.receiptState != 1 {
 		t.Fatalf("receipts = %d state %d, want 1 complete", snap.receiptRows, snap.receiptState)
 	}
-	if !snap.currentFile.Valid || snap.currentFile.Int64 != first.File.ID {
-		t.Fatalf("current selection = %v, want the uploaded file %d", snap.currentFile, first.File.ID)
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != winner.File.ID {
+		t.Fatalf("current selection = %v, want the uploaded file %d", snap.currentFile, winner.File.ID)
 	}
 	if snap.revision != 1 {
 		t.Fatalf("mutation revision = %d, want 1", snap.revision)
