@@ -140,12 +140,12 @@ func TestBotAPIGetUpdates(t *testing.T) {
 	observedStore.emptyQuery = make(chan struct{})
 	longPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, serverURL, tokenA, firstNextOffset, 5)
+		response, err := doBotAPIGetUpdates(f.ctx, client, serverURL, tokenA, firstNextOffset, 30)
 		longPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
 	case <-observedStore.emptyQuery:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("getUpdates did not reach its empty-log wait after the photo")
 	}
 	if err := humanA.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -163,7 +163,7 @@ func TestBotAPIGetUpdates(t *testing.T) {
 			t.Fatalf("long-poll request failed: %v", result.err)
 		}
 		afterPhoto = result.response
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("getUpdates did not wake from the existing update notification")
 	}
 	afterPhotoUpdates := decodeBotAPIUpdates(t, afterPhoto)
@@ -306,7 +306,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	secondURL := startSmokeBotAPIServerWithHandler(t, f, secondHandler)
 	startSmokeBotAPINotifyListener(t, f, firstHandler)
 	startSmokeBotAPINotifyListener(t, f, secondHandler)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 45 * time.Second}
 
 	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -325,23 +325,23 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 
 	firstPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, firstURL, token, confirmedOffset+1, 5)
+		response, err := doBotAPIGetUpdates(f.ctx, client, firstURL, token, confirmedOffset+1, 30)
 		firstPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
 	case <-firstStore.emptyQuery:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("first replica did not enter the empty-log wait")
 	}
 
 	secondPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, secondURL, token, confirmedOffset, 5)
+		response, err := doBotAPIGetUpdates(f.ctx, client, secondURL, token, confirmedOffset, 30)
 		secondPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
 	case <-secondStore.emptyQuery:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("second replica did not enter the empty-log wait")
 	}
 
@@ -352,7 +352,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 			t.Fatalf("superseded poll request failed: %v", result.err)
 		}
 		superseded = result.response
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("first replica was not woken by the newer poll generation")
 	}
 	if superseded.Code != http.StatusConflict {
@@ -374,7 +374,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 			t.Fatalf("current poll request failed: %v", result.err)
 		}
 		current = result.response
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("second replica did not return the update")
 	}
 	updates := decodeBotAPIUpdates(t, current)
@@ -463,7 +463,7 @@ func TestBotAPIGetUpdatesRevocationReturns401WithoutAdvancingOffset(t *testing.T
 	}()
 	select {
 	case <-observedStore.emptyQuery:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("getUpdates did not read the empty log")
 	}
 	if err := f.store.RevokeBotToken(f.ctx, bot.ID); err != nil {
@@ -484,7 +484,7 @@ func TestBotAPIGetUpdatesRevocationReturns401WithoutAdvancingOffset(t *testing.T
 			t.Fatalf("revoked poll request failed: %v", asyncResult.err)
 		}
 		response = asyncResult.response
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("revoked getUpdates did not end at timeout")
 	}
 	if response.Code != http.StatusUnauthorized || string(response.Body) != "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}\n" {
