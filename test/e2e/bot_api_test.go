@@ -396,7 +396,7 @@ func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 	const phone = "+15551049323"
 	seedSmokeUsers(t, f, phone)
 	human := newSmokeClient(t, f, "Bot API missed notify", phone)
-	observedStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
+	observedStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{}), holdEmpty: make(chan struct{})}
 	handler := botapi.NewHandler(observedStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	serverURL := startSmokeBotAPIServerWithHandler(t, f, handler)
 	client := &http.Client{Timeout: 12 * time.Second}
@@ -420,6 +420,9 @@ func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("human sends during long poll: %v", err)
 	}
+	// The message is committed and no notify reaches this handler, so only
+	// the timeout re-read can deliver it.
+	close(observedStore.holdEmpty)
 	var response botAPIHTTPResponse
 	select {
 	case asyncResult := <-result:
@@ -738,13 +741,24 @@ type observedBotUpdateStore struct {
 	*store.Store
 
 	emptyQuery chan struct{}
-	queryOnce  sync.Once
+	// holdEmpty, when set, keeps the first empty read from returning until
+	// it is closed, so a test can commit a message before the poll waits.
+	holdEmpty chan struct{}
+	queryOnce sync.Once
 }
 
 func (s *observedBotUpdateStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	page, err := s.Store.BotMessageEvents(ctx, botID, fromPts, limit)
 	if err == nil && len(page.Events) == 0 && s.emptyQuery != nil {
-		s.queryOnce.Do(func() { close(s.emptyQuery) })
+		first := false
+		s.queryOnce.Do(func() { close(s.emptyQuery); first = true })
+		if first && s.holdEmpty != nil {
+			select {
+			case <-s.holdEmpty:
+			case <-ctx.Done():
+				return page, ctx.Err()
+			}
+		}
 	}
 	return page, err
 }
