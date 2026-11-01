@@ -2738,6 +2738,8 @@ rollback_after_target_failure() {
 restore_checkout_and_tag() {
   (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
   docker image tag "${BASE_IMAGE_ID#sha256:}" "$(rollout_compose_service):local" >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
+  restore_previous_env_for_named_changes || return 1
+  restore_previous_override_for_named_changes || return 1
 }
 
 require_clean_build_checkout() {
@@ -2757,8 +2759,6 @@ require_clean_build_checkout() {
 perform_rollback() {
   local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
-  restore_previous_env_for_named_changes || return 1
-  restore_previous_override_for_named_changes || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
       "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1
@@ -2988,7 +2988,7 @@ run_apply() {
   fi
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
   if ! verify_approved_gates || ! verify_runtime_sources; then
-    (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
+    restore_checkout_and_tag || return 1
     fail 'pinned gate hashes changed after fast-forward; target was not started'
     return 1
   fi

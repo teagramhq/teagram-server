@@ -606,7 +606,9 @@ fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
              [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
           cat "$MOCK_STATE/target-compose.json"
-        elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
+        elif { [ "${MOCK_SCENARIO:-}" = config-drift ] || \
+               [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-env-addition-preflight-drift ]; } && \
+             [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
@@ -1443,7 +1445,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3668,6 +3670,30 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/e
 else
   show_fixture_failure env-addition-success "$status"
   fail 'named .env addition must deploy through apply'
+fi
+
+prepare_env_addition_fixture env-addition-preflight-failure TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
+  target-local-carry-forward-env-addition-preflight-drift
+state=$(cat "$TMP/env-addition-preflight-failure-state-path")
+checkout=$(cat "$TMP/env-addition-preflight-failure-checkout-path")
+root=$(cat "$TMP/env-addition-preflight-failure-root-path")
+jq -c '.services.teagramd.environment.UNRELATED="changed"' \
+  "$state/target-compose.json" > "$TMP/env-addition-preflight-failure-target-compose.json"
+mv -- "$TMP/env-addition-preflight-failure-target-compose.json" "$state/target-compose.drift.json"
+status=$(run_fixture env-addition-preflight-failure built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q 'resolved Compose preflight rejected unapproved drift; target was not started' \
+     "$TMP/env-addition-preflight-failure.stderr" && \
+   cmp -s "$checkout/.env" "$TMP/env-addition-preflight-failure-previous.env" && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+   [ "$(cat "$state/teagramd")" = "$BASE_ID" ] && \
+   [ -f "$root.target/preflight-failure.txt" ] && \
+   [ ! -e "$root.rollback/rollback-result.txt" ] && \
+   ! grep -q 'docker compose up -d$' "$TMP/env-addition-preflight-failure-events"; then
+  pass 'pre-cutover preflight failure restores a named .env addition before returning to baseline'
+else
+  show_fixture_failure env-addition-preflight-failure "$status"
+  fail 'pre-cutover preflight failure must restore the previous .env without rolling back containers'
 fi
 
 prepare_env_addition_fixture turnstile-env-addition-success \
