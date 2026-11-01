@@ -494,7 +494,7 @@ if [ "${1:-}" = inspect ]; then
             "TG_TURNSTILE_SIGNIN_ENABLED=" + $env.TG_TURNSTILE_SIGNIN_ENABLED
           ] else [] end) +
           (["TG_ADVERTISE_ADDR", "TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE"]
-           | map(select($env | has(.)) | . as $key | $key + "=" + ($env[$key] | tostring)))
+           | map(. as $key | select($env | has($key)) | $key + "=" + ($env[$key] | tostring)))
       ' "$turnstile_compose")
       if [ "$(jq -er 'length' <<< "$turnstile_env")" -gt 0 ]; then
         env_json=$(jq -c --argjson turnstile "$turnstile_env" '
