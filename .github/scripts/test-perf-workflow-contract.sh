@@ -80,6 +80,14 @@ done <<< "$dependency_dirs"
   fail 'main pushes must continue to run the performance workflow'
 [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
   fail 'manual performance dispatch must remain available'
+[[ "$(query '.jobs."ops-gate-pr-during-main".name')" == 'ops: gate-pr-during-main' ]] ||
+  fail 'performance PR gate must use the ops stage naming contract'
+[[ "$(query '.jobs."ops-gate-pr-during-main".steps[] | select(.name == "Defer pull request checks while main CI is active") | .run')" == 'bash .github/scripts/gate-pr-checks-during-main.sh' ]] ||
+  fail 'performance PR runs must defer before their fixture and measurement jobs'
+[[ "$(query '.jobs."test-perf-fixture-snapshot".needs')" == 'ops-gate-pr-during-main' ]] ||
+  fail 'the fixture preparation must wait for the PR gate'
+[[ "$(query '.jobs."test-rpc-performance".needs | sort | join(",")')" == 'ops-gate-pr-during-main,test-perf-fixture-snapshot' ]] ||
+  fail 'the performance measurement must wait for the PR gate'
 expected_concurrency_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}"
 [[ "$(query '.concurrency.group')" == "$expected_concurrency_group" ]] ||
   fail 'performance runs must coalesce updates per pull request and keep main isolated'

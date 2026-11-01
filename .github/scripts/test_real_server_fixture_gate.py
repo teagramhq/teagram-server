@@ -189,6 +189,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertRegex(
             workflow,
+            r"(?ms)^  ops-gate-pr-during-main:\n.*?^        run: bash \.github/scripts/gate-pr-checks-during-main\.sh\n.*?^  real-client-browser-flow:\n    name: real-client-browser-flow\n    needs: ops-gate-pr-during-main$",
+        )
+        self.assertRegex(
+            workflow,
             r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
             r"^      - name: Check out pinned web companion\n"
             r"        uses: [^\n]+\n"
