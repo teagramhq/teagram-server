@@ -169,7 +169,7 @@ services:
     depends_on:
       tls-edge:
         condition: service_healthy
-    networks: [backend]
+    networks: [backend, publish]
     restart: unless-stopped
     logging: *logging
 
@@ -184,3 +184,8 @@ volumes:
 networks:
   backend:
     internal: true
+  publish:
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

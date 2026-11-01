@@ -62,6 +62,15 @@ jq -e --arg state "$test_state_dir" '
   | ($sources | length == 5)
     and all($sources[]; startswith($state + "/") and (startswith("/tmp/") | not))
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'a QA bind source is missing, outside persistent state, or under /tmp'
+jq -e '
+  . as $config
+  | (.networks.backend.internal == true)
+    and ([ $config.services[]
+      | select((.ports // []) | length > 0)
+      | (.networks // {} | keys[]) as $network
+      | select(($config.networks[$network].internal // false) == false)
+    ] | length > 0)
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'published QA service must join a non-internal network while backend stays internal'
 grep -Fq 'compose down --remove-orphans' "$REMOTE" || fail 'down must remove only QA project containers'
 grep -Fq -- '--project-directory "$REPO_ROOT/deploy/qa-invite"' "$REMOTE" || fail 'Compose must resolve bind sources from the persistent release'
 grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/rollback.sh"' "$REMOTE" || fail 'up rollback helper is not loaded'
