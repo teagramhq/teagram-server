@@ -21,6 +21,7 @@ const (
 	maxGetUpdatesLimit     = 100
 	maxGetUpdatesTimeout   = 50
 	maxOpenGetUpdates      = 128
+	maxGetUpdatesPages     = 10 // Bound a poll to 1,000 raw events, including reads after wakeups.
 	getUpdatesWriteTimeout = 60 * time.Second
 	// Keep one bounded query window after long-poll expiry for updates committed during the wait.
 	getUpdatesFinalScanTimeout = 5 * time.Second
@@ -296,6 +297,7 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	var updates []botAPIUpdate
 	var nextOffset int64
 	var readErr error
+	pagesRemaining := maxGetUpdatesPages
 pollLoop:
 	for {
 		if poll.wasSuperseded() {
@@ -318,7 +320,9 @@ pollLoop:
 			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
 		}
-		updates, nextOffset, readErr = h.readBotUpdates(readCtx, st, botID, effectiveOffset, params.limit)
+		var pagesRead int
+		updates, nextOffset, pagesRead, readErr = h.readBotUpdates(readCtx, st, botID, effectiveOffset, params.limit, pagesRemaining)
+		pagesRemaining -= pagesRead
 		if readErr != nil {
 			if errors.Is(readErr, context.DeadlineExceeded) && errors.Is(readCtx.Err(), context.DeadlineExceeded) && poll.ctx.Err() == nil && r.Context().Err() == nil {
 				if nextOffset > effectiveOffset {
@@ -340,7 +344,7 @@ pollLoop:
 		if nextOffset > effectiveOffset {
 			effectiveOffset = nextOffset
 		}
-		if len(updates) != 0 || params.timeout == 0 {
+		if len(updates) != 0 || params.timeout == 0 || pagesRemaining == 0 {
 			break
 		}
 		select {
@@ -388,23 +392,25 @@ pollLoop:
 			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
 		}
-		finalReadCtx, cancelFinalRead := context.WithTimeout(poll.ctx, getUpdatesFinalScanTimeout)
-		updates, nextOffset, readErr = h.readBotUpdates(finalReadCtx, st, botID, effectiveOffset, params.limit)
-		cancelFinalRead()
-		if nextOffset > effectiveOffset {
-			effectiveOffset = nextOffset
-		}
-		if readErr != nil && !errors.Is(readErr, context.DeadlineExceeded) {
-			if poll.wasSuperseded() {
-				h.updatePollConflict(w, botID, method)
+		if pagesRemaining > 0 {
+			finalReadCtx, cancelFinalRead := context.WithTimeout(poll.ctx, getUpdatesFinalScanTimeout)
+			updates, nextOffset, _, readErr = h.readBotUpdates(finalReadCtx, st, botID, effectiveOffset, params.limit, pagesRemaining)
+			cancelFinalRead()
+			if nextOffset > effectiveOffset {
+				effectiveOffset = nextOffset
+			}
+			if readErr != nil && !errors.Is(readErr, context.DeadlineExceeded) {
+				if poll.wasSuperseded() {
+					h.updatePollConflict(w, botID, method)
+					return
+				}
+				if r.Context().Err() != nil {
+					return
+				}
+				h.log.Error("Bot API update log read failed", "bot_id", botID, "method", method, "err", readErr)
+				h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 				return
 			}
-			if r.Context().Err() != nil {
-				return
-			}
-			h.log.Error("Bot API update log read failed", "bot_id", botID, "method", method, "err", readErr)
-			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-			return
 		}
 	}
 	if poll.wasSuperseded() {
@@ -440,7 +446,7 @@ pollLoop:
 	h.write(w, http.StatusOK, encoded, botID, method)
 }
 
-func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID, offset int64, limit int) ([]botAPIUpdate, int64, error) {
+func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID, offset int64, limit, maxPages int) ([]botAPIUpdate, int64, int, error) {
 	if limit < 1 {
 		limit = 1
 	} else if limit > maxGetUpdatesLimit {
@@ -448,6 +454,7 @@ func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID,
 	}
 	updates := make([]botAPIUpdate, 0, limit)
 	scanOffset := offset
+	pagesRead := 0
 	safeOffset := func() int64 {
 		if len(updates) != 0 && scanOffset > updates[0].UpdateID {
 			// Keep the first returned update in the inclusive offset window until acknowledged.
@@ -455,20 +462,24 @@ func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID,
 		}
 		return scanOffset
 	}
+	if maxPages < 1 {
+		return updates, safeOffset(), pagesRead, nil
+	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return updates, safeOffset(), err
+			return updates, safeOffset(), pagesRead, err
 		}
+		pagesRead++
 		page, err := st.BotMessageEvents(ctx, botID, scanOffset, maxGetUpdatesLimit)
 		if err != nil {
-			return updates, safeOffset(), err
+			return updates, safeOffset(), pagesRead, err
 		}
 		remaining := limit - len(updates)
 		updates = append(updates, h.hydrateBotUpdates(botID, page.Events, scanOffset, remaining)...)
 		nextOffset := max(page.NextOffset, scanOffset)
-		if nextOffset <= scanOffset || len(updates) >= limit {
+		if nextOffset <= scanOffset || len(updates) >= limit || pagesRead >= maxPages {
 			scanOffset = nextOffset
-			return updates, safeOffset(), nil
+			return updates, safeOffset(), pagesRead, nil
 		}
 		scanOffset = nextOffset
 	}

@@ -40,7 +40,7 @@ func TestReadBotUpdatesTreatsZeroLimitAsOne(t *testing.T) {
 		}
 	}
 	st := &eventPageUpdatesStore{page: store.BotMessageEventPage{Events: events, NextOffset: 4}}
-	updates, _, err := (&handler{}).readBotUpdates(context.Background(), st, botID, 0, 0)
+	updates, _, _, err := (&handler{}).readBotUpdates(context.Background(), st, botID, 0, 0, maxGetUpdatesPages)
 	if err != nil {
 		t.Fatalf("read bot updates: %v", err)
 	}
@@ -83,12 +83,15 @@ func TestReadBotUpdatesPreservesProgressWhenPageReadHitsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	st := &deadlinePagingUpdatesStore{}
-	updates, nextOffset, err := (&handler{}).readBotUpdates(ctx, st, 123456, 0, maxGetUpdatesLimit)
+	updates, nextOffset, pagesRead, err := (&handler{}).readBotUpdates(ctx, st, 123456, 0, maxGetUpdatesLimit, maxGetUpdatesPages)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("readBotUpdates error = %v, want deadline exceeded", err)
 	}
 	if len(updates) != 0 || nextOffset != maxGetUpdatesLimit {
 		t.Fatalf("partial scan = %d updates, offset %d, want no updates and preserved offset %d", len(updates), nextOffset, maxGetUpdatesLimit)
+	}
+	if pagesRead != 2 {
+		t.Fatalf("page queries before deadline = %d, want 2 including the interrupted read", pagesRead)
 	}
 	if st.calls != 2 {
 		t.Fatalf("page reads = %d, want a follow-up page read bounded by the deadline", st.calls)

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,19 @@ type deadlineAfterFirstPageUpdatesStore struct {
 	*fakeUpdatesStore
 
 	queryCount atomic.Int32
+}
+
+type pageQueryCountingUpdatesStore struct {
+	*fakeUpdatesStore
+
+	queryCount atomic.Int32
+	fromPts    []int64
+}
+
+func (s *pageQueryCountingUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
+	s.fromPts = append(s.fromPts, fromPts)
+	s.queryCount.Add(1)
+	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
 }
 
 type sharedReplicaUpdatesStore struct {
@@ -1251,6 +1265,68 @@ func TestGetUpdatesScansPastMoreThanOnePageOfSkippedEvents(t *testing.T) {
 	}
 	if st.offset != 101 {
 		t.Fatalf("stored offset = %d, want returned update's inclusive offset 101", st.offset)
+	}
+}
+
+func TestGetUpdatesCapsLargeGapScanAndPersistsCursor(t *testing.T) {
+	const (
+		pageCap       = 10
+		eventsPerPage = 100
+		skippedEvents = pageCap * eventsPerPage
+		updateID      = int64(skippedEvents + 1)
+	)
+	events := make([]store.Event, skippedEvents+1)
+	messages := make(map[int64]store.Message, len(events))
+	for i := range skippedEvents {
+		pts := i + 1
+		events[i] = store.Event{Pts: pts, Type: store.EventNewMessage, LocalID: int64(pts)}
+		messages[int64(pts)] = store.Message{
+			OwnerID: 123456, LocalID: int64(pts), PeerType: store.PeerTypeUser,
+			PeerID: 987, FromID: 987, Text: "photo", FileID: 42,
+		}
+	}
+	events[skippedEvents] = store.Event{Pts: int(updateID), Type: store.EventNewMessage, LocalID: updateID}
+	messages[updateID] = store.Message{
+		OwnerID: 123456, LocalID: updateID, PeerType: store.PeerTypeUser,
+		PeerID: 987, FromID: 987, Date: time.Unix(1700000000, 0), Text: "after gaps",
+	}
+	st := &pageQueryCountingUpdatesStore{fakeUpdatesStore: &fakeUpdatesStore{
+		fakeStore: newFakeStore(),
+		events:    events,
+		messages:  messages,
+		users: map[int64]store.User{
+			987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+		},
+	}}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?offset=0&limit=100&timeout=0", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if got := st.queryCount.Load(); got != pageCap {
+		t.Fatalf("first request scanned %d event pages, want cap %d", got, pageCap)
+	}
+	if response.Code != http.StatusOK || response.Body.String() != "{\"ok\":true,\"result\":[]}\n" {
+		t.Fatalf("first getUpdates response = (%d, %q), want empty success after bounded gap scan", response.Code, response.Body.String())
+	}
+	if want := int64(skippedEvents + 1); st.offset != want {
+		t.Fatalf("persisted scan cursor = %d, want %d after %d skipped events", st.offset, want, skippedEvents)
+	}
+
+	secondRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/bot123456:secret-sentinel/getUpdates?offset=0&limit=100&timeout=0", nil)
+	secondRequest.RemoteAddr = "100.64.1.2:3457"
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), `"update_id":`+strconv.FormatInt(updateID, 10)) {
+		t.Fatalf("second getUpdates response = (%d, %q), want update %d after persisted cursor", secondResponse.Code, secondResponse.Body.String(), updateID)
+	}
+	if len(st.fromPts) <= pageCap {
+		t.Fatalf("second poll made no event page read after %d first-request pages", pageCap)
+	}
+	if st.fromPts[pageCap] != updateID {
+		t.Fatalf("second poll began at pts %d, want persisted scan cursor %d", st.fromPts[pageCap], updateID)
 	}
 }
 
