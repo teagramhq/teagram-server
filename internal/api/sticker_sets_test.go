@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/reactionassets"
@@ -499,6 +500,99 @@ func TestSearchStickerSetsMatchesCatalogueCaseInsensitivelyAndSupportsHash(t *te
 	}
 	if modified := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
 		t.Fatal("searchStickerSets with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsCombinesCatalogueAndUserMatchesForHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs, pgtest.DSN(t))
+	creator, err := s.CreateUser(ctx, "+15551810021")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	viewer, err := s.CreateUser(ctx, "+15551810022")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGS(t))
+	request := createStickerRequest("generated_twemoji_cats", file, false, false)
+	request.Title = "Twemoji Cats"
+	created := createStickerSet(t, fullChannelDispatcher(s), creator.ID, request)
+	h := fullChannelDispatcher(s)
+
+	result := searchStickerSets(t, h, viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || full.Hash == 0 || len(full.Sets) != 2 {
+		t.Fatalf("combined search = %T with hash %d and %d sets, want catalogue and user matches", result, foundStickerSetsHash(result), foundStickerSetsCount(result))
+	}
+	shortNames := make(map[string]bool, len(full.Sets))
+	for _, result := range full.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok {
+			t.Fatalf("combined search result = %T, want covered sticker set", result)
+		}
+		shortNames[covered.Set.ShortName] = true
+	}
+	for _, shortName := range []string{"twemoji_reactions", created.Set.ShortName} {
+		if !shortNames[shortName] {
+			t.Errorf("combined search omitted set %q", shortName)
+		}
+	}
+	if modified := searchStickerSets(t, h, viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
+		t.Fatal("combined search with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsRejectsOversizedQueryWithoutDatabaseWork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tracer := &stickerSearchQueryCounter{}
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore(), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551810023")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	tracer.n.Store(0)
+	body := dispatchChatMethod(t, fullChannelDispatcher(s), owner.ID, "messages.searchStickerSets", &tg.MessagesSearchStickerSetsRequest{
+		Q: strings.Repeat("猫", 501),
+	})
+	if got := stickerRPCError(t, body); got != "MESSAGE_TOO_LONG" {
+		t.Fatalf("oversized sticker-set search error = %q, want MESSAGE_TOO_LONG", got)
+	}
+	if got := tracer.n.Load(); got != 0 {
+		t.Fatalf("oversized sticker-set search ran %d database queries, want none", got)
+	}
+}
+
+func TestSearchStickerSetsUsesMessagesSearchRateLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810024")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcherWithRateLimits(s, config.RateLimitsConfig{
+		SearchMessages: store.RateLimitConfig{Limit: 1, Window: time.Minute},
+	})
+	request := &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"}
+	if result := searchStickerSets(t, h, owner.ID, request); result == nil {
+		t.Fatal("first sticker-set search returned nil")
+	}
+	body := dispatchChatMethod(t, h, owner.ID, "messages.searchStickerSets", request)
+	if got := stickerRPCError(t, body); !strings.HasPrefix(got, "FLOOD_WAIT_") {
+		t.Fatalf("second sticker-set search error = %q, want FLOOD_WAIT", got)
 	}
 }
 

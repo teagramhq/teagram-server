@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -187,6 +188,14 @@ func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, err
 	if req.Q == "" {
 		return &tg.MessagesFoundStickerSets{Hash: 0, Sets: []tg.StickerSetCoveredClass{}}, nil
 	}
+	if utf8.RuneCountInString(req.Q) > maxSearchQueryLen {
+		return nil, errMessageTooLong
+	}
+	// Sticker-set search enumerates live sets across accounts. Charge it to the
+	// shared messages-search budget before loading the catalogue or user rows.
+	if err := h.checkRateLimit(r, "messages_search", h.rateLimitSearchMessages); err != nil {
+		return nil, err
+	}
 	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker sets for search", "err", err)
@@ -225,9 +234,8 @@ func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, err
 			(!strings.Contains(strings.ToLower(set.Title), query) && !strings.Contains(strings.ToLower(set.ShortName), query)) {
 			continue
 		}
-		userSet := userStickerSetTL(set, r.UserID, h.dcID, nil)
 		coveredSets = append(coveredSets, &tg.StickerSetCovered{
-			Set: userSet.Set, Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
+			Set: userStickerSetSummaryTL(set, r.UserID, nil), Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
 		})
 		userSetCount++
 	}

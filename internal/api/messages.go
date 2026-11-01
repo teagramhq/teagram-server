@@ -24,10 +24,9 @@ const (
 	defaultDialogsLimit = 20
 	maxDialogsLimit     = 100
 
-	// maxSearchQueryLen bounds the query string in messages.search. A query past
-	// this cap is rejected before reaching the database, following the same
-	// precedent as oversized message payloads (errMessageTooLong). 500 matches
-	// Telegram's own cap on fulltext search terms.
+	// maxSearchQueryLen bounds user-supplied search text before it reaches a
+	// backing query. A query past this cap is rejected with errMessageTooLong.
+	// 500 matches Telegram's own cap on fulltext search terms.
 	maxSearchQueryLen = 500
 
 	// maxForwardMessagesPerCall bounds the source messages one forward may name.
