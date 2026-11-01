@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -50,36 +49,10 @@ type turnstileVerifier struct {
 	timeout       time.Duration
 }
 
-// NewTurnstileVerifier builds a Siteverify client from the process environment.
-func NewTurnstileVerifier(secretKey string) SignUpTurnstileVerifier {
-	return newTurnstileVerifier(secretKey)
-}
-
 // NewTurnstileVerifierWithConfig builds a Siteverify client from validated
 // startup configuration.
 func NewTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypassToken string, logger *slog.Logger) SignUpTurnstileVerifier {
 	return newTurnstileVerifierWithConfig(secretKey, hostnames, qaBypassToken, logger)
-}
-
-func newTurnstileVerifier(secretKey string) *turnstileVerifier {
-	hostnames := []string{turnstileHostname}
-	if raw := strings.TrimSpace(os.Getenv("TG_TURNSTILE_HOSTNAMES")); raw != "" {
-		hostnames = strings.Split(raw, ",")
-	}
-	for index := range hostnames {
-		hostnames[index] = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostnames[index]), "."))
-	}
-	qaBypassToken := ""
-	if path := strings.TrimSpace(os.Getenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")); path != "" {
-		data, err := os.ReadFile(path) // #nosec G304,G703 -- validated operator-configured QA secret path.
-		if err != nil {
-			slog.Default().Error("read Turnstile QA bypass token file", "error", err)
-		} else {
-			qaBypassToken = strings.TrimSpace(string(data))
-			clear(data)
-		}
-	}
-	return newTurnstileVerifierWithConfig(secretKey, hostnames, qaBypassToken, slog.Default())
 }
 
 func newTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypassToken string, logger *slog.Logger) *turnstileVerifier {
