@@ -13,6 +13,8 @@ MOCK_PROJECT=fixture
 MOCK_ORPHANS=1
 MOCK_STOP_TIMEOUT=120
 MOCK_TARGET_SERVICES=$'postgres\nteagramd'
+MOCK_HAPROXY_HEALTH=healthy
+MOCK_PUBLIC_PROBE_FAILURE_IP=
 
 docker() {
 	printf 'docker' >> "$TEST_EVENTS"
@@ -22,6 +24,25 @@ docker() {
 		[[ "${4:-}" == '{{ index .Config.Labels "com.docker.compose.project" }}' ]]
 		printf '%s\n' "$MOCK_PROJECT"
 		return 0
+	fi
+	if [[ "${1:-}" == inspect && "${3:-}" == --format && "${4:-}" == '{{.State.Status}}' ]]; then
+		case "${2:-}" in
+			"$PUBLIC_HAPROXY_CONTAINER"|"$PUBLIC_REPLICA_ONE_CONTAINER"|"$PUBLIC_REPLICA_TWO_CONTAINER")
+				printf 'running\n'
+				return 0
+			;;
+		esac
+	fi
+	if [[ "${1:-}" == inspect && "${3:-}" == --format && "${4:-}" == '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' ]]; then
+		[[ "${2:-}" == "$PUBLIC_HAPROXY_CONTAINER" ]]
+		printf '%s\n' "$MOCK_HAPROXY_HEALTH"
+		return 0
+	fi
+	if [[ "${1:-}" == inspect && "${3:-}" == --format && "${4:-}" == '{{with index .NetworkSettings.Networks "public-backend"}}{{.IPAddress}}{{end}}' ]]; then
+		case "${2:-}" in
+			"$PUBLIC_REPLICA_ONE_CONTAINER") printf '198.18.132.21\n'; return 0 ;;
+			"$PUBLIC_REPLICA_TWO_CONTAINER") printf '198.18.132.22\n'; return 0 ;;
+		esac
 	fi
 	if [[ "${1:-}" == inspect && "${3:-}" == --format &&
 		"${4:-}" == '{{.State.Running}} {{.Config.StopTimeout}}' ]]; then
@@ -46,6 +67,28 @@ docker() {
 				teagramd-public-2) printf '%s\n' "$PUBLIC_REPLICA_TWO_CONTAINER" ;;
 			esac
 		fi
+		return 0
+	fi
+	if [[ "${1:-}" == compose && "${2:-}" == --profile && "${3:-}" == public &&
+		"${4:-}" == ps && "${5:-}" == --all && "${6:-}" == --quiet ]]; then
+		case "${7:-}" in
+			public-haproxy) printf '%s\n' "$PUBLIC_HAPROXY_CONTAINER" ;;
+			teagramd-public-1) printf '%s\n' "$PUBLIC_REPLICA_ONE_CONTAINER" ;;
+			teagramd-public-2) printf '%s\n' "$PUBLIC_REPLICA_TWO_CONTAINER" ;;
+			esac
+		return 0
+	fi
+	if [[ "${1:-}" == exec && "${2:-}" == "$PUBLIC_HAPROXY_CONTAINER" ]]; then
+		local probe_args="$*"
+		if [[ "$probe_args" != *'GET /.well-known/teagramd/client'* ||
+			"$probe_args" != *'busybox nc -w 3'* ]]; then
+			printf 'unexpected public replica probe: %s\n' "$probe_args" >&2
+			return 90
+		fi
+		if [[ -n "$MOCK_PUBLIC_PROBE_FAILURE_IP" && "$probe_args" == *"$MOCK_PUBLIC_PROBE_FAILURE_IP"* ]]; then
+			return 1
+		fi
+		printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"version":1,"websocket":{"endpoint":"wss://example.test/apiws"}}\n'
 		return 0
 	fi
 	if [[ "${1:-}" == compose && "${2:-}" == --profile && "${3:-}" == public &&
@@ -131,6 +174,65 @@ rollback_teagramd_line=$(grep -nF 'docker compose up -d --no-build --no-deps "$(
 rollback_restore_line=$(grep -nF 'restore_removed_public_profile_services || return 1' "$SCRIPT_DIR/rollout-runner.sh" | cut -d: -f1)
 if [[ -z "$rollback_teagramd_line" || -z "$rollback_restore_line" || "$rollback_teagramd_line" -ge "$rollback_restore_line" ]]; then
 	echo 'FAIL rollback must recreate baseline teagramd before restoring its public profile services' >&2
+	exit 1
+fi
+
+: > "$TEST_EVENTS"
+READY_SECONDS=2
+MOCK_HAPROXY_HEALTH=starting
+if wait_for_restored_public_profile_health >"$TEST_TMP/starting-health.stdout" 2>"$TEST_TMP/starting-health.stderr"; then
+	echo 'FAIL public profile readiness must wait for healthy HAProxy' >&2
+	exit 1
+fi
+MOCK_HAPROXY_HEALTH=healthy
+wait_for_restored_public_profile_health
+for address in 198.18.132.21 198.18.132.22; do
+	if ! grep -Fq "$address" "$TEST_EVENTS"; then
+		printf 'FAIL restored public replica was not probed: %s\n' "$address" >&2
+		exit 1
+	fi
+done
+MOCK_PUBLIC_PROBE_FAILURE_IP=198.18.132.22
+if wait_for_restored_public_profile_health >"$TEST_TMP/replica-health.stdout" 2>"$TEST_TMP/replica-health.stderr"; then
+	echo 'FAIL public profile readiness must reject an unhealthy restored replica' >&2
+	exit 1
+fi
+MOCK_PUBLIC_PROBE_FAILURE_IP=
+
+# Exercise the rollback result gate with public-profile readiness failing while
+# the baseline teagramd equivalence and readiness checks pass.
+ROLLBACK_DIR="$TEST_TMP/rollback"
+mkdir -m 700 "$ROLLBACK_DIR"
+PREVIOUS_SHA=9999999999999999999999999999999999999999
+BASE_IMAGE_ID=sha256:1111111111111111111111111111111111111111111111111111111111111111
+restore_checkout_and_tag() { return 0; }
+restore_previous_env_for_named_changes() { return 0; }
+restore_previous_override_for_named_changes() { return 0; }
+validate_rollback_blob_authority() { return 0; }
+restore_removed_public_profile_services() { return 0; }
+current_service_id() { printf '%s\n' "$BASELINE_CONTAINER"; }
+capture_snapshot() { return 0; }
+compare_rollback_to_baseline() { return 0; }
+run_rollback_readiness() { return 0; }
+record_verified_env() { return 0; }
+write_immutable() { printf '%s\n' "$2" > "$1"; }
+MOCK_ROLLBACK_PUBLIC_RC=1
+wait_for_restored_public_profile_health() { return "$MOCK_ROLLBACK_PUBLIC_RC"; }
+if perform_rollback >"$TEST_TMP/rollback-unhealthy.stdout" 2>"$TEST_TMP/rollback-unhealthy.stderr"; then
+	echo 'FAIL rollback must not verify when a restored public replica is unhealthy' >&2
+	exit 1
+fi
+if ! grep -q '^result=failed ' "$ROLLBACK_DIR/rollback-result.txt" ||
+	! grep -q 'public_profile_readiness_exit=1' "$ROLLBACK_DIR/rollback-result.txt"; then
+	echo 'FAIL failed rollback evidence must record public-profile readiness failure' >&2
+	exit 1
+fi
+rm -f "$ROLLBACK_DIR/rollback-result.txt"
+MOCK_ROLLBACK_PUBLIC_RC=0
+perform_rollback >"$TEST_TMP/rollback-healthy.stdout"
+if ! grep -q '^result=verified ' "$ROLLBACK_DIR/rollback-result.txt" ||
+	! grep -q 'public_profile_readiness=pass' "$ROLLBACK_DIR/rollback-result.txt"; then
+	echo 'FAIL verified rollback evidence must record public-profile readiness success' >&2
 	exit 1
 fi
 

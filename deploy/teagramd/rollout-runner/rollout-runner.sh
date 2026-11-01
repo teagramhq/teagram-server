@@ -985,6 +985,121 @@ restore_removed_public_profile_services() {
     "${restore_services[*]}"
 }
 
+probe_restored_public_replica() {
+  local haproxy_id=$1 address=$2 response status body
+  response=$(docker exec "$haproxy_id" sh -c '
+    printf "\\r\\n\\r\\n\\000\\r\\nQUIT\\n\\040\\000\\000\\000GET /.well-known/teagramd/client HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n" |
+      busybox nc -w 3 "$1" 2446
+  ' sh "$address" 2>/dev/null) || return 1
+  status=${response%%$'\r\n'*}
+  [[ "$status" =~ ^HTTP/1\.[01]\ 200([[:space:]]|$) ]] || return 1
+  body=${response#*$'\r\n\r\n'}
+  [ "$body" != "$response" ] || return 1
+  printf '%s' "$body" | jq -e \
+    '.version == 1 and (.websocket.endpoint | type == "string" and test("^wss://[^/]+/apiws$"))' \
+    >/dev/null 2>&1
+}
+
+wait_for_restored_public_profile_health() {
+  local service removed_service container_ids id state health address expected_address haproxy_id
+  local ready deadline remaining
+  local -a services_to_check=()
+  local -A ready_ids=()
+  [ "${#REMOVED_PUBLIC_PROFILE_SERVICES[@]}" -gt 0 ] || return 0
+  [[ "$READY_SECONDS" =~ ^[0-9]+$ ]] && [ "$READY_SECONDS" -ge 1 ] && [ "$READY_SECONDS" -le 120 ] || {
+    fail 'public profile readiness bound must be between 1 and 120 seconds'
+    return 1
+  }
+
+  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+    ready=0
+    for removed_service in "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}"; do
+      if [ "$removed_service" = "$service" ]; then
+        ready=1
+        break
+      fi
+    done
+    if [ "$service" = public-haproxy ] && [ "$ready" = 0 ]; then
+      for removed_service in "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}"; do
+        case "$removed_service" in
+          teagramd-public-1|teagramd-public-2) ready=1; break ;;
+        esac
+      done
+    fi
+    [ "$ready" = 1 ] && services_to_check+=("$service")
+  done
+
+  deadline=$((SECONDS + READY_SECONDS))
+  for service in "${services_to_check[@]}"; do
+    ready=0
+    while [ "$SECONDS" -le "$deadline" ]; do
+      container_ids=$(docker compose --profile public ps --all --quiet "$service" </dev/null 2>/dev/null) || container_ids=''
+      id=${container_ids%%$'\n'*}
+      if [ -n "$id" ]; then
+        [ "$container_ids" = "$id" ] || {
+          fail "restored public profile service $service has multiple containers"
+          return 1
+        }
+        [[ "$id" =~ ^[0-9a-f]{64}$ ]] || {
+          fail "restored public profile service $service has an invalid container ID"
+          return 1
+        }
+        state=$(docker inspect "$id" --format '{{.State.Status}}' </dev/null 2>/dev/null) || state=unknown
+        case "$state" in
+          dead)
+            fail "restored public profile service $service stopped before becoming healthy"
+            return 1
+            ;;
+          exited|created|restarting)
+            ;;
+          running)
+            if [ "$service" = public-haproxy ]; then
+              health=$(docker inspect "$id" \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                </dev/null 2>/dev/null) || health=unknown
+              case "$health" in
+                healthy)
+                  ready=1
+                  ;;
+                missing)
+                  fail 'restored public-haproxy has no configured Docker healthcheck'
+                  return 1
+                  ;;
+              esac
+            else
+              case "$service" in
+                teagramd-public-1) expected_address=198.18.132.21 ;;
+                teagramd-public-2) expected_address=198.18.132.22 ;;
+                *) fail "unknown restored public profile service $service"; return 1 ;;
+              esac
+              address=$(docker inspect "$id" \
+                --format '{{with index .NetworkSettings.Networks "public-backend"}}{{.IPAddress}}{{end}}' \
+                </dev/null 2>/dev/null) || address=''
+              haproxy_id=${ready_ids[public-haproxy]:-}
+              if [ "$address" = "$expected_address" ] && [ -n "$haproxy_id" ] && \
+                  probe_restored_public_replica "$haproxy_id" "$address"; then
+                ready=1
+              fi
+            fi
+            ;;
+        esac
+        if [ "$ready" = 1 ]; then
+          ready_ids[$service]=$id
+          printf 'restored public profile service healthy service=%s container_id=%s\n' "$service" "$id"
+          break
+        fi
+      fi
+      remaining=$((deadline - SECONDS))
+      [ "$remaining" -gt 0 ] || break
+      sleep 1
+    done
+    [ "$ready" = 1 ] || {
+      fail "restored public profile service $service did not become healthy within ${READY_SECONDS}s"
+      return 1
+    }
+  done
+}
+
 rollout_compose_service() {
   printf '%s\n' "$ROLLOUT_COMPOSE_SERVICE"
 }
@@ -2616,12 +2731,14 @@ perform_rollback() {
   fi
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
   restore_removed_public_profile_services || return 1
+  local public_profile_readiness_rc=0
+  if wait_for_restored_public_profile_health; then :; else public_profile_readiness_rc=$?; fi
   rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
-  if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
+  if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ] && [ "$public_profile_readiness_rc" -eq 0 ]; then
     if [ -n "$ADDED_ENV" ]; then
       rollback_env_record=$(jq -er '.container_env_added' "$ROLLBACK_DIR/rollback.snapshot.json") || {
         fail 'verified rollback snapshot has no added-environment record'
@@ -2654,13 +2771,13 @@ perform_rollback() {
       record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
     fi
     write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
-      "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass" || return 1
+      "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass public_profile_readiness=pass" || return 1
     printf 'rollback=verified baseline_sha=%s container_id=%s\n' "$PREVIOUS_SHA" "$rollback_id"
     return 0
   fi
   write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
-    "result=failed checkout_sha=$PREVIOUS_SHA container_id=$rollback_id equivalence_exit=$equivalence_rc readiness_exit=$readiness_rc"
-  fail 'rollback did not pass baseline-equivalence and readiness gates'
+    "result=failed checkout_sha=$PREVIOUS_SHA container_id=$rollback_id equivalence_exit=$equivalence_rc readiness_exit=$readiness_rc public_profile_readiness_exit=$public_profile_readiness_rc"
+  fail 'rollback did not pass baseline-equivalence, readiness, and public-profile health gates'
 }
 
 run_apply() {
