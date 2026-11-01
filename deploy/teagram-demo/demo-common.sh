@@ -47,6 +47,20 @@ demo_fail() {
   return 1
 }
 
+demo_server_client_config() {
+  local service="$1" server_ids_output
+  local -a server_ids=()
+  server_ids_output=$(demo_compose ps --status running -q "$service") || return 1
+  if [[ -n "$server_ids_output" ]]; then
+    mapfile -t server_ids <<< "$server_ids_output"
+  fi
+  ((${#server_ids[@]} == 1)) || {
+    demo_fail "client-config requires exactly one running $service container"
+    return 1
+  }
+  demo_compose exec -T "$service" /usr/local/bin/teagramd client-config
+}
+
 [[ -f "$DEMO_SCRIPT_DIR/haproxy.cfg" && -f "$DEMO_SCRIPT_DIR/render-haproxy-config.py" &&
   -f "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf" ]] || {
   demo_fail 'proxy configuration source is missing'

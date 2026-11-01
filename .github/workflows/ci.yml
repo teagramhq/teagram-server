@@ -1214,6 +1214,7 @@ jobs:
           bash -n deploy/teagram-demo/activity-credential.sh
           bash -n deploy/teagram-demo/test-activity-credential-handoff.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
           bash -n deploy/teagram-demo/test-seed-compose.sh
@@ -1258,6 +1259,7 @@ jobs:
             deploy/teagram-demo/activity-credential.sh \
             deploy/teagram-demo/test-activity-credential-handoff.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/ops/weekly-wipe.sh \
             deploy/teagram-demo/test-turnstile-signin-rollout.sh \
             deploy/teagram-demo/test-image-release.sh \
             deploy/teagram-demo/test-seed-compose.sh \
