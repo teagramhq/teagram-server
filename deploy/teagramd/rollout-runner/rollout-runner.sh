@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=7d593c30bd8fc717af0f7e7ba3667b50fff1566236054d5be2aaaa03e4816f18
+readonly APPROVED_VERIFIER_SHA=21850be8f3758e31201895fe58342d234052c22adb2f48d75f180b02addef40e
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -54,6 +54,7 @@ ROLLOUT_COMPOSE_SERVICE=teagramd
 INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
+REMOVED_PUBLIC_PROFILE_SERVICES=()
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
@@ -93,7 +94,6 @@ if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
   STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.pinned"
-  PUBLIC_WEBSOCKET_CHECK="$SCRIPT_DIR/public-websocket-check.py"
 else
   VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
@@ -102,7 +102,6 @@ else
   STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
 fi
 QUALIFIER_HELPER="$SCRIPT_DIR/qualify-rustfs-transition.py"
-PUBLIC_WEBSOCKET_CHECK="$SCRIPT_DIR/public-websocket-check.py"
 
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
@@ -311,12 +310,11 @@ verify_runtime_sources() {
     deploy/teagramd/rollout-runner/blob-mode-state.py
     deploy/teagramd/rollout-runner/qualify-rustfs-transition.py
     deploy/teagramd/rollout-runner/stack-move-runner.py
-    deploy/teagramd/rollout-runner/public-websocket-check.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER" "$PUBLIC_WEBSOCKET_CHECK")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py" "$PUBLIC_WEBSOCKET_CHECK")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
   if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
@@ -827,14 +825,12 @@ pin_runtime() {
   pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/qualify-rustfs-transition.py" "$BASELINE_DIR/qualify-rustfs-transition.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/stack-move-runner.py" "$BASELINE_DIR/stack-move-runner.pinned" || return 1
-  pin_runtime_file "$SCRIPT_DIR/public-websocket-check.py" "$BASELINE_DIR/public-websocket-check.py" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
   SCHEMA_GATE_HELPER="$BASELINE_DIR/schema-result-gate.py"
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
   QUALIFIER_HELPER="$BASELINE_DIR/qualify-rustfs-transition.py"
   STACK_MOVE_HELPER="$BASELINE_DIR/stack-move-runner.pinned"
-  PUBLIC_WEBSOCKET_CHECK="$BASELINE_DIR/public-websocket-check.py"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
@@ -875,6 +871,118 @@ current_service_id() {
   id=$(printf '%s' "$id" | head -n 1)
   [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$id"
+}
+
+remove_orphaned_public_profile_services() {
+  local baseline_container=$1 project target_services service container_ids container_id container_state stop_timeout found=0
+  local -a observed_services=() remove_ids=()
+  REMOVED_PUBLIC_PROFILE_SERVICES=()
+
+  project=$(docker inspect "$baseline_container" \
+    --format '{{ index .Config.Labels "com.docker.compose.project" }}' </dev/null) || {
+    fail 'cannot read the baseline Compose project before removing public profile orphans'
+    return 1
+  }
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    fail 'baseline Compose project label is missing or invalid before public profile cleanup'
+    return 1
+  }
+
+  # Keep HAProxy routing while each application replica drains existing sessions.
+  for service in teagramd-public-1 teagramd-public-2 public-haproxy; do
+    container_ids=$(docker ps --all --quiet --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service" </dev/null) || {
+      fail "cannot list old Compose containers for public profile service $service"
+      return 1
+    }
+    if [ -n "$container_ids" ]; then
+      observed_services+=("$service")
+      found=1
+    fi
+  done
+  [ "$found" = 1 ] || return 0
+
+  target_services=$(docker compose --profile public config --services </dev/null) || {
+    fail 'cannot inspect target Compose services before removing public profile orphans'
+    return 1
+  }
+  for service in "${observed_services[@]}"; do
+    if printf '%s\n' "$target_services" | grep -Fxq "$service"; then
+      continue
+    fi
+    container_ids=$(docker ps --all --quiet --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service" </dev/null) || {
+      fail "cannot recheck old Compose containers for public profile service $service"
+      return 1
+    }
+    [ -n "$container_ids" ] || continue
+    while IFS= read -r container_id; do
+      [ -n "$container_id" ] || continue
+      [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+        fail "old Compose container ID for public profile service $service is invalid"
+        return 1
+      }
+      remove_ids+=("$container_id")
+    done <<< "$container_ids"
+    REMOVED_PUBLIC_PROFILE_SERVICES+=("$service")
+  done
+
+  [ "${#remove_ids[@]}" -gt 0 ] || return 0
+  for container_id in "${remove_ids[@]}"; do
+    container_state=$(docker inspect "$container_id" \
+      --format '{{.State.Running}} {{.Config.StopTimeout}}' </dev/null) || {
+      fail "cannot inspect public profile container $container_id before stopping it"
+      return 1
+    }
+    read -r container_state stop_timeout <<< "$container_state"
+    case "$container_state" in
+      true)
+        # The server's bounded shutdown drain is 90 seconds.
+        [[ "$stop_timeout" =~ ^[0-9]{1,5}$ ]] && [ "$stop_timeout" -ge 90 ] || {
+          fail "public profile container $container_id has no safe configured shutdown timeout"
+          return 1
+        }
+        docker stop --timeout "$stop_timeout" "$container_id" </dev/null >/dev/null || {
+          fail "cannot gracefully stop public profile container $container_id"
+          return 1
+        }
+        ;;
+      false) ;;
+      *)
+        fail "public profile container $container_id has an invalid running state"
+        return 1
+        ;;
+    esac
+  done
+  docker rm "${remove_ids[@]}" </dev/null >/dev/null || {
+    fail 'cannot remove stopped public profile containers before replacing teagramd'
+    return 1
+  }
+  printf 'gracefully stopped and removed public profile containers project=%s services=%s\n' \
+    "$project" "${REMOVED_PUBLIC_PROFILE_SERVICES[*]}"
+}
+
+restore_removed_public_profile_services() {
+  local service removed_service
+  local -a restore_services=()
+  [ "${#REMOVED_PUBLIC_PROFILE_SERVICES[@]}" -gt 0 ] || return 0
+  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+    for removed_service in "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}"; do
+      if [ "$removed_service" = "$service" ]; then
+        restore_services+=("$service")
+        break
+      fi
+    done
+  done
+  docker compose --profile public up -d --no-build --no-deps \
+    "${restore_services[@]}" </dev/null || {
+    fail 'could not restore removed public profile services during rollback'
+    return 1
+  }
+  printf 'restored baseline public profile services after rollback: %s\n' \
+    "${restore_services[*]}"
 }
 
 rollout_compose_service() {
@@ -2060,9 +2168,7 @@ target_compare() {
     return "$rc"
   fi
   if ! copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/baseline.snapshot.json"; then return 1; fi
-  if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
-      ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
-      ROLLOUT_PUBLIC_WEBSOCKET="${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" bash "$VERIFIER" compare \
+  if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" bash "$VERIFIER" compare \
       "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
       "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then
     expected_logging=$(jq -er '.compose_logging_policy' "$TARGET_DIR/preflight.snapshot.json") || {
@@ -2249,9 +2355,6 @@ compare_resolved_preflight() {
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "resolved target is missing $field"; return 1; }
     if [ "$before" = "$after" ] || {
       [ "$field" = compose_public_ws_2446 ] && [ "$before" = false ] && [ "$after" = true ];
-    } || {
-      [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] &&
-        [ "$field" = compose_public_ws_2446 ] && [ "$before" = true ] && [ "$after" = false ];
     }; then
       result=pass
     else
@@ -2262,11 +2365,7 @@ compare_resolved_preflight() {
   done
   for field in compose_replica_count compose_client_addr_trust; do
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
-    if [ "$field" = compose_replica_count ]; then
-      expected=1
-    else
-      expected=socket
-    fi
+    if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
     if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$expected" "$after" "$result" || return 1
   done
@@ -2488,8 +2587,6 @@ rollback_after_target_failure() {
 restore_checkout_and_tag() {
   (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
   docker image tag "${BASE_IMAGE_ID#sha256:}" "$(rollout_compose_service):local" >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
-  restore_previous_env_for_named_changes || return 1
-  restore_previous_override_for_named_changes || return 1
 }
 
 require_clean_build_checkout() {
@@ -2509,7 +2606,8 @@ require_clean_build_checkout() {
 perform_rollback() {
   local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
-  remove_public_websocket_target_containers || return 1
+  restore_previous_env_for_named_changes || return 1
+  restore_previous_override_for_named_changes || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
       "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1
@@ -2517,6 +2615,7 @@ perform_rollback() {
     return 1
   fi
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
+  restore_removed_public_profile_services || return 1
   rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
@@ -2562,127 +2661,6 @@ perform_rollback() {
   write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
     "result=failed checkout_sha=$PREVIOUS_SHA container_id=$rollback_id equivalence_exit=$equivalence_rc readiness_exit=$readiness_rc"
   fail 'rollback did not pass baseline-equivalence and readiness gates'
-}
-
-verify_public_websocket_target() {
-  local rendered profile_list
-  [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] || return 0
-  profile_list=",${COMPOSE_PROFILES:-},"
-  [[ "$profile_list" == *,public,* ]] || {
-    fail 'public WebSocket rollout requires the public Compose profile'
-    return 1
-  }
-  rendered=$(docker compose --profile public config --format json </dev/null) || {
-    fail 'cannot render public WebSocket Compose topology'
-    return 1
-  }
-  printf '%s' "$rendered" | python3 "$PUBLIC_WEBSOCKET_CHECK" \
-    --haproxy-config "$CHECKOUT/deploy/teagramd/haproxy-public-websocket.cfg" || {
-    fail 'public WebSocket trust-boundary preflight rejected the target'
-    return 1
-  }
-}
-
-verify_public_websocket_runtime() {
-  local service id inspect_json state health attempt ports rendered base_id base_inspect
-  local -a public_services=(public-haproxy teagramd-public-1 teagramd-public-2)
-  [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] || return 0
-  rendered=$(docker compose --profile public config --format json </dev/null) || {
-    fail 'cannot render public WebSocket runtime environment expectations'
-    return 1
-  }
-  base_id=$(current_service_id "$(rollout_compose_service)") || {
-    fail 'base teagramd has no container after the public WebSocket rollout'
-    return 1
-  }
-  base_inspect=$(docker inspect "$base_id") || { fail 'cannot inspect base teagramd after the public WebSocket rollout'; return 1; }
-  printf '%s' "$base_inspect" | jq -e '
-    [.[0].Config.Env[] | select(startswith("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="))] == ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="] and
-    [.[0].Config.Env[] | select(startswith("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR="))] == ["TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR="] and
-    ([.[0].NetworkSettings.Ports // {} | to_entries[] | select(.key == "2446/tcp" and .value != null and .value != [])] | length) == 0
-  ' >/dev/null || {
-    fail 'base teagramd still exposes or advertises the public WebSocket listener'
-    return 1
-  }
-  for ((attempt=0; attempt<READY_SECONDS; attempt++)); do
-    id=$(current_service_id public-haproxy) || id=''
-    if [ -n "$id" ]; then
-      health=$(docker inspect "$id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' 2>/dev/null) || health=missing
-      [ "$health" = healthy ] && break
-    fi
-    sleep 1
-  done
-  [ "${health:-missing}" = healthy ] || {
-    fail 'public HAProxy did not become healthy with an available public backend'
-    return 1
-  }
-  for service in "${public_services[@]}"; do
-    id=$(current_service_id "$service") || {
-      fail "public WebSocket service $service has no container"
-      return 1
-    }
-    inspect_json=$(docker inspect "$id") || { fail "cannot inspect public WebSocket service $service"; return 1; }
-    state=$(printf '%s' "$inspect_json" | jq -er '.[0].State.Status') || return 1
-    [ "$state" = running ] || { fail "public WebSocket service $service is not running"; return 1; }
-    if [ "$service" = public-haproxy ]; then
-      ports=$(printf '%s' "$inspect_json" | jq -ce '
-        [.[0].NetworkSettings.Ports // {} | to_entries[] | .key as $port | .value[]? | {port:$port,host_ip:.HostIp,host_port:.HostPort}] | sort_by(.port)
-      ') || return 1
-      [ "$ports" = '[{"port":"2446/tcp","host_ip":"127.0.0.1","host_port":"2446"}]' ] || {
-        fail 'public HAProxy runtime port is not loopback-only on 2446'
-        return 1
-      }
-    else
-      if ! { printf '%s\n' "$inspect_json" "$rendered"; } | jq -se --arg service "$service" '
-        .[0] as $inspect | .[1] as $compose |
-        $inspect[0].Config.Env as $env |
-        $compose.services[$service].environment as $expected |
-        all([
-          "TG_CLIENT_ADDR_TRUST", "TG_CLIENT_ADDR_PROXY_CIDRS", "TG_REPLICA_COUNT",
-          "TG_REPLICA_ID", "TG_WEBSOCKET_LISTEN_ADDR", "TG_WEBSOCKET_ALLOWED_ORIGINS",
-          "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
-          "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS",
-          "TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"
-        ][]; . as $key |
-          ($expected | has($key)) and
-          ([ $env[] | select(type == "string" and startswith($key + "=")) ] | length) == 1 and
-          ([ $env[] | select(type == "string" and startswith($key + "=")) ][0] == ($key + "=" + ($expected[$key] | tostring))
-        ) and
-        ([ $inspect[0].NetworkSettings.Ports // {} | to_entries[] | select(.value != null and .value != []) ] | length) == 0)
-      ' >/dev/null; then
-        fail "public replica $service has unsafe runtime trust, count, or port bindings"
-        return 1
-      fi
-      if ! docker compose logs --no-color "$service" </dev/null 2>/dev/null | grep -F 'Public WebSocket MTProto listening' >/dev/null; then
-        fail "public replica $service did not log its dedicated listener readiness"
-        return 1
-      fi
-    fi
-  done
-}
-
-remove_public_websocket_target_containers() {
-  local project service ids
-  local -a container_ids=()
-  [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] || return 0
-  project=$(docker compose config --format json </dev/null | jq -er '.name | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))') || {
-    fail 'cannot identify the Compose project for public WebSocket rollback cleanup'
-    return 1
-  }
-  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
-    ids=$(docker ps --quiet --all \
-      --filter "label=com.docker.compose.project=$project" \
-      --filter "label=com.docker.compose.service=$service") || {
-      fail "cannot enumerate rollback container for $service"
-      return 1
-    }
-    [ -z "$ids" ] && continue
-    mapfile -t container_ids <<< "$ids"
-    [ "${#container_ids[@]}" -gt 0 ] && docker rm --force "${container_ids[@]}" >/dev/null || {
-      fail "cannot remove target public WebSocket container $service during rollback"
-      return 1
-    }
-  done
 }
 
 run_apply() {
@@ -2839,11 +2817,6 @@ run_apply() {
     fail 'pinned gate hashes changed after fast-forward; target was not started'
     return 1
   fi
-  verify_public_websocket_target || {
-    restore_checkout_and_tag || return 1
-    fail 'public WebSocket trust-boundary preflight failed; target was not started'
-    return 1
-  }
   if ! capture_snapshot "$baseline_id" "$TARGET_DIR" preflight; then
     write_immutable "$TARGET_DIR/preflight-failure.txt" "result=rejected target_sha=$TARGET_SHA reason=resolved-config-capture-failed" || :
     restore_checkout_and_tag || return 1
@@ -2956,13 +2929,14 @@ run_apply() {
     fail "pre-rollout teagramd logs could not be preserved (exit=$rc); baseline checkout and image restored"
     return 1
   fi
+  if remove_orphaned_public_profile_services "$baseline_id"; then :; else
+    rc=$?
+    rollback_after_target_failure "public_profile_cleanup_exit_$rc" || return 2
+    return 1
+  fi
   if docker compose up -d </dev/null; then :; else
     rc=$?
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
-    return 1
-  fi
-  if verify_public_websocket_runtime; then :; else
-    rollback_after_target_failure public_websocket_runtime_failed || return 2
     return 1
   fi
   target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''

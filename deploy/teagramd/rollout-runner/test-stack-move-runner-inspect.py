@@ -33,7 +33,7 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
-    def test_public_profile_addition_reuses_existing_data_mounts(self) -> None:
+    def test_public_profile_addition_is_rejected_as_layout_change(self) -> None:
         runner = load_runner()
         server_mounts = [
             {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
@@ -89,18 +89,18 @@ class InspectComposeSelectionTest(unittest.TestCase):
             "COMPOSE_PROFILES": "public",
             "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
         }, clear=True):
-            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+            self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
             diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
-            self.assertEqual(diagnostics["reason"], "approved_layout")
-            self.assertEqual(diagnostics["public_profile"], "accepted")
-            self.assertEqual(diagnostics["changed_components"], [])
+            self.assertEqual(diagnostics["reason"], "persistent_layout_mismatch")
+            self.assertEqual(diagnostics["public_profile"], "not_applicable")
+            self.assertEqual(diagnostics["changed_components"], ["persistent_service_mounts"])
 
             unprofiled = copy.deepcopy(target_config)
             unprofiled["services"]["teagramd-public-1"]["profiles"] = []
             unprofiled_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(unprofiled, "teagramd"), unprofiled,
             )
-            self.assertEqual(unprofiled_diagnostics["reason"], "invalid_public_replica_profile")
+            self.assertEqual(unprofiled_diagnostics["reason"], "persistent_layout_mismatch")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(unprofiled, "teagramd"), unprofiled,
@@ -114,7 +114,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             replica_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
             )
-            self.assertEqual(replica_diagnostics["reason"], "public_replica_mounts_differ")
+            self.assertEqual(replica_diagnostics["reason"], "persistent_layout_mismatch")
             self.assertEqual(replica_diagnostics["changed_components"], ["persistent_service_mounts"])
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
@@ -129,7 +129,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             proxy_diagnostics = runner.ordinary_rollout_layout_diagnostics(
                 source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
             )
-            self.assertEqual(proxy_diagnostics["reason"], "invalid_public_proxy_mount")
+            self.assertEqual(proxy_diagnostics["reason"], "persistent_layout_mismatch")
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
@@ -142,7 +142,10 @@ class InspectComposeSelectionTest(unittest.TestCase):
                 source, runner.layout(added_volume, "teagramd"), added_volume,
             )
             self.assertEqual(volume_diagnostics["reason"], "persistent_layout_mismatch")
-            self.assertEqual(volume_diagnostics["changed_components"], ["volumes"])
+            self.assertEqual(
+                volume_diagnostics["changed_components"],
+                ["persistent_service_mounts", "volumes"],
+            )
             self.assertTrue(
                 runner.ordinary_rollout_layout_changed(
                     source, runner.layout(added_volume, "teagramd"), added_volume,
@@ -166,12 +169,8 @@ class InspectComposeSelectionTest(unittest.TestCase):
         ):
             with mock.patch.dict(os.environ, environment, clear=True):
                 diagnostics = runner.ordinary_rollout_layout_diagnostics(source, target, target_config)
-                expected_reason = (
-                    "public_profile_opt_in_missing"
-                    if environment.get("COMPOSE_PROFILES")
-                    else "public_profile_not_selected"
-                )
-                self.assertEqual(diagnostics["reason"], expected_reason)
+                self.assertEqual(diagnostics["reason"], "persistent_layout_mismatch")
+                self.assertEqual(diagnostics["public_profile"], "not_applicable")
                 self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
 
     def test_only_additive_read_only_media_key_mount_is_a_safe_layout_change(self) -> None:
