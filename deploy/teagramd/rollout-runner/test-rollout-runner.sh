@@ -154,7 +154,6 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py") cat "$MOCK_TARGET_RUNTIME_DIR/qualify-rustfs-transition.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/stack-move-runner.py") cat "$MOCK_TARGET_RUNTIME_DIR/stack-move-runner.py" ;;
-  "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/public-websocket-check.py") cat "$MOCK_TARGET_RUNTIME_DIR/public-websocket-check.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
@@ -308,6 +307,22 @@ if [ "${1:-}" = image ] && [ "${2:-}" = tag ]; then
   exit 0
 fi
 if [ "${1:-}" = ps ]; then
+  if [ "${2:-}" = --all ] && [ "${3:-}" = --quiet ] && [ "${4:-}" = --no-trunc ]; then
+    project=''
+    service=''
+    for arg in "$@"; do
+      case "$arg" in
+        label=com.docker.compose.project=*) project=${arg#*=}; project=${project#*=} ;;
+        label=com.docker.compose.service=*) service=${arg#*=}; service=${service#*=} ;;
+      esac
+    done
+    [ "$project" = fixture ] || { printf 'unexpected Compose project filter: %s\n' "$project" >&2; exit 95; }
+    case "$service" in
+      public-haproxy|teagramd-public-1|teagramd-public-2) ;;
+      *) printf 'unexpected public profile service filter: %s\n' "$service" >&2; exit 96 ;;
+    esac
+    exit 0
+  fi
   if [ "${2:-}" = --no-trunc ] && [ "${3:-}" = -q ]; then
     if [ "${MOCK_SCENARIO:-}" = initial-local-replica-network-drift ]; then
       printf '%s\n' "${MOCK_BASE_ID//a/1}"
@@ -352,6 +367,7 @@ if [ "${1:-}" = inspect ]; then
   if [ "${1:-}" = --format ]; then
     template=${2:-}
     case "$template" in
+      '{{ index .Config.Labels "com.docker.compose.project" }}') printf 'fixture\n' ;;
       '{{.HostConfig.LogConfig.Type}}')
         if [ -f "$MOCK_STATE/unsupported-live-logger" ] && [ "$subject" = "$MOCK_BASE_ID" ]; then
           printf 'journald\n'
@@ -590,7 +606,9 @@ fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
              [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
           cat "$MOCK_STATE/target-compose.json"
-        elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
+        elif { [ "${MOCK_SCENARIO:-}" = config-drift ] || \
+               [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-env-addition-preflight-drift ]; } && \
+             [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
@@ -960,8 +978,7 @@ make_fixture() {
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" \
-    "$checkout/deploy/teagramd/rollout-runner/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -971,7 +988,7 @@ make_fixture() {
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$target_runtime/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -1085,8 +1102,7 @@ make_real_git_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py \
-    deploy/teagramd/rollout-runner/public-websocket-check.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ] && [ "$tracked_path" = deploy/teagramd/rollout-runner/stack-move-runner.py ]; then
       mode=100644
@@ -1123,7 +1139,7 @@ make_real_git_fixture() {
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
@@ -1205,8 +1221,7 @@ make_fixed_target_transition_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
     deploy/teagramd/rollout-runner/qualify-rustfs-transition.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py \
-    deploy/teagramd/rollout-runner/public-websocket-check.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ]; then
       # The immutable target predates the renamed runtime path; use the
@@ -1235,7 +1250,7 @@ make_fixed_target_transition_fixture() {
 
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   printf '%s\n' "$baseline_sha" > "$state/head"
   printf '%s\n' "$runtime_source_sha" > "$state/origin"
@@ -1430,7 +1445,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3655,6 +3670,32 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/e
 else
   show_fixture_failure env-addition-success "$status"
   fail 'named .env addition must deploy through apply'
+fi
+
+prepare_env_addition_fixture env-addition-preflight-failure TG_USER_INVITE_QUOTA '' \
+  'TG_USER_INVITE_QUOTA=5' TG_USER_INVITE_QUOTA=5 \
+  target-local-carry-forward-env-addition-preflight-drift
+state=$(cat "$TMP/env-addition-preflight-failure-state-path")
+checkout=$(cat "$TMP/env-addition-preflight-failure-checkout-path")
+root=$(cat "$TMP/env-addition-preflight-failure-root-path")
+baseline_container_id=$(cat "$state/teagramd")
+jq -c '.services.teagramd.environment.UNRELATED="changed"' \
+  "$state/target-compose.json" > "$TMP/env-addition-preflight-failure-target-compose.json"
+mv -- "$TMP/env-addition-preflight-failure-target-compose.json" "$state/target-compose.drift.json"
+status=$(run_fixture env-addition-preflight-failure built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q 'resolved Compose preflight rejected unapproved drift; target was not started' \
+     "$TMP/env-addition-preflight-failure.stderr" && \
+   cmp -s "$checkout/.env" "$TMP/env-addition-preflight-failure-previous.env" && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+   [ "$(cat "$state/teagramd")" = "$baseline_container_id" ] && \
+   [ -f "$root.target/preflight-failure.txt" ] && \
+   [ ! -e "$root.rollback/rollback-result.txt" ] && \
+   ! grep -q 'docker compose up -d$' "$TMP/env-addition-preflight-failure-events"; then
+  pass 'pre-cutover preflight failure restores a named .env addition before returning to baseline'
+else
+  show_fixture_failure env-addition-preflight-failure "$status"
+  fail 'pre-cutover preflight failure must restore the previous .env without rolling back containers'
 fi
 
 prepare_env_addition_fixture turnstile-env-addition-success \
