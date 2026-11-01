@@ -317,7 +317,7 @@ func TestDisabledTailnetNetworkBudgetAllowsOverTwentyWhilePublicStillRefuses(t *
 	}
 }
 
-func TestDefaultExchangeBudgetLimitsBothListenerFamilies(t *testing.T) {
+func TestDefaultExchangeBudgetDisablesTailnetNetworkLimitOnly(t *testing.T) {
 	addr := netip.MustParseAddr("192.0.2.54")
 	now := time.Now()
 	for _, listener := range []store.RateLimitListener{store.RateLimitListenerTailnet, store.RateLimitListenerPublic} {
@@ -326,10 +326,13 @@ func TestDefaultExchangeBudgetLimitsBothListenerFamilies(t *testing.T) {
 		for attempt := 1; attempt <= 21; attempt++ {
 			var connectionAttempts int
 			layer, err := budget.charge(context.Background(), keys, &connectionAttempts, addr, listener, now)
-			if attempt < 21 && (layer != "" || err != nil) {
+			if listener == store.RateLimitListenerTailnet && (layer != "" || err != nil) {
+				t.Fatalf("tailnet attempt %d = (%q, %v), want admitted without a network limit", attempt, layer, err)
+			}
+			if listener == store.RateLimitListenerPublic && attempt < 21 && (layer != "" || err != nil) {
 				t.Fatalf("listener %d attempt %d = (%q, %v), want admitted", listener, attempt, layer, err)
 			}
-			if attempt == 21 && (layer != "network" || err != nil) {
+			if listener == store.RateLimitListenerPublic && attempt == 21 && (layer != "network" || err != nil) {
 				t.Fatalf("listener %d attempt %d = (%q, %v), want network refusal", listener, attempt, layer, err)
 			}
 		}
@@ -358,7 +361,6 @@ func TestExplicitTailnetNetworkLimitAppliesOnlyToTailnetListener(t *testing.T) {
 
 func TestTailnetWithoutNetworkBudgetKeepsConnectionAndGlobalCaps(t *testing.T) {
 	limits := DefaultExchangeLimits()
-	limits.TailnetPerNetwork.Limit = 0
 	addr := netip.MustParseAddr("192.0.2.53")
 	now := time.Now().Add(time.Second)
 

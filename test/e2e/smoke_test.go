@@ -87,6 +87,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeStickerBundleCatalogue(t)
 	})
+	t.Run("user-created-sticker-sets", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUserCreatedStickerSets(t)
+	})
 	t.Run("help-countries", func(t *testing.T) {
 		t.Parallel()
 		testSmokeHelpCountries(t)

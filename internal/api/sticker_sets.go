@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -155,7 +156,7 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 	set.set.SetFlags()
 
 	catalog := &stickerSetCatalog{
-		byShortName:   map[string]*builtInStickerSet{set.set.ShortName: set},
+		byShortName:   map[string]*builtInStickerSet{strings.ToLower(set.set.ShortName): set},
 		byID:          map[int64]*builtInStickerSet{set.set.ID: set},
 		featured:      []*builtInStickerSet{set},
 		documents:     make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)),
@@ -202,7 +203,7 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 
 func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundle) error {
 	for _, pack := range bundle.Packs {
-		if _, exists := catalog.byShortName[pack.ShortName]; exists {
+		if _, exists := catalog.byShortName[strings.ToLower(pack.ShortName)]; exists {
 			return fmt.Errorf("sticker bundle pack %q collides with an existing sticker set", pack.ShortName)
 		}
 		setIdentity := namespacedDigest("teagram-bundle-sticker-set-identity-v1", appendHashPart(nil, []byte(pack.ShortName)))
@@ -261,7 +262,7 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 				path: sticker.Path,
 			}
 		}
-		catalog.byShortName[set.set.ShortName] = set
+		catalog.byShortName[strings.ToLower(set.set.ShortName)] = set
 		catalog.byID[set.set.ID] = set
 		catalog.featured = append(catalog.featured, set)
 	}
@@ -405,7 +406,7 @@ func (c *stickerSetCatalog) resolve(ref tg.InputStickerSetClass) (*builtInSticke
 		if value == nil || len(value.ShortName) > maxStickerSetShortNameBytes {
 			return nil, false
 		}
-		set, ok := c.byShortName[value.ShortName]
+		set, ok := c.byShortName[strings.ToLower(value.ShortName)]
 		return set, ok
 	case *tg.InputStickerSetID:
 		if value == nil {
@@ -464,7 +465,10 @@ func specialStickerSet(ref tg.InputStickerSetClass) (*builtInStickerSet, bool) {
 	return set, true
 }
 
-func (h *handlers) resolveStickerDocument(id, accessHash int64) (bool, error) {
+func (h *handlers) resolveStickerDocument(ctx context.Context, id, accessHash int64) (bool, error) {
+	if id > 0 {
+		return h.store.UserStickerDocumentExists(ctx, id, accessHash)
+	}
 	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		return false, err
@@ -476,7 +480,10 @@ func (h *handlers) resolveStickerDocument(id, accessHash int64) (bool, error) {
 // validStickerRetryIdentity keeps current catalogue identities exact while
 // allowing a retry for a catalogue id that has since gone stale to render its
 // stored message as unsupported.
-func (h *handlers) validStickerRetryIdentity(id, accessHash int64) (bool, error) {
+func (h *handlers) validStickerRetryIdentity(ctx context.Context, id, accessHash int64) (bool, error) {
+	if id > 0 {
+		return h.store.UserStickerDocumentExists(ctx, id, accessHash)
+	}
 	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		return false, err
@@ -574,19 +581,43 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
+	if _, ok := req.Stickerset.(*tg.InputStickerSetShortName); ok {
+		if err := h.checkRateLimit(r, stickerSetLookupRateSurface, stickerSetMutationRateLimit); err != nil {
+			return nil, err
+		}
+	}
 	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, errInternal
 	}
 	set, ok := catalog.resolve(req.Stickerset)
+	var userSet *store.UserStickerSet
 	if !ok {
-		set, ok = specialStickerSet(req.Stickerset)
-		if !ok {
-			return nil, errStickerSetInvalid
+		if special, specialOK := specialStickerSet(req.Stickerset); specialOK {
+			set = special
+		} else {
+			resolved, resolveErr := h.userStickerSetByRef(r, req.Stickerset)
+			if errors.Is(resolveErr, store.ErrStickerSetNotFound) {
+				return nil, errStickerSetInvalid
+			}
+			if resolveErr != nil {
+				h.log.Error("resolve user sticker set", "user_id", r.UserID, "err", resolveErr)
+				return nil, errInternal
+			}
+			userSet = &resolved
 		}
 	}
-	if req.Hash != 0 && req.Hash == set.set.Hash {
+	var setHash int
+	var setID int64
+	if userSet != nil {
+		setHash = userSet.Hash
+		setID = userSet.ID
+	} else {
+		setHash = set.set.Hash
+		setID = set.set.ID
+	}
+	if req.Hash != 0 && req.Hash == setHash {
 		return &tg.MessagesStickerSetNotModified{}, nil
 	}
 	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
@@ -594,12 +625,9 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 		h.log.Error("load installed sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	var installedAt *time.Time
-	for _, item := range installed {
-		if item.ID == set.set.ID {
-			installedAt = &item.InstalledAt
-			break
-		}
+	installedAt := installedStickerSetDate(installed, setID)
+	if userSet != nil {
+		return userStickerSetTL(*userSet, r.UserID, h.dcID, installedAt), nil
 	}
 	return &tg.MessagesStickerSet{
 		Set:       set.responseSet(installedAt),
@@ -627,13 +655,35 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 		h.log.Error("load installed sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	userSetIDs := make([]int64, 0, len(installed))
+	for _, item := range installed {
+		if item.ID > 0 {
+			userSetIDs = append(userSetIDs, item.ID)
+		}
+	}
+	userSets, err := h.store.UserStickerSetSummariesByInstalledIDs(r.Ctx, userSetIDs)
+	if err != nil {
+		h.log.Error("load installed user sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	sets := make([]tg.StickerSet, 0, len(installed))
 	for _, item := range installed {
-		set, ok := catalog.byID[item.ID]
+		if item.ID < 0 {
+			set, ok := catalog.byID[item.ID]
+			if !ok {
+				continue
+			}
+			sets = append(sets, set.responseSet(&item.InstalledAt))
+			continue
+		}
+		userSet, ok := userSets[item.ID]
 		if !ok {
 			continue
 		}
-		sets = append(sets, set.responseSet(&item.InstalledAt))
+		if userSet.Kind == "emojis" {
+			continue
+		}
+		sets = append(sets, userStickerSetSummaryTL(userSet, r.UserID, &item.InstalledAt))
 	}
 	hash := installedStickerSetsHash(sets)
 	if req.Hash != 0 && req.Hash == hash {
@@ -658,13 +708,19 @@ func (h *handlers) handleInstallStickerSet(c *mtproto.Conn, r *mtproto.Request) 
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, nil, errInternal
 	}
-	set, ok := catalog.resolve(req.Stickerset)
-	if !ok {
+	setID, resolveErr := h.resolvedStickerSetID(r, catalog, req.Stickerset)
+	if resolveErr != nil {
+		return nil, nil, resolveErr
+	}
+	changed, err := h.store.InstallStickerSet(r.Ctx, r.UserID, setID)
+	if errors.Is(err, store.ErrStickerSetNotFound) {
 		return nil, nil, errStickerSetInvalid
 	}
-	changed, err := h.store.InstallStickerSet(r.Ctx, r.UserID, set.set.ID)
+	if errors.Is(err, store.ErrStickerSetInstallLimit) {
+		return nil, nil, errStickersTooMuch
+	}
 	if err != nil {
-		h.log.Error("install sticker set", "user_id", r.UserID, "set_id", set.set.ID, "err", err)
+		h.log.Error("install sticker set", "user_id", r.UserID, "set_id", setID, "err", err)
 		return nil, nil, errInternal
 	}
 	if !changed {
@@ -691,13 +747,13 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, nil, errInternal
 	}
-	set, ok := catalog.resolve(req.Stickerset)
-	if !ok {
-		return nil, nil, errStickerSetInvalid
+	setID, resolveErr := h.resolvedStickerSetID(r, catalog, req.Stickerset)
+	if resolveErr != nil {
+		return nil, nil, resolveErr
 	}
-	changed, err := h.store.UninstallStickerSet(r.Ctx, r.UserID, set.set.ID)
+	changed, err := h.store.UninstallStickerSet(r.Ctx, r.UserID, setID)
 	if err != nil {
-		h.log.Error("uninstall sticker set", "user_id", r.UserID, "set_id", set.set.ID, "err", err)
+		h.log.Error("uninstall sticker set", "user_id", r.UserID, "set_id", setID, "err", err)
 		return nil, nil, errInternal
 	}
 	if !changed {

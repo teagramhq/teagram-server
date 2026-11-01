@@ -157,6 +157,14 @@ func allocatorInventory() []allocatorFact {
 			noReuse: "monotone non-cycling sequence",
 		},
 		{
+			name: "public.user_created_sticker_sets.id", sequence: "public.user_created_sticker_sets_id_seq",
+			table: "user_created_sticker_sets", column: "id",
+			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
+			colType: "bigint", widthBits: 64, class: classClientVisible,
+			guard: guardSequenceCeiling, wire: "tg.StickerSet.ID (int64)",
+			noReuse: "monotone non-cycling sequence",
+		},
+		{
 			name: "public.chats.id", sequence: "public.chats_id_seq",
 			table: "chats", column: "id",
 			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
@@ -322,6 +330,7 @@ func wireAnchors() []wireAnchor {
 	return []wireAnchor{
 		{allocator: "public.users.id", value: tg.PeerUser{}, field: "UserID"},
 		{allocator: "public.files.id", value: tg.Document{}, field: "ID"},
+		{allocator: "public.user_created_sticker_sets.id", value: tg.StickerSet{}, field: "ID"},
 		{allocator: "public.chats.id", value: tg.PeerChat{}, field: "ChatID"},
 		{allocator: "public.channels.id", value: tg.PeerChannel{}, field: "ChannelID"},
 		{allocator: "public.secret_chats.id", value: tg.EncryptedChat{}, field: "ID"},
@@ -907,7 +916,8 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 
 	want := map[allocatorClass][]string{
 		classClientVisible: {
-			"public.users.id", "public.files.id", "public.chats.id", "public.channels.id",
+			"public.users.id", "public.files.id", "public.user_created_sticker_sets.id",
+			"public.chats.id", "public.channels.id",
 			"public.secret_chats.id", "public.polls.id",
 			"public.update_state.next_local_id", "public.update_state.pts",
 			"public.channel_state.next_local_id", "public.channel_state.pts",

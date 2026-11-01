@@ -74,7 +74,7 @@ esac
 		t.Fatalf("read docker log: %v", err)
 	}
 	logText := string(log)
-	readyAt := strings.Index(logText, "pg_isready -h 127.0.0.1 -U postgres -q")
+	readyAt := strings.Index(logText, "pg_isready -h 127.0.0.1 -p 5432 -U postgres -q")
 	if readyAt < 0 {
 		t.Fatalf("Postgres readiness did not check its TCP listener:\n%s", log)
 	}

@@ -111,7 +111,14 @@ var (
 	errReactionInvalid = rpcErr(400, "REACTION_INVALID")
 	// errStickerSetInvalid rejects every input set reference that does not match
 	// the built-in catalogue exactly, including special and partially valid IDs.
-	errStickerSetInvalid = rpcErr(400, "STICKERSET_INVALID")
+	errStickerSetInvalid      = rpcErr(400, "STICKERSET_INVALID")
+	errStickersEmpty          = rpcErr(400, "STICKERS_EMPTY")
+	errStickersTooMuch        = rpcErr(400, "STICKERS_TOO_MUCH")
+	errShortNameInvalid       = rpcErr(400, "SHORT_NAME_INVALID")
+	errShortNameOccupied      = rpcErr(400, "SHORT_NAME_OCCUPIED")
+	errStickerDocumentInvalid = rpcErr(400, "STICKER_DOCUMENT_INVALID")
+	errStickerEmojiInvalid    = rpcErr(400, "STICKER_EMOJI_INVALID")
+	errStickerSetTitleInvalid = rpcErr(400, "TITLE_INVALID")
 	// errChatLinkExists rejects hiding history while a channel has a public link.
 	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")
 	// errChatAboutNotModified answers an editChatAbout request whose description

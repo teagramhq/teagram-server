@@ -74,6 +74,8 @@ type handlers struct {
 	rateLimitSetTyping store.RateLimitConfig
 	// rateLimitPollVote limits messages.sendVote per account.
 	rateLimitPollVote store.RateLimitConfig
+	// rateLimitCreateStickerSet bounds expensive sticker-byte reads and parsing.
+	rateLimitCreateStickerSet store.RateLimitConfig
 	// rateLimitCreateChat limits messages.createChat per account.
 	rateLimitCreateChat store.RateLimitConfig
 	// rateLimitAddChatUser limits messages.addChatUser per account.
@@ -381,6 +383,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		rateLimitMessageSend:         rateLimits.MessageSend,
 		rateLimitSetTyping:           defaultSetTypingRateLimit,
 		rateLimitPollVote:            rateLimits.PollVote,
+		rateLimitCreateStickerSet:    rateLimits.CreateStickerSet,
 		rateLimitCreateChat:          rateLimits.CreateChat,
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
 		rateLimitCreateChannel:       rateLimits.CreateChannel,
@@ -562,6 +565,10 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetEmojiStickerGroupsRequestTypeID, h.handleGetEmojiStickerGroups)
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)
 	register(d, tg.MessagesGetStickerSetRequestTypeID, h.handleGetStickerSet)
+	registerReply(d, tg.StickersCreateStickerSetRequestTypeID, h.handleCreateStickerSet)
+	registerReply(d, tg.StickersAddStickerToSetRequestTypeID, h.handleAddStickerToSetUnsupported)
+	registerReply(d, tg.StickersCheckShortNameRequestTypeID, h.handleCheckStickerSetShortName)
+	registerReply(d, tg.StickersSuggestShortNameRequestTypeID, h.handleSuggestStickerSetShortName)
 	registerReply(d, tg.MessagesInstallStickerSetRequestTypeID, h.handleInstallStickerSet)
 	registerReply(d, tg.MessagesUninstallStickerSetRequestTypeID, h.handleUninstallStickerSet)
 	register(d, tg.MessagesGetStickersRequestTypeID, h.handleGetStickers)

@@ -232,7 +232,7 @@ printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
 if { [ "$script_name" = stack-move-runner.py ] || [ "$script_name" = stack-move-runner.pinned ]; } && \
    [ "${2:-}" = inspect ]; then
   if [ "${MOCK_SCENARIO:-}" = project-layout-changed ]; then
-    printf '%s\n' '{"changed":true}'
+    printf '%s\n' '{"changed":true,"layout_diagnostics":{"reason":"persistent_layout_mismatch","changed_components":["server_mounts","volumes"],"public_profile":"not_applicable"}}'
   else
     printf '%s\n' '{"changed":false,"source_database":"teagram","target_database":"teagram"}'
   fi
@@ -2166,7 +2166,7 @@ status=$(run_fixture project-layout-change built 0 '' 2 '' '' apply)
 root=$(cat "$TMP/project-layout-change-root-path")
 state=$(cat "$TMP/project-layout-change-state-path")
 if [ "$status" != 0 ] && \
-   grep -q 'Compose project or persistent mounts changed; use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
+   grep -q 'Compose project or persistent mounts changed (reason=persistent_layout_mismatch components=server_mounts,volumes public_profile=not_applicable); use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
    grep -q '^python3 stack-move-runner.py inspect$' "$TMP/project-layout-change-events" && \
    ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose (build|up)|^git .* (merge|reset)' "$TMP/project-layout-change-events" && \
    [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \

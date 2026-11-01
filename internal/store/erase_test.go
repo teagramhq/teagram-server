@@ -105,6 +105,48 @@ func TestErasureSweepErasesUnreferencedFile(t *testing.T) {
 	}
 }
 
+func TestErasureRetainsStickerSetFileAfterSetIsNotLive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15559200021")
+	file := storedFileWithBytes(t, s, owner.ID)
+	set, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Retained", ShortName: "retained_file", Kind: "regular",
+	}, []store.UserStickerSetItem{{
+		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
+		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
+	}})
+	if err != nil {
+		t.Fatalf("create sticker set: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect set fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close set fixture: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, set.ID); err != nil {
+		t.Fatalf("take set out of live state: %v", err)
+	}
+
+	scan, err := s.MediaErasureScan(ctx, future(), 0, 0, 100)
+	if err != nil {
+		t.Fatalf("scan retained sticker file: %v", err)
+	}
+	if scan.Counts.SkippedStickerSetRef != 1 || len(scan.Unreferenced) != 0 {
+		t.Fatalf("scan = %+v, want one set reference and no candidate", scan)
+	}
+	counts := sweep(t, s, future())
+	if counts.Erased != 0 || !rowPresent(t, s, file.ID) || !blobPresent(t, s, file.ID) {
+		t.Fatalf("erasure = %+v; set file row/blob survived: row=%t blob=%t", counts, rowPresent(t, s, file.ID), blobPresent(t, s, file.ID))
+	}
+}
+
 func TestErasureSweepErasesUnsentUploadGrant(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
