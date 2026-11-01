@@ -874,7 +874,7 @@ current_service_id() {
 }
 
 remove_orphaned_public_profile_services() {
-  local baseline_container=$1 project target_services service container_ids container_id found=0
+  local baseline_container=$1 project target_services service container_ids container_id container_state stop_timeout found=0
   local -a observed_services=() remove_ids=()
   REMOVED_PUBLIC_PROFILE_SERVICES=()
 
@@ -888,7 +888,8 @@ remove_orphaned_public_profile_services() {
     return 1
   }
 
-  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+  # Keep HAProxy routing while each application replica drains existing sessions.
+  for service in teagramd-public-1 teagramd-public-2 public-haproxy; do
     container_ids=$(docker ps --all --quiet --no-trunc \
       --filter "label=com.docker.compose.project=$project" \
       --filter "label=com.docker.compose.service=$service" </dev/null) || {
@@ -929,23 +930,59 @@ remove_orphaned_public_profile_services() {
   done
 
   [ "${#remove_ids[@]}" -gt 0 ] || return 0
-  docker rm -f "${remove_ids[@]}" </dev/null >/dev/null || {
-    fail 'cannot remove orphaned public profile containers before replacing teagramd'
+  for container_id in "${remove_ids[@]}"; do
+    container_state=$(docker inspect "$container_id" \
+      --format '{{.State.Running}} {{.Config.StopTimeout}}' </dev/null) || {
+      fail "cannot inspect public profile container $container_id before stopping it"
+      return 1
+    }
+    read -r container_state stop_timeout <<< "$container_state"
+    case "$container_state" in
+      true)
+        # The server's bounded shutdown drain is 90 seconds.
+        [[ "$stop_timeout" =~ ^[0-9]{1,5}$ ]] && [ "$stop_timeout" -ge 90 ] || {
+          fail "public profile container $container_id has no safe configured shutdown timeout"
+          return 1
+        }
+        docker stop --timeout "$stop_timeout" "$container_id" </dev/null >/dev/null || {
+          fail "cannot gracefully stop public profile container $container_id"
+          return 1
+        }
+        ;;
+      false) ;;
+      *)
+        fail "public profile container $container_id has an invalid running state"
+        return 1
+        ;;
+    esac
+  done
+  docker rm "${remove_ids[@]}" </dev/null >/dev/null || {
+    fail 'cannot remove stopped public profile containers before replacing teagramd'
     return 1
   }
-  printf 'removed orphaned public profile containers project=%s services=%s\n' \
+  printf 'gracefully stopped and removed public profile containers project=%s services=%s\n' \
     "$project" "${REMOVED_PUBLIC_PROFILE_SERVICES[*]}"
 }
 
 restore_removed_public_profile_services() {
+  local service removed_service
+  local -a restore_services=()
   [ "${#REMOVED_PUBLIC_PROFILE_SERVICES[@]}" -gt 0 ] || return 0
+  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+    for removed_service in "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}"; do
+      if [ "$removed_service" = "$service" ]; then
+        restore_services+=("$service")
+        break
+      fi
+    done
+  done
   docker compose --profile public up -d --no-build --no-deps \
-    "${REMOVED_PUBLIC_PROFILE_SERVICES[@]}" </dev/null || {
+    "${restore_services[@]}" </dev/null || {
     fail 'could not restore removed public profile services during rollback'
     return 1
   }
   printf 'restored baseline public profile services after rollback: %s\n' \
-    "${REMOVED_PUBLIC_PROFILE_SERVICES[*]}"
+    "${restore_services[*]}"
 }
 
 rollout_compose_service() {

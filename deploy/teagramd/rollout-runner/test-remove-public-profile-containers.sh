@@ -11,6 +11,7 @@ PUBLIC_REPLICA_ONE_CONTAINER=$(printf 'c%.0s' {1..64})
 PUBLIC_REPLICA_TWO_CONTAINER=$(printf 'd%.0s' {1..64})
 MOCK_PROJECT=fixture
 MOCK_ORPHANS=1
+MOCK_STOP_TIMEOUT=120
 MOCK_TARGET_SERVICES=$'postgres\nteagramd'
 
 docker() {
@@ -21,6 +22,15 @@ docker() {
 		[[ "${4:-}" == '{{ index .Config.Labels "com.docker.compose.project" }}' ]]
 		printf '%s\n' "$MOCK_PROJECT"
 		return 0
+	fi
+	if [[ "${1:-}" == inspect && "${3:-}" == --format &&
+		"${4:-}" == '{{.State.Running}} {{.Config.StopTimeout}}' ]]; then
+		case "${2:-}" in
+			"$PUBLIC_HAPROXY_CONTAINER"|"$PUBLIC_REPLICA_ONE_CONTAINER"|"$PUBLIC_REPLICA_TWO_CONTAINER")
+				printf 'true %s\n' "$MOCK_STOP_TIMEOUT"
+				return 0
+			;;
+		esac
 	fi
 	if [[ "${1:-}" == ps ]]; then
 		local service=''
@@ -44,6 +54,12 @@ docker() {
 		return 0
 	fi
 	if [[ "${1:-}" == rm && "${2:-}" == -f ]]; then
+		return 0
+	fi
+	if [[ "${1:-}" == stop && "${2:-}" == --timeout && "${3:-}" == "$MOCK_STOP_TIMEOUT" ]]; then
+		return 0
+	fi
+	if [[ "${1:-}" == rm ]]; then
 		return 0
 	fi
 	if [[ "${1:-}" == compose && "${2:-}" == up && "${3:-}" == -d ]]; then
@@ -72,25 +88,36 @@ fi
 remove_orphaned_public_profile_services "$BASELINE_CONTAINER"
 docker compose up -d
 
-remove_line=$(grep -n '<rm> <-f>' "$TEST_EVENTS" | cut -d: -f1)
+remove_line=$(grep -n '<rm>' "$TEST_EVENTS" | cut -d: -f1)
 up_line=$(grep -n '<compose> <up> <-d>' "$TEST_EVENTS" | cut -d: -f1)
-if [[ -z "$remove_line" || -z "$up_line" || "$remove_line" -ge "$up_line" ]]; then
+if [[ -z "$remove_line" || -z "$up_line" || "$remove_line" -ge "$up_line" ]] || grep -q '<rm> <-f>' "$TEST_EVENTS"; then
 	echo 'FAIL orphaned public profile containers must be removed before Compose starts the replacement' >&2
 	exit 1
 fi
 for container in "$PUBLIC_HAPROXY_CONTAINER" "$PUBLIC_REPLICA_ONE_CONTAINER" "$PUBLIC_REPLICA_TWO_CONTAINER"; do
-	if ! grep -Fq "<$container>" "$TEST_EVENTS"; then
-		printf 'FAIL orphaned public profile container was not removed: %s\n' "$container" >&2
+	stop_line=$(grep -nF "<stop> <--timeout> <$MOCK_STOP_TIMEOUT> <$container>" "$TEST_EVENTS" | cut -d: -f1)
+	rm_command=$(sed -n "${remove_line}p" "$TEST_EVENTS")
+	if [[ -z "$stop_line" || "$stop_line" -ge "$remove_line" || "$rm_command" != *"<$container>"* ]]; then
+		printf 'FAIL orphaned public profile container was not stopped with its configured timeout before removal: %s\n' "$container" >&2
 		exit 1
 	fi
 done
+replica_one_stop_line=$(grep -nF "<stop> <--timeout> <$MOCK_STOP_TIMEOUT> <$PUBLIC_REPLICA_ONE_CONTAINER>" "$TEST_EVENTS" | cut -d: -f1)
+replica_two_stop_line=$(grep -nF "<stop> <--timeout> <$MOCK_STOP_TIMEOUT> <$PUBLIC_REPLICA_TWO_CONTAINER>" "$TEST_EVENTS" | cut -d: -f1)
+haproxy_stop_line=$(grep -nF "<stop> <--timeout> <$MOCK_STOP_TIMEOUT> <$PUBLIC_HAPROXY_CONTAINER>" "$TEST_EVENTS" | cut -d: -f1)
+if [[ "$replica_one_stop_line" -ge "$haproxy_stop_line" || "$replica_two_stop_line" -ge "$haproxy_stop_line" ]]; then
+	echo 'FAIL public replicas must drain while HAProxy can still route their existing sessions' >&2
+	exit 1
+fi
 
 : > "$TEST_EVENTS"
 docker compose up -d --no-build --no-deps teagramd
 restore_removed_public_profile_services
 baseline_up_line=$(grep -n '<compose> <up> <-d> <--no-build> <--no-deps> <teagramd>' "$TEST_EVENTS" | cut -d: -f1)
 profile_restore_line=$(grep -n '<compose> <--profile> <public> <up> <-d> <--no-build> <--no-deps>' "$TEST_EVENTS" | cut -d: -f1)
-if [[ -z "$baseline_up_line" || -z "$profile_restore_line" || "$baseline_up_line" -ge "$profile_restore_line" ]]; then
+restore_command=$(sed -n "${profile_restore_line}p" "$TEST_EVENTS")
+if [[ -z "$baseline_up_line" || -z "$profile_restore_line" || "$baseline_up_line" -ge "$profile_restore_line" ||
+	"$restore_command" != *'<public-haproxy>'*'<teagramd-public-1>'*'<teagramd-public-2>'* ]]; then
 	echo 'FAIL removed public profile services must be restored after baseline teagramd during rollback' >&2
 	exit 1
 fi
@@ -108,9 +135,21 @@ if [[ -z "$rollback_teagramd_line" || -z "$rollback_restore_line" || "$rollback_
 fi
 
 : > "$TEST_EVENTS"
+MOCK_STOP_TIMEOUT=60
+if remove_orphaned_public_profile_services "$BASELINE_CONTAINER" >"$TEST_TMP/short-timeout.stdout" 2>"$TEST_TMP/short-timeout.stderr"; then
+	echo 'FAIL cleanup must reject a stop timeout shorter than the server drain window' >&2
+	exit 1
+fi
+if grep -q '<stop>' "$TEST_EVENTS" || grep -q '<rm>' "$TEST_EVENTS"; then
+	echo 'FAIL unsafe stop timeout must be rejected before stopping or removing containers' >&2
+	exit 1
+fi
+MOCK_STOP_TIMEOUT=120
+
+: > "$TEST_EVENTS"
 MOCK_TARGET_SERVICES+=$'\npublic-haproxy\nteagramd-public-1\nteagramd-public-2'
 remove_orphaned_public_profile_services "$BASELINE_CONTAINER"
-if grep -q '<rm> <-f>' "$TEST_EVENTS"; then
+if grep -q '<rm>' "$TEST_EVENTS" || grep -q '<stop>' "$TEST_EVENTS"; then
 	echo 'FAIL public profile containers still present in target Compose must remain managed by Compose' >&2
 	exit 1
 fi
