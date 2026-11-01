@@ -159,24 +159,77 @@ The published username policy is advisory to clients; the server remains the
 enforcement boundary. This change does not alter login-code verification,
 password verification, session binding, or account admission semantics.
 
-# Threat model: Turnstile test mode and demo QA bypass
+# Threat model: signup Turnstile verifier
 
-## Assets and boundaries
+## Scope and trust boundary
 
-Turnstile protects signup admission from automated abuse. Its secret key and
-the demo QA token are server-side credentials; the site key is public. Signup
-registration mode, invite rules, and per-IP limits remain separate server-side
-controls.
+This model covers the optional server-side Turnstile check on `auth.signUp`.
+The protected assets are account creation under the configured registration
+policy, the Cloudflare Siteverify secret, and the demo QA bypass token. Signup
+RPCs and their challenge tokens are attacker-controlled; the site key is
+public. The server process, its startup configuration and secret mounts, the
+deployment operators, and Cloudflare's Siteverify endpoint over HTTPS are
+trusted. A successful challenge is an anti-automation signal, not proof of
+identity or authorization. Registration mode, invite validation, and signup
+rate limits remain independent server-side controls.
 
-## Abuse cases and controls
+## Construction and configuration
+
+`cmd/teagramd` creates the verifier from the `TurnstileConfig` loaded and
+validated at startup. The gate is disabled when credentials are unset. When
+enabled, configuration requires the public `TG_TURNSTILE_SITE_KEY` and exactly
+one Siteverify secret source: `TG_TURNSTILE_SECRET_KEY_FILE` (preferred) or
+`TG_TURNSTILE_SECRET_KEY`. The secret stays server-side and remains in process
+memory while the verifier is in use. `NewTurnstileVerifierWithConfig` takes
+explicit values; the runtime relies on callers supplying validated startup
+configuration, since the constructor itself does not enforce the deployment
+policy. Any other in-process caller is therefore inside the trusted
+configuration boundary.
+
+`TG_TURNSTILE_HOSTNAMES` is a comma-separated list of exact DNS hostnames,
+defaulting to `web.teagram.io`. The demo allows `web.teagram.io` and
+`demo.teagram.io`. The verifier normalizes case and a trailing dot, then
+requires Siteverify success, the expected action, and an exact hostname match.
+This check uses Cloudflare's response, not a client-supplied `Host`, `Origin`,
+or RPC field; wildcards are not supported. Operators must keep the list limited
+to hostnames that should be allowed to submit signup challenges. Local and CI
+test mode accepts only Cloudflare's official test key pairs and refuses to
+start when a public `*.teagram.io` deployment hostname is advertised.
+
+With proxy-v2 client-address trust, the verifier may send the connection
+address reported by the allowlisted proxy to Siteverify. Direct socket peers
+and client-provided forwarding headers do not become this value. The verifier
+posts to the fixed HTTPS Siteverify endpoint, disables redirects, bounds the
+token and response sizes, limits concurrent checks, and fails closed on
+provider errors, malformed responses, action mismatches, or host mismatches.
+After verification, signup still passes through registration, IP-rate-limit,
+session-state, username, and invite checks.
+
+## Demo QA bypass
+
+`TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` is an operator-provisioned static token
+loaded at startup. Configuration permits it only when the advertised stack
+includes `demo.teagram.io` and no production Teagram hostname; it must contain
+32 to 256 allowed characters and must differ from the Siteverify secret. The
+demo deploy mounts this separate file only into `teagramd`. A constant-time
+exact match bypasses Siteverify only for the `signup` action. It is not
+one-use: anyone who obtains it can reuse it while it remains configured. The
+token is not logged, and use of it still requires the normal registration
+policy, signup IP limit, and account-admission checks. It is not a production
+credential or a recovery path.
+
+## Abuse cases and residual risk
 
 | Abuse case | Control and remaining risk |
 |---|---|
-| A real credential is accidentally used in local or CI test mode | Test mode accepts only Cloudflare's official test pairs and rejects a real Siteverify secret. It also refuses every advertised `*.teagram.io` hostname, including the public web and demo stacks. |
-| A caller tries to use the QA token for sign-in or another action | The verifier compares the token only for the `signup` action. Other actions continue through Siteverify, and the raw token is excluded from log fields. |
-| A leaked QA token creates demo accounts without solving the widget | The bypass is enabled only by a configured file on `demo.teagram.io`, stays inside the protected server secret mount, and does not skip registration rules or the signup IP limit. A token holder can still use the demo signup allowance until its rate limit resets. |
-| A client removes or forges challenge UI | The server still requires a valid Siteverify response or the exact demo QA token. Registration and per-IP limits are enforced server-side. |
+| A caller removes or forges the challenge UI or submits a fabricated token | The server verifies the token with Siteverify and checks its action and exact response hostname. This does not establish the caller's identity; distributed callers can still obtain valid challenges. |
+| An operator uses test credentials on a public stack | Test mode accepts only Cloudflare's official test key pairs and rejects advertised public Teagram deployment hostnames. Test mode does not open registration or disable signup limits. |
+| The hostname allowlist includes an unintended site | Only exact configured hostnames match, but every configured hostname broadens the accepted Siteverify response set. DNS syntax validation cannot decide which domains the operator intended. |
+| The demo QA token leaks | A holder can skip the challenge repeatedly on the demo stack until the token is rotated and the server restarted. Registration rules and the signup IP limit still apply; distributed sources can multiply per-IP budgets. |
+| Cloudflare Siteverify is unavailable or the verifier is saturated | Verification fails closed; callers cannot complete signup until the provider or local capacity recovers. This preserves the gate at an availability cost. |
+| Turnstile is left unconfigured | Signup has no Turnstile check by design. The configured registration policy, invite checks, and rate limits remain the admission controls. |
 
-Test mode does not open registration or disable signup limits. The demo QA token
-is scoped to public demo account creation and is not a production recovery or
-operator credential.
+The host, deployment configuration, and secret-file access are part of the
+trusted boundary. Compromise of them can expose the Siteverify credential or
+demo bypass token; Turnstile does not protect against a compromised server or
+operator.
