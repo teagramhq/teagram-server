@@ -105,6 +105,28 @@ async function verifyTreeTermination(signal, timeoutBeforeSignal) {
   });
 }
 
+test('reports operation failures after cleanup succeeds', async () => {
+  const operationError = new Error('test body failed');
+  let cleanupRan = false;
+
+  await assert.rejects(
+    runWithCleanup(() => { throw operationError; }, () => { cleanupRan = true; }),
+    (error) => error === operationError
+  );
+  assert.equal(cleanupRan, true);
+});
+
+test('reports cleanup failures after the operation succeeds', async () => {
+  const cleanupError = new Error('process-group cleanup failed');
+  let operationRan = false;
+
+  await assert.rejects(
+    runWithCleanup(() => { operationRan = true; }, () => { throw cleanupError; }),
+    (error) => error === cleanupError
+  );
+  assert.equal(operationRan, true);
+});
+
 test('reports cleanup failures alongside operation failures', async () => {
   const operationError = new Error('test body failed');
   const cleanupError = new Error('process-group cleanup failed');
@@ -117,6 +139,39 @@ test('reports cleanup failures alongside operation failures', async () => {
 
   assert(failure instanceof AggregateError);
   assert.deepEqual(failure.errors, [operationError, cleanupError]);
+});
+
+test('verifyTreeTermination surfaces body errors and still kills the process group', {skip: process.platform === 'win32'}, async (t) => {
+  const realKill = process.kill;
+  let grandchildPid;
+  let cleanupGroupPid;
+  t.mock.method(process, 'kill', (pid, signal) => {
+    if(signal === 0 && pid > 0 && grandchildPid === undefined) {
+      grandchildPid = pid;
+      realKill.call(process, pid, 0);
+      const error = new Error('injected process check failure');
+      error.code = 'EPERM';
+      throw error;
+    }
+    if(signal === 'SIGKILL' && pid < 0) cleanupGroupPid = -pid;
+    return realKill.call(process, pid, signal);
+  });
+
+  await assert.rejects(verifyTreeTermination('SIGINT', 0), {code: 'EPERM'});
+  assert.ok(Number.isInteger(grandchildPid));
+  assert.ok(Number.isInteger(cleanupGroupPid));
+  const deadline = Date.now() + 1_000;
+  while(true) {
+    try {
+      realKill.call(process, grandchildPid, 0);
+    } catch(error) {
+      if(error.code === 'ESRCH') break;
+      throw error;
+    }
+    assert(Date.now() < deadline, 'grandchild should be gone after SIGKILL cleanup');
+    await delay(25);
+  }
+  assert.throws(() => realKill.call(process, -cleanupGroupPid, 0), {code: 'ESRCH'});
 });
 
 test('cancellation and timeout terminate surviving process-group descendants', {skip: process.platform === 'win32'}, async (t) => {
