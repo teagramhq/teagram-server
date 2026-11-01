@@ -1,0 +1,7 @@
+# source: gotd v0.162.0 layer-228 generated request type
+messages.sendMessage#fef48f62
+  flags: 8 [entities bit 3]
+  peer: inputPeerChat#35a95cb9(chat_id: <N>)
+  message: "hi ⭐"
+  random_id: <N>
+  entities: [messageEntityCustomEmoji#c8cf05f8(offset: 3, length: 1, document_id: <N>)]

@@ -25,6 +25,7 @@ type testPack struct {
 	Source      string        `json:"source"`
 	License     string        `json:"license,omitempty"`
 	Attribution string        `json:"attribution"`
+	Kind        string        `json:"kind,omitempty"`
 	Format      string        `json:"format,omitempty"`
 	Stickers    []testSticker `json:"stickers"`
 	Art         []byte        `json:"-"`
@@ -54,8 +55,35 @@ func TestLoadValidatesBundleAndBuildsTitles(t *testing.T) {
 	if pack.ShortName != "openmoji_animals" || pack.Attribution != "Emoji by OpenMoji" || len(pack.Stickers) != 1 {
 		t.Fatalf("loaded pack metadata = %+v", pack)
 	}
+	if pack.Kind != stickerbundle.PackKindStickers {
+		t.Fatalf("default pack kind = %q, want %q", pack.Kind, stickerbundle.PackKindStickers)
+	}
 	if pack.Stickers[0].Size != int64(len(testWebP)) || pack.Stickers[0].Path == "" {
 		t.Fatalf("loaded sticker = %+v, want a checked file path and size", pack.Stickers[0])
+	}
+}
+
+func TestLoadAcceptsCustomEmojiPackKind(t *testing.T) {
+	pack := validTestPack("catalog_custom_emojis")
+	pack.Kind = "emojis"
+	bundle, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err != nil {
+		t.Fatalf("load custom emoji bundle pack: %v", err)
+	}
+	if len(bundle.Packs) != 1 {
+		t.Fatalf("custom emoji bundle packs = %d, want one", len(bundle.Packs))
+	}
+	if bundle.Packs[0].Kind != stickerbundle.PackKindEmojis {
+		t.Fatalf("custom emoji bundle pack kind = %q, want %q", bundle.Packs[0].Kind, stickerbundle.PackKindEmojis)
+	}
+}
+
+func TestLoadRejectsUnsupportedPackKind(t *testing.T) {
+	pack := validTestPack("unsupported_pack_kind")
+	pack.Kind = "emoji"
+	_, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err == nil || !strings.Contains(err.Error(), pack.ShortName) {
+		t.Fatalf("load unsupported pack kind error = %v, want pack %q named", err, pack.ShortName)
 	}
 }
 

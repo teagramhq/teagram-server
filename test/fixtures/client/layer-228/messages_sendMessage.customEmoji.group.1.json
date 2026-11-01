@@ -1,0 +1,30 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_sendMessage.customEmoji.group.1.txt",
+  "method": "messages.sendMessage",
+  "request": {
+    "type": "messages.sendMessage",
+    "flags": 8,
+    "fields": {
+      "peer": {
+        "type": "inputPeerChat",
+        "fields": {
+          "chat_id": "<N>"
+        }
+      },
+      "message": "hi ⭐",
+      "random_id": "<N>",
+      "entities": [
+        {
+          "type": "messageEntityCustomEmoji",
+          "fields": {
+            "offset": 3,
+            "length": 1,
+            "document_id": "<N>"
+          }
+        }
+      ]
+    }
+  }
+}

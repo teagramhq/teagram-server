@@ -18,8 +18,19 @@ func TestStickerBundleCatalogueKeepsSetIdentityAcrossArtRegeneration(t *testing.
 	first := loadTestStickerCatalogue(t, firstArt)
 	second := loadTestStickerCatalogue(t, secondArt)
 
-	if len(first.byShortName) != 3 || len(second.byShortName) != 3 {
-		t.Fatalf("catalogue set counts = %d and %d, want built-in plus two bundle packs", len(first.byShortName), len(second.byShortName))
+	if len(first.byShortName) != 4 || len(second.byShortName) != 4 {
+		t.Fatalf("catalogue set counts = %d and %d, want built-in sticker and emoji sets plus two bundle packs", len(first.byShortName), len(second.byShortName))
+	}
+	firstEmojiSet := first.byShortName[twemojiCustomEmojiSetShortName]
+	secondEmojiSet := second.byShortName[twemojiCustomEmojiSetShortName]
+	if firstEmojiSet == nil || secondEmojiSet == nil || !firstEmojiSet.set.GetEmojis() || len(firstEmojiSet.documents) != 73 {
+		t.Fatalf("production custom emoji catalogue set = %+v, want 73 emoji documents", firstEmojiSet)
+	}
+	if firstEmojiSet.set.ID != secondEmojiSet.set.ID || firstEmojiSet.set.AccessHash != secondEmojiSet.set.AccessHash || firstEmojiSet.set.Hash != secondEmojiSet.set.Hash {
+		t.Fatalf("production custom emoji set identity changed: first=%+v second=%+v", firstEmojiSet.set, secondEmojiSet.set)
+	}
+	if attribute, ok := findCustomEmojiAttribute(firstEmojiSet.documents[0]); !ok || !attribute.GetFree() || attribute.Alt == "" {
+		t.Fatalf("production custom emoji document attribute = %#v, want free Twemoji emoji metadata", firstEmojiSet.documents[0].Attributes)
 	}
 	firstSet := first.byShortName["openmoji_animals"]
 	secondSet := second.byShortName["openmoji_animals"]
