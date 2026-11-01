@@ -54,12 +54,16 @@ func TestStickerSetTakedownUnavailableFilesReturnsConflictAndKeepsSetLive(t *tes
 	if err != nil {
 		t.Fatalf("store sticker file: %v", err)
 	}
+	_, fingerprint, err := st.ReadStickerFileForSetWithFingerprint(ctx, file)
+	if err != nil {
+		t.Fatalf("read sticker file for validation: %v", err)
+	}
 	set, err := st.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Unavailable", ShortName: "unavailable_blob", Kind: "regular",
 	}, []store.UserStickerSetItem{{
 		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
 		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
-	}})
+	}}, []store.StickerFileFingerprint{fingerprint})
 	if err != nil {
 		t.Fatalf("create sticker set: %v", err)
 	}

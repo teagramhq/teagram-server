@@ -72,6 +72,17 @@ type UserStickerSetItem struct {
 	MaskCoords string
 }
 
+// StickerFileFingerprint is an opaque proof that the store read and hashed one
+// stored sticker file. It is accepted only by the Store that produced it.
+type StickerFileFingerprint struct {
+	store      *Store
+	fileID     int64
+	accessHash int64
+	size       int64
+	digest     [sha256.Size]byte
+	valid      bool
+}
+
 // StickerFileRef identifies a client-supplied file reference that must match
 // both the owner's uploaded file and its access hash.
 type StickerFileRef struct {
@@ -115,6 +126,23 @@ func (s *Store) StickerFilesForSet(ctx context.Context, ownerID int64, refs []St
 // ReadStickerFileForSet reads bytes only after StickerFilesForSet preflights
 // the full request. The blob key is always derived from the stored row.
 func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, error) {
+	return s.readStickerFileForSet(ctx, file)
+}
+
+// ReadStickerFileForSetWithFingerprint returns the validation bytes and a
+// store-derived fingerprint from the same blob read.
+func (s *Store) ReadStickerFileForSetWithFingerprint(ctx context.Context, file File) ([]byte, StickerFileFingerprint, error) {
+	data, err := s.readStickerFileForSet(ctx, file)
+	if err != nil {
+		return nil, StickerFileFingerprint{}, err
+	}
+	return data, StickerFileFingerprint{
+		store: s, fileID: file.ID, accessHash: file.AccessHash, size: file.Size,
+		digest: sha256.Sum256(data), valid: true,
+	}, nil
+}
+
+func (s *Store) readStickerFileForSet(ctx context.Context, file File) ([]byte, error) {
 	if file.ID <= 0 || !file.Stored || file.Size <= 0 || s.withoutBlobStore {
 		return nil, ErrStickerDocumentInvalid
 	}
@@ -131,11 +159,11 @@ func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, e
 	return data, nil
 }
 
-// CreateUserStickerSet reads and fingerprints the referenced blobs before its
-// write transaction. The transaction then locks the owner row, takedown
-// interlock, and file references in ascending order before revalidating files
-// and publishing the set.
-func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem) (UserStickerSet, error) {
+// CreateUserStickerSet accepts only fingerprints produced by this store's
+// validation reads, then locks the owner row, takedown interlock, and file
+// references in ascending order before revalidating files and publishing the
+// set. Callers cannot supply their own content hashes.
+func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem, fingerprints []StickerFileFingerprint) (UserStickerSet, error) {
 	maxItems := MaxUserStickerCount
 	if set.Kind == "emojis" {
 		maxItems = MaxUserEmojiCount
@@ -161,32 +189,18 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	if len(ascendingUnique(fileIDs)) != len(fileIDs) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
-
-	preflightFiles, err := s.q.StickerFilesForOwner(ctx, db.StickerFilesForOwnerParams{
-		FileIds: fileIDs, UploaderID: set.CreatorID, AccessHashes: accessHashes,
-	})
-	if err != nil {
-		return UserStickerSet{}, fmt.Errorf("preflight sticker file references: %w", err)
-	}
-	if len(preflightFiles) != len(items) {
+	if len(fingerprints) != len(items) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
 	contentHashes := make([][]byte, len(items))
+	fingerprints = append([]StickerFileFingerprint(nil), fingerprints...)
 	for i, item := range items {
-		fileRow := preflightFiles[i]
-		if fileRow.ID != item.FileID || fileRow.AccessHash != item.AccessHash || fileRow.Size != item.Size {
+		fingerprint := fingerprints[i]
+		if !fingerprint.valid || fingerprint.store != s || fingerprint.fileID != item.FileID ||
+			fingerprint.accessHash != item.AccessHash || fingerprint.size != item.Size {
 			return UserStickerSet{}, ErrStickerDocumentInvalid
 		}
-		data, readErr := s.ReadStickerFileForSet(ctx, fileFromRow(fileRow))
-		if readErr != nil {
-			wrappedErr := fmt.Errorf("read sticker file %d for content fingerprint: %w", item.FileID, readErr)
-			if errors.Is(readErr, blob.ErrNotFound) || errors.Is(readErr, ErrStickerDocumentInvalid) {
-				return UserStickerSet{}, fmt.Errorf("%w: %w", ErrStickerDocumentInvalid, wrappedErr)
-			}
-			return UserStickerSet{}, wrappedErr
-		}
-		digest := sha256.Sum256(data)
-		contentHashes[i] = digest[:]
+		contentHashes[i] = fingerprint.digest[:]
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -228,9 +242,9 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
 	for i, file := range checkedFiles {
-		preflight := preflightFiles[i]
-		if file.ID != preflight.ID || file.AccessHash != preflight.AccessHash ||
-			file.Size != preflight.Size || file.Stored != preflight.Stored || file.UploaderID != preflight.UploaderID {
+		fingerprint := fingerprints[i]
+		if file.ID != fingerprint.fileID || file.AccessHash != fingerprint.accessHash ||
+			file.Size != fingerprint.size || !file.Stored || file.UploaderID != set.CreatorID {
 			return UserStickerSet{}, ErrStickerDocumentInvalid
 		}
 	}

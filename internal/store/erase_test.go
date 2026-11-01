@@ -29,6 +29,7 @@ var blobBody = []byte("the bytes of one media file")
 func storedFileWithBytes(t *testing.T, s *store.Store, uploaderID int64) store.File {
 	t.Helper()
 	f := storedFile(t, s, uploaderID)
+	f.Stored = true
 	if _, err := store.BlobsOf(s).Put(context.Background(), blob.Key(f.ID), bytes.NewReader(blobBody)); err != nil {
 		t.Fatalf("put blob for file %d: %v", f.ID, err)
 	}
@@ -113,12 +114,16 @@ func TestErasureRetainsStickerSetFileAfterSetIsNotLive(t *testing.T) {
 	s := openStore(t, dsn)
 	owner := mustUser(t, s, "+15559200021")
 	file := storedFileWithBytes(t, s, owner.ID)
+	_, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, file)
+	if err != nil {
+		t.Fatalf("read sticker file for validation: %v", err)
+	}
 	set, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Retained", ShortName: "retained_file", Kind: "regular",
 	}, []store.UserStickerSetItem{{
 		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
 		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
-	}})
+	}}, []store.StickerFileFingerprint{fingerprint})
 	if err != nil {
 		t.Fatalf("create sticker set: %v", err)
 	}

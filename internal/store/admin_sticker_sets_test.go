@@ -25,6 +25,7 @@ type stickerSetReadGate struct {
 	armed   bool
 	entered chan struct{}
 	release chan struct{}
+	reads   int
 }
 
 func (g *stickerSetReadGate) arm(key string) (<-chan struct{}, chan struct{}) {
@@ -39,6 +40,7 @@ func (g *stickerSetReadGate) arm(key string) (<-chan struct{}, chan struct{}) {
 
 func (g *stickerSetReadGate) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
 	g.mu.Lock()
+	g.reads++
 	block := g.armed && key == g.key
 	entered, release := g.entered, g.release
 	if block {
@@ -54,6 +56,12 @@ func (g *stickerSetReadGate) ReadAt(ctx context.Context, key string, offset, lim
 		}
 	}
 	return g.Store.ReadAt(ctx, key, offset, limit)
+}
+
+func (g *stickerSetReadGate) readCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.reads
 }
 
 func openStickerSetReadGateStore(t *testing.T, blobs *stickerSetReadGate, dsns ...string) *store.Store {
@@ -79,6 +87,7 @@ func openStickerSetReadGateStore(t *testing.T, blobs *stickerSetReadGate, dsns .
 func stickerSetFileWithBytes(t *testing.T, s *store.Store, owner store.User, data []byte) store.File {
 	t.Helper()
 	file := storedFile(t, s, owner.ID)
+	file.Stored = true
 	if int64(len(data)) != file.Size {
 		t.Fatalf("sticker fixture has %d bytes, file row has size %d", len(data), file.Size)
 	}
@@ -89,27 +98,42 @@ func stickerSetFileWithBytes(t *testing.T, s *store.Store, owner store.User, dat
 }
 
 func createOneFileStickerSet(ctx context.Context, s *store.Store, owner store.User, file store.File, title, shortName string, data []byte) (store.UserStickerSet, error) {
+	readData, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, file)
+	if err != nil {
+		return store.UserStickerSet{}, err
+	}
+	if !bytes.Equal(readData, data) {
+		return store.UserStickerSet{}, errors.New("sticker fixture bytes differ from the validated blob")
+	}
 	return s.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: owner.ID, Title: title, ShortName: shortName, Kind: "regular",
 	}, []store.UserStickerSetItem{{
 		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
 		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
-	}})
+	}}, []store.StickerFileFingerprint{fingerprint})
 }
 
 func TestCreateUserStickerSetStoresFingerprintFromBlob(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := openStickerSetReadGateStore(t, &stickerSetReadGate{Store: testBlobs(t)})
+	blobs := &stickerSetReadGate{Store: testBlobs(t)}
+	s := openStickerSetReadGateStore(t, blobs)
 	owner := mustUser(t, s, "+15559310003")
 	data := []byte("hello world")
 	file := stickerSetFileWithBytes(t, s, owner, data)
+	readData, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, file)
+	if err != nil {
+		t.Fatalf("read sticker file for validation: %v", err)
+	}
+	if !bytes.Equal(readData, data) {
+		t.Fatal("validation read returned unexpected sticker bytes")
+	}
 	set, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Digest", ShortName: "digest_source", Kind: "regular",
 	}, []store.UserStickerSetItem{{
 		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
 		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
-	}})
+	}}, []store.StickerFileFingerprint{fingerprint})
 	if err != nil {
 		t.Fatalf("create sticker set: %v", err)
 	}
@@ -122,6 +146,9 @@ func TestCreateUserStickerSetStoresFingerprintFromBlob(t *testing.T) {
 	want := sha256.Sum256(data)
 	if !bytes.Equal(got, want[:]) {
 		t.Fatalf("stored fingerprint = %x, want hash of blob %x", got, want)
+	}
+	if got := blobs.readCount(); got != 1 {
+		t.Fatalf("sticker blob read count = %d, want one validation read", got)
 	}
 }
 
