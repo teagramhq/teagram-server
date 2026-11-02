@@ -43,8 +43,19 @@ for image in "${images[@]}"; do
     exit 1
   fi
   if ! push_output="$(docker image push --quiet "$tag" 2>&1)"; then
-    printf 'Could not push %s: %s\n' "$tag" "${push_output:-<empty>}" >&2
-    exit 1
+    if [[ "$push_output" =~ (^|[^[:alnum:]_])denied([^[:alnum:]_]|$) ]]; then
+      printf 'GHCR denied the first push for %s; retrying once after 10 seconds: %s\n' \
+        "$tag" "${push_output:-<empty>}" >&2
+      sleep 10
+      if ! push_output="$(docker image push --quiet "$tag" 2>&1)"; then
+        printf 'Could not push %s after one denied retry: %s\n' \
+          "$tag" "${push_output:-<empty>}" >&2
+        exit 1
+      fi
+    else
+      printf 'Could not push %s: %s\n' "$tag" "${push_output:-<empty>}" >&2
+      exit 1
+    fi
   fi
 
   if ! repo_digests="$(docker image inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>&1)"; then
