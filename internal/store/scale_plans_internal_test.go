@@ -300,6 +300,130 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	}
 }
 
+func TestUserCreatedStickerSetActiveItemsStayBoundedWithArchivedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "UPDATE server_administration SET election_closed = true WHERE singleton_id = 1"); err != nil {
+		t.Fatalf("close scale election: %v", err)
+	}
+
+	var ownerID int64
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO users (phone, first_name) VALUES ($1, 'Active item scale') RETURNING id", "+active-item-scale-owner",
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("create active item scale user: %v", err)
+	}
+	const setAccessHash int64 = 7_000_000_000_000_001
+	var setID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		VALUES ($1, $2, 'Active item scale', 'active_items_scale', 'regular', 3)
+		RETURNING id`, setAccessHash, ownerID,
+	).Scan(&setID); err != nil {
+		t.Fatalf("create active item scale set: %v", err)
+	}
+
+	const fileIDBase int64 = 6_000_000_000_000_000_000
+	const itemCount = 20_003
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO files (id, uploader_id, access_hash, size, mime_type, file_name, stored)
+		SELECT $1::bigint + n, $2, 8_000_000::bigint + n, 1, 'image/webp', 'active-item-scale-' || n, true
+		FROM generate_series(1, $3::int) AS n`, fileIDBase, ownerID, itemCount,
+	); err != nil {
+		t.Fatalf("seed active item scale files: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_created_sticker_set_items
+		    (set_id, position, file_id, emoji, keywords, format, width, height, is_active)
+		SELECT $1,
+		       CASE WHEN n <= 3 THEN n - 1 ELSE 200_000 + n END,
+		       $2::bigint + n, '⭐', '', 'WEBP', 100, 100, n <= 3
+		FROM generate_series(1, $3::int) AS n`, setID, fileIDBase, itemCount,
+	); err != nil {
+		t.Fatalf("seed active and archived sticker items: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "ANALYZE user_created_sticker_set_items"); err != nil {
+		t.Fatalf("analyze active item scale data: %v", err)
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	set, err := store.UserStickerSetByID(ctx, setID, setAccessHash)
+	if err != nil {
+		t.Fatalf("get scale sticker set: %v", err)
+	}
+	if len(set.Items) != 3 {
+		t.Fatalf("get scale sticker set returned %d active items, want 3", len(set.Items))
+	}
+	mutationRows, err := store.q.UserCreatedStickerSetItemsForMutation(ctx, setID)
+	if err != nil {
+		t.Fatalf("read scale sticker set items for mutation: %v", err)
+	}
+	if len(mutationRows) != 3 {
+		t.Fatalf("mutation read returned %d active items, want 3", len(mutationRows))
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	for _, queryName := range []string{
+		"UserCreatedStickerSetItems :many",
+		"UserCreatedStickerSetItemsForMutation :many",
+	} {
+		var query *pgx.TraceQueryStartData
+		for i := range queries {
+			if strings.Contains(queries[i].SQL, "-- name: "+queryName) {
+				query = &queries[i]
+				break
+			}
+		}
+		if query == nil {
+			t.Fatalf("active item query %q was not traced", queryName)
+		}
+		_, sql, ok := strings.Cut(query.SQL, "\n")
+		if !ok {
+			t.Fatalf("active item query %q is missing its sqlc header: %s", queryName, query.SQL)
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+sql, query.Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain active item query %q: %v", queryName, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode active item plan %q: %v", queryName, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("active item query %q explain returned %d plans, want 1", queryName, len(plans))
+		}
+		plan := plans[0].Plan
+		if !plan.usesIndex("user_created_sticker_set_items_active_position_idx") {
+			t.Errorf("active item query %q does not use the active-position index: %s", queryName, strings.Join(plan.accessSummary(), "; "))
+		}
+		if rows := plan.rowsReadFrom("user_created_sticker_set_items"); rows > 10 {
+			t.Errorf("active item query %q read %.0f item rows with only 3 active among %d historical rows: %s",
+				queryName, rows, itemCount, strings.Join(plan.accessSummary(), "; "))
+		}
+	}
+}
+
 func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
 	var plan scalePlan
 	if err := json.Unmarshal([]byte(`{"Relation Name":"dialogs","Actual Rows":2,"Actual Loops":3,"Rows Removed by Filter":5,"Rows Removed by Index Recheck":7}`), &plan); err != nil {
