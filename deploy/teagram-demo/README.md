@@ -217,6 +217,39 @@ the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
 and reports its own result. The demo deploy is disabled unless the `demo` GitHub
 environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
 
+When the dev deploy is unavailable, `Deploy demo.` also accepts a manual
+dispatch with an issue key. It deploys only the current `main` SHA after that
+SHA has a successful `CI` push run; the normal demo preflight, database backup,
+candidate checks and rollback still apply.
+
+### Direct demo deployment threat model
+
+The protected assets are the public demo's release integrity and availability,
+demo account and message data, and the Tailscale and SSH credentials that reach
+the demo host. A GitHub user with repository write access can manually dispatch
+this workflow ([GitHub documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)).
+The required issue key is for run attribution; its format check does not grant
+or restrict deployment access. The current `demo` environment allows
+deployments from the selected `main` branch and has no required-reviewer rule,
+so that branch policy limits which ref can access environment secrets but does
+not require a second person to approve a run ([environment protection rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)).
+
+The workflow rejects a direct run whose ref is not `main`, then requires its
+commit to equal the current `main` SHA and finds a successful push `CI` run for
+that exact SHA. It takes the image digest from that run and only publishes the
+pinned web artifact after its source and content checks pass. The workflow
+token has read-only repository and Actions permissions. The `demo` environment
+holds the Tailscale OAuth credentials and dedicated deploy key; a deployment
+also requires `TEAGRAM_DEMO_DEPLOY_ENABLED=true`. The SSH key is restricted to
+`forced-command.sh` with no shell, forwarding or PTY, and the script accepts
+only a main-branch server SHA with its image digest or the separately verified
+web artifact release. The host deploy path takes a database backup and rolls
+back the active server release on failure. These controls constrain what a
+dispatch can release, but an authorized writer can deploy any current `main`
+commit that passes CI. A compromised authorized account, workflow runner,
+trusted main change or deployment credential could still affect the public demo
+or expose demo data; this workflow does not deploy to the production server.
+
 Before enabling it, configure the `demo` GitHub environment with:
 
 | Name | Kind | Value |
@@ -539,6 +572,12 @@ The installer refuses to enable a timer without that seed command. Check a
 run with `systemctl status teagram-demo-weekly-wipe.service` and
 `journalctl -u teagram-demo-weekly-wipe.service`; manually triggering the
 service is a destructive reset of public demo content.
+After a reviewed fix is deployed, the operations menu can run the service and
+return the current run's verification line:
+
+```sh
+ssh -T teagram-demo 'run <main-sha> weekly-wipe'
+```
 
 ## Monitoring
 

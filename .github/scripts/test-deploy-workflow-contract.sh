@@ -13,7 +13,7 @@ dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
-expected_demo_if="\${{ github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true' }}"
+expected_demo_if="(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
@@ -294,6 +294,18 @@ check_demo_deploy_target_download() (
   cat > "$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == api ]]; then
+  case "$2" in
+    repos/test/server/commits/main)
+      printf '%s\n' "$TEST_API_MAIN_SHA"
+      ;;
+    'repos/test/server/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=100')
+      printf '{"workflow_runs":%s}\n' "$TEST_CI_RUNS"
+      ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
 [[ "$1" == run && "$2" == download && "$3" == "$TEST_DEPLOY_RUN_ID" ]]
 shift 3
 repo=
@@ -341,7 +353,7 @@ SH
   # shellcheck disable=SC2030,SC2031
   export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
   # shellcheck disable=SC2030,SC2031
-  export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
+  export EVENT_NAME=workflow_run DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
   # shellcheck disable=SC2030,SC2031
   export TEST_DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   # shellcheck disable=SC2030,SC2031
@@ -359,6 +371,48 @@ SH
       fail "the demo deploy must reject invalid target artifact metadata ($target_case)"
     fi
   done
+
+  local manual_sha manual_run_id
+  manual_sha=cccccccccccccccccccccccccccccccccccccccc
+  manual_run_id=333333333
+  export EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_SHA="$manual_sha"
+  export ISSUE_KEY=MAIN-3121 TEST_API_MAIN_SHA="$manual_sha"
+  export TEST_CI_RUNS='[{"head_sha":"cccccccccccccccccccccccccccccccccccccccc","event":"push","status":"completed","conclusion":"success","run_number":52,"id":333333333},{"head_sha":"cccccccccccccccccccccccccccccccccccccccc","event":"push","status":"completed","conclusion":"failure","run_number":53,"id":444444444},{"head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":"push","status":"completed","conclusion":"success","run_number":99,"id":555555555}]'
+  : > "$GITHUB_OUTPUT"
+  GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1
+  [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$manual_sha"$'\nci_run_id='"$manual_run_id" ]] ||
+    fail 'a direct demo deploy must select current main only after that exact SHA has successful push CI'
+
+  : > "$GITHUB_OUTPUT"
+  if TEST_API_MAIN_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1; then
+    fail 'a direct demo deploy must reject a stale main SHA'
+  fi
+  : > "$GITHUB_OUTPUT"
+  if TEST_CI_RUNS='[]' GH_TOKEN=test-token \
+    bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1; then
+    fail 'a direct demo deploy must reject a current main SHA without successful push CI'
+  fi
+)
+
+check_demo_manual_request() (
+  set -euo pipefail
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual") | .run' > "$tmp/manual.sh"
+  # The output path is scoped to this subshell and consumed by the extracted workflow step.
+  # shellcheck disable=SC2030,SC2031
+  export GITHUB_OUTPUT="$tmp/output"
+  : > "$GITHUB_OUTPUT"
+  GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 bash -euo pipefail "$tmp/manual.sh"
+  [[ "$(cat "$GITHUB_OUTPUT")" == 'succeeded=true' ]] || fail 'a valid direct demo request must pass its issue gate'
+  if GITHUB_REF=refs/heads/fix ISSUE_KEY=MAIN-3121 bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+    fail 'a direct demo deployment must reject non-main refs'
+  fi
+  if GITHUB_REF=refs/heads/main ISSUE_KEY=OTHER-1 bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+    fail 'a direct demo deployment must reject non-MAIN issue keys'
+  fi
 )
 
 check_demo_deploy_result() (
@@ -504,8 +558,16 @@ check_contract() {
 
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
-  [[ "$(demo_query '.on | keys | join(",")')" == 'workflow_run' ]] ||
-    fail 'the demo workflow must run only from workflow_run'
+  [[ "$(demo_query '.run-name')" == "$expected_run_name" ]] ||
+    fail 'direct demo deploy runs must include the issue key in the name for failure routing'
+  [[ "$(demo_query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
+    fail 'the demo workflow must support automatic and direct deployments'
+  [[ "$(demo_query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
+    fail 'a direct demo deployment must require one issue key'
+  [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
+    fail 'a direct demo deployment must require an issue key for CI routing'
+  [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+    fail 'the direct demo deployment issue key must be a string'
   [[ "$(demo_query '.on.workflow_run.workflows | join(",")')" == 'Deploy.' ]] ||
     fail 'the demo workflow must start from the server Deploy. workflow'
   [[ "$(demo_query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
@@ -524,8 +586,12 @@ check_contract() {
     fail 'the server deploy verification job must follow the check-stage naming contract'
   [[ "$(demo_query '.jobs.check-server-deploy-result.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read' ]] ||
     fail 'the verification job must use actions: read only'
-  [[ "$(demo_query '.jobs.check-server-deploy-result.outputs.succeeded')" == '${{ steps.verify.outputs.succeeded }}' ]] ||
-    fail 'the verified deploy result must gate the demo job'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.outputs.succeeded')" == '${{ steps.verify.outputs.succeeded || steps.manual.outputs.succeeded }}' ]] ||
+    fail 'the verified deploy or direct-request result must gate the demo job'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify").if')" == '${{ github.event_name == '"'"'workflow_run'"'"' }}' ]] ||
+    fail 'the server deploy check must run only for workflow_run events'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual").if')" == '${{ github.event_name == '"'"'workflow_dispatch'"'"' }}' ]] ||
+    fail 'direct demo deploys must validate the selected main ref and issue key'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
     fail 'the verifier must inspect the workflow run that triggered the demo'
   local deploy_verify_run
@@ -551,7 +617,11 @@ check_contract() {
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
     fail 'the demo gate must read the Tailscale OAuth secret from the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
-    fail 'the target artifact must be selected by the triggering Deploy. run ID'
+    fail 'workflow_run deploys must select the target artifact by the triggering Deploy. run ID'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.EVENT_NAME')" == '${{ github.event_name }}' ]] ||
+    fail 'target resolution must distinguish automatic and direct demo deployments'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.ISSUE_KEY')" == '${{ inputs.issue }}' ]] ||
+    fail 'direct target resolution must receive the issue key'
   local demo_gate_run
   demo_gate_run="$(query '.jobs.deploy-demo.steps[0].run')"
   [[ "$demo_gate_run" == *'enabled=true'* && "$demo_gate_run" == *'enabled=false'* ]] ||
@@ -832,6 +902,7 @@ check_contract
 check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
   check_demo_credential_gate
+  check_demo_manual_request
   check_demo_deploy_result
   check_demo_deploy_target_download
   self_test
