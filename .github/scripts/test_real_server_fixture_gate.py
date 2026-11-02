@@ -325,11 +325,11 @@ class RealServerFixtureGateTests(unittest.TestCase):
 
         result_guard = re.search(
             r'(?ms)^          if \[\[ (?P<condition>'
-            r'"\$MAIN_PRIORITY_RESULT" != "\$expected_priority_result" \|\|.*?) \]\]; then$',
+            r'"\$MAIN_PRIORITY_RESULT" != "success" \|\|.*?) \]\]; then$',
             body,
         )
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
-        expected_guard = '"$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || '
+        expected_guard = '"$MAIN_PRIORITY_RESULT" != "success" || '
         expected_guard += " || ".join(
             f'"${result_envs[lane]}" != "success"'
             for lane in needed_lanes
@@ -353,7 +353,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
                 if lane != "ops-prioritize-main"
             }
         )
-        environment[result_envs["ops-prioritize-main"]] = "skipped"
+        environment[result_envs["ops-prioritize-main"]] = "success"
         success = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
@@ -378,6 +378,23 @@ class RealServerFixtureGateTests(unittest.TestCase):
             "CI aggregate returned success when a required lane failed: "
             + failure.stdout
             + failure.stderr,
+        )
+
+        environment.update({env_name: "success" for env_name in result_envs.values()})
+        environment[result_envs["ops-prioritize-main"]] = "failure"
+        priority_failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            priority_failure.returncode,
+            0,
+            "CI aggregate returned success when main prioritization failed: "
+            + priority_failure.stdout
+            + priority_failure.stderr,
         )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
