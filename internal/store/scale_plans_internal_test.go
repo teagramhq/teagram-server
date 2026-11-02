@@ -110,7 +110,7 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 
 func (p scalePlan) accessSummary() []string {
 	var accesses []string
-	if p.Relation != "" {
+	if p.Relation != "" || p.IndexName != "" {
 		accesses = append(accesses, fmt.Sprintf("%s %s index=%s rows=%.0f loops=%.0f",
 			p.Node, p.Relation, p.IndexName, p.Rows, p.Loops))
 	}
@@ -120,7 +120,7 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
-func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScale(t *testing.T) {
+func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtScale(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
@@ -187,6 +187,12 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 		            'argument', CASE WHEN n <= 100 THEN 1000000 + n ELSE 30000000 + n END
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{ownerID, peerID}},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
+		 SELECT $1, n, 1, $2, $1, 'other-owner popular emoji', true,
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000201
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{peerID, ownerID}},
 		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
 		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
@@ -195,7 +201,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 		            'type', 18, 'offset', 0, 'length', 1,
 		            'argument', CASE WHEN n <= 99 THEN 1000100 + n ELSE 50000000 + n END
 		        )))
-		 FROM generate_series(1, 200) AS n`, args: []any{visibleChannelID, ownerID}},
+		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID}},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'popular hidden scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
@@ -213,7 +219,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 		}
 	}
 
-	fileIDs := make([]int64, 200)
+	fileIDs := make([]int64, 201)
 	for i := range fileIDs {
 		fileIDs[i] = 1_000_001 + int64(i)
 	}
@@ -233,13 +239,15 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 	if err != nil {
 		t.Fatalf("resolve scale historical emoji references: %v", err)
 	}
-	if len(referenced) != len(fileIDs)-1 {
-		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-1)
+	if len(referenced) != len(fileIDs)-2 {
+		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-2)
 	}
 	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
-		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-1])
+		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
 	}
-
+	if _, found := referenced[fileIDs[len(fileIDs)-2]]; found {
+		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
+	}
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
 	recorded.mu.Unlock()
@@ -260,7 +268,10 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	for _, index := range []string{"messages_custom_emoji_document_ids_gin_idx"} {
+	for _, index := range []string{
+		"messages_owner_custom_emoji_document_ids_gin_idx",
+		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+	} {
 		if !plans[0].Plan.usesIndex(index) {
 			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
@@ -272,7 +283,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScal
 	}
 	for _, table := range []string{"messages", "channel_messages"} {
 		if rows := plans[0].Plan.rowsReadFrom(table); rows > 800 {
-			t.Errorf("historical emoji plan read %.0f %s rows for 200 IDs: %s", rows, table, strings.Join(plans[0].Plan.accessSummary(), "; "))
+			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(fileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
 }
