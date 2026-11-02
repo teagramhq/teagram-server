@@ -841,8 +841,8 @@ snapshot_from_json() {
   local snapshot_name=${6:-}
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
-  local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
+  local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
+  local mounts_sha exposure_sha config_sha config_without_restart_sha compose_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
   local media_key_source media_key_current
@@ -869,6 +869,8 @@ snapshot_from_json() {
     "$snapshot_name" "$compose_source" || return 1
   compose_logging_policy=not-captured
   compose_log_login_codes=not-captured
+  config_without_restart_sha=not-captured
+  compose_restart_policies='{}'
   if [ "$compose_source" = selected-compose-render ]; then
     compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].logging as $logging
@@ -1205,6 +1207,8 @@ snapshot_from_json() {
     compose_replica_count=not-captured
     compose_client_addr_trust=not-captured
     config_sha=not-captured
+    config_without_restart_sha=not-captured
+    compose_restart_policies='{}'
     env_sha=not-captured
     override_sha=not-captured
   else
@@ -1331,6 +1335,11 @@ snapshot_from_json() {
     ')
     grace=$(printf '%s' "$resolved_config" | jq -er '.stop_grace_period')
     config_sha=$(sha256_text "$canonical_compose")
+    canonical_without_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart)') || return 1
+    config_without_restart_sha=$(sha256_text "$canonical_without_restart")
+    compose_restart_policies=$(printf '%s' "$canonical_compose" | jq -ceS '
+      .services | with_entries(.value = (.value.restart // "no"))
+    ') || return 1
     env_sha=$(sha256sum "$env_file" | awk '{print $1}')
     override_sha=$(sha256sum "$override_file" | awk '{print $1}')
   fi
@@ -1363,6 +1372,8 @@ snapshot_from_json() {
     --arg mounts_sha "$mounts_sha" \
     --arg exposure_sha "$exposure_sha" \
     --arg config_sha "$config_sha" \
+    --arg config_without_restart_sha "$config_without_restart_sha" \
+    --argjson compose_restart_policies "$compose_restart_policies" \
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
     --arg container_env_sha "$container_env_sha" \
@@ -1386,6 +1397,8 @@ snapshot_from_json() {
       container_client_addr_trust:$container_client_addr_trust,
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
+      config_without_restart_sha256:$config_without_restart_sha,
+      compose_restart_policies:$compose_restart_policies,
       env_sha256:$env_sha,override_sha256:$override_sha,
       container_env_sha256:$container_env_sha,
       container_logging_sha256:$container_logging_sha,
@@ -1524,13 +1537,36 @@ record_ordinary_setting() {
   return 0
 }
 
+approved_restart_policy_transition() {
+  local before_file=$1 after_file=$2
+  jq -en --slurpfile before "$before_file" --slurpfile after "$after_file" '
+    ($before[0].compose_restart_policies) as $before_policies
+    | ($after[0].compose_restart_policies) as $after_policies
+    | ($before_policies | type == "object") and
+      ($after_policies | type == "object") and
+      (($before_policies | keys) == ($after_policies | keys)) and
+      (($before_policies | del(.postgres, .teagramd)) ==
+       ($after_policies | del(.postgres, .teagramd))) and
+      (
+        ($before_policies.postgres == "no" and
+         $before_policies.teagramd == "no" and
+         $after_policies.postgres == "unless-stopped" and
+         $after_policies.teagramd == "unless-stopped") or
+        ($after_policies.postgres == "no" and
+         $after_policies.teagramd == "no" and
+         $before_policies.postgres == "unless-stopped" and
+         $before_policies.teagramd == "unless-stopped")
+      )
+  ' >/dev/null
+}
+
 compare_snapshots() {
   local before_file=$1
   local after_file=$2
   local expected_image=$3
   local result_file=$4
-  local field before_value after_value before_image after_image result before_logging_policy after_logging_policy
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
+  local field before_value after_value before_image after_image result before_logging_policy after_logging_policy before_config_without_restart after_config_without_restart
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 compose_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -1560,7 +1596,9 @@ compare_snapshots() {
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
-      (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$before_file" >/dev/null \
     || ! jq -e '
@@ -1587,7 +1625,9 @@ compare_snapshots() {
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
-      (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$after_file" >/dev/null \
     || ! [[ "$expected_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -1605,10 +1645,30 @@ compare_snapshots() {
   before_logging_policy=$(jq -er '.compose_logging_policy' "$before_file") || return 1
   after_logging_policy=$(jq -er '.compose_logging_policy' "$after_file") || return 1
   for field in "${fields[@]}"; do
-    if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
-    if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
+    if ! before_value=$(jq -cer --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
+    if ! after_value=$(jq -cer --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
     if [ "$field" = compose_logging_policy ]; then
       if approved_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
+    elif [ "$field" = config_sha256 ]; then
+      if [ "$before_value" = "$after_value" ]; then
+        result=pass
+      else
+        before_config_without_restart=$(jq -er '.config_without_restart_sha256' "$before_file") || return 1
+        after_config_without_restart=$(jq -er '.config_without_restart_sha256' "$after_file") || return 1
+        if [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+           approved_restart_policy_transition "$before_file" "$after_file"; then
+          result=pass
+        else
+          result=fail
+        fi
+      fi
+    elif [ "$field" = compose_restart_policies ]; then
+      if [ "$before_value" = "$after_value" ] || \
+         approved_restart_policy_transition "$before_file" "$after_file"; then
+        result=pass
+      else
+        result=fail
+      fi
     elif [ "$field" = compose_log_login_codes ] || [ "$field" = container_log_login_codes ]; then
       if approved_login_code_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
     elif [ "$field" = media_key_source ] && [ "$before_value" = unset ] && [[ "$after_value" = /* ]]; then

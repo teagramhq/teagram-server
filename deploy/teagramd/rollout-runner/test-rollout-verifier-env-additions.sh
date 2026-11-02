@@ -188,6 +188,98 @@ COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"sysl
 INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+restart_policy_baseline_compose=$(jq -c '
+  .services.postgres={image:"postgres"}
+  | .services.rustfs={image:"rustfs",restart:"unless-stopped"}
+' <<< "$COMPOSE_JSON")
+restart_policy_target_compose=$(jq -c '
+  .services.postgres.restart="unless-stopped"
+  | .services.teagramd.restart="unless-stopped"
+' <<< "$restart_policy_baseline_compose")
+restart_policy_baseline=$(snapshot_from_json \
+  "$(inspect_json '')" "$restart_policy_baseline_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+restart_policy_target=$(snapshot_from_json \
+  "$(inspect_json '')" "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$restart_policy_baseline" > "$TMP/restart-policy-baseline.snapshot.json"
+printf '%s\n' "$restart_policy_target" > "$TMP/restart-policy-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL exact postgres and teagramd restart-policy transition was rejected' >&2
+  cat "$TMP/restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'config_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" || \
+   ! grep -q $'compose_restart_policies\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" || \
+   ! grep -q $'config_without_restart_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL restart-policy exception was not recorded in comparison evidence' >&2
+  cat "$TMP/restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact postgres and teagramd restart-policy transition is approved and recorded'
+cp "$TMP/restart-policy-target.snapshot.json" "$TMP/restart-policy-rollback-baseline.snapshot.json"
+cp "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/restart-policy-rollback-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/restart-policy-rollback-comparisons.tsv"; then
+  printf '%s\n' 'FAIL rollback of the exact restart-policy transition was rejected' >&2
+  cat "$TMP/restart-policy-rollback-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS rollback of the exact restart-policy transition remains available'
+partial_restart_policy_compose=$(jq -c '.services.postgres.restart="unless-stopped"' <<< "$restart_policy_baseline_compose")
+partial_restart_policy_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$partial_restart_policy_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$partial_restart_policy_snapshot" > "$TMP/partial-restart-policy.snapshot.json"
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/partial-restart-policy.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/partial-restart-policy-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL partial restart-policy transition was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_restart_policies\t.*\tfail' "$TMP/partial-restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL partial restart-policy transition was not recorded as rejected' >&2
+  cat "$TMP/partial-restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS partial restart-policy transition remains rejected'
+extra_restart_policy_compose=$(jq -c '.services.rustfs.restart="always"' <<< "$restart_policy_target_compose")
+extra_restart_policy_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$extra_restart_policy_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$extra_restart_policy_snapshot" > "$TMP/extra-restart-policy.snapshot.json"
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/extra-restart-policy.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/extra-restart-policy-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unrelated rustfs restart-policy drift was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_restart_policies\t.*\tfail' "$TMP/extra-restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated restart-policy drift was not recorded as rejected' >&2
+  cat "$TMP/extra-restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated restart-policy drift remains rejected'
+unrelated_compose_drift=$(jq -c '.services.teagramd.image="teagramd:unreviewed"' <<< "$restart_policy_target_compose")
+unrelated_compose_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$unrelated_compose_drift" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$unrelated_compose_snapshot" > "$TMP/unrelated-compose-drift.snapshot.json"
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/unrelated-compose-drift.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/unrelated-compose-drift-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unrelated Compose config drift was accepted with the restart-policy exception' >&2
+  exit 1
+fi
+if ! grep -q $'config_without_restart_sha256\t.*\tfail' "$TMP/unrelated-compose-drift-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated Compose config drift was not recorded as rejected' >&2
+  cat "$TMP/unrelated-compose-drift-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated Compose config drift remains rejected'
 rotation_base_compose=$(jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
   .services.teagramd.image="teagramd:local"
   | .services.teagramd.environment += {

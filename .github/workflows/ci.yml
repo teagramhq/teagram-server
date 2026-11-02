@@ -2704,6 +2704,11 @@ jobs:
           # Compose omits inactive profile services, so include migration to
           # inspect its read-only mount.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
+          # Include every profile so the restart contract covers production
+          # replicas and proxy services as well as the default stack.
+          docker compose --profile '*' config --format json >"$RUNNER_TEMP/teagram-server-all-compose.json"
+          python3 -B .github/scripts/test-prod-compose-restart-policy.py
+          python3 -B .github/scripts/check-prod-compose-restart-policy.py "$RUNNER_TEMP/teagram-server-all-compose.json"
           jq -e --arg revision "$GITHUB_SHA" --arg media_key_dir "$RUNNER_TEMP/teagramd-media-keys" '
             (.name == "teagram")
             and (.volumes.pgdata.name == "teagram_pgdata")
