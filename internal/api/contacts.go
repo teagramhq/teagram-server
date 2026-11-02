@@ -146,36 +146,62 @@ func (h *handlers) handleGetContacts(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errAuthKeyUnreg
 	}
 
-	contacts, total, err := h.store.Contacts(r.Ctx, r.UserID)
-	if err != nil {
-		h.log.Error("get contacts", "user_id", r.UserID, "err", err)
-		return nil, errInternal
+	var contacts []store.Contact
+	var owners []store.User
+	var profilePhotoIDs map[int64]int64
+	var total int
+	if req.Hash == 0 {
+		rows, count, err := h.store.ContactsWithUsers(r.Ctx, r.UserID)
+		if err != nil {
+			h.log.Error("get contacts", "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		total = count
+		contacts = make([]store.Contact, len(rows))
+		owners = make([]store.User, len(rows))
+		profilePhotoIDs = make(map[int64]int64)
+		for i, row := range rows {
+			contacts[i] = row.Contact
+			owners[i] = row.User
+			if row.PhotoID > 0 {
+				profilePhotoIDs[row.User.ID] = row.PhotoID
+			}
+		}
+	} else {
+		var err error
+		contacts, total, err = h.store.Contacts(r.Ctx, r.UserID)
+		if err != nil {
+			h.log.Error("get contacts", "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
 	}
 	hash := contactListHash(contacts)
 	if req.Hash != 0 && req.Hash == hash {
 		return &tg.ContactsContactsNotModified{}, nil
 	}
 
-	ids := make([]int64, len(contacts))
-	for i, contact := range contacts {
-		ids[i] = contact.UserID
-	}
-	usersByID, err := h.store.UsersByID(r.Ctx, ids)
-	if err != nil {
-		h.log.Error("get contact users", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-
-	owners := make([]store.User, len(contacts))
-	for i, contact := range contacts {
-		user, ok := usersByID[contact.UserID]
-		if !ok {
-			h.log.Error("get contact user missing", "user_id", r.UserID, "contact_id", contact.UserID)
+	if req.Hash != 0 {
+		ids := make([]int64, len(contacts))
+		for i, contact := range contacts {
+			ids[i] = contact.UserID
+		}
+		usersByID, err := h.store.UsersByID(r.Ctx, ids)
+		if err != nil {
+			h.log.Error("get contact users", "user_id", r.UserID, "err", err)
 			return nil, errInternal
 		}
-		owners[i] = user
+
+		owners = make([]store.User, len(contacts))
+		for i, contact := range contacts {
+			user, ok := usersByID[contact.UserID]
+			if !ok {
+				h.log.Error("get contact user missing", "user_id", r.UserID, "contact_id", contact.UserID)
+				return nil, errInternal
+			}
+			owners[i] = user
+		}
 	}
-	rendered, err := h.usersToTLWithContactStates(r.Ctx, owners, r.UserID, false, contacts)
+	rendered, err := h.usersToTLWithContactStates(r.Ctx, owners, r.UserID, false, contacts, profilePhotoIDs)
 	if err != nil {
 		h.log.Error("get contact users: render", "user_id", r.UserID, "err", err)
 		return nil, errInternal

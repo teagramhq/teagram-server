@@ -1,4 +1,4 @@
-h1:WQzfdC78kyJoe9NatzyBLQ2Ag+dYKX1FhpNcG/zqal4=
+h1:abNlPTtFENcpIpuIefs42J7L9bGvr0vDdKl/szmsyhg=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -156,3 +156,4 @@ h1:WQzfdC78kyJoe9NatzyBLQ2Ag+dYKX1FhpNcG/zqal4=
 20261101000004_user_created_sticker_sets_literal_trgm_idx.sql h1:ZUsqApsbtQ0dMpWcmwpzPAijv02GHGJuLF850J78fSM=
 20261101000005_user_created_sticker_sets_title_literal_trgm_idx.sql h1:3ol6wSy4rG37V90cUyRQHOhXbMTx7sb0GkzeL6L/obQ=
 20261101000006_user_created_sticker_sets_short_name_literal_trgm_idx.sql h1:k+vunml5Qn2UJyeHGqP43taDfnbjCG24Qeg48agy5bU=
+20261101000007_user_contacts_contact_owner_idx.sql h1:YriFIVoj8HFZjY+cuqbJHNEMmVMaqnmQoFclwK0BtnQ=

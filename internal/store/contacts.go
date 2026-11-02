@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -43,6 +45,14 @@ func WithMaxContactsPerUser(n int) Option {
 type Contact struct {
 	UserID int64
 	Mutual bool
+}
+
+// ContactWithUser is a contact edge, its rendered user record, and visible
+// current profile photo, if any.
+type ContactWithUser struct {
+	Contact Contact
+	User    User
+	PhotoID int64
 }
 
 func validContactIDs(ownerID, contactID int64) bool {
@@ -265,6 +275,48 @@ func (s *Store) Contacts(ctx context.Context, ownerID int64) ([]Contact, int, er
 			total = int(row.Total)
 		}
 	}
+	return contacts, total, nil
+}
+
+// ContactsWithUsers loads a full contact page, user records, and visible
+// current profile photos in one query. Results are ordered by contact ID for
+// deterministic contacts hashes. Hash-only checks should use Contacts so they
+// do not hydrate users unnecessarily.
+func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactWithUser, int, error) {
+	rows, err := s.q.ContactsWithUsers(ctx, ownerID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list contacts with users: %w", err)
+	}
+	if len(rows) == 0 {
+		return []ContactWithUser{}, 0, nil
+	}
+	total := int(rows[0].Total)
+	if len(rows) != total {
+		return nil, 0, fmt.Errorf("list contacts with users: got %d rows for %d contacts", len(rows), total)
+	}
+	contacts := make([]ContactWithUser, len(rows))
+	for i, row := range rows {
+		var photoID int64
+		if row.PhotoFileID != nil {
+			photoID = *row.PhotoFileID
+		}
+		contacts[i] = ContactWithUser{
+			Contact: Contact{UserID: row.ContactID, Mutual: row.Mutual},
+			User: UserFromDB(db.UserByIDRow{
+				ID:         row.ContactID,
+				FirstName:  row.FirstName,
+				LastName:   row.LastName,
+				IsOnline:   row.IsOnline,
+				LastSeenAt: row.LastSeenAt,
+				Username:   row.Username,
+				Kind:       row.Kind,
+			}),
+			PhotoID: photoID,
+		}
+	}
+	slices.SortFunc(contacts, func(a, b ContactWithUser) int {
+		return cmp.Compare(a.Contact.UserID, b.Contact.UserID)
+	})
 	return contacts, total, nil
 }
 
