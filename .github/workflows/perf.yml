@@ -64,13 +64,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       - name: Defer pull request checks while main CI is active
         if: ${{ github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/gate-pr-checks-during-main.sh
+        run: |
+          if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]; then
+            bash .github/scripts/gate-pr-checks-during-main.sh
+          else
+            echo "::notice::The base branch does not yet include the trusted main-CI gate; skipping this bootstrap check."
+          fi
 
   # Main always looks up and refills the snapshot cache, even when its public
   # release already exists. V2 adds seed provenance; v1 caches predate that

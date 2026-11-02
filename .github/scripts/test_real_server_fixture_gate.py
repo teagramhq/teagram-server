@@ -189,7 +189,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertRegex(
             workflow,
-            r"(?ms)^  ops-gate-pr-during-main:\n.*?^        run: bash \.github/scripts/gate-pr-checks-during-main\.sh\n.*?^  real-client-browser-flow:\n    name: real-client-browser-flow\n    needs: ops-gate-pr-during-main$",
+            r"(?ms)^  ops-gate-pr-during-main:\n.*?^        run: \|\n"
+            r"          if \[\[ -f \.github/scripts/gate-pr-checks-during-main\.sh && -f \.github/scripts/main-ci-active-run\.sh \]\]; then\n"
+            r"            bash \.github/scripts/gate-pr-checks-during-main\.sh\n"
+            r".*?^  real-client-browser-flow:\n    name: real-client-browser-flow\n    needs: ops-gate-pr-during-main$",
         )
         self.assertRegex(
             workflow,

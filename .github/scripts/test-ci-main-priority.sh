@@ -18,6 +18,10 @@ recovery_query() {
   yq -r "$1" "$recovery_workflow"
 }
 
+workflow_query() {
+  yq -r "$1" "$2"
+}
+
 priority_if="$(query '.jobs."ops-prioritize-main".if')"
 [[ "$(query '.jobs."ops-prioritize-main".name')" == 'ops: prioritize-main' ]] ||
   fail 'the priority job must use the ops stage naming contract'
@@ -27,6 +31,9 @@ priority_if="$(query '.jobs."ops-prioritize-main".if')"
   fail 'the priority job must have only Actions write and contents read permissions'
 [[ "$(query '.jobs."ops-prioritize-main".permissions.actions')" == 'write' ]] ||
   fail 'the priority job needs Actions write permission to cancel and defer runs'
+priority_checkout_ref="$(query '.jobs."ops-prioritize-main".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')"
+[[ "$priority_checkout_ref" == *'github.event.pull_request.base.sha'* && "$priority_checkout_ref" == *'github.sha'* ]] ||
+  fail 'the PR priority helper must be checked out from the base branch'
 
 cancel_step="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Cancel active pull request checks for main") | .run')"
 [[ "$cancel_step" == 'bash .github/scripts/cancel-pr-checks-for-main.sh' ]] ||
@@ -42,11 +49,15 @@ grep -q 'for run_status_filter in queued in_progress pending waiting requested' 
 bash -n .github/scripts/cancel-pr-checks-for-main.sh
 
 gate_step="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Defer pull request CI while main CI is active") | .run')"
-[[ "$gate_step" == 'bash .github/scripts/gate-pr-checks-during-main.sh' ]] ||
-  fail 'new PR CI runs must gate before fan-out'
+[[ "$gate_step" == *'if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]'* && "$gate_step" == *'bash .github/scripts/gate-pr-checks-during-main.sh'* && "$gate_step" == *'bootstrap check'* ]] ||
+  fail 'PR CI must run only the trusted base-branch gate helper'
 [[ "$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Defer pull request CI while main CI is active") | .if')" == "\${{ github.event_name == 'pull_request' }}" ]] ||
   fail 'the CI PR gate must run on pull requests'
+printf '%s\n' "$gate_step" | bash -n
 bash -n .github/scripts/gate-pr-checks-during-main.sh
+bash -n .github/scripts/main-ci-active-run.sh
+grep -q 'main-ci-active-run.sh' .github/scripts/gate-pr-checks-during-main.sh ||
+  fail 'the PR gate must use the shared main-CI activity predicate'
 
 [[ "$(query '.jobs."ops-prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-pr-checks.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'main must expose cancelled checks for recovery'
@@ -63,12 +74,14 @@ dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery") | .run')"
 [[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-3126'* && "$dispatch_step" == *'main_run_id=$MAIN_RUN_ID'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* ]] ||
   fail 'main must dispatch recovery with the issue, run ID, and cancelled targets'
+[[ "$dispatch_step" == *'exit 1'* ]] ||
+  fail 'a failed recovery dispatch must fail the main workflow'
 printf '%s\n' "$dispatch_step" | bash -n
 
 [[ "$(recovery_query '.on.workflow_dispatch.inputs.issue.required')" == true && "$(recovery_query '.on.workflow_dispatch.inputs.cancelled_pr_run_targets.required')" == false && "$(recovery_query '.on.workflow_dispatch.inputs.main_run_id.required')" == true ]] ||
   fail 'recovery must require its issue, main run ID, and cancellation targets'
-[[ "$(recovery_query '.on.workflow_dispatch.inputs.main_concurrency_group.default')" == 'CI-main-priority-v2' && "$(recovery_query '.concurrency.group')" == "\${{ inputs.main_concurrency_group || 'CI-main-priority-v2' }}" && "$(recovery_query '.concurrency.cancel-in-progress')" == false ]] ||
-  fail 'manual recovery must queue behind main CI without cancelling it or taking a runner'
+[[ "$(recovery_query '.on.workflow_dispatch.inputs.main_concurrency_group')" == 'null' && "$(recovery_query '.concurrency')" == 'null' ]] ||
+  fail 'recovery must not take or share the main concurrency group'
 [[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".permissions | keys | sort | join(",")')" == 'actions,contents,pull-requests' ]] ||
   fail 'recovery permissions must be limited to Actions write, contents read, and pull request read'
 [[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
@@ -77,6 +90,23 @@ rerun_step="$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".steps[] | select
 [[ "$rerun_step" == 'bash .github/scripts/recover-cancelled-pr-checks.sh' ]] ||
   fail 'recovery must use the current-head checks helper'
 bash -n .github/scripts/recover-cancelled-pr-checks.sh
+grep -q 'main_ci_active_run_id' .github/scripts/recover-cancelled-pr-checks.sh ||
+  fail 'recovery must wait for main CI to become idle before every rerun'
+
+perf_checkout_ref="$(workflow_query '.jobs."ops-gate-pr-during-main".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref' .github/workflows/perf.yml)"
+[[ "$perf_checkout_ref" == *'github.event.pull_request.base.sha'* && "$perf_checkout_ref" == *'github.sha'* ]] ||
+  fail 'the RPC performance PR gate must use the base branch helper'
+perf_gate_step="$(workflow_query '.jobs."ops-gate-pr-during-main".steps[] | select(.name == "Defer pull request checks while main CI is active") | .run' .github/workflows/perf.yml)"
+[[ "$perf_gate_step" == *'if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]'* && "$perf_gate_step" == *'bootstrap check'* ]] ||
+  fail 'RPC performance must only run the trusted base-branch gate helper'
+printf '%s\n' "$perf_gate_step" | bash -n
+browser_checkout_ref="$(workflow_query '.jobs."ops-gate-pr-during-main".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref' .github/workflows/real-client-browser-flow.yml)"
+[[ "$browser_checkout_ref" == *'github.event.pull_request.base.sha'* ]] ||
+  fail 'the browser-flow PR gate must use the base branch helper'
+browser_gate_step="$(workflow_query '.jobs."ops-gate-pr-during-main".steps[] | select(.name == "Defer pull request checks while main CI is active") | .run' .github/workflows/real-client-browser-flow.yml)"
+[[ "$browser_gate_step" == *'if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]'* && "$browser_gate_step" == *'bootstrap check'* ]] ||
+  fail 'browser-flow must only run the trusted base-branch gate helper'
+printf '%s\n' "$browser_gate_step" | bash -n
 
 bash .github/scripts/test-pr-main-ci-gate.sh
 bash .github/scripts/test-recover-cancelled-pr-checks.sh
@@ -194,7 +224,7 @@ priority_test_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.nam
 [[ "$priority_test_step" == '.github/scripts/test-ci-main-priority.sh' ]] ||
   fail 'the deploy workflow contract job must run the priority contract test'
 contract_syntax_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check workflow contract script syntax") | .run')"
-[[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
+[[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'.github/scripts/main-ci-active-run.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
   fail 'the deploy workflow contract job must syntax-check and lint the priority contract test'
 
 printf 'main CI priority contract holds\n'

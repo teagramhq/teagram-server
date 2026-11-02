@@ -23,12 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Defer pull request checks while main CI is active
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/gate-pr-checks-during-main.sh
+        run: |
+          if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]; then
+            bash .github/scripts/gate-pr-checks-during-main.sh
+          else
+            echo "::notice::The base branch does not yet include the trusted main-CI gate; skipping this bootstrap check."
+          fi
 
   real-client-browser-flow:
     name: real-client-browser-flow

@@ -35,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       - name: Cancel active pull request checks for main
@@ -48,7 +49,12 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/gate-pr-checks-during-main.sh
+        run: |
+          if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]; then
+            bash .github/scripts/gate-pr-checks-during-main.sh
+          else
+            echo "::notice::The base branch does not yet include the trusted main-CI gate; skipping this bootstrap check."
+          fi
 
   ops-dispatch-pr-ci-recovery:
     name: 'ops: dispatch-pr-ci-recovery'
@@ -76,7 +82,8 @@ jobs:
             -f issue=MAIN-3126 \
             -f "main_run_id=$MAIN_RUN_ID" \
             -f "cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS"; then
-            echo "::warning::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_TARGETS"
+            echo "::error::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_TARGETS"
+            exit 1
           fi
   check-sticker-license:
     name: 'check: sticker-license'
@@ -1139,8 +1146,8 @@ jobs:
 
       - name: Check workflow contract script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
-          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
 
       - name: Check deploy script syntax
         run: |

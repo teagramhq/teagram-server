@@ -82,8 +82,10 @@ done <<< "$dependency_dirs"
   fail 'manual performance dispatch must remain available'
 [[ "$(query '.jobs."ops-gate-pr-during-main".name')" == 'ops: gate-pr-during-main' ]] ||
   fail 'performance PR gate must use the ops stage naming contract'
-[[ "$(query '.jobs."ops-gate-pr-during-main".steps[] | select(.name == "Defer pull request checks while main CI is active") | .run')" == 'bash .github/scripts/gate-pr-checks-during-main.sh' ]] ||
-  fail 'performance PR runs must defer before their fixture and measurement jobs'
+performance_gate_step="$(query '.jobs."ops-gate-pr-during-main".steps[] | select(.name == "Defer pull request checks while main CI is active") | .run')"
+[[ "$performance_gate_step" == *'if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]'* && "$performance_gate_step" == *'bash .github/scripts/gate-pr-checks-during-main.sh'* ]] ||
+  fail 'performance PR runs must use the trusted base-branch gate before fixture and measurement jobs'
+printf '%s\n' "$performance_gate_step" | bash -n
 [[ "$(query '.jobs."test-perf-fixture-snapshot".needs')" == 'ops-gate-pr-during-main' ]] ||
   fail 'the fixture preparation must wait for the PR gate'
 [[ "$(query '.jobs."test-rpc-performance".needs | sort | join(",")')" == 'ops-gate-pr-during-main,test-perf-fixture-snapshot' ]] ||

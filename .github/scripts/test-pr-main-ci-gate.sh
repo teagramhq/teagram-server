@@ -27,7 +27,7 @@ gh() {
           return 0
           ;;
         multiple)
-          printf '900\n901\n'
+          printf '901\n900\n'
           return 0
           ;;
         *) return 2 ;;
@@ -69,15 +69,20 @@ GATE_MODE=active GITHUB_RUN_ID=701 GITHUB_REPOSITORY=example/repo CANCEL_LOG="$t
 [[ "$(<"$test_tmp/gate-cancels")" == 701 ]] || fail 'the gate must cancel the deferred PR workflow run'
 [[ "$(<"$test_tmp/gate-active-output")" == *'Deferring pull request checks until main CI run 900 completes'* ]] || fail 'the gate must identify the main aggregate holding the PR run'
 
+GATE_MODE=multiple GITHUB_RUN_ID=704 GITHUB_REPOSITORY=example/repo CANCEL_LOG="$test_tmp/gate-cancels" \
+  bash "$gate_script" > "$test_tmp/gate-multiple-output" || fail 'an active main run must defer PR checks even if a completed run is listed first'
+[[ "$(<"$test_tmp/gate-cancels")" == $'701\n704' ]] || fail 'the gate must continue past completed main runs and cancel for the active run'
+[[ "$(<"$test_tmp/gate-multiple-output")" == *'main CI run 900 completes'* ]] || fail 'the gate must identify the active aggregate after a completed run'
+
 GATE_MODE=missing-ci GITHUB_RUN_ID=702 GITHUB_REPOSITORY=example/repo CANCEL_LOG="$test_tmp/gate-cancels" \
   bash "$gate_script" > "$test_tmp/gate-missing-output" || fail 'a queued main run without its ci job must defer PR checks'
-[[ "$(<"$test_tmp/gate-cancels")" == $'701\n702' ]] || fail 'the gate must defer while the main ci job has not appeared'
+[[ "$(<"$test_tmp/gate-cancels")" == $'701\n704\n702' ]] || fail 'the gate must defer while the main ci job has not appeared'
 
 if GATE_MODE=api-error GITHUB_RUN_ID=703 GITHUB_REPOSITORY=example/repo CANCEL_LOG="$test_tmp/gate-cancels" \
   bash "$gate_script" > "$test_tmp/gate-error-output" 2>&1; then
   fail 'the PR gate must fail closed when it cannot inspect main CI'
 fi
-[[ "$(<"$test_tmp/gate-cancels")" == $'701\n702' ]] || fail 'an API error must block PR fan-out without claiming a cancellation'
+[[ "$(<"$test_tmp/gate-cancels")" == $'701\n704\n702' ]] || fail 'an API error must block PR fan-out without claiming a cancellation'
 
 export GITHUB_REPOSITORY=example/repo
 export GITHUB_OUTPUT="$test_tmp/cancel-output"
@@ -85,6 +90,13 @@ export CANCEL_LOG="$test_tmp/sweep-cancels"
 gh() {
   if [[ "$1" == api && "$2" == --paginate ]]; then
     local path="$3"
+    if [[ "${SWEEP_MODE:-success}" == list-error ]]; then
+      return 2
+    fi
+    if [[ "${SWEEP_MODE:-success}" == cancel-error ]]; then
+      printf '101\t2026-10-28T00:00:00Z\n202\t2026-10-28T00:01:00Z\n'
+      return 0
+    fi
     case "$path" in
       *'/ci.yml/runs?event=pull_request&status=queued&per_page=100') printf '101\t2026-10-28T00:00:00Z\n' ;;
       *'/perf.yml/runs?event=pull_request&status=in_progress&per_page=100') printf '202\t2026-10-28T00:01:00Z\n' ;;
@@ -96,6 +108,9 @@ gh() {
   if [[ "$1" == run && "$2" == cancel ]]; then
     printf '%s\n' "$3" >> "$CANCEL_LOG"
     [[ "$4" == --repo && "$5" == "$GITHUB_REPOSITORY" ]] || return 2
+    if [[ "${SWEEP_MODE:-success}" == cancel-error && "$3" != 101 ]]; then
+      return 2
+    fi
     return 0
   fi
   return 2
@@ -104,5 +119,14 @@ export -f gh
 bash "$cancel_script" || fail 'main priority cancellation sweep should finish'
 [[ "$(<"$test_tmp/sweep-cancels")" == $'101\n202\n303' ]] || fail 'the priority sweep must cancel queued and running checks in all three workflows'
 [[ "$(<"$GITHUB_OUTPUT")" == 'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z perf.yml:202:2026-10-28T00:01:00Z real-client-browser-flow.yml:303:2026-10-28T00:02:00Z' ]] || fail 'the priority sweep must retain workflow IDs and timestamps for recovery'
+
+if SWEEP_MODE=list-error GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/list-error-output" CANCEL_LOG="$test_tmp/list-error-cancels" bash "$cancel_script" > "$test_tmp/list-error-log" 2>&1; then
+  fail 'the priority sweep must fail if it cannot list PR runs'
+fi
+
+if SWEEP_MODE=cancel-error GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/cancel-error-output" CANCEL_LOG="$test_tmp/cancel-error-cancels" bash "$cancel_script" > "$test_tmp/cancel-error-log" 2>&1; then
+  fail 'the priority sweep must fail if it cannot cancel a PR run'
+fi
+[[ "$(<"$test_tmp/cancel-error-output")" == 'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z' ]] || fail 'the failed sweep must still publish cancellations completed before its error'
 
 printf 'PR main-CI gate and cancellation tests pass\n'
