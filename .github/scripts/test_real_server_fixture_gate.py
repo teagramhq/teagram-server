@@ -252,7 +252,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertNotIn("ops-prioritize-main", body)
 
-        # The demo pin is advisory and must not gate the production aggregate.
+        # The demo publisher and demo pin are advisory. K8s image publication
+        # gates production because the prod overlay pins those images.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
@@ -339,9 +340,12 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
         expected_guard = " || ".join(
-            f'"${result_envs[lane]}" != "success"'
+            (
+                f'"${result_envs[lane]}" != "$expected_publish_result"'
+                if lane == "publish-k8s-images"
+                else f'"${result_envs[lane]}" != "success"'
+            )
             for lane in needed_lanes
-            if lane != "publish-k8s-images"
         )
         self.assertEqual(
             " ".join(result_guard.group("condition").split()),
@@ -413,6 +417,35 @@ class RealServerFixtureGateTests(unittest.TestCase):
             0,
             "merge-group aggregate returned success when a required lane was skipped",
         )
+
+        failed_publisher_environment = environment.copy()
+        failed_publisher_environment[result_envs["publish-k8s-images"]] = "failure"
+        failed_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=failed_publisher_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failed_publisher.returncode,
+            0,
+            "CI aggregate returned success when the image publisher failed: "
+            + failed_publisher.stdout
+            + failed_publisher.stderr,
+        )
+
+        fork_environment = environment.copy()
+        fork_environment["PULL_REQUEST_HEAD_REPO"] = "fork/teagram-server"
+        fork_environment[result_envs["publish-k8s-images"]] = "skipped"
+        fork_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=fork_environment,
+            text=True,
+        )
+        self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
 
         failed_lane = needed_lanes[0]
         environment[result_envs[failed_lane]] = "failure"
