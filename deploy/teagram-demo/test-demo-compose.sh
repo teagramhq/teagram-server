@@ -834,6 +834,26 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
+resume_deploy = deploy.split("demo_resume_interrupted_install() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", [
+    '[[ -f "$DEMO_AUTHORITY_DIR/mode.json" && ! -L "$DEMO_AUTHORITY_DIR/mode.json" ]]',
+    '[[ -f "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]]',
+    'demo_compose ps -q postgres',
+    'demo_compose ps -q "$ACTIVE_SERVER"',
+    'demo_compose ps -q "$CANDIDATE_SERVER"',
+    'demo_compose ps -q haproxy',
+    'demo_compose ps -q edge',
+    'demo_compose ps -q turnstile-egress',
+    'demo_backup_database',
+    'DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"',
+    'BACKUP_READY=0',
+])
+assert_text_order(deploy, "deploy-main.sh incomplete service recovery gate", [
+    'if ((${#CONTAINER_IDS[@]} < 4)); then',
+    'demo_resume_interrupted_install ||',
+    "demo_fail 'demo services are incomplete and do not match a resumable interrupted install'",
+    'exit 0',
+])
 deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
 assert_text_order(deploy_edge_refresh, "deploy-main.sh reloaded edge inventory", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
@@ -997,6 +1017,8 @@ assert_text_order(init, "init-demo.sh resume lock", [
     'MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"',
     'if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then',
 ])
+if 'DEMO_DEPLOY_LOCK_HELD' not in init or 'flock -n 9' not in init:
+    raise SystemExit("init-demo.sh: deploy recovery must reuse and verify the inherited deploy lock")
 if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
