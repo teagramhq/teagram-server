@@ -364,7 +364,7 @@ export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"
 # Check candidate RSA identity before applying migrations. The candidate's
 # discovery generation is intentionally disabled for this probe because the
 # pre-migration database may not have the generation table yet.
-demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client-before-migration.json"
+demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false teagramd-maintenance client-config > "$TMP_DIR/client-before-migration.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"
@@ -379,7 +379,7 @@ CANDIDATE_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-before-migration.js
 demo_compose rm -sf migrate >/dev/null
 demo_compose up -d migrate
 demo_wait_migration demo_compose 'deployment migrations'
-demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"
+demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"

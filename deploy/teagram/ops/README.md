@@ -3,14 +3,13 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|rollback-public-websocket|apply-user-invite-quota> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the five current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `rollback-public-websocket`, and
-`apply-user-invite-quota`. A script's presence in an older main commit does
-not authorize a retired operation. The allowlist lives in
+the four current operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, and `apply-user-invite-quota`. A script's presence in
+an older main commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover both retired names at an older main SHA. Keep
 every operation narrowly scoped to its named purpose. Validate arguments
 before using them, fail closed, and never put secrets in arguments, logs, or
@@ -94,16 +93,6 @@ ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
 It checks that the recorded environment is exactly the saved `.env` plus the
 quota setting, then reruns the probe against the current live image without
 applying another rollout.
-
-`rollback-public-websocket.sh` is the pre-revert step for a deployed public
-WebSocket route. Run it through `teagram-ops` with the current deployed SHA;
-it takes `/tmp/teagram-deploy.lock`, verifies the live checkout and base image
-match that SHA, removes only the `teagram` project's `public-haproxy`,
-`teagramd-public-1`, and `teagramd-public-2` containers, then confirms those
-containers are gone and no container publishes host port 2446. After it
-succeeds, revert the route commit and let `Deploy.` recreate base `teagramd`
-with its original `127.0.0.1:2446` publish. The operation is repeatable and
-does not touch volumes or the database.
 
 ## User-invite quota threat model
 

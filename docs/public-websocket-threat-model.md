@@ -5,23 +5,18 @@
 This model covers the public MTProto WebSocket listener at
 `server.teagram.io`. The ingress contract sends only `/apiws` and
 `/.well-known/teagramd/client` through the host-side Cloudflare Tunnel to
-`127.0.0.1:2446`; Compose publishes that port for the public HAProxy frontend
-on LXC loopback. Treat the
+`127.0.0.1:2446`; Compose publishes that listener on LXC loopback. Treat the
 hostname as internet-facing: any caller that can reach it can fetch public
 discovery and open a WebSocket, including a script or native client that does
 not use the Teagram web app. The listener is separate from the default MTProto
 TCP listener and the existing tailnet WebSocket listener.
 
 The host loopback bind prevents direct connections from other network hosts.
-The public HAProxy frontend is attached to a fixed internal network with no
-other Compose services. Its first connection rule allows only that network's
-gateway address, which is the peer Docker presents for the host-side tunnel's
-published connection. The smoke test inspects and asserts that observed peer.
-Host processes share this gateway address and can therefore forge the header;
-the host and Docker daemon are trusted boundaries. Cloudflare's overwritten
-`CF-Connecting-IP` value is also trusted. This rollout does not add a
-Cloudflare Access identity policy, so application authentication must assume
-an anonymous caller.
+It does not isolate the listener from host processes, the Docker daemon, or
+containers attached to the Compose network. The tunnel, host, Docker daemon,
+Cloudflare zone and tunnel administrators, and tailnet membership are trusted
+boundaries. This rollout does not add a Cloudflare Access identity policy, so
+application authentication must assume an anonymous caller.
 
 The protected assets are account and session integrity, registration invites,
 authentication state, and availability of the public and tailnet services.
@@ -53,30 +48,16 @@ a new username.
 
 ## Abuse limits and residual risk
 
-HAProxy rejects a request unless it has exactly one parseable
-`CF-Connecting-IP` value, then sets its source address from that value. Missing,
-duplicate, comma-separated or invalid values receive HTTP 400. The route never
-reads `X-Forwarded-For`. HAProxy sends PROXY v2 only to the dedicated public
-listener. Its backend sets `http-reuse never`, so idle connections are not
-shared between sessions; the smoke test sends two upgrades with different
-addresses over one keep-alive frontend connection and checks both addresses at
-the PROXY-v2 backend.
-
-The two public replicas use `TG_CLIENT_ADDR_TRUST=proxy-v2`, trust only
-HAProxy's fixed backend address, and publish no host ports. `clientAddrUntil`
-closes peers outside that allowlist on every listener of each public replica.
-The public replicas bind the dedicated public listener and retain its invite
-registration rule, Origin allowlist, advertise address and Turnstile settings.
-The base `teagramd` service remains in `socket` trust and keeps tailnet TCP
-2443 and the optional tailnet WebSocket listener. It no longer binds or
-publishes the public listener, so traffic cannot fall through to
-`TG_REGISTRATION` or the tailnet budget scope.
-
-Per-IP limits remain per network prefix, not per individual address: IPv4 uses
-its address and IPv6 uses its network prefix. A caller with many networks can
-therefore obtain many buckets; per-account and global limits remain the
-backstop. Cloudflare's client address claim and any host process using the
-pinned Docker gateway are trusted by design.
+The production Compose configuration uses `TG_CLIENT_ADDR_TRUST=socket`. The
+authentication counters therefore use the address of the socket peer, not a
+forwarded HTTP header. With a host-local tunnel connection, public visitors
+may share one observed network bucket. This caps aggregate public RPC traffic
+but is not a per-visitor limit and may also throttle legitimate users together.
+The public listener's budgets are selected from the accepted listener; request
+headers cannot select or merge them with the tailnet budget. Do not trust
+`X-Forwarded-For` to change this; any client-address proxy mode requires an
+explicitly allowlisted, trusted proxy that supplies the supported PROXY-v2
+metadata.
 
 The 20-per-hour `account.checkUsername` budget shares this source-address
 behavior. With the host-local tunnel, all public visitors may contend for one
@@ -94,7 +75,8 @@ Unauthenticated callers can still consume connection and shared service
 capacity; per-RPC authentication limits do not by themselves prevent a
 connection-level denial of service. The public Origin check does not stop
 direct clients, and the invite rule does not protect sign-in attempts for
-existing accounts. Keep `TG_LOG_LOGIN_CODES=false`; enabling it writes transient authentication
+existing accounts. This listener change does not enable or change Turnstile.
+Keep `TG_LOG_LOGIN_CODES=false`; enabling it writes transient authentication
 codes to logs. Rate limits, invites, and Origin checks reduce specific abuse
 paths but do not make the public listener private or provide a general bot
 defense.
@@ -104,11 +86,10 @@ listeners and network routes and share their original per-client counters.
 Existing rows remain assigned to that tailnet scope; the additive migration
 creates separate public counters without resetting or copying them.
 `TG_REGISTRATION=open` continues to apply only there; public sign-up uses the
-separate invite policy. Deployment verification checks HAProxy health and
-bounded logs, the loopback-only publish, the gateway peer seen on the public
-frontend, rejection from the Compose default network, header validation,
-per-client PROXY-v2 attribution across a keep-alive connection, public sign-up
-without an invite, and tailnet authentication through TCP and WebSocket.
+separate invite policy. Deployment verification must confirm the host publish
+remains loopback-only, the tunnel routes only the two documented paths, public
+sign-up without an invite is refused, public budgets still limit traffic, and
+tailnet authentication still works through TCP and WebSocket.
 
 The isolated `demo.teagram.io` deployment has separate ingress and data
 stores. Its online deployment dumps can retain live demo account and message

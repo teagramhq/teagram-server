@@ -139,7 +139,7 @@ demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
 # before the public edge starts.
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
-demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client-after-wipe.json"
+demo_server_client_config "$ACTIVE_SERVER" > "$TMP_DIR/client-after-wipe.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"
