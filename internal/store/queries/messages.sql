@@ -267,6 +267,65 @@ WHERE owner_id = sqlc.arg(owner_id)
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int;
 
+-- MessageSearchDialogReady checks whether the postings for one dialog are
+-- initialized. Keep this separate from the page query so PostgreSQL never
+-- plans and scans the legacy history path for a ready dialog.
+-- name: MessageSearchDialogReady :one
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM message_search_unready_dialogs
+    WHERE owner_id = sqlc.arg(owner_id)::bigint
+      AND peer_type = sqlc.arg(peer_type)::smallint
+      AND peer_id = sqlc.arg(peer_id)::bigint
+);
+
+-- SearchMessagesByPostings reads only the ordered lexeme postings for one
+-- ready dialog. The per-dialog posting counts choose the rarest query lexeme
+-- before the ordered walk; the tsquery check preserves full-query semantics.
+-- name: SearchMessagesByPostings :many
+WITH parsed_query AS MATERIALIZED (
+    SELECT plainto_tsquery('simple', sqlc.arg(query)::text) AS tsquery,
+           tsvector_to_array(to_tsvector('simple', sqlc.arg(query)::text)) AS lexemes
+),
+query_lexemes AS (
+    SELECT parsed.tsquery, term.lexeme
+    FROM parsed_query AS parsed
+    CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
+),
+selected_query AS MATERIALIZED (
+    SELECT ql.tsquery, ql.lexeme
+    FROM query_lexemes AS ql
+    LEFT JOIN message_search_posting_counts AS counts
+      ON counts.owner_id = sqlc.arg(owner_id)::bigint
+     AND counts.peer_type = sqlc.arg(peer_type)::smallint
+     AND counts.peer_id = sqlc.arg(peer_id)::bigint
+     AND counts.lexeme = ql.lexeme
+    ORDER BY COALESCE(counts.posting_count, 0), ql.lexeme
+    LIMIT 1
+)
+SELECT m.*
+FROM selected_query AS q
+CROSS JOIN LATERAL (
+    SELECT m.*
+    FROM message_search_postings AS p
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE p.owner_id = sqlc.arg(owner_id)::bigint
+      AND p.peer_type = sqlc.arg(peer_type)::smallint
+      AND p.peer_id = sqlc.arg(peer_id)::bigint
+      AND p.lexeme = q.lexeme
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND (sqlc.arg(offset_id)::bigint = 0 OR p.local_id < sqlc.arg(offset_id)::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+) AS m
+ORDER BY m.local_id DESC;
+
 -- SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
 -- file_id <> 0 as a top-level predicate so the partial messages_file_idx can
 -- serve a large text-only history without scanning its message rows.
