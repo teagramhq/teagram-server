@@ -75,10 +75,6 @@ LIVE_COMPOSE_FILES=$container_compose_files
 [[ "$LIVE_COMPOSE_FILES" == "$EXPECTED_COMPOSE_FILES" ]] || {
   fail 'live Compose selection is not the reviewed teagram S3 stack'
 }
-COMPOSE_FILE="$REPO/docker-compose.yml:$REPO/docker-compose.override.yml"
-COMPOSE_PROJECT_NAME=teagram
-export COMPOSE_FILE COMPOSE_PROJECT_NAME
-unset COMPOSE_ENV_FILES COMPOSE_PROFILES
 for compose_file in "$REPO/docker-compose.yml" "$REPO/docker-compose.override.yml"; do
   [[ -f "$compose_file" && ! -L "$compose_file" ]] || fail 'live Compose input is missing or symlinked'
 done
@@ -90,12 +86,10 @@ inspect_container "$POSTGRES_CONTAINER"
 [[ "$container_compose_files" == "$LIVE_COMPOSE_FILES" ]] || {
   fail 'server containers do not share the inspected Compose selection'
 }
-POSTGRES_STATE=$container_state
 inspect_container "$SERVER_CONTAINER"
 [[ "$container_compose_files" == "$LIVE_COMPOSE_FILES" ]] || {
   fail 'teagramd Compose selection changed during preflight'
 }
-SERVER_STATE=$container_state
 
 git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py" \
   > "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot stage the reviewed blob authority validator'
@@ -128,17 +122,27 @@ for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
   [[ -f "$env_file" && ! -L "$env_file" ]] || fail 'verified Compose environment file is unavailable'
 done
 
-docker_compose_start() {
-  docker compose --project-directory "$REPO" --project-name teagram \
-    --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}" \
-    start "$1"
+start_existing_container() {
+  local name=$1 expected_service=$2
+  inspect_container "$name"
+  [[ "$container_project" == teagram && "$container_service" == "$expected_service" ]] || {
+    fail "$expected_service container is not in the teagram Compose project"
+  }
+  [[ "$container_compose_files" == "$LIVE_COMPOSE_FILES" ]] || {
+    fail "$expected_service container no longer matches the inspected Compose selection"
+  }
+  if [[ "$container_state" != running ]]; then
+    docker start "$name" >/dev/null || fail "could not start the existing $expected_service container"
+  fi
+  inspect_container "$name"
+  [[ "$container_project" == teagram && "$container_service" == "$expected_service" &&
+     "$container_compose_files" == "$LIVE_COMPOSE_FILES" ]] || {
+    fail "$expected_service container identity changed during startup"
+  }
+  [[ "$container_state" == running ]] || fail "$expected_service did not enter the running state"
 }
 
-if [[ "$POSTGRES_STATE" != running ]]; then
-  docker_compose_start postgres || fail 'could not start the existing postgres service'
-fi
-inspect_container "$POSTGRES_CONTAINER"
-[[ "$container_state" == running ]] || fail 'postgres did not enter the running state'
+start_existing_container "$POSTGRES_CONTAINER" "$EXPECTED_POSTGRES_SERVICE"
 
 sleep 5
 postgres_ready=0
@@ -153,10 +157,6 @@ for attempt in {1..28}; do
 done
 [[ "$postgres_ready" == 1 ]] || fail 'Postgres did not become ready within 60 seconds'
 
-if [[ "$SERVER_STATE" != running ]]; then
-  docker_compose_start teagramd || fail 'could not start the existing teagramd service'
-fi
-inspect_container "$SERVER_CONTAINER"
-[[ "$container_state" == running ]] || fail 'teagramd did not enter the running state'
+start_existing_container "$SERVER_CONTAINER" "$EXPECTED_SERVER_SERVICE"
 
 printf 'postgres=ready teagramd=running compose_selection=verified\n'

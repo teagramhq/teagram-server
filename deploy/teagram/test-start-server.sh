@@ -91,37 +91,35 @@ if [[ "$1" == inspect ]]; then
     *) echo "unexpected fixture inspect format: $format" >&2; exit 99 ;;
   esac
 elif [[ "$1" == compose ]]; then
-  [[ "$COMPOSE_FILE" == "$FIXTURE_REPO/docker-compose.yml:$FIXTURE_REPO/docker-compose.override.yml" &&
-     "$COMPOSE_PROJECT_NAME" == teagram ]] || {
-    echo 'Compose did not preserve the inspected project and file selection' >&2
+  if [[ "$*" == *' start teagramd' ]]; then
+    printf 'start:migrate\n' >> "$MOCK_EVENTS"
+    printf 'running\n' > "$MOCK_MIGRATE_STATE_FILE"
+    printf 'start:teagramd\n' >> "$MOCK_EVENTS"
+    printf 'running\n' > "$MOCK_TEAGRAMD_STATE_FILE"
+  else
+    echo "unexpected fixture Compose command: $*" >&2
     exit 98
-  }
-  expected=(compose --project-directory "$FIXTURE_REPO" --project-name teagram \
-    --env-file "$FIXTURE_REPO/.env" --env-file "$FIXTURE_REPO/.env.rustfs-parked" start)
-  actual=()
-  service=
-  for arg in "$@"; do
-    actual+=("$arg")
-  done
-  service=${actual[-1]}
-  expected+=("$service")
-  [[ "${#actual[@]}" == "${#expected[@]}" ]] || { echo "unexpected fixture compose args: $*" >&2; exit 99; }
-  for index in "${!expected[@]}"; do
-    [[ "${actual[$index]}" == "${expected[$index]}" ]] || { echo "unexpected fixture compose args: $*" >&2; exit 99; }
-  done
-  case "$service" in
-    postgres)
-      printf 'start:postgres\n' >> "$MOCK_EVENTS"
-      [[ "${MOCK_START_FAIL_SERVICE:-}" != postgres ]] || exit 42
-      printf 'running\n' > "$MOCK_POSTGRES_STATE_FILE"
+  fi
+elif [[ "$1" == start ]]; then
+  [[ "$#" == 2 ]] || { echo "unexpected fixture start args: $*" >&2; exit 99; }
+  case "$2" in
+    teagram-postgres-1)
+      service=postgres
+      state_file=$MOCK_POSTGRES_STATE_FILE
+      failure_service=postgres
+      failure_status=42
       ;;
-    teagramd)
-      printf 'start:teagramd\n' >> "$MOCK_EVENTS"
-      [[ "${MOCK_START_FAIL_SERVICE:-}" != teagramd ]] || exit 43
-      printf 'running\n' > "$MOCK_TEAGRAMD_STATE_FILE"
+    teagram-teagramd-1)
+      service=teagramd
+      state_file=$MOCK_TEAGRAMD_STATE_FILE
+      failure_service=teagramd
+      failure_status=43
       ;;
-    *) echo "unexpected fixture compose service: $service" >&2; exit 99 ;;
+    *) echo "unexpected fixture container start: $2" >&2; exit 99 ;;
   esac
+  printf 'start:%s\n' "$service" >> "$MOCK_EVENTS"
+  [[ "${MOCK_START_FAIL_SERVICE:-}" != "$failure_service" ]] || exit "$failure_status"
+  printf 'running\n' > "$state_file"
 elif [[ "$1" == exec ]]; then
   [[ "$#" == 7 && "$2" == teagram-postgres-1 && "$3" == pg_isready &&
      "$4" == -U && "$5" == postgres && "$6" == -d && "$7" == teagram ]] || {
@@ -153,6 +151,7 @@ setup_case() {
   FIXTURE_REPO=$dir/repo
   MOCK_POSTGRES_STATE_FILE=$dir/postgres-state
   MOCK_TEAGRAMD_STATE_FILE=$dir/teagramd-state
+  MOCK_MIGRATE_STATE_FILE=$dir/migrate-state
   MOCK_EVENTS=$dir/events
   MOCK_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   unset MOCK_POSTGRES_PROJECT MOCK_TEAGRAMD_PROJECT MOCK_POSTGRES_FILES MOCK_TEAGRAMD_FILES
@@ -166,10 +165,12 @@ setup_case() {
   printf 'RUSTFS_SECRET_KEY=fixture-parked-secret\n' > "$FIXTURE_REPO/.env.rustfs-parked"
   printf 'exited\n' > "$MOCK_POSTGRES_STATE_FILE"
   printf 'exited\n' > "$MOCK_TEAGRAMD_STATE_FILE"
+  printf 'exited\n' > "$MOCK_MIGRATE_STATE_FILE"
   : > "$MOCK_EVENTS"
   sed "s|/opt/teagram|$FIXTURE_REPO|g" "$OP_SCRIPT" > "$dir/op.sh"
   chmod 755 "$dir/op.sh"
-  export FIXTURE_REPO FIXTURE_AUTHORITY_JSON MOCK_POSTGRES_STATE_FILE MOCK_TEAGRAMD_STATE_FILE MOCK_EVENTS MOCK_COMPOSE_FILES
+  export FIXTURE_REPO FIXTURE_AUTHORITY_JSON MOCK_POSTGRES_STATE_FILE MOCK_TEAGRAMD_STATE_FILE \
+    MOCK_MIGRATE_STATE_FILE MOCK_EVENTS MOCK_COMPOSE_FILES
 }
 
 run_operation() {
@@ -194,7 +195,8 @@ output=$(run_operation)
 [[ "$output" == *'postgres=ready teagramd=running compose_selection=verified'* ]]
 [[ "$output" != *'fixture-secret-value'* && "$output" != *'fixture-parked-secret'* ]]
 [[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd' ]]
-printf '%s\n' 'PASS starts existing Postgres, waits for readiness, then starts teagramd with the live Compose selection'
+[[ "$(cat "$MOCK_MIGRATE_STATE_FILE")" == exited ]]
+printf '%s\n' 'PASS starts Postgres before only the existing teagramd container, without starting migration dependencies'
 
 setup_case already-running
 printf 'running\n' > "$MOCK_POSTGRES_STATE_FILE"
@@ -246,7 +248,7 @@ MOCK_START_FAIL_SERVICE=postgres
 export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'could not start the existing postgres service'* ]]
+[[ "$output" == *'could not start the existing postgres container'* ]]
 assert_no_event '^start:teagramd$'
 printf '%s\n' 'PASS does not start teagramd when Postgres startup fails'
 
@@ -255,7 +257,7 @@ MOCK_START_FAIL_SERVICE=teagramd
 export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'could not start the existing teagramd service'* ]]
+[[ "$output" == *'could not start the existing teagramd container'* ]]
 printf '%s\n' 'PASS reports a teagramd startup failure after Postgres is ready'
 
 setup_case bad-arguments

@@ -102,9 +102,12 @@ Compose project, service names and recorded file selection, then checks the
 S3 authority and environment-file paths with the reviewed blob-transition
 helper. Only the live `docker-compose.yml` plus `docker-compose.override.yml`
 selection is accepted. It starts the existing `postgres` container, waits five
-seconds and checks `pg_isready` for up to 60 seconds before starting the
-existing `teagramd` container. It uses `docker compose start`; it does not
-create or replace containers, apply migrations, or operate on volumes.
+seconds and checks `pg_isready` for up to 60 seconds before starting only the
+inspected `teagramd` container. It uses `docker start` on each existing
+container, not Compose dependency startup, so this recovery cannot restart the
+`migrate` container. It does not create or replace containers, run migrations,
+or issue volume operations; the resumed server can make its normal database
+writes after it is running.
 
 Run the operation from a merged `main` commit:
 
@@ -114,10 +117,10 @@ ssh teagram run <reviewed-main-sha> start-server
 
 There is no staging LXC. The preflight and fixture suite are the preview gate;
 the operation reports success only after Postgres is ready and `teagramd` is
-running. If recovery must be rolled back, the Steward can stop both containers
-from alpha with this command. It preserves the named volumes and returns the
-services to their previous stopped state; `teagramd` can take up to 120 seconds
-to finish its configured graceful stop.
+running. If both containers were stopped before recovery and it must be rolled
+back, the Steward can stop them from alpha with this command. It preserves the
+named volumes; `teagramd` can take up to 120 seconds to finish its configured
+graceful stop.
 
 ```sh
 incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
