@@ -4634,7 +4634,7 @@ else
 fi
 
 prepare_target_local_apply_fixture turnstile-production-defaults \
-  turnstile-production-defaults "$E58_LOCAL_COMPOSE_TARGET_SHA"
+  target-local-turnstile-production-defaults "$E58_LOCAL_COMPOSE_TARGET_SHA"
 seed_live_turnstile_defaults turnstile-production-defaults
 state=$(cat "$TMP/turnstile-production-defaults-state-path")
 jq -c '.services.teagramd.environment += {
@@ -4657,7 +4657,7 @@ else
 fi
 
 prepare_target_local_apply_fixture turnstile-production-test-mode \
-  turnstile-production-test-mode "$E58_LOCAL_COMPOSE_TARGET_SHA"
+  target-local-turnstile-production-test-mode "$E58_LOCAL_COMPOSE_TARGET_SHA"
 seed_live_turnstile_defaults turnstile-production-test-mode
 state=$(cat "$TMP/turnstile-production-test-mode-state-path")
 jq -c '.services.teagramd.environment += {
