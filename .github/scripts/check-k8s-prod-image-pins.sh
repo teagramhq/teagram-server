@@ -27,6 +27,12 @@ image_digest() {
     [[ "$reference" == "${references[0]}" ]] ||
       fail "${image} has inconsistent digests across its production workloads"
   done
+
+  local published_reference="${image}@sha256:${digest}"
+  local registry_output
+  if ! registry_output="$(docker manifest inspect "$published_reference" 2>&1)"; then
+    fail "GHCR could not resolve ${published_reference}: ${registry_output:-no registry response}"
+  fi
   printf '%s' "$digest"
 }
 
