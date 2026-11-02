@@ -1,0 +1,71 @@
+name: PR CI priority
+
+on:
+  pull_request_target:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [CI, RPC performance, Real-client browser flow]
+    types: [requested, in_progress, completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-priority-${{ (github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && format('pr-{0}', github.event.workflow_run.pull_requests[0].number)) || (github.event_name == 'push' && 'main-push') || format('recovery-{0}', github.event.workflow_run.id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  ops-cancel-pr-checks:
+    name: 'ops: cancel-pr-checks'
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request_target' || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && (github.event.action == 'requested' || github.event.action == 'in_progress')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Gate this pull request while main CI is active
+        if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+        run: bash .github/scripts/gate-pr-checks-during-main.sh
+
+      - name: Cancel active pull request checks for main
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/cancel-pr-checks-for-main.sh
+
+  ops-dispatch-pr-ci-recovery:
+    name: 'ops: dispatch-pr-ci-recovery'
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+
+    steps:
+      - name: Dispatch cancelled pull request CI recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if ! gh workflow run recover-cancelled-pr-ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f issue=MAIN-3126 \
+            -f "main_run_id=$MAIN_RUN_ID" \
+            -f cancelled_pr_run_targets=; then
+            echo "::error::Could not dispatch recovery for pull request checks cancelled by main CI run $MAIN_RUN_ID."
+            exit 1
+          fi

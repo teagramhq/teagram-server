@@ -16,25 +16,12 @@ jobs:
   ops-gate-pr-during-main:
     name: 'ops: gate-pr-during-main'
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 1
     permissions:
-      actions: write
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-
-      - name: Defer pull request checks while main CI is active
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [[ -f .github/scripts/gate-pr-checks-during-main.sh && -f .github/scripts/main-ci-active-run.sh ]]; then
-            bash .github/scripts/gate-pr-checks-during-main.sh
-          else
-            echo "::notice::The base branch does not yet include the trusted main-CI gate; skipping this bootstrap check."
-          fi
+      - name: Defer privileged priority operations to trusted workflow
+        run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
 
   real-client-browser-flow:
     name: real-client-browser-flow
