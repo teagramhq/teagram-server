@@ -52,11 +52,25 @@ inspect_json() {
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
+        Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120,Labels:{"com.docker.compose.service":"teagramd"}},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
+        HostConfig:{RestartPolicy:{Name:"no"},LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
+}
+
+restart_policy_pair_inspect() {
+  local server_policy=$1 postgres_policy=$2 server postgres
+  server=$(jq -c --arg policy "$server_policy" '
+    .HostConfig.RestartPolicy.Name=$policy
+  ' <<< "$(inspect_json '')")
+  postgres=$(jq -nc --arg policy "$postgres_policy" '
+    {Id:"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     Image:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     Config:{Labels:{"com.docker.compose.service":"postgres"}},
+     HostConfig:{RestartPolicy:{Name:$policy}}}
+  ')
+  printf '%s\n%s\n' "$server" "$postgres" | jq -cs .
 }
 
 rotation_inspect_json() {
@@ -218,6 +232,27 @@ if ! grep -q $'config_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" ||
   exit 1
 fi
 printf '%s\n' 'PASS exact postgres and teagramd restart-policy transition is approved and recorded'
+
+restart_policy_runtime_match=$(snapshot_from_json \
+  "$(restart_policy_pair_inspect unless-stopped unless-stopped)" \
+  "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' '[]' true)
+if [ "$(jq -c '.container_restart_policies' <<< "$restart_policy_runtime_match")" != \
+     '{"postgres":"unless-stopped","teagramd":"unless-stopped"}' ]; then
+  printf '%s\n' 'FAIL target snapshot did not capture both live restart policies' >&2
+  exit 1
+fi
+for mismatch in 'no unless-stopped' 'unless-stopped no'; do
+  read -r server_policy postgres_policy <<< "$mismatch"
+  if snapshot_from_json \
+    "$(restart_policy_pair_inspect "$server_policy" "$postgres_policy")" \
+    "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' '[]' true \
+    >/dev/null 2>&1; then
+    printf 'FAIL target snapshot accepted mismatched runtime restart policies: teagramd=%s postgres=%s\n' \
+      "$server_policy" "$postgres_policy" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS target snapshot requires postgres and teagramd runtime restart policies to match Compose'
 
 cp "$TMP/restart-policy-target.snapshot.json" "$TMP/restart-policy-rollback-baseline.snapshot.json"
 cp "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json"

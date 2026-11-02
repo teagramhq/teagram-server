@@ -50,6 +50,14 @@ class RestartPolicyContractTests(unittest.TestCase):
 
         self.assertTrue(any("new-worker" in error and "needs a restart policy" in error for error in errors))
 
+    def test_rejects_explicit_no_on_a_long_running_service(self) -> None:
+        compose = resolved_compose()
+        compose["services"]["new-worker"] = {"restart": "no"}
+
+        errors = CHECKER.validate_compose(compose)
+
+        self.assertTrue(any("new-worker" in error and "needs a restart policy" in error for error in errors))
+
     def test_rejects_restart_policy_on_a_one_shot(self) -> None:
         compose = resolved_compose()
         compose["services"]["migrate"]["restart"] = "unless-stopped"

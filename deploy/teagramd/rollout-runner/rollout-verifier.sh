@@ -882,8 +882,9 @@ snapshot_from_json() {
   local snapshot_name=${6:-}
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
+  local require_restart_policies=${9:-false}
   local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
-  local mounts_sha exposure_sha config_sha config_without_restart_sha compose_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
+  local mounts_sha exposure_sha config_sha config_without_restart_sha compose_restart_policies container_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
   local media_key_source media_key_current
@@ -912,6 +913,7 @@ snapshot_from_json() {
   compose_log_login_codes=not-captured
   config_without_restart_sha=not-captured
   compose_restart_policies='{}'
+  container_restart_policies='{}'
   if [ "$compose_source" = selected-compose-render ]; then
     compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].logging as $logging
@@ -1387,6 +1389,33 @@ snapshot_from_json() {
     env_sha=$(sha256sum "$env_file" | awk '{print $1}')
     override_sha=$(sha256sum "$override_file" | awk '{print $1}')
   fi
+  container_restart_policies=$(printf '%s' "$inspect_json" | jq -ceS --arg server_service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
+    def containers: if type == "array" then . else [.] end;
+    [containers[] as $container
+     | ($container.Config.Labels["com.docker.compose.service"] // "") as $service
+     | select($service == "postgres" or $service == $server_service)
+     | {key:$service,
+        value:((($container.HostConfig.RestartPolicy.Name // "no")
+          | if . == "" then "no" else . end))}]
+    | (map(.key) | unique | length) as $unique_count
+    | if $unique_count == length then from_entries else error("duplicate service inspection") end
+  ') || {
+    printf '%s\n' 'container restart policy inspection is invalid' >&2
+    return 1
+  }
+  if [ "$require_restart_policies" = true ] && [ "$compose_source" = selected-compose-render ] && \
+     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; }; then
+    if ! jq -en --argjson actual "$container_restart_policies" --argjson expected "$compose_restart_policies" \
+      --arg server_service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
+      ($actual.postgres != null) and ($actual[$server_service] != null) and
+      ($expected.postgres != null) and ($expected[$server_service] != null) and
+      ($actual.postgres == $expected.postgres) and
+      ($actual[$server_service] == $expected[$server_service])
+    ' >/dev/null; then
+      printf '%s\n' 'inspected postgres and teagramd restart policies do not match resolved Compose' >&2
+      return 1
+    fi
+  fi
   mount_count=$(printf '%s' "$mounts" | jq -er 'length')
   mounts_sha=$(sha256_text "$mounts")
   exposure_sha=$(sha256_text "$exposure_for_hash")
@@ -1418,6 +1447,7 @@ snapshot_from_json() {
     --arg config_sha "$config_sha" \
     --arg config_without_restart_sha "$config_without_restart_sha" \
     --argjson compose_restart_policies "$compose_restart_policies" \
+    --argjson container_restart_policies "$container_restart_policies" \
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
     --arg container_env_sha "$container_env_sha" \
@@ -1443,6 +1473,7 @@ snapshot_from_json() {
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
       config_without_restart_sha256:$config_without_restart_sha,
       compose_restart_policies:$compose_restart_policies,
+      container_restart_policies:$container_restart_policies,
       env_sha256:$env_sha,override_sha256:$override_sha,
       container_env_sha256:$container_env_sha,
       container_logging_sha256:$container_logging_sha,
@@ -1610,7 +1641,7 @@ compare_snapshots() {
   local expected_image=$3
   local result_file=$4
   local field before_value after_value before_image after_image result before_logging_policy after_logging_policy before_config_without_restart after_config_without_restart
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 compose_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 compose_restart_policies container_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -1642,6 +1673,7 @@ compare_snapshots() {
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
       (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$before_file" >/dev/null \
@@ -1671,6 +1703,7 @@ compare_snapshots() {
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
       (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$after_file" >/dev/null \
@@ -1707,6 +1740,13 @@ compare_snapshots() {
         fi
       fi
     elif [ "$field" = compose_restart_policies ]; then
+      if [ "$before_value" = "$after_value" ] || \
+         approved_restart_policy_transition "$before_file" "$after_file"; then
+        result=pass
+      else
+        result=fail
+      fi
+    elif [ "$field" = container_restart_policies ]; then
       if [ "$before_value" = "$after_value" ] || \
          approved_restart_policy_transition "$before_file" "$after_file"; then
         result=pass
@@ -1961,7 +2001,7 @@ live_ready_command() {
 snapshot_command() {
   local container_id=$1 evidence_dir=$2 name=$3 env_file=$4 override_file=$5
   local compose_source=${6:-selected-compose-render}
-  local inspect_json compose_json image_env_json image_id snapshot output
+  local inspect_json compose_json image_env_json image_id postgres_container_id snapshot output require_restart_policies=false
   secure_evidence_dir "$evidence_dir"
   validate_container_id "$container_id"
   if [ "$PWD" != "$ROLLOUT_CHECKOUT_PATH" ] || [ "$env_file" != "$ROLLOUT_CHECKOUT_PATH/.env" ] || [ "$override_file" != "$ROLLOUT_CHECKOUT_PATH/docker-compose.override.yml" ]; then
@@ -1974,10 +2014,27 @@ snapshot_command() {
     *) printf '%s\n' 'invalid snapshot source' >&2; return 64 ;;
   esac
   output="$evidence_dir/$name.snapshot.json"
-  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
   if [ "$compose_source" = selected-compose-render ]; then
     compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
+    postgres_container_id=$(docker compose ps -aq postgres </dev/null 2>/dev/null) || {
+      printf '%s\n' 'postgres container ID is unavailable for restart policy inspection' >&2
+      return 1
+    }
+    validate_container_id "$postgres_container_id" || {
+      printf '%s\n' 'postgres container ID is invalid for restart policy inspection' >&2
+      return 1
+    }
+    [ "$container_id" != "$postgres_container_id" ] || {
+      printf '%s\n' 'teagramd and postgres container IDs are not distinct' >&2
+      return 1
+    }
+    inspect_json=$(docker inspect "$container_id" "$postgres_container_id" 2>/dev/null) || {
+      printf '%s\n' 'serving and postgres container snapshot unavailable' >&2
+      return 1
+    }
+    require_restart_policies=true
   else
+    inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
     compose_json='{}'
   fi
   image_id=$(printf '%s' "$inspect_json" | jq -er 'def item: if type == "array" then .[0] else . end; item.Image | select(type == "string" and length > 0)') || {
@@ -1992,7 +2049,7 @@ snapshot_command() {
     printf '%s\n' 'container image environment is invalid' >&2
     return 1
   }
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}" "$image_env_json") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}" "$image_env_json" "$require_restart_policies") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \
@@ -2052,7 +2109,7 @@ secure_replay_evidence_dir() {
 
 preflight_snapshot_command() {
   local container_id=$1 project_dir=$2 evidence_dir=$3 name=$4 project_name=$5 selection=$6
-  local env_file override_file compose_files_value='' compose_json inspect_json snapshot output entry file canonical owner=0
+  local env_file override_file compose_files_value='' compose_json inspect_json postgres_container_id snapshot output entry file canonical owner=0
   local -a compose_entries=() compose_args=()
   secure_replay_evidence_dir "$evidence_dir" || return 1
   if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then owner=$(id -u) || return 1; fi
@@ -2126,17 +2183,30 @@ preflight_snapshot_command() {
   export COMPOSE_EXPERIMENTAL_OCI_REMOTE XDG_CACHE_HOME
   export ROLLOUT_CHECKOUT_PATH ROLLOUT_COMPOSE_SERVICE
   export ROLLOUT_ADDED_ENV ROLLOUT_CHANGED_ENV
-  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || {
-    printf '%s\n' 'cannot inspect the live teagramd container' >&2
-    return 1
-  }
   compose_json=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
     "${compose_args[@]}" config --format json </dev/null 2>/dev/null) || {
     printf '%s\n' 'cannot render the selected Compose files' >&2
     return 1
   }
+  postgres_container_id=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
+    "${compose_args[@]}" ps -aq postgres </dev/null 2>/dev/null) || {
+    printf '%s\n' 'cannot find the live postgres container for restart policy inspection' >&2
+    return 1
+  }
+  validate_container_id "$postgres_container_id" || {
+    printf '%s\n' 'live postgres container ID is invalid for restart policy inspection' >&2
+    return 1
+  }
+  [ "$container_id" != "$postgres_container_id" ] || {
+    printf '%s\n' 'live teagramd and postgres container IDs are not distinct' >&2
+    return 1
+  }
+  inspect_json=$(docker inspect "$container_id" "$postgres_container_id" 2>/dev/null) || {
+    printf '%s\n' 'cannot inspect the live teagramd and postgres containers' >&2
+    return 1
+  }
   snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" \
-    selected-compose-render "$name" "$compose_files_value") || {
+    selected-compose-render "$name" "$compose_files_value" '[]' true) || {
     printf '%s\n' 'preflight replay snapshot validation failed' >&2
     return 1
   }
