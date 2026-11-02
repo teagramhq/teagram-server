@@ -11,9 +11,12 @@ fail() {
 
 revision=0123456789abcdef0123456789abcdef01234567
 revision_expression="$(yq -r '.env.K8S_IMAGE_REVISION' .github/workflows/ci.yml)"
-[[ "$revision_expression" == *"github.event.pull_request.head.sha"* &&
-   "$revision_expression" == *"github.sha"* ]] ||
-  fail 'image tags must identify the PR head, or the tested commit outside pull requests'
+# shellcheck disable=SC2016 # GitHub expressions are expected as literal workflow text.
+[[ "$revision_expression" == '${{ github.sha }}' ]] ||
+  fail 'image tags must identify the tested merge commit'
+merge_group_types="$(yq -r '.on.merge_group.types[]' .github/workflows/ci.yml)"
+[[ "$merge_group_types" == checks_requested ]] ||
+  fail 'the CI workflow must validate merge-queue commits'
 
 publish_step="$(yq -r '.jobs."publish-k8s-images".steps[] | select(.name == "Publish immutable commit tags and capture digests") | .run' .github/workflows/ci.yml)"
 [[ "$publish_step" == *'.github/scripts/publish-k8s-image-digests.sh'* ]] ||
@@ -84,7 +87,7 @@ for image in \
   ghcr.io/teagramhq/link-edge-landing \
   ghcr.io/teagramhq/link-edge-selector; do
   grep --fixed-strings --line-regexp --quiet "push:${image}:sha-${revision}" "$test_dir/docker-calls" ||
-    fail "the immutable tag for ${image} must use the PR head revision"
+    fail "the immutable tag for ${image} must use the tested commit revision"
 done
 
 printf 'K8s image digest publication test passed\n'

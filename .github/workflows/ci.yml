@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -16,7 +18,7 @@ concurrency:
 # Testcontainers rewrites Docker Hub pulls through Google's public mirror.
 env:
   TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
-  K8S_IMAGE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  K8S_IMAGE_REVISION: ${{ github.sha }}
 
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
@@ -1067,6 +1069,9 @@ jobs:
       - name: Test immutable K8s image digest publication
         run: .github/scripts/test-k8s-image-digests.sh
 
+      - name: Test bounded K8s workload checks
+        run: .github/scripts/test-k8s-deploy-contract.sh
+
       - name: Check RPC performance workflow contract
         env:
           GOPROXY: 'https://proxy.golang.org|direct'
@@ -1081,6 +1086,8 @@ jobs:
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
+          bash -n .github/scripts/test-k8s-deploy-contract.sh
+          shellcheck .github/scripts/test-k8s-deploy-contract.sh
 
       - name: Check deploy script syntax
         run: |
@@ -1620,6 +1627,9 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=create jobs \
+            --selector=app.kubernetes.io/name=rustfs-init \
+            --namespace teagram --timeout=180s
           kubectl get jobs --namespace teagram \
             --selector=app.kubernetes.io/name=rustfs-init --output json \
             | jq --exit-status '
@@ -1816,7 +1826,6 @@ jobs:
             "test-browser-acceptance=$TEST_BROWSER_ACCEPTANCE_RESULT"
             "build-browser-acceptance-image=$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT"
             "test-migrations=$TEST_MIGRATIONS_RESULT"
-            "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
             "check-k8s-manifests=$K8S_MANIFESTS_RESULT"
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
