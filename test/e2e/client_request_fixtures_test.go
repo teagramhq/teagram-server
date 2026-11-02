@@ -247,7 +247,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 		return false
 	}
 	switch fieldName {
-	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
+	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "document_id", "access_hash", "random_id":
 		return true
 	default:
 		return false
@@ -303,6 +303,16 @@ func TestClientTLValueRedactsFileIDs(t *testing.T) {
 	}
 	if got != "<N>" {
 		t.Fatalf("redacted file_id = %#v, want <N>", got)
+	}
+}
+
+func TestClientTLValueRedactsCustomEmojiDocumentIDs(t *testing.T) {
+	got, err := clientTLValue("document_id", reflect.ValueOf(int64(42)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "<N>" {
+		t.Fatalf("redacted document_id = %#v, want <N>", got)
 	}
 }
 
@@ -523,6 +533,10 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.sticker.1",
 		"messages_sendMedia.gif.1",
 		"stickers_createStickerSet.1",
+		"messages_getCustomEmojiDocuments.1",
+		"messages_sendMessage.customEmoji.private.1",
+		"messages_sendMessage.customEmoji.group.1",
+		"messages_sendMessage.customEmoji.channel.1",
 		"messages_saveGif.1",
 		"messages_saveGif.2",
 		"messages_getSavedGifs.1",
@@ -684,6 +698,46 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-sticker-set fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getOldFeaturedStickers.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetOldFeaturedStickers(ctx, &tg.MessagesGetOldFeaturedStickersRequest{Offset: 0, Limit: 100, Hash: 0})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesFeaturedStickers)
+		if !ok || full == nil || full.Count < 1 {
+			return fmt.Errorf("getOldFeaturedStickers = %T, want featured catalogue sets", result)
+		}
+		for _, item := range full.Sets {
+			covered, ok := item.(*tg.StickerSetCovered)
+			if ok && covered.Set.ShortName == stickerSetShortName {
+				return nil
+			}
+		}
+		return fmt.Errorf("getOldFeaturedStickers omitted %q", stickerSetShortName)
+	}); err != nil {
+		t.Fatalf("replay get-old-featured-stickers fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_searchStickerSets.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSearchStickerSets(ctx, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: 0})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok || full == nil || len(full.Sets) != 1 {
+			count := 0
+			if full != nil {
+				count = len(full.Sets)
+			}
+			return fmt.Errorf("searchStickerSets = %T with %d sets, want Twemoji catalogue match", result, count)
+		}
+		covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+		if !ok || covered.Set.ShortName != stickerSetShortName {
+			return fmt.Errorf("searchStickerSets result = %T, want %q", full.Sets[0], stickerSetShortName)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay search-sticker-sets fixture: %v", err)
 	}
 	stickerSetIDRef := &tg.InputStickerSetID{ID: stickerSet.ID, AccessHash: stickerSet.AccessHash}
 	if err := fixtureClientCall(t, creator, "messages_getStickerSet.2", func(ctx context.Context, api *tg.Client) error {

@@ -1,0 +1,14 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_searchStickerSets.1.txt",
+  "method": "messages.searchStickerSets",
+  "request": {
+    "type": "messages.searchStickerSets",
+    "flags": 0,
+    "fields": {
+      "q": "TWEMOJI",
+      "hash": 0
+    }
+  }
+}

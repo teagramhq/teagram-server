@@ -6,14 +6,17 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/reactionassets"
@@ -447,6 +450,347 @@ func TestFeaturedStickerSetsReflectOnlyTheViewersInstalledState(t *testing.T) {
 	}
 }
 
+func TestGetOldFeaturedStickerSetsSupportsPaginationAndHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810011")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	full := getOldFeaturedStickerSets(t, h, owner.ID, 0, 1, 0)
+	if full.Hash == 0 || full.Count != 1 || len(full.Sets) != 1 {
+		t.Fatalf("old featured sets = hash %d, count %d, %d sets; want the catalogue set", full.Hash, full.Count, len(full.Sets))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "twemoji_reactions" {
+		t.Fatalf("old featured set = %T (%v), want the Twemoji catalogue set", full.Sets[0], full.Sets[0])
+	}
+	if got := getOldFeaturedStickerSets(t, h, owner.ID, 0, 0, 0); len(got.Sets) != 0 || got.Count != full.Count {
+		t.Fatalf("zero-limit old featured sets = count %d, %d entries; want total count %d and no entries", got.Count, len(got.Sets), full.Count)
+	}
+	if got := getOldFeaturedStickerSets(t, h, owner.ID, 1, 1, 0); len(got.Sets) != 0 || got.Count != full.Count {
+		t.Fatalf("past-end old featured sets = count %d, %d entries; want total count %d and no entries", got.Count, len(got.Sets), full.Count)
+	}
+	if modified := getOldFeaturedStickerSets(t, h, owner.ID, 0, 1, full.Hash); modified != nil {
+		t.Fatal("getOldFeaturedStickers with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsMatchesCatalogueCaseInsensitivelyAndSupportsHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810012")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	result := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || full.Hash == 0 || len(full.Sets) != 1 {
+		t.Fatalf("searchStickerSets = %T with hash %d and %d sets; want one catalogue match", result, foundStickerSetsHash(result), foundStickerSetsCount(result))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "twemoji_reactions" {
+		t.Fatalf("searchStickerSets result = %T (%v), want the Twemoji catalogue set", full.Sets[0], full.Sets[0])
+	}
+	if modified := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
+		t.Fatal("searchStickerSets with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsCombinesCatalogueAndUserMatchesForHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs, pgtest.DSN(t))
+	creator, err := s.CreateUser(ctx, "+15551810021")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	viewer, err := s.CreateUser(ctx, "+15551810022")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGS(t))
+	request := createStickerRequest("generated_twemoji_cats", file, false, false)
+	request.Title = "Twemoji Cats"
+	created := createStickerSet(t, fullChannelDispatcher(s), creator.ID, request)
+	h := fullChannelDispatcher(s)
+
+	result := searchStickerSets(t, h, viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || full.Hash == 0 || len(full.Sets) != 2 {
+		t.Fatalf("combined search = %T with hash %d and %d sets, want catalogue and user matches", result, foundStickerSetsHash(result), foundStickerSetsCount(result))
+	}
+	shortNames := make(map[string]bool, len(full.Sets))
+	for _, result := range full.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok {
+			t.Fatalf("combined search result = %T, want covered sticker set", result)
+		}
+		shortNames[covered.Set.ShortName] = true
+	}
+	for _, shortName := range []string{"twemoji_reactions", created.Set.ShortName} {
+		if !shortNames[shortName] {
+			t.Errorf("combined search omitted set %q", shortName)
+		}
+	}
+	if modified := searchStickerSets(t, h, viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
+		t.Fatal("combined search with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsRejectsOversizedQueryWithoutDatabaseWork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tracer := &stickerSearchQueryCounter{}
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore(), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551810023")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	tracer.n.Store(0)
+	body := dispatchChatMethod(t, fullChannelDispatcher(s), owner.ID, "messages.searchStickerSets", &tg.MessagesSearchStickerSetsRequest{
+		Q: strings.Repeat("猫", 501),
+	})
+	if got := stickerRPCError(t, body); got != "MESSAGE_TOO_LONG" {
+		t.Fatalf("oversized sticker-set search error = %q, want MESSAGE_TOO_LONG", got)
+	}
+	if got := tracer.n.Load(); got != 0 {
+		t.Fatalf("oversized sticker-set search ran %d database queries, want none", got)
+	}
+}
+
+func TestSearchStickerSetsUsesMessagesSearchRateLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810024")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcherWithRateLimits(s, config.RateLimitsConfig{
+		SearchMessages: store.RateLimitConfig{Limit: 1, Window: time.Minute},
+	})
+	request := &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"}
+	if result := searchStickerSets(t, h, owner.ID, request); result == nil {
+		t.Fatal("first sticker-set search returned nil")
+	}
+	body := dispatchChatMethod(t, h, owner.ID, "messages.searchStickerSets", request)
+	if got := stickerRPCError(t, body); !strings.HasPrefix(got, "FLOOD_WAIT_") {
+		t.Fatalf("second sticker-set search error = %q, want FLOOD_WAIT", got)
+	}
+}
+
+func TestSearchStickerSetsIncludesOnlyCallerVisibleUserSets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551810014")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	viewer, err := s.CreateUser(ctx, "+15551810015")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	created := createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("generated_cats", file, false, false))
+
+	search := func() *tg.MessagesFoundStickerSets {
+		t.Helper()
+		result := searchStickerSets(t, fullChannelDispatcher(s), viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "GENERATED", ExcludeFeatured: true})
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok {
+			t.Fatalf("searchStickerSets = %T, want full result", result)
+		}
+		return full
+	}
+	full := search()
+	if full.Hash == 0 || len(full.Sets) != 1 {
+		t.Fatalf("searchStickerSets user set result = hash %d, %d sets; want one caller-visible user set", full.Hash, len(full.Sets))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "generated_cats" || covered.Set.Creator {
+		t.Fatalf("searchStickerSets result = %T (%v); want non-creator view of generated_cats", full.Sets[0], full.Sets[0])
+	}
+	resolved := getStickerSet(t, fullChannelDispatcher(s), viewer.ID, &tg.InputStickerSetID{ID: covered.Set.ID, AccessHash: covered.Set.AccessHash}, 0)
+	if resolved.Set.ShortName != created.Set.ShortName || resolved.Set.Creator {
+		t.Fatalf("getStickerSet for search result = %+v; want the viewer-visible non-creator set", resolved.Set)
+	}
+	if modified := searchStickerSets(t, fullChannelDispatcher(s), viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "GENERATED", ExcludeFeatured: true, Hash: full.Hash}); modified != nil {
+		t.Fatal("searchStickerSets with current user-set hash returned a full result")
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for set liveness change: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close set liveness connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, created.Set.ID); err != nil {
+		t.Fatalf("disable user set: %v", err)
+	}
+	if inactive := search(); len(inactive.Sets) != 0 || inactive.Hash == full.Hash {
+		t.Fatalf("searchStickerSets after set deactivation = hash %d, %d sets; want it excluded and hash changed", inactive.Hash, len(inactive.Sets))
+	}
+}
+
+func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	tracer := &stickerSearchQueryCounter{}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551810016")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	for _, shortName := range []string{
+		"bulk_cats", "bulk_dogs", "bulkcats", "a_b", "prefix_a_b_suffix", "title_only",
+	} {
+		file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+		request := createStickerRequest(shortName, file, false, false)
+		if shortName == "title_only" {
+			request.Title = "Contains a_b"
+		}
+		createStickerSet(t, h, owner.ID, request)
+	}
+
+	tracer.n.Store(0)
+	result := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "BULK", ExcludeFeatured: true})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || len(full.Sets) != 3 {
+		t.Fatalf("searchStickerSets = %T with %d sets; want all three bulk-created sets", result, foundStickerSetsCount(result))
+	}
+	for _, result := range full.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered.Cover == nil {
+			t.Errorf("search result = %T (%v), want a set with a cover", result, result)
+		}
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("searchStickerSets used %d database queries for three results, want one indexed search and one bulk resolution", got)
+	}
+
+	tracer.n.Store(0)
+	literalResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "bulk_cats", ExcludeFeatured: true})
+	literal, ok := literalResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(literal.Sets) != 1 {
+		t.Fatalf("literal underscore search = %T with %d sets; want only bulk_cats", literalResult, foundStickerSetsCount(literalResult))
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("literal underscore search used %d database queries, want one search and one bulk resolution", got)
+	}
+
+	tracer.n.Store(0)
+	shortNameResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "a_b", ExcludeFeatured: true})
+	shortNameMatch, ok := shortNameResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(shortNameMatch.Sets) != 3 {
+		t.Fatalf("substring short-name search = %T with %d sets, want all three matches", shortNameResult, foundStickerSetsCount(shortNameResult))
+	}
+	matchedShortNames := make(map[string]bool, len(shortNameMatch.Sets))
+	for _, result := range shortNameMatch.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered.Cover == nil {
+			t.Errorf("substring search result = %T (%v), want a covered set", result, result)
+			continue
+		}
+		matchedShortNames[covered.Set.ShortName] = true
+	}
+	for _, shortName := range []string{"a_b", "prefix_a_b_suffix", "title_only"} {
+		if !matchedShortNames[shortName] {
+			t.Errorf("substring search omitted matching set %q", shortName)
+		}
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("substring search used %d database queries, want one indexed lookup and one bulk resolution", got)
+	}
+
+	for _, query := range []string{"q", "qz", "猫"} {
+		tracer.n.Store(0)
+		searchResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: query, ExcludeFeatured: true})
+		found, ok := searchResult.(*tg.MessagesFoundStickerSets)
+		if !ok || len(found.Sets) != 0 {
+			t.Errorf("search for %q = %T with %d sets, want an empty result", query, searchResult, foundStickerSetsCount(searchResult))
+		}
+		if got := tracer.n.Load(); got != 0 {
+			t.Errorf("search for %q used %d database queries, want none", query, got)
+		}
+	}
+
+	tracer.n.Store(0)
+	searchResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "!!!", ExcludeFeatured: true})
+	found, ok := searchResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(found.Sets) != 0 {
+		t.Errorf("search for %q = %T with %d sets, want an empty result", "!!!", searchResult, foundStickerSetsCount(searchResult))
+	}
+	if got := tracer.n.Load(); got != 1 {
+		t.Errorf("search for %q used %d database queries, want one indexed candidate lookup", "!!!", got)
+	}
+}
+
+type stickerSearchQueryCounter struct{ n atomic.Int64 }
+
+func (c *stickerSearchQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (*stickerSearchQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestSearchStickerSetsReturnsEmptyForUnmatchedAndEmptyQueries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810013")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	for _, req := range []*tg.MessagesSearchStickerSetsRequest{
+		{Q: "no matching catalogue set"},
+		{Q: "twemoji", ExcludeFeatured: true},
+		{Q: "", Hash: 123},
+	} {
+		result := searchStickerSets(t, h, owner.ID, req)
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok || len(full.Sets) != 0 {
+			t.Errorf("searchStickerSets(%q, excludeFeatured=%t, hash=%d) = %T with %d sets; want an empty full result", req.Q, req.ExcludeFeatured, req.Hash, result, foundStickerSetsCount(result))
+		}
+	}
+}
+
 func getFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash int64) *tg.MessagesFeaturedStickers {
 	t.Helper()
 	body := dispatchChatMethod(t, h, userID, "messages.getFeaturedStickers", &tg.MessagesGetFeaturedStickersRequest{Hash: hash})
@@ -462,6 +806,62 @@ func getFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash 
 		t.Fatalf("getFeaturedStickers = %T, want full or notModified", box.FeaturedStickers)
 	}
 	return full
+}
+
+func getOldFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, offset, limit int, hash int64) *tg.MessagesFeaturedStickers {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.getOldFeaturedStickers", &tg.MessagesGetOldFeaturedStickersRequest{Offset: offset, Limit: limit, Hash: hash})
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("getOldFeaturedStickers returned RPC error %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	var box tg.MessagesFeaturedStickersBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode getOldFeaturedStickers: %v", err)
+	}
+	if _, ok := box.FeaturedStickers.(*tg.MessagesFeaturedStickersNotModified); ok {
+		return nil
+	}
+	full, ok := box.FeaturedStickers.(*tg.MessagesFeaturedStickers)
+	if !ok {
+		t.Fatalf("getOldFeaturedStickers = %T, want full or notModified", box.FeaturedStickers)
+	}
+	return full
+}
+
+func searchStickerSets(t *testing.T, h mtproto.Handler, userID int64, req *tg.MessagesSearchStickerSetsRequest) tg.MessagesFoundStickerSetsClass {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.searchStickerSets", req)
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("searchStickerSets returned RPC error %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	var box tg.MessagesFoundStickerSetsBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode searchStickerSets: %v", err)
+	}
+	if _, ok := box.FoundStickerSets.(*tg.MessagesFoundStickerSetsNotModified); ok {
+		return nil
+	}
+	full, ok := box.FoundStickerSets.(*tg.MessagesFoundStickerSets)
+	if !ok {
+		t.Fatalf("searchStickerSets = %T, want full or notModified", box.FoundStickerSets)
+	}
+	return full
+}
+
+func foundStickerSetsCount(result tg.MessagesFoundStickerSetsClass) int {
+	if full, ok := result.(*tg.MessagesFoundStickerSets); ok && full != nil {
+		return len(full.Sets)
+	}
+	return 0
+}
+
+func foundStickerSetsHash(result tg.MessagesFoundStickerSetsClass) int64 {
+	if full, ok := result.(*tg.MessagesFoundStickerSets); ok && full != nil {
+		return full.Hash
+	}
+	return 0
 }
 
 func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T) {
