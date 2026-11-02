@@ -157,7 +157,8 @@ setup_case() {
   MOCK_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   unset MOCK_POSTGRES_PROJECT MOCK_TEAGRAMD_PROJECT MOCK_POSTGRES_FILES MOCK_TEAGRAMD_FILES
   unset MOCK_PG_READY MOCK_START_FAIL_SERVICE
-  FIXTURE_AUTHORITY_JSON="{\"outcome\":\"s3-accepted\",\"env_files\":[\"$FIXTURE_REPO/.env\",\"$FIXTURE_REPO/.env.rustfs-parked\"]}"
+  FIXTURE_AUTHORITY_JSON=$(jq -cn --arg repo "$FIXTURE_REPO" \
+    '{outcome:"s3-accepted",env_files:[$repo + "/.env",$repo + "/.env.rustfs-parked"]}')
   mkdir -p "$FIXTURE_REPO/.state/blob-mode"
   printf 'fixture compose\n' > "$FIXTURE_REPO/docker-compose.yml"
   printf 'fixture override\n' > "$FIXTURE_REPO/docker-compose.override.yml"
@@ -176,6 +177,15 @@ run_operation() {
   output=$(env OPS_SHA="$FIXTURE_SHA" PATH="$TMP/bin:$PATH" bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/op.sh" "$@" 2>&1) || status=$?
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$output"
+}
+
+assert_no_event() {
+  local pattern=$1 status=0
+  grep -q -- "$pattern" "$MOCK_EVENTS" || status=$?
+  [[ "$status" == 1 ]] || {
+    echo "unexpected fixture event or unreadable event log: $pattern" >&2
+    return 1
+  }
 }
 
 setup_case ordered-start
@@ -200,7 +210,7 @@ export MOCK_COMPOSE_FILES
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'live Compose selection is not the reviewed teagram S3 stack'* ]]
-! grep -q '^start:' "$MOCK_EVENTS"
+assert_no_event '^start:'
 printf '%s\n' 'PASS rejects a changed live Compose selection before starting services'
 
 setup_case mismatched-postgres
@@ -209,16 +219,17 @@ export MOCK_POSTGRES_FILES
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'server containers do not share the inspected Compose selection'* ]]
-! grep -q '^start:' "$MOCK_EVENTS"
+assert_no_event '^start:'
 printf '%s\n' 'PASS rejects a Postgres container created from a different Compose selection'
 
 setup_case invalid-environment
-FIXTURE_AUTHORITY_JSON="{\"outcome\":\"s3-accepted\",\"env_files\":[\"$FIXTURE_REPO/.env\",\"/tmp/unexpected-env\"]}"
+FIXTURE_AUTHORITY_JSON=$(jq -cn --arg repo "$FIXTURE_REPO" \
+  '{outcome:"s3-accepted",env_files:[$repo + "/.env","/tmp/unexpected-env"]}')
 export FIXTURE_AUTHORITY_JSON
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'live S3 environment selection includes an unapproved credential path'* ]]
-! grep -q '^start:' "$MOCK_EVENTS"
+assert_no_event '^start:'
 printf '%s\n' 'PASS rejects an unapproved parked credential path before starting services'
 
 setup_case postgres-not-ready
@@ -227,7 +238,7 @@ export MOCK_PG_READY
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Postgres did not become ready within 60 seconds'* ]]
-! grep -q '^start:teagramd$' "$MOCK_EVENTS"
+assert_no_event '^start:teagramd$'
 printf '%s\n' 'PASS leaves teagramd stopped when Postgres never becomes ready'
 
 setup_case postgres-start-fails
@@ -236,7 +247,7 @@ export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'could not start the existing postgres service'* ]]
-! grep -q '^start:teagramd$' "$MOCK_EVENTS"
+assert_no_event '^start:teagramd$'
 printf '%s\n' 'PASS does not start teagramd when Postgres startup fails'
 
 setup_case app-start-fails
@@ -251,5 +262,5 @@ setup_case bad-arguments
 output=$(run_operation unexpected)
 [[ "$(cat "$TMP/operation-status")" == 64 ]]
 [[ "$output" == *'usage: start-server.sh'* ]]
-! grep -q '^start:' "$MOCK_EVENTS"
+assert_no_event '^start:'
 printf '%s\n' 'PASS rejects caller-supplied operation arguments'
