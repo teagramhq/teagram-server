@@ -26,6 +26,7 @@ from typing import Iterable
 
 
 MAX_STICKERS_PER_PACK = 120
+MAX_EMOJI_ITEMS_PER_PACK = 200
 MAX_BUNDLE_BYTES = 150_000_000
 MAX_WORKERS = 12
 MAX_TGS_GZIP_BYTES = 64 * 1024
@@ -66,6 +67,7 @@ class Pack:
     license_id: str
     attribution: str
     file_format: str
+    kind: str
     stickers: tuple[Sticker, ...]
 
 
@@ -112,12 +114,17 @@ def make_packs(
     available: set[tuple[int, ...]],
     attribution: str = "",
     file_format: str = "webp",
+    kind: str = "stickers",
 ) -> list[Pack]:
     slug = dict(GROUPS).get(group_name)
     if slug is None:
         raise GeneratorError(f"unknown emoji group {group_name!r}")
     if file_format not in {"webp", "tgs"}:
         raise GeneratorError(f"unsupported sticker file format {file_format!r}")
+    if kind not in {"stickers", "emojis"}:
+        raise GeneratorError(f"unsupported sticker pack kind {kind!r}")
+    if kind == "emojis" and file_format != "webp":
+        raise GeneratorError("custom emoji packs must use static WebP files")
     stickers = [
         Sticker(emoji, "")
         for emoji in emojis
@@ -125,13 +132,15 @@ def make_packs(
     ]
     if not stickers:
         return []
-    numbered = len(stickers) > MAX_STICKERS_PER_PACK
+    pack_limit = MAX_EMOJI_ITEMS_PER_PACK if kind == "emojis" else MAX_STICKERS_PER_PACK
+    numbered = len(stickers) > pack_limit
     packs: list[Pack] = []
-    for start in range(0, len(stickers), MAX_STICKERS_PER_PACK):
-        chunk = stickers[start : start + MAX_STICKERS_PER_PACK]
-        sequence = start // MAX_STICKERS_PER_PACK + 1
+    for start in range(0, len(stickers), pack_limit):
+        chunk = stickers[start : start + pack_limit]
+        sequence = start // pack_limit + 1
         suffix = f"_{sequence:02d}" if numbered else ""
-        short_name = f"{source_id}_{slug}{suffix}"
+        kind_suffix = "emoji_" if kind == "emojis" else ""
+        short_name = f"{source_id}_{kind_suffix}{slug}{suffix}"
         named_stickers = tuple(
             Sticker(sticker.emoji, f"{short_name}/{emoji_filename(sticker.emoji.codepoints)}.{file_format}")
             for sticker in chunk
@@ -144,6 +153,7 @@ def make_packs(
                 license_id=license_id,
                 attribution=attribution,
                 file_format=file_format,
+                kind=kind,
                 stickers=named_stickers,
             )
         )
@@ -479,9 +489,12 @@ class RendererWorker:
             raise GeneratorError("Node.js is required; run tools/stickerbundle/generate.sh") from error
         return self
 
-    def render(self, svg: bytes, context: str) -> bytes:
+    def render(self, svg: bytes, context: str, target_size: int | None = None) -> bytes:
         assert self.process.stdin is not None and self.process.stdout is not None
-        request = json.dumps({"svg": base64.b64encode(svg).decode("ascii")})
+        request_value = {"svg": base64.b64encode(svg).decode("ascii")}
+        if target_size is not None:
+            request_value["targetSize"] = target_size
+        request = json.dumps(request_value)
         try:
             self.process.stdin.write(request + "\n")
             self.process.stdin.flush()
@@ -508,8 +521,13 @@ class RendererWorker:
             raise GeneratorError(f"image renderer exited with status {return_code}: {detail}")
 
 
-def render_webp(svg: bytes, renderer: RendererWorker, context: str) -> tuple[bytes, int, str]:
-    content = renderer.render(svg, context)
+def render_webp(
+    svg: bytes,
+    renderer: RendererWorker,
+    context: str,
+    target_size: int | None = None,
+) -> tuple[bytes, int, str]:
+    content = renderer.render(svg, context, target_size)
     if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WEBP":
         raise GeneratorError(f"{context}: converter did not produce a WebP file")
     return content, len(content), hashlib.sha256(content).hexdigest()
@@ -634,7 +652,8 @@ def source_manifest(
             size = len(content)
             checksum = hashlib.sha256(content).hexdigest()
         else:
-            content, size, checksum = render_webp(file_lookup[asset_path], renderer, context)
+            target_size = 100 if pack.kind == "emojis" else None
+            content, size, checksum = render_webp(file_lookup[asset_path], renderer, context, target_size)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(content)
         manifest_stickers.append(
@@ -654,6 +673,8 @@ def source_manifest(
         "attribution": pack.attribution,
         "stickers": manifest_stickers,
     }
+    if pack.kind != "stickers":
+        result["kind"] = pack.kind
     if pack.file_format != "webp":
         result["format"] = pack.file_format
     return result
@@ -713,23 +734,26 @@ def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tupl
                         except GeneratorError as error:
                             rejected_animations.append(str(error))
                     available = set(converted_animations)
+                kinds = ("stickers", "emojis") if file_format == "webp" else ("stickers",)
                 for group_name, _ in GROUPS:
-                    packs = make_packs(
-                        source_id=source["id"],
-                        source_name=source["name"],
-                        license_id=source["license"],
-                        group_name=group_name,
-                        emojis=grouped[group_name],
-                        available=available,
-                        attribution=source["attribution"],
-                        file_format=file_format,
-                    )
-                    for pack in packs:
-                        output_pack = source_manifest(
-                            pack, source, downloaded, assets, converted_animations, stage, renderer,
+                    for kind in kinds:
+                        packs = make_packs(
+                            source_id=source["id"],
+                            source_name=source["name"],
+                            license_id=source["license"],
+                            group_name=group_name,
+                            emojis=grouped[group_name],
+                            available=available,
+                            attribution=source["attribution"],
+                            file_format=file_format,
+                            kind=kind,
                         )
-                        if output_pack is not None:
-                            all_packs.append(output_pack)
+                        for pack in packs:
+                            output_pack = source_manifest(
+                                pack, source, downloaded, assets, converted_animations, stage, renderer,
+                            )
+                            if output_pack is not None:
+                                all_packs.append(output_pack)
         if not all_packs:
             raise GeneratorError("no sticker packs were produced")
         bundle_manifest = manifest_bytes(all_packs)
@@ -769,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.print_source_digests:
             elapsed = time.monotonic() - started
             print(
-                f"Generated {packs} packs with {stickers} stickers ({size} bytes) in {elapsed:.1f}s; "
+            f"Generated {packs} packs with {stickers} items ({size} bytes) in {elapsed:.1f}s; "
                 f"dropped {dropped} animated stickers"
             )
         return 0
