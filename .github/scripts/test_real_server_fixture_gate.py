@@ -187,12 +187,21 @@ class RealServerFixtureGateTests(unittest.TestCase):
             workflow,
             r"(?m)^concurrency:\n  group: real-client-browser-flow-pr-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true$",
         )
+        ops_gate = re.search(
+            r"(?ms)^  ops-gate-pr-during-main:\n(?P<body>.*?)(?=^  real-client-browser-flow:\n)",
+            workflow,
+        )
+        self.assertIsNotNone(ops_gate, "browser workflow has no priority gate job")
+        ops_gate_body = ops_gate.group("body")
+        self.assertIn("permissions:\n      contents: read", ops_gate_body)
+        self.assertNotIn("GH_TOKEN", ops_gate_body)
+        self.assertIn(
+            "run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'",
+            ops_gate_body,
+        )
         self.assertRegex(
             workflow,
-            r"(?ms)^  ops-gate-pr-during-main:\n.*?^        run: \|\n"
-            r"          if \[\[ -f \.github/scripts/gate-pr-checks-during-main\.sh && -f \.github/scripts/main-ci-active-run\.sh \]\]; then\n"
-            r"            bash \.github/scripts/gate-pr-checks-during-main\.sh\n"
-            r".*?^  real-client-browser-flow:\n    name: real-client-browser-flow\n    needs: ops-gate-pr-during-main$",
+            r"(?m)^    needs: ops-gate-pr-during-main$",
         )
         self.assertRegex(
             workflow,
