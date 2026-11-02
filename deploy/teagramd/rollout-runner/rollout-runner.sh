@@ -2426,7 +2426,7 @@ compare_resolved_preflight() {
   local old_file=${PREFLIGHT_BASELINE_SNAPSHOT:-"$BASELINE_DIR/baseline.snapshot.json"}
   local target_file=${PREFLIGHT_TARGET_SNAPSHOT:-"$TARGET_DIR/preflight.snapshot.json"}
   local results=${PREFLIGHT_RESULTS_FILE:-"$TARGET_DIR/preflight-comparisons.tsv"}
-  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current)
+  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_turnstile_test_mode compose_turnstile_hostnames compose_turnstile_qa_bypass)
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
@@ -2494,6 +2494,10 @@ compare_resolved_preflight() {
       if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = compose_log_login_codes ]; then
       if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    elif [ "$field" = compose_turnstile_test_mode ] && [ "$before" = unset ] && [ "$after" = false ]; then
+      result=pass
+    elif [ "$field" = compose_turnstile_hostnames ] && [ "$before" = unset ] && [ "$after" = web.teagram.io ]; then
+      result=pass
     elif [ "$field" = media_key_source ] && [ "$before" = unset ] && [[ "$after" = /* ]]; then
       result=pass
     elif [ "$field" = media_key_current ] && [ "$before" = unset ] && [ "$after" = 1 ]; then
@@ -2584,7 +2588,7 @@ compare_resolved_preflight_command() {
   # Preserve empty private values; Bash treats TSV tabs as collapsible IFS whitespace.
   if ! public_rows=$(awk -F '\t' '
     BEGIN {
-      count = split("config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_public_ws_2446 exposure_public_ws_2446 compose_replica_count compose_client_addr_trust", fields, " ")
+      count = split("config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_turnstile_test_mode compose_turnstile_hostnames compose_turnstile_qa_bypass compose_public_ws_2446 exposure_public_ws_2446 compose_replica_count compose_client_addr_trust", fields, " ")
       for (i = 1; i <= count; i++) allowed[fields[i]] = 1
     }
     # write_immutable creates an empty TSV with one newline before rows append.

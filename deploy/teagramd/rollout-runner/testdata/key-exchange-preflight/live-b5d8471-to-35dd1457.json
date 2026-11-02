@@ -5,7 +5,7 @@
     "captured_at_utc": "2026-10-25T19:00:03Z",
     "tailnet_env": "absent",
     "container_env_added": "none",
-    "comparison_rows": 12
+    "comparison_rows": 15
   },
   "baseline": {
     "config_sha256": "a94c4597e912e70814a39294042c41d1bd144828039bd6fb86040dd9e69dac88",
@@ -14,6 +14,9 @@
     "stop_grace_period": "2m0s",
     "compose_logging_policy": "syslog-v1",
     "compose_log_login_codes": "false",
+    "compose_turnstile_test_mode": "unset",
+    "compose_turnstile_hostnames": "unset",
+    "compose_turnstile_qa_bypass": "unset",
     "media_key_source": "/etc/teagramd/media-keys",
     "media_key_current": "1",
     "compose_public_ws_2446": "true",
@@ -31,6 +34,9 @@
     "stop_grace_period": "2m0s",
     "compose_logging_policy": "syslog-v1",
     "compose_log_login_codes": "false",
+    "compose_turnstile_test_mode": "unset",
+    "compose_turnstile_hostnames": "unset",
+    "compose_turnstile_qa_bypass": "unset",
     "media_key_source": "/etc/teagramd/media-keys",
     "media_key_current": "1",
     "compose_public_ws_2446": "true",

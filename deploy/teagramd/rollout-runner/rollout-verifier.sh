@@ -241,6 +241,25 @@ verify_turnstile_compose_configuration() {
   local compose_json=$1 checkout_root secret_source file_source secret_dir runtime_uid
   checkout_root=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
   secret_source="$checkout_root/.secrets/teagramd-turnstile"
+  if ! printf '%s\n' "$compose_json" | jq -e '
+    def valid_hostname:
+      type == "string" and length >= 1 and length <= 253 and
+      (split(".") | all(.[]; length >= 1 and length <= 63 and test("^[A-Za-z0-9-]+$") and
+        (startswith("-") | not) and (endswith("-") | not)));
+    def valid_hostnames:
+      type == "string" and length <= 1024 and (split(",") | all(.[]; valid_hostname));
+    (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $env
+    | ($env.TG_TURNSTILE_TEST_MODE // "false") as $test_mode
+    | ($env.TG_TURNSTILE_HOSTNAMES // "web.teagram.io") as $hostnames
+    | ($env.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE // "") as $qa_bypass_file
+    | ($env | type == "object") and
+      ($test_mode == "false") and
+      ($hostnames | valid_hostnames) and
+      ($qa_bypass_file == "")
+  ' >/dev/null; then
+    printf '%s\n' 'resolved Compose has unsafe Turnstile test, hostname, or QA bypass settings' >&2
+    return 1
+  fi
   if ! printf '%s\n' "$compose_json" | jq -e --arg secret_source "$secret_source" '
     (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $env
     | (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets // []) as $service_secrets
@@ -311,6 +330,17 @@ verify_turnstile_container_configuration() {
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
+    def valid_hostname:
+      type == "string" and length >= 1 and length <= 253 and
+      (split(".") | all(.[]; length >= 1 and length <= 63 and test("^[A-Za-z0-9-]+$") and
+        (startswith("-") | not) and (endswith("-") | not)));
+    def valid_hostnames:
+      type == "string" and length <= 1024 and (split(",") | all(.[]; valid_hostname));
+    def safe_policy_value($name; $value):
+      if $name == "TG_TURNSTILE_TEST_MODE" then $value == "false"
+      elif $name == "TG_TURNSTILE_HOSTNAMES" then ($value | valid_hostnames)
+      elif $name == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE" then $value == ""
+      else false end;
     .[0] as $inspect
     | .[1] as $compose
     | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $compose_env
@@ -325,7 +355,15 @@ verify_turnstile_container_configuration() {
             startswith("TG_TURNSTILE_SECRET_KEY=")
           )
         ] as $turnstile_entries
-        | if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
+        | ["TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE"] as $policy_names
+        | [$policy_names[] as $name | select($compose_env | has($name)) | $name] as $configured_policy_names
+        | [
+            $container_env[] | select(type == "string") |
+            select(. as $entry | any($policy_names[]; . as $name | $entry | startswith($name + "=")))
+          ] as $policy_entries
+        | [$policy_entries[] | capture("^(?<name>[^=]+)=(?<value>.*)$")] as $policy_values
+        | (
+          if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
             ($turnstile_entries | length) == 0
           else
             ([$turnstile_entries[] | select(startswith("TG_TURNSTILE_SECRET_KEY="))] | length) == 0 and
@@ -352,6 +390,17 @@ verify_turnstile_container_configuration() {
               end
             )
           end
+        ) and (
+          ([$policy_values[].name] | unique | length) == ($policy_values | length) and
+          ($snapshot_name == "preflight" or
+            all($configured_policy_names[]; . as $name | any($policy_values[]; .name == $name))) and
+          all($policy_values[];
+            . as $entry
+            | safe_policy_value($entry.name; $entry.value) and
+              ($snapshot_name == "preflight" or ($compose_env | has($entry.name) | not) or
+               $entry.value == ($compose_env[$entry.name] | tostring))
+          )
+        )
       end
   ' >/dev/null; then
     printf '%s\n' 'container Turnstile environment does not match the resolved Compose mapping' >&2
@@ -809,6 +858,7 @@ snapshot_from_json() {
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
+  local compose_turnstile_test_mode compose_turnstile_hostnames compose_turnstile_qa_bypass
   local media_key_source media_key_current
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
   MEDIA_KEY_MOUNT_CONFIGURED=false
@@ -834,6 +884,28 @@ snapshot_from_json() {
   compose_logging_policy=not-captured
   compose_log_login_codes=not-captured
   if [ "$compose_source" = selected-compose-render ]; then
+    compose_turnstile_test_mode=$(printf '%s' "$compose_json" | jq -er '
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
+      | if ($env | type) != "object" then "invalid"
+        elif ($env | has("TG_TURNSTILE_TEST_MODE") | not) then "unset"
+        elif $env.TG_TURNSTILE_TEST_MODE == "false" then "false"
+        elif $env.TG_TURNSTILE_TEST_MODE == "true" then "true"
+        else "invalid" end
+    ') || return 1
+    compose_turnstile_hostnames=$(printf '%s' "$compose_json" | jq -er '
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
+      | if ($env | type) != "object" then "invalid"
+        elif ($env | has("TG_TURNSTILE_HOSTNAMES") | not) then "unset"
+        elif ($env.TG_TURNSTILE_HOSTNAMES | type) == "string" then $env.TG_TURNSTILE_HOSTNAMES
+        else "invalid" end
+    ') || return 1
+    compose_turnstile_qa_bypass=$(printf '%s' "$compose_json" | jq -er '
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
+      | if ($env | type) != "object" then "invalid"
+        elif ($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE") | not) then "unset"
+        elif $env.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "" then "unset"
+        else "configured" end
+    ') || return 1
     compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].logging as $logging
       | if $logging == null then "default"
@@ -1105,7 +1177,10 @@ snapshot_from_json() {
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
-             . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
+             . == "TG_TURNSTILE_SIGNIN_ENABLED=false" or
+             . == "TG_TURNSTILE_TEST_MODE=false" or
+             . == "TG_TURNSTILE_HOSTNAMES=web.teagram.io" or
+             . == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=") | not
           )))
         | sort
       end
@@ -1131,6 +1206,8 @@ snapshot_from_json() {
      | select($snapshot_name == "target" or
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
+                "TG_TURNSTILE_TEST_MODE=false", "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+                "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
                 "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
               ) | not))
@@ -1167,6 +1244,9 @@ snapshot_from_json() {
     config_sha=not-captured
     env_sha=not-captured
     override_sha=not-captured
+    compose_turnstile_test_mode=not-captured
+    compose_turnstile_hostnames=not-captured
+    compose_turnstile_qa_bypass=not-captured
   else
     [ "$compose_source" = selected-compose-render ] || {
       printf '%s\n' 'invalid Compose provenance for snapshot' >&2
@@ -1228,7 +1308,9 @@ snapshot_from_json() {
           .TG_LOG_LOGIN_CODES,
           .TG_MEDIA_KEY_DIR, .TG_MEDIA_KEY_CURRENT,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
-          .TG_TURNSTILE_SIGNIN_ENABLED)
+          .TG_TURNSTILE_SIGNIN_ENABLED,
+          .TG_TURNSTILE_TEST_MODE, .TG_TURNSTILE_HOSTNAMES,
+          .TG_TURNSTILE_QA_BYPASS_TOKEN_FILE)
       end
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
@@ -1309,6 +1391,9 @@ snapshot_from_json() {
     --argjson stop_timeout "$stop_timeout" \
     --arg compose_replica_count "$compose_replica_count" \
     --arg compose_client_addr_trust "$compose_client_addr_trust" \
+    --arg compose_turnstile_test_mode "$compose_turnstile_test_mode" \
+    --arg compose_turnstile_hostnames "$compose_turnstile_hostnames" \
+    --arg compose_turnstile_qa_bypass "$compose_turnstile_qa_bypass" \
     --arg container_replica_count "$container_replica_count" \
     --arg container_client_addr_trust "$container_client_addr_trust" \
     --arg compose_public_ws_2446 "$compose_public_ws_2446" \
@@ -1335,6 +1420,9 @@ snapshot_from_json() {
       container_stop_timeout:$stop_timeout,
       compose_replica_count:$compose_replica_count,
       compose_client_addr_trust:$compose_client_addr_trust,
+      compose_turnstile_test_mode:$compose_turnstile_test_mode,
+      compose_turnstile_hostnames:$compose_turnstile_hostnames,
+      compose_turnstile_qa_bypass:$compose_turnstile_qa_bypass,
       compose_public_ws_2446:$compose_public_ws_2446,
       compose_logging_policy:$compose_logging_policy,
       compose_log_login_codes:$compose_log_login_codes,

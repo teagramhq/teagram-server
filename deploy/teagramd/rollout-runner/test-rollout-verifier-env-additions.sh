@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROLLOUT_VERIFIER_SOURCE_ONLY=1
 source "$SCRIPT_DIR/rollout-verifier.sh"
 
-TMP=$(mktemp -d)
+TMP=$(mktemp -d /tmp/rollout-verifier-env-additions.XXXXXXXX)
 trap 'rm -rf -- "$TMP"' EXIT
 chmod 700 "$TMP"
 ROLLOUT_CHECKOUT_PATH="$TMP/checkout"
@@ -936,11 +936,15 @@ public_retained_target=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$public_retained_baseline")" = "$(jq -r '.container_env_sha256' <<< "$public_retained_target")" ]
 printf '%s\n' 'PASS previously added public settings are retained on a later unnamed rollout'
 
-turnstile_legacy_inspect=$(inspect_json '')
+turnstile_legacy_inspect=$(INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}' inspect_json '')
+turnstile_base_compose=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
 turnstile_legacy_snapshot=$(snapshot_from_json \
-  "$turnstile_legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+  "$turnstile_legacy_inspect" "$turnstile_base_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 turnstile_disabled_compose=$(jq -c '
   .services.teagramd.environment += {
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:"",
     TG_TURNSTILE_SITE_KEY:"",
     TG_TURNSTILE_SECRET_KEY_FILE:"",
     TG_TURNSTILE_SIGNIN_ENABLED:"false"
@@ -950,9 +954,12 @@ turnstile_disabled_compose=$(jq -c '
       target:"teagramd-turnstile"
     }]
   | .secrets.teagramd_turnstile = {file:"/dev/null"}
-' <<< "$COMPOSE_JSON")
+' <<< "$turnstile_base_compose")
 turnstile_disabled_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c '
   .Config.Env += [
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
     "TG_TURNSTILE_SITE_KEY=",
     "TG_TURNSTILE_SECRET_KEY_FILE=",
     "TG_TURNSTILE_SIGNIN_ENABLED=false"
@@ -973,6 +980,41 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+turnstile_preflight_dir="$TMP"
+printf '%s\n' "$turnstile_legacy_snapshot" > "$turnstile_preflight_dir/baseline.snapshot.json"
+turnstile_preflight_compose=$(jq -c '
+  .services.teagramd.environment |= del(
+    .TG_TURNSTILE_SITE_KEY,
+    .TG_TURNSTILE_SECRET_KEY_FILE,
+    .TG_TURNSTILE_SIGNIN_ENABLED
+  )
+  | .services.teagramd.secrets = []
+  | .secrets |= del(.teagramd_turnstile)
+  | if (.secrets | length) == 0 then del(.secrets) else . end
+' <<< "$turnstile_disabled_compose")
+turnstile_preflight_snapshot=$(snapshot_from_json \
+  "$turnstile_legacy_inspect" "$turnstile_preflight_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+printf '%s\n' "$turnstile_preflight_snapshot" > "$turnstile_preflight_dir/preflight.snapshot.json"
+chmod 600 "$turnstile_preflight_dir"/*.json
+if ! turnstile_preflight_output=$(ROLLOUT_PREFLIGHT_TEST_MODE=1 bash "$SCRIPT_DIR/rollout-runner.sh" compare-resolved-preflight "$turnstile_preflight_dir"); then
+  cat "$turnstile_preflight_dir/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+for expected in $'compose_turnstile_test_mode\tpass' $'compose_turnstile_hostnames\tpass' $'compose_turnstile_qa_bypass\tpass'; do
+  if ! grep -Fxq "$expected" <<< "$turnstile_preflight_output"; then
+    printf 'missing preflight result: %q\n%s\n' "$expected" "$turnstile_preflight_output" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS safe Turnstile Compose defaults pass preflight before the live container receives them'
+if snapshot_from_json "$turnstile_legacy_inspect" "$turnstile_preflight_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-missing-target-env.err"; then
+  printf '%s\n' 'FAIL target verification accepted missing Turnstile policy environment' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target verification requires the resolved Turnstile policy environment'
+
 turnstile_local_compose=$(jq -c '
   .services.teagramd.environment += {
     TG_TURNSTILE_SITE_KEY:"",
@@ -985,6 +1027,9 @@ turnstile_local_compose=$(jq -c '
 ' <<< "$turnstile_disabled_compose")
 turnstile_local_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c '
   .Config.Env += [
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
     "TG_TURNSTILE_SITE_KEY=",
     "TG_TURNSTILE_SECRET_KEY_FILE=",
     "TG_TURNSTILE_SIGNIN_ENABLED=false"
@@ -1005,6 +1050,23 @@ readlink() { busybox_readlink "$@"; }
 verify_turnstile_compose_configuration "$turnstile_disabled_compose"
 unset -f readlink busybox_readlink
 printf '%s\n' 'PASS Turnstile path validation supports BusyBox readlink'
+
+turnstile_test_mode_compose=$(printf '%s' "$turnstile_disabled_compose" | jq -c '.services.teagramd.environment.TG_TURNSTILE_TEST_MODE="true"')
+if verify_turnstile_compose_configuration "$turnstile_test_mode_compose" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL public server Compose accepted Turnstile test mode' >&2
+  exit 1
+fi
+turnstile_qa_bypass_compose=$(printf '%s' "$turnstile_disabled_compose" | jq -c '.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="/run/secrets/qa-bypass"')
+if verify_turnstile_compose_configuration "$turnstile_qa_bypass_compose" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL public server Compose accepted a Turnstile QA bypass file' >&2
+  exit 1
+fi
+turnstile_invalid_hostnames_compose=$(printf '%s' "$turnstile_disabled_compose" | jq -c '.services.teagramd.environment.TG_TURNSTILE_HOSTNAMES="web.teagram.io, bad host"')
+if verify_turnstile_compose_configuration "$turnstile_invalid_hostnames_compose" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL invalid Turnstile hostnames were accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Turnstile mode, hostnames, and QA bypass settings remain guarded'
 
 turnstile_secret_dir="$ROLLOUT_CHECKOUT_PATH/.secrets"
 mkdir -m 700 "$turnstile_secret_dir"
@@ -1563,7 +1625,7 @@ if ! jq -e '
   .source.candidate_head == "35dd14574b0fc94bde1048120629c48cfb97c639" and
   .source.tailnet_env == "absent" and
   .source.container_env_added == "none" and
-  .source.comparison_rows == 12 and
+  .source.comparison_rows == 15 and
   .baseline.provenance.compose_source == "selected-compose-render" and
   .preflight.provenance.compose_source == "selected-compose-render"
 ' "$live_preflight_fixture" >/dev/null; then
@@ -1582,8 +1644,8 @@ if ! compare_resolved_preflight; then
   exit 1
 fi
 live_preflight_rows=$(grep -vc '^$' "$TARGET_DIR/preflight-comparisons.tsv")
-[ "$live_preflight_rows" -eq 12 ] || {
-  printf 'FAIL live baseline-to-target comparison recorded %s rows instead of 12\n' "$live_preflight_rows" >&2
+[ "$live_preflight_rows" -eq 15 ] || {
+  printf 'FAIL live baseline-to-target comparison recorded %s rows instead of 15\n' "$live_preflight_rows" >&2
   cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
   exit 1
 }
@@ -1593,4 +1655,4 @@ if awk -F '\t' 'NF > 0 && $5 != "pass" { found=1 } END { exit !found }' \
   cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
   exit 1
 fi
-printf '%s\n' 'PASS live b5d8471-to-35dd1457 preflight fixture passes all 12 comparisons'
+printf '%s\n' 'PASS live b5d8471-to-35dd1457 preflight fixture passes all 15 comparisons'
