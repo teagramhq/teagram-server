@@ -39,9 +39,6 @@ type scalePlan struct {
 	Node                  string      `json:"Node Type"`
 	Relation              string      `json:"Relation Name"`
 	IndexName             string      `json:"Index Name"`
-	IndexCond             string      `json:"Index Cond"`
-	RecheckCond           string      `json:"Recheck Cond"`
-	Filter                string      `json:"Filter"`
 	SortKey               []string    `json:"Sort Key"`
 	Cost                  float64     `json:"Total Cost"`
 	Rows                  float64     `json:"Actual Rows"`
@@ -123,7 +120,7 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
-func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testing.T) {
+func TestUserStickerSetMessageReferencedFileIDsScopesPopularChannelHistoryAtScale(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
@@ -136,7 +133,7 @@ func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testi
 		t.Fatalf("close scale election: %v", err)
 	}
 
-	var ownerID, peerID, channelID int64
+	var ownerID, peerID int64
 	for _, user := range []struct {
 		phone  string
 		target *int64
@@ -155,54 +152,63 @@ func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testi
 	); err != nil {
 		t.Fatalf("create scale update state: %v", err)
 	}
-	channelID = 9_000_000_000_000_000_001
-	if err := pool.QueryRow(ctx,
-		"INSERT INTO channels (id, title, creator_id) VALUES ($1, 'Emoji scale', $2) RETURNING id", channelID, ownerID,
-	).Scan(&channelID); err != nil {
-		t.Fatalf("create scale channel: %v", err)
-	}
-	for _, sql := range []string{
-		"INSERT INTO channel_state (channel_id) VALUES ($1)",
-		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)",
+	visibleChannelID := int64(9_000_000_000_000_000_001)
+	hiddenChannelID := int64(9_000_000_000_000_000_002)
+	for _, channel := range []struct {
+		id        int64
+		creatorID int64
+	}{
+		{id: visibleChannelID, creatorID: ownerID},
+		{id: hiddenChannelID, creatorID: peerID},
 	} {
-		args := []any{channelID}
-		if strings.Contains(sql, "channel_participants") {
-			args = append(args, ownerID)
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO channels (id, title, creator_id) VALUES ($1, 'Emoji scale', $2)", channel.id, channel.creatorID,
+		); err != nil {
+			t.Fatalf("create scale channel: %v", err)
 		}
-		if _, err := pool.Exec(ctx, sql, args...); err != nil {
-			t.Fatalf("seed scale channel membership: %v", err)
+		if _, err := pool.Exec(ctx, "INSERT INTO channel_state (channel_id) VALUES ($1)", channel.id); err != nil {
+			t.Fatalf("seed scale channel state: %v", err)
 		}
 	}
-	for _, sql := range []string{
-		"ALTER TABLE messages DISABLE TRIGGER USER",
-		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)", visibleChannelID, ownerID,
+	); err != nil {
+		t.Fatalf("seed visible scale channel membership: %v", err)
+	}
+	seeds := []struct {
+		query string
+		args  []any
+	}{
+		{query: "ALTER TABLE messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
 		 SELECT $1, n, 1, $2, $1, 'scale emoji', true,
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
 		            'type', 18, 'offset', 0, 'length', 1,
 		            'argument', CASE WHEN n <= 100 THEN 1000000 + n ELSE 30000000 + n END
 		        )))
-		 FROM generate_series(1, 20000) AS n`,
-		"ALTER TABLE messages ENABLE TRIGGER USER",
-		"ALTER TABLE channel_messages DISABLE TRIGGER USER",
-		`INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
-		 SELECT $1, n, $2, 'scale emoji',
+		 FROM generate_series(1, 20000) AS n`, args: []any{ownerID, peerID}},
+		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
+		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
+		 SELECT $1, n, $2, 'visible scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
 		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE WHEN n <= 100 THEN 1000100 + n ELSE 40000000 + n END
+		            'argument', CASE WHEN n <= 99 THEN 1000100 + n ELSE 50000000 + n END
 		        )))
-		 FROM generate_series(1, 20000) AS n`,
-		"ALTER TABLE channel_messages ENABLE TRIGGER USER",
-		"ANALYZE messages",
-		"ANALYZE channel_messages",
-		"ANALYZE channel_participants",
-	} {
-		var args []any
-		if strings.Contains(sql, "INSERT INTO messages") {
-			args = []any{ownerID, peerID}
-		} else if strings.Contains(sql, "INSERT INTO channel_messages") {
-			args = []any{channelID, ownerID}
-		}
-		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+		 FROM generate_series(1, 200) AS n`, args: []any{visibleChannelID, ownerID}},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
+		 SELECT $1, n, $2, 'popular hidden scale emoji',
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000200
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{hiddenChannelID, peerID}},
+		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: "ANALYZE messages"},
+		{query: "ANALYZE channel_messages"},
+		{query: "ANALYZE channel_participants"},
+	}
+	for _, seed := range seeds {
+		if _, err := pool.Exec(ctx, seed.query, seed.args...); err != nil {
 			t.Fatalf("seed scaled emoji history: %v", err)
 		}
 	}
@@ -227,8 +233,11 @@ func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testi
 	if err != nil {
 		t.Fatalf("resolve scale historical emoji references: %v", err)
 	}
-	if len(referenced) != len(fileIDs) {
-		t.Fatalf("resolved %d historical emoji references, want %d", len(referenced), len(fileIDs))
+	if len(referenced) != len(fileIDs)-1 {
+		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-1)
+	}
+	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
+		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-1])
 	}
 
 	recorded.mu.Lock()
@@ -251,7 +260,7 @@ func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testi
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	for _, index := range []string{"messages_custom_emoji_document_ids_gin_idx", "channel_messages_custom_emoji_document_ids_gin_idx"} {
+	for _, index := range []string{"messages_custom_emoji_document_ids_gin_idx"} {
 		if !plans[0].Plan.usesIndex(index) {
 			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}

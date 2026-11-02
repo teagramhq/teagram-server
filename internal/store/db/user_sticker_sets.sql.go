@@ -1555,13 +1555,27 @@ func (q *Queries) UserStickerSetAlreadyInstalled(ctx context.Context, arg UserSt
 const userStickerSetMessageReferencedFileIDs = `-- name: UserStickerSetMessageReferencedFileIDs :many
 WITH requested AS (
     SELECT DISTINCT unnest($2::text[]) AS file_id
+), -- Filter channel memberships before materializing message candidates.
+visible_channels AS MATERIALIZED (
+    SELECT cp.channel_id, cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c ON c.id = cp.channel_id
+    WHERE cp.user_id = $3
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND c.deleted_at IS NULL
 ), channel_matches AS MATERIALIZED (
-    SELECT cm.channel_id, cm.local_id, cm.entities
-    FROM channel_messages cm
-    WHERE cm.deleted = false
-      AND cm.entities IS NOT NULL
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-      AND message_custom_emoji_document_ids(cm.entities) && $2::text[]
+    SELECT candidate.entities
+    FROM visible_channels vc
+    CROSS JOIN LATERAL (
+        SELECT cm.entities
+        FROM channel_messages cm
+        WHERE cm.channel_id = vc.channel_id
+          AND cm.local_id > vc.available_min_id
+          AND cm.deleted = false
+          AND cm.entities IS NOT NULL
+          AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+          AND message_custom_emoji_document_ids(cm.entities) && $2::text[]
+    ) AS candidate
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
@@ -1573,14 +1587,6 @@ WITH requested AS (
     UNION ALL
     SELECT cm.entities
     FROM channel_matches cm
-    JOIN channel_participants cp
-      ON cp.channel_id = cm.channel_id AND cp.user_id = $3
-    WHERE cm.local_id > cp.available_min_id
-      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
-      AND EXISTS (
-          SELECT 1 FROM channels c
-          WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
-      )
 )
 SELECT DISTINCT requested.file_id::bigint
 FROM visible_entities
