@@ -61,7 +61,8 @@ for probe in startupProbe readinessProbe livenessProbe; do
     fail "the main teagramd container must have a $probe that checks its MTProto listener"
 done
 identity_guard_status=0
-rg --quiet 'ensure-identity|ensure-server-identity' deploy/k8s || identity_guard_status=$?
+grep --recursive --extended-regexp --quiet \
+  'ensure-identity|ensure-server-identity' deploy/k8s || identity_guard_status=$?
 require_no_match_status "$identity_guard_status" 'the K8s identity command guard'
 
 public_workload_guard_status=0
