@@ -36,7 +36,7 @@ export OPS_SHA TARGET_SHA OFF_MAIN_SHA OLD_MAIN_SHA CONTAINER_ID \
 export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
-export MOCK_START_SERVER_SCRIPT="$TMP/start-server.sh"
+export MOCK_START_SERVER_SCRIPT="$tmp/start-server.sh"
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_SHOW_LOG="$tmp/show.log"
