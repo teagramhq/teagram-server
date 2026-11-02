@@ -750,7 +750,7 @@ cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
   "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
-  "$SCRIPT_DIR/ops/weekly-wipe.sh" <<'PY'
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import sys
 
@@ -861,6 +861,11 @@ assert_text_order(recovery_gate, "deploy-main.sh incomplete service recovery gat
     'demo_resume_interrupted_install',
     'exit 0',
 ])
+recovery_gate_start = deploy.index('if ((${#CONTAINER_IDS[@]} < 4)); then')
+recovery_gate_end = deploy.index('\n(("${#CONTAINER_IDS[@]}" >= 4))', recovery_gate_start)
+Path(sys.argv[8], 'demo-recovery-gate.sh').write_text(
+    deploy[recovery_gate_start:recovery_gate_end] + '\n', encoding='utf-8'
+)
 deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
 assert_text_order(deploy_edge_refresh, "deploy-main.sh reloaded edge inventory", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
@@ -1529,6 +1534,7 @@ env \
 
 RESUME_FUNCTION="$TMP_DIR/deploy-resume-function.sh"
 sed -n '/^demo_resume_interrupted_install() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$RESUME_FUNCTION"
+RECOVERY_GATE="$TMP_DIR/demo-recovery-gate.sh"
 cat > "$TMP_DIR/init-demo.sh" <<'BASH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -1538,22 +1544,22 @@ chmod +x "$TMP_DIR/init-demo.sh"
 cat > "$TMP_DIR/deploy-resume-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$RESUME_FUNCTION"
+demo_interrupted_install_matches() { return 0; }
+demo_fail() { printf 'unexpected recovery preflight failure: %s\n' "$1" >&2; return 1; }
 SCRIPT_DIR="$TMP_DIR"
 IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHA=0123456789abcdef0123456789abcdef01234567
 BACKUP_DIR="$TMP_DIR/backup"
 BACKUP_READY=1
+CONTAINER_IDS=(postgres active-server)
 demo_backup_database() { [[ "${FAIL_AT:-}" != backup ]]; }
-if [[ "${RUN_RECOVERY:-}" == yes ]]; then
-  demo_resume_interrupted_install
-  exit 0
-fi
+source "$RECOVERY_GATE"
 BASH
 for failure in backup init; do
   if env \
     FAIL_AT="$failure" \
-    RUN_RECOVERY=yes \
     RESUME_FUNCTION="$RESUME_FUNCTION" \
+    RECOVERY_GATE="$RECOVERY_GATE" \
     TMP_DIR="$TMP_DIR" \
     bash "$TMP_DIR/deploy-resume-failure-regression.sh" > "$TMP_DIR/deploy-resume-$failure.log" 2>&1; then
     printf 'deploy resume accepted a failed %s step\n' "$failure" >&2
