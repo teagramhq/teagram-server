@@ -16,9 +16,19 @@ on:
         description: Main CI workflow run whose aggregate must finish before recovery
         required: true
         type: string
+      main_concurrency_group:
+        description: Concurrency group held by main CI until recovery can start
+        required: false
+        type: string
+        default: CI-main-priority-v2
 
 permissions:
   contents: read
+
+# Queue recovery without consuming a runner until the main workflow releases its group.
+concurrency:
+  group: ${{ inputs.main_concurrency_group || 'CI-main-priority-v2' }}
+  cancel-in-progress: false
 
 jobs:
   ops-rerun-cancelled-pr-ci:

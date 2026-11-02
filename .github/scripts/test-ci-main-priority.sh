@@ -67,6 +67,8 @@ printf '%s\n' "$dispatch_step" | bash -n
 
 [[ "$(recovery_query '.on.workflow_dispatch.inputs.issue.required')" == true && "$(recovery_query '.on.workflow_dispatch.inputs.cancelled_pr_run_targets.required')" == false && "$(recovery_query '.on.workflow_dispatch.inputs.main_run_id.required')" == true ]] ||
   fail 'recovery must require its issue, main run ID, and cancellation targets'
+[[ "$(recovery_query '.on.workflow_dispatch.inputs.main_concurrency_group.default')" == 'CI-main-priority-v2' && "$(recovery_query '.concurrency.group')" == "\${{ inputs.main_concurrency_group || 'CI-main-priority-v2' }}" && "$(recovery_query '.concurrency.cancel-in-progress')" == false ]] ||
+  fail 'manual recovery must queue behind main CI without cancelling it or taking a runner'
 [[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".permissions | keys | sort | join(",")')" == 'actions,contents,pull-requests' ]] ||
   fail 'recovery permissions must be limited to Actions write, contents read, and pull request read'
 [[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
