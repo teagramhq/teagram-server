@@ -1338,6 +1338,34 @@ func (s *Store) UserStickerSetsByFileIDs(ctx context.Context, fileIDs []int64) (
 	return result, nil
 }
 
+// UserStickerSetMessageReferencedFileIDs returns historical custom emoji IDs
+// still referenced by messages visible to ownerID.
+func (s *Store) UserStickerSetMessageReferencedFileIDs(ctx context.Context, ownerID int64, fileIDs []int64) (map[int64]struct{}, error) {
+	result := make(map[int64]struct{}, len(fileIDs))
+	if ownerID <= 0 || len(fileIDs) == 0 {
+		return result, nil
+	}
+	ids := make([]int64, 0, len(fileIDs))
+	for _, id := range ascendingUnique(fileIDs) {
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return result, nil
+	}
+	rows, err := s.q.UserStickerSetMessageReferencedFileIDs(ctx, db.UserStickerSetMessageReferencedFileIDsParams{
+		OwnerID: ownerID, FileIds: ids, EntityType: int32(PollDescriptionEntityCustomEmoji),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("find visible messages referencing historical custom emoji: %w", err)
+	}
+	for _, id := range rows {
+		result[id] = struct{}{}
+	}
+	return result, nil
+}
+
 // UserStickerDocument combines the public set identity and one media record.
 type UserStickerDocument struct {
 	Set      UserStickerSet

@@ -1552,6 +1552,77 @@ func (q *Queries) UserStickerSetAlreadyInstalled(ctx context.Context, arg UserSt
 	return exists, err
 }
 
+const userStickerSetMessageReferencedFileIDs = `-- name: UserStickerSetMessageReferencedFileIDs :many
+WITH requested AS (
+    SELECT DISTINCT unnest($3::bigint[]) AS file_id
+)
+SELECT requested.file_id::bigint
+FROM requested
+WHERE EXISTS (
+    SELECT 1
+    FROM messages m
+    WHERE m.owner_id = $1
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.entities @> jsonb_build_object(
+          'version', 1,
+          'entities', jsonb_build_array(jsonb_build_object(
+              'type', $2::int,
+              'argument', requested.file_id
+          ))
+      )
+)
+OR EXISTS (
+    SELECT 1
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id AND cp.user_id = $1
+    WHERE cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
+      )
+      AND cm.entities @> jsonb_build_object(
+          'version', 1,
+          'entities', jsonb_build_array(jsonb_build_object(
+              'type', $2::int,
+              'argument', requested.file_id
+          ))
+      )
+)
+`
+
+type UserStickerSetMessageReferencedFileIDsParams struct {
+	OwnerID    int64
+	EntityType int32
+	FileIds    []int64
+}
+
+// Only a caller-visible stored message keeps a removed or deleted custom emoji
+// document resolvable. Current set members are served directly from set state.
+func (q *Queries) UserStickerSetMessageReferencedFileIDs(ctx context.Context, arg UserStickerSetMessageReferencedFileIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, userStickerSetMessageReferencedFileIDs, arg.OwnerID, arg.EntityType, arg.FileIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var requested_file_id int64
+		if err := rows.Scan(&requested_file_id); err != nil {
+			return nil, err
+		}
+		items = append(items, requested_file_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userStickerSetOccupiedShortNames = `-- name: UserStickerSetOccupiedShortNames :many
 SELECT lower(short_name) AS short_name
 FROM user_created_sticker_sets

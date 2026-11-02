@@ -29,12 +29,26 @@ func (h *handlers) handleGetCustomEmojiDocuments(r *mtproto.Request) (bin.Encode
 		h.log.Error("resolve custom emoji documents", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	historicalIDs := make([]int64, 0, len(userDocuments))
+	for id, document := range userDocuments {
+		if document.Set.Kind == "emojis" && (!document.Set.IsLive || !document.IsActive) {
+			historicalIDs = append(historicalIDs, id)
+		}
+	}
+	messageReferencedIDs, err := h.store.UserStickerSetMessageReferencedFileIDs(r.Ctx, r.UserID, historicalIDs)
+	if err != nil {
+		h.log.Error("check historical custom emoji message references", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	documents := make([]tg.DocumentClass, 0, len(req.DocumentID))
 	for _, id := range req.DocumentID {
-		if customEmoji, ok := userDocuments[id]; ok && customEmoji.Set.IsLive && customEmoji.Set.Kind == "emojis" && customEmoji.IsActive {
-			documents = append(documents, userStickerDocumentTL(customEmoji.Set, customEmoji.Item, h.dcID))
-			continue
+		if customEmoji, ok := userDocuments[id]; ok && customEmoji.Set.Kind == "emojis" {
+			_, messageReferenced := messageReferencedIDs[id]
+			if (customEmoji.Set.IsLive && customEmoji.IsActive) || messageReferenced {
+				documents = append(documents, userStickerDocumentTL(customEmoji.Set, customEmoji.Item, h.dcID))
+				continue
+			}
 		}
 		if document, ok := catalog.documentsByID[id]; ok && isCustomEmojiDocument(document) {
 			documents = append(documents, cloneStickerDocument(document, h.dcID))

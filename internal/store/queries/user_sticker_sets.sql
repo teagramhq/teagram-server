@@ -269,6 +269,50 @@ JOIN files f ON f.id = i.file_id
 WHERE i.file_id = ANY($1::bigint[]) AND f.stored = true
 ORDER BY i.file_id;
 
+-- Only a caller-visible stored message keeps a removed or deleted custom emoji
+-- document resolvable. Current set members are served directly from set state.
+-- name: UserStickerSetMessageReferencedFileIDs :many
+WITH requested AS (
+    SELECT DISTINCT unnest(sqlc.arg(file_ids)::bigint[]) AS file_id
+)
+SELECT requested.file_id::bigint
+FROM requested
+WHERE EXISTS (
+    SELECT 1
+    FROM messages m
+    WHERE m.owner_id = sqlc.arg(owner_id)
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.entities @> jsonb_build_object(
+          'version', 1,
+          'entities', jsonb_build_array(jsonb_build_object(
+              'type', sqlc.arg(entity_type)::int,
+              'argument', requested.file_id
+          ))
+      )
+)
+OR EXISTS (
+    SELECT 1
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id AND cp.user_id = sqlc.arg(owner_id)
+    WHERE cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
+      )
+      AND cm.entities @> jsonb_build_object(
+          'version', 1,
+          'entities', jsonb_build_array(jsonb_build_object(
+              'type', sqlc.arg(entity_type)::int,
+              'argument', requested.file_id
+          ))
+      )
+);
+
 -- name: UserStickerSetShortNameExists :one
 SELECT EXISTS (
     SELECT 1 FROM user_created_sticker_sets WHERE lower(short_name) = lower($1)
