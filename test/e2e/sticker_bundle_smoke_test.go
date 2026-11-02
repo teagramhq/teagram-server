@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gotd/td/tg"
 
@@ -46,6 +48,136 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	f.codes.chFor(smokeAuthHandle(f, phoneA)) <- "not-a-login-code"
 	a := newSmokeClient(t, f, "bundle sticker owner", phoneA)
 	b := newSmokeClient(t, f, "bundle sticker recipient", phoneB)
+	stickerPacks := make([]stickerbundle.Pack, 0, len(bundle.Packs))
+	emojiPacks := make([]stickerbundle.Pack, 0, len(bundle.Packs))
+	for _, pack := range bundle.Packs {
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			emojiPacks = append(emojiPacks, pack)
+		} else {
+			stickerPacks = append(stickerPacks, pack)
+		}
+	}
+	if len(emojiPacks) == 0 {
+		t.Fatal("generated sticker bundle has no custom emoji packs")
+	}
+
+	var featuredEmoji *tg.MessagesFeaturedStickers
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesGetFeaturedEmojiStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		featuredEmoji, ok = result.(*tg.MessagesFeaturedStickers)
+		wantCount := len(emojiPacks) + 1 // Includes the built-in Twemoji custom emoji set.
+		if !ok || featuredEmoji.Count != wantCount || len(featuredEmoji.Sets) != wantCount {
+			return fmt.Errorf("featured emoji sets = %T with count %d and %d entries, want Twemoji plus %d bundle packs", result, featuredCount(featuredEmoji), featuredSetCount(featuredEmoji), len(emojiPacks))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get featured bundle custom emoji packs: %v", err)
+	}
+	coveredEmojiByName := make(map[string]*tg.StickerSetCovered, len(featuredEmoji.Sets))
+	for _, item := range featuredEmoji.Sets {
+		covered, ok := item.(*tg.StickerSetCovered)
+		if !ok || !covered.Set.GetEmojis() {
+			t.Fatalf("featured emoji set = %T (%+v), want emoji StickerSetCovered", item, item)
+		}
+		coveredEmojiByName[covered.Set.ShortName] = covered
+	}
+	if _, ok := coveredEmojiByName["twemoji_custom_emojis"]; !ok {
+		t.Fatal("featured emoji sets omitted twemoji_custom_emojis")
+	}
+	for _, pack := range emojiPacks {
+		covered, ok := coveredEmojiByName[pack.ShortName]
+		if !ok || covered.Set.Title != pack.Title || covered.Set.Count != len(pack.Stickers) {
+			t.Fatalf("featured bundle emoji set %q = %+v, want title %q and %d documents", pack.ShortName, covered, pack.Title, len(pack.Stickers))
+		}
+	}
+
+	emojiPack := emojiPacks[0]
+	emoji := emojiPack.Stickers[0]
+	emojiDocument := getSmokeBundleCustomEmojiDocument(t, f, a, emojiPack.ShortName, len(emojiPack.Stickers), emoji.Emoji)
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{
+			Stickerset: &tg.InputStickerSetShortName{ShortName: emojiPack.ShortName},
+		})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+			return fmt.Errorf("install custom emoji set %q = %T, want success", emojiPack.ShortName, result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("install generated custom emoji set: %v", err)
+	}
+	var installedEmojiSets *tg.MessagesAllStickers
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesGetEmojiStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		installedEmojiSets, ok = result.(*tg.MessagesAllStickers)
+		if !ok {
+			return fmt.Errorf("getEmojiStickers = %T, want *tg.MessagesAllStickers", result)
+		}
+		for _, set := range installedEmojiSets.Sets {
+			if set.ShortName == emojiPack.ShortName && set.GetEmojis() {
+				return nil
+			}
+		}
+		return fmt.Errorf("getEmojiStickers omitted installed emoji pack %q", emojiPack.ShortName)
+	}); err != nil {
+		t.Fatalf("list installed generated custom emoji set: %v", err)
+	}
+
+	emojiText := "Hi " + emoji.Emoji
+	emojiOffset := len(utf16.Encode([]rune("Hi ")))
+	emojiLength := len(utf16.Encode([]rune(emoji.Emoji)))
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(a.id, b.id), Message: emojiText, RandomID: 1049899,
+			Entities: []tg.MessageEntityClass{&tg.MessageEntityCustomEmoji{
+				Offset: emojiOffset, Length: emojiLength, DocumentID: emojiDocument.ID,
+			}},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("send catalogue custom emoji response = %T, want *tg.Updates", result)
+		}
+		return smokeNoPremiumUsers(updates.Users, "catalogue messages.sendMessage")
+	}); err != nil {
+		t.Fatalf("send generated custom emoji to second non-Premium account: %v", err)
+	}
+	pushedEmoji := recvOrCtx(t, f.ctx, b.push.newMsg, "recipient live catalogue custom emoji update")
+	if pushedEmoji.Message != emojiText || len(pushedEmoji.Entities) != 1 {
+		t.Fatalf("recipient live custom emoji message = %q with %d entities, want %q and one entity", pushedEmoji.Message, len(pushedEmoji.Entities), emojiText)
+	}
+	pushedEntity, ok := pushedEmoji.Entities[0].(*tg.MessageEntityCustomEmoji)
+	if !ok || pushedEntity.DocumentID != emojiDocument.ID {
+		t.Fatalf("recipient live custom emoji entity = %#v, want catalogue document %d", pushedEmoji.Entities[0], emojiDocument.ID)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		documents, err := client.MessagesGetCustomEmojiDocuments(ctx, []int64{emojiDocument.ID})
+		if err != nil {
+			return err
+		}
+		if len(documents) != 1 {
+			return fmt.Errorf("getCustomEmojiDocuments returned %d documents, want the catalogue emoji document", len(documents))
+		}
+		document, ok := documents[0].(*tg.Document)
+		if !ok || document.ID != emojiDocument.ID || document.AccessHash != emojiDocument.AccessHash {
+			return fmt.Errorf("getCustomEmojiDocuments result = %#v, want catalogue document (%d,%d)", documents[0], emojiDocument.ID, emojiDocument.AccessHash)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get sent catalogue emoji document as recipient: %v", err)
+	}
 
 	var featured *tg.MessagesFeaturedStickers
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -55,9 +187,9 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		}
 		var ok bool
 		featured, ok = result.(*tg.MessagesFeaturedStickers)
-		wantCount := len(bundle.Packs) + 1
+		wantCount := len(stickerPacks) + 1
 		if !ok || featured.Count != wantCount || len(featured.Sets) != wantCount {
-			return fmt.Errorf("featured sticker sets = %T with count %d and %d entries, want Twemoji and %d bundle packs", result, featuredCount(featured), featuredSetCount(featured), len(bundle.Packs))
+			return fmt.Errorf("featured sticker sets = %T with count %d and %d entries, want Twemoji and %d bundle packs", result, featuredCount(featured), featuredSetCount(featured), len(stickerPacks))
 		}
 		return nil
 	}); err != nil {
@@ -77,7 +209,7 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	if _, ok := coveredByName["twemoji_reactions"]; !ok {
 		t.Fatal("featured sets omitted twemoji_reactions")
 	}
-	for _, pack := range bundle.Packs {
+	for _, pack := range stickerPacks {
 		covered, ok := coveredByName[pack.ShortName]
 		if !ok || covered.Set.Title != pack.Title || covered.Set.Count != len(pack.Stickers) {
 			t.Fatalf("featured bundle set %q = %+v, want title %q and %d stickers", pack.ShortName, covered, pack.Title, len(pack.Stickers))
@@ -134,8 +266,8 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		t.Fatalf("search catalogue bundle sticker pack: %v", err)
 	}
 
-	installedNames := make(map[string]struct{}, len(bundle.Packs))
-	for _, pack := range bundle.Packs {
+	installedNames := make(map[string]struct{}, len(stickerPacks))
+	for _, pack := range stickerPacks {
 		installedNames[pack.ShortName] = struct{}{}
 	}
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -168,7 +300,7 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		t.Fatalf("install and list bundle sticker pack: %v", err)
 	}
 
-	for i, pack := range bundle.Packs {
+	for i, pack := range stickerPacks {
 		if len(pack.Stickers) == 0 {
 			t.Fatalf("bundle pack %q contains no stickers", pack.ShortName)
 		}
@@ -249,8 +381,47 @@ func testSmokeRunningStickerBundleCatalogue(t *testing.T) {
 		t.Fatal("running image featured sets omitted twemoji_reactions")
 	}
 	for _, pack := range bundle.Packs {
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			continue
+		}
 		if _, ok := got[pack.ShortName]; !ok {
 			t.Errorf("running image featured sets omitted bundled pack %q", pack.ShortName)
+		}
+	}
+
+	var featuredEmoji *tg.MessagesFeaturedStickers
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetFeaturedEmojiStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		featuredEmoji, ok = result.(*tg.MessagesFeaturedStickers)
+		if !ok || featuredEmoji == nil {
+			return fmt.Errorf("featured emoji sets = %T, want *tg.MessagesFeaturedStickers", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get featured emoji packs from running image: %v", err)
+	}
+
+	gotEmoji := make(map[string]struct{}, len(featuredEmoji.Sets))
+	for _, item := range featuredEmoji.Sets {
+		covered, ok := item.(*tg.StickerSetCovered)
+		if !ok || !covered.Set.GetEmojis() {
+			t.Fatalf("featured emoji set = %T, want emoji *tg.StickerSetCovered", item)
+		}
+		gotEmoji[covered.Set.ShortName] = struct{}{}
+	}
+	if _, ok := gotEmoji["twemoji_custom_emojis"]; !ok {
+		t.Fatal("running image featured emoji sets omitted twemoji_custom_emojis")
+	}
+	for _, pack := range bundle.Packs {
+		if pack.Kind != stickerbundle.PackKindEmojis {
+			continue
+		}
+		if _, ok := gotEmoji[pack.ShortName]; !ok {
+			t.Errorf("running image featured emoji sets omitted bundled pack %q", pack.ShortName)
 		}
 	}
 }
@@ -320,11 +491,12 @@ func loadSmokeStickerBundleCatalogue(t *testing.T) (*api.StickerSetCatalog, *sti
 
 	dir := t.TempDir()
 	packs := []struct {
-		shortName, source, license, emoji, filename, format, attribution string
-		art                                                              []byte
+		shortName, source, license, emoji, filename, format, attribution, kind string
+		art                                                                    []byte
 	}{
 		{shortName: "openmoji_animals", source: "OpenMoji Animals", license: "CC-BY-SA-4.0", emoji: "🐈", filename: "animal.webp", attribution: "Artwork by OpenMoji", art: smokeStickerArt("animal")},
 		{shortName: "openmoji_food", source: "OpenMoji Food", license: "CC0-1.0", emoji: "🍕", filename: "food.webp", attribution: "Artwork by OpenMoji", art: smokeStickerArt("food")},
+		{shortName: "openmoji_emoji_animals_nature", source: "OpenMoji Animals & Nature", license: "CC-BY-SA-4.0", emoji: "🐈", filename: "cat.webp", attribution: "Artwork by OpenMoji", kind: stickerbundle.PackKindEmojis, art: smokeStickerArt("custom emoji")},
 		{shortName: "noto_animated_smileys_emotion", source: "Animated Noto Emoji Smileys & Emotion", license: "CC-BY-4.0", emoji: "😀", filename: "grinning_face.tgs", format: "tgs", attribution: "Animated Noto Emoji by Google.", art: smokeStickerTGS(t)},
 	}
 	manifestPacks := make([]map[string]any, 0, len(packs))
@@ -339,6 +511,9 @@ func loadSmokeStickerBundleCatalogue(t *testing.T) (*api.StickerSetCatalog, *sti
 			"stickers": []any{map[string]any{
 				"emoji": pack.emoji, "file": file, "size": len(pack.art), "sha256": hex.EncodeToString(checksum[:]),
 			}},
+		}
+		if pack.kind != "" {
+			manifestPack["kind"] = pack.kind
 		}
 		if pack.format != "" {
 			manifestPack["format"] = pack.format
@@ -392,6 +567,52 @@ func getSmokeBundleStickerDocument(t *testing.T, f *smokeFixture, owner *smokeCl
 		return nil
 	}); err != nil {
 		t.Fatalf("get bundle sticker set %q: %v", shortName, err)
+	}
+	return document
+}
+
+func getSmokeBundleCustomEmojiDocument(t *testing.T, f *smokeFixture, owner *smokeClient, shortName string, itemCount int, wantAlt string) *tg.Document {
+	t.Helper()
+	var document *tg.Document
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{
+			Stickerset: &tg.InputStickerSetShortName{ShortName: shortName},
+		})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesStickerSet)
+		if !ok || full == nil || !full.Set.GetEmojis() || full.Set.Count != itemCount || len(full.Documents) != itemCount || len(full.Packs) != itemCount {
+			return fmt.Errorf("getStickerSet %q = %T, want custom emoji set with %d documents and packs", shortName, result, itemCount)
+		}
+		var okDocument bool
+		document, okDocument = full.Documents[0].(*tg.Document)
+		if !okDocument {
+			return fmt.Errorf("bundle custom emoji document = %T, want *tg.Document", full.Documents[0])
+		}
+		var customEmoji *tg.DocumentAttributeCustomEmoji
+		var imageSize *tg.DocumentAttributeImageSize
+		for _, attribute := range document.Attributes {
+			switch value := attribute.(type) {
+			case *tg.DocumentAttributeCustomEmoji:
+				customEmoji = value
+			case *tg.DocumentAttributeImageSize:
+				imageSize = value
+			}
+		}
+		if customEmoji == nil {
+			return errors.New("custom emoji document has no custom emoji attribute")
+		}
+		setRef, ok := customEmoji.Stickerset.(*tg.InputStickerSetID)
+		if customEmoji.Alt != wantAlt || !customEmoji.GetFree() || !ok || setRef.ID != full.Set.ID || setRef.AccessHash != full.Set.AccessHash {
+			return fmt.Errorf("custom emoji document attribute = %+v, want free %q in set %d", customEmoji, wantAlt, full.Set.ID)
+		}
+		if imageSize == nil || imageSize.W != 100 || imageSize.H != 100 {
+			return fmt.Errorf("custom emoji image size = %+v, want 100x100", imageSize)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get bundle custom emoji set %q: %v", shortName, err)
 	}
 	return document
 }

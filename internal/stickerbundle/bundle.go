@@ -20,6 +20,7 @@ const (
 	manifestName       = "manifest.json"
 	manifestMaxBytes   = 8 << 20
 	maxStickerCount    = 120
+	maxEmojiCount      = 200
 	maxShortNameBytes  = 64
 	maxEmojiBytes      = 64
 	maxTitleCharacters = 64
@@ -173,10 +174,11 @@ func Load(root string) (*Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := seenNames[pack.ShortName]; exists {
+		nameKey := strings.ToLower(pack.ShortName)
+		if _, exists := seenNames[nameKey]; exists {
 			return nil, fmt.Errorf("sticker bundle pack %q duplicates a short name", pack.ShortName)
 		}
-		seenNames[pack.ShortName] = struct{}{}
+		seenNames[nameKey] = struct{}{}
 		bundle.Packs = append(bundle.Packs, pack)
 	}
 	return bundle, nil
@@ -203,11 +205,14 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 	if pack.Format != "webp" && pack.Format != "tgs" {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has unsupported format %q", pack.ShortName, pack.Format)
 	}
+	if pack.Kind == PackKindEmojis && pack.Format != "webp" {
+		return Pack{}, fmt.Errorf("sticker bundle emoji pack %q has unsupported format %q", pack.ShortName, pack.Format)
+	}
 	if !validShortName(pack.ShortName) {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has an invalid short name", pack.ShortName)
 	}
-	if pack.ShortName == "twemoji_reactions" {
-		return Pack{}, fmt.Errorf("sticker bundle pack %q collides with the built-in sticker set", pack.ShortName)
+	if strings.EqualFold(pack.ShortName, "twemoji_reactions") || strings.EqualFold(pack.ShortName, "twemoji_custom_emojis") {
+		return Pack{}, fmt.Errorf("sticker bundle pack %q collides with a built-in sticker or emoji set", pack.ShortName)
 	}
 	if !validText(pack.Source) || strings.TrimSpace(pack.Source) != pack.Source {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has an invalid source", pack.ShortName)
@@ -218,12 +223,20 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 	if !validText(pack.Attribution) || strings.TrimSpace(pack.Attribution) != pack.Attribution {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has an invalid attribution", pack.ShortName)
 	}
-	pack.Title = pack.Source + " (" + displayLicense(pack.License) + ")"
+	titleLicense := displayLicense(pack.License)
+	if pack.Kind == PackKindEmojis {
+		titleLicense = pack.License
+	}
+	pack.Title = pack.Source + " (" + titleLicense + ")"
 	if utf8.RuneCountInString(pack.Title) > maxTitleCharacters {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q title exceeds Telegram's %d-character limit", pack.ShortName, maxTitleCharacters)
 	}
-	if len(raw.Stickers) == 0 || len(raw.Stickers) > maxStickerCount {
-		return Pack{}, fmt.Errorf("sticker bundle pack %q has %d stickers; want between 1 and %d", pack.ShortName, len(raw.Stickers), maxStickerCount)
+	maxCount := maxStickerCount
+	if pack.Kind == PackKindEmojis {
+		maxCount = maxEmojiCount
+	}
+	if len(raw.Stickers) == 0 || len(raw.Stickers) > maxCount {
+		return Pack{}, fmt.Errorf("sticker bundle pack %q has %d stickers; want between 1 and %d", pack.ShortName, len(raw.Stickers), maxCount)
 	}
 	pack.Stickers = make([]Sticker, 0, len(raw.Stickers))
 	for _, rawSticker := range raw.Stickers {

@@ -126,7 +126,7 @@ func TestGetCustomEmojiDocumentsReturnsMessageReferencedHistoricalSetMembers(t *
 	body := dispatchChatMethod(t, h, requester.ID, "messages.getCustomEmojiDocuments", &tg.MessagesGetCustomEmojiDocumentsRequest{
 		DocumentID: []int64{
 			emojiDocument.ID, inactiveDocument.ID, unreferencedRemovedDocument.ID,
-			referencedRemovedDocument.ID, deletedDocument.ID, regularDocument.ID, attachment.ID, 919999,
+			referencedRemovedDocument.ID, deletedDocument.ID, regularDocument.ID, attachment.ID, 919999, -919999,
 		},
 	})
 	var documents tg.DocumentClassVector

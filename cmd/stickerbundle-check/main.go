@@ -25,7 +25,7 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "validated %d sticker packs\n", len(bundle.Packs)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "validated %d sticker/emoji packs\n", len(bundle.Packs)); err != nil {
 		return fmt.Errorf("write validation result: %w", err)
 	}
 	return nil
