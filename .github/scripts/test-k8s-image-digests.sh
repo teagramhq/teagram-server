@@ -75,6 +75,23 @@ test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 mkdir -p "$test_dir/bin"
 
+cat > "$test_dir/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$1" == manifest && "$2" == inspect ]] || {
+  printf 'unexpected docker command: %s\n' "$*" >&2
+  exit 2
+}
+reference="$3"
+if [[ "${UNPULLABLE_REFERENCE:-}" == "$reference" ]]; then
+  printf 'no such manifest: %s\n' "$reference" >&2
+  exit 1
+fi
+printf '{}\n'
+DOCKER
+chmod 0755 "$test_dir/bin/docker"
+
 valid_prod_manifest="$test_dir/k8s-prod.yaml"
 teagramd_digest="$(printf '1%.0s' {1..64})"
 migrations_digest="$(printf '2%.0s' {1..64})"
@@ -90,14 +107,14 @@ printf '%s\n' \
   "image: ghcr.io/teagramhq/link-edge-selector@sha256:$selector_digest" \
   "  name: db-migrations-${migrations_digest:0:16}" \
   "  name: rustfs-init-${rustfs_init_digest:0:16}" > "$valid_prod_manifest"
-bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
+PATH="$test_dir/bin:$PATH" bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
   fail 'the production image pin validator must accept valid images and matching Job suffixes'
 
 placeholder_prod_manifest="$test_dir/k8s-prod-placeholder.yaml"
 zero_digest="$(printf '%064d' 0)"
 sed "s|teagramd@sha256:$teagramd_digest|teagramd@sha256:$zero_digest|" \
   "$valid_prod_manifest" > "$placeholder_prod_manifest"
-if bash .github/scripts/check-k8s-prod-image-pins.sh "$placeholder_prod_manifest" \
+if PATH="$test_dir/bin:$PATH" bash .github/scripts/check-k8s-prod-image-pins.sh "$placeholder_prod_manifest" \
   >"$test_dir/placeholder-output" 2>"$test_dir/placeholder-error"; then
   fail 'the production image pin validator must reject all-zero digests'
 fi
@@ -107,12 +124,25 @@ grep --fixed-strings --quiet 'all-zero placeholder' "$test_dir/placeholder-error
 wrong_job_prod_manifest="$test_dir/k8s-prod-wrong-job.yaml"
 sed "s|db-migrations-${migrations_digest:0:16}|db-migrations-0000000000000000|" \
   "$valid_prod_manifest" > "$wrong_job_prod_manifest"
-if bash .github/scripts/check-k8s-prod-image-pins.sh "$wrong_job_prod_manifest" \
+if PATH="$test_dir/bin:$PATH" bash .github/scripts/check-k8s-prod-image-pins.sh "$wrong_job_prod_manifest" \
   >"$test_dir/wrong-job-output" 2>"$test_dir/wrong-job-error"; then
   fail 'the production image pin validator must reject a migration Job suffix mismatch'
 fi
 grep --fixed-strings --quiet 'migration Job name' "$test_dir/wrong-job-error" ||
   fail 'a migration Job suffix rejection must identify the mismatch'
+
+unpullable_digest="$(printf '9%.0s' {1..64})"
+unpullable_reference="ghcr.io/teagramhq/teagramd@sha256:$unpullable_digest"
+unpullable_prod_manifest="$test_dir/k8s-prod-unpullable.yaml"
+sed "s|teagramd@sha256:$teagramd_digest|teagramd@sha256:$unpullable_digest|" \
+  "$valid_prod_manifest" > "$unpullable_prod_manifest"
+if PATH="$test_dir/bin:$PATH" UNPULLABLE_REFERENCE="$unpullable_reference" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$unpullable_prod_manifest" \
+  >"$test_dir/unpullable-output" 2>"$test_dir/unpullable-error"; then
+  fail 'the production image pin validator must reject registry references that do not resolve'
+fi
+grep --fixed-strings --quiet "$unpullable_reference" "$test_dir/unpullable-error" ||
+  fail 'an unpullable digest rejection must identify the unavailable registry reference'
 
 cat > "$test_dir/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
