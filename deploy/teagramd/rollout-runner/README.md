@@ -85,61 +85,13 @@ Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
 previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
-The public WebSocket replicas set `TG_REPLICA_COUNT=3` directly in their
-Compose services. The base socket-trust `teagramd` keeps its `.env` value,
-defaulting to `1`, so the split does not divide its process-local tailnet and
-raw-TCP budgets. `deploy-main.sh` does not modify `.env` for this route; the
-public topology checker rejects a base render whose count is not `1` before
-target startup.
-
-The public WebSocket route is applied with the `public` Compose profile and
-`ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1`. `deploy-main.sh` takes the database dump
-first. The public topology checker validates the isolated HAProxy frontend
-and backend, the peer and header rules, the two proxy-v2 replicas, registration
-and Origin policy, and their absence of host ports. It also requires the
-bounded HAProxy healthcheck and logs. The runner checks HAProxy health, the
-loopback-only publish, both replica environments and listener readiness after
-startup.
-
-The `public` profile may add only `public-haproxy`, `teagramd-public-1`, and
-`teagramd-public-2` to an existing layout. Each replica must reuse the current
-`teagramd` mounts exactly, and HAProxy may mount only its reviewed config file
-read-only. The ordinary layout preflight still rejects changed existing mounts,
-new data volumes, and any other added service mount before the backup gate.
-
-If a deployed route must be reverted, free the public proxy's loopback 2446
-publish before reverting. Read the current deployed SHA, then run the reviewed
-teardown operation from that same commit:
-
-```sh
-set -eu
-DEPLOYED_SHA=$(ssh teagram live | sed -n 's/^live_sha=//p')
-[[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]
-ssh teagram "run $DEPLOYED_SHA rollback-public-websocket $DEPLOYED_SHA"
-```
-
-The operation takes the shared deploy lock, verifies the live checkout and base
-image revision, removes only the public containers in the `teagram` Compose
-project, and confirms no container still publishes 2446. After it succeeds,
-merge the route revert and let `Deploy.` recreate base `teagramd`; without this
-step Compose retains the orphan HAProxy container and rejects the port binding.
-
-The existing host tunnel keeps its `127.0.0.1:2446` origin; Compose now assigns
-that publish to HAProxy, while the ordinary socket-trust service has no public
-listener or 2446 publish. The public advertise address comes from the same
-verified `.env` but is set only on the public replicas because the base process
-rejects an advertise address when its public listener is disabled.
-
-Snapshot normalization removes only the three reviewed public services and
-their two fixed networks, the public-only environment settings, and the exact
-loopback 2446 binding from the ordinary service's baseline digest. The separate
-topology checker validates those removed fields in full. The base service's
-public listener and 2446 publish must be absent after rollout. On failure, the
-runner restores the previous checkout and `.env`, removes only containers
-carrying this Compose project's public-service labels, recreates the prior
-`teagramd`, and verifies baseline equivalence and readiness. The database dump
-is retained at the path printed by `deploy-main.sh`; the previous `.env` is
-retained as `/root/teagramd-env-before-<sha>-<timestamp>`.
+The only approved Compose listener addition is `127.0.0.1:2446:2446` for the
+public WebSocket listener. Preflight and post-start comparisons normalize that
+exact binding from the configuration and inspected-exposure digests, while
+recording its presence separately and requiring the replacement container to
+match the Compose mapping. A wildcard host IP, another host or container port,
+or any other port change remains a configuration drift and rejects before
+replacement.
 
 The only approved `teagramd` logging change is the reviewed transition from
 Compose's default logger to `syslog` at `/dev/log` with the `teagramd` tag,
@@ -229,19 +181,14 @@ reviewed artifact and content pin before rollout.
 
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
-database, building, or stopping a container. The initial exact read-only bind
-from `/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
-`teagramd` service remains an approved addition. It requires
-`TG_MEDIA_KEY_CURRENT=1` and a matching mode-0600 key file owned by uid/gid
-65532 in a mode-0700 directory outside the application checkout. The runner
-pins the host path and key version after that first rollout; later changes
-remain blocked. The initial public WebSocket profile is the one service-only
-exception and requires both `COMPOSE_PROFILES=public` and
-`ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1`. Its two replicas must keep the exact
-`teagramd` mounts and HAProxy must have only the reviewed read-only config bind.
-The public topology preflight validates those services before they start. Any
-other project, volume, or mount change fails closed and asks for the explicit
-`move-stack` action.
+database, building, or stopping a container. The only additional layout change
+allowed during an ordinary rollout is the initial exact read-only bind from
+`/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
+`teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
+mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
+application checkout. The runner pins the host path and key version after that
+first rollout; later changes remain blocked. Any project, volume, or other
+mount change fails closed and asks for the explicit `move-stack` action.
 `deploy-main.sh` continues to call `apply`, so a main-branch deployment that
 contains the project rename exits before changing the running stack until the
 move action is run. The normal readiness and rollback gates still apply when

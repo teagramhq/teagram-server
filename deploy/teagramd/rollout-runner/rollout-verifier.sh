@@ -186,7 +186,6 @@ verify_safe_public_environment() {
     | .[1] as $compose
     | ($inspect | item | .Config.Env // null) as $container_env
     | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
-    | ($compose.services["teagramd-public-1"].environment // null) as $public_env
     | ($env_content | split("\n")) as $env_lines
     | if ($container_env | type) != "array" then false
       elif $compose_source == "selected-compose-render" and ($compose_env | type) != "object" then false
@@ -203,24 +202,12 @@ verify_safe_public_environment() {
           | values($container_env; $name) as $container_values
           | (($compose_source == "selected-compose-render") and ($compose_env | has($name))) as $compose_has
           | (if $compose_has then $compose_env[$name] else $default end) as $compose_value
-          | (($public_env | type) == "object" and
-             ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR")) and
-             ($public_env | has($name))) as $route_moved
-          | (if $route_moved then $public_env[$name] else $compose_value end) as $active_value
           | (if ($container_values | length) == 0 then $default else $container_values[0] end) as $container_value
           | assignments($env_lines; $name) as $env_assignments
           | if ($container_values | length) > 1 or
                ($compose_has and ($compose_value | type) != "string") then false
             elif $compose_source == "live-container-inspection" then
               is_default($name; $container_value)
-            elif $route_moved then
-              ($compose_value == $default) and
-              ($active_value | type) == "string" and
-              (valid_value($name; $active_value)) and
-              ($env_assignments | length) == 1 and
-              (dotenv_value($env_assignments[0]) == $active_value) and
-              (if $snapshot_name == "target" then $container_value == $compose_value
-               else $container_value == $active_value end)
             elif is_default($name; $compose_value) and is_default($name; $container_value) then true
             elif $name == "TG_WELCOME_CHANNEL" or
                  (valid_value($name; $compose_value) | not) or
@@ -997,11 +984,8 @@ snapshot_from_json() {
   if [ "$compose_source" = selected-compose-render ] && \
      { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
      [ "$compose_public_ws_2446" != "$exposure_public_ws_2446" ]; then
-    if ! { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$snapshot_name" = preflight ] && \
-           [ "$compose_public_ws_2446" = false ] && [ "$exposure_public_ws_2446" = true ]; }; then
-      printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
-      return 1
-    fi
+    printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
+    return 1
   fi
   exposure_for_hash=$(printf '%s' "$exposure" | jq -ce '
     map(
@@ -1148,8 +1132,7 @@ snapshot_from_json() {
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
-                "TG_REPLICA_COUNT=1"
+                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
               ) | not))
      | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -1283,10 +1266,6 @@ snapshot_from_json() {
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
                                           .target == $mode_target and .read_only == true) | not))
           else . end)
-      | .services |= with_entries(select(.key | IN("public-haproxy", "teagramd-public-1", "teagramd-public-2") | not))
-      | if (.networks | type) == "object" then
-          .networks |= with_entries(select(.key | IN("public-ingress", "public-backend") | not))
-        else . end
       # The migration-only operator is validated as an isolated, read-only
       # profile above. It cannot affect the serving container while inactive.
       | if .services["blob-key-rotate"] != null then
@@ -1607,9 +1586,7 @@ compare_snapshots() {
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
-    if [ "$before_value" = "$after_value" ] || \
-       { [ "$before_value" = false ] && [ "$after_value" = true ]; } || \
-       { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$before_value" = true ] && [ "$after_value" = false ]; }; then
+    if [ "$before_value" = "$after_value" ] || { [ "$before_value" = false ] && [ "$after_value" = true ]; }; then
       result=pass
     else
       result=fail

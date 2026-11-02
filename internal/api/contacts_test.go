@@ -494,6 +494,219 @@ func TestContactsGetContactsAndIDsUseSortedOwnerScopedHash(t *testing.T) {
 	}
 }
 
+func TestContactsGetContactsAppliesLastSeenPrivacy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	viewer := contactUser(t, s, "+15551970911", "privacyviewer", "Viewer", "Contact")
+	allowed := contactUser(t, s, "+15551970912", "privacyallowed", "Allowed", "Contact")
+	denied := contactUser(t, s, "+15551970913", "privacydenied", "Denied", "Contact")
+	for _, contact := range []store.User{allowed, denied} {
+		if changed, err := s.AddContact(ctx, viewer.ID, contact.ID); err != nil || !changed {
+			t.Fatalf("add contact %d: changed=%v err=%v", contact.ID, changed, err)
+		}
+		if _, err := api.UpdateStatusForTest(s, contact.ID, true); err != nil {
+			t.Fatalf("set contact %d offline: %v", contact.ID, err)
+		}
+	}
+	if err := s.SetLastSeenPrivacy(ctx, allowed.ID, store.LastSeenPrivacyRule{
+		BaseRule:       "nobody",
+		AllowedUserIDs: []int64{viewer.ID},
+	}); err != nil {
+		t.Fatalf("allow viewer for contact status: %v", err)
+	}
+	if err := s.SetLastSeenPrivacy(ctx, denied.ID, store.LastSeenPrivacyRule{BaseRule: "nobody"}); err != nil {
+		t.Fatalf("deny viewer for contact status: %v", err)
+	}
+
+	result, err := api.GetContactsForTest(s, viewer.ID, &tg.ContactsGetContactsRequest{})
+	if err != nil {
+		t.Fatalf("get contacts: %v", err)
+	}
+	full, ok := result.(*tg.ContactsContacts)
+	if !ok || len(full.Contacts) != 2 || len(full.Users) != 2 {
+		t.Fatalf("contacts response = %#v, want two contacts and users", result)
+	}
+	users := make(map[int64]*tg.User, len(full.Users))
+	for _, raw := range full.Users {
+		user, ok := raw.(*tg.User)
+		if !ok {
+			t.Fatalf("contact user = %T, want *tg.User", raw)
+		}
+		users[user.ID] = user
+	}
+	allowedUser := users[allowed.ID]
+	if allowedUser == nil || users[denied.ID] == nil {
+		t.Fatalf("contact users = %v, want allowed %d and denied %d", users, allowed.ID, denied.ID)
+	}
+	allowedStatus, ok := allowedUser.Status.(*tg.UserStatusOffline)
+	if !ok {
+		t.Fatalf("allowed contact status = %T, want exact offline status", allowedUser.Status)
+	}
+	currentAllowed, found, err := s.UserByID(ctx, allowed.ID)
+	if err != nil || !found || currentAllowed.LastSeenAt == nil {
+		t.Fatalf("reload allowed contact: found=%v last_seen=%v err=%v", found, currentAllowed.LastSeenAt, err)
+	}
+	if allowedStatus.WasOnline != int(currentAllowed.LastSeenAt.Unix()) {
+		t.Fatalf("allowed contact was_online = %d, want %d", allowedStatus.WasOnline, currentAllowed.LastSeenAt.Unix())
+	}
+	deniedStatus, ok := users[denied.ID].Status.(*tg.UserStatusRecently)
+	if !ok || deniedStatus.ByMe {
+		t.Fatalf("denied contact status = %#v, want coarse recently status not hidden by viewer", users[denied.ID].Status)
+	}
+}
+
+func TestContactsGetContactsIncludesCurrentProfilePhoto(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	queries := &contactQueryCapture{}
+	s, dsn := openStoreDSNWithOptions(t, store.WithQueryTracer(queries))
+	f := newGalleryFixtureWithStore(t, s, dsn, "+15551970921", "+15551970922")
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+	if changed, err := s.AddContact(ctx, f.viewer, f.owner); err != nil || !changed {
+		t.Fatalf("add photo owner as contact: changed=%v err=%v", changed, err)
+	}
+
+	queries.reset()
+	result, err := api.GetContactsForTest(s, f.viewer, &tg.ContactsGetContactsRequest{})
+	if err != nil {
+		t.Fatalf("get contacts: %v", err)
+	}
+	full, ok := result.(*tg.ContactsContacts)
+	if !ok || len(full.Users) != 1 {
+		t.Fatalf("contacts response = %#v, want one contact user", result)
+	}
+	user, ok := full.Users[0].(*tg.User)
+	if !ok || user.ID != f.owner {
+		t.Fatalf("contact user = %#v, want owner %d", full.Users[0], f.owner)
+	}
+	rawProfile, hasProfile := user.GetPhoto()
+	profile, ok := rawProfile.(*tg.UserProfilePhoto)
+	if !hasProfile || !ok || profile.PhotoID != f.photoID {
+		t.Fatalf("contact profile photo = %T/%+v, want photo %d", rawProfile, rawProfile, f.photoID)
+	}
+	if got := len(queries.snapshot()); got != 1 {
+		t.Fatalf("contacts response queries = %d, want one combined hydration query", got)
+	}
+}
+
+func TestContactsGetContactsHidesIneligibleCurrentProfilePhoto(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		prepare           func(*testing.T, *galleryFixture)
+		requiredPredicate string
+	}{
+		{
+			name: "owner blocked viewer",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				f.block(t, f.owner, f.viewer)
+			},
+		},
+		{
+			name:              "file is not stored",
+			requiredPredicate: "f.stored = true",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				// The file metadata constraint disallows photo-kind rows unless
+				// stored=true, so use a pending allocation and pin the SQL guard.
+				pending, err := f.s.AllocateFile(context.Background(), f.owner, 10, "image/jpeg",
+					"avatar.jpg", api.TestMaxUserStorageBytes)
+				if err != nil {
+					t.Fatalf("allocate unstored profile photo: %v", err)
+				}
+				f.addEntry(t, f.owner, pending.ID)
+				f.selectCurrentPhoto(t, f.owner, pending.ID)
+			},
+		},
+		{
+			name:              "stored file is not a photo",
+			requiredPredicate: "f.media_kind = 'photo'",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				document, err := f.s.AllocateFile(context.Background(), f.owner, 10, "application/octet-stream",
+					"avatar.bin", api.TestMaxUserStorageBytes)
+				if err != nil {
+					t.Fatalf("allocate profile document: %v", err)
+				}
+				if err := f.s.MarkFileStored(context.Background(), document.ID); err != nil {
+					t.Fatalf("mark profile document stored: %v", err)
+				}
+				f.addEntry(t, f.owner, document.ID)
+				f.selectCurrentPhoto(t, f.owner, document.ID)
+			},
+		},
+		{
+			name: "gallery photo is not current",
+			prepare: func(t *testing.T, f *galleryFixture) {
+				t.Helper()
+				tag, err := f.writer().Exec(context.Background(), `
+UPDATE profile_photo_state
+SET current_file_id = NULL
+WHERE user_id = $1 AND current_file_id = $2`, f.owner, f.photoID)
+				if err != nil {
+					t.Fatalf("clear current profile photo: %v", err)
+				}
+				if tag.RowsAffected() != 1 {
+					t.Fatalf("clear current profile photo affected %d rows, want 1", tag.RowsAffected())
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			queries := &contactQueryCapture{}
+			s, dsn := openStoreDSNWithOptions(t, store.WithQueryTracer(queries))
+			f := newGalleryFixtureWithStore(t, s, dsn, "+15551970931", "+15551970932")
+			f.selectCurrentPhoto(t, f.owner, f.photoID)
+			if changed, err := s.AddContact(ctx, f.viewer, f.owner); err != nil || !changed {
+				t.Fatalf("add photo owner as contact: changed=%v err=%v", changed, err)
+			}
+			tc.prepare(t, f)
+
+			queries.reset()
+			result, err := api.GetContactsForTest(s, f.viewer, &tg.ContactsGetContactsRequest{})
+			if err != nil {
+				t.Fatalf("get contacts: %v", err)
+			}
+			full, ok := result.(*tg.ContactsContacts)
+			if !ok || len(full.Users) != 1 {
+				t.Fatalf("contacts response = %#v, want one contact user", result)
+			}
+			user, ok := full.Users[0].(*tg.User)
+			if !ok || user.ID != f.owner {
+				t.Fatalf("contact user = %#v, want owner %d", full.Users[0], f.owner)
+			}
+			photo, hasPhoto := user.GetPhoto()
+			if profile, ok := photo.(*tg.UserProfilePhoto); ok {
+				t.Fatalf("contact profile photo = %+v, want no UserProfilePhoto", profile)
+			}
+			if hasPhoto {
+				t.Fatalf("contact photo = %T, want no photo", photo)
+			}
+			if tc.requiredPredicate != "" {
+				found := false
+				for _, query := range queries.snapshot() {
+					if strings.Contains(query, "-- name: ContactsWithUsers :many") {
+						found = true
+						if !strings.Contains(query, tc.requiredPredicate) {
+							t.Fatalf("contacts hydration query is missing gate %q", tc.requiredPredicate)
+						}
+						break
+					}
+				}
+				if !found {
+					t.Fatal("contacts hydration query was not issued")
+				}
+			}
+		})
+	}
+}
+
 func TestContactsGetContactsReusesLoadedContactState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -521,9 +734,19 @@ func TestContactsGetContactsReusesLoadedContactState(t *testing.T) {
 	if !ok || !user.Contact || !user.MutualContact {
 		t.Fatalf("contact user = %#v, want contact and mutual flags", full.Users[0])
 	}
-	for _, statement := range queries.snapshot() {
+	statements := queries.snapshot()
+	if len(statements) != 1 {
+		t.Fatalf("contacts response queries = %d, want one combined contact/user/photo hydration query", len(statements))
+	}
+	if !strings.Contains(statements[0], "-- name: ContactsWithUsers :many") {
+		t.Fatalf("first contacts query = %q, want combined contact/user hydration", statements[0])
+	}
+	for _, statement := range statements {
 		if strings.Contains(statement, "-- name: ContactStates :many") {
 			t.Fatal("contacts response reloaded contact state already returned by ListContacts")
+		}
+		if strings.Contains(statement, "-- name: EvaluateLastSeenPrivacyForViewer :many") {
+			t.Fatal("contacts response evaluated last-seen privacy for users with no presence")
 		}
 	}
 }
