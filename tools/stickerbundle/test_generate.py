@@ -96,6 +96,8 @@ class RecordingRenderer:
         self.target_sizes.append(target_size)
         return b"RIFF\x04\x00\x00\x00WEBP"
 
+
+class SourceLookupAndChecksumTests(unittest.TestCase):
     def test_source_asset_lookup_prefers_raw_zwj_filename_then_falls_back(self):
         codepoints = (0x1F937, 0x200D, 0x2640, 0xFE0F)
         source_files = (
