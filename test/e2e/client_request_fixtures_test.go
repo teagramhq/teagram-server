@@ -247,7 +247,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 		return false
 	}
 	switch fieldName {
-	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
+	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "document_id", "access_hash", "random_id":
 		return true
 	default:
 		return false
@@ -303,6 +303,16 @@ func TestClientTLValueRedactsFileIDs(t *testing.T) {
 	}
 	if got != "<N>" {
 		t.Fatalf("redacted file_id = %#v, want <N>", got)
+	}
+}
+
+func TestClientTLValueRedactsCustomEmojiDocumentIDs(t *testing.T) {
+	got, err := clientTLValue("document_id", reflect.ValueOf(int64(42)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "<N>" {
+		t.Fatalf("redacted document_id = %#v, want <N>", got)
 	}
 }
 
@@ -523,6 +533,10 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.sticker.1",
 		"messages_sendMedia.gif.1",
 		"stickers_createStickerSet.1",
+		"messages_getCustomEmojiDocuments.1",
+		"messages_sendMessage.customEmoji.private.1",
+		"messages_sendMessage.customEmoji.group.1",
+		"messages_sendMessage.customEmoji.channel.1",
 		"messages_saveGif.1",
 		"messages_saveGif.2",
 		"messages_getSavedGifs.1",

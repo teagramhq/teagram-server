@@ -222,6 +222,11 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load installed emoji sticker catalogue", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("load installed emoji sticker sets", "user_id", r.UserID, "err", err)
@@ -240,7 +245,13 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 	}
 	sets := make([]tg.StickerSet, 0, len(installed))
 	for _, item := range installed {
-		if item.ID <= 0 {
+		if item.ID < 0 {
+			if set, ok := catalog.byID[item.ID]; ok && set.set.GetEmojis() {
+				sets = append(sets, set.responseSet(&item.InstalledAt))
+			}
+			continue
+		}
+		if item.ID == 0 {
 			continue
 		}
 		set, ok := userSets[item.ID]

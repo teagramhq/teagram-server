@@ -234,6 +234,14 @@ assert not public_base.get("ports")
 assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]
 assert proxy["networks"]["public-ingress"]["ipv4_address"] == "198.18.131.10"
 assert proxy["networks"]["public-backend"]["ipv4_address"] == "198.18.132.10"
+proxy_mounts = proxy.get("volumes", [])
+assert len(proxy_mounts) == 1
+proxy_mount = proxy_mounts[0]
+assert proxy_mount["type"] == "bind"
+assert proxy_mount["source"].endswith("/deploy/teagramd/haproxy-public-websocket.cfg")
+assert proxy_mount["target"] == "/usr/local/etc/haproxy/haproxy.cfg"
+assert proxy_mount["read_only"] is True
+assert proxy_mount["bind"].get("create_host_path") is False
 assert any(
     port.get("host_ip") == "127.0.0.1"
     and str(port.get("published")) == sys.argv[4]

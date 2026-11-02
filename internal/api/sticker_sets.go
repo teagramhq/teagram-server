@@ -25,11 +25,13 @@ import (
 )
 
 const (
-	twemojiReactionSetShortName = "twemoji_reactions"
-	twemojiReactionSetTitle     = "Twemoji Reactions"
-	twemojiReactionDocumentDate = 1_735_689_600 // 2025-01-01 00:00:00 UTC.
-	stickerSetRateLimitSurface  = "sticker_set_mutation"
-	maxStickerSetShortNameBytes = 64
+	twemojiReactionSetShortName    = "twemoji_reactions"
+	twemojiReactionSetTitle        = "Twemoji Reactions"
+	twemojiCustomEmojiSetShortName = "twemoji_custom_emojis"
+	twemojiCustomEmojiSetTitle     = "Twemoji Custom Emoji (CC BY 4.0)"
+	twemojiReactionDocumentDate    = 1_735_689_600 // 2025-01-01 00:00:00 UTC.
+	stickerSetRateLimitSurface     = "sticker_set_mutation"
+	maxStickerSetShortNameBytes    = 64
 )
 
 var stickerSetMutationRateLimit = store.RateLimitConfig{Limit: 60, Window: time.Minute}
@@ -40,10 +42,17 @@ type builtInStickerSet struct {
 	packs     []tg.StickerPack
 }
 
+type twemojiStickerAsset struct {
+	entry    reactionassets.Entry
+	filename string
+	data     []byte
+}
+
 type stickerSetCatalog struct {
 	byShortName   map[string]*builtInStickerSet
 	byID          map[int64]*builtInStickerSet
 	featured      []*builtInStickerSet
+	emojiSets     []*builtInStickerSet
 	documents     map[reactionDocumentIdentity]builtInReactionDocument
 	documentsByID map[int64]*tg.Document
 }
@@ -116,6 +125,7 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 	setInput := make([]byte, 0, 32+len(twemojiReactionSetTitle)+len(twemojiReactionSetShortName))
 	setInput = appendHashPart(setInput, []byte(twemojiReactionSetShortName))
 	setInput = appendHashPart(setInput, []byte(twemojiReactionSetTitle))
+	assets := make([]twemojiStickerAsset, 0, len(entries))
 	for i, entry := range entries {
 		stem := strings.TrimSuffix(entry.SVG, ".svg")
 		if stem == entry.SVG || stem == "" || path.Base(entry.SVG) != entry.SVG {
@@ -132,6 +142,7 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 		setInput = appendHashPart(setInput, []byte(entry.Emoji))
 		setInput = appendHashPart(setInput, []byte(filename))
 		setInput = appendHashPart(setInput, data)
+		assets = append(assets, twemojiStickerAsset{entry: entry, filename: filename, data: data})
 	}
 	setDigest := namespacedDigest("teagram-sticker-set-v1", setInput)
 	setID := negativeContentID(setDigest[:8])
@@ -162,13 +173,8 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 		documents:     make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)),
 		documentsByID: make(map[int64]*tg.Document, len(entries)),
 	}
-	for _, entry := range entries {
-		stem := strings.TrimSuffix(entry.SVG, ".svg")
-		filename := stem + ".webp"
-		data, err := reactionassets.Files.ReadFile("static/" + filename)
-		if err != nil {
-			return nil, fmt.Errorf("read twemoji sticker %q WebP: %w", entry.Emoji, err)
-		}
+	for _, asset := range assets {
+		entry, filename, data := asset.entry, asset.filename, asset.data
 		digest := namespacedDigest("teagram-sticker-document-v1", appendHashPart(nil,
 			[]byte(twemojiReactionSetShortName), []byte(entry.Emoji), []byte(filename), data,
 		))
@@ -198,7 +204,68 @@ func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 			data: data,
 		}
 	}
+	appendTwemojiCustomEmojiSet(catalog, assets)
 	return catalog, nil
+}
+
+func appendTwemojiCustomEmojiSet(catalog *stickerSetCatalog, assets []twemojiStickerAsset) {
+	setInput := appendHashPart(nil, []byte(twemojiCustomEmojiSetShortName), []byte(twemojiCustomEmojiSetTitle))
+	for _, asset := range assets {
+		setInput = appendHashPart(setInput, []byte(asset.entry.Emoji), []byte(asset.filename), asset.data)
+	}
+	setDigest := namespacedDigest("teagram-twemoji-custom-emoji-set-v1", setInput)
+	setHash := int(binary.BigEndian.Uint32(setDigest[24:28]) & 0x7fffffff)
+	if setHash == 0 {
+		setHash = 1
+	}
+	set := &builtInStickerSet{
+		set: tg.StickerSet{
+			ID:         negativeContentID(setDigest[:8]),
+			AccessHash: positiveContentHash(setDigest[8:16]),
+			Title:      twemojiCustomEmojiSetTitle,
+			ShortName:  twemojiCustomEmojiSetShortName,
+			Count:      len(assets),
+			Hash:       setHash,
+		},
+		documents: make([]*tg.Document, 0, len(assets)),
+		packs:     make([]tg.StickerPack, 0, len(assets)),
+	}
+	set.set.SetEmojis(true)
+	set.set.SetFlags()
+	for _, asset := range assets {
+		entry, filename, data := asset.entry, asset.filename, asset.data
+		digest := namespacedDigest("teagram-twemoji-custom-emoji-document-v1", appendHashPart(nil,
+			[]byte(twemojiCustomEmojiSetShortName), []byte(entry.Emoji), []byte(filename), data,
+		))
+		customEmoji := &tg.DocumentAttributeCustomEmoji{
+			Alt:        entry.Emoji,
+			Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
+		}
+		customEmoji.SetFree(true)
+		document := &tg.Document{
+			ID:            negativeContentID(digest[:8]),
+			AccessHash:    positiveContentHash(digest[8:16]),
+			FileReference: bytes.Clone(digest[16:]),
+			Date:          twemojiReactionDocumentDate,
+			MimeType:      "image/webp",
+			Size:          int64(len(data)),
+			Attributes: []tg.DocumentAttributeClass{
+				&tg.DocumentAttributeImageSize{W: 512, H: 512},
+				customEmoji,
+				&tg.DocumentAttributeFilename{FileName: filename},
+			},
+		}
+		set.documents = append(set.documents, document)
+		set.packs = append(set.packs, tg.StickerPack{Emoticon: entry.Emoji, Documents: []int64{document.ID}})
+		catalog.documentsByID[document.ID] = document
+		catalog.documents[reactionDocumentIdentity{id: document.ID, accessHash: document.AccessHash}] = builtInReactionDocument{
+			file: reactionStoreFile(document, data),
+			data: data,
+		}
+	}
+	catalog.byShortName[strings.ToLower(set.set.ShortName)] = set
+	catalog.byID[set.set.ID] = set
+	catalog.emojiSets = append(catalog.emojiSets, set)
 }
 
 func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundle) error {
@@ -208,6 +275,9 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 		}
 		setIdentity := namespacedDigest("teagram-bundle-sticker-set-identity-v1", appendHashPart(nil, []byte(pack.ShortName)))
 		setContent := appendHashPart(nil, []byte(pack.ShortName), []byte(pack.Title), []byte(pack.Attribution))
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			setContent = appendHashPart(setContent, []byte(pack.Kind))
+		}
 		for _, sticker := range pack.Stickers {
 			setContent = appendHashPart(setContent, []byte(sticker.Emoji), []byte(sticker.File), []byte(strconv.FormatInt(sticker.Size, 10)), sticker.SHA256[:])
 		}
@@ -228,21 +298,37 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 			documents: make([]*tg.Document, 0, len(pack.Stickers)),
 			packs:     make([]tg.StickerPack, 0, len(pack.Stickers)),
 		}
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			set.set.SetEmojis(true)
+		}
 		set.set.SetFlags()
 		for _, sticker := range pack.Stickers {
 			filename := path.Base(sticker.File)
-			digest := namespacedDigest("teagram-bundle-sticker-document-v1", appendHashPart(nil,
+			documentNamespace := "teagram-bundle-sticker-document-v1"
+			if pack.Kind == stickerbundle.PackKindEmojis {
+				documentNamespace = "teagram-bundle-custom-emoji-document-v1"
+			}
+			digest := namespacedDigest(documentNamespace, appendHashPart(nil,
 				[]byte(pack.ShortName), []byte(sticker.Emoji), []byte(sticker.File), sticker.SHA256[:],
 			))
-			attributes := make([]tg.DocumentAttributeClass, 0, 3)
-			attributes = append(attributes,
-				&tg.DocumentAttributeImageSize{W: 512, H: 512},
-				&tg.DocumentAttributeSticker{
-					Alt:        sticker.Emoji,
-					Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
-				},
-				&tg.DocumentAttributeFilename{FileName: filename},
-			)
+			imageSize := 512
+			if pack.Kind == stickerbundle.PackKindEmojis {
+				imageSize = 100
+			}
+			attributes := make([]tg.DocumentAttributeClass, 0, 4)
+			attributes = append(attributes, &tg.DocumentAttributeImageSize{W: imageSize, H: imageSize})
+			setRef := &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash}
+			if pack.Kind == stickerbundle.PackKindEmojis {
+				if sticker.Animated {
+					attributes = append(attributes, &tg.DocumentAttributeAnimated{})
+				}
+				customEmoji := &tg.DocumentAttributeCustomEmoji{Alt: sticker.Emoji, Stickerset: setRef}
+				customEmoji.SetFree(true)
+				attributes = append(attributes, customEmoji)
+			} else {
+				attributes = append(attributes, &tg.DocumentAttributeSticker{Alt: sticker.Emoji, Stickerset: setRef})
+			}
+			attributes = append(attributes, &tg.DocumentAttributeFilename{FileName: filename})
 			document := &tg.Document{
 				ID:            negativeContentID(digest[:8]),
 				AccessHash:    positiveContentHash(digest[8:16]),
@@ -264,7 +350,11 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 		}
 		catalog.byShortName[strings.ToLower(set.set.ShortName)] = set
 		catalog.byID[set.set.ID] = set
-		catalog.featured = append(catalog.featured, set)
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			catalog.emojiSets = append(catalog.emojiSets, set)
+		} else {
+			catalog.featured = append(catalog.featured, set)
+		}
 	}
 	return nil
 }
@@ -351,7 +441,10 @@ func validateStickerSetCatalog(set *builtInStickerSet, reactions *reactionDocume
 }
 
 func validateStickerSetCatalogIdentities(catalog *stickerSetCatalog, reactions *reactionDocumentCatalog) error {
-	identities := make(map[int64]string, len(reactions.documents)*2+len(catalog.documents)*2+len(catalog.featured)*3)
+	allSets := make([]*builtInStickerSet, 0, len(catalog.featured)+len(catalog.emojiSets))
+	allSets = append(allSets, catalog.featured...)
+	allSets = append(allSets, catalog.emojiSets...)
+	identities := make(map[int64]string, len(reactions.documents)*2+len(catalog.documents)*2+len(allSets)*3)
 	addIdentity := func(value int64, description string) error {
 		if existing, ok := identities[value]; ok {
 			return fmt.Errorf("built-in sticker identity collision: %s collides with %s", description, existing)
@@ -367,7 +460,7 @@ func validateStickerSetCatalogIdentities(catalog *stickerSetCatalog, reactions *
 			return err
 		}
 	}
-	for _, set := range catalog.featured {
+	for _, set := range allSets {
 		if set.set.ID >= 0 || set.set.AccessHash == 0 || set.set.Hash == 0 || set.set.Count != len(set.documents) {
 			return fmt.Errorf("sticker set %q has invalid identity or count", set.set.ShortName)
 		}
@@ -526,6 +619,13 @@ func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
 				cloned.Stickerset = &refCopy
 			}
 			document.Attributes[i] = &cloned
+		case *tg.DocumentAttributeCustomEmoji:
+			cloned := *value
+			if ref, ok := value.Stickerset.(*tg.InputStickerSetID); ok {
+				refCopy := *ref
+				cloned.Stickerset = &refCopy
+			}
+			document.Attributes[i] = &cloned
 		case *tg.DocumentAttributeFilename:
 			cloned := *value
 			document.Attributes[i] = &cloned
@@ -670,7 +770,7 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 	for _, item := range installed {
 		if item.ID < 0 {
 			set, ok := catalog.byID[item.ID]
-			if !ok {
+			if !ok || set.set.GetEmojis() {
 				continue
 			}
 			sets = append(sets, set.responseSet(&item.InstalledAt))
