@@ -45,6 +45,27 @@ func TestDeriveStable(t *testing.T) {
 	}
 }
 
+func TestDeriveManyMatchesDerive(t *testing.T) {
+	t.Parallel()
+
+	d := deriver(t, masterA)
+	peerIDs := []int64{0, 7, 1002, 1 << 40, 1002}
+	for _, kind := range []peerhash.Kind{peerhash.KindUser, peerhash.KindChat, peerhash.KindChannel} {
+		got := d.DeriveMany(1001, kind, peerIDs)
+		if len(got) != len(peerIDs) {
+			t.Fatalf("DeriveMany returned %d hashes for %d peers", len(got), len(peerIDs))
+		}
+		for i, peerID := range peerIDs {
+			if want := d.Derive(1001, kind, peerID); got[i] != want {
+				t.Errorf("DeriveMany(%d, %d) = %d, want Derive = %d", kind, peerID, got[i], want)
+			}
+		}
+	}
+	if got := d.DeriveMany(1001, peerhash.KindUser, nil); len(got) != 0 {
+		t.Fatalf("DeriveMany with no peers returned %d hashes, want none", len(got))
+	}
+}
+
 func TestDeriveKeyDependent(t *testing.T) {
 	t.Parallel()
 
