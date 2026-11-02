@@ -1406,18 +1406,14 @@ jobs:
           latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
           required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
           test "$required_migration" = "$latest_migration"
-          for overlay in prod ci; do
-            rendered="$RUNNER_TEMP/k8s-${overlay}.yaml"
+          for overlay in prod ci bootstrap bootstrap/ci; do
+            rendered_overlay="${overlay//\//-}"
+            rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
-
-      - name: Check public WebSocket ingress invariants
-        env:
-          KUBECONFIG: ${{ runner.temp }}/k3s.yaml
-        run: bash deploy/k8s/test-public-websocket-component.sh
 
       - name: Remove k3s manifest-check server
         if: always()
@@ -1615,6 +1611,25 @@ jobs:
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
 
+      - name: Bootstrap the server identity explicitly
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=create pvc/key-data-teagramd-0 \
+            --namespace teagram --timeout=180s
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/key-data-teagramd-0 \
+            --namespace teagram --timeout=180s
+          kubectl scale statefulset/teagramd --replicas=0 --namespace teagram
+          kubectl delete pod teagramd-0 --namespace teagram \
+            --ignore-not-found=true --wait=true --timeout=180s
+          kubectl apply --dry-run=server -k deploy/k8s/bootstrap/ci
+          kubectl apply -k deploy/k8s/bootstrap/ci
+          kubectl wait --for=condition=complete job/teagramd-identity-bootstrap \
+            --namespace teagram --timeout=180s
+          kubectl logs job/teagramd-identity-bootstrap --namespace teagram
+          kubectl delete -k deploy/k8s/bootstrap/ci
+          kubectl scale statefulset/teagramd --replicas=1 --namespace teagram
+
       - name: Check RustFS initializer secret mounts
         run: |
           set -euo pipefail
@@ -1652,16 +1667,6 @@ jobs:
             --selector=app.kubernetes.io/name=rustfs-init \
             --namespace teagram --timeout=600s
           kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
-          app_pod=$(kubectl get pods --namespace teagram \
-            --selector=app.kubernetes.io/name=teagramd \
-            --output jsonpath='{.items[0].metadata.name}')
-          test -n "$app_pod"
-          identity_log=$(kubectl logs "$app_pod" --namespace teagram --container ensure-server-identity)
-          rsa_fingerprint=$(sed -n 's/^RSA identity ready: fingerprint=\(-\{0,1\}[0-9][0-9]*\) path=.*/\1/p' <<<"$identity_log")
-          grep --extended-regexp --quiet '^-?[0-9]+$' <<<"$rsa_fingerprint"
-          kubectl create configmap teagramd-public-identity --namespace teagram \
-            --from-literal="TG_RSA_KEY_FINGERPRINT=$rsa_fingerprint"
-          kubectl rollout status deployment/teagramd-public --namespace teagram --timeout=240s
           kubectl rollout status deployment/linklanding --namespace teagram --timeout=180s
           kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
           kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s

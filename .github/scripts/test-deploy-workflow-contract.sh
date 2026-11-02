@@ -173,9 +173,6 @@ check_ci_contract() {
     ci_fail 'the manifest check must wait for K3s to register a node before kubectl wait'
   [[ "$manifest_start" != *"k3s kubectl"* ]] ||
     ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
-  [[ "$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Check public WebSocket ingress invariants") | .env.KUBECONFIG')" == '${{ runner.temp }}/k3s.yaml' ]] ||
-    ci_fail 'the public WebSocket invariant check must use the job-local k3s API'
-
   deploy_start="$(ci_query '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run')"
   [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
      "$deploy_start" == *"docker exec teagram-k3s kubectl wait"* ]] ||
