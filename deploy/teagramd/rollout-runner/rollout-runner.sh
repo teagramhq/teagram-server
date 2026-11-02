@@ -2427,7 +2427,7 @@ compare_resolved_preflight() {
   local target_file=${PREFLIGHT_TARGET_SNAPSHOT:-"$TARGET_DIR/preflight.snapshot.json"}
   local results=${PREFLIGHT_RESULTS_FILE:-"$TARGET_DIR/preflight-comparisons.tsv"}
   local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current)
-  local field before after result expected failures=0
+  local field before after result expected failures=0 before_config_without_restart after_config_without_restart
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
     local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes container_replica_count container_client_addr_trust)
@@ -2490,7 +2490,27 @@ compare_resolved_preflight() {
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
-    if [ "$field" = compose_logging_policy ]; then
+    if [ "$field" = config_sha256 ]; then
+      if [ "$before" = "$after" ]; then
+        result=pass
+      else
+        before_config_without_restart=$(jq -er '.config_without_restart_sha256' "$old_file") || {
+          fail 'baseline is missing a restart-neutral Compose digest'
+          return 1
+        }
+        after_config_without_restart=$(jq -er '.config_without_restart_sha256' "$target_file") || {
+          fail 'resolved target is missing a restart-neutral Compose digest'
+          return 1
+        }
+        if [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+           bash "$VERIFIER" restart-policy-transition "$old_file" "$target_file" >/dev/null 2>&1; then
+          result=pass
+        else
+          result=fail
+          failures=$((failures + 1))
+        fi
+      fi
+    elif [ "$field" = compose_logging_policy ]; then
       if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = compose_log_login_codes ]; then
       if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi

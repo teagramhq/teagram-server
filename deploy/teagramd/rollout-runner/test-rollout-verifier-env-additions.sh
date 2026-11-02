@@ -218,6 +218,7 @@ if ! grep -q $'config_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" ||
   exit 1
 fi
 printf '%s\n' 'PASS exact postgres and teagramd restart-policy transition is approved and recorded'
+
 cp "$TMP/restart-policy-target.snapshot.json" "$TMP/restart-policy-rollback-baseline.snapshot.json"
 cp "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json"
 if ! compare_snapshots \
@@ -267,6 +268,7 @@ unrelated_compose_drift=$(jq -c '.services.teagramd.image="teagramd:unreviewed"'
 unrelated_compose_snapshot=$(snapshot_from_json \
   "$(inspect_json '')" "$unrelated_compose_drift" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
 printf '%s\n' "$unrelated_compose_snapshot" > "$TMP/unrelated-compose-drift.snapshot.json"
+
 if compare_snapshots \
   "$TMP/restart-policy-baseline.snapshot.json" "$TMP/unrelated-compose-drift.snapshot.json" \
   sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
@@ -1065,6 +1067,71 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+turnstile_controls_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
+  }
+  | .services.teagramd.logging={driver:"syslog",options:{
+      "syslog-address":"unixgram:///dev/log",
+      "syslog-facility":"daemon",
+      "syslog-format":"rfc5424",
+      tag:"teagramd"
+    }}
+' <<< "$turnstile_disabled_compose")
+turnstile_controls_inspect=$(printf '%s' "$turnstile_disabled_inspect" | jq -c '
+  .Config.Env += [
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
+  ]
+  | .HostConfig.LogConfig={Type:"syslog",Config:{
+      "syslog-address":"unixgram:///dev/log",
+      "syslog-facility":"daemon",
+      "syslog-format":"rfc5424",
+      tag:"teagramd"
+    }}
+')
+turnstile_controls_snapshot=$(snapshot_from_json \
+  "$turnstile_controls_inspect" "$turnstile_controls_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.config_sha256' <<< "$turnstile_controls_snapshot")" ] || \
+   [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.container_env_sha256' <<< "$turnstile_controls_snapshot")" ]; then
+  printf '%s\n' 'FAIL safe Turnstile rollout controls changed normalized deployment digests' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS safe Turnstile rollout controls preserve normalized deployment digests'
+
+for turnstile_control in test-mode hostname bypass-file; do
+  case "$turnstile_control" in
+    test-mode)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_TEST_MODE="true"' <<< "$turnstile_controls_compose")
+      ;;
+    hostname)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_HOSTNAMES="attacker.example"' <<< "$turnstile_controls_compose")
+      ;;
+    bypass-file)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="/run/secrets/qa-bypass"' <<< "$turnstile_controls_compose")
+      ;;
+  esac
+  if verify_turnstile_compose_configuration "$unsafe_turnstile_controls" >/dev/null 2>&1; then
+    printf 'FAIL unsafe Turnstile %s control was accepted\n' "$turnstile_control" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS unsafe Turnstile test, hostname, and QA bypass controls remain rejected'
+
+turnstile_unsafe_container=$(printf '%s' "$turnstile_controls_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_TURNSTILE_HOSTNAMES=") then
+    "TG_TURNSTILE_HOSTNAMES=attacker.example" else . end)
+')
+if snapshot_from_json "$turnstile_unsafe_container" "$turnstile_controls_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unsafe Turnstile container controls matched the approved Compose defaults' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Turnstile container controls must match the approved Compose defaults'
+
 turnstile_local_compose=$(jq -c '
   .services.teagramd.environment += {
     TG_TURNSTILE_SITE_KEY:"",
@@ -1649,6 +1716,72 @@ for setting_value in \
   printf 'PASS target container must match the production Turnstile setting: %s\n' "$setting"
 done
 unset INSPECT_LOG_CONFIG
+INITIALIZE_LOCAL=0
+BASELINE_DIR="$TMP/restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$restart_policy_target" > "$TARGET_DIR/preflight.snapshot.json"
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL exact postgres and teagramd restart-policy preflight transition was rejected' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL exact restart-policy preflight did not record the config digest as approved' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact postgres and teagramd restart-policy preflight transition is approved'
+
+BASELINE_DIR="$TMP/partial-restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/partial-restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$partial_restart_policy_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL partial restart-policy preflight transition was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL partial restart-policy preflight transition was not rejected by its config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS partial restart-policy preflight transition remains rejected'
+
+BASELINE_DIR="$TMP/unrelated-restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/unrelated-restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$unrelated_compose_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL unrelated Compose drift with restart-policy preflight was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated Compose drift was not rejected by restart-policy preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated Compose drift remains rejected by restart-policy preflight'
+
+BASELINE_DIR="$TMP/turnstile-controls-preflight.baseline"
+TARGET_DIR="$TMP/turnstile-controls-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$turnstile_legacy_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$turnstile_controls_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL exact safe Turnstile control additions were rejected by resolved Compose preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL safe Turnstile control additions did not preserve the approved config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact safe Turnstile control additions pass resolved Compose preflight'
 
 media_key_initial_local_baseline=$(jq -c '
   .provenance.compose_source="live-container-inspection"

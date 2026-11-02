@@ -255,6 +255,9 @@ verify_turnstile_compose_configuration() {
           ($env | has("TG_TURNSTILE_SITE_KEY")) or
           ($env | has("TG_TURNSTILE_SECRET_KEY_FILE")) or
           ($env | has("TG_TURNSTILE_SIGNIN_ENABLED")) or
+          ($env | has("TG_TURNSTILE_TEST_MODE")) or
+          ($env | has("TG_TURNSTILE_HOSTNAMES")) or
+          ($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) or
           any($service_secrets[]?; .source == "teagramd_turnstile") or
           ($secrets | has("teagramd_turnstile"))
         ) as $configured
@@ -262,6 +265,15 @@ verify_turnstile_compose_configuration() {
         ($env.TG_TURNSTILE_SITE_KEY | type == "string") and
         ($env.TG_TURNSTILE_SECRET_KEY_FILE | type == "string") and
         ($env.TG_TURNSTILE_SIGNIN_ENABLED | IN("false", "true")) and
+        (
+          if ($env | has("TG_TURNSTILE_TEST_MODE")) or
+             ($env | has("TG_TURNSTILE_HOSTNAMES")) or
+             ($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) then
+            $env.TG_TURNSTILE_TEST_MODE == "false" and
+            $env.TG_TURNSTILE_HOSTNAMES == "web.teagram.io" and
+            $env.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+          else true end
+        ) and
         ($env | has("TG_TURNSTILE_SECRET_KEY") | not) and
         (
           if $env.TG_TURNSTILE_SITE_KEY == "" then
@@ -361,7 +373,8 @@ verify_turnstile_container_configuration() {
             startswith("TG_TURNSTILE_SECRET_KEY=")
           )
         ] as $turnstile_entries
-        | if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
+        | (
+          if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
             ($turnstile_entries | length) == 0
           else
             ([$turnstile_entries[] | select(startswith("TG_TURNSTILE_SECRET_KEY="))] | length) == 0 and
@@ -388,6 +401,34 @@ verify_turnstile_container_configuration() {
               end
             )
           end
+        ) and (
+          [
+            $container_env[] | select(type == "string") |
+            select(
+              startswith("TG_TURNSTILE_TEST_MODE=") or
+              startswith("TG_TURNSTILE_HOSTNAMES=") or
+              startswith("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=")
+            )
+          ] as $control_entries
+          | [
+              "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+              "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
+              "TG_TURNSTILE_TEST_MODE=false"
+            ] as $expected_control_entries
+          | if ($compose_env | has("TG_TURNSTILE_TEST_MODE")) or
+               ($compose_env | has("TG_TURNSTILE_HOSTNAMES")) or
+               ($compose_env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) then
+              if $snapshot_name == "target" then
+                ($control_entries | sort) == $expected_control_entries
+              else
+                ($control_entries | length) == 0 or
+                ($control_entries | sort) == $expected_control_entries
+              end
+            else
+              ($control_entries | length) == 0 or
+              ($control_entries | sort) == $expected_control_entries
+            end
+        )
       end
   ' >/dev/null; then
     printf '%s\n' 'container Turnstile environment does not match the resolved Compose mapping' >&2
@@ -1143,7 +1184,10 @@ snapshot_from_json() {
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
-             . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
+             . == "TG_TURNSTILE_SIGNIN_ENABLED=false" or
+             . == "TG_TURNSTILE_TEST_MODE=false" or
+             . == "TG_TURNSTILE_HOSTNAMES=web.teagram.io" or
+             . == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=") | not
           )))
         | map(select(type != "string" or (
             ((split("="))[0]) as $key
@@ -1972,6 +2016,15 @@ compare_command() {
   fi
 }
 
+restart_policy_transition_command() {
+  local before=$1 after=$2
+  [ -f "$before" ] && [ ! -L "$before" ] && [ -f "$after" ] && [ ! -L "$after" ] || {
+    printf '%s\n' 'restart-policy snapshots are unavailable' >&2
+    return 1
+  }
+  approved_restart_policy_transition "$before" "$after"
+}
+
 secure_replay_evidence_dir() {
   local dir=$1 canonical owner=0
   if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
@@ -2095,7 +2148,7 @@ preflight_snapshot_command() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2; return 64; }
+  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
   case "$command" in
@@ -2108,6 +2161,9 @@ main() {
     compare)
       [ "$#" -eq 5 ] || { printf '%s\n' 'usage: rollout-verifier.sh compare BEFORE AFTER EXPECTED_IMAGE_ID EVIDENCE_DIR NAME' >&2; return 64; }
       compare_command "$@" ;;
+    restart-policy-transition)
+      [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-verifier.sh restart-policy-transition BEFORE AFTER' >&2; return 64; }
+      restart_policy_transition_command "$@" ;;
     ready)
       [ "$#" -eq 3 ] || { printf '%s\n' 'usage: rollout-verifier.sh ready target|rollback CONTAINER_ID EVIDENCE_DIR' >&2; return 64; }
       live_ready_command "$@" ;;
@@ -2123,7 +2179,7 @@ main() {
       secure_evidence_dir "$(dirname "$3")"
       wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
-      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2
+      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, ready, ready-pair' >&2
       return 64 ;;
   esac
 }
