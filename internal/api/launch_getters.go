@@ -441,10 +441,32 @@ func (h *handlers) handleGetFeaturedEmojiStickers(r *mtproto.Request) (bin.Encod
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load featured custom emoji sets", "err", err)
+		return nil, errInternal
+	}
+	installedAt, err := h.featuredStickerSetInstalledAt(r, catalog)
+	if err != nil {
+		h.log.Error("load featured custom emoji set state", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if len(catalog.emojiSets) == 0 {
+		return nil, errInternal
+	}
+	hash := featuredStickerSetsHashList(catalog.emojiSets, installedAt)
+	if req.Hash != 0 && req.Hash == hash {
+		return &tg.MessagesFeaturedStickersNotModified{}, nil
+	}
+	coveredSets, err := stickerSetCoveredResults(catalog.emojiSets, h.dcID, installedAt)
+	if err != nil {
+		h.log.Error("build featured custom emoji set response", "err", err)
+		return nil, errInternal
+	}
 	return &tg.MessagesFeaturedStickers{
-		Hash:   0,
-		Count:  0,
-		Sets:   []tg.StickerSetCoveredClass{},
+		Hash:   hash,
+		Count:  len(coveredSets),
+		Sets:   coveredSets,
 		Unread: []int64{},
 	}, nil
 }
