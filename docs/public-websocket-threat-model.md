@@ -23,6 +23,9 @@ the host and Docker daemon are trusted boundaries. Cloudflare's overwritten
 Cloudflare Access identity policy, so application authentication must assume
 an anonymous caller.
 
+That host-gateway topology is specific to Compose. The Kubernetes ingress has
+a separate trust boundary, described below.
+
 The protected assets are account and session integrity, registration invites,
 authentication state, and availability of the public and tailnet services.
 Neither the admin HTTP listener nor the tailnet TCP listener is part of the
@@ -115,3 +118,58 @@ stores. Its online deployment dumps can retain live demo account and message
 data until the weekly wipe; see the [demo stack data-retention threat
 model](../deploy/teagram-demo/README.md#stack-data-retention-threat-model) for
 backup access, retention and deletion controls.
+
+## Kubernetes ingress deployment
+
+### Trust boundary and client address
+
+The production request path is Cloudflare edge to the Cloudflare Tunnel, then
+the `cloudflared` pod's HTTP connection to the in-cluster
+`teagramd-public` ClusterIP Service on port 2446, then the HAProxy sidecar, and
+finally PROXY v2 over `127.0.0.1:2447` to `teagramd`. The Service is
+ClusterIP-only; it has no NodePort, LoadBalancer, or host port. The
+`cloudflared-token` Secret authorizes the connector, and its pod does not mount
+a Kubernetes service-account token. The Cloudflared-to-HAProxy hop is plain
+HTTP inside the cluster, so the cluster pod network and its policy enforcement
+are part of the trusted boundary.
+
+The `teagramd-public-ingress` NetworkPolicy selects the public application pods
+and permits TCP/2446 only from same-namespace pods labeled
+`app.kubernetes.io/name: cloudflared`. This depends on a CNI that enforces
+Kubernetes NetworkPolicy and RBAC that limits who can create pods with that
+label. The selector identifies a label, not a cryptographic workload identity;
+an unauthorized pod creator could spoof it. Cluster administrators, the CNI,
+and namespace workload controls are trusted.
+
+HAProxy requires exactly one parseable `CF-Connecting-IP`, sets its source
+address from that value, ignores `X-Forwarded-For`, and sends PROXY v2 only to
+the app's loopback listener. The app trusts PROXY v2 only from
+`127.0.0.1/32`. This assumes Cloudflare overwrites the client-address header at
+the edge and the trusted `cloudflared` connector forwards it. The application
+does not cryptographically authenticate the claimed address. A compromised
+connector or sidecar, a pod that bypasses the NetworkPolicy, or code execution
+inside the shared public pod can forge the claim, so IP-based attribution and
+rate-limit buckets depend on this chain remaining intact. HAProxy logs both
+the pod peer and claimed client address; treat those logs as client data.
+
+### Abuse controls and residual risk
+
+The Kubernetes route does not add Cloudflare Access identity checks. Anyone
+who can reach the public hostname can open a WebSocket. The `Origin` allowlist
+is a browser cross-origin control, not authentication; non-browser clients
+can omit or set the header. Invite-only registration, account-level limits,
+and the public listener's per-network RPC budgets remain the application
+controls described above. IPv4 `/32` and IPv6 `/64` network buckets limit
+single-source probing, but callers with many networks can multiply those
+buckets. The two public replicas must keep `TG_REPLICA_COUNT=2` aligned with
+the deployment replica count for the intended admission budgets.
+
+The repository configures no HAProxy connection-rate or concurrent-connection
+limit. RPC budgets apply after a connection is established and do not by
+themselves protect the tunnel, proxy sockets, or cluster capacity from a
+connection flood. No Cloudflare edge rate-limit policy is provisioned here;
+operators must provide and monitor any such edge control separately. The
+Cloudflared metrics Service is cluster-internal, while HAProxy's health endpoint
+is local to its pod. A compromised connector can reach the public backend and
+forge client addresses, and a cluster-level flood can still exhaust resources
+despite the application controls.
