@@ -205,6 +205,9 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 	if pack.Format != "webp" && pack.Format != "tgs" {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has unsupported format %q", pack.ShortName, pack.Format)
 	}
+	if pack.Kind == PackKindEmojis && pack.Format != "webp" {
+		return Pack{}, fmt.Errorf("sticker bundle emoji pack %q has unsupported format %q", pack.ShortName, pack.Format)
+	}
 	if !validShortName(pack.ShortName) {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has an invalid short name", pack.ShortName)
 	}

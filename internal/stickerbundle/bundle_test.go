@@ -121,6 +121,22 @@ func TestLoadAcceptsTelegramStickerBundleFile(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTelegramStickerBundleForCustomEmojiPack(t *testing.T) {
+	pack := validTestPack("custom_emoji_tgs")
+	pack.Kind = stickerbundle.PackKindEmojis
+	pack.Format = "tgs"
+	pack.Stickers[0].File = "art/grinning_face.tgs"
+	pack.Art = testTGS(t)
+	pack.Stickers[0].Size = int64(len(pack.Art))
+	checksum := sha256.Sum256(pack.Art)
+	pack.Stickers[0].SHA256 = hex.EncodeToString(checksum[:])
+
+	_, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err == nil || !strings.Contains(err.Error(), pack.ShortName) || !strings.Contains(err.Error(), "format") {
+		t.Fatalf("load custom emoji TGS error = %v, want pack %q rejected for its format", err, pack.ShortName)
+	}
+}
+
 func TestLoadRejectsInvalidAndOversizedTGSFilesWithPackName(t *testing.T) {
 	for _, tc := range []struct {
 		name string

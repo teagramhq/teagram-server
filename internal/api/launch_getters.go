@@ -297,15 +297,17 @@ func (h *handlers) featuredStickerSetInstalledAt(r *mtproto.Request, catalog *st
 func stickerSetCoveredResults(sets []*builtInStickerSet, dcID int, installedAt map[int64]time.Time) ([]tg.StickerSetCoveredClass, error) {
 	result := make([]tg.StickerSetCoveredClass, 0, len(sets))
 	for _, set := range sets {
-		documents := set.responseDocuments(dcID)
-		if len(documents) == 0 {
+		if len(set.documents) == 0 {
 			return nil, fmt.Errorf("sticker set %q has no cover document", set.set.ShortName)
 		}
 		var setInstalledAt *time.Time
 		if value, ok := installedAt[set.set.ID]; ok {
 			setInstalledAt = &value
 		}
-		result = append(result, &tg.StickerSetCovered{Set: set.responseSet(setInstalledAt), Cover: documents[0]})
+		result = append(result, &tg.StickerSetCovered{
+			Set:   set.responseSet(setInstalledAt),
+			Cover: cloneStickerDocument(set.documents[0], dcID),
+		})
 	}
 	return result, nil
 }
@@ -449,9 +451,6 @@ func (h *handlers) handleGetFeaturedEmojiStickers(r *mtproto.Request) (bin.Encod
 	installedAt, err := h.featuredStickerSetInstalledAt(r, catalog)
 	if err != nil {
 		h.log.Error("load featured custom emoji set state", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-	if len(catalog.emojiSets) == 0 {
 		return nil, errInternal
 	}
 	hash := featuredStickerSetsHashList(catalog.emojiSets, installedAt)
