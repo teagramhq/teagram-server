@@ -229,14 +229,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # Image publishers run after their build and CI gates. The demo pin is
-        # advisory and must not gate the production aggregate; the priority job
-        # is skipped on PRs and checked separately.
+        # The demo publisher and demo pin are advisory. K8s image publication
+        # gates production because the prod overlay pins those images. The
+        # priority job is skipped on PRs and checked separately.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
             "check-demo-web-pin",
-            "publish-k8s-images",
             "ops-dispatch-pr-ci-recovery",
             "ops-prioritize-main",
             "mirror-rustfs-qualification-images",
@@ -323,7 +322,11 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
         expected_guard = '"$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || '
         expected_guard += " || ".join(
-            f'"${result_envs[lane]}" != "success"'
+            (
+                f'"${result_envs[lane]}" != "$expected_publish_result"'
+                if lane == "publish-k8s-images"
+                else f'"${result_envs[lane]}" != "success"'
+            )
             for lane in needed_lanes
             if lane != "ops-prioritize-main"
         )
@@ -338,6 +341,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         shell_script = textwrap.dedent(run_script.group("script"))
         environment = os.environ.copy()
         environment["GITHUB_EVENT_NAME"] = "pull_request"
+        environment["GITHUB_REPOSITORY"] = "teagramhq/teagram-server"
+        environment["PULL_REQUEST_HEAD_REPO"] = "teagramhq/teagram-server"
         environment.update(
             {
                 env_name: "success"
@@ -354,6 +359,35 @@ class RealServerFixtureGateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        failed_publisher_environment = environment.copy()
+        failed_publisher_environment[result_envs["publish-k8s-images"]] = "failure"
+        failed_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=failed_publisher_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failed_publisher.returncode,
+            0,
+            "CI aggregate returned success when the image publisher failed: "
+            + failed_publisher.stdout
+            + failed_publisher.stderr,
+        )
+
+        fork_environment = environment.copy()
+        fork_environment["PULL_REQUEST_HEAD_REPO"] = "fork/teagram-server"
+        fork_environment[result_envs["publish-k8s-images"]] = "skipped"
+        fork_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=fork_environment,
+            text=True,
+        )
+        self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
 
         failed_lane = next(lane for lane in needed_lanes if lane != "ops-prioritize-main")
         environment[result_envs[failed_lane]] = "failure"
