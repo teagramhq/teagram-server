@@ -172,9 +172,15 @@ ci_if="$(query '.jobs.ci.if')"
   fail 'the required ci summary must run to report priority-gate failures on main'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == "\${{ needs.ops-prioritize-main.result }}" ]] ||
   fail 'the required ci summary must inspect the priority result'
-[[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
-  fail 'the required ci summary must fail when main priority does not succeed'
 summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')"
+summary_env=(GITHUB_EVENT_NAME=pull_request)
+while IFS= read -r env_name; do
+  summary_env+=("$env_name=success")
+done < <(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env | keys | .[]')
+env "${summary_env[@]}" bash -e -c "$summary_run" > /dev/null ||
+  fail 'the required ci summary must accept a successful priority job on pull requests'
+[[ "$summary_run" == *'"$MAIN_PRIORITY_RESULT" != "success"'* ]] ||
+  fail 'the required ci summary must require a successful priority job'
 [[ "$summary_run" == *'"$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success"'* && "$summary_run" != *'expected_browser_acceptance_image_result=skipped'* ]] ||
   fail 'the required ci summary must require browser images on pull requests and main pushes'
 

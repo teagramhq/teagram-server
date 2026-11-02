@@ -1429,10 +1429,6 @@ jobs:
           TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
         run: |
-          expected_priority_result=success
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            expected_priority_result=skipped
-          fi
           lane_results=(
             "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
             "check-security=$CHECK_SECURITY_RESULT"
@@ -1456,7 +1452,7 @@ jobs:
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
           )
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
+          if [[ "$MAIN_PRIORITY_RESULT" != "success" ||
                 "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
                 "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
