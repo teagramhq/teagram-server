@@ -243,12 +243,6 @@ class RealServerFixtureGateTests(unittest.TestCase):
             "restore-readiness",
             "rustfs-transition-qualification",
         }
-            "ops-dispatch-pr-ci-recovery",
-            "ops-prioritize-main",
-            "mirror-rustfs-qualification-images",
-            "restore-readiness",
-            "rustfs-transition-qualification",
-        }
         workflow_jobs = set(
             re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
         )
