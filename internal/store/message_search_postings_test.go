@@ -259,7 +259,7 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 		DROP TABLE IF EXISTS public.message_search_postings;`); err != nil {
 		t.Fatalf("restore pre-migration search schema: %v", err)
 	}
-	setupMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261101000001_message_search_postings.sql"))
+	setupMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261102000001_message_search_postings.sql"))
 	if err != nil {
 		t.Fatalf("read message-search setup migration: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 		t.Fatalf("apply message-search setup migration to existing messages: %v", err)
 	}
 	newMessage := send(t, s, newOwner, newPeer, "fresh lavender", 6022)
-	readinessMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261101000002_message_search_postings_readiness.sql"))
+	readinessMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261102000002_message_search_postings_readiness.sql"))
 	if err != nil {
 		t.Fatalf("read message-search readiness migration: %v", err)
 	}
