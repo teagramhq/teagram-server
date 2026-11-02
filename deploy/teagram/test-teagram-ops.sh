@@ -197,10 +197,9 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|rollback-public-websocket|apply-user-invite-quota'* ]]
-  [[ "$help_output" == *'apply-user-invite-quota default and'* && \
-    "$help_output" == *'rollback-public-websocket mutate live state'* && \
-    "$help_output" == *'apply-user-invite-quota verify is read-only'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota'* ]]
+  [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
+    "$help_output" == *'verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
 done
@@ -242,6 +241,7 @@ expect_status 64 "run gggggggggggggggggggggggggggggggggggggggg rollout-evidence"
 expect_status 64 "run ${OPS_SHA:0:7} rollout-evidence"
 expect_status 65 "run $OFF_MAIN_SHA rollout-evidence"
 expect_status 64 "run $OPS_SHA missing-script $TARGET_SHA"
+expect_status 64 "run $OPS_SHA rollback-public-websocket"
 expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
 expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
 expect_status 64 "run $OLD_MAIN_SHA replay-check"
