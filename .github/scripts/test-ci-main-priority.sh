@@ -66,6 +66,8 @@ priority_checkout_ref="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | 
 gate_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Gate this pull request while main CI is active") | .run')"
 [[ "$gate_step" == 'bash .github/scripts/gate-pr-checks-during-main.sh' ]] ||
   fail 'the trusted PR controller must use the base gate helper'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Gate this pull request while main CI is active") | .env.PR_WORKFLOW_RUN_ID')" == *'github.event.workflow_run.id'* ]] ||
+  fail 'the trusted PR gate must pass the triggering run ID for fork PRs without metadata'
 gate_if="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Gate this pull request while main CI is active") | .if')"
 [[ "$gate_if" == *"github.event_name == 'pull_request_target'"* && "$gate_if" == *"github.event_name == 'workflow_run'"* ]] ||
   fail 'the trusted PR gate must cover the pull_request_target and workflow_run race windows'

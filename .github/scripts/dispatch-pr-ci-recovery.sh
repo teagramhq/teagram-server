@@ -12,6 +12,17 @@ if [[ ! "$MAIN_RUN_ID" =~ ^[0-9]+$ || ! "$MAIN_RUN_ATTEMPT" =~ ^[0-9]+$ || ! "$M
   exit 1
 fi
 
+if ! main_ci_job_ids="$(gh api --paginate \
+  "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?per_page=100" \
+  --jq '.jobs[]? | select(.name == "ci") | .id' 2>/dev/null)"; then
+  echo "::error::Could not inspect CI jobs for main run ${MAIN_RUN_ID}; cannot dispatch PR check recovery. Issue: $ISSUE"
+  exit 1
+fi
+if [[ -z "$main_ci_job_ids" ]]; then
+  echo "::notice::Main CI run ${MAIN_RUN_ID} never started and has no ci job; skipping PR check recovery."
+  exit 0
+fi
+
 artifact_name="cancelled-pr-run-targets-${MAIN_RUN_ID}-${MAIN_RUN_ATTEMPT}"
 if ! artifacts="$(gh api --paginate \
   "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \

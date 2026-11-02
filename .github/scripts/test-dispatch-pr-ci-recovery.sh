@@ -14,9 +14,17 @@ fail() {
 gh() {
   if [[ "$1" == api ]]; then
     if [[ "$2" == --paginate ]]; then
-      [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${EXPECTED_ARTIFACT_NAME}&per_page=100" && "$4" == --jq ]] || return 2
-      printf '%s\t700\n' "$EXPECTED_ARTIFACT_NAME"
-      return 0
+      [[ "$4" == --jq ]] || return 2
+      if [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?per_page=100" ]]; then
+        [[ "${MOCK_CI_JOB_PRESENT:-yes}" == no ]] || printf '701\n'
+        return 0
+      fi
+      if [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${EXPECTED_ARTIFACT_NAME}&per_page=100" ]]; then
+        [[ "${MOCK_ARTIFACT_MODE:-present}" == no-manifest ]] && return 0
+        printf '%s\t700\n' "$EXPECTED_ARTIFACT_NAME"
+        return 0
+      fi
+      return 2
     fi
     if [[ "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/700" ]]; then
       [[ "$3" == --jq && "$4" == '[.name, .event, .head_branch] | @tsv' ]] || return 2
@@ -58,6 +66,24 @@ for mode in empty populated; do
   grep -Fxq 'main_run_id=900' "$DISPATCH_ARGS_FILE" || fail 'recovery dispatch must preserve the main run ID'
   grep -Fxq "cancelled_pr_run_targets=$expected_targets" "$DISPATCH_ARGS_FILE" || fail "recovery dispatch must preserve the $mode cancellation target list"
 done
+
+env \
+  MOCK_CI_JOB_PRESENT=no \
+  MOCK_ARTIFACT_MODE=no-manifest \
+  DISPATCH_ARGS_FILE="$test_tmp/never-started-dispatch-args" \
+  bash "$dispatch_script" > "$test_tmp/never-started-output" 2>&1 || fail 'a main run with no ci job must skip recovery successfully'
+grep -Fq 'never started and has no ci job' "$test_tmp/never-started-output" || fail 'a superseded main run must explain why recovery was skipped'
+[[ ! -e "$test_tmp/never-started-dispatch-args" ]] || fail 'a main run without a ci job must not dispatch recovery'
+
+if env \
+  MOCK_CI_JOB_PRESENT=yes \
+  MOCK_ARTIFACT_MODE=no-manifest \
+  DISPATCH_ARGS_FILE="$test_tmp/started-without-manifest-dispatch-args" \
+  bash "$dispatch_script" > "$test_tmp/started-without-manifest-output" 2>&1; then
+  fail 'a started main run without its cancellation manifest must fail'
+fi
+grep -Fq 'Expected one cancellation manifest' "$test_tmp/started-without-manifest-output" || fail 'a started main run must retain the missing-manifest error'
+[[ ! -e "$test_tmp/started-without-manifest-dispatch-args" ]] || fail 'a started main run without a manifest must not dispatch recovery'
 
 if env \
   DISPATCH_ARGS_FILE="$test_tmp/untrusted-dispatch-args" \

@@ -22,7 +22,7 @@ gh() {
       case "$GATE_MODE" in
         none) return 0 ;;
         api-error) return 2 ;;
-        completed|active|missing-ci)
+        completed|active|missing-ci|fork-active)
           printf '900\n'
           return 0
           ;;
@@ -38,6 +38,7 @@ gh() {
         completed) printf 'completed\n' ;;
         active) printf 'in_progress\n' ;;
         missing-ci) return 0 ;;
+        fork-active) printf 'in_progress\n' ;;
         multiple) printf 'in_progress\n' ;;
         *) return 2 ;;
       esac
@@ -68,22 +69,22 @@ gh() {
 export -f gh
 
 for mode in none completed; do
-  GATE_MODE="$mode" GITHUB_REPOSITORY=example/repo PR_NUMBER=42 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
+  GATE_MODE="$mode" GITHUB_REPOSITORY=example/repo PR_NUMBER=42 PR_WORKFLOW_RUN_ID=777 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
     bash "$gate_script" > "$test_tmp/gate-$mode-output" || fail "gate should allow PR checks when mode is $mode"
 done
 [[ ! -e "$test_tmp/gate-cancels" ]] || fail 'the main aggregate must be complete before the gate allows PR checks'
 
-GATE_MODE=active GITHUB_REPOSITORY=example/repo PR_NUMBER=42 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
+GATE_MODE=active GITHUB_REPOSITORY=example/repo PR_NUMBER=42 PR_WORKFLOW_RUN_ID=777 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
   bash "$gate_script" > "$test_tmp/gate-active-output" || { cat "$test_tmp/gate-active-output" >&2; fail 'an active main aggregate must defer PR checks'; }
 [[ "$(<"$test_tmp/gate-cancels")" == 801 ]] || fail 'the trusted gate must cancel the matching PR workflow run'
 [[ "$(<"$test_tmp/gate-active-output")" == *'Deferring pull request checks until main CI run 900 completes'* ]] || fail 'the gate must identify the main aggregate holding the PR run'
 
-GATE_MODE=multiple GITHUB_REPOSITORY=example/repo PR_NUMBER=42 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
+GATE_MODE=multiple GITHUB_REPOSITORY=example/repo PR_NUMBER=42 PR_WORKFLOW_RUN_ID=777 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
   bash "$gate_script" > "$test_tmp/gate-multiple-output" || fail 'an active main run must defer PR checks even if a completed run is listed first'
 [[ "$(<"$test_tmp/gate-cancels")" == $'801\n802' ]] || fail 'the gate must continue past completed main runs and cancel matching PR checks'
 [[ "$(<"$test_tmp/gate-multiple-output")" == *'main CI run 900 completes'* ]] || fail 'the gate must identify the active aggregate after a completed run'
 
-GATE_MODE=missing-ci GITHUB_REPOSITORY=example/repo PR_NUMBER=42 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
+GATE_MODE=missing-ci GITHUB_REPOSITORY=example/repo PR_NUMBER=42 PR_WORKFLOW_RUN_ID=777 GITHUB_OUTPUT="$test_tmp/gate-output" CANCEL_LOG="$test_tmp/gate-cancels" \
   bash "$gate_script" > "$test_tmp/gate-missing-output" || fail 'a queued main run without its ci job must defer PR checks'
 [[ "$(<"$test_tmp/gate-cancels")" == $'801\n802' ]] || fail 'a main run without its ci job must not cancel unrelated runs'
 
@@ -92,6 +93,11 @@ if GATE_MODE=api-error GITHUB_REPOSITORY=example/repo PR_NUMBER=42 GITHUB_OUTPUT
   fail 'the PR gate must fail closed when it cannot inspect main CI'
 fi
 [[ "$(<"$test_tmp/gate-cancels")" == $'801\n802' ]] || fail 'an API error must not claim a cancellation'
+
+GATE_MODE=fork-active GITHUB_REPOSITORY=example/repo PR_NUMBER='' PR_WORKFLOW_RUN_ID=777 GITHUB_OUTPUT="$test_tmp/fork-gate-output" CANCEL_LOG="$test_tmp/fork-gate-cancels" \
+  bash "$gate_script" > "$test_tmp/fork-gate-log" || fail 'the gate must cancel a fork PR run when its PR number is unavailable'
+[[ "$(<"$test_tmp/fork-gate-cancels")" == 777 ]] || fail 'the gate must cancel the triggering workflow run when pull request metadata is empty'
+[[ "$(<"$test_tmp/fork-gate-log")" == *'pull request number was unavailable'* ]] || fail 'fork PR cancellation must explain why it used the workflow run ID'
 
 export GITHUB_REPOSITORY=example/repo
 export GITHUB_OUTPUT="$test_tmp/cancel-output"
