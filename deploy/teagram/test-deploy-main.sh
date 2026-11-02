@@ -83,6 +83,9 @@ for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-r
   fi
 done
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
+if [[ "${FIXTURE_PUBLIC_PROFILE_ORPHAN:-0}" == 1 ]]; then
+  printf 'rollout-runner\n' >> "${DEPLOY_ACTION_LOG:?}"
+fi
 image_id=${FIXTURE_POST_IMAGE_ID:-sha256:fixture}
 printf 'source_sha=%s image_id=%s built_at=fixture\n' "$2" "$image_id" \
   > "$DEPLOY_ROOT/main1238-fixture.build/built-image.identity"
@@ -174,6 +177,7 @@ if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && "$1" == compose ]]; then
   esac
 fi
 case "$*" in
+  *'{{index .Config.Labels "com.docker.compose.project"}}'*) echo teagram ;;
   *'--entrypoint /usr/local/bin/mtproto-smoke'*)
     case "$*" in
       *'--network host'*'--read-only'*'--cap-drop ALL'*'--security-opt no-new-privileges'*'--user 65532:65532'*) ;;
@@ -195,6 +199,11 @@ case "$*" in
     ;;
   *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
+  *'ps --all --quiet --no-trunc'*)
+    if [[ "${FIXTURE_PUBLIC_PROFILE_ORPHAN:-0}" == 1 && "$*" == *'label=com.docker.compose.service=public-haproxy'* ]]; then
+      printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    fi
+    ;;
   *'{{.Image}}'*)
     if [[ -f "${DEPLOY_IMAGE_ID_FILE:?}" ]]; then
       cat "$DEPLOY_IMAGE_ID_FILE"
@@ -204,6 +213,9 @@ case "$*" in
     ;;
   *'pg_dump'*)
     [[ "${FIXTURE_DEPLOY_SUCCESS:-0}" == 1 ]] || { echo "unexpected docker call: $*" >&2; exit 99; }
+    if [[ "${FIXTURE_PUBLIC_PROFILE_ORPHAN:-0}" == 1 ]]; then
+      printf 'pg_dump\n' >> "${DEPLOY_ACTION_LOG:?}"
+    fi
     printf 'fixture dump complete\n'
     ;;
   *org.opencontainers.image.revision*) echo "$DEPLOY_SHA" ;;
@@ -309,6 +321,19 @@ if [[ ! -s "$ops_backup" || "$(stat -c '%a' "$ops_backup")" != 600 || "$(<"$ops_
   echo 'FAIL deploy did not keep a root-only copy of the prior teagram-ops command' >&2
   failures=$((failures + 1))
 fi
+
+# A matching SHA and image provenance must not skip rollout cleanup when stale
+# public-profile containers remain from an interrupted earlier run.
+: > "$DEPLOY_ACTION_LOG"
+expect 0 "deployed $second" --contains 'runner exit 0' \
+  FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_PUBLIC_PROFILE_ORPHAN=1 \
+  FIXTURE_POST_IMAGE_ID=sha256:already-deployed \
+  FIXTURE_SMOKE_IMAGE_ID=sha256:already-deployed DEPLOY_SHA="$second"
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'pg_dump\nrollout-runner\nreadiness\nlink-edge\nmtproto-smoke sha256:already-deployed' ]]; then
+  echo 'FAIL same-SHA retry skipped rollout cleanup for stale public-profile containers' >&2
+  failures=$((failures + 1))
+fi
+
 if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$second" ]]; then
   echo 'FAIL an already deployed server SHA did not refresh the link edge' >&2
   failures=$((failures + 1))

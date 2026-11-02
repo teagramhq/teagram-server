@@ -381,7 +381,30 @@ run_mtproto_smoke() {
     "$image_id"
 }
 IMG=$(docker inspect --format '{{.Image}}' $C)
-if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+public_profile_orphans_absent() {
+  local project service container_ids
+  project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$C") || {
+    echo 'cannot inspect Compose project before same-SHA shortcut' >&2
+    return 1
+  }
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    echo 'invalid Compose project before same-SHA shortcut' >&2
+    return 1
+  }
+  for service in teagramd-public-1 teagramd-public-2 public-haproxy; do
+    container_ids=$(docker ps --all --quiet --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service") || {
+      echo "cannot check public profile service $service before same-SHA shortcut" >&2
+      return 1
+    }
+    if [[ -n "$container_ids" ]]; then
+      echo "same-SHA shortcut skipped: public profile service $service still has containers" >&2
+      return 1
+    fi
+  done
+}
+if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity && public_profile_orphans_absent; then
   umask 077
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
