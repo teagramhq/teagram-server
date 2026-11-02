@@ -273,45 +273,47 @@ ORDER BY i.file_id;
 -- document resolvable. Current set members are served directly from set state.
 -- name: UserStickerSetMessageReferencedFileIDs :many
 WITH requested AS (
-    SELECT DISTINCT unnest(sqlc.arg(file_ids)::bigint[]) AS file_id
-)
-SELECT requested.file_id::bigint
-FROM requested
-WHERE EXISTS (
-    SELECT 1
+    SELECT DISTINCT unnest(sqlc.arg(file_ids)::text[]) AS file_id
+), channel_matches AS MATERIALIZED (
+    SELECT cm.channel_id, cm.local_id, cm.entities
+    FROM channel_messages cm
+    WHERE cm.deleted = false
+      AND cm.entities IS NOT NULL
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
+), visible_entities AS (
+    SELECT m.entities
     FROM messages m
     WHERE m.owner_id = sqlc.arg(owner_id)
       AND m.deleted = false
+      AND m.entities IS NOT NULL
       AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-      AND m.entities @> jsonb_build_object(
-          'version', 1,
-          'entities', jsonb_build_array(jsonb_build_object(
-              'type', sqlc.arg(entity_type)::int,
-              'argument', requested.file_id
-          ))
-      )
-)
-OR EXISTS (
-    SELECT 1
-    FROM channel_messages cm
+      AND message_custom_emoji_document_ids(m.entities) && sqlc.arg(file_ids)::text[]
+    UNION ALL
+    SELECT cm.entities
+    FROM channel_matches cm
     JOIN channel_participants cp
       ON cp.channel_id = cm.channel_id AND cp.user_id = sqlc.arg(owner_id)
-    WHERE cm.deleted = false
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-      AND cm.local_id > cp.available_min_id
+    WHERE cm.local_id > cp.available_min_id
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND EXISTS (
           SELECT 1 FROM channels c
           WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
       )
-      AND cm.entities @> jsonb_build_object(
-          'version', 1,
-          'entities', jsonb_build_array(jsonb_build_object(
-              'type', sqlc.arg(entity_type)::int,
-              'argument', requested.file_id
-          ))
-      )
-);
+)
+SELECT DISTINCT requested.file_id::bigint
+FROM visible_entities
+CROSS JOIN LATERAL jsonb_array_elements(
+    CASE
+        WHEN jsonb_typeof(visible_entities.entities->'entities') = 'array'
+            THEN visible_entities.entities->'entities'
+        ELSE '[]'::jsonb
+    END
+) AS entity(value)
+JOIN requested ON entity.value->>'argument' = requested.file_id
+WHERE jsonb_typeof(entity.value->'type') = 'number'
+  AND entity.value->>'type' = sqlc.arg(entity_type)::int::text
+  AND jsonb_typeof(entity.value->'argument') = 'number';
 
 -- name: UserStickerSetShortNameExists :one
 SELECT EXISTS (

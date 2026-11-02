@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +38,10 @@ func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEnd
 type scalePlan struct {
 	Node                  string      `json:"Node Type"`
 	Relation              string      `json:"Relation Name"`
+	IndexName             string      `json:"Index Name"`
+	IndexCond             string      `json:"Index Cond"`
+	RecheckCond           string      `json:"Recheck Cond"`
+	Filter                string      `json:"Filter"`
 	SortKey               []string    `json:"Sort Key"`
 	Cost                  float64     `json:"Total Cost"`
 	Rows                  float64     `json:"Actual Rows"`
@@ -71,6 +76,18 @@ func (p scalePlan) containsNode(node string) bool {
 	return false
 }
 
+func (p scalePlan) usesIndex(index string) bool {
+	if p.IndexName == index {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.usesIndex(index) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p scalePlan) sortsOn(key string) bool {
 	if slices.Contains(p.SortKey, key) {
 		return true
@@ -92,6 +109,163 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 		rows += child.rowsReadFrom(table)
 	}
 	return rows
+}
+
+func (p scalePlan) accessSummary() []string {
+	var accesses []string
+	if p.Relation != "" {
+		accesses = append(accesses, fmt.Sprintf("%s %s index=%s rows=%.0f loops=%.0f",
+			p.Node, p.Relation, p.IndexName, p.Rows, p.Loops))
+	}
+	for _, child := range p.Plans {
+		accesses = append(accesses, child.accessSummary()...)
+	}
+	return accesses
+}
+
+func TestUserStickerSetMessageReferencedFileIDsUsesEntityIndexesAtScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "UPDATE server_administration SET election_closed = true WHERE singleton_id = 1"); err != nil {
+		t.Fatalf("close scale election: %v", err)
+	}
+
+	var ownerID, peerID, channelID int64
+	for _, user := range []struct {
+		phone  string
+		target *int64
+	}{
+		{phone: "+emoji-history-scale-owner", target: &ownerID},
+		{phone: "+emoji-history-scale-peer", target: &peerID},
+	} {
+		if err := pool.QueryRow(ctx,
+			"INSERT INTO users (phone, first_name) VALUES ($1, 'Emoji scale') RETURNING id", user.phone,
+		).Scan(user.target); err != nil {
+			t.Fatalf("create scale user: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO update_state (user_id) VALUES ($1), ($2) ON CONFLICT DO NOTHING", ownerID, peerID,
+	); err != nil {
+		t.Fatalf("create scale update state: %v", err)
+	}
+	channelID = 9_000_000_000_000_000_001
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO channels (id, title, creator_id) VALUES ($1, 'Emoji scale', $2) RETURNING id", channelID, ownerID,
+	).Scan(&channelID); err != nil {
+		t.Fatalf("create scale channel: %v", err)
+	}
+	for _, sql := range []string{
+		"INSERT INTO channel_state (channel_id) VALUES ($1)",
+		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)",
+	} {
+		args := []any{channelID}
+		if strings.Contains(sql, "channel_participants") {
+			args = append(args, ownerID)
+		}
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed scale channel membership: %v", err)
+		}
+	}
+	for _, sql := range []string{
+		"ALTER TABLE messages DISABLE TRIGGER USER",
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
+		 SELECT $1, n, 1, $2, $1, 'scale emoji', true,
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1,
+		            'argument', CASE WHEN n <= 100 THEN 1000000 + n ELSE 30000000 + n END
+		        )))
+		 FROM generate_series(1, 20000) AS n`,
+		"ALTER TABLE messages ENABLE TRIGGER USER",
+		"ALTER TABLE channel_messages DISABLE TRIGGER USER",
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
+		 SELECT $1, n, $2, 'scale emoji',
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1,
+		            'argument', CASE WHEN n <= 100 THEN 1000100 + n ELSE 40000000 + n END
+		        )))
+		 FROM generate_series(1, 20000) AS n`,
+		"ALTER TABLE channel_messages ENABLE TRIGGER USER",
+		"ANALYZE messages",
+		"ANALYZE channel_messages",
+		"ANALYZE channel_participants",
+	} {
+		var args []any
+		if strings.Contains(sql, "INSERT INTO messages") {
+			args = []any{ownerID, peerID}
+		} else if strings.Contains(sql, "INSERT INTO channel_messages") {
+			args = []any{channelID, ownerID}
+		}
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed scaled emoji history: %v", err)
+		}
+	}
+
+	fileIDs := make([]int64, 200)
+	for i := range fileIDs {
+		fileIDs[i] = 1_000_001 + int64(i)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	referenced, err := store.UserStickerSetMessageReferencedFileIDs(ctx, ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve scale historical emoji references: %v", err)
+	}
+	if len(referenced) != len(fileIDs) {
+		t.Fatalf("resolved %d historical emoji references, want %d", len(referenced), len(fileIDs))
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("historical emoji query count = %d, want 1", len(queries))
+	}
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("historical emoji query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain historical emoji references: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode historical emoji plan: %v", err)
+	}
+	for _, index := range []string{"messages_custom_emoji_document_ids_gin_idx", "channel_messages_custom_emoji_document_ids_gin_idx"} {
+		if !plans[0].Plan.usesIndex(index) {
+			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "messages" || table == "channel_messages" {
+			t.Errorf("historical emoji plan sequentially scans %s: %s", table, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	for _, table := range []string{"messages", "channel_messages"} {
+		if rows := plans[0].Plan.rowsReadFrom(table); rows > 800 {
+			t.Errorf("historical emoji plan read %.0f %s rows for 200 IDs: %s", rows, table, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
 }
 
 func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {

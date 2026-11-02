@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1354,8 +1355,12 @@ func (s *Store) UserStickerSetMessageReferencedFileIDs(ctx context.Context, owne
 	if len(ids) == 0 {
 		return result, nil
 	}
+	fileIDTexts := make([]string, len(ids))
+	for i, id := range ids {
+		fileIDTexts[i] = strconv.FormatInt(id, 10)
+	}
 	rows, err := s.q.UserStickerSetMessageReferencedFileIDs(ctx, db.UserStickerSetMessageReferencedFileIDsParams{
-		OwnerID: ownerID, FileIds: ids, EntityType: int32(PollDescriptionEntityCustomEmoji),
+		OwnerID: ownerID, FileIds: fileIDTexts, EntityType: int32(PollDescriptionEntityCustomEmoji),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("find visible messages referencing historical custom emoji: %w", err)
