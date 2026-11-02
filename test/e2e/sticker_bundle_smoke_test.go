@@ -381,8 +381,47 @@ func testSmokeRunningStickerBundleCatalogue(t *testing.T) {
 		t.Fatal("running image featured sets omitted twemoji_reactions")
 	}
 	for _, pack := range bundle.Packs {
+		if pack.Kind == stickerbundle.PackKindEmojis {
+			continue
+		}
 		if _, ok := got[pack.ShortName]; !ok {
 			t.Errorf("running image featured sets omitted bundled pack %q", pack.ShortName)
+		}
+	}
+
+	var featuredEmoji *tg.MessagesFeaturedStickers
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetFeaturedEmojiStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		featuredEmoji, ok = result.(*tg.MessagesFeaturedStickers)
+		if !ok || featuredEmoji == nil {
+			return fmt.Errorf("featured emoji sets = %T, want *tg.MessagesFeaturedStickers", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get featured emoji packs from running image: %v", err)
+	}
+
+	gotEmoji := make(map[string]struct{}, len(featuredEmoji.Sets))
+	for _, item := range featuredEmoji.Sets {
+		covered, ok := item.(*tg.StickerSetCovered)
+		if !ok || !covered.Set.GetEmojis() {
+			t.Fatalf("featured emoji set = %T, want emoji *tg.StickerSetCovered", item)
+		}
+		gotEmoji[covered.Set.ShortName] = struct{}{}
+	}
+	if _, ok := gotEmoji["twemoji_custom_emojis"]; !ok {
+		t.Fatal("running image featured emoji sets omitted twemoji_custom_emojis")
+	}
+	for _, pack := range bundle.Packs {
+		if pack.Kind != stickerbundle.PackKindEmojis {
+			continue
+		}
+		if _, ok := gotEmoji[pack.ShortName]; !ok {
+			t.Errorf("running image featured emoji sets omitted bundled pack %q", pack.ShortName)
 		}
 	}
 }
