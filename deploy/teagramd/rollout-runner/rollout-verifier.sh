@@ -1047,6 +1047,8 @@ snapshot_from_json() {
        | select(. != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=")
        | select(. != "TG_USER_INVITE_QUOTA=")
        | select(IN(
+           "TG_ADVERTISE_ADDR=", "TG_TURNSTILE_TEST_MODE=false",
+           "TG_TURNSTILE_HOSTNAMES=web.teagram.io", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
            "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
@@ -1130,7 +1132,7 @@ snapshot_from_json() {
         | sort
       end
   ')
-  # Disabled Turnstile and public listener defaults count as unset before the
+  # Inert Turnstile and listener defaults count as unset before the
   # target, so a named addition can introduce them and the target must carry it.
   container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" '
     def item: if type == "array" then .[0] else . end;
@@ -1151,6 +1153,8 @@ snapshot_from_json() {
      | select($snapshot_name == "target" or
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
+                "TG_ADVERTISE_ADDR=", "TG_TURNSTILE_TEST_MODE=false",
+                "TG_TURNSTILE_HOSTNAMES=web.teagram.io", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
                 "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
                 "TG_REPLICA_COUNT=1"

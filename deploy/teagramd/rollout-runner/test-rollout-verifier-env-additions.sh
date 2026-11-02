@@ -1066,6 +1066,27 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+turnstile_defaults_added_names=TG_ADVERTISE_ADDR,TG_TURNSTILE_TEST_MODE,TG_TURNSTILE_HOSTNAMES,TG_TURNSTILE_QA_BYPASS_TOKEN_FILE
+printf '%s\n' \
+  'TG_ADVERTISE_ADDR=' \
+  'TG_TURNSTILE_TEST_MODE=false' \
+  'TG_TURNSTILE_HOSTNAMES=web.teagram.io' \
+  'TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=' > "$ENV_FILE"
+turnstile_defaults_added_baseline=$(ROLLOUT_ADDED_ENV="$turnstile_defaults_added_names" snapshot_from_json \
+  "$turnstile_disabled_inspect" "$turnstile_disabled_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_defaults_added_baseline")" = none ]
+turnstile_defaults_added_target=$(ROLLOUT_ADDED_ENV="$turnstile_defaults_added_names" snapshot_from_json \
+  "$turnstile_disabled_inspect" "$turnstile_disabled_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_defaults_added_target")" = \
+  TG_ADVERTISE_ADDR,TG_TURNSTILE_HOSTNAMES,TG_TURNSTILE_QA_BYPASS_TOKEN_FILE,TG_TURNSTILE_TEST_MODE ]
+turnstile_defaults_added_rollback=$(ROLLOUT_ADDED_ENV="$turnstile_defaults_added_names" snapshot_from_json \
+  "$turnstile_disabled_inspect" "$turnstile_disabled_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_defaults_added_rollback")" = none ]
+printf '%s\n' 'PASS named additions of inert listener and Turnstile defaults are absent from baseline and rollback'
+
 assert_non_default_environment_remains_pinned() {
   local key=$1 value=$2 compose inspect snapshot
   compose=$(jq -c --arg key "$key" --arg value "$value" \

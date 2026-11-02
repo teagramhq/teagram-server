@@ -259,6 +259,7 @@ test('the patched poll locator selects the latest copy for a confirmed message I
     first() { return this; },
     waitFor: async() => {},
     count: async() => 1,
+    getAttribute: async(name) => name === 'data-mid' ? '56' : null,
     getByText(text) {
       assert.equal(text, question);
       return {waitFor: async() => {}};
@@ -286,6 +287,7 @@ test('the patched poll locator selects the latest copy for a confirmed message I
   assert.equal(selectedSelector, '#column-center .bubble[data-mid="56"]');
   assert.equal(latestCopySelected, true);
   assert.equal(poll, latestCopy);
+  assert.equal(await poll.getAttribute('data-mid'), '56');
 });
 
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {

@@ -29,6 +29,8 @@ export function patchRealClientObserver(webRoot) {
     "const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';\nconst ACTIVE_POLL_OPTION_SELECTOR = '[data-poll-option-idx]:not(.fade-2-exit-active):not(.fade-2-exit-to)';",
     'active poll option selector');
 
+  // Read-state updates can leave read and sent copies with the same confirmed
+  // server ID. Both identify the poll; use its latest DOM copy for interactions.
   browser = replaceOnce(browser,
     'if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`);',
     'if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`).last();',
