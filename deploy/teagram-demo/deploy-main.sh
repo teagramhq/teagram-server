@@ -271,7 +271,7 @@ demo_backup_database() {
   BACKUP_READY=1
 }
 
-demo_resume_interrupted_install() {
+demo_interrupted_install_matches() {
   local -a container_ids=() postgres_ids=() active_ids=() inactive_ids=()
   local -a haproxy_ids=() edge_ids=() egress_ids=()
 
@@ -289,7 +289,9 @@ demo_resume_interrupted_install() {
   ((${#postgres_ids[@]} == 1 && ${#active_ids[@]} == 1)) || return 1
   ((${#inactive_ids[@]} == 0 && ${#haproxy_ids[@]} == 0 &&
     ${#edge_ids[@]} == 0 && ${#egress_ids[@]} == 0)) || return 1
+}
 
+demo_resume_interrupted_install() {
   demo_backup_database
   DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"
   BACKUP_READY=0
@@ -327,8 +329,11 @@ TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 if ((${#CONTAINER_IDS[@]} < 4)); then
-  demo_resume_interrupted_install ||
+  if ! demo_interrupted_install_matches; then
     demo_fail 'demo services are incomplete and do not match a resumable interrupted install'
+    exit 1
+  fi
+  demo_resume_interrupted_install
   exit 0
 fi
 (("${#CONTAINER_IDS[@]}" >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'

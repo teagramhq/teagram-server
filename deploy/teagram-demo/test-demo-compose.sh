@@ -834,8 +834,8 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
-resume_deploy = deploy.split("demo_resume_interrupted_install() {", 1)[1].split("\n}", 1)[0]
-assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", [
+resume_match = deploy.split("demo_interrupted_install_matches() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_match, "deploy-main.sh interrupted install state", [
     '[[ -f "$DEMO_AUTHORITY_DIR/mode.json" && ! -L "$DEMO_AUTHORITY_DIR/mode.json" ]]',
     '[[ -f "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]]',
     'demo_compose ps -q postgres',
@@ -844,14 +844,21 @@ assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", 
     'demo_compose ps -q haproxy',
     'demo_compose ps -q edge',
     'demo_compose ps -q turnstile-egress',
+])
+resume_deploy = deploy.split("demo_resume_interrupted_install() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", [
     'demo_backup_database',
     'DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"',
     'BACKUP_READY=0',
 ])
-assert_text_order(deploy, "deploy-main.sh incomplete service recovery gate", [
-    'if ((${#CONTAINER_IDS[@]} < 4)); then',
-    'demo_resume_interrupted_install ||',
+recovery_gate = deploy.split('if ((${#CONTAINER_IDS[@]} < 4)); then\n', 1)[1].split(
+    '\nexit 0\nfi\n', 1
+)[0] + '\nexit 0'
+assert_text_order(recovery_gate, "deploy-main.sh incomplete service recovery gate", [
+    'if ! demo_interrupted_install_matches; then',
     "demo_fail 'demo services are incomplete and do not match a resumable interrupted install'",
+    'exit 1',
+    'demo_resume_interrupted_install',
     'exit 0',
 ])
 deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
@@ -1519,6 +1526,44 @@ env \
   SHA=0123456789abcdef0123456789abcdef01234567 \
   BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" \
   bash "$TMP_DIR/deploy-backup-regression.sh"
+
+RESUME_FUNCTION="$TMP_DIR/deploy-resume-function.sh"
+sed -n '/^demo_resume_interrupted_install() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$RESUME_FUNCTION"
+cat > "$TMP_DIR/init-demo.sh" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${FAIL_AT:-}" != init ]]
+BASH
+chmod +x "$TMP_DIR/init-demo.sh"
+cat > "$TMP_DIR/deploy-resume-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$RESUME_FUNCTION"
+SCRIPT_DIR="$TMP_DIR"
+IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SHA=0123456789abcdef0123456789abcdef01234567
+BACKUP_DIR="$TMP_DIR/backup"
+BACKUP_READY=1
+demo_backup_database() { [[ "${FAIL_AT:-}" != backup ]]; }
+if [[ "${RUN_RECOVERY:-}" == yes ]]; then
+  demo_resume_interrupted_install
+  exit 0
+fi
+BASH
+for failure in backup init; do
+  if env \
+    FAIL_AT="$failure" \
+    RUN_RECOVERY=yes \
+    RESUME_FUNCTION="$RESUME_FUNCTION" \
+    TMP_DIR="$TMP_DIR" \
+    bash "$TMP_DIR/deploy-resume-failure-regression.sh" > "$TMP_DIR/deploy-resume-$failure.log" 2>&1; then
+    printf 'deploy resume accepted a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+  if grep -Fq 'demo install resumed' "$TMP_DIR/deploy-resume-$failure.log"; then
+    printf 'deploy resume reported success after a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+done
 
 MIGRATION_FUNCTION="$TMP_DIR/demo-wait-migration.sh"
 sed -n '/^demo_wait_migration() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$MIGRATION_FUNCTION"
