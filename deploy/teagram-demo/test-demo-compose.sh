@@ -899,6 +899,7 @@ assert_text_order(backup_function, "deploy-main.sh backup function", [
     "demo_compose_input exec -T postgres pg_restore --list",
     'BACKUP_READY=1',
 ])
+normal_deploy_start = deploy.index('CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")')
 assert_order(deploy_path, [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
@@ -909,7 +910,7 @@ assert_order(deploy_path, [
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
-])
+], start=normal_deploy_start)
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
