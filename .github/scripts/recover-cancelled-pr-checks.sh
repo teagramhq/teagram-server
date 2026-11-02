@@ -12,6 +12,7 @@ declare -A handled_pr_run_ids=()
 declare -A rerun_requested_attempt_by_run=()
 recovery_failure_count=0
 
+# shellcheck source=./main-ci-active-run.sh
 source "$(dirname "${BASH_SOURCE[0]}")/main-ci-active-run.sh"
 
 if [[ ! "$MAIN_RUN_ID" =~ ^[0-9]+$ ]]; then
