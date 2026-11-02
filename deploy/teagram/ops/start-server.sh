@@ -97,8 +97,13 @@ git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"
   > "$TEMP_DIR/blob-mode-state.py" || fail 'cannot stage the reviewed blob state validator'
 git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py" \
   > "$TEMP_DIR/qualify-rustfs-transition.py" || fail 'cannot stage the reviewed transition report validator'
+git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-inert-surfaces.sql" \
+  > "$TEMP_DIR/rustfs-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-69 transition query'
+git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql" \
+  > "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-70 transition query'
 chmod 600 "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/blob-mode-state.py" \
-  "$TEMP_DIR/qualify-rustfs-transition.py" || {
+  "$TEMP_DIR/qualify-rustfs-transition.py" "$TEMP_DIR/rustfs-inert-surfaces.sql" \
+  "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" || {
   fail 'cannot protect the staged blob authority validators'
 }
 

@@ -51,7 +51,9 @@ set -euo pipefail
 case "$4" in
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py")
+  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py"|\
+  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/rustfs-inert-surfaces.sql"|\
+  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql")
     printf '# fixture helper\n'
     ;;
   *) echo "unexpected fixture git show: $4" >&2; exit 99 ;;
@@ -63,7 +65,8 @@ cat > "$TMP/bin/python3" <<'PYTHON'
 set -euo pipefail
 [[ "$1" == */blob-transition-runner.py ]] || { echo 'unexpected fixture helper' >&2; exit 99; }
 helper_dir=$(dirname "$1")
-[[ -f "$helper_dir/blob-mode-state.py" && -f "$helper_dir/qualify-rustfs-transition.py" ]] || {
+[[ -f "$helper_dir/blob-mode-state.py" && -f "$helper_dir/qualify-rustfs-transition.py" &&
+   -f "$helper_dir/rustfs-inert-surfaces.sql" && -f "$helper_dir/rustfs-r70-inert-surfaces.sql" ]] || {
   echo 'reviewed blob state dependencies were not staged together' >&2
   exit 99
 }
