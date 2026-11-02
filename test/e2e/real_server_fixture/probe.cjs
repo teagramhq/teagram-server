@@ -298,7 +298,7 @@ function createNetworkObserver(browserCdp) {
     const match = LOG_BLOCKED_URL.exec(entry.text || '');
     if (!match) return;
     const url = match[1];
-    let protocol = '';
+    let protocol;
     try { protocol = new URL(url).protocol; } catch { return; }
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(protocol)) return;
     const kind = ['ws:', 'wss:'].includes(protocol) ? 'websocket' : 'fetch';
