@@ -4,7 +4,7 @@ set -euo pipefail
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 
-# shellcheck source=./main-ci-active-run.sh
+# shellcheck source=.github/scripts/main-ci-active-run.sh
 source "$(dirname "${BASH_SOURCE[0]}")/main-ci-active-run.sh"
 
 if main_run_id="$(main_ci_active_run_id)"; then

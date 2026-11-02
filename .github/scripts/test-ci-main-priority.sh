@@ -58,6 +58,10 @@ bash -n .github/scripts/gate-pr-checks-during-main.sh
 bash -n .github/scripts/main-ci-active-run.sh
 grep -q 'main-ci-active-run.sh' .github/scripts/gate-pr-checks-during-main.sh ||
   fail 'the PR gate must use the shared main-CI activity predicate'
+grep -Fq '# shellcheck source=.github/scripts/main-ci-active-run.sh' .github/scripts/gate-pr-checks-during-main.sh ||
+  fail 'ShellCheck must resolve the PR gate shared helper from the repository root'
+grep -Fq '# shellcheck source=.github/scripts/main-ci-active-run.sh' .github/scripts/recover-cancelled-pr-checks.sh ||
+  fail 'ShellCheck must resolve the recovery shared helper from the repository root'
 
 [[ "$(query '.jobs."ops-prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-pr-checks.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'main must expose cancelled checks for recovery'
