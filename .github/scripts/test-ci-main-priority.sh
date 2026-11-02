@@ -370,24 +370,26 @@ while IFS= read -r job; do
   is_gated "$job" || fail "$job can run without waiting for the main priority job"
 done <<< "$all_jobs"
 
-needs_jobs="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "publish-demo-image" and .value.needs != null) | .key')"
+needs_jobs="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ops-dispatch-pr-ci-recovery" and .key != "publish-demo-image" and .value.needs != null) | .key')"
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
+  [[ "$job" != check-demo-web-pin ]] || continue
   job_needs="$(query ".jobs.\"$job\".needs")"
   [[ "$job_needs" == *'ops-prioritize-main'* ]] ||
     fail "$job must directly wait for the priority job"
   job_if="$(query ".jobs.\"$job\".if")"
-  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
-    fail "$job must bypass the skipped priority job on pull requests"
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* && "$job_if" == *"github.event_name == 'merge_group'"* ]] ||
+    fail "$job must bypass the skipped priority job on pull requests and merge groups"
 done <<< "$needs_jobs"
 
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
+  [[ "$job" != check-demo-web-pin && "$job" != publish-demo-image ]] || continue
   job_if="$(query ".jobs.\"$job\".if")"
   [[ "$job_if" == *"needs.ops-prioritize-main.result == 'success'"* ]] ||
     fail "$job must run after a successful priority job on main"
-  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
-    fail "$job must bypass the skipped priority job on pull requests"
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* && "$job_if" == *"github.event_name == 'merge_group'"* ]] ||
+    fail "$job must bypass the skipped priority job on pull requests and merge groups"
 done <<< "$actual_roots"
 
 sticker_bundle_if="$(query '.jobs."check-sticker-license".if')"
@@ -397,7 +399,7 @@ k8s_deploy_if="$(query '.jobs."test-k8s-deploy".if')"
 [[ "$k8s_deploy_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$k8s_deploy_if" == *"github.event_name == 'merge_group'"* && "$k8s_deploy_if" == *"needs.check-sticker-license.result == 'success'"* ]] ||
   fail 'the K8s deployment test must run on merge groups after the sticker bundle'
 
-always_jobs="$(query '.jobs | to_entries[] | select(.key != "ci" and ((.value.if // "") | contains("always()"))) | .key')"
+always_jobs="$(query '.jobs | to_entries[] | select(.key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and .key != "check-demo-web-pin" and .key != "publish-demo-image" and ((.value.if // "") | contains("always()"))) | .key')"
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
   job_needs="$(query ".jobs.\"$job\".needs")"
@@ -406,8 +408,8 @@ while IFS= read -r job; do
   job_if="$(query ".jobs.\"$job\".if")"
   [[ "$job_if" == *"needs.ops-prioritize-main.result == 'success'"* ]] ||
     fail "$job must stop if the main priority job fails"
-  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
-    fail "$job must allow pull request runs when the priority job is skipped"
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* && "$job_if" == *"github.event_name == 'merge_group'"* ]] ||
+    fail "$job must allow pull request and merge-group runs when the priority job is skipped"
 done <<< "$always_jobs"
 
 ci_needs="$(query '.jobs.ci.needs[]')"
@@ -421,8 +423,13 @@ ci_if="$(query '.jobs.ci.if')"
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'
 summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')"
-[[ "$summary_run" == *'if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then'* && "$summary_run" == *'"$MAIN_PRIORITY_RESULT" != skipped'* && "$summary_run" == *'"$K8S_DEPLOY_RESULT" != success'* ]] ||
-  fail 'the merge-group ci summary must require the skipped priority gate and K8s deployment lane'
+[[ "$summary_run" != *'if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then'* &&
+   "$summary_run" == *'expected_priority_result=success'* &&
+   "$summary_run" == *'GITHUB_EVENT_NAME" == pull_request || "$GITHUB_EVENT_NAME" == merge_group'* &&
+   "$summary_run" == *'"$TEST_GO_RESULT" != "success"'* &&
+   "$summary_run" == *'"$K8S_DEPLOY_RESULT" != "success"'* &&
+   "$summary_run" == *'"$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result"'* ]] ||
+  fail 'the merge-group ci summary must gate every required lane'
 [[ "$summary_run" == *'"$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success"'* && "$summary_run" != *'expected_browser_acceptance_image_result=skipped'* ]] ||
   fail 'the required ci summary must require browser images on pull requests and main pushes'
 

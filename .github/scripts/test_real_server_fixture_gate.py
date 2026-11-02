@@ -178,6 +178,41 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_required_ci_lanes_are_enabled_for_merge_groups(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs_block = re.search(r"(?ms)^jobs:\n(?P<body>.*)\Z", workflow)
+        self.assertIsNotNone(jobs_block, "CI workflow has no jobs")
+        excluded_jobs = {
+            "ci",
+            "publish-demo-image",
+            "check-demo-web-pin",
+            "ops-dispatch-pr-ci-recovery",
+            "ops-prioritize-main",
+            "mirror-rustfs-qualification-images",
+            "restore-readiness",
+            "rustfs-transition-qualification",
+        }
+        workflow_jobs = set(
+            re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
+        )
+        for lane in sorted(workflow_jobs - excluded_jobs):
+            job = re.search(
+                rf"(?ms)^  {re.escape(lane)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job, f"CI workflow has no {lane} job")
+            self.assertIn(
+                "needs.ops-prioritize-main.result == 'skipped'",
+                job.group("body"),
+                f"CI lane {lane} does not handle the skipped priority job",
+            )
+            self.assertIn(
+                "github.event_name == 'merge_group'",
+                job.group("body"),
+                f"CI lane {lane} is not enabled for merge groups",
+            )
+
     def test_real_client_browser_checkout_uses_declared_revision(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (
@@ -388,6 +423,41 @@ class RealServerFixtureGateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
+
+        merge_group_environment = environment.copy()
+        merge_group_environment["GITHUB_EVENT_NAME"] = "merge_group"
+        merge_group_environment[result_envs["ops-prioritize-main"]] = "skipped"
+        merge_group_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertEqual(
+            merge_group_success.returncode,
+            0,
+            "CI aggregate rejected a successful merge-group run: "
+            + merge_group_success.stdout
+            + merge_group_success.stderr,
+        )
+
+        failed_merge_group_environment = merge_group_environment.copy()
+        failed_merge_group_environment[result_envs["test-go"]] = "failure"
+        failed_merge_group = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=failed_merge_group_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failed_merge_group.returncode,
+            0,
+            "CI aggregate returned success when a merge-group lane failed: "
+            + failed_merge_group.stdout
+            + failed_merge_group.stderr,
+        )
 
         failed_lane = next(lane for lane in needed_lanes if lane != "ops-prioritize-main")
         environment[result_envs[failed_lane]] = "failure"
