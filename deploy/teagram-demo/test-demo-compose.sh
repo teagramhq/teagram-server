@@ -750,7 +750,7 @@ cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
   "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
-  "$SCRIPT_DIR/ops/weekly-wipe.sh" <<'PY'
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import sys
 
@@ -834,6 +834,38 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
+resume_match = deploy.split("demo_interrupted_install_matches() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_match, "deploy-main.sh interrupted install state", [
+    '[[ -f "$DEMO_AUTHORITY_DIR/mode.json" && ! -L "$DEMO_AUTHORITY_DIR/mode.json" ]]',
+    '[[ -f "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]]',
+    'demo_compose ps -q postgres',
+    'demo_compose ps -q "$ACTIVE_SERVER"',
+    'demo_compose ps -q "$CANDIDATE_SERVER"',
+    'demo_compose ps -q haproxy',
+    'demo_compose ps -q edge',
+    'demo_compose ps -q turnstile-egress',
+])
+resume_deploy = deploy.split("demo_resume_interrupted_install() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", [
+    'demo_backup_database',
+    'DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"',
+    'BACKUP_READY=0',
+])
+recovery_gate = deploy.split('if ((${#CONTAINER_IDS[@]} < 4)); then\n', 1)[1].split(
+    '\nexit 0\nfi\n', 1
+)[0] + '\nexit 0'
+assert_text_order(recovery_gate, "deploy-main.sh incomplete service recovery gate", [
+    'if ! demo_interrupted_install_matches; then',
+    "demo_fail 'demo services are incomplete and do not match a resumable interrupted install'",
+    'exit 1',
+    'demo_resume_interrupted_install',
+    'exit 0',
+])
+recovery_gate_start = deploy.index('if ((${#CONTAINER_IDS[@]} < 4)); then')
+recovery_gate_end = deploy.index('\n(("${#CONTAINER_IDS[@]}" >= 4))', recovery_gate_start)
+Path(sys.argv[8], 'demo-recovery-gate.sh').write_text(
+    deploy[recovery_gate_start:recovery_gate_end] + '\n', encoding='utf-8'
+)
 deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
 assert_text_order(deploy_edge_refresh, "deploy-main.sh reloaded edge inventory", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
@@ -879,6 +911,7 @@ assert_text_order(backup_function, "deploy-main.sh backup function", [
     "demo_compose_input exec -T postgres pg_restore --list",
     'BACKUP_READY=1',
 ])
+normal_deploy_start = deploy.index('CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")')
 assert_order(deploy_path, [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
@@ -889,7 +922,7 @@ assert_order(deploy_path, [
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
-])
+], start=normal_deploy_start)
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
@@ -997,6 +1030,8 @@ assert_text_order(init, "init-demo.sh resume lock", [
     'MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"',
     'if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then',
 ])
+if 'DEMO_DEPLOY_LOCK_HELD' not in init or 'flock -n 9' not in init:
+    raise SystemExit("init-demo.sh: deploy recovery must reuse and verify the inherited deploy lock")
 if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
@@ -1496,6 +1531,45 @@ env \
   SHA=0123456789abcdef0123456789abcdef01234567 \
   BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" \
   bash "$TMP_DIR/deploy-backup-regression.sh"
+
+RESUME_FUNCTION="$TMP_DIR/deploy-resume-function.sh"
+sed -n '/^demo_resume_interrupted_install() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$RESUME_FUNCTION"
+RECOVERY_GATE="$TMP_DIR/demo-recovery-gate.sh"
+cat > "$TMP_DIR/init-demo.sh" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${FAIL_AT:-}" != init ]]
+BASH
+chmod +x "$TMP_DIR/init-demo.sh"
+cat > "$TMP_DIR/deploy-resume-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$RESUME_FUNCTION"
+demo_interrupted_install_matches() { return 0; }
+demo_fail() { printf 'unexpected recovery preflight failure: %s\n' "$1" >&2; return 1; }
+SCRIPT_DIR="$TMP_DIR"
+IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SHA=0123456789abcdef0123456789abcdef01234567
+BACKUP_DIR="$TMP_DIR/backup"
+BACKUP_READY=1
+CONTAINER_IDS=(postgres active-server)
+demo_backup_database() { [[ "${FAIL_AT:-}" != backup ]]; }
+source "$RECOVERY_GATE"
+BASH
+for failure in backup init; do
+  if env \
+    FAIL_AT="$failure" \
+    RESUME_FUNCTION="$RESUME_FUNCTION" \
+    RECOVERY_GATE="$RECOVERY_GATE" \
+    TMP_DIR="$TMP_DIR" \
+    bash "$TMP_DIR/deploy-resume-failure-regression.sh" > "$TMP_DIR/deploy-resume-$failure.log" 2>&1; then
+    printf 'deploy resume accepted a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+  if grep -Fq 'demo install resumed' "$TMP_DIR/deploy-resume-$failure.log"; then
+    printf 'deploy resume reported success after a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+done
 
 MIGRATION_FUNCTION="$TMP_DIR/demo-wait-migration.sh"
 sed -n '/^demo_wait_migration() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$MIGRATION_FUNCTION"

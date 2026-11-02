@@ -7,6 +7,17 @@ DEMO_REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 
 demo_lock_init() {
   LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
+  if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" == 1 ]]; then
+    [[ "$(readlink -e "/proc/$$/fd/9")" == "$LOCK_PATH" ]] || {
+      printf 'teagram-demo: deployment caller did not pass the deploy lock\n' >&2
+      return 1
+    }
+    flock -n 9 || {
+      printf 'teagram-demo: deployment caller does not hold the deploy lock\n' >&2
+      return 1
+    }
+    return 0
+  fi
   mkdir -p "$(dirname "$LOCK_PATH")"
   exec 9> "$LOCK_PATH"
   flock -x 9
