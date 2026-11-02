@@ -25,12 +25,29 @@ jobs:
     name: 'ops: prioritize-main'
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 1
+    timeout-minutes: 35
     permissions:
       contents: read
+      statuses: read
 
     steps:
+      - uses: actions/checkout@v7.0.1
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Wait for trusted PR cancellation before main fan-out
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.run_id }}
+          MAIN_RUN_ATTEMPT: ${{ github.run_attempt }}
+          MAIN_HEAD_SHA: ${{ github.sha }}
+        run: bash .github/scripts/wait-for-main-priority-controller.sh
+
       - name: Defer privileged priority operations to trusted workflow
+        if: ${{ github.event_name == 'pull_request' }}
         run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
   check-sticker-license:
     name: 'check: sticker-license'
@@ -1078,7 +1095,7 @@ jobs:
             .github/workflows/deploy-qa-invite.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/pr-ci-priority.yml .github/workflows/recover-cancelled-pr-ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
@@ -1095,8 +1112,8 @@ jobs:
 
       - name: Check workflow contract script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
-          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/wait-for-main-priority-controller.sh .github/scripts/test-wait-for-main-priority-controller.sh .github/scripts/dispatch-pr-ci-recovery.sh .github/scripts/test-dispatch-pr-ci-recovery.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/wait-for-main-priority-controller.sh .github/scripts/test-wait-for-main-priority-controller.sh .github/scripts/dispatch-pr-ci-recovery.sh .github/scripts/test-dispatch-pr-ci-recovery.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
 
       - name: Check deploy script syntax
         run: |

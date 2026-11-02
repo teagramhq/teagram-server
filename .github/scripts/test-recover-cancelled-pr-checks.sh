@@ -53,6 +53,7 @@ gh() {
         ;;
       *) return 2 ;;
     esac
+    [[ "$RECOVERY_MODE" != no-target ]] || return 0
     run_count="$(rerun_count "$run_id")"
     run_attempt=1
     run_status=completed
@@ -157,5 +158,10 @@ if env "${common_env[@]}" RECOVERY_MODE=exhausted RECOVERY_MAX_STATUS_CHECKS=2 b
   fail 'recovery must exit non-zero when checks do not finish before polling is exhausted'
 fi
 [[ "$(<"$test_tmp/exhausted-output")" == *'Could not confirm cancelled pull request checks'* ]] || fail 'recovery must report exhausted polling'
+
+rm -f "$test_tmp/reruns"
+env "${common_env[@]}" CANCELLED_PR_RUN_TARGETS='' RECOVERY_MODE=no-target bash "$recovery_script" > "$test_tmp/no-target-output" ||
+  fail 'recovery must complete successfully when the main sweep found no PR checks to cancel'
+[[ ! -s "$test_tmp/reruns" ]] || fail 'an empty cancellation manifest must not invent PR reruns'
 
 printf 'cancelled PR check recovery tests pass\n'

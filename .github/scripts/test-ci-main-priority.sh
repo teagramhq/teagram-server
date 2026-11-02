@@ -33,21 +33,31 @@ priority_if="$(query '.jobs."ops-prioritize-main".if')"
   fail 'the priority job must use the ops stage naming contract'
 [[ "$priority_if" == *"github.event_name == 'push' && github.ref == 'refs/heads/main'"* && "$priority_if" == *"github.event_name == 'pull_request'"* ]] ||
   fail 'the priority placeholder must remain in the CI dependency graph for main and pull request runs'
-[[ "$(query '.jobs."ops-prioritize-main".permissions | keys | join(",")')" == 'contents' ]] ||
-  fail 'the pull_request workflow must not hold an Actions write token for priority operations'
-[[ "$(query '[.jobs."ops-prioritize-main".steps[] | select((.env // {}) | has("GH_TOKEN"))] | length')" == 0 ]] ||
-  fail 'the pull_request workflow must not expose GH_TOKEN in its priority job'
+[[ "$(query '.jobs."ops-prioritize-main".permissions | keys | sort | join(",")')" == 'contents,statuses' ]] ||
+  fail 'the main gate may read commit statuses but must not hold Actions write'
+[[ "$(query '.jobs."ops-prioritize-main".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')" == *'github.sha'* ]] ||
+  fail 'the main gate must check out the trusted main commit'
+wait_if="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Wait for trusted PR cancellation before main fan-out") | .if')"
+[[ "$wait_if" == *"github.event_name == 'push' && github.ref == 'refs/heads/main'"* ]] ||
+  fail 'main fan-out must wait for the trusted cancellation status'
+[[ "$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Wait for trusted PR cancellation before main fan-out") | .run')" == 'bash .github/scripts/wait-for-main-priority-controller.sh' ]] ||
+  fail 'the main gate must use its trusted-controller status helper'
+[[ "$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Wait for trusted PR cancellation before main fan-out") | .env.MAIN_RUN_ATTEMPT')" == *'github.run_attempt'* ]] ||
+  fail 'the main gate status must be unique to each workflow run attempt'
+placeholder_if="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Defer privileged priority operations to trusted workflow") | .if')"
+[[ "$placeholder_if" == *"github.event_name == 'pull_request'"* ]] ||
+  fail 'pull request priority must remain a read-only delegation'
 [[ "$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Defer privileged priority operations to trusted workflow") | .run')" == "echo 'Pull request cancellation and recovery are handled by PR CI priority.'" ]] ||
   fail 'the pull_request workflow must delegate privileged priority operations'
 
-[[ "$(priority_query '.on | keys | sort | join(",")')" == 'pull_request_target,push,workflow_run' ]] ||
+[[ "$(priority_query '.on | keys | sort | join(",")')" == 'pull_request_target,workflow_run' ]] ||
   fail 'privileged priority operations must run from the base-defined trusted workflow'
 [[ "$(priority_query '.on.pull_request_target.branches | join(",")')" == 'main' ]] ||
   fail 'the trusted PR controller must handle only pull requests targeting main'
 [[ "$(priority_query '.on.workflow_run.workflows | join(",")')" == 'CI,RPC performance,Real-client browser flow' && "$(priority_query '.on.workflow_run.types | join(",")')" == 'requested,in_progress,completed' ]] ||
   fail 'the trusted controller must observe PR workflow starts and main CI completion'
-[[ "$(priority_query '.jobs."ops-cancel-pr-checks".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read' ]] ||
-  fail 'only the base-defined cancellation controller may get Actions write'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,statuses=write' ]] ||
+  fail 'only the base-defined cancellation controller may get Actions and status write'
 priority_checkout_ref="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')"
 [[ "$priority_checkout_ref" == *'github.event.pull_request.base.sha'* && "$priority_checkout_ref" == *'github.sha'* ]] ||
   fail 'the trusted controller must use the base commit for its helper code'
@@ -61,15 +71,34 @@ gate_if="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name =
   fail 'the trusted PR gate must cover the pull_request_target and workflow_run race windows'
 cancel_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Cancel active pull request checks for main") | .run')"
 [[ "$cancel_step" == 'bash .github/scripts/cancel-pr-checks-for-main.sh' ]] ||
-  fail 'the trusted main-push handler must cancel runs in all three PR workflows'
+  fail 'the trusted main handler must cancel runs in all three PR workflows'
+cancel_if="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Cancel active pull request checks for main") | .if')"
+[[ "$cancel_if" == *"github.event.action == 'in_progress'"* && "$cancel_if" == *"github.event.workflow_run.head_branch == 'main'"* ]] ||
+  fail 'the trusted main handler must run when main CI begins'
+artifact_name="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Save cancelled PR run targets") | .with.name')"
+[[ "$artifact_name" == *'cancelled-pr-run-targets-'* && "$artifact_name" == *'github.event.workflow_run.id'* && "$artifact_name" == *'github.event.workflow_run.run_attempt'* ]] ||
+  fail 'the trusted main handler must persist cancellation targets by main run attempt'
+pending_status_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Mark main priority pending") | .run')"
+[[ "$pending_status_step" == *'context=main-priority-${MAIN_RUN_ID}-${MAIN_RUN_ATTEMPT}'* ]] ||
+  fail 'the trusted controller must mark the matching main attempt pending before the sweep'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Write cancelled PR run targets") | .env.CANCELLED_PR_RUN_TARGETS')" == *'steps.cancel-pr-checks.outputs.cancelled_pr_run_targets'* ]] ||
+  fail 'the trusted main handler must persist the cancellation sweep output'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.CANCEL_STEP_RESULT')" == *'steps.cancel-pr-checks.outcome'* && "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.ARTIFACT_STEP_RESULT')" == *'steps.save-cancelled-pr-run-targets.outcome'* ]] ||
+  fail 'the main gate status must report cancellation and target persistence results'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.MAIN_RUN_ID')" == *'github.event.workflow_run.id'* ]] ||
+  fail 'the main gate status must be unique to its workflow run'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.MAIN_RUN_ATTEMPT')" == *'github.event.workflow_run.run_attempt'* ]] ||
+  fail 'the main gate status must be unique to each workflow run attempt'
 dispatch_if="$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".if')"
-[[ "$dispatch_if" == *"github.event_name == 'workflow_run'"* && "$dispatch_if" == *"github.event.workflow_run.name == 'CI'"* && "$dispatch_if" == *"github.event.workflow_run.event == 'push'"* && "$dispatch_if" == *"github.event.workflow_run.head_branch == 'main'"* ]] ||
+[[ "$dispatch_if" == *"github.event_name == 'workflow_run'"* && "$dispatch_if" == *"github.event.workflow_run.name == 'CI'"* && "$dispatch_if" == *"github.event.workflow_run.event == 'push'"* && "$dispatch_if" == *"github.event.workflow_run.head_branch == 'main'"* && "$dispatch_if" == *"github.event.action == 'completed'"* ]] ||
   fail 'the trusted dispatcher must run only after main push CI completes'
-dispatch_step="$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery") | .run')"
-[[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-3126'* && "$dispatch_step" == *'main_run_id=$MAIN_RUN_ID'* && "$dispatch_step" == *'exit 1'* ]] ||
-  fail 'the trusted workflow must dispatch recovery after the main aggregate'
-[[ "$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
-  fail 'the recovery dispatcher must have only Actions write permission'
+dispatch_step="$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select((.name // "") | contains("Dispatch recovery with the main sweep")) | .run')"
+[[ "$dispatch_step" == 'bash .github/scripts/dispatch-pr-ci-recovery.sh' ]] ||
+  fail 'the trusted workflow must dispatch recovery with the saved cancellation targets'
+[[ "$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | sort | join(",")')" == 'actions,contents' ]] ||
+  fail 'the recovery dispatcher must have Actions write and contents read permissions'
+[[ "$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')" == 'main' ]] ||
+  fail 'the recovery dispatcher must check out only trusted main workflow code'
 printf '%s\n' "$gate_step" "$dispatch_step" | bash -n
 
 [[ -f .github/scripts/cancel-pr-checks-for-main.sh ]] || fail 'the cross-workflow cancellation helper must exist'
@@ -80,6 +109,14 @@ grep -q 'for run_status_filter in queued in_progress pending waiting requested' 
 bash -n .github/scripts/cancel-pr-checks-for-main.sh
 bash -n .github/scripts/gate-pr-checks-during-main.sh
 bash -n .github/scripts/main-ci-active-run.sh
+[[ -f .github/scripts/wait-for-main-priority-controller.sh ]] || fail 'main fan-out must wait for the trusted controller'
+bash -n .github/scripts/wait-for-main-priority-controller.sh
+[[ -f .github/scripts/dispatch-pr-ci-recovery.sh ]] || fail 'recovery must receive the main sweep targets'
+bash -n .github/scripts/dispatch-pr-ci-recovery.sh
+[[ -f .github/scripts/test-wait-for-main-priority-controller.sh ]] || fail 'main controller gate tests must exist'
+bash -n .github/scripts/test-wait-for-main-priority-controller.sh
+[[ -f .github/scripts/test-dispatch-pr-ci-recovery.sh ]] || fail 'recovery dispatch tests must exist'
+bash -n .github/scripts/test-dispatch-pr-ci-recovery.sh
 grep -q 'main-ci-active-run.sh' .github/scripts/gate-pr-checks-during-main.sh ||
   fail 'the PR gate must use the shared main-CI activity predicate'
 grep -Fq '# shellcheck source=.github/scripts/main-ci-active-run.sh' .github/scripts/gate-pr-checks-during-main.sh ||
@@ -111,7 +148,12 @@ for pr_workflow in .github/workflows/perf.yml .github/workflows/real-client-brow
     fail "$pr_workflow must delegate privileged priority operations"
 done
 
-for pr_workflow in .github/workflows/ci.yml .github/workflows/perf.yml .github/workflows/real-client-browser-flow.yml; do
+[[ "$(workflow_query '[.jobs."ops-prioritize-main".steps[] | select((.env // {}) | has("GH_TOKEN"))] | length' .github/workflows/ci.yml)" == 1 ]] ||
+  fail 'the main gate must use a read-only token only to inspect its priority status'
+[[ "$(workflow_query '.jobs."ops-prioritize-main".steps[] | select(.name == "Wait for trusted PR cancellation before main fan-out") | .if' .github/workflows/ci.yml)" == *"github.event_name == 'push' && github.ref == 'refs/heads/main'"* ]] ||
+  fail 'only main push fan-out may inspect the trusted priority status'
+
+for pr_workflow in .github/workflows/perf.yml .github/workflows/real-client-browser-flow.yml; do
   [[ "$(workflow_query '[.jobs | to_entries[] | select(.key == "ops-prioritize-main" or .key == "ops-gate-pr-during-main") | .value.steps[]? | select((.env // {}) | has("GH_TOKEN"))] | length' "$pr_workflow")" == 0 ]] ||
     fail "$pr_workflow must not expose GH_TOKEN in its priority job"
   if rg -q 'gh run cancel|gh workflow run recover-cancelled-pr-ci\.yml' "$pr_workflow"; then
@@ -121,9 +163,12 @@ done
 [[ -f "$threat_model" ]] || fail 'the trusted priority workflow must ship its threat model'
 grep -Fq '.github/workflows/pr-ci-priority.yml' "$threat_model" || fail 'the threat model must identify the trusted controller'
 grep -Fq 'does not check out or execute pull request code or artifacts' "$threat_model" || fail 'the trusted controller threat model must forbid PR code execution'
+grep -Fq 'waits for that status before any fan-out' "$threat_model" || fail 'the threat model must record the main fan-out barrier'
 
 bash .github/scripts/test-pr-main-ci-gate.sh
 bash .github/scripts/test-recover-cancelled-pr-checks.sh
+bash .github/scripts/test-wait-for-main-priority-controller.sh
+bash .github/scripts/test-dispatch-pr-ci-recovery.sh
 
 expected_roots=$'build-browser-acceptance-image\nbuild-server-image\ncheck-demo-web-pin\ncheck-deploy-workflow\ncheck-security\ncheck-sqlc-drift\ncheck-sticker-license\nlint-css\nlint-go\nlint-sql\npublish-demo-image\ntest-browser-acceptance\ntest-compose\ntest-e2e-admin\ntest-git-hooks\ntest-go\ntest-migrations\ntest-photo-worker\ntest-real-server-fixtures\ntest-smoke\ntest-websocket-d1\ntest-websocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and (.value.needs == "ops-prioritize-main" or (.value.needs[] == "ops-prioritize-main"))) | .key' | LC_ALL=C sort)"
@@ -238,7 +283,7 @@ priority_test_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.nam
 [[ "$priority_test_step" == '.github/scripts/test-ci-main-priority.sh' ]] ||
   fail 'the deploy workflow contract job must run the priority contract test'
 contract_syntax_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check workflow contract script syntax") | .run')"
-[[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'.github/scripts/main-ci-active-run.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
+[[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'.github/scripts/main-ci-active-run.sh'* && "$contract_syntax_step" == *'.github/scripts/wait-for-main-priority-controller.sh'* && "$contract_syntax_step" == *'.github/scripts/dispatch-pr-ci-recovery.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
   fail 'the deploy workflow contract job must syntax-check and lint the priority contract test'
 
 printf 'main CI priority contract holds\n'
