@@ -58,8 +58,13 @@ kubectl scale statefulset/teagramd --replicas=0 --namespace teagram
 kubectl wait --for=delete pod/teagramd-0 --namespace teagram --timeout=180s
 kubectl delete -k deploy/k8s/bootstrap --ignore-not-found=true
 kubectl apply -k deploy/k8s/bootstrap
-kubectl wait --for=condition=complete job/teagramd-identity-bootstrap \
-  --namespace teagram --timeout=300s
+if ! kubectl wait --for=condition=complete job/teagramd-identity-bootstrap \
+  --namespace teagram --timeout=300s; then
+  kubectl logs job/teagramd-identity-bootstrap --namespace teagram \
+    --all-containers=true --prefix=true || true
+  kubectl describe job/teagramd-identity-bootstrap --namespace teagram || true
+  exit 1
+fi
 kubectl logs job/teagramd-identity-bootstrap --namespace teagram
 kubectl delete -k deploy/k8s/bootstrap
 kubectl scale statefulset/teagramd --replicas=1 --namespace teagram

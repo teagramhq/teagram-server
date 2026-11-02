@@ -428,7 +428,7 @@ func runClientConfigCommand(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	key, err := rsakey.Load(cfg.RSAKeyPath)
+	key, err := loadServerRSAIdentity(cfg.RSAKeyPath)
 	if err != nil {
 		return err
 	}
@@ -448,6 +448,17 @@ func runClientConfigCommand(stdout io.Writer) error {
 		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
 	}
 	return discovery.WriteDocument(stdout, doc)
+}
+
+func loadServerRSAIdentity(path string) (*rsa.PrivateKey, error) {
+	key, err := rsakey.Load(path)
+	if err == nil {
+		return key, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("server RSA identity missing at %s; on a new install run the bootstrap-identity Job (deploy/k8s/README.md): %w", path, err)
+	}
+	return nil, fmt.Errorf("load server RSA identity at %s: %w", path, err)
 }
 
 func writeBootstrapIdentityUsage(w io.Writer) error {
@@ -840,7 +851,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	defer cancelService()
 
-	key, err := rsakey.Load(cfg.RSAKeyPath)
+	key, err := loadServerRSAIdentity(cfg.RSAKeyPath)
 	if err != nil {
 		return err
 	}

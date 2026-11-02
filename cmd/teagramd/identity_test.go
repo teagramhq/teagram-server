@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -40,8 +41,11 @@ func TestRunFailsClosedWhenRSAIdentityIsMissing(t *testing.T) {
 	setIdentityRunConfig(t, keyPath)
 
 	err := run(slog.New(slog.DiscardHandler))
-	if err == nil || !strings.Contains(err.Error(), keyPath) {
-		t.Fatalf("run error = %v, want an RSA key load error naming the configured path", err)
+	if err == nil || !errors.Is(err, os.ErrNotExist) ||
+		!strings.Contains(err.Error(), keyPath) ||
+		!strings.Contains(err.Error(), "run the bootstrap-identity Job") ||
+		!strings.Contains(err.Error(), "deploy/k8s/README.md") {
+		t.Fatalf("run error = %v, want a wrapped missing-key error pointing to the first-install bootstrap instructions", err)
 	}
 	if _, statErr := os.Stat(keyPath); !os.IsNotExist(statErr) {
 		t.Fatalf("serving created the missing RSA key, stat error = %v", statErr)

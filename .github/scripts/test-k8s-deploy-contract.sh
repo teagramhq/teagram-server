@@ -9,6 +9,24 @@ fail() {
   exit 1
 }
 
+require_no_match_status() {
+  local status="$1"
+  local description="$2"
+  case "$status" in
+    0) fail "$description unexpectedly matched" ;;
+    1) return 0 ;;
+    *) fail "$description check failed with status $status" ;;
+  esac
+}
+
+# A missing command or parse error must not count as proof that a resource is absent.
+if (require_no_match_status 127 'rg') >/dev/null 2>&1; then
+  fail 'rg command errors must not pass an absence check'
+fi
+if (require_no_match_status 2 'yq') >/dev/null 2>&1; then
+  fail 'yq parse errors must not pass an absence check'
+fi
+
 check_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Check RustFS initializer secret mounts") | .run' .github/workflows/ci.yml)"
 [[ -n "$check_step" && "$check_step" != null ]] ||
   fail 'the RustFS secret mount check must remain in the deployment test'
@@ -42,11 +60,13 @@ for probe in startupProbe readinessProbe livenessProbe; do
   [[ "$probe_port" == mtproto ]] ||
     fail "the main teagramd container must have a $probe that checks its MTProto listener"
 done
-if rg --quiet 'ensure-identity|ensure-server-identity' deploy/k8s; then
-  fail 'the server identity must only be created by the explicit bootstrap Job'
-fi
-if yq -e '.resources[] | select(. == "teagramd-public-deployment.yaml")' deploy/k8s/base/kustomization.yaml >/dev/null; then
-  fail 'the reverted public WebSocket workload must not be part of the K8s base'
-fi
+identity_guard_status=0
+rg --quiet 'ensure-identity|ensure-server-identity' deploy/k8s || identity_guard_status=$?
+require_no_match_status "$identity_guard_status" 'the K8s identity command guard'
+
+public_workload_guard_status=0
+yq -e '.resources[] | select(. == "teagramd-public-deployment.yaml")' \
+  deploy/k8s/base/kustomization.yaml >/dev/null 2>&1 || public_workload_guard_status=$?
+require_no_match_status "$public_workload_guard_status" 'the K8s public WebSocket workload guard'
 
 printf 'K8s deployment contract passed\n'
