@@ -100,6 +100,11 @@ export function patchRealClientObserver(webRoot) {
       'poll content assertion export');
   }
 
+  browser = replaceOnce(browser,
+    "    await alicePoll.click({button: 'right'}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));",
+    "    const aliceSentPoll = alice.page.locator(`#column-center .bubble.is-sent[data-mid=\"${sendDiagnostic.sentMessageId}\"]`);\n    await aliceSentPoll.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));\n    await aliceSentPoll.click({button: 'right'}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));",
+    'poll stop click target');
+
   const directMessageWaiter = `async function waitForDirectMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
   currentStage = stage;
   await startGroupMessageTrace(page, stage);

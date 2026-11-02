@@ -253,6 +253,15 @@ test('the patched poll content check ignores an exiting duplicate option row', a
   await browser.assertPollContent(resolvedPoll, {question, description: '', stage: 'poll_exiting_option'});
 });
 
+test('the poll stop action targets the sent bubble when its message id is duplicated during an update', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browserPath} = patchBrowserForTest(t);
+  const browserSource = readFileSync(browserPath, 'utf8');
+
+  assert.match(browserSource,
+    /const aliceSentPoll = alice\.page\.locator\(`#column-center \.bubble\.is-sent\[data-mid="\$\{sendDiagnostic\.sentMessageId\}"\]`\);\s+await aliceSentPoll\.waitFor\(\{state: 'visible', timeout: 10_000\}\).*?await aliceSentPoll\.click\(\{button: 'right'\}\)/s);
+});
+
 test('the patched observer recovers missed CDP evidence from the worker timing entry', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const {browser, observation} = patchBrowserForTest(t);
