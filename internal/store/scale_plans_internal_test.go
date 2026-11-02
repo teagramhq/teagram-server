@@ -275,6 +275,18 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		if !plans[0].Plan.usesIndex(index) {
 			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
+		var predicate string
+		if err := pool.QueryRow(ctx, `
+			SELECT pg_get_expr(index_info.indpred, index_info.indrelid)
+			FROM pg_index AS index_info
+			JOIN pg_class AS index_name ON index_name.oid = index_info.indexrelid
+			WHERE index_name.relname = $1
+		`, index).Scan(&predicate); err != nil {
+			t.Fatalf("read %s predicate: %v", index, err)
+		}
+		if !strings.Contains(predicate, "cardinality") || !strings.Contains(predicate, "message_custom_emoji_document_ids") {
+			t.Errorf("%s indexes rows without custom emoji references: %s", index, predicate)
+		}
 	}
 	for _, table := range plans[0].Plan.sequentialTables() {
 		if table == "messages" || table == "channel_messages" {

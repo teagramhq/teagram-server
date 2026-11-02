@@ -299,6 +299,7 @@ visible_channels AS MATERIALIZED (
       AND cm.deleted = false
       AND cm.entities IS NOT NULL
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
       AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
 ), visible_entities AS (
     SELECT m.entities
@@ -307,6 +308,7 @@ visible_channels AS MATERIALIZED (
       AND m.deleted = false
       AND m.entities IS NOT NULL
       AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
       AND message_custom_emoji_document_ids(m.entities) && sqlc.arg(file_ids)::text[]
     UNION ALL
     SELECT cm.entities

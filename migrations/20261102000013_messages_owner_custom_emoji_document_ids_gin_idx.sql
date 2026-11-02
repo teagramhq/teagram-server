@@ -3,4 +3,6 @@
 
 CREATE INDEX CONCURRENTLY messages_owner_custom_emoji_document_ids_gin_idx
     ON messages USING GIN (owner_id, message_custom_emoji_document_ids(entities))
-    WHERE deleted = false AND entities IS NOT NULL;
+    WHERE deleted = false
+      AND entities IS NOT NULL
+      AND cardinality(message_custom_emoji_document_ids(entities)) > 0;
