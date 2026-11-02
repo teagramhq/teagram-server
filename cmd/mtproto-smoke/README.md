@@ -33,6 +33,11 @@ registration mode, invite-enabled flag, and exact quota. It also creates one
 unbound auth-key row as described above; it sends no account credentials or
 login RPC.
 
+The deploy and QA probes accept `--endpoint` and `--discovery-url` overrides.
+The production workflow keeps the defaults above; a private QA run can target
+its own HTTPS discovery document and raw MTProto endpoint without changing the
+production probe target.
+
 ## Privilege boundary
 
 The workflow runs after successful CI on `main` or manual dispatch, in the

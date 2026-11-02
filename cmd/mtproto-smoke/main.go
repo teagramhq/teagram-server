@@ -50,6 +50,8 @@ type serverIdentity struct {
 
 func main() {
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
+	endpoint := flag.String("endpoint", liveMTProtoEndpoint, "MTProto endpoint to probe")
+	discoveryURL := flag.String("discovery-url", liveDiscoveryURL, "HTTPS client-discovery URL")
 	flag.Parse()
 	quotaExpectationSet := false
 	flag.Visit(func(value *flag.Flag) {
@@ -63,12 +65,12 @@ func main() {
 	if flag.NArg() != 0 {
 		log.Fatal("unexpected arguments")
 	}
-	if err := run(*expectedInviteQuota); err != nil {
+	if err := run(*expectedInviteQuota, *endpoint, *discoveryURL); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(expectedInviteQuota int) error {
+func run(expectedInviteQuota int, endpoint, discoveryURL string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
@@ -82,24 +84,24 @@ func run(expectedInviteQuota int) error {
 		},
 	}
 	if expectedInviteQuota >= 0 {
-		settings, err := probeAppConfig(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client)
+		settings, err := probeAppConfig(ctx, endpoint, discoveryURL, client)
 		if err != nil {
-			return fmt.Errorf("MTProto app-config smoke on %s: %w", liveMTProtoEndpoint, err)
+			return fmt.Errorf("MTProto app-config smoke on %s: %w", endpoint, err)
 		}
 		if settings.registrationMode != "invite" || !settings.userInvitesEnabled || settings.userInviteQuota != expectedInviteQuota {
 			return fmt.Errorf("help.getAppConfig registration_mode=%q user_invites_enabled=%t user_invite_quota=%d; want invite, true, %d",
 				settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota, expectedInviteQuota)
 		}
 		if _, err := fmt.Printf("help.getAppConfig passed on %s registration_mode=%s user_invites_enabled=%t user_invite_quota=%d\n",
-			liveMTProtoEndpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
+			endpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
 			return fmt.Errorf("write app-config smoke result: %w", err)
 		}
 		return nil
 	}
-	if err := probe(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client); err != nil {
-		return fmt.Errorf("MTProto smoke on %s: %w", liveMTProtoEndpoint, err)
+	if err := probe(ctx, endpoint, discoveryURL, client); err != nil {
+		return fmt.Errorf("MTProto smoke on %s: %w", endpoint, err)
 	}
-	if _, err := fmt.Printf("MTProto auth-key exchange passed on %s\n", liveMTProtoEndpoint); err != nil {
+	if _, err := fmt.Printf("MTProto auth-key exchange passed on %s\n", endpoint); err != nil {
 		return fmt.Errorf("write smoke result: %w", err)
 	}
 	return nil
