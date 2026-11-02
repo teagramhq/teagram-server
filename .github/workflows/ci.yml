@@ -1088,6 +1088,8 @@ jobs:
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/check-k8s-prod-image-pins.sh
+          shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
       - name: Check deploy script syntax
         run: |
@@ -1410,17 +1412,7 @@ jobs:
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
-          for image in teagramd teagram-migrations teagramd-mc-init link-edge-landing link-edge-selector; do
-            grep --quiet --extended-regexp \
-              "image: ghcr\\.io/teagramhq/${image}@sha256:[0-9a-f]{64}$" \
-              "$RUNNER_TEMP/k8s-prod.yaml"
-          done
-          migrations_digest=$(sed -n 's/^ *image: ghcr.io\/teagramhq\/teagram-migrations@sha256:\([0-9a-f]*\)$/\1/p' "$RUNNER_TEMP/k8s-prod.yaml" | head -n 1)
-          rustfs_init_digest=$(sed -n 's/^ *image: ghcr.io\/teagramhq\/teagramd-mc-init@sha256:\([0-9a-f]*\)$/\1/p' "$RUNNER_TEMP/k8s-prod.yaml" | head -n 1)
-          test "${#migrations_digest}" -eq 64
-          test "${#rustfs_init_digest}" -eq 64
-          grep --fixed-strings --quiet "name: db-migrations-${migrations_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
-          grep --fixed-strings --quiet "name: rustfs-init-${rustfs_init_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
+          bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
       - name: Check public WebSocket ingress invariants
         env:
@@ -1777,6 +1769,7 @@ jobs:
       - check-deploy-workflow
       - check-k8s-manifests
       - test-k8s-deploy
+      - publish-k8s-images
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1805,7 +1798,13 @@ jobs:
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
           K8S_MANIFESTS_RESULT: ${{ needs.check-k8s-manifests.result }}
           K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
+          PUBLISH_K8S_IMAGES_RESULT: ${{ needs.publish-k8s-images.result }}
+          PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
+          expected_publish_result=success
+          if [[ "$GITHUB_EVENT_NAME" == merge_group || ( "$GITHUB_EVENT_NAME" == pull_request && "$PULL_REQUEST_HEAD_REPO" != "$GITHUB_REPOSITORY" ) ]]; then
+            expected_publish_result=skipped
+          fi
           lane_results=(
             "check-security=$CHECK_SECURITY_RESULT"
             "test-go=$TEST_GO_RESULT"
@@ -1829,6 +1828,7 @@ jobs:
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
             "check-k8s-manifests=$K8S_MANIFESTS_RESULT"
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
+            "publish-k8s-images=$PUBLISH_K8S_IMAGES_RESULT"
           )
           if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -1851,7 +1851,8 @@ jobs:
                 "$TEST_MIGRATIONS_RESULT" != "success" ||
                 "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ||
                 "$K8S_MANIFESTS_RESULT" != "success" ||
-                "$K8S_DEPLOY_RESULT" != "success" ]]; then
+                "$K8S_DEPLOY_RESULT" != "success" ||
+                "$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -1862,8 +1863,7 @@ jobs:
     name: "publish: k8s-images"
     if: >-
       ${{
-        (github.event_name == 'pull_request' && !cancelled() ||
-          github.event_name != 'pull_request' && always()) &&
+        !cancelled() &&
         success() &&
         (
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
@@ -1871,7 +1871,26 @@ jobs:
         )
       }}
     needs:
-      - ci
+      - check-security
+      - test-go
+      - check-sticker-license
+      - test-photo-worker
+      - test-real-server-fixtures
+      - lint-go
+      - check-sqlc-drift
+      - build-server-image
+      - test-compose
+      - test-smoke
+      - test-e2e-admin
+      - test-websocket-d1
+      - test-websocket-permanent-exchange
+      - lint-sql
+      - test-git-hooks
+      - lint-css
+      - test-browser-acceptance
+      - build-browser-acceptance-image
+      - test-migrations
+      - check-deploy-workflow
       - check-k8s-manifests
       - test-k8s-deploy
     runs-on: ubuntu-26.04

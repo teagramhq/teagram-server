@@ -252,12 +252,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertNotIn("ops-prioritize-main", body)
 
-        # Publishers depend on the aggregate and cannot be its dependencies.
         # The demo pin is advisory and must not gate the production aggregate.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
-            "publish-k8s-images",
             "check-demo-web-pin",
             "mirror-rustfs-qualification-images",
             "restore-readiness",
@@ -343,6 +341,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         expected_guard = " || ".join(
             f'"${result_envs[lane]}" != "success"'
             for lane in needed_lanes
+            if lane != "publish-k8s-images"
         )
         self.assertEqual(
             " ".join(result_guard.group("condition").split()),
@@ -359,6 +358,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
                 env_name: "success" for env_name in result_envs.values()
             }
         )
+        environment.update(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REPOSITORY": "teagramhq/teagram-server",
+                "PULL_REQUEST_HEAD_REPO": "teagramhq/teagram-server",
+            }
+        )
         success = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
@@ -367,6 +373,46 @@ class RealServerFixtureGateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        workflow_triggers = re.search(r"(?ms)^on:\n(?P<body>.*?)^permissions:", workflow)
+        self.assertIsNotNone(workflow_triggers, "CI workflow has no event triggers")
+        self.assertRegex(
+            workflow_triggers.group("body"),
+            r"(?m)^  merge_group:\n    types: \[checks_requested\]$",
+        )
+        merge_group_environment = environment.copy()
+        merge_group_environment.update(
+            {
+                "GITHUB_EVENT_NAME": "merge_group",
+                "PULL_REQUEST_HEAD_REPO": "",
+                result_envs["publish-k8s-images"]: "skipped",
+            }
+        )
+        merge_group_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertEqual(
+            merge_group_success.returncode,
+            0,
+            merge_group_success.stdout + merge_group_success.stderr,
+        )
+        merge_group_environment[result_envs["test-go"]] = "skipped"
+        merge_group_failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_failure.returncode,
+            0,
+            "merge-group aggregate returned success when a required lane was skipped",
+        )
 
         failed_lane = needed_lanes[0]
         environment[result_envs[failed_lane]] = "failure"

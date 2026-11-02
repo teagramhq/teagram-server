@@ -14,6 +14,8 @@ ClusterIP-only. The NetworkPolicy permits its public port only from pods labeled
 Cloudflare connector in that namespace with that label and point the tunnel's
 `server.teagram.io` ingress at
 `http://teagramd-public.teagram.svc.cluster.local:2446`.
+The Kubernetes client-IP trust boundary and residual abuse risks are covered in
+the [public WebSocket threat model](../../../../docs/public-websocket-threat-model.md#kubernetes-ingress-deployment).
 Do not add another NetworkPolicy that selects these pods and grants broader
 ingress; Kubernetes combines matching policies additively.
 

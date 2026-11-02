@@ -10,11 +10,11 @@ configMapGenerator:
   - name: db-migrations-job-revision
     behavior: merge
     literals:
-      - job-name=db-migrations-0000000000000000
+      - job-name=db-migrations-6f6250dd2d036eaa
   - name: rustfs-init-job-revision
     behavior: merge
     literals:
-      - job-name=rustfs-init-0000000000000000
+      - job-name=rustfs-init-0915dda9cadd4a1e
 
 replacements:
   - source:
@@ -44,12 +44,12 @@ replacements:
 
 images:
   - name: ghcr.io/teagramhq/teagramd
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:f589fab308a5d802f5023a95bf2687257fab2bba75b6d80220c4514fc5f0a874
   - name: ghcr.io/teagramhq/teagram-migrations
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:6f6250dd2d036eaab8360ee54a83f9b1b4e20dcfe1136b63e202ce2bdf02393e
   - name: ghcr.io/teagramhq/teagramd-mc-init
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:0915dda9cadd4a1e6045a249bdd4dd492d7ba448e79292ed2a6270800cbcd235
   - name: ghcr.io/teagramhq/link-edge-landing
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:a77891c6ea686e8e39632cb41dcb28565ee3db06217dfafdebb1c7e3034b1ee3
   - name: ghcr.io/teagramhq/link-edge-selector
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:86c3927a4d677d7dd85fd9598da205653fde21629a18862b1ad538e8541605bd
