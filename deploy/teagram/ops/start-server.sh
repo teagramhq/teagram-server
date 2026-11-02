@@ -95,7 +95,10 @@ git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-run
   > "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot stage the reviewed blob authority validator'
 git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py" \
   > "$TEMP_DIR/blob-mode-state.py" || fail 'cannot stage the reviewed blob state validator'
-chmod 600 "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/blob-mode-state.py" || {
+git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py" \
+  > "$TEMP_DIR/qualify-rustfs-transition.py" || fail 'cannot stage the reviewed transition report validator'
+chmod 600 "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/blob-mode-state.py" \
+  "$TEMP_DIR/qualify-rustfs-transition.py" || {
   fail 'cannot protect the staged blob authority validators'
 }
 

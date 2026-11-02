@@ -50,7 +50,8 @@ set -euo pipefail
 }
 case "$4" in
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py")
+  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
+  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py")
     printf '# fixture helper\n'
     ;;
   *) echo "unexpected fixture git show: $4" >&2; exit 99 ;;
@@ -61,6 +62,11 @@ cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == */blob-transition-runner.py ]] || { echo 'unexpected fixture helper' >&2; exit 99; }
+helper_dir=$(dirname "$1")
+[[ -f "$helper_dir/blob-mode-state.py" && -f "$helper_dir/qualify-rustfs-transition.py" ]] || {
+  echo 'reviewed blob state dependencies were not staged together' >&2
+  exit 99
+}
 shift
 [[ "$1" == deployment-env && "$2" == --checkout && "$3" == "$FIXTURE_REPO" &&
    "$4" == --state-dir && "$5" == "$FIXTURE_REPO/.state/blob-mode" &&
@@ -206,6 +212,32 @@ output=$(run_operation)
 [[ "$(cat "$MOCK_EVENTS")" == $'sleep:5\nreadiness:postgres' ]]
 printf '%s\n' 'PASS repeated recovery is idempotent for running containers'
 
+setup_case wrong-teagramd-project
+MOCK_TEAGRAMD_PROJECT=other
+export MOCK_TEAGRAMD_PROJECT
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'teagramd container is not in the teagram Compose project'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects teagramd from a different Compose project before starting services'
+
+setup_case paused-teagramd
+printf 'paused\n' > "$MOCK_TEAGRAMD_STATE_FILE"
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'existing teagram-teagramd-1 container state is not restartable'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects a paused teagramd container before starting services'
+
+setup_case mismatched-teagramd
+MOCK_TEAGRAMD_FILES="$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.local-blobs.yml"
+export MOCK_TEAGRAMD_FILES
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'live Compose selection is not the reviewed teagram S3 stack'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects teagramd from a different Compose selection before starting services'
+
 setup_case unapproved-compose
 MOCK_COMPOSE_FILES="$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml,$FIXTURE_REPO/docker-compose.local-blobs.yml"
 export MOCK_COMPOSE_FILES
@@ -233,6 +265,15 @@ output=$(run_operation)
 [[ "$output" == *'live S3 environment selection includes an unapproved credential path'* ]]
 assert_no_event '^start:'
 printf '%s\n' 'PASS rejects an unapproved parked credential path before starting services'
+
+setup_case rejected-authority
+FIXTURE_AUTHORITY_JSON=$(jq -cn '{outcome:"transition-rejected",env_files:[]}')
+export FIXTURE_AUTHORITY_JSON
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'live S3 environment selection is invalid'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects a non-accepted S3 authority result before starting services'
 
 setup_case postgres-not-ready
 MOCK_PG_READY=0
