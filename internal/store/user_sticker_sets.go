@@ -160,9 +160,9 @@ func (s *Store) readStickerFileForSet(ctx context.Context, file File) ([]byte, e
 }
 
 // CreateUserStickerSet accepts only fingerprints produced by this store's
-// validation reads, then locks the owner row, takedown interlock, and file
-// references in ascending order before revalidating files and publishing the
-// set. Callers cannot supply their own content hashes.
+// validation reads, then locks the owner row, shared creation interlock, and
+// file references in ascending order before revalidating files and publishing
+// the set. Callers cannot supply their own content hashes.
 func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, items []UserStickerSetItem, fingerprints []StickerFileFingerprint) (UserStickerSet, error) {
 	maxItems := MaxUserStickerCount
 	if set.Kind == "emojis" {
@@ -214,8 +214,8 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 	} else if err != nil {
 		return UserStickerSet{}, fmt.Errorf("lock sticker set owner: %w", err)
 	}
-	if err = qtx.LockStickerTakedownInterlock(ctx); err != nil {
-		return UserStickerSet{}, fmt.Errorf("lock sticker takedown interlock: %w", err)
+	if err = qtx.LockStickerSetCreateInterlock(ctx); err != nil {
+		return UserStickerSet{}, fmt.Errorf("lock sticker-set creation interlock: %w", err)
 	}
 	count, err := qtx.UserCreatedStickerSetCount(ctx, set.CreatorID)
 	if err != nil {

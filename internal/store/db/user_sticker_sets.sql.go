@@ -377,15 +377,26 @@ func (q *Queries) LockLiveUserStickerSet(ctx context.Context, id int64) (int64, 
 	return id_2, err
 }
 
-const lockStickerTakedownInterlock = `-- name: LockStickerTakedownInterlock :exec
-SELECT pg_advisory_xact_lock(1145132116, 237731251)
+const lockStickerSetCreateInterlock = `-- name: LockStickerSetCreateInterlock :exec
+SELECT pg_advisory_xact_lock_shared(1145132116, 237731251)
 `
 
 // Lock order for sticker-set writes is owner users FOR UPDATE, this interlock,
 // set-row locks, then file-reference locks in ascending file ID order. A path
 // may omit a class but must not acquire an earlier class after a later one.
-// Fingerprinting is done before opening the transaction; this lock serializes
-// the final blocked-content check with takedown hash publication.
+// Fingerprinting is done before opening the transaction; the shared/exclusive
+// modes serialize the final blocked-content check with takedown hash publication.
+// Create transactions share this gate. Takedown and restore use the exclusive
+// lock below, so they wait for in-flight creations before publishing state.
+func (q *Queries) LockStickerSetCreateInterlock(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockStickerSetCreateInterlock)
+	return err
+}
+
+const lockStickerTakedownInterlock = `-- name: LockStickerTakedownInterlock :exec
+SELECT pg_advisory_xact_lock(1145132116, 237731251)
+`
+
 func (q *Queries) LockStickerTakedownInterlock(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, lockStickerTakedownInterlock)
 	return err

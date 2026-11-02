@@ -304,7 +304,7 @@ func TestStickerSetTakedownRevalidatesAfterBlobRead(t *testing.T) {
 	}
 }
 
-func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *testing.T) {
+func TestStickerSetCreatesShareInterlockWhileTakedownWaitsAndBlocksLaterDuplicate(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
@@ -314,6 +314,7 @@ func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *test
 	s := openStickerSetReadGateStore(t, blobs, dsn)
 	owner := mustUser(t, s, "+15559310021")
 	creatingOwner := mustUser(t, s, "+15559310022")
+	secondCreatingOwner := mustUser(t, s, "+15559310023")
 	setData := []byte("hello world")
 	setFile := stickerSetFileWithBytes(t, s, owner, setData)
 	set, err := createOneFileStickerSet(ctx, s, owner, setFile, "Original", "original_set", setData)
@@ -322,6 +323,8 @@ func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *test
 	}
 	creatingFile := stickerSetFileWithBytes(t, s, creatingOwner, setData)
 	laterFile := stickerSetFileWithBytes(t, s, creatingOwner, setData)
+	secondCreateData := []byte("other value")
+	secondCreatingFile := stickerSetFileWithBytes(t, s, secondCreatingOwner, secondCreateData)
 
 	const gateKey1 int32 = 1145132188
 	const gateKey2 int32 = 237731252
@@ -366,13 +369,33 @@ func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *test
 		t.Fatalf("hold sticker-set create gate: %v", err)
 	}
 
-	createDone := make(chan error, 1)
+	createDone := make(chan error, 2)
 	go func() {
 		_, createErr := createOneFileStickerSet(ctx, s, creatingOwner, creatingFile, "Concurrent", "concurrent_same", setData)
 		createDone <- createErr
 	}()
 	if err := waitForStickerSetCreateGate(ctx, control); err != nil {
 		t.Fatal(err)
+	}
+	go func() {
+		_, createErr := createOneFileStickerSet(ctx, s, secondCreatingOwner, secondCreatingFile, "Also concurrent", "also_concurrent", secondCreateData)
+		createDone <- createErr
+	}()
+	if err := waitForStickerSetCreateGateWaiters(ctx, control, 2, 5*time.Second); err != nil {
+		if commitErr := gateTx.Commit(ctx); commitErr != nil {
+			t.Fatalf("release sticker-set create gate after failed concurrency check: %v (wait: %v)", commitErr, err)
+		}
+		for range 2 {
+			select {
+			case createErr := <-createDone:
+				if createErr != nil {
+					t.Errorf("sticker-set create after releasing test gate: %v", createErr)
+				}
+			case <-ctx.Done():
+				t.Fatalf("sticker-set creates did not drain after releasing test gate: %v (wait: %v)", ctx.Err(), err)
+			}
+		}
+		t.Fatalf("sticker-set creates did not overlap under the takedown interlock: %v", err)
 	}
 
 	ref := stickerSetAdminRefByID(t, set.ID)
@@ -387,13 +410,15 @@ func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *test
 	if err := gateTx.Commit(ctx); err != nil {
 		t.Fatalf("release sticker-set create gate: %v", err)
 	}
-	select {
-	case createErr := <-createDone:
-		if createErr != nil {
-			t.Fatalf("finish in-flight create: %v", createErr)
+	for range 2 {
+		select {
+		case createErr := <-createDone:
+			if createErr != nil {
+				t.Fatalf("finish in-flight create: %v", createErr)
+			}
+		case <-ctx.Done():
+			t.Fatalf("in-flight creates did not finish: %v", ctx.Err())
 		}
-	case <-ctx.Done():
-		t.Fatalf("in-flight create did not finish: %v", ctx.Err())
 	}
 	select {
 	case takedownErr := <-takedownDone:
@@ -410,29 +435,39 @@ func TestStickerSetTakedownWaitsForInFlightCreateAndBlocksLaterDuplicate(t *test
 }
 
 func waitForStickerSetCreateGate(ctx context.Context, conn *pgx.Conn) error {
+	return waitForStickerSetCreateGateWaiters(ctx, conn, 1, 0)
+}
+
+func waitForStickerSetCreateGateWaiters(ctx context.Context, conn *pgx.Conn, want int64, timeout time.Duration) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+	var timeoutC <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutC = timer.C
+	}
 	for {
-		var waiting bool
+		var waiters int64
 		err := conn.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM pg_locks
-				WHERE locktype = 'advisory'
-				  AND classid = 1145132188::oid
-				  AND objid = 237731252::oid
-				  AND objsubid = 2
-				  AND NOT granted
-			)
-		`).Scan(&waiting)
+			SELECT count(*) FROM pg_locks
+			WHERE locktype = 'advisory'
+			  AND classid = 1145132188::oid
+			  AND objid = 237731252::oid
+			  AND objsubid = 2
+			  AND NOT granted
+		`).Scan(&waiters)
 		if err != nil {
-			return fmt.Errorf("observe create gate waiter: %w", err)
+			return fmt.Errorf("observe create gate waiters: %w", err)
 		}
-		if waiting {
+		if waiters >= want {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("create did not reach gate: %w", ctx.Err())
+			return fmt.Errorf("wanted %d sticker-set create gate waiters, saw %d: %w", want, waiters, ctx.Err())
+		case <-timeoutC:
+			return fmt.Errorf("wanted %d sticker-set create gate waiters, saw %d after %s", want, waiters, timeout)
 		case <-ticker.C:
 		}
 	}
