@@ -699,6 +699,46 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay get-sticker-set fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "messages_getOldFeaturedStickers.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetOldFeaturedStickers(ctx, &tg.MessagesGetOldFeaturedStickersRequest{Offset: 0, Limit: 100, Hash: 0})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesFeaturedStickers)
+		if !ok || full == nil || full.Count < 1 {
+			return fmt.Errorf("getOldFeaturedStickers = %T, want featured catalogue sets", result)
+		}
+		for _, item := range full.Sets {
+			covered, ok := item.(*tg.StickerSetCovered)
+			if ok && covered.Set.ShortName == stickerSetShortName {
+				return nil
+			}
+		}
+		return fmt.Errorf("getOldFeaturedStickers omitted %q", stickerSetShortName)
+	}); err != nil {
+		t.Fatalf("replay get-old-featured-stickers fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_searchStickerSets.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSearchStickerSets(ctx, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: 0})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok || full == nil || len(full.Sets) != 1 {
+			count := 0
+			if full != nil {
+				count = len(full.Sets)
+			}
+			return fmt.Errorf("searchStickerSets = %T with %d sets, want Twemoji catalogue match", result, count)
+		}
+		covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+		if !ok || covered.Set.ShortName != stickerSetShortName {
+			return fmt.Errorf("searchStickerSets result = %T, want %q", full.Sets[0], stickerSetShortName)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay search-sticker-sets fixture: %v", err)
+	}
 	stickerSetIDRef := &tg.InputStickerSetID{ID: stickerSet.ID, AccessHash: stickerSet.AccessHash}
 	if err := fixtureClientCall(t, creator, "messages_getStickerSet.2", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: stickerSetIDRef})

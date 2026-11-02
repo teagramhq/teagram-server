@@ -50,7 +50,7 @@ func TestTurnstileVerifierPostsFormAndChecksActionAndHostname(t *testing.T) {
 	}))
 	defer server.Close()
 
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 	if err := verifier.Verify(context.Background(), "token&part=one", "signup", "203.0.113.7"); err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -74,7 +74,7 @@ func TestTurnstileVerifierRejectsActionMismatch(t *testing.T) {
 		writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"web.teagram.io"}`)
 	}))
 	defer server.Close()
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 	if err := verifier.Verify(context.Background(), "signin-token", "signin", ""); !errors.Is(err, errTurnstileRejected) {
 		t.Fatalf("Verify mismatched action error = %v, want rejected", err)
@@ -104,9 +104,9 @@ func TestTurnstileVerifiersRejectTokensFromOtherServerKeys(t *testing.T) {
 	}))
 	defer server.Close()
 
-	publicVerifier := newTurnstileVerifier(publicSecret)
+	publicVerifier := newTurnstileVerifierWithConfig(publicSecret, []string{turnstileHostname}, "", nil)
 	publicVerifier.endpoint = server.URL
-	demoVerifier := newTurnstileVerifier(demoSecret)
+	demoVerifier := newTurnstileVerifierWithConfig(demoSecret, []string{turnstileHostname}, "", nil)
 	demoVerifier.endpoint = server.URL
 	for _, tc := range []struct {
 		name     string
@@ -155,7 +155,7 @@ func TestTurnstileVerifierFailsClosedForInvalidSiteverifyResponses(t *testing.T)
 			}))
 			defer server.Close()
 
-			verifier := newTurnstileVerifier("private-secret")
+			verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 			verifier.endpoint = server.URL
 			if err := verifier.Verify(context.Background(), "token", "signup", ""); err == nil {
 				t.Fatal("Verify accepted an invalid Siteverify response")
@@ -182,7 +182,7 @@ func TestTurnstileVerifierDoesNotSendRemoteIPWhenUnavailable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 	if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -200,7 +200,7 @@ func TestTurnstileVerifierRejectsTokenBoundsBeforeNetwork(t *testing.T) {
 		writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"web.teagram.io"}`)
 	}))
 	defer server.Close()
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 
 	for _, token := range []string{"", strings.Repeat("x", turnstileMaxTokenBytes+1)} {
@@ -224,7 +224,7 @@ func TestTurnstileVerifierHonorsCallerDeadline(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}))
 	defer server.Close()
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -248,7 +248,7 @@ func TestTurnstileVerifierBoundsConcurrentSiteverifyCalls(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
 	verifier.semaphore = make(chan struct{}, 1)
 
@@ -283,7 +283,7 @@ func TestTurnstileVerifierRefusesRedirectsWithoutForwardingCredentials(t *testin
 	}))
 	defer origin.Close()
 
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = origin.URL
 	if err := verifier.Verify(context.Background(), "token", "signup", ""); err == nil {
 		t.Fatal("Verify accepted a redirect response")
@@ -294,13 +294,12 @@ func TestTurnstileVerifierRefusesRedirectsWithoutForwardingCredentials(t *testin
 }
 
 func TestTurnstileVerifierUsesConfiguredHostnameAllowlist(t *testing.T) {
-	t.Setenv("TG_TURNSTILE_HOSTNAMES", "LOCALHOST, qa.stack.test.")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"QA.STACK.TEST."}`)
 	}))
 	defer server.Close()
 
-	verifier := newTurnstileVerifier("private-secret")
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"LOCALHOST", " qa.stack.test."}, "", nil)
 	verifier.endpoint = server.URL
 	if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
 		t.Fatalf("Verify with configured hostname: %v", err)
@@ -310,13 +309,12 @@ func TestTurnstileVerifierUsesConfiguredHostnameAllowlist(t *testing.T) {
 func TestTurnstileVerifierAcceptsDemoAndWebHostnames(t *testing.T) {
 	for _, hostname := range []string{"web.teagram.io", "demo.teagram.io"} {
 		t.Run(hostname, func(t *testing.T) {
-			t.Setenv("TG_TURNSTILE_HOSTNAMES", "web.teagram.io,demo.teagram.io")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"`+hostname+`"}`)
 			}))
 			defer server.Close()
 
-			verifier := newTurnstileVerifier("private-secret")
+			verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io", "demo.teagram.io"}, "", nil)
 			verifier.endpoint = server.URL
 			if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
 				t.Fatalf("Verify with configured hostname %q: %v", hostname, err)
