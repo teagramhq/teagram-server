@@ -27,12 +27,12 @@ trap cleanup EXIT
 # Fixture values are fake. Every one must stay out of the script's output.
 pg_password='tgtest-postgres-pw-91c2'
 tunnel_token='tgtest-cloudflared-token-55'
-rustfs_access_key='1a2b3c4d5e6f70819a2b'
+rustfs_access_key=$(printf 'rustfs-access-tgtest' | sha256sum | cut -c1-20)
 rustfs_secret_key="$(printf 'e1%.0s' {1..32})"
 blob_access_key_id='2b3c4d5e6f708192a3b4'
 blob_secret_key="$(printf 'c3%.0s' {1..32})"
 media_key='tgtest-media-key-body-1'
-ghcr_auth='dGd0ZXN0OmdoY3ItcmVhZC10b2tlbg=='
+ghcr_auth=$(printf 'tgtest:ghcr-read' | base64 -w0)
 deployer_token='tgtest-deployer-token-7f3a9c'
 dsn="postgres://postgres:${pg_password}@postgres:5432/teagram?sslmode=disable"
 
