@@ -104,14 +104,30 @@ export GITHUB_OUTPUT="$test_tmp/cancel-output"
 export CANCEL_LOG="$test_tmp/sweep-cancels"
 gh() {
   if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/202" ]]; then
-    [[ "$3" == --jq && "$4" == '.status' ]] || return 2
-    [[ "${SWEEP_MODE:-success}" == cancel-error ]] || return 2
-    printf 'in_progress\n'
+    [[ "$3" == --jq && "${SWEEP_MODE:-success}" == cancel-error ]] || return 2
+    case "$4" in
+      '.status') printf 'in_progress\n' ;;
+      '[.status, (.conclusion // "")] | @tsv') printf 'in_progress\t\n' ;;
+      *) return 2 ;;
+    esac
     return 0
   fi
   if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/404" ]]; then
-    [[ "$3" == --jq && "$4" == '.status' && "${SWEEP_MODE:-success}" == terminal-race ]] || return 2
-    printf 'completed\n'
+    [[ "$3" == --jq && "${SWEEP_MODE:-success}" == terminal-race ]] || return 2
+    case "$4" in
+      '.status') printf 'completed\n' ;;
+      '[.status, (.conclusion // "")] | @tsv') printf 'completed\tsuccess\n' ;;
+      *) return 2 ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/405" ]]; then
+    [[ "$3" == --jq && "${SWEEP_MODE:-success}" == raced-cancel ]] || return 2
+    case "$4" in
+      '.status') printf 'completed\n' ;;
+      '[.status, (.conclusion // "")] | @tsv') printf 'completed\tcancelled\n' ;;
+      *) return 2 ;;
+    esac
     return 0
   fi
   if [[ "$1" == api && "$2" == --paginate ]]; then
@@ -122,6 +138,13 @@ gh() {
     if [[ "${SWEEP_MODE:-success}" == terminal-race ]]; then
       case "$path" in
         *'/ci.yml/runs?event=pull_request&status=queued&per_page=100') printf '404\t2026-10-28T00:00:00Z\n' ;;
+        *) return 0 ;;
+      esac
+      return 0
+    fi
+    if [[ "${SWEEP_MODE:-success}" == raced-cancel ]]; then
+      case "$path" in
+        *'/ci.yml/runs?event=pull_request&status=queued&per_page=100') printf '405\t2026-10-28T00:00:00Z\n' ;;
         *) return 0 ;;
       esac
       return 0
@@ -144,7 +167,7 @@ gh() {
     if [[ "${SWEEP_MODE:-success}" == cancel-error && "$3" != 101 ]]; then
       return 2
     fi
-    if [[ "${SWEEP_MODE:-success}" == terminal-race ]]; then
+    if [[ "${SWEEP_MODE:-success}" == terminal-race || "${SWEEP_MODE:-success}" == raced-cancel ]]; then
       return 2
     fi
     return 0
@@ -170,5 +193,11 @@ SWEEP_MODE=terminal-race GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp
 [[ "$(<"$test_tmp/terminal-race-cancels")" == 404 ]] || fail 'the terminal-race test must exercise the cancel conflict'
 [[ "$(<"$test_tmp/terminal-race-output")" == 'cancelled_pr_run_targets=' ]] || fail 'a run that completed before cancellation must not be queued for recovery'
 [[ "$(<"$test_tmp/terminal-race-log")" == *'completed before it could be cancelled'* ]] || fail 'the terminal cancel race must be reported as benign'
+
+SWEEP_MODE=raced-cancel GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/raced-cancel-output" CANCEL_LOG="$test_tmp/raced-cancel-cancels" \
+  bash "$cancel_script" > "$test_tmp/raced-cancel-log" || fail 'the priority sweep must retain a run cancelled by another priority event'
+[[ "$(<"$test_tmp/raced-cancel-cancels")" == 405 ]] || fail 'the cancelled-race test must exercise the cancel conflict'
+[[ "$(<"$test_tmp/raced-cancel-output")" == 'cancelled_pr_run_targets=ci.yml:405:2026-10-28T00:00:00Z' ]] || fail 'a run cancelled by another priority event must be persisted for recovery'
+[[ "$(<"$test_tmp/raced-cancel-log")" == *'was already cancelled; including it for recovery'* ]] || fail 'the cancelled race must explain that the run was added to recovery'
 
 printf 'PR main-CI gate and cancellation tests pass\n'

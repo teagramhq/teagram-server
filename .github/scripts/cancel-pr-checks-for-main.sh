@@ -38,11 +38,19 @@ for workflow_file in "${workflow_files[@]}"; do
       if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
         cancelled_pr_run_targets+="${workflow_file}:${run_id}:${run_created_at} "
       else
-        if ! run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status' 2>/dev/null)"; then
-          echo "::error::Could not cancel pull request run ${run_id} in ${workflow_file} or confirm its status; main CI priority cannot be enforced."
+        if ! run_status_and_conclusion="$(gh api \
+          "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+          --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
+          echo "::error::Could not cancel pull request run ${run_id} in ${workflow_file} or confirm its status and conclusion; main CI priority cannot be enforced."
           exit 1
         fi
+        IFS=$'\t' read -r run_status run_conclusion <<< "$run_status_and_conclusion"
         if [[ "$run_status" == completed ]]; then
+          if [[ "$run_conclusion" == cancelled ]]; then
+            cancelled_pr_run_targets+="${workflow_file}:${run_id}:${run_created_at} "
+            echo "::notice::Pull request run ${run_id} in ${workflow_file} was already cancelled; including it for recovery."
+            continue
+          fi
           echo "::notice::Pull request run ${run_id} in ${workflow_file} completed before it could be cancelled."
           continue
         fi
