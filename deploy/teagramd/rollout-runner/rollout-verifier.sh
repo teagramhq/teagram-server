@@ -247,13 +247,18 @@ verify_turnstile_compose_configuration() {
     | (.secrets // {}) as $secrets
     | ($secrets.teagramd_turnstile.file // "") as $file_source
     | (
-        ($env | has("TG_TURNSTILE_SITE_KEY")) or
-        ($env | has("TG_TURNSTILE_SECRET_KEY_FILE")) or
-        ($env | has("TG_TURNSTILE_SIGNIN_ENABLED")) or
-        any($service_secrets[]?; .source == "teagramd_turnstile") or
-        ($secrets | has("teagramd_turnstile"))
-      ) as $configured
-    | if ($configured | not) then true else
+        (($env | has("TG_TURNSTILE_TEST_MODE") | not) or $env.TG_TURNSTILE_TEST_MODE == "false") and
+        (($env | has("TG_TURNSTILE_HOSTNAMES") | not) or $env.TG_TURNSTILE_HOSTNAMES == "web.teagram.io") and
+        (($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE") | not) or $env.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "")
+      ) and (
+        (
+          ($env | has("TG_TURNSTILE_SITE_KEY")) or
+          ($env | has("TG_TURNSTILE_SECRET_KEY_FILE")) or
+          ($env | has("TG_TURNSTILE_SIGNIN_ENABLED")) or
+          any($service_secrets[]?; .source == "teagramd_turnstile") or
+          ($secrets | has("teagramd_turnstile"))
+        ) as $configured
+        | if ($configured | not) then true else
         ($env.TG_TURNSTILE_SITE_KEY | type == "string") and
         ($env.TG_TURNSTILE_SECRET_KEY_FILE | type == "string") and
         ($env.TG_TURNSTILE_SIGNIN_ENABLED | IN("false", "true")) and
@@ -281,7 +286,8 @@ verify_turnstile_compose_configuration() {
           end
         ) and
         ($env.TG_TURNSTILE_SIGNIN_ENABLED != "true" or $env.TG_TURNSTILE_SITE_KEY != "")
-      end
+        end
+      )
   ' >/dev/null; then
     printf '%s\n' 'resolved Compose Turnstile mapping is incomplete or unsafe' >&2
     return 1
@@ -304,6 +310,36 @@ verify_turnstile_compose_configuration() {
 
 verify_turnstile_container_configuration() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3 added_env_names=$4 changed_env_names=$5
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" '
+    def item: if type == "array" then .[0] else . end;
+    def safe_default($name):
+      if $name == "TG_TURNSTILE_TEST_MODE" then "false"
+      elif $name == "TG_TURNSTILE_HOSTNAMES" then "web.teagram.io"
+      else "" end;
+    def values($env; $name):
+      [$env[] | select(type == "string" and startswith($name + "=")) | .[($name | length) + 1:]];
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $compose_env
+    | ($inspect | item | .Config.Env // []) as $container_env
+    | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
+        all(["TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE"][];
+          . as $name
+          | values($container_env; $name) as $container_values
+          | if ($compose_env | has($name)) then
+              $compose_env[$name] == safe_default($name) and
+              ($container_values == [$compose_env[$name]] or
+               (($snapshot_name == "preflight" or $snapshot_name == "initial-local-target-render") and
+                ($container_values | length) == 0))
+            else
+              ($container_values | length) == 0
+            end
+        )
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'container Turnstile runtime settings do not match the production Compose policy' >&2
+    return 1
+  fi
   if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" \
     --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
@@ -1107,6 +1143,10 @@ snapshot_from_json() {
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
              . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
           )))
+        | map(select(type != "string" or (
+            ((split("="))[0]) as $key
+            | ($key | IN("TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES", "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE") | not)
+          )))
         | sort
       end
   ')
@@ -1228,7 +1268,8 @@ snapshot_from_json() {
           .TG_LOG_LOGIN_CODES,
           .TG_MEDIA_KEY_DIR, .TG_MEDIA_KEY_CURRENT,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
-          .TG_TURNSTILE_SIGNIN_ENABLED)
+          .TG_TURNSTILE_SIGNIN_ENABLED, .TG_TURNSTILE_TEST_MODE,
+          .TG_TURNSTILE_HOSTNAMES, .TG_TURNSTILE_QA_BYPASS_TOKEN_FILE)
       end
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
