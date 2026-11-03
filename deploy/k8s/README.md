@@ -9,6 +9,9 @@ without a tunnel credential. `bootstrap/` contains a separate, explicitly
 applied first-install Job for the server RSA identity; it is not included in
 the production workload overlay.
 
+Read the [Kubernetes server-identity threat model](identity-threat-model.md)
+before bootstrapping, backing up, restoring, or replacing that identity.
+
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
 immutable completed Job. The teagramd init container waits until Atlas reports
