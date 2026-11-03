@@ -46,13 +46,17 @@ func TestPartPrefixHasOneBoundedWriter(t *testing.T) {
 	// both map to encrypted/<key>, outside the root parts/ orphan scope. Key
 	// rotation writes the caller's key; for a part key it buffers the
 	// replacement only after checking the envelope's bounded plaintext length.
+	// migrate.go writes entry.Key twice: the plaintext copy, which lands under
+	// the parts/ scope for part keys, and the encrypted copy, which goes through
+	// the encrypted/ prefix store. Both read part keys through migrationReader,
+	// which buffers them only after the MaxPartBytes check.
 	want := map[string][]string{
 		"internal/api/media.go":             {"blob.Key(file.ID)", "key"},
 		"internal/blob/envelope.go":         {"key"},
 		"internal/blob/prefix.go":           {"physical"},
 		"internal/blob/rotation.go":         {"plan.key"},
 		"internal/blobmigration/encrypt.go": {"ref.Key"},
-		"internal/blobmigration/migrate.go": {"entry.Key"},
+		"internal/blobmigration/migrate.go": {"entry.Key", "entry.Key"},
 		"internal/store/uploads.go":         {"key"},
 	}
 

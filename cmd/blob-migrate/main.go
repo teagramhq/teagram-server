@@ -126,11 +126,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 			if cfg.MediaKeys == nil {
 				return errors.New("encrypted local-to-S3 migration requires TG_MEDIA_KEY_DIR and a current media key")
 			}
-			encrypted, err := blob.NewEncrypted(remote, cfg.MediaKeys, blob.DefaultChunkSize)
+			encrypted, encryptedTree, err := encryptedDestination(remote, cfg.MediaKeys)
 			if err != nil {
-				return fmt.Errorf("construct encrypted S3 destination: %w", err)
+				return err
 			}
-			summary, err := blobmigration.MigrateEncryptedWithManifest(ctx, local, encrypted, remote, io.Discard, manifestWriter)
+			summary, err := blobmigration.MigrateEncryptedWithManifest(ctx, local, encrypted, encryptedTree, io.Discard, manifestWriter)
 			if err != nil {
 				return err
 			}
@@ -177,4 +177,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// encryptedDestination returns the encrypted writer for S3 objects and the tree
+// it verifies against. Writes go to the encrypted namespace the serving store
+// reads, so an envelope never replaces the accepted plaintext object at the
+// same logical key.
+func encryptedDestination(remote blob.Store, keys *blob.KeyRing) (*blob.Encrypted, *blob.PrefixedStore, error) {
+	prefixed, err := blob.NewPrefixedStore(remote, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		return nil, nil, fmt.Errorf("construct encrypted object namespace: %w", err)
+	}
+	encrypted, err := blob.NewEncrypted(prefixed, keys, blob.DefaultChunkSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("construct encrypted S3 destination: %w", err)
+	}
+	return encrypted, prefixed, nil
 }

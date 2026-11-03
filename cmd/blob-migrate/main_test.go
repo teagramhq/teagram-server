@@ -2,10 +2,62 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/teagramhq/teagram-server/internal/blob"
 )
+
+func TestEncryptedDestinationWritesUnderEncryptedNamespace(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	remote, err := blob.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("open remote store: %v", err)
+	}
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{1}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("create key ring: %v", err)
+	}
+	encrypted, tree, err := encryptedDestination(remote, ring)
+	if err != nil {
+		t.Fatalf("construct encrypted destination: %v", err)
+	}
+	key, err := blob.NewPartKey()
+	if err != nil {
+		t.Fatalf("create part key: %v", err)
+	}
+	if _, err := encrypted.Put(context.Background(), key, strings.NewReader("payload")); err != nil {
+		t.Fatalf("write encrypted object: %v", err)
+	}
+
+	// An envelope at the plaintext key would replace the accepted object the
+	// serving store does not read.
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(key))); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("encrypted write landed at plaintext key %q: stat err = %v", key, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, blob.EncryptedObjectsPrefix, filepath.FromSlash(key))); err != nil {
+		t.Fatalf("encrypted write missing from encrypted namespace: %v", err)
+	}
+	var walked []string
+	if err := tree.Walk(context.Background(), func(entry blob.Entry) error {
+		if entry.Regular && !entry.Dir {
+			walked = append(walked, entry.Key)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk encrypted namespace: %v", err)
+	}
+	if len(walked) != 1 || walked[0] != key {
+		t.Fatalf("encrypted namespace walk = %v, want [%q]", walked, key)
+	}
+}
 
 func TestHasPrivateManifestOutput(t *testing.T) {
 	t.Parallel()

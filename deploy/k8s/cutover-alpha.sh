@@ -341,6 +341,7 @@ kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
   sh -ec 'install -d -m 0700 /var/lib/postgresql/cutover-backups' >/dev/null
 incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
   pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram |
+  # shellcheck disable=SC2016 # The inner sh expands $1 from its argument list.
   kubectl exec --namespace "$NAMESPACE" --stdin postgres-0 -c postgres -- \
     sh -ec 'umask 077; cat > "$1"' -- "$dump_path"
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
@@ -360,6 +361,7 @@ target_used_bytes=$(kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres
   fail 'the PostgreSQL dump leaves insufficient headroom to restore the source database'
 (( target_used_bytes + source_database_bytes + MIN_STORAGE_RESERVE_BYTES <= POSTGRES_PVC_BYTES )) ||
   fail 'the PostgreSQL dump and restored database exceed the 8 GiB target PVC budget'
+# shellcheck disable=SC2016 # The inner sh expands $POSTGRES_PASSWORD and $1 in the pod.
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
   sh -ec 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore --clean --if-exists --no-owner --no-acl --exit-on-error --username=postgres --dbname=teagram "$1"' \
   -- "$dump_path"
@@ -426,6 +428,7 @@ kubectl rollout status statefulset/teagramd --namespace "$NAMESPACE" --timeout=9
 kubectl rollout status deployment/linklanding --namespace "$NAMESPACE" --timeout=300s >/dev/null
 kubectl rollout status deployment/linkselector --namespace "$NAMESPACE" --timeout=300s >/dev/null
 
+# shellcheck disable=SC2016 # The awk program runs in the target LXC's shell.
 linkselector_ip=$(incus exec "$TARGET_INSTANCE" -- sh -ec \
   'ip -o -4 addr show dev eth0 scope global | awk "NR == 1 {split(\$4, a, \"/\"); print a[1]}"')
 [[ $linkselector_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail 'could not identify the private teagram-k3s LXC address'
