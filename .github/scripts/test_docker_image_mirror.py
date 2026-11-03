@@ -116,11 +116,8 @@ class DockerImageMirrorTests(unittest.TestCase):
         job = photo_job.group(1)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
+            r"(?m)^    needs:\n      - check-sticker-license$",
         )
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
-        self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("actions: read", job)
         self.assertIn("path: build/sticker-bundle", job)
@@ -190,11 +187,8 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
+            r"(?m)^    needs:\n      - check-sticker-license$",
         )
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
-        self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
