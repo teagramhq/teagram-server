@@ -252,9 +252,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertNotIn("ops-prioritize-main", body)
 
-        # The publisher is main-push-only. The demo pin is advisory and must
-        # not gate the production CI aggregate. MAIN-2918 is deleting the
-        # other three lanes.
+        # The demo publisher and demo pin are advisory. K8s image publication
+        # gates production because the prod overlay pins those images.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
@@ -341,7 +340,11 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
         expected_guard = " || ".join(
-            f'"${result_envs[lane]}" != "success"'
+            (
+                f'"${result_envs[lane]}" != "$expected_publish_result"'
+                if lane == "publish-k8s-images"
+                else f'"${result_envs[lane]}" != "success"'
+            )
             for lane in needed_lanes
         )
         self.assertEqual(
@@ -359,6 +362,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
                 env_name: "success" for env_name in result_envs.values()
             }
         )
+        environment.update(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REPOSITORY": "teagramhq/teagram-server",
+                "PULL_REQUEST_HEAD_REPO": "teagramhq/teagram-server",
+            }
+        )
         success = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
@@ -367,6 +377,89 @@ class RealServerFixtureGateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        workflow_triggers = re.search(r"(?ms)^on:\n(?P<body>.*?)^permissions:", workflow)
+        self.assertIsNotNone(workflow_triggers, "CI workflow has no event triggers")
+        self.assertRegex(
+            workflow_triggers.group("body"),
+            r"(?m)^  merge_group:\n    types: \[checks_requested\]$",
+        )
+        merge_group_environment = environment.copy()
+        merge_group_environment.update(
+            {
+                "GITHUB_EVENT_NAME": "merge_group",
+                "PULL_REQUEST_HEAD_REPO": "",
+                result_envs["publish-k8s-images"]: "skipped",
+            }
+        )
+        merge_group_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertEqual(
+            merge_group_success.returncode,
+            0,
+            merge_group_success.stdout + merge_group_success.stderr,
+        )
+        merge_group_publisher_ran = merge_group_environment.copy()
+        merge_group_publisher_ran[result_envs["publish-k8s-images"]] = "success"
+        merge_group_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_publisher_ran,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_publisher.returncode,
+            0,
+            "merge-group aggregate returned success when image publication ran",
+        )
+        merge_group_environment[result_envs["test-go"]] = "skipped"
+        merge_group_failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_failure.returncode,
+            0,
+            "merge-group aggregate returned success when a required lane was skipped",
+        )
+
+        failed_publisher_environment = environment.copy()
+        failed_publisher_environment[result_envs["publish-k8s-images"]] = "failure"
+        failed_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=failed_publisher_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failed_publisher.returncode,
+            0,
+            "CI aggregate returned success when the image publisher failed: "
+            + failed_publisher.stdout
+            + failed_publisher.stderr,
+        )
+
+        fork_environment = environment.copy()
+        fork_environment["PULL_REQUEST_HEAD_REPO"] = "fork/teagram-server"
+        fork_environment[result_envs["publish-k8s-images"]] = "skipped"
+        fork_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=fork_environment,
+            text=True,
+        )
+        self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
 
         failed_lane = needed_lanes[0]
         environment[result_envs[failed_lane]] = "failure"

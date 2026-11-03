@@ -623,9 +623,7 @@ quota lower. The check is not gated by registration mode, so its occupancy
 signal remains available in closed and invite modes. This is an abuse throttle,
 not a privacy guarantee: targeted probes fit within one window and distributed
 sources multiply the budget. `auth.signUp` remains authoritative if availability
-changes after the check. See the
-[public listener threat model](public-websocket-threat-model.md#authentication-controls)
-for shared-bucket and residual-risk details.
+changes after the check.
 
 ### 5b. New account flow
 
