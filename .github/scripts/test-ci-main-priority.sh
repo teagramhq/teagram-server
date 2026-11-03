@@ -56,6 +56,13 @@ placeholder_if="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "
   fail 'the trusted PR controller must handle only pull requests targeting main'
 [[ "$(priority_query '.on.workflow_run.workflows | join(",")')" == 'CI,RPC performance,Real-client browser flow' && "$(priority_query '.on.workflow_run.types | join(",")')" == 'requested,in_progress,completed' ]] ||
   fail 'the trusted controller must observe PR workflow starts and main CI completion'
+priority_concurrency_group="$(priority_query '.concurrency.group')"
+[[ "$priority_concurrency_group" == *"github.event.workflow_run.pull_requests[0].number && format('pr-{0}'"* && "$priority_concurrency_group" == *"format('run-{0}', github.event.workflow_run.id)"* ]] ||
+  fail 'fork workflow_run events without PR metadata must use their triggering run ID for concurrency'
+fork_run_a_group='pr-ci-priority-run-81001'
+fork_run_b_group='pr-ci-priority-run-81002'
+[[ "$fork_run_a_group" != "$fork_run_b_group" ]] ||
+  fail 'concurrent fork workflow_run events must not replace one another in the same concurrency group'
 [[ "$(priority_query '.jobs."ops-cancel-pr-checks".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,statuses=write' ]] ||
   fail 'only the base-defined cancellation controller may get Actions and status write'
 priority_checkout_ref="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')"
