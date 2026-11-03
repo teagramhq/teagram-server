@@ -4959,7 +4959,7 @@ compose_selection=$(awk -F '\t' '{print $1}' "$TMP/bounded-readiness-compose-sel
 if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
    grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout" && \
    [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
-   grep -q $'\tcompose build teagramd' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose build --pull teagramd' "$TMP/bounded-readiness-compose-selections" && \
    grep -q $'\tcompose up -d' "$TMP/bounded-readiness-compose-selections" && \
    grep -q $'\tcompose up -d --no-build --no-deps teagramd' "$TMP/bounded-readiness-compose-selections"; then
   pass 'pinned local Compose render is reused for preflight, build, startup, readiness, and rollback'
