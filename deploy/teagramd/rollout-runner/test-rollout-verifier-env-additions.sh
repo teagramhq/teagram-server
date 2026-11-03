@@ -1529,16 +1529,33 @@ for setting_value in \
   fi
 done
 printf '%s\n' 'PASS unsafe production Turnstile runtime settings are rejected'
-turnstile_mismatched_container=$(jq -c '
-  .Config.Env |= map(if startswith("TG_TURNSTILE_TEST_MODE=") then "TG_TURNSTILE_TEST_MODE=true" else . end)
-' <<< "$turnstile_default_target_inspect")
-if snapshot_from_json "$turnstile_mismatched_container" "$turnstile_default_compose" \
+if snapshot_from_json "$(inspect_json '')" "$turnstile_default_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
   >/dev/null 2>&1; then
-  printf '%s\n' 'FAIL target container with unsafe Turnstile runtime settings was accepted' >&2
+  printf '%s\n' 'FAIL target container missing Compose Turnstile defaults was accepted' >&2
   exit 1
 fi
-printf '%s\n' 'PASS target container Turnstile runtime settings must match production policy'
+printf '%s\n' 'PASS target container must include Compose Turnstile defaults'
+for setting_value in \
+  TG_TURNSTILE_TEST_MODE=true \
+  TG_TURNSTILE_HOSTNAMES=localhost \
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass; do
+  setting=${setting_value%%=*}
+  value=${setting_value#*=}
+  turnstile_mismatched_container=$(jq -c --arg setting "$setting" --arg value "$value" '
+    .Config.Env |= map(
+      if startswith($setting + "=") then ($setting + "=" + $value) else . end
+    )
+  ' <<< "$turnstile_default_target_inspect")
+  if snapshot_from_json "$turnstile_mismatched_container" "$turnstile_default_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>&1; then
+    printf 'FAIL target container with mismatched Turnstile setting was accepted: %s\n' \
+      "$setting" >&2
+    exit 1
+  fi
+  printf 'PASS target container must match the production Turnstile setting: %s\n' "$setting"
+done
 unset INSPECT_LOG_CONFIG
 
 media_key_initial_local_baseline=$(jq -c '
