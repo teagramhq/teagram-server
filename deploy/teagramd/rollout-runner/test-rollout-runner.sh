@@ -430,9 +430,13 @@ if [ "${1:-}" = inspect ]; then
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
   esac
   if [ "$cfg" = postgres ]; then
-    restart_compose="$MOCK_STATE/base-compose.json"
-    [ "$phase" != target ] || restart_compose="$MOCK_STATE/target-compose.json"
-    restart_policy=$(jq -er '.services.postgres.restart // "no"' "$restart_compose")
+    if [ -f "$MOCK_STATE/active-postgres-restart-policy" ]; then
+      restart_policy=$(cat "$MOCK_STATE/active-postgres-restart-policy")
+    else
+      restart_compose="$MOCK_STATE/base-compose.json"
+      [ "$phase" != target ] || restart_compose="$MOCK_STATE/target-compose.json"
+      restart_policy=$(jq -er '.services.postgres.restart // "no"' "$restart_compose")
+    fi
     jq -nc --arg id "$id" --arg image "$image" --arg restart_policy "$restart_policy" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{RestartPolicy:{Name:$restart_policy},PortBindings:{}},Mounts:[{Type:"volume",Name:"fixture_pgdata",Source:"/synthetic/pgdata",Destination:"/var/lib/postgresql/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
   elif [ "$cfg" = migrate ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
@@ -757,11 +761,22 @@ fi
       # Record the render each container starts from, so a later run sees
       # the live container as it was started rather than the new render.
       if [[ " $* " == *' --no-build '* ]]; then
+        if [[ " $* " == *' postgres '* ]] && [[ " $* " != *' teagramd '* ]] && [[ " $* " != *' telegramd '* ]]; then
+          jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/base-compose.json" \
+            > "$MOCK_STATE/active-postgres-restart-policy"
+          exit 0
+        fi
         printf '%s\n' rollback > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/teagramd"
         cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
+        if [[ " $* " == *' postgres '* ]]; then
+          jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/base-compose.json" \
+            > "$MOCK_STATE/active-postgres-restart-policy"
+        fi
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
+        jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/target-compose.json" \
+          > "$MOCK_STATE/active-postgres-restart-policy"
         if [ "${MOCK_SCENARIO:-}" = target-container-unavailable ]; then
           : > "$MOCK_STATE/teagramd"
         else
@@ -4622,6 +4637,31 @@ if [ "$status" != 0 ] && \
 else
   show_fixture_failure restart-policy-with-config-drift "$status"
   fail 'restart-only preflight exception must reject when another Compose field changes'
+fi
+
+prepare_apply_fixture restart-policy-rollback old-target-image
+state=$(cat "$TMP/restart-policy-rollback-state-path")
+jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.postgres.restart="unless-stopped" | .services.teagramd.restart="unless-stopped"' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture restart-policy-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/restart-policy-rollback-root-path")
+events="$TMP/restart-policy-rollback-events"
+if [ "$status" != 0 ] && \
+   grep -q 'reason=target_comparison_rejected' "$root.target/target-failure.txt" && \
+   [ "$(jq -er '.container_restart_policies.postgres' "$root.target/target.snapshot.json")" = unless-stopped ] && \
+   grep -q 'rollback=verified' "$TMP/restart-policy-rollback.stdout" && \
+   [ "$(jq -er '.container_restart_policies.postgres' "$root.rollback/rollback.snapshot.json")" = no ] && \
+   awk '/compose up -d --no-build --no-deps --wait --wait-timeout 2 postgres$/ {postgres=NR} \
+        /compose up -d --no-build --no-deps teagramd$/ {teagramd=NR} \
+        END {exit !(postgres > 0 && teagramd > postgres)}' "$events"; then
+  pass 'target gate rollback recreates postgres with the baseline restart policy before restoring teagramd'
+else
+  show_fixture_failure restart-policy-rollback "$status"
+  fail 'target gate rollback must restore and verify the baseline postgres restart policy'
 fi
 
 make_fixture gate-mutation gate-mutation

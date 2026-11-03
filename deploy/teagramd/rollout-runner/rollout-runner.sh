@@ -2785,6 +2785,10 @@ perform_rollback() {
     fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
+  docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" postgres </dev/null || {
+    fail 'baseline postgres recreation or health check failed'
+    return 1
+  }
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
   restore_removed_public_profile_services || return 1
   local public_profile_readiness_rc=0
