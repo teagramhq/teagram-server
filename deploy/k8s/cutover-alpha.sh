@@ -339,9 +339,9 @@ dump_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 dump_path="$POSTGRES_DUMP_DIR/source-$dump_stamp.dump"
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
   sh -ec 'install -d -m 0700 /var/lib/postgresql/cutover-backups' >/dev/null
+# shellcheck disable=SC2016 # The inner sh expands $1 from its argument list.
 incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
   pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram |
-  # shellcheck disable=SC2016 # The inner sh expands $1 from its argument list.
   kubectl exec --namespace "$NAMESPACE" --stdin postgres-0 -c postgres -- \
     sh -ec 'umask 077; cat > "$1"' -- "$dump_path"
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
