@@ -255,9 +255,6 @@ verify_turnstile_compose_configuration() {
           ($env | has("TG_TURNSTILE_SITE_KEY")) or
           ($env | has("TG_TURNSTILE_SECRET_KEY_FILE")) or
           ($env | has("TG_TURNSTILE_SIGNIN_ENABLED")) or
-          ($env | has("TG_TURNSTILE_TEST_MODE")) or
-          ($env | has("TG_TURNSTILE_HOSTNAMES")) or
-          ($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) or
           any($service_secrets[]?; .source == "teagramd_turnstile") or
           ($secrets | has("teagramd_turnstile"))
         ) as $configured
