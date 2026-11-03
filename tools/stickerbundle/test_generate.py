@@ -3,6 +3,7 @@ import json
 import random
 import string
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -40,6 +41,63 @@ class EmojiDefinitionTests(unittest.TestCase):
         self.assertEqual([pack.short_name for pack in packs], ["twemoji_smileys_emotion_01", "twemoji_smileys_emotion_02"])
         self.assertEqual([len(pack.stickers) for pack in packs], [120, 1])
 
+    def test_custom_emoji_group_splits_at_200_and_uses_a_distinct_name(self):
+        emoji_group = [generate.Emoji((0x1F600 + offset,), chr(0x1F600 + offset)) for offset in range(201)]
+
+        packs = generate.make_packs(
+            source_id="twemoji",
+            source_name="Twemoji",
+            license_id="CC-BY-4.0",
+            group_name="Smileys & Emotion",
+            emojis=emoji_group,
+            available={emoji.codepoints for emoji in emoji_group},
+            kind="emojis",
+        )
+
+        self.assertEqual([pack.short_name for pack in packs], ["twemoji_emoji_smileys_emotion_01", "twemoji_emoji_smileys_emotion_02"])
+        self.assertEqual([pack.kind for pack in packs], ["emojis", "emojis"])
+        self.assertEqual([len(pack.stickers) for pack in packs], [200, 1])
+        self.assertEqual(packs[0].stickers[0].emoji.text, "😀")
+        self.assertEqual(packs[1].stickers[0].emoji.text, chr(0x1F600 + 200))
+
+    def test_custom_emoji_manifest_marks_the_set_type_and_renders_at_100_px(self):
+        pack = generate.make_packs(
+            source_id="openmoji",
+            source_name="OpenMoji",
+            license_id="CC-BY-SA-4.0",
+            group_name="Animals & Nature",
+            emojis=[generate.Emoji((0x1F431,), "🐱")],
+            available={(0x1F431,)},
+            kind="emojis",
+        )[0]
+        renderer = RecordingRenderer()
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = generate.source_manifest(
+                pack,
+                {"name": "OpenMoji"},
+                {"color/svg/1F431.svg": b"<svg/>"},
+                {(0x1F431,): "color/svg/1F431.svg"},
+                {},
+                Path(directory),
+                renderer,
+            )
+
+        self.assertEqual(manifest["kind"], "emojis")
+        self.assertEqual(manifest["stickers"][0]["emoji"], "🐱")
+        self.assertEqual(renderer.target_sizes, [100])
+
+
+class RecordingRenderer:
+    def __init__(self):
+        self.target_sizes = []
+
+    def render(self, _svg, _context, target_size=None):
+        self.target_sizes.append(target_size)
+        return b"RIFF\x04\x00\x00\x00WEBP"
+
+
+class SourceLookupAndChecksumTests(unittest.TestCase):
     def test_source_asset_lookup_prefers_raw_zwj_filename_then_falls_back(self):
         codepoints = (0x1F937, 0x200D, 0x2640, 0xFE0F)
         source_files = (

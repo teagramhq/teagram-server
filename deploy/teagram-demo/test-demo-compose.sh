@@ -147,6 +147,16 @@ jq -e \
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
 
+"${compose[@]}" --profile maintenance config --format json > "$TMP_DIR/maintenance.json"
+jq -e '
+  .services["teagramd-maintenance"].profiles == ["maintenance"]
+  and (.services["teagramd-maintenance"].ports // [] | length) == 0
+  and (.services["teagramd-maintenance"].networks | keys) == ["backend"]
+  and (.services["teagramd-maintenance"].networks.backend | has("ipv4_address") | not)
+  and any(.services["teagramd-maintenance"].volumes[]; .target == "/var/lib/teagramd")
+  and any(.services["teagramd-maintenance"].volumes[]; .target == "/run/teagramd/blob-mode" and .read_only)
+' "$TMP_DIR/maintenance.json" >/dev/null
+
 EDGE_CONFIG_FIXTURE="$TMP_DIR/restrictive-checkout/deploy/teagram-demo"
 (
   umask 077
@@ -739,7 +749,8 @@ cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
-  "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" <<'PY'
+  "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import sys
 
@@ -799,6 +810,7 @@ if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanu
 if "demo_reload_edge" not in cleanup:
     raise SystemExit("deploy-main.sh: directory-mounted edge rollback must reload gracefully")
 forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
+weekly_wipe_op = Path(sys.argv[7]).read_text(encoding="utf-8")
 if "demo_restore_legacy_edge_after_rollback" in forced_command:
     raise SystemExit("forced-command.sh: first migration recovery must run before the old wrapper resets checkout")
 if 'bash "$REPO/deploy/teagram-demo/deploy-main.sh"' not in forced_command:
@@ -808,7 +820,7 @@ assert_text_order(init, "init-demo.sh image release", [
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     'export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"',
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
-    'demo_compose run --rm --no-deps teagramd bootstrap-identity',
+    'demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity',
 ])
 if '[[ "$#" -ne 1 || ! "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]' not in init:
     raise SystemExit("init-demo.sh: first install must require the digest copied from the selected main CI run")
@@ -822,6 +834,38 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
+resume_match = deploy.split("demo_interrupted_install_matches() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_match, "deploy-main.sh interrupted install state", [
+    '[[ -f "$DEMO_AUTHORITY_DIR/mode.json" && ! -L "$DEMO_AUTHORITY_DIR/mode.json" ]]',
+    '[[ -f "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]]',
+    'demo_compose ps -q postgres',
+    'demo_compose ps -q "$ACTIVE_SERVER"',
+    'demo_compose ps -q "$CANDIDATE_SERVER"',
+    'demo_compose ps -q haproxy',
+    'demo_compose ps -q edge',
+    'demo_compose ps -q turnstile-egress',
+])
+resume_deploy = deploy.split("demo_resume_interrupted_install() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(resume_deploy, "deploy-main.sh interrupted install recovery", [
+    'demo_backup_database',
+    'DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"',
+    'BACKUP_READY=0',
+])
+recovery_gate = deploy.split('if ((${#CONTAINER_IDS[@]} < 4)); then\n', 1)[1].split(
+    '\nexit 0\nfi\n', 1
+)[0] + '\nexit 0'
+assert_text_order(recovery_gate, "deploy-main.sh incomplete service recovery gate", [
+    'if ! demo_interrupted_install_matches; then',
+    "demo_fail 'demo services are incomplete and do not match a resumable interrupted install'",
+    'exit 1',
+    'demo_resume_interrupted_install',
+    'exit 0',
+])
+recovery_gate_start = deploy.index('if ((${#CONTAINER_IDS[@]} < 4)); then')
+recovery_gate_end = deploy.index('\n(("${#CONTAINER_IDS[@]}" >= 4))', recovery_gate_start)
+Path(sys.argv[8], 'demo-recovery-gate.sh').write_text(
+    deploy[recovery_gate_start:recovery_gate_end] + '\n', encoding='utf-8'
+)
 deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
 assert_text_order(deploy_edge_refresh, "deploy-main.sh reloaded edge inventory", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
@@ -832,12 +876,12 @@ deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
-    'demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client-before-migration.json"',
+    'demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false teagramd-maintenance client-config > "$TMP_DIR/client-before-migration.json"',
     'CANDIDATE_SPKI=$(jq -er',
     '[[ "$CANDIDATE_SPKI" == "$OLD_SPKI" ]]',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
-    'demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"',
+    'demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"',
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
@@ -867,6 +911,7 @@ assert_text_order(backup_function, "deploy-main.sh backup function", [
     "demo_compose_input exec -T postgres pg_restore --list",
     'BACKUP_READY=1',
 ])
+normal_deploy_start = deploy.index('CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")')
 assert_order(deploy_path, [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
@@ -877,7 +922,7 @@ assert_order(deploy_path, [
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
-])
+], start=normal_deploy_start)
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
@@ -905,7 +950,7 @@ assert_text_order(wipe, "wipe-weekly.sh wipe generation publication", [
     'BEFORE_GENERATION=$(jq -er',
     'dropdb -U postgres --if-exists teagram',
     "demo_wait_migration demo_compose 'post-reset migrations'",
-    'client-config > "$TMP_DIR/client-after-wipe.json"',
+    'demo_server_client_config "$ACTIVE_SERVER" > "$TMP_DIR/client-after-wipe.json"',
     'AFTER_GENERATION=$(jq -er',
     '[[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]]',
     'install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"',
@@ -932,6 +977,28 @@ assert_text_order(deploy, "deploy-main.sh client config after migrations", [
 ])
 if 'capture_wipe_generation()' not in seed_test.read_text(encoding="utf-8"):
     raise SystemExit("test-seed-compose.sh: must verify the stored wipe generation remains stable during seed convergence")
+if 'output=$(demo_server_client_config "$ACTIVE_SERVER")' not in seed_test.read_text(encoding="utf-8"):
+    raise SystemExit("test-seed-compose.sh: must read wipe generation from the running server container")
+for script_path in [Path(sys.argv[1]), Path(sys.argv[2]), deploy_path, Path(sys.argv[6])]:
+    script = script_path.read_text(encoding="utf-8")
+    if 'demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config' in script:
+        raise SystemExit(f"{script_path.name}: client-config must not start a one-off container on a pinned server address")
+for fragment in [
+    'demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity',
+    'demo_compose run --rm --no-deps teagramd-maintenance client-config',
+]:
+    if fragment not in init:
+        raise SystemExit("init-demo.sh: one-off commands must use the dynamic-address maintenance service")
+if 'demo_compose run --rm --no-deps teagramd-maintenance client-config' not in deploy:
+    raise SystemExit("deploy-main.sh: candidate config must use the dynamic-address maintenance service")
+for fragment in [
+    'systemctl reset-failed "$SERVICE"',
+    'systemctl start "$SERVICE"',
+    'systemctl show --property=Result --value "$SERVICE"',
+    'journalctl --unit "$SERVICE" --since "$STARTED_AT" --output cat --no-pager',
+]:
+    if fragment not in weekly_wipe_op:
+        raise SystemExit("weekly-wipe ops: must verify the service result and current run's verification line")
 assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "unset DEMO_DEPLOY_LOCK_HELD",
     'readonly IMAGE_DIGEST=${BASH_REMATCH[2]}',
@@ -963,6 +1030,8 @@ assert_text_order(init, "init-demo.sh resume lock", [
     'MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"',
     'if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then',
 ])
+if 'DEMO_DEPLOY_LOCK_HELD' not in init or 'flock -n 9' not in init:
+    raise SystemExit("init-demo.sh: deploy recovery must reuse and verify the inherited deploy lock")
 if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
@@ -1032,6 +1101,55 @@ assert_text_order(wipe, "wipe-weekly.sh persistent identity check", [
     '[[ "$ACTIVE_GENERATION" == "$AFTER_GENERATION" ]]',
 ])
 PY
+
+CLIENT_CONFIG_HELPER="$TMP_DIR/demo-server-client-config.sh"
+sed -n '/^demo_server_client_config() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$CLIENT_CONFIG_HELPER"
+cat > "$TMP_DIR/client-config-active-server-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$CLIENT_CONFIG_HELPER"
+ACTIVE_SERVER=teagramd-next
+demo_fail() {
+  printf 'test failure: %s\n' "$1" >&2
+  return 1
+}
+demo_compose() {
+  if [[ "$1 $2 $3 $4" == 'ps --status running -q' && "$5" == "$ACTIVE_SERVER" ]]; then
+    printf '%s\n' active-server-container
+  elif [[ "$1 $2 $3 $4" == "exec -T $ACTIVE_SERVER /usr/local/bin/teagramd" &&
+    "$5" == client-config ]]; then
+    [[ "$ACTIVE_SERVER_UP" == true ]] || return 1
+    printf '%s\n' '{"demo":{"wipe_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+  elif [[ "$1" == run ]]; then
+    printf '%s\n' 'failed to set up container networking: Address already in use' >&2
+    return 1
+  else
+    printf 'unexpected Compose call: %s\n' "$*" >&2
+    return 1
+  fi
+}
+config=$(demo_server_client_config "$ACTIVE_SERVER")
+jq -e '.demo.wipe_generation == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' <<< "$config" >/dev/null
+BASH
+env CLIENT_CONFIG_HELPER="$CLIENT_CONFIG_HELPER" ACTIVE_SERVER_UP=true \
+  bash "$TMP_DIR/client-config-active-server-regression.sh"
+
+MOCK_BIN="$TMP_DIR/weekly-wipe-bin"
+mkdir -p "$MOCK_BIN"
+cat > "$MOCK_BIN/systemctl" <<'SH'
+#!/bin/sh
+case "$*" in
+  'reset-failed teagram-demo-weekly-wipe.service'|'start teagram-demo-weekly-wipe.service') exit 0 ;;
+  'show --property=Result --value teagram-demo-weekly-wipe.service') printf 'success\n' ;;
+  *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 1 ;;
+esac
+SH
+cat > "$MOCK_BIN/journalctl" <<'SH'
+#!/bin/sh
+printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
+SH
+chmod +x "$MOCK_BIN/systemctl" "$MOCK_BIN/journalctl"
+OPS_OUTPUT=$(PATH="$MOCK_BIN:/usr/bin:/bin" bash "$SCRIPT_DIR/ops/weekly-wipe.sh")
+[[ "$OPS_OUTPUT" == 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data' ]]
 
 INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"
 sed -n '/^demo_lock_init() {$/,/^}/p' "$SCRIPT_DIR/init-demo.sh" > "$INIT_LOCK_FUNCTION"
@@ -1413,6 +1531,45 @@ env \
   SHA=0123456789abcdef0123456789abcdef01234567 \
   BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" \
   bash "$TMP_DIR/deploy-backup-regression.sh"
+
+RESUME_FUNCTION="$TMP_DIR/deploy-resume-function.sh"
+sed -n '/^demo_resume_interrupted_install() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$RESUME_FUNCTION"
+RECOVERY_GATE="$TMP_DIR/demo-recovery-gate.sh"
+cat > "$TMP_DIR/init-demo.sh" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${FAIL_AT:-}" != init ]]
+BASH
+chmod +x "$TMP_DIR/init-demo.sh"
+cat > "$TMP_DIR/deploy-resume-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$RESUME_FUNCTION"
+demo_interrupted_install_matches() { return 0; }
+demo_fail() { printf 'unexpected recovery preflight failure: %s\n' "$1" >&2; return 1; }
+SCRIPT_DIR="$TMP_DIR"
+IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SHA=0123456789abcdef0123456789abcdef01234567
+BACKUP_DIR="$TMP_DIR/backup"
+BACKUP_READY=1
+CONTAINER_IDS=(postgres active-server)
+demo_backup_database() { [[ "${FAIL_AT:-}" != backup ]]; }
+source "$RECOVERY_GATE"
+BASH
+for failure in backup init; do
+  if env \
+    FAIL_AT="$failure" \
+    RESUME_FUNCTION="$RESUME_FUNCTION" \
+    RECOVERY_GATE="$RECOVERY_GATE" \
+    TMP_DIR="$TMP_DIR" \
+    bash "$TMP_DIR/deploy-resume-failure-regression.sh" > "$TMP_DIR/deploy-resume-$failure.log" 2>&1; then
+    printf 'deploy resume accepted a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+  if grep -Fq 'demo install resumed' "$TMP_DIR/deploy-resume-$failure.log"; then
+    printf 'deploy resume reported success after a failed %s step\n' "$failure" >&2
+    exit 1
+  fi
+done
 
 MIGRATION_FUNCTION="$TMP_DIR/demo-wait-migration.sh"
 sed -n '/^demo_wait_migration() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$MIGRATION_FUNCTION"

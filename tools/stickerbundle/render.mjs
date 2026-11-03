@@ -4,27 +4,36 @@ import sharp from 'sharp';
 
 const FONT_OPTIONS = { font: { loadSystemFonts: false } };
 
-async function render(svgBase64) {
+async function render(svgBase64, targetSize) {
   const svg = Buffer.from(svgBase64, 'base64');
   const original = new Resvg(svg, FONT_OPTIONS);
   if (!Number.isFinite(original.width) || !Number.isFinite(original.height) || original.width <= 0 || original.height <= 0) {
     throw new Error('SVG has invalid dimensions');
   }
+  if (targetSize !== undefined && (!Number.isInteger(targetSize) || targetSize < 1 || targetSize > 512)) {
+    throw new Error('target size must be an integer from 1 to 512');
+  }
 
+  const longestSide = targetSize ?? 512;
   const fitTo = original.width >= original.height
-    ? { mode: 'width', value: 512 }
-    : { mode: 'height', value: 512 };
+    ? { mode: 'width', value: longestSide }
+    : { mode: 'height', value: longestSide };
   const png = new Resvg(svg, { ...FONT_OPTIONS, fitTo }).render().asPng();
-  return sharp(png)
-    .webp({ quality: 90, alphaQuality: 100, effort: 3, exact: true })
-    .toBuffer();
+  let image = sharp(png);
+  if (targetSize !== undefined) {
+    image = image.resize(targetSize, targetSize, {
+      fit: 'contain',
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    });
+  }
+  return image.webp({ quality: 90, alphaQuality: 100, effort: 3, exact: true }).toBuffer();
 }
 
 const input = readline.createInterface({ input: process.stdin });
 for await (const line of input) {
   try {
     const request = JSON.parse(line);
-    const webp = await render(request.svg);
+    const webp = await render(request.svg, request.targetSize);
     process.stdout.write(`${JSON.stringify({ webp: webp.toString('base64') })}\n`);
   } catch (error) {
     process.stdout.write(`${JSON.stringify({ error: error.message })}\n`);

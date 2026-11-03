@@ -271,6 +271,33 @@ demo_backup_database() {
   BACKUP_READY=1
 }
 
+demo_interrupted_install_matches() {
+  local -a container_ids=() postgres_ids=() active_ids=() inactive_ids=()
+  local -a haproxy_ids=() edge_ids=() egress_ids=()
+
+  [[ -f "$DEMO_AUTHORITY_DIR/mode.json" && ! -L "$DEMO_AUTHORITY_DIR/mode.json" ]] || return 1
+  [[ -f "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]] || return 1
+
+  mapfile -t container_ids < <(demo_compose ps -q)
+  ((${#container_ids[@]} == 2)) || return 1
+  mapfile -t postgres_ids < <(demo_compose ps -q postgres)
+  mapfile -t active_ids < <(demo_compose ps -q "$ACTIVE_SERVER")
+  mapfile -t inactive_ids < <(demo_compose ps -q "$CANDIDATE_SERVER")
+  mapfile -t haproxy_ids < <(demo_compose ps -q haproxy)
+  mapfile -t edge_ids < <(demo_compose ps -q edge)
+  mapfile -t egress_ids < <(demo_compose ps -q turnstile-egress)
+  ((${#postgres_ids[@]} == 1 && ${#active_ids[@]} == 1)) || return 1
+  ((${#inactive_ids[@]} == 0 && ${#haproxy_ids[@]} == 0 &&
+    ${#edge_ids[@]} == 0 && ${#egress_ids[@]} == 0)) || return 1
+}
+
+demo_resume_interrupted_install() {
+  demo_backup_database
+  DEMO_DEPLOY_LOCK_HELD=1 "$SCRIPT_DIR/init-demo.sh" "$IMAGE_DIGEST"
+  BACKUP_READY=0
+  printf 'demo install resumed sha=%s backup=%s\n' "$SHA" "$BACKUP_DIR"
+}
+
 demo_require_root
 demo_prepare_edge_config_permissions
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'DEPLOY_SHA must be a full 40-hex commit SHA'
@@ -301,6 +328,14 @@ chown root:root "$BACKUP_DIR"
 TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
+if ((${#CONTAINER_IDS[@]} < 4)); then
+  if ! demo_interrupted_install_matches; then
+    demo_fail 'demo services are incomplete and do not match a resumable interrupted install'
+    exit 1
+  fi
+  demo_resume_interrupted_install
+  exit 0
+fi
 (("${#CONTAINER_IDS[@]}" >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
 [[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
@@ -364,7 +399,7 @@ export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"
 # Check candidate RSA identity before applying migrations. The candidate's
 # discovery generation is intentionally disabled for this probe because the
 # pre-migration database may not have the generation table yet.
-demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client-before-migration.json"
+demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false teagramd-maintenance client-config > "$TMP_DIR/client-before-migration.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"
@@ -379,7 +414,7 @@ CANDIDATE_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-before-migration.js
 demo_compose rm -sf migrate >/dev/null
 demo_compose up -d migrate
 demo_wait_migration demo_compose 'deployment migrations'
-demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"
+demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"

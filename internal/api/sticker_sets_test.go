@@ -450,6 +450,29 @@ func TestFeaturedStickerSetsReflectOnlyTheViewersInstalledState(t *testing.T) {
 	}
 }
 
+func TestFeaturedEmojiStickerSetsSupportsHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810012")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	result := getFeaturedEmojiStickers(t, h, owner.ID, 0)
+	full, ok := result.(*tg.MessagesFeaturedStickers)
+	if !ok || full.Hash == 0 || len(full.Sets) == 0 {
+		t.Fatalf("featured emoji sets = %T (%+v), want a full non-empty response with a hash", result, result)
+	}
+
+	if modified := getFeaturedEmojiStickers(t, h, owner.ID, full.Hash); modified == nil {
+		t.Fatal("getFeaturedEmojiStickers with the current hash returned a full result")
+	} else if _, ok := modified.(*tg.MessagesFeaturedStickersNotModified); !ok {
+		t.Fatalf("getFeaturedEmojiStickers with the current hash = %T, want NotModified", modified)
+	}
+}
+
 func TestGetOldFeaturedStickerSetsSupportsPaginationAndHash(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -806,6 +829,19 @@ func getFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash 
 		t.Fatalf("getFeaturedStickers = %T, want full or notModified", box.FeaturedStickers)
 	}
 	return full
+}
+
+func getFeaturedEmojiStickers(t *testing.T, h mtproto.Handler, userID int64, hash int64) tg.MessagesFeaturedStickersClass {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.getFeaturedEmojiStickers", &tg.MessagesGetFeaturedEmojiStickersRequest{Hash: hash})
+	var box tg.MessagesFeaturedStickersBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode getFeaturedEmojiStickers: %v", err)
+	}
+	if box.FeaturedStickers == nil {
+		t.Fatal("getFeaturedEmojiStickers returned no featured sticker result")
+	}
+	return box.FeaturedStickers
 }
 
 func getOldFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, offset, limit int, hash int64) *tg.MessagesFeaturedStickers {

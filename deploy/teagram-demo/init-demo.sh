@@ -7,6 +7,17 @@ DEMO_REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 
 demo_lock_init() {
   LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
+  if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" == 1 ]]; then
+    [[ "$(readlink -e "/proc/$$/fd/9")" == "$LOCK_PATH" ]] || {
+      printf 'teagram-demo: deployment caller did not pass the deploy lock\n' >&2
+      return 1
+    }
+    flock -n 9 || {
+      printf 'teagram-demo: deployment caller does not hold the deploy lock\n' >&2
+      return 1
+    }
+    return 0
+  fi
   mkdir -p "$(dirname "$LOCK_PATH")"
   exec 9> "$LOCK_PATH"
   flock -x 9
@@ -116,7 +127,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   demo_compose down --remove-orphans
   demo_bootstrap_compose up -d migrate
   demo_wait_migration demo_bootstrap_compose 'resume migrations'
-  demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client.json"
+  demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"
   jq -e '
     .version == 1
     and .mtproto.endpoint == "demo.teagram.io:443"
@@ -178,13 +189,13 @@ export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"
 demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
 "$SEED_SCRIPT" --check
 
-demo_compose run --rm --no-deps teagramd bootstrap-identity > "$TMP_DIR/bootstrap.stdout" 2> "$TMP_DIR/bootstrap.stderr"
+demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity > "$TMP_DIR/bootstrap.stdout" 2> "$TMP_DIR/bootstrap.stderr"
 FINGERPRINT=$(sed -n 's/.*fingerprint=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$TMP_DIR/bootstrap.stdout" | head -n 1)
 [[ "$FINGERPRINT" =~ ^-?[0-9]+$ ]] || demo_fail 'identity bootstrap did not report an RSA fingerprint'
 
 demo_bootstrap_compose up -d migrate
 demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'
-demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client.json"
+demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"

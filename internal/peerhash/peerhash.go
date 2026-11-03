@@ -34,6 +34,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 )
 
 const (
@@ -110,13 +111,40 @@ func (d *Deriver) Derive(viewerID int64, kind Kind, peerID int64) int64 {
 	putInt64(msg[n+12:], peerID)
 
 	mac := hmac.New(sha256.New, d.key)
+	return deriveWithMAC(mac, msg[:])
+}
+
+// DeriveMany returns the access hashes for peerIDs in input order. It reuses
+// one HMAC state for the batch while deriving the same value as Derive for
+// each (viewer, kind, peer) tuple.
+func (d *Deriver) DeriveMany(viewerID int64, kind Kind, peerIDs []int64) []int64 {
+	if len(peerIDs) == 0 {
+		return nil
+	}
+
+	hashes := make([]int64, len(peerIDs))
+	mac := hmac.New(sha256.New, d.key)
+	var msg [len(label) + 8 + 4 + 8]byte
+	n := copy(msg[:], label)
+	putInt64(msg[n:], viewerID)
+	binary.BigEndian.PutUint32(msg[n+8:], uint32(kind))
+	for i, peerID := range peerIDs {
+		putInt64(msg[n+12:], peerID)
+		hashes[i] = deriveWithMAC(mac, msg[:])
+	}
+	return hashes
+}
+
+func deriveWithMAC(mac hash.Hash, msg []byte) int64 {
+	mac.Reset()
 	// hash.Hash never returns an error from Write.
-	mac.Write(msg[:])
-	sum := mac.Sum(nil)
+	mac.Write(msg)
+	var sum [sha256.Size]byte
+	digest := mac.Sum(sum[:0])
 	// Truncate to 64 bits by taking the leading eight bytes. access_hash is an
 	// int64 on the wire and every bit pattern is a legal value, so the whole
 	// range is used rather than masked into a positive half.
-	return int64(binary.BigEndian.Uint64(sum[:8])) //nolint:gosec // reinterpreting all 64 bits, not narrowing
+	return int64(binary.BigEndian.Uint64(digest[:8])) //nolint:gosec // reinterpreting all 64 bits, not narrowing
 }
 
 // putInt64 writes v big-endian into b. The unsigned conversion reinterprets the

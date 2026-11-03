@@ -134,6 +134,13 @@ services:
       backend:
         ipv4_address: 198.18.130.251
 
+  # One-off identity and discovery commands use a dynamic backend address so
+  # they can run while either pinned server slot is active.
+  teagramd-maintenance:
+    <<: *teagramd
+    profiles: [maintenance]
+    networks: [backend]
+
   demo-seed:
     image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
     profiles: [seed]

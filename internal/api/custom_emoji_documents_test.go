@@ -67,7 +67,7 @@ func TestGetCustomEmojiDocumentsReturnsOnlyLiveCustomEmojiSetMembers(t *testing.
 	}
 
 	body := dispatchChatMethod(t, fullChannelDispatcher(s), requester.ID, "messages.getCustomEmojiDocuments", &tg.MessagesGetCustomEmojiDocumentsRequest{
-		DocumentID: []int64{emojiDocument.ID, inactiveDocument.ID, regularDocument.ID, attachment.ID, 919999},
+		DocumentID: []int64{emojiDocument.ID, inactiveDocument.ID, regularDocument.ID, attachment.ID, 919999, -919999},
 	})
 	var documents tg.DocumentClassVector
 	if err := documents.Decode(&bin.Buffer{Buf: body}); err != nil {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gotd/td/tg"
+
 	"github.com/teagramhq/teagram-server/internal/stickerbundle"
 )
 
@@ -61,6 +63,82 @@ func TestStickerBundleCatalogueKeepsSetIdentityAcrossArtRegeneration(t *testing.
 	if string(read) != string(firstArt) {
 		t.Fatalf("bundle artwork bytes = %q, want %q", read, firstArt)
 	}
+}
+
+func TestStickerBundleCustomEmojiIdentityDependsOnlyOnShortName(t *testing.T) {
+	first := loadTestCustomEmojiCatalogue(t, testBundleWebP("first custom emoji art"))
+	second := loadTestCustomEmojiCatalogue(t, testBundleWebP("regenerated custom emoji art"))
+	firstSet := first.byShortName["openmoji_emoji_animals"]
+	secondSet := second.byShortName["openmoji_emoji_animals"]
+	if firstSet == nil || secondSet == nil || !firstSet.set.GetEmojis() {
+		t.Fatalf("custom emoji catalogue sets = %+v and %+v, want generated emoji set", firstSet, secondSet)
+	}
+	if firstSet.set.ID != secondSet.set.ID || firstSet.set.AccessHash != secondSet.set.AccessHash {
+		t.Fatalf("custom emoji set identity changed with art: first=(%d,%d), second=(%d,%d)", firstSet.set.ID, firstSet.set.AccessHash, secondSet.set.ID, secondSet.set.AccessHash)
+	}
+	if firstSet.set.Hash == secondSet.set.Hash {
+		t.Fatalf("custom emoji set hash stayed %d after art changed", firstSet.set.Hash)
+	}
+	if firstSet.set.Title != "OpenMoji Animals (CC-BY-SA-4.0)" {
+		t.Fatalf("custom emoji set title = %q, want source and SPDX license", firstSet.set.Title)
+	}
+	document := firstSet.documents[0]
+	customEmoji, ok := findCustomEmojiAttribute(document)
+	if !ok || customEmoji.Alt != "🐈" || !customEmoji.GetFree() {
+		t.Fatalf("custom emoji document attribute = %#v, want free cat emoji metadata", document.Attributes)
+	}
+	var imageSize *tg.DocumentAttributeImageSize
+	for _, attribute := range document.Attributes {
+		if value, ok := attribute.(*tg.DocumentAttributeImageSize); ok {
+			imageSize = value
+		}
+	}
+	if imageSize == nil || imageSize.W != 100 || imageSize.H != 100 {
+		t.Fatalf("custom emoji document image size = %+v, want 100x100", imageSize)
+	}
+}
+
+func loadTestCustomEmojiCatalogue(t *testing.T, art []byte) *stickerSetCatalog {
+	t.Helper()
+	dir := t.TempDir()
+	const shortName = "openmoji_emoji_animals"
+	const artworkPath = "openmoji_emoji_animals/cat.webp"
+	checksum := sha256.Sum256(art)
+	manifest := map[string]any{
+		"version": 1,
+		"packs": []any{map[string]any{
+			"short_name":  shortName,
+			"source":      "OpenMoji Animals",
+			"license":     "CC-BY-SA-4.0",
+			"attribution": "Emoji by OpenMoji",
+			"kind":        stickerbundle.PackKindEmojis,
+			"stickers": []any{map[string]any{
+				"emoji": "🐈", "file": artworkPath, "size": len(art), "sha256": hex.EncodeToString(checksum[:]),
+			}},
+		}},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("encode custom emoji bundle manifest: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, artworkPath)), 0o700); err != nil {
+		t.Fatalf("create custom emoji artwork directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, artworkPath), art, 0o600); err != nil {
+		t.Fatalf("write custom emoji bundle artwork: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0o600); err != nil {
+		t.Fatalf("write custom emoji bundle manifest: %v", err)
+	}
+	bundle, err := stickerbundle.Load(dir)
+	if err != nil {
+		t.Fatalf("load custom emoji bundle: %v", err)
+	}
+	catalog, err := buildStickerSetCatalog(bundle)
+	if err != nil {
+		t.Fatalf("build custom emoji sticker catalogue: %v", err)
+	}
+	return catalog
 }
 
 func loadTestStickerCatalogue(t *testing.T, art []byte) *stickerSetCatalog {
