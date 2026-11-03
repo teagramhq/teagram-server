@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -52,5 +53,39 @@ func TestRemoveStickerSetThumbnailItemClearsReferenceAndChangesHash(t *testing.T
 	if persisted.ThumbDocumentID != 0 || persisted.ThumbVersion != updated.ThumbVersion || persisted.Hash != updated.Hash {
 		t.Fatalf("persisted thumbnail state = id %d, version %d, hash %d; want id 0, version %d, hash %d",
 			persisted.ThumbDocumentID, persisted.ThumbVersion, persisted.Hash, updated.ThumbVersion, updated.Hash)
+	}
+}
+
+func TestRemovedCustomEmojiCannotBeReferencedByMessagesOrChannelPosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559201002")
+	sender := mustUser(t, s, "+15559201003")
+	recipient := mustUser(t, s, "+15559201004")
+	removedItem := storedFile(t, s, owner.ID)
+	remainingItem := storedFile(t, s, owner.ID)
+	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_removed_reference", Kind: "emojis",
+	}, []store.UserStickerSetItem{
+		{FileID: removedItem.ID, AccessHash: removedItem.AccessHash, Size: removedItem.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
+		{FileID: remainingItem.ID, AccessHash: remainingItem.AccessHash, Size: remainingItem.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
+	})
+	if err != nil {
+		t.Fatalf("create emoji sticker set: %v", err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove emoji item: %v", err)
+	}
+	entities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: removedItem.ID,
+	}}
+	if _, _, _, _, err = s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92002, 0, 0, entities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Fatalf("send message referencing removed emoji = %v, want ErrMediaInvalid", err)
+	}
+
+	channel := mustChannel(t, s, sender.ID, "emoji reference")
+	if _, _, _, err = s.PostChannelMessageAsWithEntities(ctx, channel.ID, sender.ID, "⭐", 92003, nil, 0, entities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Fatalf("post channel message referencing removed emoji = %v, want ErrMediaInvalid", err)
 	}
 }

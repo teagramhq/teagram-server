@@ -1393,9 +1393,21 @@ func (s *Store) UserStickerDocumentExists(ctx context.Context, id, accessHash in
 	return s.q.UserStickerDocumentExists(ctx, db.UserStickerDocumentExistsParams{ID: id, AccessHash: accessHash})
 }
 
-// lockLiveUserStickerDocuments is the write-side liveness boundary for sends
-// and forwards. It resolves every positive document through set membership and
-// holds each owning live set FOR SHARE until the message transaction commits.
+// positiveCustomEmojiDocumentIDs returns only mutable user-set references.
+// Catalogue custom emoji have stable negative IDs and need no set-row lock.
+func positiveCustomEmojiDocumentIDs(entities []PollDescriptionEntity) []int64 {
+	var ids []int64
+	for _, entity := range entities {
+		if entity.Type == PollDescriptionEntityCustomEmoji && entity.Argument > 0 {
+			ids = append(ids, entity.Argument)
+		}
+	}
+	return ids
+}
+
+// lockLiveUserStickerDocuments is the write-side liveness boundary for message
+// references to user-set documents. It resolves each positive document through
+// active set membership and holds its live set FOR SHARE until commit.
 func lockLiveUserStickerDocuments(ctx context.Context, qtx *db.Queries, documentIDs ...int64) error {
 	var ids []int64
 	for _, id := range documentIDs {

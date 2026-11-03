@@ -273,10 +273,12 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	if err = lockOwners(ctx, tx, owners...); err != nil {
 		return Message{}, nil, false, err
 	}
+	stickerDocumentIDs := positiveCustomEmojiDocumentIDs(f.Entities)
 	if f.StickerDocumentID != nil {
-		if err = lockLiveUserStickerDocuments(ctx, qtx, *f.StickerDocumentID); err != nil {
-			return Message{}, nil, false, err
-		}
+		stickerDocumentIDs = append(stickerDocumentIDs, *f.StickerDocumentID)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return Message{}, nil, false, err
 	}
 
 	// One lock for the whole fan-out, taken before the first per-member insert,

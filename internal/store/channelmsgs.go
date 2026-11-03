@@ -470,11 +470,12 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 //
 // This layer trusts its caller: it does not check that fromID may post here.
 //
-// Locking: no Go-level lock and no advisory lock, only the channel_state row
-// lock, taken by the LockChannelState read ahead of the dedup lookup and held to
-// commit. The channel_messages foreign key checks channel_id with KEY SHARE on
-// channels; that is compatible with LockChannel's NO KEY UPDATE lock, allowing
-// the post to commit while an invite waits for channel_state.
+// Locking: no Go-level lock or advisory lock. The channel_state row lock is
+// taken ahead of dedup and held to commit; referenced user sticker sets are
+// additionally held FOR SHARE through commit. The channel_messages foreign key
+// checks channel_id with KEY SHARE on channels; that is compatible with
+// LockChannel's NO KEY UPDATE lock, allowing the post to commit while an invite
+// waits for channel_state.
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
@@ -897,10 +898,12 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, err
 		}
 	}
+	stickerDocumentIDs := positiveCustomEmojiDocumentIDs(entities)
 	if stickerDocumentID != nil {
-		if err = lockLiveUserStickerDocuments(ctx, qtx, *stickerDocumentID); err != nil {
-			return ChannelMessage{}, 0, false, err
-		}
+		stickerDocumentIDs = append(stickerDocumentIDs, *stickerDocumentID)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return ChannelMessage{}, 0, false, err
 	}
 
 	// Idempotency: a resend with the same random_id returns the original post,

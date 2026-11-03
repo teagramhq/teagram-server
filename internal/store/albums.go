@@ -329,10 +329,18 @@ func albumEntityPayloads(a AlbumSend) ([]string, error) {
 	return payloads, nil
 }
 
+func albumCustomEmojiDocumentIDs(items []AlbumItem) []int64 {
+	ids := make([]int64, 0, len(items)*MaxPollDescriptionEntities)
+	for _, item := range items {
+		ids = append(ids, positiveCustomEmojiDocumentIDs(item.Entities)...)
+	}
+	return ids
+}
+
 // SendUserAlbum writes a 1:1 album: every grant consumed and every copy of
 // every item written in one transaction, or nothing. Lock order is the one
-// SendMessage takes: both owners' advisory locks, then the files rows. Blocks
-// decide a new album as they decide SendMessage.
+// SendMessage takes: both owners' advisory locks, referenced live sticker sets,
+// then the files rows. Blocks decide a new album as they decide SendMessage.
 func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (AlbumResult, error) {
 	entityPayloads, err := albumEntityPayloads(a)
 	if err != nil {
@@ -347,6 +355,9 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 	qtx := s.q.WithTx(tx)
 
 	if err = lockOwners(ctx, tx, fromID, toID); err != nil {
+		return AlbumResult{}, err
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
 		return AlbumResult{}, err
 	}
 	randomIDs := albumRandomIDs(a.Items)
@@ -428,10 +439,11 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 
 // SendChatAlbum writes a basic-group album to every member. Lock order and
 // membership rules are fanOut's: the chats row, the member set read under it,
-// the members' advisory locks ascending, then the files rows. Each item is its
-// own fan-out with its own fanout_id; every copy of every item shares the
-// album's grouped_id. Default restrictions are judged item by item on each
-// file's stored rights, so the album is refused when any item would be.
+// the members' advisory locks ascending, referenced live sticker sets, then the
+// files rows. Each item is its own fan-out with its own fanout_id; every copy of
+// every item shares the album's grouped_id. Default restrictions are judged
+// item by item on each file's stored rights, so the album is refused when any
+// item would be.
 func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (AlbumResult, error) {
 	entityPayloads, err := albumEntityPayloads(a)
 	if err != nil {
@@ -478,6 +490,9 @@ func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (A
 		return AlbumResult{}, ErrChatFull
 	}
 	if err = lockOwners(ctx, tx, owners...); err != nil {
+		return AlbumResult{}, err
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
 		return AlbumResult{}, err
 	}
 
@@ -713,6 +728,9 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	}
 	role, err := checkChannelMediaPostRights(ctx, qtx, channelID, fromID)
 	if err != nil {
+		return ChannelAlbumResult{}, err
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
 		return ChannelAlbumResult{}, err
 	}
 	randomIDs := albumRandomIDs(a.Items)
