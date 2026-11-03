@@ -4582,8 +4582,7 @@ else
   fail 'configuration drift rejection'
 fi
 
-prepare_target_local_apply_fixture restart-policy-only restart-policy-only \
-  "$APPLY_TARGET_SHA" "$TARGET_SHA"
+prepare_target_local_apply_fixture restart-policy-only restart-policy-only
 state=$(cat "$TMP/restart-policy-only-state-path")
 jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
   "$state/base-compose.json" > "$state/base-compose.next.json"
@@ -4604,8 +4603,7 @@ else
   fail 'restart-only Compose change must pass the runner preflight and verify runtime policies'
 fi
 
-prepare_target_local_apply_fixture restart-policy-with-config-drift restart-policy-with-config-drift \
-  "$APPLY_TARGET_SHA" "$TARGET_SHA"
+prepare_target_local_apply_fixture restart-policy-with-config-drift restart-policy-with-config-drift
 state=$(cat "$TMP/restart-policy-with-config-drift-state-path")
 jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
   "$state/base-compose.json" > "$state/base-compose.next.json"
