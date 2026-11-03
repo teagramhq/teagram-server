@@ -97,8 +97,13 @@ transaction. In key order by owner, peer type, and peer ID, the initializer
 locks that dialog's unready marker, then its current message rows by `local_id`,
 then postings and counts. One materialized backfill statement takes the row
 locks before it clears postings and rebuilds them from the same statement
-snapshot. Inserts after that snapshot remain covered by the message triggers;
-edits and deletes of rows in the snapshot wait for the initializer's row locks.
+snapshot. Inserts after that snapshot are covered by the message triggers, but
+they wait for the initializer too: the backfill's posting deletes and inserts
+fire the count trigger, which row-locks that dialog's
+`message_search_posting_counts` rows until the dialog's transaction commits. A
+send into the dialog therefore blocks while it holds its owners' advisory locks,
+which also blocks that owner's other sends until the dialog's backfill commits.
+Edits and deletes of rows in the snapshot wait for the initializer's row locks.
 
 Existing send, edit, and delete transactions acquire their existing owner or
 chat locks before changing message rows; the message triggers then update
@@ -106,7 +111,10 @@ postings and counts. Some message mutations can touch rows in multiple dialogs
 in one transaction, so the initializer holds message rows for only one dialog
 at a time. This avoids a cross-dialog message-row lock cycle. The initializer
 does not use the configured Postgres statement timeout: clearing and backfilling
-a large dialog can take longer than the normal request statement ceiling. If a
+a large dialog can take longer than the normal request statement ceiling. The
+blocked sends, edits, and deletes are bounded by that request timeout, so they
+fail for as long as the dialog takes to commit. Run the command in a low-traffic
+window; the stall grows with the dialog's message count. If a
 dialog transaction fails or the command stops, its marker and postings roll
 back together, while previously committed dialogs stay ready; running the
 command again continues from the remaining markers.
