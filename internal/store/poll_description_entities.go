@@ -181,8 +181,12 @@ func validStoredEntity(entity PollDescriptionEntity, maxOffset, maxTextBytes int
 		return entity.Argument == 0 && !entity.Collapsed
 	case PollDescriptionEntityTextURL:
 		return entity.Argument == 0 && entity.Text != "" && !entity.Collapsed
-	case PollDescriptionEntityMentionName, PollDescriptionEntityCustomEmoji:
+	case PollDescriptionEntityMentionName:
 		return entity.Argument > 0 && entity.Text == "" && !entity.Collapsed
+	case PollDescriptionEntityCustomEmoji:
+		// Catalogue custom emoji documents use stable negative IDs; live user-set
+		// documents use positive IDs. Zero is never a valid document reference.
+		return entity.Argument != 0 && entity.Text == "" && !entity.Collapsed
 	case PollDescriptionEntityBlockquote:
 		return entity.Argument == 0 && entity.Text == ""
 	default:

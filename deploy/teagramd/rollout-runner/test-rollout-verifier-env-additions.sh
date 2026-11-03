@@ -1077,7 +1077,10 @@ turnstile_compose=$(jq -c --arg source "$turnstile_secret_source" '
   .services.teagramd.environment += {
     TG_TURNSTILE_SITE_KEY:"fixture-site-key",
     TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
-    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+    TG_TURNSTILE_SIGNIN_ENABLED:"false",
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
   }
   | .services.teagramd.secrets = [{
       source:"teagramd_turnstile",
@@ -1101,7 +1104,10 @@ turnstile_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c --arg source
   .Config.Env += [
     "TG_TURNSTILE_SITE_KEY=fixture-site-key",
     "TG_TURNSTILE_SECRET_KEY_FILE=/run/secrets/teagramd-turnstile",
-    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+    "TG_TURNSTILE_SIGNIN_ENABLED=false",
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
   ]
   | .Mounts += [{
       Type:"bind",
@@ -1149,7 +1155,10 @@ turnstile_alias_compose=$(jq -c --arg source "$turnstile_secret_source" '
   .services.teagramd.environment += {
     TG_TURNSTILE_SITE_KEY:"fixture-site-key",
     TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
-    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+    TG_TURNSTILE_SIGNIN_ENABLED:"false",
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
   }
   | .services.teagramd.secrets = [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
   | .secrets.teagramd_turnstile = {file:$source}
@@ -1158,7 +1167,10 @@ turnstile_alias_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c --arg 
   .Config.Env += [
     "TG_TURNSTILE_SITE_KEY=fixture-site-key",
     "TG_TURNSTILE_SECRET_KEY_FILE=/run/secrets/teagramd-turnstile",
-    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+    "TG_TURNSTILE_SIGNIN_ENABLED=false",
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
   ]
   | .Mounts += [{
       Type:"bind",
@@ -1523,6 +1535,103 @@ write_immutable() { : > "$1"; }
 append_evidence_row() { printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" >> "$1"; }
 fail() { printf '%s\n' "$1" >&2; return 1; }
 copy_immutable() { cp -- "$1" "$2" && chmod 600 -- "$2"; }
+
+turnstile_base_compose=$(jq -c \
+  '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  <<< "$COMPOSE_JSON")
+turnstile_default_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
+  }
+' <<< "$turnstile_base_compose")
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+turnstile_default_target_inspect=$(jq -c '
+  .Config.Env += [
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
+  ]
+  | .Id="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  | .Image="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+' <<< "$(inspect_json '')")
+turnstile_default_baseline=$(snapshot_from_json \
+  "$(inspect_json '')" "$turnstile_base_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render baseline)
+turnstile_default_preflight=$(snapshot_from_json \
+  "$(inspect_json '')" "$turnstile_default_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+turnstile_default_target=$(snapshot_from_json \
+  "$turnstile_default_target_inspect" "$turnstile_default_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target)
+BASELINE_DIR="$TMP/turnstile-defaults.baseline"
+TARGET_DIR="$TMP/turnstile-defaults.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$turnstile_default_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$turnstile_default_preflight" > "$TARGET_DIR/preflight.snapshot.json"
+printf '%s\n' "$turnstile_default_target" > "$TARGET_DIR/target.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+INITIALIZE_LOCAL=0
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL safe Turnstile runtime defaults changed the resolved Compose preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TARGET_DIR/target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL safe Turnstile runtime defaults changed the target container comparison' >&2
+  cat "$TARGET_DIR/target-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS safe Turnstile runtime defaults preserve preflight and target comparisons'
+
+for setting_value in \
+  TG_TURNSTILE_TEST_MODE=true \
+  TG_TURNSTILE_HOSTNAMES=localhost \
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass; do
+  setting=${setting_value%%=*}
+  value=${setting_value#*=}
+  unsafe_turnstile_compose=$(jq -c --arg setting "$setting" --arg value "$value" \
+    '.services.teagramd.environment[$setting]=$value' <<< "$turnstile_default_compose")
+  if snapshot_from_json "$(inspect_json '')" "$unsafe_turnstile_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+    >/dev/null 2>&1; then
+    printf 'FAIL unsafe production Turnstile setting was accepted: %s\n' "$setting" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS unsafe production Turnstile runtime settings are rejected'
+if snapshot_from_json "$(inspect_json '')" "$turnstile_default_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL target container missing Compose Turnstile defaults was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target container must include Compose Turnstile defaults'
+for setting_value in \
+  TG_TURNSTILE_TEST_MODE=true \
+  TG_TURNSTILE_HOSTNAMES=localhost \
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass; do
+  setting=${setting_value%%=*}
+  value=${setting_value#*=}
+  turnstile_mismatched_container=$(jq -c --arg setting "$setting" --arg value "$value" '
+    .Config.Env |= map(
+      if startswith($setting + "=") then ($setting + "=" + $value) else . end
+    )
+  ' <<< "$turnstile_default_target_inspect")
+  if snapshot_from_json "$turnstile_mismatched_container" "$turnstile_default_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>&1; then
+    printf 'FAIL target container with mismatched Turnstile setting was accepted: %s\n' \
+      "$setting" >&2
+    exit 1
+  fi
+  printf 'PASS target container must match the production Turnstile setting: %s\n' "$setting"
+done
+unset INSPECT_LOG_CONFIG
+
 media_key_initial_local_baseline=$(jq -c '
   .provenance.compose_source="live-container-inspection"
   | .provenance.stop_grace_period_source="docker-inspect-config-stop-timeout"

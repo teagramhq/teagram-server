@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=7baec218753d2f4fa872e47ed5b9c082a81414154b6d8fb9aeb8b3bd34d19532
+readonly APPROVED_VERIFIER_SHA=f47e6f8c3ded623271d2e7e47ce7e249d4497b4b9acd19674a598962b31626bf
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -3078,7 +3078,8 @@ run_apply() {
     fail 'Compose build provenance rejected; baseline checkout and tag restored'
     return 1
   fi
-  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q "$(rollout_compose_service)" </dev/null || {
+  # Preserve BuildKit output in the deploy log so a failed module fetch has its cause.
+  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build "$(rollout_compose_service)" </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
       restore_checkout_and_tag || return 1

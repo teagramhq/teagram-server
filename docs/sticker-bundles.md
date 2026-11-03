@@ -51,13 +51,20 @@ be omitted for static WebP packs:
 
 Each pack needs a unique lowercase short name, source, attribution and an SPDX
 license from this allow-list: `CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`,
-`Apache-2.0`, `MIT`, or `OFL-1.1`. The server displays the title with a
-readable license name, such as `<source> (CC BY-SA 4.0)`; it must fit
-Telegram's 64-character limit. Packs may
-contain 1 to 120 stickers. Each sticker's file path is relative to the bundle
-directory, and its declared size and SHA-256 must match a regular file of the
-pack's format. TGS files are gzip-compressed Lottie JSON with a 512x512 canvas,
-at most 3 seconds, at most 60 fps and at most 64 KiB compressed.
+`Apache-2.0`, `MIT`, or `OFL-1.1`. Sticker titles use a readable license name,
+such as `<source> (CC BY-SA 4.0)`. Emoji-pack titles include the SPDX ID,
+such as `<source> (CC-BY-SA-4.0)`. Both must fit Telegram's 64-character
+limit. Sticker packs may contain 1 to 120 items; custom emoji packs may contain
+1 to 200. Each item's file path is relative to the bundle directory, and its
+declared size and SHA-256 must match a regular file of the pack's format. TGS
+files are gzip-compressed Lottie JSON with a 512x512 canvas, at most 3 seconds,
+at most 60 fps and at most 64 KiB compressed.
+
+A custom emoji pack sets `kind` to `emojis` and lists the same emoji alternatives
+as its source artwork. Its files are transparent, square WebP images at 100x100
+pixels. The generated static bundle uses distinct `*_emoji_*` short names for
+these sets; short names cannot duplicate a sticker pack or either built-in
+Twemoji set.
 
 Validate a bundle before publishing it:
 
@@ -75,16 +82,19 @@ tools/stickerbundle/generate.sh --output /tmp/sticker-bundle
 
 The command installs its locked SVG and WebP renderers, downloads the pinned
 Unicode group list and upstream source files, verifies their revisions,
-licenses and SHA-256 digests, then writes a deterministic bundle. Animated
-Noto Emoji Lottie files use the pinned Google Fonts CDN `17.0` release and the
-official animation index. The generator checks each animation against the TGS
+licenses and SHA-256 digests, then writes a deterministic bundle. For every
+static sticker pack it also generates a custom emoji pack from the same source
+art and emoji alternatives at 100x100 pixels. Animated Noto Emoji Lottie files
+use the pinned Google Fonts CDN `17.0` release and the official animation index;
+they remain sticker packs. The generator checks each animation against the TGS
 limits above and reports each rejected emoji by name. The output directory must
-not already exist. Static art uses transparent backgrounds and scales each
-image so its longest side is 512 pixels. Generated art stays out of the
+not already exist. Static sticker art uses transparent backgrounds and scales
+each image so its longest side is 512 pixels. Generated art stays out of the
 repository. Each source digest covers the sorted relative paths, byte lengths
 and bytes of the downloaded license, metadata and selected art files for that
 source.
 
 To enable the bundle, set `TG_STICKER_CATALOG_BUNDLE` to its directory. The
 server validates the complete bundle before starting. With the setting absent
-or empty, it serves only the built-in `twemoji_reactions` set.
+or empty, it serves the built-in `twemoji_reactions` sticker set and
+`twemoji_custom_emojis` emoji set.

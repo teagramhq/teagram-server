@@ -236,8 +236,19 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err := assertFullGetterVariant("messages.getFeaturedEmojiStickers", featuredEmoji, &tg.MessagesFeaturedStickers{}); err != nil {
 			return err
 		}
-		if result, ok := featuredEmoji.(*tg.MessagesFeaturedStickers); ok && (result.Hash != 0 || result.Count != 0 || len(result.Sets) != 0 || len(result.Unread) != 0) {
-			return errors.New("messages.getFeaturedEmojiStickers returned data for empty featured stickers")
+		result, ok = featuredEmoji.(*tg.MessagesFeaturedStickers)
+		if !ok || result == nil {
+			return fmt.Errorf("messages.getFeaturedEmojiStickers = %T, want *tg.MessagesFeaturedStickers", featuredEmoji)
+		}
+		if result.Hash == 0 || result.Count != 1 || len(result.Sets) != 1 || len(result.Unread) != 0 {
+			return fmt.Errorf("messages.getFeaturedEmojiStickers = hash %d, count %d, %d sets and %d unread; want the Twemoji custom emoji set", result.Hash, result.Count, len(result.Sets), len(result.Unread))
+		}
+		covered, ok = result.Sets[0].(*tg.StickerSetCovered)
+		if !ok || covered.Set.ShortName != "twemoji_custom_emojis" || covered.Set.Count != 73 || !covered.Set.GetEmojis() {
+			return fmt.Errorf("messages.getFeaturedEmojiStickers cover = %T; want twemoji_custom_emojis with 73 emojis", result.Sets[0])
+		}
+		if _, ok := covered.Cover.(*tg.Document); !ok {
+			return fmt.Errorf("messages.getFeaturedEmojiStickers cover document = %T; want *tg.Document", covered.Cover)
 		}
 
 		savedGifs, err := client.MessagesGetSavedGifs(ctx, hash)
