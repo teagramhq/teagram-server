@@ -3,17 +3,17 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the four current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, and `apply-user-invite-quota`. A script's presence in
-an older main commit does not authorize a retired operation. The allowlist lives in
-`teagram-ops.sh`; tests cover both retired names at an older main SHA. Keep
-every operation narrowly scoped to its named purpose. Validate arguments
-before using them, fail closed, and never put secrets in arguments, logs, or
-output.
+the five current operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, `apply-user-invite-quota`, and `start-server`. A
+script's presence in an older main commit does not authorize a retired
+operation. The allowlist lives in `teagram-ops.sh`; tests cover retired names
+at an older main SHA. Keep every operation narrowly scoped to its named
+purpose. Validate arguments before using them, fail closed, and never put
+secrets in arguments, logs, or output.
 
 ## Threat model
 
@@ -93,6 +93,38 @@ ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
 It checks that the recorded environment is exactly the saved `.env` plus the
 quota setting, then reruns the probe against the current live image without
 applying another rollout.
+
+## Restarting the existing server containers
+
+`start-server.sh` recovers the existing S3-backed server stack after its
+containers stop. It takes the deployment lock, validates both containers'
+Compose project, service names and recorded file selection, then checks the
+S3 authority and environment-file paths with the reviewed blob-transition
+helper. Only the live `docker-compose.yml` plus `docker-compose.override.yml`
+selection is accepted. It starts the existing `postgres` container, waits five
+seconds and checks `pg_isready` for up to 60 seconds before starting only the
+inspected `teagramd` container. It uses `docker start` on each existing
+container, not Compose dependency startup, so this recovery cannot restart the
+`migrate` container. It does not create or replace containers, run migrations,
+or issue volume operations; the resumed server can make its normal database
+writes after it is running.
+
+Run the operation from a merged `main` commit:
+
+```sh
+ssh teagram run <reviewed-main-sha> start-server
+```
+
+There is no staging LXC. The preflight and fixture suite are the preview gate;
+the operation reports success only after Postgres is ready and `teagramd` is
+running. If both containers were stopped before recovery and it must be rolled
+back, the Steward can stop them from alpha with this command. It preserves the
+named volumes; `teagramd` can take up to 120 seconds to finish its configured
+graceful stop.
+
+```sh
+incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
+```
 
 ## User-invite quota threat model
 

@@ -82,6 +82,26 @@ for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-r
     exit 90
   fi
 done
+if [[ "${FIXTURE_ROLLOUT_FAILURE:-0}" == 1 ]]; then
+  printf '%s\n' \
+    'BuildKit output before failure' \
+    '------' \
+    ' > [build 5/7] RUN go mod download:' \
+    '#10 0.123 go: downloading golang.org/x/crypto' \
+    '#10 0.456 FAILURE_BLOCK_CAUSE=module proxy unavailable' \
+    '#10 0.500 build diagnostic detail 1' \
+    '#10 0.600 build diagnostic detail 2' \
+    '#10 0.700 build diagnostic detail 3' \
+    '#10 0.800 build diagnostic detail 4' \
+    '#10 0.900 build diagnostic detail 5' \
+    '------' \
+    'Dockerfile:14' \
+    '  12 | COPY . .' \
+    '  13 | RUN go mod download' \
+    'ERROR: failed to solve: process failed' \
+    'rollout runner rejected: baseline checkout and tag restored'
+  exit 86
+fi
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
 if [[ "${FIXTURE_PUBLIC_PROFILE_ORPHAN:-0}" == 1 ]]; then
   printf 'rollout-runner\n' >> "${DEPLOY_ACTION_LOG:?}"
@@ -245,16 +265,26 @@ export DEPLOY_IMAGE_ID_FILE="$tmp/root/current-image-id"
 : > "$DEPLOY_ACTION_LOG"
 # expect <exit code> <last line> [VAR=value...]
 expect() {
-  local want_rc="$1" want_last="$2" want_contains='' out rc=0
+  local want_rc="$1" want_last="$2" want_omits='' out rc=0 contains_missing=0 expected
+  local -a want_contains=()
   shift 2
-  if [[ "${1:-}" == --contains ]]; then
-    want_contains="$2"
+  while [[ "${1:-}" == --contains || "${1:-}" == --omits ]]; do
+    case "$1" in
+      --contains) want_contains+=("$2") ;;
+      --omits) want_omits="$2" ;;
+    esac
     shift 2
-  fi
+  done
   out=$(env "$@" PATH="$tmp/bin:$PATH" DEPLOY_DIR="$tmp/live" DEPLOY_ROOT="$tmp/root" \
     DEPLOY_LOCK_LOG="$tmp/lock-targets" bash "$script" 2>&1) || rc=$?
+  for expected in "${want_contains[@]}"; do
+    if [[ "$out" != *"$expected"* ]]; then
+      contains_missing=1
+    fi
+  done
   if [[ "$rc" != "$want_rc" || "${out##*$'\n'}" != "$want_last" || \
-      ( -n "$want_contains" && "$out" != *"$want_contains"* ) ]]; then
+      "$contains_missing" != 0 || \
+      ( -n "$want_omits" && "$out" == *"$want_omits"* ) ]]; then
     printf 'FAIL %s: want rc=%s last=%q, got rc=%s output:\n%s\n' "$*" "$want_rc" "$want_last" "$rc" "$out" >&2
     failures=$((failures + 1))
   fi
@@ -405,6 +435,13 @@ expect 1 'live S3 Compose has no valid s3-accepted authority or credentials; ref
 expect 0 "deployed $fifth" --contains 'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
   FIXTURE_COMPOSE_FILES="$unapproved_compose" FIXTURE_AUTHORITY_OUTCOME=s3-accepted \
   FIXTURE_EXPECT_S3_ENV=1 FIXTURE_PARKED_ENV="$tmp/telegram-server/.env.rustfs-parked" DEPLOY_SHA="$fifth"
+
+rollout_failure=$(commit rollout-failure)
+git -C "$tmp/work" push -q "$tmp/origin.git" main
+expect 1 'runner exit 86' --contains 'FAILURE_BLOCK_CAUSE=module proxy unavailable' \
+  --contains 'rollout runner rejected: baseline checkout and tag restored' \
+  --omits 'BuildKit output before failure' \
+  FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_ROLLOUT_FAILURE=1 DEPLOY_SHA="$rollout_failure"
 
 smoke_failure=$(commit smoke-failure)
 git -C "$tmp/work" push -q "$tmp/origin.git" main

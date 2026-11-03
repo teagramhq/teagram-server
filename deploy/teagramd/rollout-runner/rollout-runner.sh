@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=99919cbf8428346ea87fb101f22685e4dc39196dbf3330503cb76928eee30f30
+readonly APPROVED_VERIFIER_SHA=237139a2cbe3a5594f2cf28883d02673b760d246bce39a8f3413fe1080185dd8
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -2427,7 +2427,7 @@ compare_resolved_preflight() {
   local target_file=${PREFLIGHT_TARGET_SNAPSHOT:-"$TARGET_DIR/preflight.snapshot.json"}
   local results=${PREFLIGHT_RESULTS_FILE:-"$TARGET_DIR/preflight-comparisons.tsv"}
   local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current)
-  local field before after result expected failures=0
+  local field before after result expected failures=0 before_config_without_restart after_config_without_restart
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
     local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes container_replica_count container_client_addr_trust)
@@ -2490,7 +2490,27 @@ compare_resolved_preflight() {
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
-    if [ "$field" = compose_logging_policy ]; then
+    if [ "$field" = config_sha256 ]; then
+      if [ "$before" = "$after" ]; then
+        result=pass
+      else
+        before_config_without_restart=$(jq -er '.config_without_restart_sha256' "$old_file") || {
+          fail 'baseline is missing a restart-neutral Compose digest'
+          return 1
+        }
+        after_config_without_restart=$(jq -er '.config_without_restart_sha256' "$target_file") || {
+          fail 'resolved target is missing a restart-neutral Compose digest'
+          return 1
+        }
+        if [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+           bash "$VERIFIER" restart-policy-transition "$old_file" "$target_file" >/dev/null 2>&1; then
+          result=pass
+        else
+          result=fail
+          failures=$((failures + 1))
+        fi
+      fi
+    elif [ "$field" = compose_logging_policy ]; then
       if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = compose_log_login_codes ]; then
       if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
@@ -2765,6 +2785,10 @@ perform_rollback() {
     fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
+  docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" postgres </dev/null || {
+    fail 'baseline postgres recreation or health check failed'
+    return 1
+  }
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
   restore_removed_public_profile_services || return 1
   local public_profile_readiness_rc=0
@@ -3074,7 +3098,8 @@ run_apply() {
     fail 'Compose build provenance rejected; baseline checkout and tag restored'
     return 1
   fi
-  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q "$(rollout_compose_service)" </dev/null || {
+  # Preserve BuildKit output and refresh mutable base-image tags before building.
+  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build --pull "$(rollout_compose_service)" </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
       restore_checkout_and_tag || return 1

@@ -87,6 +87,8 @@ jq -e \
   and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
+  and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "20"
   and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
@@ -487,6 +489,8 @@ jq -e '
   and .services.teagramd.environment.HTTPS_PROXY == ""
   and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
@@ -514,6 +518,8 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
 jq -e '
   .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"

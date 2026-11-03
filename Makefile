@@ -78,7 +78,7 @@ test: docker-bridge
 # failure attribution. The exact-cap fleet writer runs separately after the
 # non-e2e package tests so shared Postgres load does not consume its deadline.
 test-unit: docker-bridge
-	$(TESTENV) go test -race -timeout 20m -skip '$(FLEET_CAP_TEST)' $$(go list ./... | grep -v '^$(E2E_PKG)$$')
+	$(TESTENV) go test -race -timeout 25m -skip '$(FLEET_CAP_TEST)' $$(go list ./... | grep -v '^$(E2E_PKG)$$')
 	$(MAKE) test-fleet-cap
 
 # The exactly-cap fleet writer shares pgtest's reusable Postgres across

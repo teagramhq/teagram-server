@@ -20,106 +20,9 @@ env:
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
 jobs:
-  ops-prioritize-main:
-    name: 'ops: prioritize-main'
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    outputs:
-      cancelled_pr_run_targets: ${{ steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets }}
-    permissions:
-      actions: write
-
-    steps:
-      - name: Cancel queued pull request CI runs
-        id: cancel-queued-pr-runs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cancelled_pr_run_targets=""
-          publish_cancelled_pr_run_targets() {
-            printf 'cancelled_pr_run_targets=%s\n' "${cancelled_pr_run_targets% }" >> "$GITHUB_OUTPUT"
-          }
-
-          if ! runs="$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" \
-            --jq '.workflow_runs[]? | [.id, .created_at] | @tsv' 2>/dev/null)"; then
-            echo "::warning::Could not list queued pull request CI runs; continuing without cancellation."
-            publish_cancelled_pr_run_targets
-            exit 0
-          fi
-          if [[ -z "$runs" ]]; then
-            echo "No queued pull request CI runs."
-            publish_cancelled_pr_run_targets
-            exit 0
-          fi
-          while IFS=$'\t' read -r run_id run_created_at; do
-            [[ -n "$run_id" ]] || continue
-            [[ "$run_id" =~ ^[0-9]+$ ]] || {
-              echo "::warning::Ignoring invalid pull request workflow run id."
-              continue
-            }
-            [[ "$run_created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$ ]] || {
-              echo "::warning::Ignoring pull request CI run ${run_id} with an invalid creation timestamp."
-              continue
-            }
-            if ! run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status' 2>/dev/null)"; then
-              echo "::warning::Could not check pull request CI run ${run_id}; continuing."
-              continue
-            fi
-            if [[ "$run_status" != queued ]]; then
-              echo "Leaving pull request CI run ${run_id} in status ${run_status}."
-              continue
-            fi
-            if ! started_jobs="$(gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
-              --jq '.jobs[]? | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped")) | .id' 2>/dev/null)"; then
-              echo "::warning::Could not check jobs for pull request CI run ${run_id}; leaving it alone."
-              continue
-            fi
-            if [[ -n "$started_jobs" ]]; then
-              echo "Leaving pull request CI run ${run_id}; it has started jobs."
-              continue
-            fi
-            if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
-              cancelled_pr_run_targets+="${run_id}:${run_created_at} "
-            else
-              echo "::warning::Could not cancel queued pull request CI run ${run_id}; it may have started or been superseded."
-            fi
-          done <<< "$runs"
-          publish_cancelled_pr_run_targets
-
-  ops-dispatch-pr-ci-recovery:
-    name: 'ops: dispatch-pr-ci-recovery'
-    needs:
-      - ops-prioritize-main
-    # Evaluate the PR-only skip before main prioritization can cancel a queued
-    # PR run. Main fan-out jobs share the priority dependency and unlock here.
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-
-    steps:
-      - name: Dispatch cancelled pull request CI recovery
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANCELLED_PR_RUN_TARGETS: ${{ needs.ops-prioritize-main.outputs.cancelled_pr_run_targets }}
-        run: |
-          set -euo pipefail
-          if ! gh workflow run recover-cancelled-pr-ci.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f issue=MAIN-2765 \
-            -f "cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS"; then
-            echo "::warning::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_TARGETS"
-          fi
   check-sticker-license:
     name: 'check: sticker-license'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -128,6 +31,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -186,8 +91,7 @@ jobs:
 
   check-security:
     name: 'check: security'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -279,8 +183,7 @@ jobs:
 
   lint-go:
     name: 'lint: go'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     # Keep lint's timeout aligned with its former step in ci.
     timeout-minutes: 20
@@ -332,8 +235,7 @@ jobs:
 
   lint-sql:
     name: 'lint: sql'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -372,8 +274,7 @@ jobs:
 
   test-git-hooks:
     name: 'test: git-hooks'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -390,8 +291,7 @@ jobs:
 
   test-browser-acceptance:
     name: 'test: browser-acceptance'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -454,9 +354,8 @@ jobs:
   build-browser-acceptance-image:
     name: 'build: browser-acceptance-image (${{ matrix.arch }})'
     needs:
-      - ops-prioritize-main
       - test-browser-acceptance
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.test-browser-acceptance.result == 'success' }}
+    if: ${{ !cancelled() && needs.test-browser-acceptance.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
@@ -638,8 +537,7 @@ jobs:
 
   test-go:
     name: 'test: go'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -906,8 +804,7 @@ jobs:
 
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -1001,8 +898,7 @@ jobs:
 
   test-websocket-d1:
     name: 'test: websocket-d1'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1082,8 +978,7 @@ jobs:
 
   test-websocket-permanent-exchange:
     name: 'test: websocket-permanent-exchange'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1127,8 +1022,7 @@ jobs:
 
   check-deploy-workflow:
     name: 'check: deploy-workflow'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1160,7 +1054,7 @@ jobs:
             .github/workflows/deploy-qa-invite.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
@@ -1172,7 +1066,7 @@ jobs:
       - name: Check RPC performance workflow contract
         run: .github/scripts/test-perf-workflow-contract.sh
 
-      - name: Check main CI queue priority contract
+      - name: Check PR CI cancellation policy
         run: .github/scripts/test-ci-main-priority.sh
 
       - name: Check workflow contract script syntax
@@ -1194,6 +1088,8 @@ jobs:
           bash -n deploy/teagram/test-target-failure-report.sh
           bash -n deploy/teagram/ops/apply-user-invite-quota.sh
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
+          bash -n deploy/teagram/ops/start-server.sh
+          bash -n deploy/teagram/test-start-server.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -1243,6 +1139,8 @@ jobs:
             deploy/teagram/test-target-failure-report.sh \
             deploy/teagram/ops/apply-user-invite-quota.sh \
             deploy/teagram/test-apply-user-invite-quota.sh \
+            deploy/teagram/ops/start-server.sh \
+            deploy/teagram/test-start-server.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1298,6 +1196,9 @@ jobs:
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
 
+      - name: Check teagram server start operation
+        run: bash deploy/teagram/test-start-server.sh
+
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
 
@@ -1327,8 +1228,7 @@ jobs:
 
   check-demo-web-pin:
     name: 'check: demo-web-pin'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     continue-on-error: ${{ github.event_name == 'push' }}
     outputs:
@@ -1416,9 +1316,8 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ always() }}
     needs:
-      - ops-prioritize-main
       - check-security
       - test-go
       - check-sticker-license
@@ -1445,7 +1344,6 @@ jobs:
     steps:
       - name: Require all CI lanes to pass
         env:
-          MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
           CHECK_SECURITY_RESULT: ${{ needs.check-security.result }}
           TEST_GO_RESULT: ${{ needs.test-go.result }}
           CHECK_STICKER_LICENSE_RESULT: ${{ needs.check-sticker-license.result }}
@@ -1467,12 +1365,7 @@ jobs:
           TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
         run: |
-          expected_priority_result=success
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            expected_priority_result=skipped
-          fi
           lane_results=(
-            "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
             "check-security=$CHECK_SECURITY_RESULT"
             "test-go=$TEST_GO_RESULT"
             "check-sticker-license=$CHECK_STICKER_LICENSE_RESULT"
@@ -1494,8 +1387,7 @@ jobs:
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
           )
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
-                "$CHECK_SECURITY_RESULT" != "success" ||
+          if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
                 "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
                 "$TEST_PHOTO_WORKER_RESULT" != "success" ||
@@ -1523,9 +1415,8 @@ jobs:
 
   publish-demo-image:
     name: 'publish: demo-image'
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
-      - ops-prioritize-main
       - test-browser-acceptance
       - build-browser-acceptance-image
       - ci
@@ -1613,8 +1504,7 @@ jobs:
   # merge gate on every PR that does not touch internal/admin.
   lint-css:
     name: 'lint: css'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1652,8 +1542,7 @@ jobs:
   # cannot turn the repo red on its own.
   check-sqlc-drift:
     name: 'check: sqlc-drift'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1685,21 +1574,17 @@ jobs:
   # harness, so this check can run beside ci without shared services or files.
   test-e2e-admin:
     name: 'test: e2e-admin'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
     # a hang (a browser that never launches, a webServer that never binds). A
     # new Ubuntu image version has a cold apt cache and downloads packages first.
     timeout-minutes: 35
 
-    # Narrower than it looks: actions: write is the scope that covers the cache
-    # API, and it is here only so this job can delete an apt cache entry that
-    # turns out not to satisfy the dependency check. contents: read is repeated
-    # because a job-level block replaces the workflow's rather than adding to it.
+    # Keep this PR test job read-only. An invalid cache entry falls back to the
+    # network and can be replaced by a trusted main run.
     permissions:
       contents: read
-      actions: write
 
     env:
       # Same reasoning as the ci job: the runner is destroyed at the end of the
@@ -1709,6 +1594,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Pre-pull the shared PostgreSQL test image with retry
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
@@ -1877,20 +1764,11 @@ jobs:
       # still missing, or dpkg refused, the step falls through to the network
       # path rather than leaving a half-installed runner to fail in the browser.
       #
-      # An entry that fails that check is deleted, because a cache key is
-      # otherwise written once and never rewritten: without this, a bad entry is
-      # restored and warned about on every subsequent run and the job is back on
-      # the network for good, silently. Deleting it makes the next run miss,
-      # repopulate, and go warm again. It needs actions: write, hence the job's
-      # permissions block; where the token has no such write (a fork PR, which
-      # has no access to these caches anyway) the delete warns and the run still
-      # completes over the network.
+      # A bad entry falls back to the network. PR jobs do not get an Actions
+      # write token to delete cache entries; the trusted main run can refresh it.
       - name: Install the system dependencies from cache
         id: apt-cached-install
         if: steps.apt-cache.outputs.cache-hit == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APT_CACHE_KEY: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
         run: |
           if sudo dpkg -i .apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
             echo "installed=true" >>"$GITHUB_OUTPUT"
@@ -1898,8 +1776,6 @@ jobs:
           fi
           echo "::warning::cached debs did not satisfy the dependencies; falling back to the network install"
           echo "installed=false" >>"$GITHUB_OUTPUT"
-          gh cache delete "$APT_CACHE_KEY" \
-            || echo "::warning::could not delete the unusable cache entry $APT_CACHE_KEY"
 
       # The cold path, and the only step here that needs the network. Download
       # and install are separate so the debs land in a directory the cache can
@@ -2081,9 +1957,8 @@ jobs:
   build-server-image:
     name: 'build: server-image'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -2127,6 +2002,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8.0.2
         with:
@@ -2305,9 +2182,8 @@ jobs:
   test-compose:
     name: 'test: compose'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -2331,6 +2207,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8.0.2
         with:
@@ -2781,6 +2659,11 @@ jobs:
           # Compose omits inactive profile services, so include migration to
           # inspect its read-only mount.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
+          # Include every profile so the restart contract covers production
+          # replicas and proxy services as well as the default stack.
+          docker compose --profile '*' config --format json >"$RUNNER_TEMP/teagram-server-all-compose.json"
+          python3 -B .github/scripts/test-prod-compose-restart-policy.py
+          python3 -B .github/scripts/check-prod-compose-restart-policy.py "$RUNNER_TEMP/teagram-server-all-compose.json"
           jq -e --arg revision "$GITHUB_SHA" --arg media_key_dir "$RUNNER_TEMP/teagramd-media-keys" '
             (.name == "teagram")
             and (.volumes.pgdata.name == "teagram_pgdata")
@@ -3259,9 +3142,8 @@ jobs:
   test-photo-worker:
     name: 'test: photo-worker (${{ matrix.arch }})'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -3411,8 +3293,7 @@ jobs:
   # and its Postgres container are discarded with this job.
   test-smoke:
     name: 'test: smoke'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -3553,8 +3434,7 @@ jobs:
 
   test-migrations:
     name: "test: migrations"
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
