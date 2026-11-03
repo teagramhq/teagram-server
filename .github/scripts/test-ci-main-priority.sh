@@ -178,7 +178,7 @@ done
 [[ -f "$threat_model" ]] || fail 'the trusted priority workflow must ship its threat model'
 grep -Fq '.github/workflows/pr-ci-priority.yml' "$threat_model" || fail 'the threat model must identify the trusted controller'
 grep -Fq 'does not check out or execute pull request code or artifacts' "$threat_model" || fail 'the trusted controller threat model must forbid PR code execution'
-grep -Fq 'waits for that status before any fan-out' "$threat_model" || fail 'the threat model must record the main fan-out barrier'
+grep -Fq 'waits up to five minutes for that status before fan-out' "$threat_model" || fail 'the threat model must record the bounded main fan-out barrier'
 
 bash .github/scripts/test-pr-main-ci-gate.sh
 bash .github/scripts/test-recover-cancelled-pr-checks.sh
