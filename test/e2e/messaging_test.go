@@ -31,8 +31,9 @@ import (
 // --- per-phone code sink (two clients log in at once) ---
 
 type multiCodeSink struct {
-	mu    sync.Mutex
-	chans map[string]chan string
+	mu                  sync.Mutex
+	chans               map[string]chan string
+	internalAckFailures []string
 }
 
 func newMultiCodeSink() *multiCodeSink { return &multiCodeSink{chans: map[string]chan string{}} }
@@ -63,16 +64,25 @@ func (m *multiCodeSink) WithAttrs([]slog.Attr) slog.Handler       { return m }
 func (m *multiCodeSink) WithGroup(string) slog.Handler            { return m }
 
 func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
-	var identity, code string
+	var identity, code, operation, errorName string
 	r.Attrs(func(a slog.Attr) bool {
 		switch a.Key {
 		case "phone":
 			identity = a.Value.String()
 		case "code":
 			code = a.Value.String()
+		case "operation":
+			operation = a.Value.String()
+		case "error":
+			errorName = a.Value.String()
 		}
 		return true
 	})
+	if r.Message == "server operation failed" && operation == "msgs_ack" && errorName == "internal" {
+		m.mu.Lock()
+		m.internalAckFailures = append(m.internalAckFailures, "msgs_ack error=internal")
+		m.mu.Unlock()
+	}
 	if identity != "" && code != "" {
 		keys := []string{identity}
 		if phone, ok := smokePhoneForUsername(identity); ok {
@@ -86,6 +96,12 @@ func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 	return nil
+}
+
+func (m *multiCodeSink) internalAckFailureRecords() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.internalAckFailures...)
 }
 
 // --- client-side update collector ---

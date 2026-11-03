@@ -190,6 +190,9 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 	assertSmokeTurnstileVerifications(t, verifier,
 		smokeTurnstileVerification{token: sendCodeToken, action: "signup"},
 	)
+	if failures := f.codes.internalAckFailureRecords(); len(failures) != 0 {
+		t.Fatalf("guest sign-up logged internal msgs_ack send failures: %v", failures)
+	}
 }
 
 func testSmokeTurnstileSignIn(t *testing.T) {
