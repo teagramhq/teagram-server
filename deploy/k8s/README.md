@@ -14,10 +14,12 @@ before bootstrapping, backing up, restoring, or replacing that identity.
 
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
-immutable completed Job. The teagramd init container waits until Atlas reports
-at least the required version from `base/migration-version`; CI checks that
-file against the newest migration filename before validating or deploying the
-overlay.
+immutable completed Job. `prod/kustomization.yaml` pins the required migration
+version with its image digests; the validator checks it against the source
+revision label on that pinned migration image. Update the version whenever the
+production image digests are repinned. CI overrides this value from
+`base/migration-version`, which CI checks against the newest migration filename
+before validating or deploying the overlay.
 
 The production overlay expects these namespace-scoped resources to be supplied
 by the cluster's secret and configuration management before it is applied:

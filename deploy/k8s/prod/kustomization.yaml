@@ -7,6 +7,10 @@ resources:
   - ../base
 
 configMapGenerator:
+  - name: required-migration-version
+    behavior: replace
+    literals:
+      - migration-version=20261102000002
   - name: db-migrations-job-revision
     behavior: merge
     literals:

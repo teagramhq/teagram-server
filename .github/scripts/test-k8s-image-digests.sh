@@ -36,6 +36,18 @@ jq --exit-status '
 
 migrations_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
 rustfs_init_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
+production_migration_version="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").literals[] | sub("^migration-version="; "")' deploy/k8s/prod/kustomization.yaml)"
+[[ "$production_migration_version" =~ ^[0-9]+$ ]] ||
+  fail 'production must pin a migration version alongside its image digests'
+production_migration_behavior="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").behavior' deploy/k8s/prod/kustomization.yaml)"
+[[ "$production_migration_behavior" == replace ]] ||
+  fail 'production must replace the base migration version to keep the release pin stable'
+ci_migration_version="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").literals[] | sub("^migration-version="; "")' deploy/k8s/ci/kustomization.yaml)"
+[[ "$ci_migration_version" == "$(tr -d '\r\n' < deploy/k8s/base/migration-version)" ]] ||
+  fail 'the CI overlay must track the current source migration version'
+ci_migration_behavior="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").behavior' deploy/k8s/ci/kustomization.yaml)"
+[[ "$ci_migration_behavior" == replace ]] ||
+  fail 'the CI overlay must replace the production migration pin with the source version'
 migrations_job_name="$(yq -r '.configMapGenerator[] | select(.name == "db-migrations-job-revision").literals[] | sub("^job-name="; "")' deploy/k8s/prod/kustomization.yaml)"
 rustfs_init_job_name="$(yq -r '.configMapGenerator[] | select(.name == "rustfs-init-job-revision").literals[] | sub("^job-name="; "")' deploy/k8s/prod/kustomization.yaml)"
 [[ "$migrations_job_name" == "db-migrations-${migrations_digest:0:16}" ]] ||
@@ -83,18 +95,49 @@ cat > "$test_dir/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ "$1" == manifest && "$2" == inspect ]] || {
-  printf 'unexpected docker command: %s\n' "$*" >&2
-  exit 2
-}
-reference="$3"
-if [[ "${UNPULLABLE_REFERENCE:-}" == "$reference" ]]; then
-  printf 'no such manifest: %s\n' "$reference" >&2
-  exit 1
-fi
-printf '{}\n'
+case "$1" in
+  manifest)
+    [[ "$2" == inspect ]] || exit 2
+    reference="$3"
+    if [[ "${UNPULLABLE_REFERENCE:-}" == "$reference" ]]; then
+      printf 'no such manifest: %s\n' "$reference" >&2
+      exit 1
+    fi
+    printf '{}\n'
+    ;;
+  pull)
+    reference="${@: -1}"
+    [[ "${UNPULLABLE_REFERENCE:-}" != "$reference" ]] || exit 1
+    ;;
+  image)
+    [[ "$2" == inspect ]] || exit 2
+    format="${@: -1}"
+    [[ "$format" == *'org.opencontainers.image.revision'* ]] || exit 2
+    printf '%s\n' "$EXPECTED_MIGRATION_REVISION"
+    ;;
+  *)
+    printf 'unexpected docker command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
 DOCKER
 chmod 0755 "$test_dir/bin/docker"
+
+cat > "$test_dir/bin/git" <<'GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1" in
+  cat-file) exit 1 ;;
+  fetch) exit 0 ;;
+  show) printf '%s\n' "$EXPECTED_IMAGE_MIGRATION_VERSION" ;;
+  *)
+    printf 'unexpected git command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+GIT
+chmod 0755 "$test_dir/bin/git"
 
 valid_prod_manifest="$test_dir/k8s-prod.yaml"
 teagramd_digest="$(printf '1%.0s' {1..64})"
@@ -102,17 +145,58 @@ migrations_digest="$(printf '2%.0s' {1..64})"
 rustfs_init_digest="$(printf '3%.0s' {1..64})"
 landing_digest="$(printf '4%.0s' {1..64})"
 selector_digest="$(printf '5%.0s' {1..64})"
+expected_migration_revision=abcdef0123456789abcdef0123456789abcdef01
 printf '%s\n' \
-  "image: ghcr.io/teagramhq/teagramd@sha256:$teagramd_digest" \
-  "image: ghcr.io/teagramhq/teagramd@sha256:$teagramd_digest" \
-  "image: ghcr.io/teagramhq/teagram-migrations@sha256:$migrations_digest" \
-  "image: ghcr.io/teagramhq/teagramd-mc-init@sha256:$rustfs_init_digest" \
-  "image: ghcr.io/teagramhq/link-edge-landing@sha256:$landing_digest" \
-  "image: ghcr.io/teagramhq/link-edge-selector@sha256:$selector_digest" \
+  'apiVersion: v1' \
+  'kind: Pod' \
+  'spec:' \
+  '  initContainers:' \
+  '    - name: teagramd' \
+  "      image: ghcr.io/teagramhq/teagramd@sha256:$teagramd_digest" \
+  '    - name: migrations' \
+  "      image: ghcr.io/teagramhq/teagram-migrations@sha256:$migrations_digest" \
+  '    - name: rustfs-init' \
+  "      image: ghcr.io/teagramhq/teagramd-mc-init@sha256:$rustfs_init_digest" \
+  '  containers:' \
+  '    - name: link-landing' \
+  "      image: ghcr.io/teagramhq/link-edge-landing@sha256:$landing_digest" \
+  '    - name: link-selector' \
+  "      image: ghcr.io/teagramhq/link-edge-selector@sha256:$selector_digest" \
+  '---' \
+  'apiVersion: batch/v1' \
+  'kind: Job' \
+  'metadata:' \
   "  name: db-migrations-${migrations_digest:0:16}" \
-  "  name: rustfs-init-${rustfs_init_digest:0:16}" > "$valid_prod_manifest"
-PATH="$test_dir/bin:$PATH" bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
+  '---' \
+  'apiVersion: batch/v1' \
+  'kind: Job' \
+  'metadata:' \
+  "  name: rustfs-init-${rustfs_init_digest:0:16}" \
+  '---' \
+  'apiVersion: v1' \
+  "kind: ConfigMap" \
+  "metadata:" \
+  "  name: required-migration-version-test" \
+  "data:" \
+  "  migration-version: \"$production_migration_version\"" > "$valid_prod_manifest"
+PATH="$test_dir/bin:$PATH" \
+  EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
+  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
   fail 'the production image pin validator must accept valid images and matching Job suffixes'
+
+drifted_migration_manifest="$test_dir/k8s-prod-drifted-migration.yaml"
+sed "s|migration-version: \"$production_migration_version\"|migration-version: \"99999999999999\"|" \
+  "$valid_prod_manifest" > "$drifted_migration_manifest"
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
+  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$drifted_migration_manifest" \
+  >"$test_dir/drifted-migration-output" 2>"$test_dir/drifted-migration-error"; then
+  fail 'the production image pin validator must reject a migration version drift'
+fi
+grep --fixed-strings --quiet 'migration version' "$test_dir/drifted-migration-error" ||
+  fail 'a migration version drift rejection must identify the mismatch'
 
 placeholder_prod_manifest="$test_dir/k8s-prod-placeholder.yaml"
 zero_digest="$(printf '%064d' 0)"
@@ -128,7 +212,10 @@ grep --fixed-strings --quiet 'all-zero placeholder' "$test_dir/placeholder-error
 wrong_job_prod_manifest="$test_dir/k8s-prod-wrong-job.yaml"
 sed "s|db-migrations-${migrations_digest:0:16}|db-migrations-0000000000000000|" \
   "$valid_prod_manifest" > "$wrong_job_prod_manifest"
-if PATH="$test_dir/bin:$PATH" bash .github/scripts/check-k8s-prod-image-pins.sh "$wrong_job_prod_manifest" \
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
+  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$wrong_job_prod_manifest" \
   >"$test_dir/wrong-job-output" 2>"$test_dir/wrong-job-error"; then
   fail 'the production image pin validator must reject a migration Job suffix mismatch'
 fi
