@@ -1807,7 +1807,10 @@ jobs:
           PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           expected_publish_result=success
-          if [[ "$GITHUB_EVENT_NAME" == merge_group || ( "$GITHUB_EVENT_NAME" == pull_request && "$PULL_REQUEST_HEAD_REPO" != "$GITHUB_REPOSITORY" ) ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            expected_publish_result=skipped
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == pull_request && "$PULL_REQUEST_HEAD_REPO" != "$GITHUB_REPOSITORY" ]]; then
             expected_publish_result=skipped
           fi
           lane_results=(

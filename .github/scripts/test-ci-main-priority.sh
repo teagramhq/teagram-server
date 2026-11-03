@@ -40,4 +40,10 @@ ci_needs="$(yq -r '.jobs.ci.needs | join(",")' "$workflow")"
 [[ "$ci_needs" == *test-go* ]] ||
   fail 'the CI aggregate must still depend on the Go test lane'
 
+publisher_if="$(yq -r '.jobs."publish-k8s-images".if' "$workflow")"
+[[ "$publisher_if" == *"github.event_name == 'push' && github.ref == 'refs/heads/main'"* &&
+   "$publisher_if" == *"github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"* &&
+   "$publisher_if" != *"github.event_name == 'merge_group'"* ]] ||
+  fail 'K8s image publication must run only on main pushes and same-repository pull requests'
+
 printf 'PR CI cancellation policy holds\n'

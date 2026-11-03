@@ -52,8 +52,12 @@ jq --exit-status 'index("ci") == null' <<<"$publisher_needs" >/dev/null ||
 publisher_if="$(yq -r '.jobs."publish-k8s-images".if' .github/workflows/ci.yml)"
 [[ "$publisher_if" != *'needs.ci.result'* ]] ||
   fail 'the image publisher must not form a dependency cycle with ci'
+[[ "$publisher_if" != *"github.event_name == 'merge_group'"* ]] ||
+  fail 'the image publisher must not run on merge-group commits'
 ci_gate="$(yq -r '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass").run' .github/workflows/ci.yml)"
+# shellcheck disable=SC2016 # Match the literal merge-group condition in the workflow.
 [[ "$ci_gate" == *'PUBLISH_K8S_IMAGES_RESULT'* &&
+   "$ci_gate" == *'if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then'* &&
    "$ci_gate" == *'expected_publish_result=skipped'* ]] ||
   fail 'the ci aggregate must require publication except for intentionally skipped events'
 grep --fixed-strings --quiet \

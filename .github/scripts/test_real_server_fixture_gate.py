@@ -404,6 +404,20 @@ class RealServerFixtureGateTests(unittest.TestCase):
             0,
             merge_group_success.stdout + merge_group_success.stderr,
         )
+        merge_group_publisher_ran = merge_group_environment.copy()
+        merge_group_publisher_ran[result_envs["publish-k8s-images"]] = "success"
+        merge_group_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_publisher_ran,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_publisher.returncode,
+            0,
+            "merge-group aggregate returned success when image publication ran",
+        )
         merge_group_environment[result_envs["test-go"]] = "skipped"
         merge_group_failure = subprocess.run(
             ["bash", "-e", "-c", shell_script],
