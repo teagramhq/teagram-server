@@ -196,21 +196,49 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        ci_job = re.search(r"(?ms)^  test-go:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
-        fixture_job = re.search(
-            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+        checkout = r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$"
+        for job_name in (
+            "check-sticker-license",
+            "test-go",
+            "test-e2e-admin",
+            "test-real-server-fixtures",
+            "build-server-image",
+            "test-compose",
+        ):
+            with self.subTest(job=job_name):
+                job = re.search(
+                    rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                    workflow,
+                )
+                self.assertIsNotNone(job, f"CI workflow has no {job_name} job")
+                self.assertRegex(job.group("body"), checkout)
+
+    def test_admin_e2e_job_is_read_only_and_keeps_cache_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  test-e2e-admin:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
         )
-        self.assertIsNotNone(ci_job, "CI workflow has no test-go job")
-        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
-        self.assertRegex(
-            ci_job.group("body"),
-            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        self.assertIsNotNone(job, "CI workflow has no test-e2e-admin job")
+        permissions = re.search(
+            r"(?ms)^    permissions:\n(?P<body>.*?)(?=^    (?:env|steps):)",
+            job.group("body"),
         )
-        self.assertRegex(
-            fixture_job.group("body"),
-            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        self.assertIsNotNone(permissions, "test-e2e-admin permissions are missing")
+        self.assertEqual(
+            [line.strip() for line in permissions.group("body").splitlines() if line.strip()],
+            ["contents: read"],
         )
+        cached_install = re.search(
+            r"(?ms)^      - name: Install the system dependencies from cache\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            job.group("body"),
+        )
+        self.assertIsNotNone(cached_install, "cached dependency install step is missing")
+        self.assertIn("falling back to the network install", cached_install.group("body"))
+        self.assertNotIn("gh cache delete", cached_install.group("body"))
+        self.assertNotIn("GH_TOKEN", cached_install.group("body"))
 
     def test_required_ci_check_gates_all_required_lanes(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
