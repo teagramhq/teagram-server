@@ -3074,7 +3074,8 @@ run_apply() {
     fail 'Compose build provenance rejected; baseline checkout and tag restored'
     return 1
   fi
-  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q "$(rollout_compose_service)" </dev/null || {
+  # Preserve BuildKit output in the deploy log so a failed module fetch has its cause.
+  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build "$(rollout_compose_service)" </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
       restore_checkout_and_tag || return 1
