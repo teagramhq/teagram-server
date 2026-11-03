@@ -489,7 +489,7 @@ net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 EOF
 INSTALL_CHANGED=false
-install_file_if_changed "$sysctl_file" /etc/sysctl.d/90-teagram-k3s.conf 0644
+install_file_if_changed "$sysctl_file" /etc/sysctl.d/90-teagram-k3s.conf 644
 if [[ $INSTALL_CHANGED == true ]]; then
   incus exec "$INSTANCE" -- sysctl --load=/etc/sysctl.d/90-teagram-k3s.conf >/dev/null
 fi
@@ -536,9 +536,9 @@ if [[ $remote_keys != "$AGENT_AUTHORIZED_KEY" || $remote_key_mode != 600:0:0 ]];
     incus exec "$INSTANCE" -- install -o root -g root -m 0600 /dev/stdin /root/.ssh/authorized_keys
   INSTALL_CHANGED=true
 fi
-install_file_if_changed "$ops_ssh_config" /etc/ssh/sshd_config.d/00-teagram-k3s-ops.conf 0644
+install_file_if_changed "$ops_ssh_config" /etc/ssh/sshd_config.d/00-teagram-k3s-ops.conf 644
 install_file_if_changed "$REPO_ROOT/deploy/k8s/teagram-k3s-ops.sh" \
-  /usr/local/sbin/teagram-ops 0700
+  /usr/local/sbin/teagram-ops 700
 incus exec "$INSTANCE" -- sshd -t
 if ! incus exec "$INSTANCE" -- systemctl is-enabled --quiet ssh; then
   incus exec "$INSTANCE" -- systemctl enable ssh
@@ -645,6 +645,13 @@ json.dump(secret, sys.stdout, separators=(",", ":"))
 
 incus exec "$INSTANCE" -- k3s kubectl wait --for=create secret/teagram-deployer-token \
   --namespace "$NAMESPACE" --timeout=60s >/dev/null
+# The controller fills token and ca.crt after the Secret object exists, so wait for both keys.
+for data_key in '{.data.token}' '{.data.ca\.crt}'; do
+  if ! incus exec "$INSTANCE" -- k3s kubectl wait --for="jsonpath=$data_key" \
+    secret/teagram-deployer-token --namespace "$NAMESPACE" --timeout=120s >/dev/null; then
+    fail 'the deploy token or cluster CA was not populated in time'
+  fi
+done
 incus exec "$INSTANCE" -- k3s kubectl get secret teagram-deployer-token \
   --namespace "$NAMESPACE" --output json |
   python3 -c '
