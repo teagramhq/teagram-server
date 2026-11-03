@@ -898,14 +898,6 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, err
 		}
 	}
-	stickerDocumentIDs := positiveCustomEmojiDocumentIDs(entities)
-	if stickerDocumentID != nil {
-		stickerDocumentIDs = append(stickerDocumentIDs, *stickerDocumentID)
-	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
-		return ChannelMessage{}, 0, false, err
-	}
-
 	// Idempotency: a resend with the same random_id returns the original post,
 	// with no row, no event and no pts movement — same rule as the chat and 1:1
 	// send paths, read under the row lock so two concurrent resends agree.
@@ -923,6 +915,22 @@ func (s *Store) postChannelMessage(
 		if duplicate {
 			return message, pts, true, nil
 		}
+	}
+	customEmojiDocumentIDs := positiveCustomEmojiDocumentIDs(entities)
+	stickerDocumentIDs := append([]int64(nil), customEmojiDocumentIDs...)
+	if stickerDocumentID != nil {
+		stickerDocumentIDs = append(stickerDocumentIDs, *stickerDocumentID)
+	}
+	if pollDraft != nil {
+		additionalIDs := positiveCustomEmojiDocumentIDs(pollDraft.DescriptionEntities)
+		customEmojiDocumentIDs = append(customEmojiDocumentIDs, additionalIDs...)
+		stickerDocumentIDs = append(stickerDocumentIDs, additionalIDs...)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, customEmojiDocumentIDs...); err != nil {
+		return ChannelMessage{}, 0, false, err
 	}
 	channel, err := qtx.ChannelPostDefaults(ctx, channelID)
 	switch {

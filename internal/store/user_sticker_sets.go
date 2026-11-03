@@ -1405,6 +1405,40 @@ func positiveCustomEmojiDocumentIDs(entities []PollDescriptionEntity) []int64 {
 	return ids
 }
 
+func newPositiveCustomEmojiDocumentIDs(previous, next []PollDescriptionEntity) []int64 {
+	existing := make(map[int64]struct{})
+	for _, id := range positiveCustomEmojiDocumentIDs(previous) {
+		existing[id] = struct{}{}
+	}
+	var ids []int64
+	for _, id := range positiveCustomEmojiDocumentIDs(next) {
+		if _, ok := existing[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func validateLiveUserCustomEmojiDocuments(ctx context.Context, qtx *db.Queries, documentIDs ...int64) error {
+	ids := ascendingUnique(documentIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := qtx.UserCreatedStickerSetItemsByFileIDs(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("validate live custom emoji documents: %w", err)
+	}
+	if len(rows) != len(ids) {
+		return ErrMediaInvalid
+	}
+	for _, row := range rows {
+		if row.Kind != "emojis" || !row.IsLive || !row.IsActive {
+			return ErrMediaInvalid
+		}
+	}
+	return nil
+}
+
 // lockLiveUserStickerDocuments is the write-side liveness boundary for message
 // references to user-set documents. It resolves each positive document through
 // active set membership and holds its live set FOR SHARE until commit.

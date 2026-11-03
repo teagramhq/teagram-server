@@ -114,6 +114,11 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 			return h.userAlbumReplay(c, r, peerType, toID, replay)
 		}
 	}
+	for _, item := range items {
+		if err = h.validateCustomEmojiDocumentReferences(r.UserID, item.Entities); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 
 	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(items)); err != nil {
 		return nil, nil, nil, err
@@ -212,7 +217,7 @@ func albumItems(ctx context.Context, h *handlers, viewerID int64, multi []tg.Inp
 	seenFiles := make(map[int64]bool, len(multi))
 	seenRandom := make(map[int64]bool, len(multi))
 	for _, single := range multi {
-		entities, err := h.encodeMessageEntitiesWithURLs(ctx, viewerID, single.Message, single.Entities)
+		entities, err := h.encodeMessageEntitiesWithURLsUnchecked(viewerID, single.Message, single.Entities)
 		if err != nil {
 			return nil, err
 		}

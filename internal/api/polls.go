@@ -93,6 +93,9 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 			return h.pollSendResponse(c, r, existing, poll, pts, req.RandomID, nil)
 		}
 	}
+	if err := h.validateCustomEmojiDocumentReferences(r.UserID, draft.DescriptionEntities); err != nil {
+		return nil, nil, nil, err
+	}
 	if err = h.store.ValidatePollDraft(draft); err != nil {
 		return nil, nil, nil, errPollInvalid
 	}
@@ -173,6 +176,8 @@ func (h *handlers) sendChannelPoll(
 		return nil, nil, nil, errPollInvalid
 	case errors.Is(err, store.ErrMessageInvalid):
 		return nil, nil, nil, errMediaInvalid
+	case errors.Is(err, store.ErrMediaInvalid):
+		return nil, nil, nil, errInputRequestInvalid
 	case err != nil:
 		h.log.Error("send channel poll", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
@@ -1007,6 +1012,8 @@ func pollResultsToTL(poll store.Poll) tg.PollResults {
 
 func pollStoreError(err error) error {
 	switch {
+	case errors.Is(err, store.ErrMediaInvalid):
+		return errInputRequestInvalid
 	case errors.Is(err, store.ErrRandomIDExpired):
 		return errRandomIDDuplicate
 	case errors.Is(err, store.ErrPollInvalid):

@@ -357,14 +357,17 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 	if err = lockOwners(ctx, tx, fromID, toID); err != nil {
 		return AlbumResult{}, err
 	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
-		return AlbumResult{}, err
-	}
 	randomIDs := albumRandomIDs(a.Items)
 	if existing, dup, dedupErr := userAlbumDedup(ctx, qtx, fromID, PeerTypeUser, toID, randomIDs); dedupErr != nil {
 		return AlbumResult{}, dedupErr
 	} else if dup {
 		return userAlbumReplay(ctx, qtx, fromID, existing)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return AlbumResult{}, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return AlbumResult{}, err
 	}
 	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
 	if err != nil {
@@ -492,15 +495,17 @@ func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (A
 	if err = lockOwners(ctx, tx, owners...); err != nil {
 		return AlbumResult{}, err
 	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
-		return AlbumResult{}, err
-	}
-
 	randomIDs := albumRandomIDs(a.Items)
 	if existing, dup, dedupErr := userAlbumDedup(ctx, qtx, fromID, PeerTypeChat, chatID, randomIDs); dedupErr != nil {
 		return AlbumResult{}, dedupErr
 	} else if dup {
 		return userAlbumReplay(ctx, qtx, fromID, existing)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return AlbumResult{}, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return AlbumResult{}, err
 	}
 	rights, err := consumeAlbumGrants(ctx, qtx, fromID, a.Items, a.GrantTTL)
 	if err != nil {
@@ -730,12 +735,15 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	if err != nil {
 		return ChannelAlbumResult{}, err
 	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
-		return ChannelAlbumResult{}, err
-	}
 	randomIDs := albumRandomIDs(a.Items)
 	if replay, dedupErr := channelAlbumDedup(ctx, qtx, channelID, fromID, randomIDs); dedupErr != nil || replay.Duplicate {
 		return replay, dedupErr
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return ChannelAlbumResult{}, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, albumCustomEmojiDocumentIDs(a.Items)...); err != nil {
+		return ChannelAlbumResult{}, err
 	}
 
 	rights, err := consumeAlbumGrants(ctx, qtx, fromID, a.Items, a.GrantTTL)

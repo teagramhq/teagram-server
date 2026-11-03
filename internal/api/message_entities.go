@@ -24,6 +24,14 @@ func (h *handlers) encodeMessageEntitiesWithURLs(ctx context.Context, viewerID i
 	return addDetectedMessageURLs(text, encoded)
 }
 
+func (h *handlers) encodeMessageEntitiesWithURLsUnchecked(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+	encoded, err := h.encodeMessageEntitiesUnchecked(viewerID, text, entities)
+	if err != nil {
+		return nil, err
+	}
+	return addDetectedMessageURLs(text, encoded)
+}
+
 func addDetectedMessageURLs(text string, entities []store.PollDescriptionEntity) ([]store.PollDescriptionEntity, error) {
 	merged := append([]store.PollDescriptionEntity(nil), entities...)
 	if len(merged) >= store.MaxPollDescriptionEntities {
@@ -151,6 +159,17 @@ func utf16Length(text string) int {
 }
 
 func (h *handlers) encodeMessageEntities(ctx context.Context, viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+	encoded, err := h.encodeMessageEntitiesUnchecked(viewerID, text, entities)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.validateCustomEmojiDocumentReferences(viewerID, encoded); err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+func (h *handlers) encodeMessageEntitiesUnchecked(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
 	if len(entities) > store.MaxPollDescriptionEntities {
 		return nil, errEntitiesTooLong
 	}
@@ -225,9 +244,6 @@ func (h *handlers) encodeMessageEntities(ctx context.Context, viewerID int64, te
 			return nil, errInputRequestInvalid
 		}
 		encoded = append(encoded, stored)
-	}
-	if err := h.validateCustomEmojiDocumentReferences(ctx, viewerID, encoded); err != nil {
-		return nil, err
 	}
 	return encoded, nil
 }

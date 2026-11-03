@@ -74,18 +74,93 @@ func TestRemovedCustomEmojiCannotBeReferencedByMessagesOrChannelPosts(t *testing
 	if err != nil {
 		t.Fatalf("create emoji sticker set: %v", err)
 	}
-	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
-		t.Fatalf("remove emoji item: %v", err)
-	}
+	channel := mustChannel(t, s, sender.ID, "emoji reference")
 	entities := []store.PollDescriptionEntity{{
 		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: removedItem.ID,
 	}}
+	firstMessage, _, _, duplicate, err := s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92000, 0, 0, entities)
+	if err != nil || duplicate {
+		t.Fatalf("send custom emoji message: duplicate=%t err=%v", duplicate, err)
+	}
+	firstPost, _, duplicate, err := s.PostChannelMessageAsWithEntities(ctx, channel.ID, sender.ID, "⭐", 92001, nil, 0, entities)
+	if err != nil || duplicate {
+		t.Fatalf("post custom emoji channel message: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove emoji item: %v", err)
+	}
+	retriedMessage, _, _, duplicate, err := s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92000, 0, 0, entities)
+	if err != nil || !duplicate || retriedMessage.LocalID != firstMessage.LocalID {
+		t.Fatalf("retry removed emoji message = id %d duplicate=%t err=%v, want original id %d", retriedMessage.LocalID, duplicate, err, firstMessage.LocalID)
+	}
+	retriedPost, _, duplicate, err := s.PostChannelMessageAsWithEntities(ctx, channel.ID, sender.ID, "⭐", 92001, nil, 0, entities)
+	if err != nil || !duplicate || retriedPost.LocalID != firstPost.LocalID {
+		t.Fatalf("retry removed emoji channel post = id %d duplicate=%t err=%v, want original id %d", retriedPost.LocalID, duplicate, err, firstPost.LocalID)
+	}
 	if _, _, _, _, err = s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92002, 0, 0, entities); !errors.Is(err, store.ErrMediaInvalid) {
 		t.Fatalf("send message referencing removed emoji = %v, want ErrMediaInvalid", err)
 	}
-
-	channel := mustChannel(t, s, sender.ID, "emoji reference")
 	if _, _, _, err = s.PostChannelMessageAsWithEntities(ctx, channel.ID, sender.ID, "⭐", 92003, nil, 0, entities); !errors.Is(err, store.ErrMediaInvalid) {
 		t.Fatalf("post channel message referencing removed emoji = %v, want ErrMediaInvalid", err)
+	}
+}
+
+func TestMessageEditsRejectOnlyNewRemovedCustomEmojiReferences(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559201005")
+	sender := mustUser(t, s, "+15559201006")
+	recipient := mustUser(t, s, "+15559201007")
+	priorItem := storedFile(t, s, owner.ID)
+	removedItem := storedFile(t, s, owner.ID)
+	remainingItem := storedFile(t, s, owner.ID)
+	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_edit_removed_reference", Kind: "emojis",
+	}, []store.UserStickerSetItem{
+		{FileID: priorItem.ID, AccessHash: priorItem.AccessHash, Size: priorItem.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
+		{FileID: removedItem.ID, AccessHash: removedItem.AccessHash, Size: removedItem.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
+		{FileID: remainingItem.ID, AccessHash: remainingItem.AccessHash, Size: remainingItem.Size, Emoji: "🌙", Format: "TGS", Width: 100, Height: 100},
+	})
+	if err != nil {
+		t.Fatalf("create emoji sticker set: %v", err)
+	}
+	priorEntities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: priorItem.ID,
+	}}
+	directMessage, _, _, duplicate, err := s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92004, 0, 0, priorEntities)
+	if err != nil || duplicate {
+		t.Fatalf("send direct message with live emoji: duplicate=%t err=%v", duplicate, err)
+	}
+	chat, err := s.CreateChat(ctx, sender.ID, "emoji edit", []int64{recipient.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	chatMessage, _, _, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: sender.ID, Text: "⭐", RandomID: 92005, Entities: priorEntities,
+	})
+	if err != nil {
+		t.Fatalf("send chat message with live emoji: %v", err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, priorItem.ID, priorItem.AccessHash); err != nil {
+		t.Fatalf("remove prior emoji item: %v", err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove newly referenced emoji item: %v", err)
+	}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, directMessage.LocalID, "⭐", priorEntities); err != nil {
+		t.Errorf("retain an existing removed-set emoji in a direct message edit: %v", err)
+	}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, chatMessage.LocalID, "⭐", priorEntities); err != nil {
+		t.Errorf("retain an existing removed-set emoji in a chat message edit: %v", err)
+	}
+	newEntities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: removedItem.ID,
+	}}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, directMessage.LocalID, "✨", newEntities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Errorf("add removed emoji to direct message edit = %v, want ErrMediaInvalid", err)
+	}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, chatMessage.LocalID, "✨", newEntities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Errorf("add removed emoji to chat message edit = %v, want ErrMediaInvalid", err)
 	}
 }

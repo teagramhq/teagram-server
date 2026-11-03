@@ -291,19 +291,6 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 			return Message{}, 0, 0, false, err
 		}
 	}
-	stickerDocumentIDs := positiveCustomEmojiDocumentIDs(entities)
-	if stickerDocumentID != nil {
-		stickerDocumentIDs = append(stickerDocumentIDs, *stickerDocumentID)
-	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
-		return Message{}, 0, 0, false, err
-	}
-	// Both rows below carry fileID, so the file's row is locked here and held to
-	// commit. Taken after the advisory locks and before any insert; see
-	// lockFileRefs for why that is the only order this class can be taken in.
-	if err = lockFileRefs(ctx, qtx, fileID); err != nil {
-		return Message{}, 0, 0, false, err
-	}
 	// Idempotency: a resend with the same random_id returns the original, at the
 	// pts each side's stored copy occupies rather than that side's current pts.
 	// The client applies updateNewMessage by pts, so an old message carrying a
@@ -327,6 +314,23 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 		case !errors.Is(e, pgx.ErrNoRows):
 			return Message{}, 0, 0, false, fmt.Errorf("random_id lookup: %w", e)
 		}
+	}
+	customEmojiDocumentIDs := positiveCustomEmojiDocumentIDs(entities)
+	stickerDocumentIDs := append([]int64(nil), customEmojiDocumentIDs...)
+	if stickerDocumentID != nil {
+		stickerDocumentIDs = append(stickerDocumentIDs, *stickerDocumentID)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return Message{}, 0, 0, false, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, customEmojiDocumentIDs...); err != nil {
+		return Message{}, 0, 0, false, err
+	}
+	// Both rows below carry fileID, so the file's row is locked here and held to
+	// commit. Take it after the owner and set locks and before any insert; see
+	// lockFileRefs for why that is the only order this class can be taken in.
+	if err = lockFileRefs(ctx, qtx, fileID); err != nil {
+		return Message{}, 0, 0, false, err
 	}
 	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
 	if err != nil {
@@ -548,6 +552,12 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 			return Message{}, nil, Poll{}, false, fmt.Errorf("private poll random id lookup: %w", lookupErr)
 		}
 	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(draft.DescriptionEntities)...); err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(draft.DescriptionEntities)...); err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
 	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, err
@@ -666,6 +676,12 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 		case !errors.Is(lookupErr, pgx.ErrNoRows):
 			return Message{}, 0, Poll{}, false, fmt.Errorf("saved poll random id lookup: %w", lookupErr)
 		}
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(draft.DescriptionEntities)...); err != nil {
+		return Message{}, 0, Poll{}, false, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(draft.DescriptionEntities)...); err != nil {
+		return Message{}, 0, Poll{}, false, err
 	}
 	b, err := bumpState(ctx, qtx, userID)
 	if err != nil {
@@ -966,7 +982,7 @@ func (s *Store) EditMessageWithEntities(ctx context.Context, ownerID, localID in
 	}
 	peerID = pre.PeerID
 	if PeerType(pre.PeerType) == PeerTypeChat {
-		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text, entityData); err != nil {
+		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text, entityData, entities); err != nil {
 			return 0, 0, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -986,6 +1002,13 @@ func (s *Store) EditMessageWithEntities(ctx context.Context, ownerID, localID in
 	}
 	if !msg.Out || msg.Deleted {
 		return 0, 0, ErrMessageInvalid
+	}
+	newEmojiDocumentIDs := newPositiveCustomEmojiDocumentIDs(DecodeMessageEntities(msg.Entities), entities)
+	if err = lockLiveUserStickerDocuments(ctx, qtx, newEmojiDocumentIDs...); err != nil {
+		return 0, 0, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, newEmojiDocumentIDs...); err != nil {
+		return 0, 0, err
 	}
 
 	if err = qtx.SetEditedTextWithEntities(ctx, db.SetEditedTextWithEntitiesParams{OwnerID: ownerID, LocalID: localID, Message: text, Entities: entityData}); err != nil {
@@ -1140,7 +1163,7 @@ func lockPollsForDeletedMessageCopies(ctx context.Context, qtx *db.Queries, refs
 // as the chats row lock here. Leaving the chats row out is what lets
 // DeleteMessages accept a batch spanning several chats without breaking the
 // one-chats-row-per-transaction rule.
-func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text, entityData string) (int, error) {
+func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text, entityData string, entities []PollDescriptionEntity) (int, error) {
 	copies, err := chatCopies(ctx, qtx, pre)
 	if err != nil {
 		return 0, err
@@ -1163,6 +1186,13 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 	}
 	if !msg.Out || msg.Deleted {
 		return 0, ErrMessageInvalid
+	}
+	newEmojiDocumentIDs := newPositiveCustomEmojiDocumentIDs(DecodeMessageEntities(msg.Entities), entities)
+	if err = lockLiveUserStickerDocuments(ctx, qtx, newEmojiDocumentIDs...); err != nil {
+		return 0, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, newEmojiDocumentIDs...); err != nil {
+		return 0, err
 	}
 	members, err := chatMembers(ctx, qtx, pre.PeerID)
 	if err != nil {

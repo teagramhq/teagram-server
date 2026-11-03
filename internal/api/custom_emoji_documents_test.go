@@ -73,14 +73,29 @@ func TestGetCustomEmojiDocumentsReturnsMessageReferencedHistoricalSetMembers(t *
 	if !ok {
 		t.Fatalf("deleted custom emoji set document = %T, want *tg.Document", deletedSet.Documents[0])
 	}
-	if _, err := api.SendMessageForTest(s, owner.ID, &tg.MessagesSendMessageRequest{
+	initialSend, err := api.SendMessageForTest(s, owner.ID, &tg.MessagesSendMessageRequest{
 		Peer: api.InputPeerUser(owner.ID, requester.ID), Message: "⭐⭐", RandomID: 91904,
 		Entities: []tg.MessageEntityClass{
 			&tg.MessageEntityCustomEmoji{Offset: 0, Length: 1, DocumentID: referencedRemovedDocument.ID},
 			&tg.MessageEntityCustomEmoji{Offset: 1, Length: 1, DocumentID: deletedDocument.ID},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("send custom emoji references: %v", err)
+	}
+	initialUpdates, ok := initialSend.(*tg.Updates)
+	if !ok {
+		t.Fatalf("initial custom emoji send response = %T, want *tg.Updates", initialSend)
+	}
+	var initialMessageID int
+	for _, update := range initialUpdates.Updates {
+		if messageID, ok := update.(*tg.UpdateMessageID); ok {
+			initialMessageID = messageID.ID
+			break
+		}
+	}
+	if initialMessageID == 0 {
+		t.Fatal("initial custom emoji send omitted its message ID")
 	}
 
 	conn, err := pgx.Connect(ctx, dsn)
@@ -109,6 +124,30 @@ func TestGetCustomEmojiDocumentsReturnsMessageReferencedHistoricalSetMembers(t *
 	var deleteResult tg.BoolTrue
 	if err := deleteResult.Decode(&bin.Buffer{Buf: deletedBody}); err != nil {
 		t.Fatalf("delete custom emoji set: %v", err)
+	}
+	retry, err := api.SendMessageForTest(s, owner.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(owner.ID, requester.ID), Message: "⭐⭐", RandomID: 91904,
+		Entities: []tg.MessageEntityClass{
+			&tg.MessageEntityCustomEmoji{Offset: 0, Length: 1, DocumentID: referencedRemovedDocument.ID},
+			&tg.MessageEntityCustomEmoji{Offset: 1, Length: 1, DocumentID: deletedDocument.ID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("retry custom emoji send after removal and deletion: %v", err)
+	}
+	retryUpdates, ok := retry.(*tg.Updates)
+	if !ok {
+		t.Fatalf("custom emoji retry response = %T, want *tg.Updates", retry)
+	}
+	var retryMessageID int
+	for _, update := range retryUpdates.Updates {
+		if messageID, ok := update.(*tg.UpdateMessageID); ok {
+			retryMessageID = messageID.ID
+			break
+		}
+	}
+	if retryMessageID != initialMessageID {
+		t.Fatalf("custom emoji retry message ID = %d, want stored ID %d", retryMessageID, initialMessageID)
 	}
 
 	regularFile := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
