@@ -8,10 +8,9 @@ on:
 permissions:
   contents: read
 
-# Main keeps one running and the newest pending check; PR updates supersede
-# older checks for that PR without holding up main.
+# Main pushes keep one running and the newest pending check; PR updates supersede older checks.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main-priority-v2') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Testcontainers rewrites Docker Hub pulls through Google's public mirror.
@@ -21,38 +20,9 @@ env:
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
 jobs:
-  ops-prioritize-main:
-    name: 'ops: prioritize-main'
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 35
-    permissions:
-      contents: read
-      statuses: read
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Wait for trusted PR cancellation before main fan-out
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAIN_RUN_ID: ${{ github.run_id }}
-          MAIN_RUN_ATTEMPT: ${{ github.run_attempt }}
-          MAIN_HEAD_SHA: ${{ github.sha }}
-        run: bash .github/scripts/wait-for-main-priority-controller.sh
-
-      - name: Defer privileged priority operations to trusted workflow
-        if: ${{ github.event_name == 'pull_request' }}
-        run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
   check-sticker-license:
     name: 'check: sticker-license'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -121,8 +91,7 @@ jobs:
 
   check-security:
     name: 'check: security'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -214,8 +183,7 @@ jobs:
 
   lint-go:
     name: 'lint: go'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     # Keep lint's timeout aligned with its former step in ci.
     timeout-minutes: 20
@@ -267,8 +235,7 @@ jobs:
 
   lint-sql:
     name: 'lint: sql'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -307,8 +274,7 @@ jobs:
 
   test-git-hooks:
     name: 'test: git-hooks'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -325,8 +291,7 @@ jobs:
 
   test-browser-acceptance:
     name: 'test: browser-acceptance'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -389,9 +354,8 @@ jobs:
   build-browser-acceptance-image:
     name: 'build: browser-acceptance-image (${{ matrix.arch }})'
     needs:
-      - ops-prioritize-main
       - test-browser-acceptance
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.test-browser-acceptance.result == 'success' }}
+    if: ${{ !cancelled() && needs.test-browser-acceptance.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
@@ -573,8 +537,7 @@ jobs:
 
   test-go:
     name: 'test: go'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -841,8 +804,7 @@ jobs:
 
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -936,8 +898,7 @@ jobs:
 
   test-websocket-d1:
     name: 'test: websocket-d1'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1017,8 +978,7 @@ jobs:
 
   test-websocket-permanent-exchange:
     name: 'test: websocket-permanent-exchange'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1062,8 +1022,7 @@ jobs:
 
   check-deploy-workflow:
     name: 'check: deploy-workflow'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1095,7 +1054,7 @@ jobs:
             .github/workflows/deploy-qa-invite.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/pr-ci-priority.yml .github/workflows/recover-cancelled-pr-ci.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
@@ -1107,13 +1066,13 @@ jobs:
       - name: Check RPC performance workflow contract
         run: .github/scripts/test-perf-workflow-contract.sh
 
-      - name: Check main CI queue priority contract
+      - name: Check PR CI cancellation policy
         run: .github/scripts/test-ci-main-priority.sh
 
       - name: Check workflow contract script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/wait-for-main-priority-controller.sh .github/scripts/test-wait-for-main-priority-controller.sh .github/scripts/dispatch-pr-ci-recovery.sh .github/scripts/test-dispatch-pr-ci-recovery.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
-          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh .github/scripts/test-pr-main-ci-gate.sh .github/scripts/test-recover-cancelled-pr-checks.sh .github/scripts/wait-for-main-priority-controller.sh .github/scripts/test-wait-for-main-priority-controller.sh .github/scripts/dispatch-pr-ci-recovery.sh .github/scripts/test-dispatch-pr-ci-recovery.sh .github/scripts/main-ci-active-run.sh .github/scripts/gate-pr-checks-during-main.sh .github/scripts/cancel-pr-checks-for-main.sh .github/scripts/recover-cancelled-pr-checks.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
 
       - name: Check deploy script syntax
         run: |
@@ -1269,8 +1228,7 @@ jobs:
 
   check-demo-web-pin:
     name: 'check: demo-web-pin'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     continue-on-error: ${{ github.event_name == 'push' }}
     outputs:
@@ -1358,9 +1316,8 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ always() }}
     needs:
-      - ops-prioritize-main
       - check-security
       - test-go
       - check-sticker-license
@@ -1387,7 +1344,6 @@ jobs:
     steps:
       - name: Require all CI lanes to pass
         env:
-          MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
           CHECK_SECURITY_RESULT: ${{ needs.check-security.result }}
           TEST_GO_RESULT: ${{ needs.test-go.result }}
           CHECK_STICKER_LICENSE_RESULT: ${{ needs.check-sticker-license.result }}
@@ -1410,7 +1366,6 @@ jobs:
           CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
         run: |
           lane_results=(
-            "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
             "check-security=$CHECK_SECURITY_RESULT"
             "test-go=$TEST_GO_RESULT"
             "check-sticker-license=$CHECK_STICKER_LICENSE_RESULT"
@@ -1432,8 +1387,7 @@ jobs:
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
           )
-          if [[ "$MAIN_PRIORITY_RESULT" != "success" ||
-                "$CHECK_SECURITY_RESULT" != "success" ||
+          if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
                 "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
                 "$TEST_PHOTO_WORKER_RESULT" != "success" ||
@@ -1461,9 +1415,8 @@ jobs:
 
   publish-demo-image:
     name: 'publish: demo-image'
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
-      - ops-prioritize-main
       - test-browser-acceptance
       - build-browser-acceptance-image
       - ci
@@ -1551,8 +1504,7 @@ jobs:
   # merge gate on every PR that does not touch internal/admin.
   lint-css:
     name: 'lint: css'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1590,8 +1542,7 @@ jobs:
   # cannot turn the repo red on its own.
   check-sqlc-drift:
     name: 'check: sqlc-drift'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1623,8 +1574,7 @@ jobs:
   # harness, so this check can run beside ci without shared services or files.
   test-e2e-admin:
     name: 'test: e2e-admin'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
     # a hang (a browser that never launches, a webServer that never binds). A
@@ -2007,9 +1957,8 @@ jobs:
   build-server-image:
     name: 'build: server-image'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -2233,9 +2182,8 @@ jobs:
   test-compose:
     name: 'test: compose'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -3189,9 +3137,8 @@ jobs:
   test-photo-worker:
     name: 'test: photo-worker (${{ matrix.arch }})'
     needs:
-      - ops-prioritize-main
       - check-sticker-license
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -3341,8 +3288,7 @@ jobs:
   # and its Postgres container are discarded with this job.
   test-smoke:
     name: 'test: smoke'
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -3483,8 +3429,7 @@ jobs:
 
   test-migrations:
     name: "test: migrations"
-    needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
