@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_sha) || github.sha }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_sha) || github.sha }}
           persist-credentials: false
 
       - name: Gate this pull request while main CI is active

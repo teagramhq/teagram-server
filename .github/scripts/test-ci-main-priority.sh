@@ -68,8 +68,8 @@ fork_run_b_group='pr-ci-priority-run-81002'
 [[ "$(priority_query '.jobs."ops-cancel-pr-checks".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,statuses=write' ]] ||
   fail 'only the base-defined cancellation controller may get Actions and status write'
 priority_checkout_ref="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with.ref')"
-[[ "$priority_checkout_ref" == *'github.event.pull_request.base.sha'* && "$priority_checkout_ref" == *'github.sha'* ]] ||
-  fail 'the trusted controller must use the base commit for its helper code'
+[[ "$priority_checkout_ref" == *'github.event.pull_request.base.ref'* && "$priority_checkout_ref" != *'github.event.pull_request.base.sha'* && "$priority_checkout_ref" == *'github.sha'* ]] ||
+  fail 'the trusted controller must use the current base branch for its helper code'
 [[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.uses == "actions/checkout@v7.0.1") | .with."persist-credentials"')" == false ]] ||
   fail 'the trusted controller must not persist its token in git config'
 gate_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Gate this pull request while main CI is active") | .run')"
