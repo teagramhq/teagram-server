@@ -186,6 +186,9 @@ func safeRPCErrorName(err error) string {
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
 		return "transport"
 	}
+	if cause, ok := errors.AsType[*requestFailureCauseError](err); ok && cause != nil && cause.cause == requestFailureTransport {
+		return "transport"
+	}
 	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
 		return "rpc"
 	}
@@ -345,7 +348,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	req.rpcTypeID = id
 	req.rpcTypeIDSet = true
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
-		c.queueAcks(req.MsgID)
+		c.queueRPCAck(req.MsgID, id)
 	}
 
 	// Containers and acknowledgements are not executed; a container's entries
@@ -450,7 +453,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 			defer admission.finish()
 		}
 		if c != nil {
-			c.queueAcks(containerAcks(&container)...)
+			c.queueAckRecords(containerAcks(&container)...)
 		}
 		for i := range container.Messages {
 			m := container.Messages[i]

@@ -64,7 +64,7 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 	if err := validateCodeHash(codeRow); err != nil {
 		return User{}, err
 	}
-	if invitePolicy.RequireTurnstileCode && (codeRow.TurnstileAction == nil || *codeRow.TurnstileAction != "signup" ||
+	if invitePolicy.RequireTurnstileCode && (codeRow.TurnstileAction == nil || !TurnstileAction(*codeRow.TurnstileAction).Valid() || TurnstileAction(*codeRow.TurnstileAction) != TurnstileActionSignUp ||
 		codeRow.TurnstileAuthKeyID == nil || *codeRow.TurnstileAuthKeyID != authKeyID) {
 		return User{}, ErrCodeInvalid
 	}

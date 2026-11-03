@@ -159,6 +159,11 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 	}
 	req.rpcTypeID = id
 	req.rpcTypeIDSet = true
+	if c != nil && needsAck(req.seqNo, id) {
+		// Wrapper and gzip constructors are replaced before dispatch. Refresh
+		// the queued acknowledgement with the leaf RPC used by its handler.
+		c.queueRPCAck(req.MsgID, id)
+	}
 
 	d.mux.Lock()
 	h, ok := d.reqs[id]

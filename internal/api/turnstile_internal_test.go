@@ -360,7 +360,7 @@ func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, logger)
 	verifier.endpoint = server.URL
-	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin", "signup"}, ""); err != nil || action != "signup" {
+	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signup"}, ""); err != nil || action != "signup" {
 		t.Fatalf("Verify with QA bypass: %v", err)
 	}
 	if got := requests.Load(); got != 0 {
@@ -374,21 +374,21 @@ func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing
 	}
 }
 
-func TestTurnstileVerifierDoesNotApplyQABypassToSignin(t *testing.T) {
+func TestTurnstileVerifierRefusesQABypassAtSendCode(t *testing.T) {
 	const bypassToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
-		writeTurnstileBody(t, w, `{"success":true,"action":"signin","hostname":"web.teagram.io"}`)
+		writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"web.teagram.io"}`)
 	}))
 	defer server.Close()
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, nil)
 	verifier.endpoint = server.URL
-	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin"}, ""); err != nil || action != "signin" {
-		t.Fatalf("Verify signin with QA token through Siteverify: %v", err)
+	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin", "signup"}, ""); !errors.Is(err, errTurnstileRejected) || action != "" {
+		t.Fatalf("Verify sendCode with QA token = (%q, %v), want a refusal", action, err)
 	}
-	if got := requests.Load(); got != 1 {
-		t.Fatalf("signin used %d Siteverify requests, want 1 (QA bypass only applies to signup)", got)
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("sendCode made %d Siteverify requests with the reserved QA token, want 0", got)
 	}
 }

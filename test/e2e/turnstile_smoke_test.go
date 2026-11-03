@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 
@@ -24,9 +25,10 @@ type smokeTurnstileVerification struct {
 }
 
 type smokeTurnstileVerifier struct {
-	mu       sync.Mutex
-	seen     map[string]struct{}
-	verified chan smokeTurnstileVerification
+	mu            sync.Mutex
+	seen          map[string]struct{}
+	issuedActions map[string]string
+	verified      chan smokeTurnstileVerification
 }
 
 func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
@@ -40,12 +42,15 @@ func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowed
 	}
 	v.seen[token] = struct{}{}
 	v.mu.Unlock()
-	if len(allowedActions) == 0 {
-		return "", errors.New("no allowed Turnstile actions")
+	action, ok := v.issuedActions[token]
+	if !ok {
+		return "", errors.New("token has no issued Turnstile action")
 	}
-	action := allowedActions[0]
 	if action != "signin" && action != "signup" {
 		return "", errors.New("unsupported Turnstile action")
+	}
+	if !slices.Contains(allowedActions, action) {
+		return "", errors.New("token action is not allowed")
 	}
 
 	v.verified <- smokeTurnstileVerification{token: token, action: action, remoteIP: remoteIP}
@@ -54,7 +59,11 @@ func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowed
 
 func testSmokeTurnstileSignUp(t *testing.T) {
 	t.Helper()
-	verifier := &smokeTurnstileVerifier{verified: make(chan smokeTurnstileVerification, 8)}
+	const token = "smoke-turnstile-token"
+	verifier := &smokeTurnstileVerifier{
+		issuedActions: map[string]string{token: "signup"},
+		verified:      make(chan smokeTurnstileVerification, 8),
+	}
 	const siteKey = "smoke-site-key"
 	f := newSmokeFixtureWithSetup(t, config.RegistrationInvite, func(f *smokeFixture) {
 		f.turnstileSiteKey = siteKey
@@ -76,7 +85,6 @@ func testSmokeTurnstileSignUp(t *testing.T) {
 		Middlewares:    []telegram.Middleware{captureClientRequests(requests)},
 	})
 
-	const token = "smoke-turnstile-token"
 	if err := client.Run(f.ctx, func(ctx context.Context) error {
 		apiClient := client.API()
 		codeHash, err := sendCodeUsername(ctx, apiClient, username)
@@ -116,9 +124,83 @@ func testSmokeTurnstileSignUp(t *testing.T) {
 	assertSmokeTurnstileVerifications(t, verifier, smokeTurnstileVerification{token: token, action: "signup"})
 }
 
+func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
+	t.Helper()
+	const sendCodeToken = "smoke-turnstile-signup-send-code"
+	verifier := &smokeTurnstileVerifier{
+		issuedActions: map[string]string{sendCodeToken: "signup"},
+		verified:      make(chan smokeTurnstileVerification, 8),
+	}
+	const siteKey = "smoke-signup-site-key"
+	f := newSmokeFixtureWithSetup(t, config.RegistrationInvite, func(f *smokeFixture) {
+		f.turnstileSiteKey = siteKey
+		f.turnstileVerifier = verifier
+		f.turnstileSignInEnabled = true
+	})
+
+	const username = "turnstile_smoke_send_code_user"
+	_, inviteSecret, err := f.store.IssueInvite(f.ctx, username)
+	if err != nil {
+		t.Fatalf("issue sign-up invite: %v", err)
+	}
+	client := telegram.NewClient(1, "hash", telegram.Options{
+		DC:             f.dcID,
+		DCList:         dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
+		PublicKeys:     []telegram.PublicKey{{RSA: &f.key.PublicKey}},
+		Resolver:       dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage: &session.StorageMemory{},
+	})
+
+	if err := client.Run(f.ctx, func(ctx context.Context) error {
+		apiClient := client.API()
+		sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: 1, APIHash: "hash"}
+		var sent tg.AuthSentCodeBox
+		if err := apiClient.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{
+			Token: sendCodeToken,
+			Query: sendCode,
+		}, &sent); err != nil {
+			return fmt.Errorf("wrapped auth.sendCode with signup action: %w", err)
+		}
+		sentCode, ok := sent.SentCode.(*tg.AuthSentCode)
+		if !ok {
+			return fmt.Errorf("wrapped auth.sendCode response = %T, want *tg.AuthSentCode", sent.SentCode)
+		}
+
+		response, err := signInUsername(ctx, apiClient, username, sentCode.PhoneCodeHash, inviteSecret)
+		if err != nil {
+			if !isSignUpRequired(err) {
+				return fmt.Errorf("signIn: expected SIGN_UP_REQUIRED, got %w", err)
+			}
+		} else if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
+			return fmt.Errorf("signIn response = %T, want AuthAuthorizationSignUpRequired", response)
+		}
+
+		response, err = signUpUsername(ctx, apiClient, username, sentCode.PhoneCodeHash, "Turnstile", "Smoke")
+		if err != nil {
+			return fmt.Errorf("bare auth.signUp with the sendCode-bound signup challenge: %w", err)
+		}
+		if _, ok := response.(*tg.AuthAuthorization); !ok {
+			return fmt.Errorf("bare auth.signUp response = %T, want *tg.AuthAuthorization", response)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Turnstile sign-up from sendCode smoke flow: %v", err)
+	}
+
+	assertSmokeTurnstileVerifications(t, verifier,
+		smokeTurnstileVerification{token: sendCodeToken, action: "signup"},
+	)
+}
+
 func testSmokeTurnstileSignIn(t *testing.T) {
 	t.Helper()
-	verifier := &smokeTurnstileVerifier{verified: make(chan smokeTurnstileVerification, 8)}
+	verifier := &smokeTurnstileVerifier{
+		issuedActions: map[string]string{
+			"smoke-turnstile-signin-send-code":      "signin",
+			"smoke-turnstile-signin-check-password": "signin",
+		},
+		verified: make(chan smokeTurnstileVerification, 8),
+	}
 	const siteKey = "smoke-signin-site-key"
 	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.turnstileSiteKey = siteKey

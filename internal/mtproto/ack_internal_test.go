@@ -300,10 +300,10 @@ func (c *failAfterConn) Send(context.Context, *bin.Buffer) error {
 
 func (*failAfterConn) Close() error { return nil }
 
-// TestFailedAckWriteIsLogged fails the msgs_ack write while the connection
-// still closes cleanly. The failure must reach the server failure log rather
-// than vanish with the connection.
-func TestFailedAckWriteIsLogged(t *testing.T) {
+// TestFailedAckWriteLogIncludesRPCTypeForNilRequest fails the msgs_ack write
+// while the connection still closes cleanly. The failure logger has no Request
+// at this point, so the queued acknowledgement must retain its RPC constructor.
+func TestFailedAckWriteLogIncludesRPCTypeForNilRequest(t *testing.T) {
 	t.Parallel()
 	const rawError = "PRIVATE-ACK-WRITE-DETAIL"
 
@@ -337,9 +337,11 @@ func TestFailedAckWriteIsLogged(t *testing.T) {
 			}
 			for key, want := range map[string]any{
 				"rpc_method":     UnknownRPCMethod,
+				"rpc_type_id":    uint64(tg.HelpGetNearestDCRequestTypeID),
 				"request_id":     int64(0),
 				"error_category": string(RPCResultTransportFailure),
-				"error":          "internal",
+				"cause":          string(requestFailureTransport),
+				"error":          "transport",
 			} {
 				if got := r.attrs[key]; got != want {
 					t.Errorf("msgs_ack %s = %v, want %v", key, got, want)

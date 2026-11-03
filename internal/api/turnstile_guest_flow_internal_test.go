@@ -143,6 +143,18 @@ func TestGuestCreationAvailabilityAndSignupPassWhenSigninGateIsEnabled(t *testin
 	} else if stillUsable {
 		t.Fatal("signup challenge remained usable after admission")
 	}
+	var reusedSignUpRequest bin.Buffer
+	if err := (&tg.AuthSignUpRequest{
+		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, FirstName: "Fresh",
+	}).Encode(&reusedSignUpRequest); err != nil {
+		t.Fatalf("encode repeated auth.signUp: %v", err)
+	}
+	_, err = h.handleSignUp(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: addr, Buf: &reusedSignUpRequest,
+	})
+	if got := rpcErrorMessage(err); got != "RECAPTCHA_CHECK_signup__site-key" {
+		t.Fatalf("repeated auth.signUp error = %q, want signup challenge required", got)
+	}
 	if verifier.calls != 1 {
 		t.Fatalf("Turnstile verifier calls = %d, want one Siteverify call", verifier.calls)
 	}

@@ -356,16 +356,16 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	verifiedAction := ""
+	verifiedAction := store.TurnstileAction("")
 	if h.turnstileSignInEnabled {
-		var err error
-		verifiedAction, err = h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
+		verifiedActionString, err := h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
 		if err != nil {
 			if errors.Is(err, ErrTurnstileBusy) {
 				return nil, FloodWaitError(1)
 			}
 			return nil, err
 		}
+		verifiedAction = store.TurnstileAction(verifiedActionString)
 	}
 
 	// Phone-shaped identifiers are unsupported. Refuse them before applying
@@ -534,7 +534,7 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 		}
 		return h.signUpRequired(), nil
 	}
-	if h.turnstileSignInEnabled && verifiedAction != "signin" {
+	if h.turnstileSignInEnabled && verifiedAction != store.TurnstileActionSignIn {
 		return nil, turnstileCheckRequiredError("signin", h.turnstileSiteKey)
 	}
 	if resolved.Kind == store.UserKindBot {

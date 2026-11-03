@@ -3,4 +3,6 @@
 -- NULL; the new application code can roll back while the additive columns stay.
 ALTER TABLE phone_codes
     ADD COLUMN turnstile_action TEXT NULL,
-    ADD COLUMN turnstile_auth_key_id BIGINT NULL;
+    ADD COLUMN turnstile_auth_key_id BIGINT NULL,
+    ADD CONSTRAINT phone_codes_turnstile_action_check
+        CHECK (turnstile_action IN ('signin', 'signup'));

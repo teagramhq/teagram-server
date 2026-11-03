@@ -2,7 +2,6 @@ package mtproto
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -32,58 +31,87 @@ func needsAck(seqNo int, typeID uint32) bool {
 	return true
 }
 
+type queuedAck struct {
+	messageID   int64
+	rpcTypeID   uint32
+	typeIDKnown bool
+}
+
 // containerAcks returns the ids of the content messages in container, so a
 // whole container is owed acknowledgement before its first entry runs. An
 // entry queued behind a slow one would otherwise go unacknowledged until its
 // own turn.
-func containerAcks(container *proto.MessageContainer) []int64 {
-	var ids []int64
+func containerAcks(container *proto.MessageContainer) []queuedAck {
+	var acks []queuedAck
 	for _, m := range container.Messages {
 		typeID, err := (&bin.Buffer{Buf: m.Body}).PeekID()
 		if err != nil {
 			continue
 		}
 		if needsAck(m.SeqNo, typeID) {
-			ids = append(ids, m.ID)
+			acks = append(acks, queuedAck{messageID: m.ID, rpcTypeID: typeID, typeIDKnown: true})
 		}
 	}
-	return ids
+	return acks
 }
 
 // queueAcks records msgIDs as owed an acknowledgement and arms the delayed
 // flush if none is pending.
 func (c *Conn) queueAcks(msgIDs ...int64) {
+	acks := make([]queuedAck, 0, len(msgIDs))
+	for _, id := range msgIDs {
+		acks = append(acks, queuedAck{messageID: id})
+	}
+	c.queueAckRecords(acks...)
+}
+
+func (c *Conn) queueRPCAck(messageID int64, rpcTypeID uint32) {
+	c.queueAckRecords(queuedAck{messageID: messageID, rpcTypeID: rpcTypeID, typeIDKnown: true})
+}
+
+func (c *Conn) queueAckRecords(acks ...queuedAck) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	c.queueAcksLocked(msgIDs...)
+	c.queueAcksLocked(acks...)
 }
 
 // queueBoundAcks drops deferred read-ahead work if dispatch has since changed
 // the binding. Check under writeMu so a rebind cannot reset the queue between
 // this check and enqueue.
-func (c *Conn) queueBoundAcks(keyID [8]byte, session int64, msgIDs ...int64) {
+func (c *Conn) queueBoundAckRecords(keyID [8]byte, session int64, acks ...queuedAck) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if c.authKey.ID != keyID || c.sessionID != session {
 		return
 	}
-	c.queueAcksLocked(msgIDs...)
+	c.queueAcksLocked(acks...)
 }
 
 // queueAcksLocked updates the queue and its timer while writeMu is held.
-func (c *Conn) queueAcksLocked(msgIDs ...int64) {
-	if len(msgIDs) == 0 || c.acksStopped.Load() {
+func (c *Conn) queueAcksLocked(acks ...queuedAck) {
+	if len(acks) == 0 || c.acksStopped.Load() {
 		return
 	}
 	// A frame read ahead during an active RPC is queued on arrival and again
 	// when it is dispatched; one entry is enough.
-	for _, id := range msgIDs {
+	for _, ack := range acks {
+		found := false
+		for i := range c.pendingAcks {
+			if c.pendingAcks[i].messageID == ack.messageID {
+				if ack.typeIDKnown {
+					c.pendingAcks[i] = ack
+				}
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
 		if len(c.pendingAcks) >= maxMTProtoMessageIDs {
 			break
 		}
-		if !slices.Contains(c.pendingAcks, id) {
-			c.pendingAcks = append(c.pendingAcks, id)
-		}
+		c.pendingAcks = append(c.pendingAcks, ack)
 	}
 	if len(c.pendingAcks) > 0 && c.ackTimer == nil {
 		c.ackTimer = time.AfterFunc(ackDelay, c.flushAcks)
@@ -93,8 +121,8 @@ func (c *Conn) queueAcksLocked(msgIDs ...int64) {
 // answeredLocked drops msgID from the owed acknowledgements: the response
 // being written for it acknowledges it. writeMu must be held.
 func (c *Conn) answeredLocked(msgID int64) {
-	for i, id := range c.pendingAcks {
-		if id == msgID {
+	for i, ack := range c.pendingAcks {
+		if ack.messageID == msgID {
 			c.pendingAcks = append(c.pendingAcks[:i], c.pendingAcks[i+1:]...)
 			return
 		}
@@ -113,12 +141,26 @@ func (c *Conn) flushAcks() {
 	defer cancel()
 
 	c.writeMu.Lock()
-	ids := c.pendingAcks
+	acks := c.pendingAcks
 	c.pendingAcks = nil
 	c.ackTimer = nil
-	if len(ids) == 0 || c.acksStopped.Load() {
+	if len(acks) == 0 || c.acksStopped.Load() {
 		c.writeMu.Unlock()
 		return
+	}
+	ids := make([]int64, len(acks))
+	typeIDs := make([]uint32, 0, len(acks))
+	seenTypeIDs := make(map[uint32]struct{}, len(acks))
+	for i, ack := range acks {
+		ids[i] = ack.messageID
+		if !ack.typeIDKnown {
+			continue
+		}
+		if _, exists := seenTypeIDs[ack.rpcTypeID]; exists {
+			continue
+		}
+		seenTypeIDs[ack.rpcTypeID] = struct{}{}
+		typeIDs = append(typeIDs, ack.rpcTypeID)
 	}
 	var b bin.Buffer
 	if err := (&mt.MsgsAck{MsgIDs: ids}).Encode(&b); err != nil {
@@ -132,7 +174,7 @@ func (c *Conn) flushAcks() {
 		return
 	}
 	if c.ackFailed != nil {
-		c.ackFailed(err)
+		c.ackFailed(err, typeIDs)
 	}
 	if closeErr := c.closeAfterSendFailure(err); closeErr != nil && !isDisconnect(closeErr) {
 		c.log.Info("close connection after failed msgs_ack", "err", closeErr)
@@ -179,13 +221,15 @@ func (c *Conn) queueReadAheadAcks(frame []byte) {
 		if err := container.Decode(body); err != nil {
 			return
 		}
-		if ids := containerAcks(&container); len(ids) > 0 {
-			go c.queueBoundAcks(key.ID, session, ids...)
+		if acks := containerAcks(&container); len(acks) > 0 {
+			go c.queueBoundAckRecords(key.ID, session, acks...)
 		}
 		return
 	}
 	if needsAck(int(msg.SeqNo), typeID) {
-		go c.queueBoundAcks(key.ID, session, msg.MessageID)
+		go c.queueBoundAckRecords(key.ID, session, queuedAck{
+			messageID: msg.MessageID, rpcTypeID: typeID, typeIDKnown: true,
+		})
 	}
 }
 

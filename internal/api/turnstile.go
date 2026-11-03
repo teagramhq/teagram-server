@@ -92,8 +92,11 @@ func (v *turnstileVerifier) Verify(ctx context.Context, token string, allowedAct
 	if token == "" || len(token) > turnstileMaxTokenBytes {
 		return "", errTurnstileRejected
 	}
-	if turnstileActionAllowed(allowedActions, "signup") && v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
+	if v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
 		subtle.ConstantTimeCompare([]byte(token), []byte(v.qaBypassToken)) == 1 {
+		if len(allowedActions) != 1 || allowedActions[0] != "signup" {
+			return "", errTurnstileRejected
+		}
 		v.logger.Info("turnstile QA bypass used", "action", "signup")
 		return "signup", nil
 	}

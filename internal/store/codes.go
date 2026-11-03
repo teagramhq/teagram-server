@@ -28,6 +28,17 @@ const (
 	issueCodeLockClass = 0x7467434f // "tgCO" (code)
 )
 
+type TurnstileAction string
+
+const (
+	TurnstileActionSignIn TurnstileAction = "signin"
+	TurnstileActionSignUp TurnstileAction = "signup"
+)
+
+func (a TurnstileAction) Valid() bool {
+	return a == TurnstileActionSignIn || a == TurnstileActionSignUp
+}
+
 // IssueCode generates a 5-digit login code and hash for phone, storing it with
 // a TTL. It returns ErrResendTooSoon if an unconsumed prior code was issued
 // within resendCooldown. Each call inserts a new row keyed by code_hash, so
@@ -109,8 +120,8 @@ func (s *Store) IssueCodeForUsername(ctx context.Context, username string) (stri
 // IssueCodeForUsernameWithTurnstileAction stores the action and auth key of a
 // challenge verified by auth.sendCode. Empty action keeps the pre-existing
 // behavior when the sign-in gate is disabled.
-func (s *Store) IssueCodeForUsernameWithTurnstileAction(ctx context.Context, username, action string, authKeyID int64) (string, string, error) {
-	if action != "" && action != "signin" && action != "signup" {
+func (s *Store) IssueCodeForUsernameWithTurnstileAction(ctx context.Context, username string, action TurnstileAction, authKeyID int64) (string, string, error) {
+	if action != "" && !action.Valid() {
 		return "", "", errors.New("issue code for username: invalid Turnstile action")
 	}
 	code, err := randDigits5()
@@ -124,7 +135,8 @@ func (s *Store) IssueCodeForUsernameWithTurnstileAction(ctx context.Context, use
 	var actionValue *string
 	var authKeyValue *int64
 	if action != "" {
-		actionValue = &action
+		actionString := string(action)
+		actionValue = &actionString
 		authKeyValue = &authKeyID
 	}
 	err = s.q.InsertCode(ctx, db.InsertCodeParams{
@@ -221,7 +233,7 @@ func (s *Store) CheckCodeHash(ctx context.Context, phone, hash string) error {
 
 // CheckCodeHashWithTurnstileAction validates a username code hash and returns
 // the action verified by auth.sendCode, if any.
-func (s *Store) CheckCodeHashWithTurnstileAction(ctx context.Context, phone, hash string) (string, error) {
+func (s *Store) CheckCodeHashWithTurnstileAction(ctx context.Context, phone, hash string) (TurnstileAction, error) {
 	phone = NormalizePhone(phone)
 	row, err := s.q.GetCodeByHashAndPhone(ctx, db.GetCodeByHashAndPhoneParams{
 		CodeHash: hash,
@@ -237,7 +249,11 @@ func (s *Store) CheckCodeHashWithTurnstileAction(ctx context.Context, phone, has
 		return "", err
 	}
 	if row.TurnstileAction != nil {
-		return *row.TurnstileAction, nil
+		action := TurnstileAction(*row.TurnstileAction)
+		if !action.Valid() {
+			return "", errors.New("check code hash: invalid Turnstile action")
+		}
+		return action, nil
 	}
 	return "", nil
 }
@@ -260,7 +276,7 @@ func (s *Store) CheckSignUpTurnstileCode(ctx context.Context, username, hash str
 	if !codeHashIsUsable(row) {
 		return false, nil
 	}
-	return row.TurnstileAction != nil && *row.TurnstileAction == "signup" &&
+	return row.TurnstileAction != nil && TurnstileAction(*row.TurnstileAction).Valid() && TurnstileAction(*row.TurnstileAction) == TurnstileActionSignUp &&
 		row.TurnstileAuthKeyID != nil && *row.TurnstileAuthKeyID == authKeyID, nil
 }
 
