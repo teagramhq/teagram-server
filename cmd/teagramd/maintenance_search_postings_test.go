@@ -441,3 +441,235 @@ func TestRunCommandMaintenanceInitializesPostingsDuringMessageMutations(t *testi
 		}
 	}
 }
+
+func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(t *testing.T) {
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("2a", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_STATEMENT_TIMEOUT", "50ms")
+	t.Setenv("TG_REGISTRATION", "closed")
+	t.Setenv("TG_RSA_KEY_PATH", filepath.Join(t.TempDir(), "must-not-be-created.pem"))
+	t.Setenv("TG_BLOB_DIR", filepath.Join(t.TempDir(), "must-not-be-created"))
+
+	ctx := context.Background()
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create fixture blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open fixture store: %v", err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close fixture store: %v", err)
+		}
+	}()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open fixture database pool: %v", err)
+	}
+	defer pool.Close()
+
+	owner, err := s.CreateUsernameUser(ctx, "searchinsertowner", "Search", "Insert Owner")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUsernameUser(ctx, "searchinsertpeer", "Search", "Insert Peer")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	seed, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "seedterm", 30201, 0, 0) //nolint:dogsled // only the stored message is needed here
+	if err != nil {
+		t.Fatalf("send seed message: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $2, $3)
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("mark dialog unready: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION public.test_pause_message_search_posting_clear() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF OLD.lexeme = 'seedterm' THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN OLD;
+		END;
+		$function$;
+		CREATE TRIGGER test_pause_message_search_posting_clear
+		AFTER DELETE ON message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_message_search_posting_clear();
+	`); err != nil {
+		t.Fatalf("install posting clear pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS test_pause_message_search_posting_clear ON message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_message_search_posting_clear();
+		`); err != nil {
+			t.Errorf("remove posting clear pause fixture: %v", err)
+		}
+	}()
+
+	type commandResult struct {
+		err error
+	}
+	commandDone := make(chan commandResult, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		commandDone <- commandResult{err: runCommand([]string{"maintenance", "initialize-message-search-postings", "--batch-size", "10"}, slog.New(slog.DiscardHandler), &stdout, &stderr)}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%DELETE FROM message_search_postings%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check initializer clear pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-commandDone:
+				t.Fatalf("initializer returned before clear pause: %v", result.err)
+			default:
+				t.Fatal("initializer did not enter the clear pause")
+			}
+		}
+		select {
+		case result := <-commandDone:
+			t.Fatalf("initializer returned before clear pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	inserted, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "legacyterm", 30202, 0, 0) //nolint:dogsled // only the stored message is needed here
+	if err != nil {
+		t.Fatalf("insert message during clear: %v", err)
+	}
+	startEdit := func(localID int64, text string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				done <- fmt.Errorf("begin concurrent edit: %w", err)
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE messages SET message = $3, edit_date = now()
+				WHERE owner_id = $1 AND local_id = $2
+			`, owner.ID, localID, text); err != nil {
+				if rollbackErr := tx.Rollback(context.Background()); rollbackErr != nil {
+					done <- fmt.Errorf("edit message: %w; roll back edit: %w", err, rollbackErr)
+					return
+				}
+				done <- fmt.Errorf("edit message: %w", err)
+				return
+			}
+			done <- tx.Commit(ctx)
+		}()
+		return done
+	}
+	seedEditDone := startEdit(seed.LocalID, "newseedterm")
+	insertedEditDone := startEdit(inserted.LocalID, "seedterm")
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var waitingEdits int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND state = 'active'
+			  AND wait_event_type = 'Lock'
+			  AND query ILIKE '%UPDATE messages%'
+		`).Scan(&waitingEdits); err != nil {
+			t.Fatalf("check concurrent edit waits: %v", err)
+		}
+		if waitingEdits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-commandDone:
+				t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
+			case err := <-seedEditDone:
+				t.Fatalf("seed edit completed before initializer released its locks: %v", err)
+			case err := <-insertedEditDone:
+				t.Fatalf("inserted-message edit completed before initializer released its locks: %v", err)
+			default:
+				t.Fatalf("only %d concurrent edits waited for the initializer", waitingEdits)
+			}
+		}
+		select {
+		case result := <-commandDone:
+			t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
+		case err := <-seedEditDone:
+			t.Fatalf("seed edit completed before initializer released its locks: %v", err)
+		case err := <-insertedEditDone:
+			t.Fatalf("inserted-message edit completed before initializer released its locks: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	result := <-commandDone
+	if result.err != nil {
+		t.Fatalf("initialize search postings: %v", result.err)
+	}
+	if err := <-seedEditDone; err != nil {
+		t.Fatalf("commit seed edit: %v", err)
+	}
+	if err := <-insertedEditDone; err != nil {
+		t.Fatalf("commit inserted-message edit: %v", err)
+	}
+
+	var oldPostingCount, freshPostingCount int64
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE lexeme = 'legacyterm'),
+		       count(*) FILTER (WHERE lexeme = 'seedterm')
+		FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3 AND local_id = $4
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID, inserted.LocalID).Scan(&oldPostingCount, &freshPostingCount); err != nil {
+		t.Fatalf("count message postings: %v", err)
+	}
+	if oldPostingCount != 0 || freshPostingCount != 1 {
+		t.Fatalf("message postings = old %d, fresh %d; want old 0, fresh 1", oldPostingCount, freshPostingCount)
+	}
+	var oldLexemeCount, freshLexemeCount int64
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(max(posting_count) FILTER (WHERE lexeme = 'legacyterm'), 0),
+		       COALESCE(max(posting_count) FILTER (WHERE lexeme = 'seedterm'), 0)
+		FROM message_search_posting_counts
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&oldLexemeCount, &freshLexemeCount); err != nil {
+		t.Fatalf("count dialog lexeme postings: %v", err)
+	}
+	if oldLexemeCount != 0 || freshLexemeCount != 1 {
+		t.Fatalf("dialog lexeme counts = old %d, fresh %d; want old 0, fresh 1", oldLexemeCount, freshLexemeCount)
+	}
+	var ready bool
+	if err := pool.QueryRow(ctx, `
+		SELECT NOT EXISTS (
+			SELECT 1 FROM message_search_unready_dialogs
+			WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+		)
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&ready); err != nil {
+		t.Fatalf("check dialog readiness: %v", err)
+	}
+	if !ready {
+		t.Fatal("dialog remained unready after initialization")
+	}
+}

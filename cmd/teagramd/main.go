@@ -370,7 +370,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	case "initialize-message-search-postings":
 		flagSet := flag.NewFlagSet("initialize-message-search-postings", flag.ContinueOnError)
 		flagSet.SetOutput(io.Discard)
-		batchSize := flagSet.Int("batch-size", 100, "dialogs per transaction (1-1000)")
+		batchSize := flagSet.Int("batch-size", 100, "dialogs per scan batch (1-1000)")
 		if err := flagSet.Parse(args[1:]); err != nil || flagSet.NArg() != 0 || *batchSize < 1 || *batchSize > store.MessageSearchPostingsInitializationMaxBatchSize {
 			return maintenanceUsageError()
 		}
@@ -387,14 +387,17 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	// Maintenance commands deliberately do not validate TG_REGISTRATION or
 	// initialize any of the server's listeners, keys, blob backends, or sweeps.
 	ctx := context.Background()
-	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
+	storeOptions := []store.Option{
 		store.WithLogger(log),
 		store.WithPoolConfig(cfg.PostgresPool),
-		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithSessionIP(cfg.SessionIP),
 		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
-	)
+	}
+	if messageSearchPostingsBatchSize == 0 {
+		storeOptions = append(storeOptions, store.WithStatementTimeout(cfg.StatementTimeout))
+	}
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, storeOptions...)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}

@@ -75,14 +75,31 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 }
 
 const backfillMessageSearchDialogPostings = `-- name: BackfillMessageSearchDialogPostings :exec
+WITH source_messages AS MATERIALIZED (
+    SELECT message.local_id, message.message_tsv
+    FROM messages AS message
+    WHERE message.owner_id = $1::bigint
+      AND message.peer_type = $2::smallint
+      AND message.peer_id = $3::bigint
+      AND message.deleted = false
+    ORDER BY message.local_id
+    FOR SHARE OF message
+),
+cleared_postings AS (
+    DELETE FROM message_search_postings AS posting
+    USING (SELECT count(*) AS source_count FROM source_messages) AS locked_source
+    WHERE posting.owner_id = $1::bigint
+      AND posting.peer_type = $2::smallint
+      AND posting.peer_id = $3::bigint
+      AND locked_source.source_count >= 0
+    RETURNING 1
+)
 INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
-SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id, term.lexeme
-FROM messages AS message
-CROSS JOIN LATERAL unnest(tsvector_to_array(message.message_tsv)) AS term(lexeme)
-WHERE message.owner_id = $1::bigint
-  AND message.peer_type = $2::smallint
-  AND message.peer_id = $3::bigint
-  AND message.deleted = false
+SELECT $1::bigint, source.local_id,
+       $2::smallint, $3::bigint, term.lexeme
+FROM source_messages AS source
+CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
+CROSS JOIN (SELECT count(*) FROM cleared_postings) AS cleared
 ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
 `
 
@@ -92,6 +109,10 @@ type BackfillMessageSearchDialogPostingsParams struct {
 	PeerID   int64
 }
 
+// Rebuild a marked dialog from one locked source snapshot. The materialized
+// source CTE locks rows by local_id before deleting postings; the delete and
+// insert share its statement snapshot, so later inserts keep their trigger
+// postings rather than being cleared or backfilled from stale text.
 func (q *Queries) BackfillMessageSearchDialogPostings(ctx context.Context, arg BackfillMessageSearchDialogPostingsParams) error {
 	_, err := q.db.Exec(ctx, backfillMessageSearchDialogPostings, arg.OwnerID, arg.PeerType, arg.PeerID)
 	return err
@@ -189,27 +210,6 @@ func (q *Queries) ChatMessageCopiesForDeletion(ctx context.Context, arg ChatMess
 		return nil, err
 	}
 	return items, nil
-}
-
-const clearMessageSearchDialogPostings = `-- name: ClearMessageSearchDialogPostings :exec
-DELETE FROM message_search_postings
-WHERE owner_id = $1::bigint
-  AND peer_type = $2::smallint
-  AND peer_id = $3::bigint
-`
-
-type ClearMessageSearchDialogPostingsParams struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
-}
-
-// Rebuild a marked dialog from its current source rows. The message locks above
-// prevent edits and deletes from crossing the snapshot; concurrent inserts are
-// covered by the same transactional source triggers.
-func (q *Queries) ClearMessageSearchDialogPostings(ctx context.Context, arg ClearMessageSearchDialogPostingsParams) error {
-	_, err := q.db.Exec(ctx, clearMessageSearchDialogPostings, arg.OwnerID, arg.PeerType, arg.PeerID)
-	return err
 }
 
 const countFilteredMessages = `-- name: CountFilteredMessages :one
@@ -903,35 +903,6 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 	return err
 }
 
-const lockMessageSearchDialogMessages = `-- name: LockMessageSearchDialogMessages :one
-WITH locked_messages AS MATERIALIZED (
-    SELECT local_id
-    FROM messages
-    WHERE owner_id = $1::bigint
-      AND peer_type = $2::smallint
-      AND peer_id = $3::bigint
-    ORDER BY local_id
-    FOR UPDATE
-)
-SELECT count(*)::bigint
-FROM locked_messages
-`
-
-type LockMessageSearchDialogMessagesParams struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
-}
-
-// Lock all source rows before rebuilding. Message writes keep postings in sync
-// through triggers, but edits and deletes must serialize with the initial scan.
-func (q *Queries) LockMessageSearchDialogMessages(ctx context.Context, arg LockMessageSearchDialogMessagesParams) (int64, error) {
-	row := q.db.QueryRow(ctx, lockMessageSearchDialogMessages, arg.OwnerID, arg.PeerType, arg.PeerID)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const lockMessageSearchUnreadyDialog = `-- name: LockMessageSearchUnreadyDialog :one
 SELECT owner_id
 FROM message_search_unready_dialogs
@@ -1125,7 +1096,7 @@ LIMIT $1::int
 `
 
 // MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
-// The initializer locks and rechecks each marker inside its batch transaction.
+// The initializer locks and rechecks each marker inside its dialog transaction.
 func (q *Queries) MessageSearchUnreadyDialogs(ctx context.Context, batchSize int32) ([]MessageSearchUnreadyDialog, error) {
 	rows, err := q.db.Query(ctx, messageSearchUnreadyDialogs, batchSize)
 	if err != nil {

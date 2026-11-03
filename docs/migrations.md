@@ -91,14 +91,25 @@ Initialize the existing dialogs with:
 teagramd maintenance initialize-message-search-postings [--batch-size <n>]
 ```
 
-The default batch size is 100 dialogs; `n` can be from 1 to 1000. Each batch
-runs in its own transaction. It locks the unready markers and current message
-rows, rebuilds each dialog's postings and trigger-maintained counts, then clears
-the markers atomically. Concurrent inserts remain covered by the message
-triggers; edits and deletes wait for the source-row locks and then update their
-postings normally. If a batch fails or the command stops, that batch rolls back
-and previously committed batches stay ready, so running the command again
-continues from the remaining markers.
+The default batch size is 100 dialogs; `n` can be from 1 to 1000 and bounds the
+number of dialog keys fetched per scan. Each dialog is initialized in its own
+transaction. In key order by owner, peer type, and peer ID, the initializer
+locks that dialog's unready marker, then its current message rows by `local_id`,
+then postings and counts. One materialized backfill statement takes the row
+locks before it clears postings and rebuilds them from the same statement
+snapshot. Inserts after that snapshot remain covered by the message triggers;
+edits and deletes of rows in the snapshot wait for the initializer's row locks.
+
+Existing send, edit, and delete transactions acquire their existing owner or
+chat locks before changing message rows; the message triggers then update
+postings and counts. Some message mutations can touch rows in multiple dialogs
+in one transaction, so the initializer holds message rows for only one dialog
+at a time. This avoids a cross-dialog message-row lock cycle. The initializer
+does not use the configured Postgres statement timeout: clearing and backfilling
+a large dialog can take longer than the normal request statement ceiling. If a
+dialog transaction fails or the command stops, its marker and postings roll
+back together, while previously committed dialogs stay ready; running the
+command again continues from the remaining markers.
 
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain
