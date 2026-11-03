@@ -1437,7 +1437,7 @@ run_fixture() {
     target-local-selection-omits-override)
       compose_file='.rollout-compose.local-e58ba20.yml'
       ;;
-    target-local-*)
+    target-local-*|restart-policy-only|restart-policy-with-config-drift)
       compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
       ;;
     unpinned-local-arbitrary)
