@@ -1093,6 +1093,9 @@ jobs:
 
       - name: Check deploy script syntax
         run: |
+          ./deploy/k8s/bootstrap-alpha.sh --dry-run
+          bash -n deploy/k8s/bootstrap-alpha.sh
+          sh -n deploy/k8s/teagram-k3s-ops.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1144,6 +1147,8 @@ jobs:
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
+            deploy/k8s/bootstrap-alpha.sh \
+            deploy/k8s/teagram-k3s-ops.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
