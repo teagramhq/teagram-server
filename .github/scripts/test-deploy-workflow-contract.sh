@@ -18,7 +18,7 @@ expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
 expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}"
-expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main-priority-v2') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
+expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
@@ -50,19 +50,21 @@ ci_query() {
 }
 
 check_ci_contract() {
-  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'pull_request,push' ]] ||
-    ci_fail 'triggers must be exactly push and pull_request'
+  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
+    ci_fail 'triggers must be exactly merge_group, pull_request, and push'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check RPC performance workflow contract") | .env.GOPROXY')" == 'https://proxy.golang.org|direct' ]] ||
+    ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
+  [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
+    ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
     ci_fail 'push CI must be limited to main'
   [[ "$(ci_query '.concurrency.group')" == "$expected_ci_group" ]] ||
-    ci_fail 'main CI and pull request runs must use separate concurrency groups'
+    ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
-    ci_fail 'only updates to the same pull request may cancel a running check'
-  [[ "$(ci_query '.concurrency.queue // ""')" == '' ]] ||
-    ci_fail 'pull request updates must coalesce instead of filling a FIFO queue'
-  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
+    ci_fail 'only pull request updates may cancel in-progress CI runs'
+  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,ops-prioritize-main,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   for removed_job in restore-readiness rustfs-transition-qualification mirror-rustfs-qualification-images; do
     [[ "$(ci_query ".jobs | has(\"$removed_job\")")" == 'false' ]] ||
@@ -161,6 +163,32 @@ check_ci_contract() {
     ci_fail 'the tested image digest artifact must be named for its source SHA'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with."if-no-files-found"')" == 'error' ]] ||
     ci_fail 'publishing must fail if the trusted image digest artifact is missing'
+
+  local manifest_start deploy_start
+  manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
+  [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
+     "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
+    ci_fail 'the manifest check must invoke kubectl directly in its k3s container'
+  [[ "$manifest_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the manifest check must wait for K3s to register a node before kubectl wait'
+  [[ "$manifest_start" != *"k3s kubectl"* ]] ||
+    ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
+  deploy_start="$(ci_query '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run')"
+  [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
+     "$deploy_start" == *"docker exec teagram-k3s kubectl wait"* ]] ||
+    ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
+  [[ "$deploy_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the deployment check must wait for K3s to register a node before kubectl wait'
+  [[ "$deploy_start" == *'cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"'* &&
+     "$deploy_start" == *'--volume "$RUNNER_TEMP/k8s-agent-images:/var/lib/rancher/k3s/agent/images:ro"'* &&
+     "$deploy_start" == *'kubectl get nodes --output json'* &&
+     "$deploy_start" == *'status.images[]?.names[]?'* ]] ||
+    ci_fail 'the deployment check must preload workload images and verify them through the Kubernetes node API'
+  [[ "$deploy_start" != *"teagram-k3s k3s ctr"* &&
+     "$deploy_start" != *"teagram-k3s k3s crictl"* ]] ||
+    ci_fail 'the deployment check must not invoke unavailable k3s image subcommands'
+  [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
+    ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
 
 # Run the actual target step against controlled forge responses.
@@ -767,8 +795,9 @@ check_contract() {
     fail 'the demo key step must validate the configured SSH port'
   [[ "$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT] | unique | .[0]')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'both demo SSH steps must use the configured SSH port'
-  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
-    grep -Fq 'ssh -T -p "$DEMO_DEPLOY_PORT"' || fail 'demo SSH must pass the non-default port'
+  demo_ssh_runs="$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run')"
+  grep -Fq 'ssh -T -p "$DEMO_DEPLOY_PORT"' <<< "$demo_ssh_runs" ||
+    fail 'demo SSH must pass the non-default port'
   demo_port_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .run')"
   grep -Fq '[[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]' <<< "$demo_port_run" ||
     fail 'demo SSH port must contain only decimal digits'
@@ -882,6 +911,8 @@ self_test() {
   done
 
   local ci_mutations=(
+    'del(.on.merge_group)'
+    '.on.merge_group.types = ["workflow_dispatch"]'
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'
