@@ -199,6 +199,9 @@ jobs:
       - name: Test Docker Hub mirror routing
         run: python3 .github/scripts/test_docker_image_mirror.py
 
+      - name: Test Atlas version pins
+        run: python3 .github/scripts/test_atlas_version_pins.py
+
       - name: Test RPC performance fixture restore ACL handling
         run: python3 .github/scripts/test_perf_restore.py
 

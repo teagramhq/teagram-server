@@ -335,7 +335,7 @@ baseline and applied state must be exactly 60–67. This runner does not apply
 migrations 63–67 or drop 67 indexes on rollback.
 
 The PostgreSQL 18 CI proof applies the actual immutable migration directory with
-Atlas 1.2.0, runs the two capture SQL files, validates the empty catalog, and
+Atlas 1.3.0, runs the two capture SQL files, validates the empty catalog, and
 checks isolated SQL mutations for ordered keys, foreign-key actions and MATCH
 types, `SET NULL` column subsets, and `conindid` targets. Each mutation runs in a
 transaction from the passing catalog and rolls back. Run it locally with:
