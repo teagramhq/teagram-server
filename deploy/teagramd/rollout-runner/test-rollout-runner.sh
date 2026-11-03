@@ -399,7 +399,7 @@ if [ "${1:-}" = inspect ]; then
             fi
             ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -413,7 +413,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID")
       id=$MOCK_ROLLBACK_ID
@@ -430,7 +430,14 @@ if [ "${1:-}" = inspect ]; then
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
   esac
   if [ "$cfg" = postgres ]; then
-    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[{Type:"volume",Name:"fixture_pgdata",Source:"/synthetic/pgdata",Destination:"/var/lib/postgresql/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
+    if [ -f "$MOCK_STATE/active-postgres-restart-policy" ]; then
+      restart_policy=$(cat "$MOCK_STATE/active-postgres-restart-policy")
+    else
+      restart_compose="$MOCK_STATE/base-compose.json"
+      [ "$phase" != target ] || restart_compose="$MOCK_STATE/target-compose.json"
+      restart_policy=$(jq -er '.services.postgres.restart // "no"' "$restart_compose")
+    fi
+    jq -nc --arg id "$id" --arg image "$image" --arg restart_policy "$restart_policy" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{RestartPolicy:{Name:$restart_policy},PortBindings:{}},Mounts:[{Type:"volume",Name:"fixture_pgdata",Source:"/synthetic/pgdata",Destination:"/var/lib/postgresql/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
   elif [ "$cfg" = migrate ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   elif [ "$cfg" = rustfs ]; then
@@ -494,6 +501,7 @@ if [ "${1:-}" = inspect ]; then
       fi
     fi
     turnstile_source=''
+    restart_policy=no
     if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
       if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
         turnstile_compose="$MOCK_STATE/started-compose-$id.json"
@@ -502,6 +510,8 @@ if [ "${1:-}" = inspect ]; then
       else
         turnstile_compose="$MOCK_STATE/target-compose.json"
       fi
+      restart_policy=$(jq -er --arg service "$compose_service" \
+        '.services[$service].restart // "no"' "$turnstile_compose")
       turnstile_env=$(jq -c '
         (.services.teagramd // .services.telegramd).environment as $env
         | if ($env | has("TG_TURNSTILE_SITE_KEY")) then [
@@ -537,12 +547,12 @@ if [ "${1:-}" = inspect ]; then
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
       --arg log_config_type "$log_config_type" --argjson log_config "$log_config" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
-      --arg compose_service "$compose_service" \
+      --arg compose_service "$compose_service" --arg restart_policy "$restart_policy" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":(if $scenario == "initial-local-target-compose-render" then $compose_service else "teagramd" end)}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{LogConfig:{Type:$log_config_type,Config:$log_config},PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
+        HostConfig:{RestartPolicy:{Name:$restart_policy},LogConfig:{Type:$log_config_type,Config:$log_config},PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:(if $scenario == "initial-local-target-compose-render" and $compose_service == "telegramd" then "fixture_default" else "fixture_teagram_server" end)},
@@ -570,6 +580,7 @@ fi
     ps)
       if [ "${2:-}" = -q ] && { [ "${3:-}" = teagramd ] || [ "${3:-}" = telegramd ]; }; then cat "$MOCK_STATE/teagramd"; exit 0; fi
       if [ "${2:-}" = -q ] && [ "${3:-}" = postgres ]; then printf '%s\n' "$MOCK_POSTGRES_ID"; exit 0; fi
+      if [ "${2:-}" = -aq ] && [ "${3:-}" = postgres ]; then printf '%s\n' "$MOCK_POSTGRES_ID"; exit 0; fi
       if [ "${2:-}" = -aq ] && { [ "${3:-}" = teagramd ] || [ "${3:-}" = telegramd ]; }; then cat "$MOCK_STATE/teagramd"; exit 0; fi
       if [ "${2:-}" = -aq ] && [ "${3:-}" = migrate ]; then printf '%s\n' "$MOCK_MIGRATE_ID"; exit 0; fi
       exit 94
@@ -600,6 +611,13 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = restart-policy-only ] || \
+             [ "${MOCK_SCENARIO:-}" = restart-policy-with-config-drift ]; then
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then
+            cat "$MOCK_STATE/base-compose.json"
+          else
+            cat "$MOCK_STATE/target-compose.json"
+          fi
         elif { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
                [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
@@ -613,7 +631,8 @@ fi
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]] || \
-             [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ]; then
+             [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || \
+             [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
@@ -743,11 +762,22 @@ fi
       # Record the render each container starts from, so a later run sees
       # the live container as it was started rather than the new render.
       if [[ " $* " == *' --no-build '* ]]; then
+        if [[ " $* " == *' postgres '* ]] && [[ " $* " != *' teagramd '* ]] && [[ " $* " != *' telegramd '* ]]; then
+          jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/base-compose.json" \
+            > "$MOCK_STATE/active-postgres-restart-policy"
+          exit 0
+        fi
         printf '%s\n' rollback > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/teagramd"
         cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
+        if [[ " $* " == *' postgres '* ]]; then
+          jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/base-compose.json" \
+            > "$MOCK_STATE/active-postgres-restart-policy"
+        fi
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
+        jq -er '.services.postgres.restart // "no"' "$MOCK_STATE/target-compose.json" \
+          > "$MOCK_STATE/active-postgres-restart-policy"
         if [ "${MOCK_SCENARIO:-}" = target-container-unavailable ]; then
           : > "$MOCK_STATE/teagramd"
         else
@@ -1423,7 +1453,7 @@ run_fixture() {
     target-local-selection-omits-override)
       compose_file='.rollout-compose.local-e58ba20.yml'
       ;;
-    target-local-*)
+    target-local-*|restart-policy-only|restart-policy-with-config-drift)
       compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
       ;;
     unpinned-local-arbitrary)
@@ -1445,7 +1475,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-restart-policy-rollback|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -4566,6 +4596,73 @@ else
     "$status" "$(cat "$TMP/config-drift.stderr")" "$(cat "$TMP/config-drift-events")"
   cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'configuration drift rejection'
+fi
+
+prepare_target_local_apply_fixture restart-policy-only restart-policy-only
+state=$(cat "$TMP/restart-policy-only-state-path")
+jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.postgres.restart="unless-stopped" | .services.teagramd.restart="unless-stopped"' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture restart-policy-only built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/restart-policy-only-root-path")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'\tcontainer_restart_policies\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   [ "$(jq -c '.container_restart_policies' "$root.target/target.snapshot.json")" = \
+     '{"postgres":"unless-stopped","teagramd":"unless-stopped"}' ]; then
+  pass 'restart-only Compose change passes the runner preflight and verifies both live service policies'
+else
+  show_fixture_failure restart-policy-only "$status"
+  fail 'restart-only Compose change must pass the runner preflight and verify runtime policies'
+fi
+
+prepare_target_local_apply_fixture restart-policy-with-config-drift restart-policy-with-config-drift
+state=$(cat "$TMP/restart-policy-with-config-drift-state-path")
+jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.postgres.restart="unless-stopped" | .services.teagramd.restart="unless-stopped" |
+  .services.teagramd.environment.TG_SYNTHETIC_FLAG="unapproved"' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture restart-policy-with-config-drift built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/restart-policy-with-config-drift-root-path")
+if [ "$status" != 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root.target/preflight-comparisons.tsv" && \
+   grep -q 'result=rejected exit=[1-9]' "$root.target/preflight-failure.txt" && \
+   ! grep -q '^docker compose up -d$' "$TMP/restart-policy-with-config-drift-events"; then
+  pass 'restart-policy preflight exception rejects an unrelated configuration change before replacement'
+else
+  show_fixture_failure restart-policy-with-config-drift "$status"
+  fail 'restart-only preflight exception must reject when another Compose field changes'
+fi
+
+prepare_target_local_apply_fixture target-local-restart-policy-rollback target-local-restart-policy-rollback
+state=$(cat "$TMP/target-local-restart-policy-rollback-state-path")
+jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.postgres.restart="unless-stopped" | .services.teagramd.restart="unless-stopped"' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture target-local-restart-policy-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/target-local-restart-policy-rollback-root-path")
+events="$TMP/target-local-restart-policy-rollback-events"
+if [ "$status" != 0 ] && \
+   grep -q 'reason=target_comparison_rejected' "$root.target/target-failure.txt" && \
+   [ "$(jq -er '.container_restart_policies.postgres' "$root.target/target.snapshot.json")" = unless-stopped ] && \
+   grep -q 'rollback=verified' "$TMP/target-local-restart-policy-rollback.stdout" && \
+   [ "$(jq -er '.container_restart_policies.postgres' "$root.rollback/rollback.snapshot.json")" = no ] && \
+   awk '/compose up -d --no-build --no-deps --wait --wait-timeout 2 postgres$/ {postgres=NR} \
+        /compose up -d --no-build --no-deps teagramd$/ {teagramd=NR} \
+        END {exit !(postgres > 0 && teagramd > postgres)}' "$events"; then
+  pass 'target gate rollback recreates postgres with the baseline restart policy before restoring teagramd'
+else
+  show_fixture_failure restart-policy-rollback "$status"
+  fail 'target gate rollback must restore and verify the baseline postgres restart policy'
 fi
 
 make_fixture gate-mutation gate-mutation

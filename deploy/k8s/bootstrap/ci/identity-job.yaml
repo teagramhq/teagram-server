@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teagramd-identity-bootstrap
+  labels:
+    app.kubernetes.io/name: teagramd-identity-bootstrap
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teagramd-identity-bootstrap
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap-identity
+          image: ghcr.io/teagramhq/teagramd:unreleased
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/teagramd", "bootstrap-identity"]
+          env:
+            - name: TG_RSA_KEY_PATH
+              value: /var/lib/teagramd/server_key.pem
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: key-data
+              mountPath: /var/lib/teagramd
+      volumes:
+        - name: key-data
+          persistentVolumeClaim:
+            claimName: key-data-teagramd-0

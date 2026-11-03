@@ -13,19 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ops-gate-pr-during-main:
-    name: 'ops: gate-pr-during-main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 1
-    permissions:
-      contents: read
-    steps:
-      - name: Defer privileged priority operations to trusted workflow
-        run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
-
   real-client-browser-flow:
     name: real-client-browser-flow
-    needs: ops-gate-pr-during-main
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
