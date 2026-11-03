@@ -23,7 +23,8 @@ fi
 
 [[ "$(yq -r '.jobs | has("ci")' "$workflow")" == true ]] ||
   fail 'the required CI aggregate must remain present'
-[[ "$(yq -r '.jobs.ci.if' "$workflow")" == '${{ always() }}' ]] ||
+expected_ci_condition="\${{ always() }}"
+[[ "$(yq -r '.jobs.ci.if' "$workflow")" == "$expected_ci_condition" ]] ||
   fail 'the CI aggregate must still report failed fan-out lanes'
 ci_needs="$(yq -r '.jobs.ci.needs | join(",")' "$workflow")"
 [[ "$ci_needs" == *check-security* ]] ||
