@@ -299,6 +299,15 @@ load_link_edge_invite_targets() {
   export TG_INVITE_WEB_SIGNUP_URL TG_INVITE_DESKTOP_URL
 }
 
+print_rollout_build_failure() {
+  awk '
+    /^------$/ && !started { started = 1 }
+    started { print }
+    started && /^ERROR:/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$1"
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -426,7 +435,12 @@ if ! normalize_tracked_file_modes; then
   echo 'cannot normalize tracked checkout modes after rollout' >&2
   [ "$rc" != 0 ] || rc=1
 fi
-tail -5 "$R/rollout-$S-$TS.log"; echo "runner exit $rc"; [ $rc = 0 ]
+if [ "$rc" != 0 ]; then
+  print_rollout_build_failure "$R/rollout-$S-$TS.log" || tail -5 "$R/rollout-$S-$TS.log"
+else
+  tail -5 "$R/rollout-$S-$TS.log"
+fi
+echo "runner exit $rc"; [ $rc = 0 ]
 IMG=$(docker inspect --format '{{.Image}}' $C)
 [ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMG")" = "$SHA" ]
 grep -ls "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity
