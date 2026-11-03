@@ -464,6 +464,9 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
+			if existing.PeerType == store.PeerTypeUser && existing.PeerID == toID {
+				h.logDirectMessageOutcome(r.UserID, toID, existing.LocalID, 0, toID == r.UserID || existing.PeerLocalID > 0, true)
+			}
 			attempt := beginSenderRPCAt(c, r, pts)
 			users, err := h.twoUsers(r.Ctx, r.UserID, toID)
 			if err != nil {
@@ -496,7 +499,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, recipientPts, _, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID, messageEntities)
+	sender, senderPts, recipientPts, duplicate, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID, messageEntities)
 	if err != nil {
 		if errors.Is(err, store.ErrRandomIDExpired) {
 			clearSenderRPC(attempt)
@@ -521,6 +524,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 
 	// recipientPts is 0 when the send was withheld from a recipient who
 	// blocked the sender: there is nothing for them to fetch.
+	h.logDirectMessageOutcome(r.UserID, toID, sender.LocalID, recipientPts, toID == r.UserID || recipientPts > 0, duplicate)
 	if toID != r.UserID && recipientPts > 0 {
 		h.notify(r.Ctx, toID)
 	}
@@ -552,6 +556,25 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		h.notifySendAfterReply(r, senderPts)
 	}
 	return res, update, afterReply, nil
+}
+
+func (h *handlers) logDirectMessageOutcome(senderID, recipientID, messageID int64, recipientPts int, recipientCopyStored, duplicate bool) {
+	copyStatus := "stored"
+	if !recipientCopyStored {
+		copyStatus = "withheld"
+	}
+	attrs := []any{
+		"sender_id", senderID,
+		"recipient_id", recipientID,
+		"message_id", messageID,
+		"recipient_copy", copyStatus,
+		"recipient_pts", recipientPts,
+		"duplicate", duplicate,
+	}
+	if !recipientCopyStored {
+		attrs = append(attrs, "recipient_copy_reason", "recipient_blocked_sender")
+	}
+	h.log.Info("direct message outcome", attrs...)
 }
 
 // requireMember is the authorization boundary for a client-supplied chat id.

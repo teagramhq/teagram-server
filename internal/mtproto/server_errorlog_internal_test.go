@@ -842,6 +842,30 @@ func TestUnregisteredMethodFailureLogsUnknownMethodCause(t *testing.T) {
 	}
 }
 
+func TestUnregisteredKnownMethodFailureLogsDecodedName(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), NewDispatcher(), slog.New(sink))
+	var body bin.Buffer
+	body.PutID(tg.HelpGetAppConfigRequestTypeID)
+	err := server.handle(nil, &Request{MsgID: 17, Buf: &body, Ctx: context.Background()})
+	if err == nil {
+		t.Fatal("handle succeeded with an unregistered known request constructor")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	for key, want := range map[string]any{
+		"rpc_method": "help.getAppConfig",
+		"cause":      "unknown_method",
+	} {
+		if got := sink.records[0].attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
 	const cause = "PRIVATE-HANDLER-DETAIL"
 	sink := &serverErrorLogSink{}
@@ -871,6 +895,46 @@ func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
 	}
 	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, cause) {
 		t.Fatalf("failure record exposed raw handler error: %s", logged)
+	}
+}
+
+type failedRequestLogTransport struct{ err error }
+
+func (c failedRequestLogTransport) Send(context.Context, *bin.Buffer) error { return c.err }
+func (failedRequestLogTransport) Recv(context.Context, *bin.Buffer) error   { return io.EOF }
+func (failedRequestLogTransport) Close() error                              { return nil }
+
+func TestDecodedRPCFailureBeforeDispatchLogsMethod(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	handler := NewDispatcher().HandleFuncNamed(tg.HelpGetAppConfigRequestTypeID, "help.getAppConfig", func(*Conn, *Request) error {
+		t.Fatal("request reached dispatcher after msg_id validation failed")
+		return nil
+	})
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), handler, slog.New(sink))
+	server.checkMsgIDTime = true
+	conn := newConn(
+		failedRequestLogTransport{err: errors.New("write failed")},
+		tdcrypto.NewServerCipher(tdcrypto.DefaultRand()),
+		proto.NewMessageIDGen(time.Now),
+		clock.System,
+		time.Second,
+		nil,
+	)
+	conn.setKey(tdcrypto.Key{1, 2, 3, 4}.WithID())
+	conn.setSession(1)
+	var body bin.Buffer
+	body.PutID(tg.HelpGetAppConfigRequestTypeID)
+	err := server.handle(conn, &Request{MsgID: 1, seqNo: 1, Buf: &body, Ctx: context.Background()})
+	if err == nil {
+		t.Fatal("handle succeeded after the bad-message response write failed")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	if got := sink.records[0].attrs["rpc_method"]; got != "help.getAppConfig" {
+		t.Errorf("rpc_method = %v, want help.getAppConfig", got)
 	}
 }
 

@@ -118,6 +118,9 @@ func requestFailureContext(req *Request, err error) *rpcRequestError {
 	var requestID int64
 	if req != nil {
 		method = sanitizeRPCMethod(requestRPCMethod(req))
+		if method == UnknownRPCMethod && req.rpcLogMethod != "" {
+			method = sanitizeRPCMethod(req.rpcLogMethod)
+		}
 		requestID = req.MsgID
 	}
 	return &rpcRequestError{
@@ -331,6 +334,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
 	}
+	setRPCMethodForHandler(req, id, handler)
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
 		c.queueAcks(req.MsgID)
 	}
