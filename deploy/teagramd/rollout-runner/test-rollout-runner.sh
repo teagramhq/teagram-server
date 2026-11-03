@@ -2374,7 +2374,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
      and .inspection_kind == "unguarded-local-baseline-to-pinned-target"
    ' "$report" >/dev/null && \
    grep -q '^docker compose config --services$' "$TMP/initial-local-target-compose-render-events" && \
-   grep -q '^docker compose build telegramd$' "$TMP/initial-local-target-compose-render-events" && \
+   grep -q '^docker compose build --pull telegramd$' "$TMP/initial-local-target-compose-render-events" && \
    grep -q '^docker compose ps -q telegramd$' "$TMP/initial-local-target-compose-render-events" && \
    awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /^docker compose exec -T postgres pg_dump -U postgres / {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
   pass 'pinned guarded target render is kept distinct from the unguarded running baseline through initialize-local'
