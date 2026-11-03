@@ -1,0 +1,136 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: local-blob-migration
+  labels:
+    app.kubernetes.io/name: local-blob-migration
+spec:
+  suspend: true
+  backoffLimit: 1
+  activeDeadlineSeconds: 21600
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: local-blob-migration
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/teagramhq/teagramd:unreleased
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/blob-migrate"]
+          args:
+            - --direction
+            - local-to-s3
+            - --source
+            - /source
+            - --manifest
+            - discard
+            - --encrypt
+          env:
+            - name: TG_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: TG_POSTGRES_DSN
+            - name: TG_PUBLIC_LINK_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-runtime
+                  key: TG_PUBLIC_LINK_PREFIX
+            - name: TG_ADVERTISE_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-runtime
+                  key: TG_ADVERTISE_ADDR
+            - name: TG_AUTHKEY_ENC_KEY_FILE
+              value: /var/lib/teagramd/enc_key.hex
+            - name: TG_MEDIA_KEY_DIR
+              value: /run/teagramd/media-keys/..data
+            - name: TG_MEDIA_KEY_CURRENT
+              value: "1"
+            - name: TG_BLOB_S3_ENDPOINT
+              value: http://rustfs:9000
+            - name: TG_BLOB_S3_BUCKET
+              value: teagram
+            - name: TG_BLOB_S3_PREFIX
+              value: teagramd/
+            - name: TG_BLOB_S3_REGION
+              value: us-east-1
+            - name: TG_BLOB_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: teagramd-blob-credentials
+                  key: TG_BLOB_S3_ACCESS_KEY_ID
+            - name: TG_BLOB_S3_SECRET_ACCESS_KEY_FILE
+              value: /run/secrets/teagramd-blob/secret-access-key
+            - name: TG_BLOB_S3_ALLOW_INSECURE_HTTP
+              value: "true"
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: legacy-blobs
+              mountPath: /source
+              readOnly: true
+            - name: key-data
+              mountPath: /var/lib/teagramd
+              readOnly: true
+            - name: teagramd-blob-credentials
+              mountPath: /run/secrets/teagramd-blob
+              readOnly: true
+            - name: teagramd-media-keys
+              mountPath: /run/teagramd/media-keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: legacy-blobs
+          persistentVolumeClaim:
+            claimName: legacy-blobs-teagramd-0
+            readOnly: true
+        - name: key-data
+          persistentVolumeClaim:
+            claimName: key-data-teagramd-0
+            readOnly: true
+        - name: teagramd-blob-credentials
+          secret:
+            secretName: teagramd-blob-credentials
+            defaultMode: 0440
+            items:
+              - key: TG_BLOB_S3_SECRET_ACCESS_KEY
+                path: secret-access-key
+        - name: teagramd-media-keys
+          secret:
+            secretName: teagramd-media-keys
+            defaultMode: 0444
+            items:
+              - key: 1.key
+                path: 1.key
+        - name: tmp
+          emptyDir: {}

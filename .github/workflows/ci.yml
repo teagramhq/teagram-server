@@ -1093,6 +1093,8 @@ jobs:
 
       - name: Check deploy script syntax
         run: |
+          ./deploy/k8s/cutover-alpha.sh --dry-run
+          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1144,6 +1146,8 @@ jobs:
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
+            deploy/k8s/cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1200,6 +1204,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check alpha k3s cutover contract
+        run: deploy/k8s/test-cutover-alpha.sh
 
       - name: Check user invite quota operation
         run: deploy/teagram/test-apply-user-invite-quota.sh
@@ -1406,10 +1413,15 @@ jobs:
           latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
           required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
           test "$required_migration" = "$latest_migration"
-          for overlay in prod ci bootstrap bootstrap/ci; do
+          for overlay in prod prod-cutover ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
+            if [[ "$overlay" == prod-cutover ]]; then
+              yq -e 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.replicas == 0' "$rendered" >/dev/null
+              yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
+              yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
+            fi
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done

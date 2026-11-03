@@ -20,19 +20,24 @@ import (
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-		if hasPrivateManifestOutput(os.Args[1:]) {
-			logger.Error("blob-migrate private evidence operation failed")
-		} else {
-			logger.Error("blob-migrate failed", "err", err)
-		}
+		logFailure(os.Args[1:], err, os.Stderr)
 		os.Exit(1)
 	}
 }
 
+func logFailure(args []string, err error, stderr io.Writer) {
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	if hasPrivateManifestOutput(args) {
+		logger.Error("blob-migrate private evidence operation failed")
+		return
+	}
+	logger.Error("blob-migrate failed", "err", err)
+}
+
 func hasPrivateManifestOutput(args []string) bool {
 	for index, arg := range args {
-		if arg == "--manifest=stdout" || (arg == "--manifest" && index+1 < len(args) && args[index+1] == "stdout") {
+		if arg == "--manifest=stdout" || arg == "--manifest=discard" ||
+			(arg == "--manifest" && index+1 < len(args) && (args[index+1] == "stdout" || args[index+1] == "discard")) {
 			return true
 		}
 	}
@@ -45,12 +50,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 	direction := flags.String("direction", "local-to-s3", "operation: local-to-s3, s3-to-local, local-census, or s3-census")
 	sourceDir := flags.String("source", "/source", "read-only root of the legacy blob volume")
 	destinationDir := flags.String("destination", "/destination", "writable root of the local blob volume")
-	manifest := flags.String("manifest", "", "write a private verified copy or census manifest to stdout")
+	manifest := flags.String("manifest", "", "write a private manifest to stdout or discard it after verification")
+	encrypt := flags.Bool("encrypt", false, "encrypt local-to-S3 objects with the configured current media key")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: blob-migrate [--direction local-to-s3 --source /source [--manifest stdout] | --direction s3-to-local --destination /destination [--manifest stdout] | --direction local-census --manifest stdout | --direction s3-census --manifest stdout]")
+		return errors.New("usage: blob-migrate [--direction local-to-s3 --source /source [--manifest stdout|discard] [--encrypt] | --direction s3-to-local --destination /destination [--manifest stdout|discard] | --direction local-census --manifest stdout | --direction s3-census --manifest stdout]")
 	}
 	if (*direction == "local-to-s3" || *direction == "local-census") && *sourceDir == "" {
 		return errors.New("blob migration source and destination paths must be non-empty")
@@ -62,11 +68,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 		*direction != "local-census" && *direction != "s3-census" {
 		return fmt.Errorf("unsupported blob migration direction %q", *direction)
 	}
-	if *manifest != "" && *manifest != "stdout" {
-		return errors.New("--manifest must be stdout when provided")
+	if *manifest != "" && *manifest != "stdout" && *manifest != "discard" {
+		return errors.New("--manifest must be stdout or discard when provided")
 	}
 	if (*direction == "local-census" || *direction == "s3-census") && *manifest != "stdout" {
 		return errors.New("census operations require --manifest stdout")
+	}
+	if *encrypt && *direction != "local-to-s3" {
+		return errors.New("--encrypt is supported only for local-to-s3")
+	}
+	if *encrypt && *manifest == "" {
+		return errors.New("--encrypt requires --manifest discard or stdout for private evidence handling")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -102,8 +114,31 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("open source blob volume: %w", err)
 		}
+		manifestWriter := io.Discard
 		if *manifest == "stdout" {
-			summary, err := blobmigration.MigrateWithManifest(ctx, local, remote, io.Discard, stdout)
+			manifestWriter = stdout
+		}
+		if *encrypt {
+			cfg, err := config.LoadReadOnly(slog.New(slog.DiscardHandler))
+			if err != nil {
+				return fmt.Errorf("load media encryption configuration: %w", err)
+			}
+			if cfg.MediaKeys == nil {
+				return errors.New("encrypted local-to-S3 migration requires TG_MEDIA_KEY_DIR and a current media key")
+			}
+			encrypted, err := blob.NewEncrypted(remote, cfg.MediaKeys, blob.DefaultChunkSize)
+			if err != nil {
+				return fmt.Errorf("construct encrypted S3 destination: %w", err)
+			}
+			summary, err := blobmigration.MigrateEncryptedWithManifest(ctx, local, encrypted, remote, io.Discard, manifestWriter)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stderr, "blob_copy=pass mode=encrypted objects=%d bytes=%d source_manifest_sha256=%s destination_manifest_sha256=%s\n", summary.Objects, summary.Bytes, summary.SourceManifestSHA256, summary.DestinationManifestSHA256)
+			return err
+		}
+		if *manifest != "" {
+			summary, err := blobmigration.MigrateWithManifest(ctx, local, remote, io.Discard, manifestWriter)
 			if err != nil {
 				return err
 			}
@@ -118,8 +153,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("open destination blob volume: %w", err)
 		}
-		if *manifest == "stdout" {
-			summary, err := blobmigration.RestoreWithManifest(ctx, remote, local, io.Discard, stdout)
+		if *manifest != "" {
+			manifestWriter := io.Discard
+			if *manifest == "stdout" {
+				manifestWriter = stdout
+			}
+			summary, err := blobmigration.RestoreWithManifest(ctx, remote, local, io.Discard, manifestWriter)
 			if err != nil {
 				return err
 			}

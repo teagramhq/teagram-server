@@ -103,6 +103,41 @@ Cloudflared metrics endpoint is exposed only inside the cluster at
 service annotations. Container logs are written to stdout and stderr for the
 cluster's node or central log collector.
 
+## Alpha production cutover
+
+After `bootstrap-alpha.sh` has created `teagram-k3s` and its namespace
+credentials, run the cutover from a reviewed checkout on `alpha`:
+
+```sh
+sudo deploy/k8s/cutover-alpha.sh --dry-run
+sudo deploy/k8s/cutover-alpha.sh --apply
+```
+
+The script keeps the k8s app and tunnel connector at zero replicas while it
+restores PostgreSQL, copies `server_key.pem`, `enc_key.hex`, and the local blob
+tree into the new PVCs, applies the pinned Atlas migration, then encrypts and
+checksums the copied blobs into RustFS with the current media key. It saves a
+mode-0600 custom-format database dump on the PostgreSQL PVC and keeps a
+read-only local-blob copy in `legacy-blobs`. The database dump and old Compose
+volumes are recovery points for at least seven days. A fresh smoke test dumps
+and restores a provisioned account, then completes a new SRP login with the
+same password and RSA identity; CI runs it in `test: smoke`.
+
+The script runs a restartable `systemd` port-forward in `teagram-k3s` and
+changes only the Tailscale Serve `/` handler. It verifies the other four Serve
+handlers are unchanged and Funnel remains off. The old `teagram` LXC stays
+running; its only container change is stopping `teagram-web-cloudflared` during
+the switch. The cutover pauses at that point and prints the Cloudflare route
+change `http://selector:8081` to `http://linkselector:8081`. No Cloudflare API
+credential is provisioned, so make that route change in the dashboard and
+confirm the prompt before the k8s connector scales to one.
+
+The script prints the exact rollback command after the cutover. Rollback scales
+the k8s connector to zero, restores the Cloudflare route to
+`http://selector:8081`, starts `teagram-web-cloudflared`, restores only Serve
+`/` to `http://127.0.0.1:8081`, and stops the new port-forward. It leaves all
+PostgreSQL and PVC data intact.
+
 This repository's CI renders the production, CI, and bootstrap overlays and
 deploys `ci/` to a disposable k3s cluster. It does not apply production
 manifests to a live cluster.

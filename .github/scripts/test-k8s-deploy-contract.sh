@@ -63,6 +63,18 @@ prod_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/te
 bootstrap_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' deploy/k8s/bootstrap/kustomization.yaml)"
 [[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$bootstrap_teagramd_digest" ]] ||
   fail 'the production bootstrap Job must use the same pinned teagramd digest as the workload'
+cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' deploy/k8s/prod-cutover/kustomization.yaml)"
+[[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$cutover_teagramd_digest" ]] ||
+  fail 'the cutover blob migration Job must use the same pinned teagramd digest as production'
+[[ "$(yq -r '.spec.suspend' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == true ]] ||
+  fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||
+  fail 'the cutover blob migration must encrypt the private manifest and migrated media'
+for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
+  yq -e "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$pvc\")" \
+    deploy/k8s/prod-cutover/persistentvolumeclaims.yaml >/dev/null 2>&1 ||
+    fail "the cutover overlay is missing PVC $pvc"
+done
 
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do

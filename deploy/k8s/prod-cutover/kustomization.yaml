@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: teagram
+
+resources:
+  - ../prod
+  - persistentvolumeclaims.yaml
+  - volume-importer.yaml
+  - local-blob-migration-job.yaml
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: teagramd
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 0
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: cloudflared
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 0
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      labelSelector: app.kubernetes.io/name=db-migrations
+    patch: |-
+      - op: add
+        path: /spec/suspend
+        value: true
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: local-blob-migration
+    patch: |-
+      - op: add
+        path: /spec/suspend
+        value: true
+
+images:
+  - name: ghcr.io/teagramhq/teagramd
+    digest: sha256:e20ef26b80cf3ce1a3ff1cc501111c3403befa7b2a0e94506ab14fa24ed474eb
