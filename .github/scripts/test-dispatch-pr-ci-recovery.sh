@@ -12,6 +12,7 @@ fail() {
 }
 
 gh() {
+  local artifact_lookup_count=0
   if [[ "$1" == api ]]; then
     if [[ "$2" == --paginate ]]; then
       [[ "$4" == --jq ]] || return 2
@@ -20,7 +21,15 @@ gh() {
         return 0
       fi
       if [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${EXPECTED_ARTIFACT_NAME}&per_page=100" ]]; then
-        [[ "${MOCK_ARTIFACT_MODE:-present}" == no-manifest ]] && return 0
+        if [[ -f "${ARTIFACT_LOOKUPS_FILE:-}" ]]; then
+          artifact_lookup_count="$(<"$ARTIFACT_LOOKUPS_FILE")"
+        fi
+        artifact_lookup_count=$((artifact_lookup_count + 1))
+        [[ -z "${ARTIFACT_LOOKUPS_FILE:-}" ]] || printf '%s\n' "$artifact_lookup_count" > "$ARTIFACT_LOOKUPS_FILE"
+        [[ "${MOCK_ARTIFACT_MODE:-present}" != no-manifest ]] || return 0
+        if [[ "${MOCK_ARTIFACT_MODE:-present}" == late-manifest ]] && (( artifact_lookup_count == 1 )); then
+          return 0
+        fi
         printf '%s\t700\n' "$EXPECTED_ARTIFACT_NAME"
         return 0
       fi
@@ -44,11 +53,12 @@ gh() {
   fi
   return 2
 }
-export -f gh
+sleep() { :; }
+export -f gh sleep
 
-for mode in empty populated; do
+for mode in empty populated late-manifest; do
   expected_targets=""
-  if [[ "$mode" == populated ]]; then
+  if [[ "$mode" != empty ]]; then
     expected_targets='ci.yml:101:2026-10-28T00:00:00Z perf.yml:202:2026-10-28T00:01:00Z'
   fi
   export GITHUB_REPOSITORY=example/repo
@@ -58,6 +68,11 @@ for mode in empty populated; do
   export ISSUE=MAIN-3126
   export EXPECTED_ARTIFACT_NAME=cancelled-pr-run-targets-900-1
   export MOCK_CANCELLED_TARGETS="$expected_targets"
+  export MOCK_ARTIFACT_MODE=present
+  [[ "$mode" != late-manifest ]] || export MOCK_ARTIFACT_MODE=late-manifest
+  export RECOVERY_MANIFEST_MAX_CHECKS=2
+  export RECOVERY_MANIFEST_CHECK_INTERVAL_SECONDS=0
+  export ARTIFACT_LOOKUPS_FILE="$test_tmp/$mode-artifact-lookups"
   export DISPATCH_ARGS_FILE="$test_tmp/$mode-dispatch-args"
 
   bash "$dispatch_script" || fail "recovery dispatch must accept the $mode cancellation manifest"
@@ -65,6 +80,9 @@ for mode in empty populated; do
   grep -Fxq 'issue=MAIN-3126' "$DISPATCH_ARGS_FILE" || fail 'recovery dispatch must preserve the issue key'
   grep -Fxq 'main_run_id=900' "$DISPATCH_ARGS_FILE" || fail 'recovery dispatch must preserve the main run ID'
   grep -Fxq "cancelled_pr_run_targets=$expected_targets" "$DISPATCH_ARGS_FILE" || fail "recovery dispatch must preserve the $mode cancellation target list"
+  if [[ "$mode" == late-manifest ]]; then
+    [[ "$(<"$ARTIFACT_LOOKUPS_FILE")" == 2 ]] || fail 'recovery dispatch must retry the manifest lookup until the priority handler uploads it'
+  fi
 done
 
 env \
@@ -78,12 +96,16 @@ grep -Fq 'never started and has no ci job' "$test_tmp/never-started-output" || f
 if env \
   MOCK_CI_JOB_PRESENT=yes \
   MOCK_ARTIFACT_MODE=no-manifest \
+  RECOVERY_MANIFEST_MAX_CHECKS=2 \
+  RECOVERY_MANIFEST_CHECK_INTERVAL_SECONDS=0 \
+  ARTIFACT_LOOKUPS_FILE="$test_tmp/missing-manifest-lookups" \
   DISPATCH_ARGS_FILE="$test_tmp/started-without-manifest-dispatch-args" \
   bash "$dispatch_script" > "$test_tmp/started-without-manifest-output" 2>&1; then
   fail 'a started main run without its cancellation manifest must fail'
 fi
 grep -Fq 'Expected one cancellation manifest' "$test_tmp/started-without-manifest-output" || fail 'a started main run must retain the missing-manifest error'
 [[ ! -e "$test_tmp/started-without-manifest-dispatch-args" ]] || fail 'a started main run without a manifest must not dispatch recovery'
+[[ "$(<"$test_tmp/missing-manifest-lookups")" == 2 ]] || fail 'recovery dispatch must retry the manifest lookup before failing'
 
 if env \
   DISPATCH_ARGS_FILE="$test_tmp/untrusted-dispatch-args" \

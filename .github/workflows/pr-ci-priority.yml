@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-ci-priority-${{ (github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number && format('pr-{0}', github.event.workflow_run.pull_requests[0].number)) || (github.event_name == 'workflow_run' && format('run-{0}', github.event.workflow_run.id)) || format('run-{0}', github.run_id) }}
+  group: pr-ci-priority-${{ (github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number && format('pr-{0}', github.event.workflow_run.pull_requests[0].number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && format('main-run-{0}-{1}', github.event.workflow_run.id, github.event.action)) || (github.event_name == 'workflow_run' && format('run-{0}', github.event.workflow_run.id)) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 jobs:
@@ -60,6 +60,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
         run: bash .github/scripts/cancel-pr-checks-for-main.sh
 
       - name: Write cancelled PR run targets
@@ -88,11 +89,14 @@ jobs:
           MAIN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           CANCEL_STEP_RESULT: ${{ steps.cancel-pr-checks.outcome }}
           ARTIFACT_STEP_RESULT: ${{ steps.save-cancelled-pr-run-targets.outcome }}
+          MAIN_CI_COMPLETED: ${{ steps.cancel-pr-checks.outputs.main_ci_completed }}
         run: |
           set -euo pipefail
           state=success
           description='PR checks cancelled before main CI fan-out'
-          if [[ "$CANCEL_STEP_RESULT" != success || "$ARTIFACT_STEP_RESULT" != success ]]; then
+          if [[ "$MAIN_CI_COMPLETED" == true ]]; then
+            description='Main CI aggregate completed before cancellation; no sweep needed'
+          elif [[ "$CANCEL_STEP_RESULT" != success || "$ARTIFACT_STEP_RESULT" != success ]]; then
             state=failure
             description='Trusted PR cancellation or target persistence failed'
           fi

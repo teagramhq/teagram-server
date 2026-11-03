@@ -47,9 +47,23 @@ env "${common_env[@]}" STATUS_MODE=success bash "$wait_script" > "$test_tmp/succ
 
 for mode in failure timeout api-error; do
   rm -f "$test_tmp/status-calls"
-  if env "${common_env[@]}" STATUS_MODE="$mode" bash "$wait_script" > "$test_tmp/$mode-output" 2>&1; then
-    fail "main priority must fail closed when trusted-controller status is $mode"
-  fi
+  env "${common_env[@]}" STATUS_MODE="$mode" bash "$wait_script" > "$test_tmp/$mode-output" ||
+    fail "main priority must continue when trusted-controller status is $mode"
+  [[ "$(<"$test_tmp/$mode-output")" == *'::warning::'* && "$(<"$test_tmp/$mode-output")" == *'Main CI fan-out will proceed without confirmed PR cancellation'* ]] ||
+    fail "main priority must warn before continuing when trusted-controller status is $mode"
 done
+
+rm -f "$test_tmp/status-calls"
+env \
+  GITHUB_REPOSITORY=example/repo \
+  MAIN_RUN_ID=900 \
+  MAIN_RUN_ATTEMPT=2 \
+  MAIN_HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  PRIORITY_STATUS_CHECK_INTERVAL_SECONDS=0 \
+  STATUS_CALLS_FILE="$test_tmp/default-timeout-calls" \
+  STATUS_MODE=timeout \
+  bash "$wait_script" > "$test_tmp/default-timeout-output" ||
+  fail 'the default main priority wait must continue after its bounded timeout'
+[[ "$(<"$test_tmp/default-timeout-calls")" == 31 ]] || fail 'the main priority wait must default to a five-minute bound'
 
 printf 'main priority controller gate tests pass\n'

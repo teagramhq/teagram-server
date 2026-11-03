@@ -24,37 +24,64 @@ if [[ -z "$main_ci_job_ids" ]]; then
 fi
 
 artifact_name="cancelled-pr-run-targets-${MAIN_RUN_ID}-${MAIN_RUN_ATTEMPT}"
-if ! artifacts="$(gh api --paginate \
-  "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \
-  --jq '.artifacts[]? | select(.expired == false) | [.name, (.workflow_run.id | tostring)] | @tsv')"; then
-  echo "::error::Could not list the cancellation manifest artifact for main CI run ${MAIN_RUN_ID}. Issue: $ISSUE"
+manifest_max_checks="${RECOVERY_MANIFEST_MAX_CHECKS:-31}"
+manifest_check_interval="${RECOVERY_MANIFEST_CHECK_INTERVAL_SECONDS:-5}"
+if [[ ! "$manifest_max_checks" =~ ^[0-9]+$ ]] || (( manifest_max_checks < 1 )); then
+  echo "::error::Invalid cancellation manifest check limit. Issue: $ISSUE"
+  exit 1
+fi
+if [[ ! "$manifest_check_interval" =~ ^[0-9]+$ ]]; then
+  echo "::error::Invalid cancellation manifest check interval. Issue: $ISSUE"
   exit 1
 fi
 
 priority_run_id=""
 artifact_match_count=0
-while IFS=$'\t' read -r listed_artifact_name listed_priority_run_id; do
-  [[ "$listed_artifact_name" == "$artifact_name" ]] || continue
-  if [[ ! "$listed_priority_run_id" =~ ^[0-9]+$ ]]; then
-    echo "::error::The cancellation manifest artifact has no valid workflow run ID. Issue: $ISSUE"
+for ((manifest_check_attempt = 1; manifest_check_attempt <= manifest_max_checks; manifest_check_attempt++)); do
+  artifacts=""
+  if ! artifacts="$(gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" \
+    --jq '.artifacts[]? | select(.expired == false) | [.name, (.workflow_run.id | tostring)] | @tsv' 2>/dev/null)"; then
+    echo "::warning::Could not list the cancellation manifest artifact for main CI run ${MAIN_RUN_ID}; retrying. Issue: $ISSUE"
+  else
+    priority_run_id=""
+    artifact_match_count=0
+    while IFS=$'\t' read -r listed_artifact_name listed_priority_run_id; do
+      [[ "$listed_artifact_name" == "$artifact_name" ]] || continue
+      if [[ ! "$listed_priority_run_id" =~ ^[0-9]+$ ]]; then
+        echo "::error::The cancellation manifest artifact has no valid workflow run ID. Issue: $ISSUE"
+        exit 1
+      fi
+      if ! priority_run_metadata="$(gh api \
+        "repos/${GITHUB_REPOSITORY}/actions/runs/${listed_priority_run_id}" \
+        --jq '[.name, .event, .head_branch] | @tsv')"; then
+        echo "::error::Could not validate the cancellation manifest's workflow run. Issue: $ISSUE"
+        exit 1
+      fi
+      IFS=$'\t' read -r priority_run_name priority_run_event priority_run_branch <<< "$priority_run_metadata"
+      if [[ "$priority_run_name" != 'PR CI priority' || "$priority_run_event" != workflow_run || "$priority_run_branch" != main ]]; then
+        continue
+      fi
+      priority_run_id="$listed_priority_run_id"
+      artifact_match_count=$((artifact_match_count + 1))
+    done <<< "$artifacts"
+  fi
+
+  if (( artifact_match_count == 1 )); then
+    break
+  fi
+  if (( artifact_match_count > 1 )); then
+    echo "::error::Expected one cancellation manifest for main CI run ${MAIN_RUN_ID}, found ${artifact_match_count}. Issue: $ISSUE"
     exit 1
   fi
-  if ! priority_run_metadata="$(gh api \
-    "repos/${GITHUB_REPOSITORY}/actions/runs/${listed_priority_run_id}" \
-    --jq '[.name, .event, .head_branch] | @tsv')"; then
-    echo "::error::Could not validate the cancellation manifest's workflow run. Issue: $ISSUE"
-    exit 1
+  if (( manifest_check_attempt < manifest_max_checks )); then
+    echo "::notice::Cancellation manifest for main CI run ${MAIN_RUN_ID} is not available yet (${manifest_check_attempt}/${manifest_max_checks}); retrying. Issue: $ISSUE"
+    sleep "$manifest_check_interval"
   fi
-  IFS=$'\t' read -r priority_run_name priority_run_event priority_run_branch <<< "$priority_run_metadata"
-  if [[ "$priority_run_name" != 'PR CI priority' || "$priority_run_event" != workflow_run || "$priority_run_branch" != main ]]; then
-    continue
-  fi
-  priority_run_id="$listed_priority_run_id"
-  artifact_match_count=$((artifact_match_count + 1))
-done <<< "$artifacts"
+done
 
 if (( artifact_match_count != 1 )); then
-  echo "::error::Expected one cancellation manifest for main CI run ${MAIN_RUN_ID}, found ${artifact_match_count}. Issue: $ISSUE"
+  echo "::error::Expected one cancellation manifest for main CI run ${MAIN_RUN_ID} after ${manifest_max_checks} checks, found ${artifact_match_count}. Issue: $ISSUE"
   exit 1
 fi
 

@@ -100,9 +100,19 @@ GATE_MODE=fork-active GITHUB_REPOSITORY=example/repo PR_NUMBER='' PR_WORKFLOW_RU
 [[ "$(<"$test_tmp/fork-gate-log")" == *'pull request number was unavailable'* ]] || fail 'fork PR cancellation must explain why it used the workflow run ID'
 
 export GITHUB_REPOSITORY=example/repo
+export MAIN_RUN_ID=900
 export GITHUB_OUTPUT="$test_tmp/cancel-output"
 export CANCEL_LOG="$test_tmp/sweep-cancels"
 gh() {
+  if [[ "$1" == api && "$2" == --paginate && "$3" == "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?per_page=100" ]]; then
+    [[ "$4" == --jq && "$5" == '.jobs[]? | select(.name == "ci") | .status' ]] || return 2
+    if [[ "${SWEEP_MODE:-success}" == late-main ]]; then
+      printf 'completed\n'
+    else
+      printf 'in_progress\n'
+    fi
+    return 0
+  fi
   if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/202" ]]; then
     [[ "$3" == --jq && "${SWEEP_MODE:-success}" == cancel-error ]] || return 2
     case "$4" in
@@ -149,6 +159,13 @@ gh() {
       esac
       return 0
     fi
+    if [[ "${SWEEP_MODE:-success}" == late-main ]]; then
+      case "$path" in
+        *'/ci.yml/runs?event=pull_request&status=queued&per_page=100') printf '406\t2026-10-28T00:00:00Z\n' ;;
+        *) return 0 ;;
+      esac
+      return 0
+    fi
     if [[ "${SWEEP_MODE:-success}" == cancel-error ]]; then
       printf '101\t2026-10-28T00:00:00Z\n202\t2026-10-28T00:01:00Z\n'
       return 0
@@ -177,7 +194,7 @@ gh() {
 export -f gh
 bash "$cancel_script" || fail 'main priority cancellation sweep should finish'
 [[ "$(<"$test_tmp/sweep-cancels")" == $'101\n202\n303' ]] || fail 'the priority sweep must cancel queued and running checks in all three workflows'
-[[ "$(<"$GITHUB_OUTPUT")" == 'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z perf.yml:202:2026-10-28T00:01:00Z real-client-browser-flow.yml:303:2026-10-28T00:02:00Z' ]] || fail 'the priority sweep must retain workflow IDs and timestamps for recovery'
+[[ "$(<"$GITHUB_OUTPUT")" == $'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z perf.yml:202:2026-10-28T00:01:00Z real-client-browser-flow.yml:303:2026-10-28T00:02:00Z\nmain_ci_completed=false' ]] || fail 'the priority sweep must retain workflow IDs and timestamps for recovery'
 
 if SWEEP_MODE=list-error GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/list-error-output" CANCEL_LOG="$test_tmp/list-error-cancels" bash "$cancel_script" > "$test_tmp/list-error-log" 2>&1; then
   fail 'the priority sweep must fail if it cannot list PR runs'
@@ -186,18 +203,24 @@ fi
 if SWEEP_MODE=cancel-error GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/cancel-error-output" CANCEL_LOG="$test_tmp/cancel-error-cancels" bash "$cancel_script" > "$test_tmp/cancel-error-log" 2>&1; then
   fail 'the priority sweep must fail if it cannot cancel a PR run'
 fi
-[[ "$(<"$test_tmp/cancel-error-output")" == 'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z' ]] || fail 'the failed sweep must still publish cancellations completed before its error'
+[[ "$(<"$test_tmp/cancel-error-output")" == $'cancelled_pr_run_targets=ci.yml:101:2026-10-28T00:00:00Z\nmain_ci_completed=false' ]] || fail 'the failed sweep must still publish cancellations completed before its error'
 
 SWEEP_MODE=terminal-race GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/terminal-race-output" CANCEL_LOG="$test_tmp/terminal-race-cancels" \
   bash "$cancel_script" > "$test_tmp/terminal-race-log" || fail 'the priority sweep must ignore a cancel conflict only when the run is terminal'
 [[ "$(<"$test_tmp/terminal-race-cancels")" == 404 ]] || fail 'the terminal-race test must exercise the cancel conflict'
-[[ "$(<"$test_tmp/terminal-race-output")" == 'cancelled_pr_run_targets=' ]] || fail 'a run that completed before cancellation must not be queued for recovery'
+[[ "$(<"$test_tmp/terminal-race-output")" == $'cancelled_pr_run_targets=\nmain_ci_completed=false' ]] || fail 'a run that completed before cancellation must not be queued for recovery'
 [[ "$(<"$test_tmp/terminal-race-log")" == *'completed before it could be cancelled'* ]] || fail 'the terminal cancel race must be reported as benign'
 
 SWEEP_MODE=raced-cancel GITHUB_REPOSITORY=example/repo GITHUB_OUTPUT="$test_tmp/raced-cancel-output" CANCEL_LOG="$test_tmp/raced-cancel-cancels" \
   bash "$cancel_script" > "$test_tmp/raced-cancel-log" || fail 'the priority sweep must retain a run cancelled by another priority event'
 [[ "$(<"$test_tmp/raced-cancel-cancels")" == 405 ]] || fail 'the cancelled-race test must exercise the cancel conflict'
-[[ "$(<"$test_tmp/raced-cancel-output")" == 'cancelled_pr_run_targets=ci.yml:405:2026-10-28T00:00:00Z' ]] || fail 'a run cancelled by another priority event must be persisted for recovery'
+[[ "$(<"$test_tmp/raced-cancel-output")" == $'cancelled_pr_run_targets=ci.yml:405:2026-10-28T00:00:00Z\nmain_ci_completed=false' ]] || fail 'a run cancelled by another priority event must be persisted for recovery'
 [[ "$(<"$test_tmp/raced-cancel-log")" == *'was already cancelled; including it for recovery'* ]] || fail 'the cancelled race must explain that the run was added to recovery'
+
+SWEEP_MODE=late-main GITHUB_REPOSITORY=example/repo MAIN_RUN_ID=900 GITHUB_OUTPUT="$test_tmp/late-main-output" CANCEL_LOG="$test_tmp/late-main-cancels" \
+  bash "$cancel_script" > "$test_tmp/late-main-log" || fail 'the priority sweep must skip a main run whose ci aggregate already completed'
+[[ ! -e "$test_tmp/late-main-cancels" ]] || fail 'the late main handler must not cancel PR checks after its ci aggregate completed'
+[[ "$(<"$test_tmp/late-main-output")" == $'cancelled_pr_run_targets=\nmain_ci_completed=true' ]] || fail 'the late main handler must publish an empty recovery manifest and completion marker'
+[[ "$(<"$test_tmp/late-main-log")" == *'ci job is already complete; skipping cancellation sweep'* ]] || fail 'the late main handler must explain why it skipped cancellation'
 
 printf 'PR main-CI gate and cancellation tests pass\n'

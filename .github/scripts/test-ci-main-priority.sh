@@ -59,6 +59,8 @@ placeholder_if="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "
 priority_concurrency_group="$(priority_query '.concurrency.group')"
 [[ "$priority_concurrency_group" == *"github.event.workflow_run.pull_requests[0].number && format('pr-{0}'"* && "$priority_concurrency_group" == *"format('run-{0}', github.event.workflow_run.id)"* ]] ||
   fail 'fork workflow_run events without PR metadata must use their triggering run ID for concurrency'
+[[ "$priority_concurrency_group" == *"github.event.workflow_run.head_branch == 'main' && format('main-run-{0}-{1}', github.event.workflow_run.id, github.event.action)"* ]] ||
+  fail 'main in-progress and completed workflow_run events must not replace each other in a pending concurrency group'
 fork_run_a_group='pr-ci-priority-run-81001'
 fork_run_b_group='pr-ci-priority-run-81002'
 [[ "$fork_run_a_group" != "$fork_run_b_group" ]] ||
@@ -84,6 +86,8 @@ cancel_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.na
 cancel_if="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Cancel active pull request checks for main") | .if')"
 [[ "$cancel_if" == *"github.event.action == 'in_progress'"* && "$cancel_if" == *"github.event.workflow_run.head_branch == 'main'"* ]] ||
   fail 'the trusted main handler must run when main CI begins'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Cancel active pull request checks for main") | .env.MAIN_RUN_ID')" == *'github.event.workflow_run.id'* ]] ||
+  fail 'the trusted main sweep must inspect the exact triggering CI run'
 artifact_name="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Save cancelled PR run targets") | .with.name')"
 [[ "$artifact_name" == *'cancelled-pr-run-targets-'* && "$artifact_name" == *'github.event.workflow_run.id'* && "$artifact_name" == *'github.event.workflow_run.run_attempt'* ]] ||
   fail 'the trusted main handler must persist cancellation targets by main run attempt'
@@ -98,6 +102,8 @@ pending_status_step="$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | se
   fail 'the main gate status must be unique to its workflow run'
 [[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.MAIN_RUN_ATTEMPT')" == *'github.event.workflow_run.run_attempt'* ]] ||
   fail 'the main gate status must be unique to each workflow run attempt'
+[[ "$(priority_query '.jobs."ops-cancel-pr-checks".steps[] | select(.name == "Publish main priority result") | .env.MAIN_CI_COMPLETED')" == *'steps.cancel-pr-checks.outputs.main_ci_completed'* ]] ||
+  fail 'the main gate status must report when cancellation was skipped because CI already completed'
 dispatch_if="$(priority_query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 [[ "$dispatch_if" == *"github.event_name == 'workflow_run'"* && "$dispatch_if" == *"github.event.workflow_run.name == 'CI'"* && "$dispatch_if" == *"github.event.workflow_run.event == 'push'"* && "$dispatch_if" == *"github.event.workflow_run.head_branch == 'main'"* && "$dispatch_if" == *"github.event.action == 'completed'"* ]] ||
   fail 'the trusted dispatcher must run only after main push CI completes'
