@@ -20,7 +20,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-func TestStickerSetTakedownUnavailableFilesReturnsConflictAndKeepsSetLive(t *testing.T) {
+func TestStickerSetTakedownUnavailableFilesSucceedsAndAuditsUnhashedCount(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := testBlobs(t)
@@ -92,14 +92,11 @@ func TestStickerSetTakedownUnavailableFilesReturnsConflictAndKeepsSetLive(t *tes
 	req.AddCookie(&http.Cookie{Name: "__Host-admin-session", Value: sessionID}) //nolint:gosec // G124: test cookie
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("takedown status = %d, want 409; body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("takedown status = %d, want 303; body=%q", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), set.ShortName) {
-		t.Fatalf("conflict message %q does not name set %q", rec.Body.String(), set.ShortName)
-	}
-	if !strings.Contains(logOutput.String(), set.ShortName) || !strings.Contains(logOutput.String(), "read file") {
-		t.Fatalf("unavailable-file log %q does not include the set ref and wrapped read error", logOutput.String())
+	if !strings.Contains(logOutput.String(), set.ShortName) || !strings.Contains(logOutput.String(), "unhashed_files=1") {
+		t.Fatalf("unavailable-file log %q does not include the set ref and unhashed file count", logOutput.String())
 	}
 
 	var isLive bool
@@ -107,13 +104,27 @@ func TestStickerSetTakedownUnavailableFilesReturnsConflictAndKeepsSetLive(t *tes
 	if err := conn.QueryRow(ctx, `SELECT is_live FROM user_created_sticker_sets WHERE id = $1`, set.ID).Scan(&isLive); err != nil {
 		t.Fatalf("read sticker-set state: %v", err)
 	}
-	if !isLive {
-		t.Fatal("sticker set became unavailable after its blob read failed")
+	if isLive {
+		t.Fatal("sticker set stayed live after an item blob read failed")
 	}
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM admin_sticker_set_events WHERE set_id = $1`, set.ID).Scan(&events); err != nil {
 		t.Fatalf("count audit events: %v", err)
 	}
-	if events != 0 {
-		t.Fatalf("audit events after failed takedown = %d, want 0", events)
+	if events != 1 {
+		t.Fatalf("audit events after takedown = %d, want 1", events)
+	}
+	var action, reason string
+	if err := conn.QueryRow(ctx, `SELECT action, reason FROM admin_sticker_set_events WHERE set_id = $1`, set.ID).Scan(&action, &reason); err != nil {
+		t.Fatalf("read takedown audit event: %v", err)
+	}
+	if action != "takedown" || reason != "missing stored bytes" {
+		t.Fatalf("takedown event action/reason = %q/%q, want takedown/original operator reason", action, reason)
+	}
+	var hasContentHash bool
+	if err := conn.QueryRow(ctx, `SELECT content_sha256 IS NOT NULL FROM user_created_sticker_set_items WHERE set_id = $1 AND file_id = $2`, set.ID, file.ID).Scan(&hasContentHash); err != nil {
+		t.Fatalf("read unavailable item's content hash: %v", err)
+	}
+	if hasContentHash {
+		t.Fatal("unavailable item has a content hash")
 	}
 }

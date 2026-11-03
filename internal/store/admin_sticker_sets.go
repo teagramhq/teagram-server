@@ -77,6 +77,7 @@ type stickerSetContentFingerprint struct {
 	accessHash int64
 	size       int64
 	stored     bool
+	hasHash    bool
 	digest     [sha256.Size]byte
 }
 
@@ -126,15 +127,17 @@ func (s *Store) AdminStickerSetEventsPage(ctx context.Context, offset, limit int
 }
 
 // TakedownUserStickerSet makes a set unavailable and records the operator action
-// in the same transaction. Its contents and install rows stay in place.
-func (s *Store) TakedownUserStickerSet(ctx context.Context, ref StickerSetAdminRef, reason string, sessionFingerprint []byte) error {
+// in the same transaction. Its contents and install rows stay in place. It
+// returns the number of items whose bytes could not be fingerprinted.
+func (s *Store) TakedownUserStickerSet(ctx context.Context, ref StickerSetAdminRef, reason string, sessionFingerprint []byte) (int, error) {
 	return s.setUserStickerSetLive(ctx, ref, false, "takedown", reason, sessionFingerprint)
 }
 
 // RestoreUserStickerSet makes a previously removed set available again and
 // appends a restore event without changing its contents or installs.
 func (s *Store) RestoreUserStickerSet(ctx context.Context, ref StickerSetAdminRef, reason string, sessionFingerprint []byte) error {
-	return s.setUserStickerSetLive(ctx, ref, true, "restore", reason, sessionFingerprint)
+	_, err := s.setUserStickerSetLive(ctx, ref, true, "restore", reason, sessionFingerprint)
+	return err
 }
 
 func (s *Store) setUserStickerSetLive(
@@ -143,9 +146,9 @@ func (s *Store) setUserStickerSetLive(
 	live bool,
 	action, reason string,
 	sessionFingerprint []byte,
-) error {
+) (int, error) {
 	if !validStickerSetAdminRef(ref) || !validStickerSetAuditReason(reason) || len(sessionFingerprint) != sha256.Size {
-		return ErrStickerSetAdminInputInvalid
+		return 0, ErrStickerSetAdminInputInvalid
 	}
 	// Blob reads may be remote; fingerprint before opening a transaction, then
 	// revalidate the snapshot under the interlock and set row lock before publish.
@@ -155,17 +158,17 @@ func (s *Store) setUserStickerSetLive(
 	if !live {
 		snapshot, fingerprints, err = s.stickerSetTakedownFingerprints(ctx, ref)
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin sticker-set %s: %w", action, err)
+		return 0, fmt.Errorf("begin sticker-set %s: %w", action, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 	if err = qtx.LockStickerTakedownInterlock(ctx); err != nil {
-		return fmt.Errorf("lock sticker takedown interlock: %w", err)
+		return 0, fmt.Errorf("lock sticker takedown interlock: %w", err)
 	}
 
 	var row db.UserCreatedStickerSet
@@ -175,64 +178,71 @@ func (s *Store) setUserStickerSetLive(
 	case stickerSetAdminRefShortName:
 		row, err = qtx.AdminLockUserStickerSetByShortName(ctx, setRef.shortName)
 	default:
-		return ErrStickerSetAdminInputInvalid
+		return 0, ErrStickerSetAdminInputInvalid
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrStickerSetNotFound
+		return 0, ErrStickerSetNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("lock user sticker set for %s: %w", action, err)
+		return 0, fmt.Errorf("lock user sticker set for %s: %w", action, err)
 	}
 	if row.IsLive == live {
-		return ErrStickerSetStateConflict
+		return 0, ErrStickerSetStateConflict
 	}
 
+	unhashedFileCount := 0
 	if !live {
 		if row.ID != snapshot.ID || row.ItemCount != snapshot.ItemCount {
-			return ErrStickerSetStateConflict
+			return 0, ErrStickerSetStateConflict
 		}
 		items, queryErr := qtx.TakedownUserStickerSetFiles(ctx, row.ID)
 		if queryErr != nil {
-			return fmt.Errorf("recheck sticker files for takedown: %w", queryErr)
+			return 0, fmt.Errorf("recheck sticker files for takedown: %w", queryErr)
 		}
 		if len(items) != len(fingerprints) || len(items) != int(row.ItemCount) {
-			return ErrStickerSetStateConflict
+			return 0, ErrStickerSetStateConflict
 		}
 		for i, item := range items {
 			fingerprint := fingerprints[i]
 			if item.FileID != fingerprint.fileID || item.AccessHash != fingerprint.accessHash ||
 				item.Size != fingerprint.size || item.Stored != fingerprint.stored {
-				return ErrStickerSetStateConflict
+				return 0, ErrStickerSetStateConflict
+			}
+			var contentSHA256 []byte
+			if fingerprint.hasHash {
+				contentSHA256 = fingerprint.digest[:]
+			} else {
+				unhashedFileCount++
 			}
 			updated, updateErr := qtx.UpdateUserStickerSetItemContentSHA256(ctx, db.UpdateUserStickerSetItemContentSHA256Params{
-				ContentSha256: fingerprint.digest[:], SetID: row.ID, FileID: item.FileID,
+				ContentSha256: contentSHA256, SetID: row.ID, FileID: item.FileID,
 			})
 			if updateErr != nil {
-				return fmt.Errorf("store blocked sticker content hash for file %d: %w", item.FileID, updateErr)
+				return 0, fmt.Errorf("store blocked sticker content hash for file %d: %w", item.FileID, updateErr)
 			}
 			if updated != 1 {
-				return fmt.Errorf("store blocked sticker content hash for file %d: updated %d rows, want 1", item.FileID, updated)
+				return 0, fmt.Errorf("store blocked sticker content hash for file %d: updated %d rows, want 1", item.FileID, updated)
 			}
 		}
 	}
 
 	updated, err := qtx.AdminSetUserStickerSetLive(ctx, db.AdminSetUserStickerSetLiveParams{IsLive: live, ID: row.ID})
 	if err != nil {
-		return fmt.Errorf("set user sticker set %d live state: %w", row.ID, err)
+		return 0, fmt.Errorf("set user sticker set %d live state: %w", row.ID, err)
 	}
 	if updated != 1 {
-		return fmt.Errorf("set user sticker set %d live state: updated %d rows, want 1", row.ID, updated)
+		return 0, fmt.Errorf("set user sticker set %d live state: updated %d rows, want 1", row.ID, updated)
 	}
 	if err = qtx.InsertAdminStickerSetEvent(ctx, db.InsertAdminStickerSetEventParams{
 		Action: action, SetID: row.ID, SetTitle: row.Title, SetShortName: row.ShortName,
 		Reason: reason, SessionFingerprint: sessionFingerprint,
 	}); err != nil {
-		return fmt.Errorf("append sticker-set %s audit event: %w", action, err)
+		return 0, fmt.Errorf("append sticker-set %s audit event: %w", action, err)
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit sticker-set %s: %w", action, err)
+		return 0, fmt.Errorf("commit sticker-set %s: %w", action, err)
 	}
-	return nil
+	return unhashedFileCount, nil
 }
 
 func (s *Store) stickerSetTakedownFingerprints(
@@ -269,17 +279,20 @@ func (s *Store) stickerSetTakedownFingerprints(
 	for i, item := range items {
 		file := File{ID: item.FileID, AccessHash: item.AccessHash, Size: item.Size, Stored: item.Stored}
 		data, readErr := s.ReadStickerFileForSet(ctx, file)
+		fingerprint := stickerSetContentFingerprint{
+			fileID: item.FileID, accessHash: item.AccessHash, size: item.Size, stored: item.Stored,
+		}
 		if readErr != nil {
 			wrappedErr := fmt.Errorf("read file %d while taking down sticker set %d: %w", item.FileID, row.ID, readErr)
 			if errors.Is(readErr, blob.ErrNotFound) || errors.Is(readErr, ErrStickerDocumentInvalid) {
-				return db.UserCreatedStickerSet{}, nil, fmt.Errorf("%w: %w", ErrStickerDocumentInvalid, wrappedErr)
+				fingerprints[i] = fingerprint
+				continue
 			}
 			return db.UserCreatedStickerSet{}, nil, wrappedErr
 		}
-		fingerprints[i] = stickerSetContentFingerprint{
-			fileID: item.FileID, accessHash: item.AccessHash, size: item.Size, stored: item.Stored,
-			digest: sha256.Sum256(data),
-		}
+		fingerprint.hasHash = true
+		fingerprint.digest = sha256.Sum256(data)
+		fingerprints[i] = fingerprint
 	}
 	return row, fingerprints, nil
 }

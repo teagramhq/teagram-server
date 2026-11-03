@@ -152,6 +152,46 @@ func TestCreateUserStickerSetStoresFingerprintFromBlob(t *testing.T) {
 	}
 }
 
+func TestStickerSetTakedownUnavailableDocumentLeavesHashNull(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := &stickerSetReadGate{Store: testBlobs(t)}
+	s := openStickerSetReadGateStore(t, blobs)
+	owner := mustUser(t, s, "+15559310013")
+	data := []byte("hello world")
+	file := stickerSetFileWithBytes(t, s, owner, data)
+	set, err := createOneFileStickerSet(ctx, s, owner, file, "Invalid blob", "invalid_blob", data)
+	if err != nil {
+		t.Fatalf("create sticker set: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `UPDATE files SET size = size + 1 WHERE id = $1`, file.ID); err != nil {
+		t.Fatalf("corrupt stored file size: %v", err)
+	}
+
+	ref := stickerSetAdminRefByID(t, set.ID)
+	unhashedFiles, err := s.TakedownUserStickerSet(ctx, ref, "invalid document", make([]byte, sha256.Size))
+	if err != nil {
+		t.Fatalf("takedown with an invalid document: %v", err)
+	}
+	if unhashedFiles != 1 {
+		t.Fatalf("unhashed file count = %d, want 1", unhashedFiles)
+	}
+
+	var isLive bool
+	var contentSHA256 []byte
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT s.is_live, i.content_sha256
+		FROM user_created_sticker_sets s
+		JOIN user_created_sticker_set_items i ON i.set_id = s.id
+		WHERE s.id = $1 AND i.file_id = $2
+	`, set.ID, file.ID).Scan(&isLive, &contentSHA256); err != nil {
+		t.Fatalf("read set after invalid-document takedown: %v", err)
+	}
+	if isLive || contentSHA256 != nil {
+		t.Fatalf("set after invalid-document takedown is_live=%t content_sha256=%x, want down with NULL hash", isLive, contentSHA256)
+	}
+}
+
 func stickerSetAdminRefByID(t *testing.T, id int64) store.StickerSetAdminRef {
 	t.Helper()
 	ref, err := store.StickerSetAdminRefByID(id)
@@ -186,7 +226,8 @@ func TestStickerSetTakedownDoesNotHoldInterlockDuringBlobRead(t *testing.T) {
 	ref := stickerSetAdminRefByID(t, set.ID)
 	takedownDone := make(chan error, 1)
 	go func() {
-		takedownDone <- s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		_, takedownErr := s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		takedownDone <- takedownErr
 	}()
 	select {
 	case <-entered:
@@ -248,7 +289,8 @@ func TestStickerSetTakedownRevalidatesAfterBlobRead(t *testing.T) {
 	ref := stickerSetAdminRefByID(t, set.ID)
 	takedownDone := make(chan error, 1)
 	go func() {
-		takedownDone <- s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		_, takedownErr := s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		takedownDone <- takedownErr
 	}()
 	select {
 	case <-entered:
@@ -401,7 +443,8 @@ func TestStickerSetCreatesShareInterlockWhileTakedownWaitsAndBlocksLaterDuplicat
 	ref := stickerSetAdminRefByID(t, set.ID)
 	takedownDone := make(chan error, 1)
 	go func() {
-		takedownDone <- s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		_, takedownErr := s.TakedownUserStickerSet(ctx, ref, "test", make([]byte, sha256.Size))
+		takedownDone <- takedownErr
 	}()
 	if err := waitForStickerTakedownInterlockWaiter(ctx, control); err != nil {
 		t.Fatal(err)

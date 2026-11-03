@@ -245,9 +245,10 @@ func adminStickerSetAction(cfg LoginHandlerConfig, action string) http.HandlerFu
 		}
 		fingerprint := HashSessionID(sessionCookie.Value)
 		var err error
+		unhashedFileCount := 0
 		switch action {
 		case "takedown":
-			err = cfg.Store.TakedownUserStickerSet(r.Context(), ref, r.PostForm.Get("reason"), fingerprint)
+			unhashedFileCount, err = cfg.Store.TakedownUserStickerSet(r.Context(), ref, r.PostForm.Get("reason"), fingerprint)
 		case "restore":
 			err = cfg.Store.RestoreUserStickerSet(r.Context(), ref, r.PostForm.Get("reason"), fingerprint)
 		default:
@@ -271,6 +272,10 @@ func adminStickerSetAction(cfg LoginHandlerConfig, action string) http.HandlerFu
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 			return
+		}
+		if action == "takedown" && unhashedFileCount > 0 {
+			adminStickerSetLog(cfg).Warn("user sticker set taken down with unhashed files",
+				"set_ref", ref.String(), "unhashed_files", unhashedFileCount)
 		}
 		if action == "restore" {
 			http.Redirect(w, r, "/admin/sticker-sets?notice=restore", http.StatusSeeOther)
