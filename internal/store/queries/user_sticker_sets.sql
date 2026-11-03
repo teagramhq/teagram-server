@@ -135,13 +135,15 @@ WITH candidates AS (
 )
 SELECT s.id, s.access_hash, s.creator_id, s.title, s.short_name, s.software,
        s.kind, s.text_color, s.item_count, s.set_hash, s.is_live, s.created_at,
+       s.thumb_file_id, s.thumb_format, s.thumb_size, s.thumb_width,
+       s.thumb_height, s.thumb_duration_ns, s.thumb_version, s.thumb_document_id,
        i.position, i.file_id, f.access_hash AS item_access_hash, f.size, f.date,
        i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
        COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
 FROM candidates c
 JOIN user_created_sticker_sets s
   ON s.id = c.id AND s.access_hash = c.access_hash AND s.is_live = true
-JOIN user_created_sticker_set_items i ON i.set_id = s.id
+JOIN user_created_sticker_set_items i ON i.set_id = s.id AND i.is_active = true
 JOIN files f ON f.id = i.file_id AND f.stored = true
 ORDER BY s.id, i.position;
 

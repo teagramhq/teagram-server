@@ -1224,13 +1224,22 @@ func (s *Store) UserStickerSetsBySearchCandidates(ctx context.Context, candidate
 	result := make([]UserStickerSet, 0, len(candidates))
 	for _, row := range rows {
 		if len(result) == 0 || result[len(result)-1].ID != row.ID {
-			result = append(result, UserStickerSet{
+			set := UserStickerSet{
 				ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
 				Title: row.Title, ShortName: row.ShortName, Software: row.Software,
 				Kind: row.Kind, TextColor: row.TextColor,
 				ItemCount: int(row.ItemCount), Hash: int(row.SetHash), IsLive: row.IsLive,
 				CreatedAt: row.CreatedAt.Time, Items: []UserStickerSetItem{},
-			})
+				ThumbVersion: int(row.ThumbVersion), ThumbDocumentID: row.ThumbDocumentID,
+			}
+			if row.ThumbFileID != nil {
+				set.Thumbnail = &UserStickerSetThumbnail{
+					FileID: *row.ThumbFileID, Format: *row.ThumbFormat, Size: *row.ThumbSize,
+					Width: int(*row.ThumbWidth), Height: int(*row.ThumbHeight),
+					Duration: row.ThumbDurationNs,
+				}
+			}
+			result = append(result, set)
 		}
 		set := &result[len(result)-1]
 		set.Items = append(set.Items, UserStickerSetItem{

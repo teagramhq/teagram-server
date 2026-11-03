@@ -378,6 +378,20 @@ func TestUserCreatedStickerSetActiveItemsStayBoundedWithArchivedHistory(t *testi
 	if len(mutationRows) != 3 {
 		t.Fatalf("mutation read returned %d active items, want 3", len(mutationRows))
 	}
+	searchCandidates, err := store.UserStickerSetSearchCandidates(ctx, "Active item scale")
+	if err != nil {
+		t.Fatalf("search scale sticker-set candidates: %v", err)
+	}
+	searchSets, err := store.UserStickerSetsBySearchCandidates(ctx, searchCandidates)
+	if err != nil {
+		t.Fatalf("resolve scale sticker-set search candidates: %v", err)
+	}
+	if len(searchSets) != 1 {
+		t.Fatalf("search resolution returned %d sets, want one", len(searchSets))
+	}
+	if len(searchSets[0].Items) != 3 {
+		t.Fatalf("search resolution returned %d active items, want 3", len(searchSets[0].Items))
+	}
 
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
@@ -385,6 +399,7 @@ func TestUserCreatedStickerSetActiveItemsStayBoundedWithArchivedHistory(t *testi
 	for _, queryName := range []string{
 		"UserCreatedStickerSetItems :many",
 		"UserCreatedStickerSetItemsForMutation :many",
+		"UserCreatedStickerSetsBySearchCandidates :many",
 	} {
 		var query *pgx.TraceQueryStartData
 		for i := range queries {
