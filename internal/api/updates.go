@@ -575,13 +575,18 @@ func (h *handlers) renderUsersToTL(ctx context.Context, users []store.User, view
 			return nil, err
 		}
 	}
+	userIDs := make([]int64, len(users))
+	for i, user := range users {
+		userIDs[i] = user.ID
+	}
+	accessHashes := h.peers.DeriveMany(viewerID, peerhash.KindUser, userIDs)
 	out := make([]*tg.User, len(users))
 	for i, user := range users {
 		contactState := contactStatesByID[user.ID]
 		if orderedContactStates != nil {
 			contactState = orderedContactStates[i]
 		}
-		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, contactState, visibility[user.ID])
+		out[i] = h.userToTLWithAccessHash(user, markSelf && user.ID == viewerID, contactState, visibility[user.ID], accessHashes[i])
 	}
 	if profilePhotoIDs == nil {
 		if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
@@ -608,6 +613,10 @@ func (h *handlers) lastSeenVisibilityForUsers(ctx context.Context, users []store
 // self entry — names stay for every peer, since a client needs them to render
 // a conversation.
 func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact store.Contact, visibility store.LastSeenVisibility) *tg.User {
+	return h.userToTLWithAccessHash(u, self, contact, visibility, h.peers.Derive(viewerID, peerhash.KindUser, u.ID))
+}
+
+func (h *handlers) userToTLWithAccessHash(u store.User, self bool, contact store.Contact, visibility store.LastSeenVisibility, accessHash int64) *tg.User {
 	tlUser := &tg.User{
 		ID:            u.ID,
 		Self:          self,
@@ -615,7 +624,7 @@ func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact sto
 		MutualContact: !self && contact.UserID == u.ID && contact.Mutual,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		AccessHash:    h.peers.Derive(viewerID, peerhash.KindUser, u.ID),
+		AccessHash:    accessHash,
 		Status:        userStatusToTL(u, self, visibility),
 	}
 	if u.Kind == store.UserKindBot {

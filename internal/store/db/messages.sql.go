@@ -978,6 +978,32 @@ func (q *Queries) MessageRandomIDExpired(ctx context.Context, arg MessageRandomI
 	return exists, err
 }
 
+const messageSearchDialogReady = `-- name: MessageSearchDialogReady :one
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM message_search_unready_dialogs
+    WHERE owner_id = $1::bigint
+      AND peer_type = $2::smallint
+      AND peer_id = $3::bigint
+)
+`
+
+type MessageSearchDialogReadyParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// MessageSearchDialogReady checks whether the postings for one dialog are
+// initialized. Keep this separate from the page query so PostgreSQL never
+// plans and scans the legacy history path for a ready dialog.
+func (q *Queries) MessageSearchDialogReady(ctx context.Context, arg MessageSearchDialogReadyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, messageSearchDialogReady, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var not_exists bool
+	err := row.Scan(&not_exists)
+	return not_exists, err
+}
+
 const messagesByFanout = `-- name: MessagesByFanout :many
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
 WHERE fanout_id = $1 AND fanout_id <> 0
@@ -1375,6 +1401,120 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 		arg.Query,
 		arg.OffsetID,
 		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+			&i.Entities,
+			&i.StickerDocumentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchMessagesByPostings = `-- name: SearchMessagesByPostings :many
+WITH parsed_query AS MATERIALIZED (
+    SELECT plainto_tsquery('simple', $6::text) AS tsquery,
+           tsvector_to_array(to_tsvector('simple', $6::text)) AS lexemes
+),
+query_lexemes AS (
+    SELECT parsed.tsquery, term.lexeme
+    FROM parsed_query AS parsed
+    CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
+),
+selected_query AS MATERIALIZED (
+    SELECT ql.tsquery, ql.lexeme
+    FROM query_lexemes AS ql
+    LEFT JOIN message_search_posting_counts AS counts
+      ON counts.owner_id = $1::bigint
+     AND counts.peer_type = $2::smallint
+     AND counts.peer_id = $3::bigint
+     AND counts.lexeme = ql.lexeme
+    ORDER BY COALESCE(counts.posting_count, 0), ql.lexeme
+    LIMIT 1
+)
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
+FROM selected_query AS q
+CROSS JOIN LATERAL (
+    SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
+    FROM message_search_postings AS p
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE p.owner_id = $1::bigint
+      AND p.peer_type = $2::smallint
+      AND p.peer_id = $3::bigint
+      AND p.lexeme = q.lexeme
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND ($4::bigint = 0 OR p.local_id < $4::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT $5::int
+) AS m
+ORDER BY m.local_id DESC
+`
+
+type SearchMessagesByPostingsParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+	OffsetID int64
+	Lim      int32
+	Query    string
+}
+
+// SearchMessagesByPostings reads only the ordered lexeme postings for one
+// ready dialog. The per-dialog posting counts choose the rarest query lexeme
+// before the ordered walk; the tsquery check preserves full-query semantics.
+func (q *Queries) SearchMessagesByPostings(ctx context.Context, arg SearchMessagesByPostingsParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, searchMessagesByPostings,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.OffsetID,
+		arg.Lim,
+		arg.Query,
 	)
 	if err != nil {
 		return nil, err

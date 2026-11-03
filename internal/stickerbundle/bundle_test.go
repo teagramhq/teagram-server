@@ -78,6 +78,18 @@ func TestLoadAcceptsCustomEmojiPackKind(t *testing.T) {
 	}
 }
 
+func TestLoadCustomEmojiTitleIncludesSPDXLicenseID(t *testing.T) {
+	pack := validTestPack("catalog_custom_emojis")
+	pack.Kind = stickerbundle.PackKindEmojis
+	bundle, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err != nil {
+		t.Fatalf("load custom emoji bundle pack: %v", err)
+	}
+	if got, want := bundle.Packs[0].Title, "OpenMoji Animals (CC-BY-SA-4.0)"; got != want {
+		t.Fatalf("custom emoji title = %q, want source and SPDX license %q", got, want)
+	}
+}
+
 func TestLoadRejectsUnsupportedPackKind(t *testing.T) {
 	pack := validTestPack("unsupported_pack_kind")
 	pack.Kind = "emoji"
@@ -106,6 +118,22 @@ func TestLoadAcceptsTelegramStickerBundleFile(t *testing.T) {
 	sticker := bundle.Packs[0].Stickers[0]
 	if bundle.Packs[0].Format != "tgs" || sticker.Format != "tgs" || sticker.MimeType != "application/x-tgsticker" || !sticker.Animated {
 		t.Fatalf("loaded TGS sticker metadata = pack=%+v sticker=%+v", bundle.Packs[0], sticker)
+	}
+}
+
+func TestLoadRejectsTelegramStickerBundleForCustomEmojiPack(t *testing.T) {
+	pack := validTestPack("custom_emoji_tgs")
+	pack.Kind = stickerbundle.PackKindEmojis
+	pack.Format = "tgs"
+	pack.Stickers[0].File = "art/grinning_face.tgs"
+	pack.Art = testTGS(t)
+	pack.Stickers[0].Size = int64(len(pack.Art))
+	checksum := sha256.Sum256(pack.Art)
+	pack.Stickers[0].SHA256 = hex.EncodeToString(checksum[:])
+
+	_, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err == nil || !strings.Contains(err.Error(), pack.ShortName) || !strings.Contains(err.Error(), "format") {
+		t.Fatalf("load custom emoji TGS error = %v, want pack %q rejected for its format", err, pack.ShortName)
 	}
 }
 
@@ -186,10 +214,44 @@ func TestLoadRejectsMoreThanTelegramStickerLimit(t *testing.T) {
 	}
 }
 
+func TestLoadAllows200StickerEmojiPackItems(t *testing.T) {
+	pack := validTestPack("emoji_pack")
+	pack.Kind = stickerbundle.PackKindEmojis
+	pack.Stickers = make([]testSticker, 200)
+	checksum := sha256.Sum256(testWebP)
+	for i := range pack.Stickers {
+		pack.Stickers[i] = testSticker{
+			Emoji:  "😀",
+			File:   fmt.Sprintf("art/%03d.webp", i),
+			Size:   int64(len(testWebP)),
+			SHA256: hex.EncodeToString(checksum[:]),
+		}
+	}
+
+	bundle, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err != nil {
+		t.Fatalf("load custom emoji pack at Telegram's 200 item cap: %v", err)
+	}
+	if got := len(bundle.Packs[0].Stickers); got != 200 {
+		t.Fatalf("loaded custom emoji pack has %d items, want 200", got)
+	}
+
+	pack.Stickers = append(pack.Stickers, pack.Stickers[0])
+	_, err = stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err == nil || !strings.Contains(err.Error(), "want between 1 and 200") {
+		t.Fatalf("load 201-item custom emoji pack error = %v, want 200 item limit", err)
+	}
+}
+
 func TestLoadRejectsReservedAndDuplicateShortNames(t *testing.T) {
+	sticker := validTestPack("shared_name")
+	emoji := validTestPack("shared_name")
+	emoji.Kind = stickerbundle.PackKindEmojis
 	for _, packs := range [][]testPack{
 		{validTestPack("twemoji_reactions")},
+		{validTestPack("twemoji_custom_emojis")},
 		{validTestPack("same_name"), validTestPack("same_name")},
+		{sticker, emoji},
 	} {
 		_, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: packs}))
 		if err == nil {
