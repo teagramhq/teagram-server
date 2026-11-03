@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"unicode"
@@ -15,8 +16,8 @@ import (
 
 var messageURLPattern = regexp.MustCompile(`(?i)(?:https?://|tg://)[^\s\v\x{85}\p{Z}<>"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]{1,5})?(?:[/?#][^\s\v\x{85}\p{Z}<>"']*)?`)
 
-func (h *handlers) encodeMessageEntitiesWithURLs(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
-	encoded, err := h.encodeMessageEntities(viewerID, text, entities)
+func (h *handlers) encodeMessageEntitiesWithURLs(ctx context.Context, viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+	encoded, err := h.encodeMessageEntities(ctx, viewerID, text, entities)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +150,7 @@ func utf16Length(text string) int {
 	return len(utf16.Encode([]rune(text)))
 }
 
-func (h *handlers) encodeMessageEntities(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+func (h *handlers) encodeMessageEntities(ctx context.Context, viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
 	if len(entities) > store.MaxPollDescriptionEntities {
 		return nil, errEntitiesTooLong
 	}
@@ -224,6 +225,9 @@ func (h *handlers) encodeMessageEntities(viewerID int64, text string, entities [
 			return nil, errInputRequestInvalid
 		}
 		encoded = append(encoded, stored)
+	}
+	if err := h.validateCustomEmojiDocumentReferences(ctx, viewerID, encoded); err != nil {
+		return nil, err
 	}
 	return encoded, nil
 }

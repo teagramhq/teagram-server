@@ -161,6 +161,16 @@ func TestGetCustomEmojiDocumentsReturnsMessageReferencedHistoricalSetMembers(t *
 		t.Fatalf("custom emoji set reference = %#v, want set %d", customEmoji.Stickerset, emojiSet.Set.ID)
 	}
 
+	if _, err := api.SendMessageForTest(s, stranger.ID, &tg.MessagesSendMessageRequest{
+		Peer: &tg.InputPeerSelf{}, Message: "⭐⭐", RandomID: 91905,
+		Entities: []tg.MessageEntityClass{
+			&tg.MessageEntityCustomEmoji{Offset: 0, Length: 1, DocumentID: referencedRemovedDocument.ID},
+			&tg.MessageEntityCustomEmoji{Offset: 1, Length: 1, DocumentID: deletedDocument.ID},
+		},
+	}); err == nil {
+		t.Error("send custom emoji references after removal and deletion succeeded")
+	}
+
 	strangerBody := dispatchChatMethod(t, h, stranger.ID, "messages.getCustomEmojiDocuments", &tg.MessagesGetCustomEmojiDocumentsRequest{
 		DocumentID: []int64{referencedRemovedDocument.ID, deletedDocument.ID},
 	})

@@ -319,13 +319,13 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMessageEmpty
 		}
 		var entityErr error
-		descriptionEntities, entityErr = h.encodeMessageEntities(r.UserID, req.Message, req.Entities)
+		descriptionEntities, entityErr = h.encodeMessageEntities(r.Ctx, r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}
 	} else {
 		var entityErr error
-		messageEntities, entityErr = h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+		messageEntities, entityErr = h.encodeMessageEntitiesWithURLs(r.Ctx, r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}

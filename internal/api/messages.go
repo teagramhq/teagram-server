@@ -430,7 +430,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if textExceedsLimit(req.Message, messageLengthMax) {
 		return nil, nil, nil, errMessageTooLong
 	}
-	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.Ctx, r.UserID, req.Message, req.Entities)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1211,7 +1211,7 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	} else if textExceedsLimit(req.Message, messageLengthMax) {
 		return nil, nil, nil, errMessageTooLong
 	}
-	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.Ctx, r.UserID, req.Message, req.Entities)
 	if err != nil {
 		return nil, nil, nil, err
 	}

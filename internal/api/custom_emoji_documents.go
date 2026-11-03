@@ -1,13 +1,57 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const maxCustomEmojiDocumentIDs = 200
+
+func (h *handlers) validateCustomEmojiDocumentReferences(ctx context.Context, userID int64, entities []store.PollDescriptionEntity) error {
+	ids := make([]int64, 0, len(entities))
+	for _, entity := range entities {
+		if entity.Type == store.PollDescriptionEntityCustomEmoji {
+			ids = append(ids, entity.Argument)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load custom emoji catalogue", "user_id", userID, "err", err)
+		return errInternal
+	}
+	userSetIDs := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if document, ok := catalog.documentsByID[id]; ok && isCustomEmojiDocument(document) {
+			continue
+		}
+		userSetIDs = append(userSetIDs, id)
+	}
+	if len(userSetIDs) == 0 {
+		return nil
+	}
+
+	userDocuments, err := h.store.UserStickerSetsByFileIDs(ctx, userSetIDs)
+	if err != nil {
+		h.log.Error("resolve custom emoji references", "user_id", userID, "err", err)
+		return errInternal
+	}
+	for _, id := range userSetIDs {
+		document, ok := userDocuments[id]
+		if !ok || document.Set.Kind != "emojis" || !document.Set.IsLive || !document.IsActive {
+			return errInputRequestInvalid
+		}
+	}
+	return nil
+}
 
 func (h *handlers) handleGetCustomEmojiDocuments(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetCustomEmojiDocumentsRequest
