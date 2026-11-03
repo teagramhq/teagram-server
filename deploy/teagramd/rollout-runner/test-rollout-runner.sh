@@ -607,6 +607,13 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = restart-policy-only ] || \
+             [ "${MOCK_SCENARIO:-}" = restart-policy-with-config-drift ]; then
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then
+            cat "$MOCK_STATE/base-compose.json"
+          else
+            cat "$MOCK_STATE/target-compose.json"
+          fi
         elif { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
                [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
