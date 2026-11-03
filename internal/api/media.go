@@ -517,6 +517,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
+			if peerType == store.PeerTypeUser {
+				h.logDirectMessageOutcome(
+					r.UserID, toID, existing.LocalID, 0, directRecipientCopyStored(r.UserID, toID, existing), true,
+				)
+			}
 			if peerType == store.PeerTypeChat {
 				chats, err := h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID)
 				if err != nil {
@@ -735,9 +740,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if h.afterSenderCommit != nil {
 		h.afterSenderCommit()
 	}
-	if !duplicate {
-		h.logDirectMessageOutcome(r.UserID, toID, sender.LocalID, recipientPts, toID == r.UserID || recipientPts > 0, false)
+	recipientCopyStored := toID == r.UserID || recipientPts > 0
+	if duplicate {
+		recipientCopyStored = directRecipientCopyStored(r.UserID, toID, sender)
 	}
+	h.logDirectMessageOutcome(r.UserID, toID, sender.LocalID, recipientPts, recipientCopyStored, duplicate)
 
 	// recipientPts is 0 when the send was withheld from a recipient who
 	// blocked the sender: there is nothing for them to fetch.

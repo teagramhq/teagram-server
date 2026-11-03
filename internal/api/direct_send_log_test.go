@@ -273,6 +273,24 @@ func TestSendMediaLogsDirectRecipientOutcome(t *testing.T) {
 		t.Fatalf("sender media message: found=%v err=%v", ok, err)
 	}
 	assertDirectSendLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, 1, true, caption)
+
+	logs.Reset()
+	var retryBody bin.Buffer
+	if err := (&tg.MessagesSendMediaRequest{
+		Peer:    InputPeerUser(sender.ID, recipient.ID),
+		Message: caption,
+		Media: &tg.InputMediaUploadedDocument{
+			File:     &tg.InputFile{ID: fileID, Parts: 1, Name: "private.bin"},
+			MimeType: "application/octet-stream",
+		},
+		RandomID: randomID,
+	}).Encode(&retryBody); err != nil {
+		t.Fatalf("encode sendMedia retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retryBody}); err != nil {
+		t.Fatalf("retry sendMedia: %v", err)
+	}
+	assertDirectSendReplayLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, 0, true, caption)
 }
 
 func TestSendCatalogueStickerLogsDirectRecipientOutcome(t *testing.T) {
@@ -322,6 +340,23 @@ func TestSendCatalogueStickerLogsDirectRecipientOutcome(t *testing.T) {
 		t.Fatalf("recipient sticker pts: %v", err)
 	}
 	assertDirectSendLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, pts, true, caption)
+
+	logs.Reset()
+	var retryBody bin.Buffer
+	if err := (&tg.MessagesSendMediaRequest{
+		Peer:    InputPeerUser(sender.ID, recipient.ID),
+		Message: caption,
+		Media: &tg.InputMediaDocument{ID: &tg.InputDocument{
+			ID: document.ID, AccessHash: document.AccessHash,
+		}},
+		RandomID: randomID,
+	}).Encode(&retryBody); err != nil {
+		t.Fatalf("encode sticker retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retryBody}); err != nil {
+		t.Fatalf("retry sticker: %v", err)
+	}
+	assertDirectSendReplayLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, 0, true, caption)
 }
 
 func TestSendPollMediaLogsDirectRecipientOutcome(t *testing.T) {
@@ -365,6 +400,26 @@ func TestSendPollMediaLogsDirectRecipientOutcome(t *testing.T) {
 		t.Fatalf("recipient poll pts: %v", err)
 	}
 	assertDirectSendLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, pts, true, question)
+
+	logs.Reset()
+	var retryBody bin.Buffer
+	if err := (&tg.MessagesSendMediaRequest{
+		Peer: InputPeerUser(sender.ID, recipient.ID),
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: question},
+			Answers: []tg.PollAnswerClass{
+				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "first"}, Option: []byte("first")},
+				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "second"}, Option: []byte("second")},
+			},
+		}},
+		RandomID: randomID,
+	}).Encode(&retryBody); err != nil {
+		t.Fatalf("encode poll retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retryBody}); err != nil {
+		t.Fatalf("retry poll: %v", err)
+	}
+	assertDirectSendReplayLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, 0, true, question)
 }
 
 func TestSendMultiMediaLogsEachDirectAlbumOutcome(t *testing.T) {
@@ -385,14 +440,15 @@ func TestSendMultiMediaLogsEachDirectAlbumOutcome(t *testing.T) {
 		secondRandomID = int64(3273146)
 		caption        = "private album caption must not be logged"
 	)
-	var body bin.Buffer
-	if err := (&tg.MessagesSendMultiMediaRequest{
+	req := &tg.MessagesSendMultiMediaRequest{
 		Peer: InputPeerUser(sender.ID, recipient.ID),
 		MultiMedia: []tg.InputSingleMedia{
 			{Media: firstMedia, Message: caption, RandomID: firstRandomID},
 			{Media: secondMedia, Message: caption, RandomID: secondRandomID},
 		},
-	}).Encode(&body); err != nil {
+	}
+	var body bin.Buffer
+	if err := req.Encode(&body); err != nil {
 		t.Fatalf("encode sendMultiMedia: %v", err)
 	}
 	if _, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &body}); err != nil {
@@ -416,6 +472,22 @@ func TestSendMultiMediaLogsEachDirectAlbumOutcome(t *testing.T) {
 			t.Fatalf("recipient album pts: %v", err)
 		}
 		assertDirectSendLog(t, records, sender.ID, recipient.ID, message.LocalID, pts, true, caption)
+	}
+
+	logs.Reset()
+	var retryBody bin.Buffer
+	if err := req.Encode(&retryBody); err != nil {
+		t.Fatalf("encode album retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retryBody}); err != nil {
+		t.Fatalf("retry sendMultiMedia: %v", err)
+	}
+	replayRecords := directSendLogRecords(t, logs)
+	if len(replayRecords) != 2 {
+		t.Fatalf("direct album replay log lines = %d, want 2: %q", len(replayRecords), logs.String())
+	}
+	for _, message := range []store.Message{first, second} {
+		assertDirectSendReplayLog(t, replayRecords, sender.ID, recipient.ID, message.LocalID, 0, true, caption)
 	}
 }
 
@@ -454,11 +526,12 @@ func TestForwardMessagesLogsEachDirectOutcome(t *testing.T) {
 	logs.Reset()
 	const caption = "forward source text"
 	forwardRandomIDs := []int64{3273150, 3273151}
-	var body bin.Buffer
-	if err := (&tg.MessagesForwardMessagesRequest{
+	req := &tg.MessagesForwardMessagesRequest{
 		ToPeer: InputPeerUser(sender.ID, recipient.ID), FromPeer: InputPeerUser(sender.ID, sourcePeer.ID),
 		ID: sourceIDs, RandomID: forwardRandomIDs,
-	}).Encode(&body); err != nil {
+	}
+	var body bin.Buffer
+	if err := req.Encode(&body); err != nil {
 		t.Fatalf("encode forwardMessages: %v", err)
 	}
 	if _, _, _, err := h.handleForwardMessagesAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &body}); err != nil {
@@ -479,9 +552,39 @@ func TestForwardMessagesLogsEachDirectOutcome(t *testing.T) {
 		}
 		assertDirectSendLog(t, records, sender.ID, recipient.ID, message.LocalID, pts, true, caption)
 	}
+
+	logs.Reset()
+	var retryBody bin.Buffer
+	if err := req.Encode(&retryBody); err != nil {
+		t.Fatalf("encode forward retry: %v", err)
+	}
+	if _, _, _, err := h.handleForwardMessagesAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retryBody}); err != nil {
+		t.Fatalf("retry forwardMessages: %v", err)
+	}
+	replayRecords := directSendLogRecords(t, logs)
+	if len(replayRecords) != 2 {
+		t.Fatalf("direct forward replay log lines = %d, want 2: %q", len(replayRecords), logs.String())
+	}
+	for _, randomID := range forwardRandomIDs {
+		message, ok, err := s.MessageByRandomID(ctx, sender.ID, randomID)
+		if err != nil || !ok {
+			t.Fatalf("forwarded sender replay message: found=%v err=%v", ok, err)
+		}
+		assertDirectSendReplayLog(t, replayRecords, sender.ID, recipient.ID, message.LocalID, 0, true, caption)
+	}
 }
 
 func assertDirectSendLog(t *testing.T, records []map[string]any, senderID, recipientID, messageID int64, recipientPts int, stored bool, privateText string) {
+	t.Helper()
+	assertDirectSendLogWithDuplicate(t, records, senderID, recipientID, messageID, recipientPts, stored, false, privateText)
+}
+
+func assertDirectSendReplayLog(t *testing.T, records []map[string]any, senderID, recipientID, messageID int64, recipientPts int, stored bool, privateText string) {
+	t.Helper()
+	assertDirectSendLogWithDuplicate(t, records, senderID, recipientID, messageID, recipientPts, stored, true, privateText)
+}
+
+func assertDirectSendLogWithDuplicate(t *testing.T, records []map[string]any, senderID, recipientID, messageID int64, recipientPts int, stored, duplicate bool, privateText string) {
 	t.Helper()
 	wantCopy := "stored"
 	if !stored {
@@ -495,7 +598,7 @@ func assertDirectSendLog(t *testing.T, records []map[string]any, senderID, recip
 			"msg": "direct message outcome", "level": "INFO",
 			"sender_id": float64(senderID), "recipient_id": float64(recipientID),
 			"message_id": float64(messageID), "recipient_copy": wantCopy,
-			"recipient_pts": float64(recipientPts), "duplicate": false,
+			"recipient_pts": float64(recipientPts), "duplicate": duplicate,
 		} {
 			if got := record[key]; got != want {
 				t.Errorf("message %d log %s = %v, want %v", messageID, key, got, want)
