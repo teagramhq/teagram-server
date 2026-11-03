@@ -27,6 +27,7 @@ docker inspect "${SERVER_IDS[0]}" | jq -e '
     and ($env | any(. == "TG_UPLOADS_DISABLED=false"))
     and ($env | any(. == "TG_TURNSTILE_SITE_KEY="))
     and ($env | any(. == "TG_TURNSTILE_SECRET_KEY_FILE="))
+    and ($env | any(. == "TG_WELCOME_CHANNEL=teagramdemowelcome"))
 ' >/dev/null || demo_fail 'seed convergence test requires the private seed-only server configuration'
 
 SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
@@ -71,6 +72,11 @@ after_generation=$(capture_wipe_generation)
 [[ "$after_generation" == "$before_generation" ]] || demo_fail 're-seeding changed the stored wipe generation'
 
 demo_seed_compose up -d --force-recreate --wait --wait-timeout 120 "$ACTIVE_SERVER"
+mapfile -t RECREATED_SERVER_IDS < <(demo_seed_compose ps --status running -q "$ACTIVE_SERVER")
+((${#RECREATED_SERVER_IDS[@]} == 1)) || demo_fail 'seed convergence restart requires one running teagramd service'
+docker inspect "${RECREATED_SERVER_IDS[0]}" | jq -e '
+  .[0].Config.Env | any(. == "TG_WELCOME_CHANNEL=teagramdemowelcome")
+' >/dev/null || demo_fail 'server restart lost the seeded Welcome channel configuration'
 after_restart_generation=$(capture_wipe_generation)
 [[ "$after_restart_generation" == "$before_generation" ]] || demo_fail 'server restart changed the stored wipe generation'
 after_restart=$(capture_seed_report)

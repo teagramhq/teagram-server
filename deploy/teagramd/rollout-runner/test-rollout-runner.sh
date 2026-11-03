@@ -2374,7 +2374,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
      and .inspection_kind == "unguarded-local-baseline-to-pinned-target"
    ' "$report" >/dev/null && \
    grep -q '^docker compose config --services$' "$TMP/initial-local-target-compose-render-events" && \
-   grep -q '^docker compose build telegramd$' "$TMP/initial-local-target-compose-render-events" && \
+   grep -q '^docker compose build --pull telegramd$' "$TMP/initial-local-target-compose-render-events" && \
    grep -q '^docker compose ps -q telegramd$' "$TMP/initial-local-target-compose-render-events" && \
    awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /^docker compose exec -T postgres pg_dump -U postgres / {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
   pass 'pinned guarded target render is kept distinct from the unguarded running baseline through initialize-local'
@@ -4959,7 +4959,7 @@ compose_selection=$(awk -F '\t' '{print $1}' "$TMP/bounded-readiness-compose-sel
 if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
    grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout" && \
    [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
-   grep -q $'\tcompose build teagramd' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose build --pull teagramd' "$TMP/bounded-readiness-compose-selections" && \
    grep -q $'\tcompose up -d' "$TMP/bounded-readiness-compose-selections" && \
    grep -q $'\tcompose up -d --no-build --no-deps teagramd' "$TMP/bounded-readiness-compose-selections"; then
   pass 'pinned local Compose render is reused for preflight, build, startup, readiness, and rollback'
