@@ -62,7 +62,8 @@ is root-only mode 0700. Older commits without the tracked file leave the
 installed command in place.
 
 The `run` verb is a root dispatch, not a general Git script runner. It accepts
-only `target-failure-report` and `rollout-evidence`; an older `main` SHA cannot
+only `target-failure-report`, `rollout-evidence`, `invite-web-signup-url`,
+`apply-user-invite-quota`, and `start-server`; an older `main` SHA cannot
 reactivate a removed operation. Any new operation must be added to the
 dispatcher allowlist and its forced-command fixture tests.
 
