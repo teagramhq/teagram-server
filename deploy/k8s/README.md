@@ -55,6 +55,8 @@ the ReadWriteOnce claim is not mounted by both workloads, run the dedicated
 Job, then restore the replica:
 
 ```sh
+kubectl wait --for=create pvc/key-data-teagramd-0 \
+  --namespace teagram --timeout=180s
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/key-data-teagramd-0 \
   --namespace teagram --timeout=180s
 kubectl scale statefulset/teagramd --replicas=0 --namespace teagram
