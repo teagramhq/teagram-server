@@ -1091,10 +1091,14 @@ jobs:
           bash -n .github/scripts/check-k8s-prod-image-pins.sh
           shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
+      - name: Test the alpha bootstrap apply path with mocks
+        run: sudo deploy/k8s/test-bootstrap-alpha.sh
+
       - name: Check deploy script syntax
         run: |
           ./deploy/k8s/bootstrap-alpha.sh --dry-run
           bash -n deploy/k8s/bootstrap-alpha.sh
+          bash -n deploy/k8s/test-bootstrap-alpha.sh
           sh -n deploy/k8s/teagram-k3s-ops.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
@@ -1148,6 +1152,7 @@ jobs:
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/k8s/bootstrap-alpha.sh \
+            deploy/k8s/test-bootstrap-alpha.sh \
             deploy/k8s/teagram-k3s-ops.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
