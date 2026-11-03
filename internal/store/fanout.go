@@ -288,6 +288,11 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			if f.StickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *f.StickerDocumentID) {
 				return Message{}, nil, false, ErrMediaInvalid
 			}
+			// A duplicate can replay a removed custom emoji, but uploaded files
+			// must still exist on both the request and stored message references.
+			if err = lockFileRefs(ctx, qtx, f.FileID, existing.FileID); err != nil {
+				return Message{}, nil, false, err
+			}
 			pts, e2 := fanoutPts(ctx, qtx, log, f, existing, owners)
 			if e2 != nil {
 				return Message{}, nil, false, e2

@@ -1406,15 +1406,17 @@ func positiveCustomEmojiDocumentIDs(entities []PollDescriptionEntity) []int64 {
 }
 
 func newPositiveCustomEmojiDocumentIDs(previous, next []PollDescriptionEntity) []int64 {
-	existing := make(map[int64]struct{})
+	existing := make(map[int64]int)
 	for _, id := range positiveCustomEmojiDocumentIDs(previous) {
-		existing[id] = struct{}{}
+		existing[id]++
 	}
 	var ids []int64
 	for _, id := range positiveCustomEmojiDocumentIDs(next) {
-		if _, ok := existing[id]; !ok {
-			ids = append(ids, id)
+		if existing[id] > 0 {
+			existing[id]--
+			continue
 		}
+		ids = append(ids, id)
 	}
 	return ids
 }

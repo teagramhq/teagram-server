@@ -163,4 +163,14 @@ func TestMessageEditsRejectOnlyNewRemovedCustomEmojiReferences(t *testing.T) {
 	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, chatMessage.LocalID, "✨", newEntities); !errors.Is(err, store.ErrMediaInvalid) {
 		t.Errorf("add removed emoji to chat message edit = %v, want ErrMediaInvalid", err)
 	}
+	addedOccurrenceEntities := []store.PollDescriptionEntity{
+		{Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: priorItem.ID},
+		{Type: store.PollDescriptionEntityCustomEmoji, Offset: 1, Length: 1, Argument: priorItem.ID},
+	}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, directMessage.LocalID, "⭐⭐", addedOccurrenceEntities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Errorf("add a second occurrence of removed emoji to direct edit = %v, want ErrMediaInvalid", err)
+	}
+	if _, _, err = s.EditMessageWithEntities(ctx, sender.ID, chatMessage.LocalID, "⭐⭐", addedOccurrenceEntities); !errors.Is(err, store.ErrMediaInvalid) {
+		t.Errorf("add a second occurrence of removed emoji to chat edit = %v, want ErrMediaInvalid", err)
+	}
 }

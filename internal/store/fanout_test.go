@@ -219,6 +219,39 @@ func TestSendChatMessageRandomIDDedup(t *testing.T) {
 	}
 }
 
+func TestSendChatMessageRetryRefusesErasedFile(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551290021")
+	b := mustUser(t, s, "+15551290022")
+	chat := chatWith(t, s, a, b)
+	file := storedFileWithBytes(t, s, a.ID)
+	request := store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "photo", RandomID: 4243, FileID: file.ID}
+
+	first, _, duplicate, err := s.SendChatMessage(ctx, request)
+	if err != nil || duplicate {
+		t.Fatalf("initial send: duplicate=%v err=%v", duplicate, err)
+	}
+	if _, err = s.DeleteMessages(ctx, a.ID, []int64{first.LocalID}, true); err != nil {
+		t.Fatalf("delete chat fan-out: %v", err)
+	}
+	if counts := sweep(t, s, future()); counts.Erased != 1 {
+		t.Fatalf("sweep counts = %+v, want one erased file", counts)
+	}
+	before := map[int64]int{a.ID: ptsOf(t, s, a.ID), b.ID: ptsOf(t, s, b.ID)}
+
+	_, _, duplicate, err = s.SendChatMessage(ctx, request)
+	if !errors.Is(err, store.ErrFileMissing) || duplicate {
+		t.Fatalf("retry after erasure: duplicate=%v err=%v, want ErrFileMissing", duplicate, err)
+	}
+	for ownerID, want := range before {
+		if got := ptsOf(t, s, ownerID); got != want {
+			t.Errorf("owner %d pts after refused retry = %d, want %d", ownerID, got, want)
+		}
+	}
+}
+
 func TestSendChatMessageUsesActiveOwnerLocalReplyCopies(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -562,6 +562,9 @@ func (h *handlers) sendChatPoll(
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, nil, nil, errMediaInvalid
 	}
+	if errors.Is(err, store.ErrMediaInvalid) {
+		return nil, nil, nil, errInputRequestInvalid
+	}
 	if err != nil {
 		h.log.Error("send chat poll message", "user_id", r.UserID, "chat_id", chatID, "err", err)
 		return nil, nil, nil, errInternal
