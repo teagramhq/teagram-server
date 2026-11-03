@@ -99,7 +99,7 @@ if [[ "${FIXTURE_ROLLOUT_FAILURE:-0}" == 1 ]]; then
     '  12 | COPY . .' \
     '  13 | RUN go mod download' \
     'ERROR: failed to solve: process failed' \
-    'runner cleanup output after BuildKit failure'
+    'rollout runner rejected: baseline checkout and tag restored'
   exit 86
 fi
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
@@ -433,7 +433,7 @@ expect 0 "deployed $fifth" --contains 'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
 rollout_failure=$(commit rollout-failure)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 expect 1 'runner exit 86' --contains 'FAILURE_BLOCK_CAUSE=module proxy unavailable' \
-  --omits 'runner cleanup output after BuildKit failure' \
+  --contains 'rollout runner rejected: baseline checkout and tag restored' \
   FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_ROLLOUT_FAILURE=1 DEPLOY_SHA="$rollout_failure"
 
 smoke_failure=$(commit smoke-failure)

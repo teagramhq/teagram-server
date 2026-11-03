@@ -303,8 +303,7 @@ print_rollout_build_failure() {
   awk '
     /^------$/ && !started { started = 1 }
     started { print }
-    started && /^ERROR:/ { found = 1; exit }
-    END { if (!found) exit 1 }
+    started && /^ERROR:/ { exit }
   ' "$1"
 }
 
@@ -436,10 +435,9 @@ if ! normalize_tracked_file_modes; then
   [ "$rc" != 0 ] || rc=1
 fi
 if [ "$rc" != 0 ]; then
-  print_rollout_build_failure "$R/rollout-$S-$TS.log" || tail -5 "$R/rollout-$S-$TS.log"
-else
-  tail -5 "$R/rollout-$S-$TS.log"
+  print_rollout_build_failure "$R/rollout-$S-$TS.log"
 fi
+tail -5 "$R/rollout-$S-$TS.log"
 echo "runner exit $rc"; [ $rc = 0 ]
 IMG=$(docker inspect --format '{{.Image}}' $C)
 [ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMG")" = "$SHA" ]
