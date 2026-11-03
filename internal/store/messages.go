@@ -302,6 +302,12 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 			if stickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *stickerDocumentID) {
 				return Message{}, 0, 0, false, ErrMediaInvalid
 			}
+			// Duplicate custom-emoji messages bypass fresh set liveness checks so
+			// retries still work after an emoji is removed. Uploaded files must
+			// remain present, though, so keep their erasure interlock on this path.
+			if err = lockFileRefs(ctx, qtx, fileID, existing.FileID); err != nil {
+				return Message{}, 0, 0, false, err
+			}
 			sPts, e2 := newMessagePts(ctx, qtx, fromID, existing.LocalID)
 			if e2 != nil {
 				return Message{}, 0, 0, false, e2

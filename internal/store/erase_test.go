@@ -1001,11 +1001,8 @@ func TestErasureSweepErasesNothingBeforeTheCutoff(t *testing.T) {
 // Criterion 12: a resend naming an erased file is refused rather than replaying
 // the original, and it writes no message row and no reference.
 //
-// The order this depends on is the interlock sitting ahead of the per-sender
-// dedup read. Moving the dedup ahead of it would make this resend return the
-// original message — which is a message the sender themself deleted, pointing
-// at bytes that are gone — and every other test here would still pass. This
-// pins it so a later reader does not "fix" it back.
+// The duplicate path must retain the file-reference interlock: an erased
+// upload cannot be replayed even when random_id finds the original message.
 func TestResendOfAnErasedFileIsRefused(t *testing.T) {
 	t.Parallel()
 	s := open(t)
