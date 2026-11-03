@@ -966,7 +966,7 @@ func (s *Store) EditMessageWithEntities(ctx context.Context, ownerID, localID in
 	}
 	peerID = pre.PeerID
 	if PeerType(pre.PeerType) == PeerTypeChat {
-		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text, entityData, entities); err != nil {
+		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text, entityData); err != nil {
 			return 0, 0, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -977,10 +977,6 @@ func (s *Store) EditMessageWithEntities(ctx context.Context, ownerID, localID in
 	if err = lockOwners(ctx, tx, ownerID, peerID); err != nil {
 		return 0, 0, err
 	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(entities)...); err != nil {
-		return 0, 0, err
-	}
-
 	msg, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: ownerID, LocalID: localID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, 0, ErrMessageInvalid
@@ -1144,7 +1140,7 @@ func lockPollsForDeletedMessageCopies(ctx context.Context, qtx *db.Queries, refs
 // as the chats row lock here. Leaving the chats row out is what lets
 // DeleteMessages accept a batch spanning several chats without breaking the
 // one-chats-row-per-transaction rule.
-func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text, entityData string, entities []PollDescriptionEntity) (int, error) {
+func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text, entityData string) (int, error) {
 	copies, err := chatCopies(ctx, qtx, pre)
 	if err != nil {
 		return 0, err
@@ -1158,10 +1154,6 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 	if err = lockOwners(ctx, tx, copyOwners(copies)...); err != nil {
 		return 0, err
 	}
-	if err = lockLiveUserStickerDocuments(ctx, qtx, positiveCustomEmojiDocumentIDs(entities)...); err != nil {
-		return 0, err
-	}
-
 	msg, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: pre.OwnerID, LocalID: pre.LocalID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrMessageInvalid
