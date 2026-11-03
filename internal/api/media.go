@@ -703,9 +703,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	var sender store.Message
 	var senderPts, recipientPts int
 	if isSticker {
-		sender, senderPts, recipientPts, _, err = h.store.SendStickerMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, stickerDocumentID, 0, messageEntities)
+		sender, senderPts, recipientPts, duplicate, err = h.store.SendStickerMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, stickerDocumentID, 0, messageEntities)
 	} else {
-		sender, senderPts, recipientPts, _, err = h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0, messageEntities)
+		sender, senderPts, recipientPts, duplicate, err = h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0, messageEntities)
 	}
 	if errors.Is(err, store.ErrRandomIDExpired) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
@@ -734,6 +734,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	setSenderRPCPts(attempt, senderPts)
 	if h.afterSenderCommit != nil {
 		h.afterSenderCommit()
+	}
+	if !duplicate {
+		h.logDirectMessageOutcome(r.UserID, toID, sender.LocalID, recipientPts, toID == r.UserID || recipientPts > 0, false)
 	}
 
 	// recipientPts is 0 when the send was withheld from a recipient who

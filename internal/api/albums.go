@@ -169,6 +169,20 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if h.afterSenderCommit != nil {
 		h.afterSenderCommit()
 	}
+	if peerType == store.PeerTypeUser {
+		recipientFinalPts, recipientDelivered := result.PerOwner[toID]
+		for i, message := range result.Messages {
+			recipientPts := 0
+			recipientCopyStored := toID == r.UserID
+			if recipientCopyStored {
+				recipientPts = result.Pts[i]
+			} else if recipientDelivered {
+				recipientCopyStored = true
+				recipientPts = recipientFinalPts - len(result.Messages) + i + 1
+			}
+			h.logDirectMessageOutcome(r.UserID, toID, message.LocalID, recipientPts, recipientCopyStored, false)
+		}
+	}
 	notifyCommitted := func() {
 		clearSenderRPC(attempt)
 		h.notifyOwners(r.Ctx, result.PerOwner, 0)

@@ -866,6 +866,46 @@ func TestUnregisteredKnownMethodFailureLogsDecodedName(t *testing.T) {
 	}
 }
 
+type unknownTLObject struct{}
+
+func (unknownTLObject) Encode(b *bin.Buffer) error {
+	b.PutID(0xffffffff)
+	return nil
+}
+
+func (unknownTLObject) Decode(*bin.Buffer) error { return nil }
+
+func (unknownTLObject) TypeID() uint32 { return 0xffffffff }
+
+func TestWrappedUnknownMethodFailureLogsUnknown(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), UnpackInvoke(NewDispatcher()), slog.New(sink))
+	wrapped := &tg.InvokeWithLayerRequest{Layer: 100, Query: unknownTLObject{}}
+	var body bin.Buffer
+	if err := wrapped.Encode(&body); err != nil {
+		t.Fatalf("encode wrapped unknown request: %v", err)
+	}
+	err := server.handle(nil, &Request{
+		MsgID: 17, Buf: &body, Ctx: context.Background(), rpcLogMethod: "help.getAppConfig",
+	})
+	if err == nil {
+		t.Fatal("handle succeeded with a wrapped unknown request constructor")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	for key, want := range map[string]any{
+		"rpc_method": UnknownRPCMethod,
+		"cause":      "unknown_method",
+	} {
+		if got := sink.records[0].attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
 	const cause = "PRIVATE-HANDLER-DETAIL"
 	sink := &serverErrorLogSink{}

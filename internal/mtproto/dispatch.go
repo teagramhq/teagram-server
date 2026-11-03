@@ -167,9 +167,13 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 		method = unknownRPCMethod
 	}
 	req.rpcMethod = method
-	if method != unknownRPCMethod {
-		req.rpcLogMethod = method
+	logMethod := method
+	if logMethod == unknownRPCMethod {
+		if decoded := compiledMethodName(id); decoded != "" {
+			logMethod = decoded
+		}
 	}
+	req.rpcLogMethod = logMethod
 	if req.rpcStart != nil {
 		req.rpcStart(method)
 	}
@@ -196,9 +200,10 @@ func setRPCMethodForHandler(req *Request, id uint32, handler Handler) {
 	if method == "" {
 		method = compiledMethodName(id)
 	}
-	if method != "" {
-		req.rpcLogMethod = method
+	if method == "" {
+		method = unknownRPCMethod
 	}
+	req.rpcLogMethod = method
 }
 
 // compiledMethodName resolves an id through gotd's generated type registry.

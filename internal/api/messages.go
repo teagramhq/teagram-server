@@ -1679,6 +1679,7 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			h.log.Error("forward messages", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
 		}
+		h.logDirectForwardOutcomes(r.UserID, destPeerType, destPeerID, sentMsgs)
 		return h.finishForwardReply(r, destPeerType, destPeerID, srcPeerType, perOwner, sentMsgs, randomIDs, senderRPCAttempt{})
 	}
 
@@ -1784,7 +1785,28 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 	} else if attempt.conn != nil {
 		clearSenderRPC(attempt)
 	}
+	h.logDirectForwardOutcomes(r.UserID, destPeerType, destPeerID, sentMsgs)
 	return h.finishForwardReply(r, destPeerType, destPeerID, srcPeerType, perOwner, sentMsgs, randomIDs, attempt)
+}
+
+func (h *handlers) logDirectForwardOutcomes(
+	senderID int64,
+	destPeerType store.PeerType,
+	destPeerID int64,
+	sentMsgs []store.ForwardedMessage,
+) {
+	if destPeerType != store.PeerTypeUser {
+		return
+	}
+	for _, forwarded := range sentMsgs {
+		if forwarded.Duplicate {
+			continue
+		}
+		recipientCopyStored := forwarded.RecipientPts > 0
+		h.logDirectMessageOutcome(
+			senderID, destPeerID, forwarded.Message.LocalID, forwarded.RecipientPts, recipientCopyStored, false,
+		)
+	}
 }
 
 func forwardSenderPts(userID int64, destPeerType, srcPeerType store.PeerType, sentMsgs []store.ForwardedMessage) (int, bool) {
