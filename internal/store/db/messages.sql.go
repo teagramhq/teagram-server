@@ -74,6 +74,29 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 	return i, err
 }
 
+const backfillMessageSearchDialogPostings = `-- name: BackfillMessageSearchDialogPostings :exec
+INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id, term.lexeme
+FROM messages AS message
+CROSS JOIN LATERAL unnest(tsvector_to_array(message.message_tsv)) AS term(lexeme)
+WHERE message.owner_id = $1::bigint
+  AND message.peer_type = $2::smallint
+  AND message.peer_id = $3::bigint
+  AND message.deleted = false
+ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
+`
+
+type BackfillMessageSearchDialogPostingsParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+func (q *Queries) BackfillMessageSearchDialogPostings(ctx context.Context, arg BackfillMessageSearchDialogPostingsParams) error {
+	_, err := q.db.Exec(ctx, backfillMessageSearchDialogPostings, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
+}
+
 const botHasStartedPrivateChat = `-- name: BotHasStartedPrivateChat :one
 SELECT EXISTS (
     SELECT 1 FROM messages
@@ -166,6 +189,27 @@ func (q *Queries) ChatMessageCopiesForDeletion(ctx context.Context, arg ChatMess
 		return nil, err
 	}
 	return items, nil
+}
+
+const clearMessageSearchDialogPostings = `-- name: ClearMessageSearchDialogPostings :exec
+DELETE FROM message_search_postings
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+`
+
+type ClearMessageSearchDialogPostingsParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// Rebuild a marked dialog from its current source rows. The message locks above
+// prevent edits and deletes from crossing the snapshot; concurrent inserts are
+// covered by the same transactional source triggers.
+func (q *Queries) ClearMessageSearchDialogPostings(ctx context.Context, arg ClearMessageSearchDialogPostingsParams) error {
+	_, err := q.db.Exec(ctx, clearMessageSearchDialogPostings, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
 }
 
 const countFilteredMessages = `-- name: CountFilteredMessages :one
@@ -859,6 +903,75 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 	return err
 }
 
+const lockMessageSearchDialogMessages = `-- name: LockMessageSearchDialogMessages :one
+WITH locked_messages AS MATERIALIZED (
+    SELECT local_id
+    FROM messages
+    WHERE owner_id = $1::bigint
+      AND peer_type = $2::smallint
+      AND peer_id = $3::bigint
+    ORDER BY local_id
+    FOR UPDATE
+)
+SELECT count(*)::bigint
+FROM locked_messages
+`
+
+type LockMessageSearchDialogMessagesParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// Lock all source rows before rebuilding. Message writes keep postings in sync
+// through triggers, but edits and deletes must serialize with the initial scan.
+func (q *Queries) LockMessageSearchDialogMessages(ctx context.Context, arg LockMessageSearchDialogMessagesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockMessageSearchDialogMessages, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const lockMessageSearchUnreadyDialog = `-- name: LockMessageSearchUnreadyDialog :one
+SELECT owner_id
+FROM message_search_unready_dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+FOR UPDATE
+`
+
+type LockMessageSearchUnreadyDialogParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+func (q *Queries) LockMessageSearchUnreadyDialog(ctx context.Context, arg LockMessageSearchUnreadyDialogParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockMessageSearchUnreadyDialog, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
+const markMessageSearchDialogReady = `-- name: MarkMessageSearchDialogReady :exec
+DELETE FROM message_search_unready_dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+`
+
+type MarkMessageSearchDialogReadyParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+func (q *Queries) MarkMessageSearchDialogReady(ctx context.Context, arg MarkMessageSearchDialogReadyParams) error {
+	_, err := q.db.Exec(ctx, markMessageSearchDialogReady, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
+}
+
 const messageByOwnerLocal = `-- name: MessageByOwnerLocal :one
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages WHERE owner_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -1002,6 +1115,35 @@ func (q *Queries) MessageSearchDialogReady(ctx context.Context, arg MessageSearc
 	var not_exists bool
 	err := row.Scan(&not_exists)
 	return not_exists, err
+}
+
+const messageSearchUnreadyDialogs = `-- name: MessageSearchUnreadyDialogs :many
+SELECT owner_id, peer_type, peer_id
+FROM message_search_unready_dialogs
+ORDER BY owner_id, peer_type, peer_id
+LIMIT $1::int
+`
+
+// MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
+// The initializer locks and rechecks each marker inside its batch transaction.
+func (q *Queries) MessageSearchUnreadyDialogs(ctx context.Context, batchSize int32) ([]MessageSearchUnreadyDialog, error) {
+	rows, err := q.db.Query(ctx, messageSearchUnreadyDialogs, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MessageSearchUnreadyDialog
+	for rows.Next() {
+		var i MessageSearchUnreadyDialog
+		if err := rows.Scan(&i.OwnerID, &i.PeerType, &i.PeerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const messagesByFanout = `-- name: MessagesByFanout :many

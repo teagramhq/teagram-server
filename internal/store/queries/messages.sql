@@ -279,6 +279,63 @@ SELECT NOT EXISTS (
       AND peer_id = sqlc.arg(peer_id)::bigint
 );
 
+-- MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
+-- The initializer locks and rechecks each marker inside its batch transaction.
+-- name: MessageSearchUnreadyDialogs :many
+SELECT owner_id, peer_type, peer_id
+FROM message_search_unready_dialogs
+ORDER BY owner_id, peer_type, peer_id
+LIMIT sqlc.arg(batch_size)::int;
+
+-- name: LockMessageSearchUnreadyDialog :one
+SELECT owner_id
+FROM message_search_unready_dialogs
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+FOR UPDATE;
+
+-- Lock all source rows before rebuilding. Message writes keep postings in sync
+-- through triggers, but edits and deletes must serialize with the initial scan.
+-- name: LockMessageSearchDialogMessages :one
+WITH locked_messages AS MATERIALIZED (
+    SELECT local_id
+    FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)::bigint
+      AND peer_type = sqlc.arg(peer_type)::smallint
+      AND peer_id = sqlc.arg(peer_id)::bigint
+    ORDER BY local_id
+    FOR UPDATE
+)
+SELECT count(*)::bigint
+FROM locked_messages;
+
+-- Rebuild a marked dialog from its current source rows. The message locks above
+-- prevent edits and deletes from crossing the snapshot; concurrent inserts are
+-- covered by the same transactional source triggers.
+-- name: ClearMessageSearchDialogPostings :exec
+DELETE FROM message_search_postings
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
+
+-- name: BackfillMessageSearchDialogPostings :exec
+INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id, term.lexeme
+FROM messages AS message
+CROSS JOIN LATERAL unnest(tsvector_to_array(message.message_tsv)) AS term(lexeme)
+WHERE message.owner_id = sqlc.arg(owner_id)::bigint
+  AND message.peer_type = sqlc.arg(peer_type)::smallint
+  AND message.peer_id = sqlc.arg(peer_id)::bigint
+  AND message.deleted = false
+ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING;
+
+-- name: MarkMessageSearchDialogReady :exec
+DELETE FROM message_search_unready_dialogs
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
+
 -- SearchMessagesByPostings reads only the ordered lexeme postings for one
 -- ready dialog. The per-dialog posting counts choose the rarest query lexeme
 -- before the ordered walk; the tsquery check preserves full-query semantics.

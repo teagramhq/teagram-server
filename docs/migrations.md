@@ -85,6 +85,21 @@ the per-dialog counts to walk postings for the least frequent query lexeme. The
 initializer must build counts from the same history before clearing a dialog's
 unready marker.
 
+Initialize the existing dialogs with:
+
+```bash
+teagramd maintenance initialize-message-search-postings [--batch-size <n>]
+```
+
+The default batch size is 100 dialogs; `n` can be from 1 to 1000. Each batch
+runs in its own transaction. It locks the unready markers and current message
+rows, rebuilds each dialog's postings and trigger-maintained counts, then clears
+the markers atomically. Concurrent inserts remain covered by the message
+triggers; edits and deletes wait for the source-row locks and then update their
+postings normally. If a batch fails or the command stops, that batch rolls back
+and previously committed batches stay ready, so running the command again
+continues from the remaining markers.
+
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain
 unchanged; the database triggers still maintain postings on message writes.
