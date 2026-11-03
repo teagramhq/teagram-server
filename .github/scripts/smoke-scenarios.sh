@@ -59,6 +59,7 @@ SMOKE_SCENARIOS=(
   username-registration
   user-invites
   turnstile-signup
+  turnstile-signup-from-send-code
   turnstile-signin
   username-password-reset
   pollprobe
