@@ -265,19 +265,25 @@ export DEPLOY_IMAGE_ID_FILE="$tmp/root/current-image-id"
 : > "$DEPLOY_ACTION_LOG"
 # expect <exit code> <last line> [VAR=value...]
 expect() {
-  local want_rc="$1" want_last="$2" want_contains='' want_omits='' out rc=0
+  local want_rc="$1" want_last="$2" want_omits='' out rc=0 contains_missing=0 expected
+  local -a want_contains=()
   shift 2
   while [[ "${1:-}" == --contains || "${1:-}" == --omits ]]; do
     case "$1" in
-      --contains) want_contains="$2" ;;
+      --contains) want_contains+=("$2") ;;
       --omits) want_omits="$2" ;;
     esac
     shift 2
   done
   out=$(env "$@" PATH="$tmp/bin:$PATH" DEPLOY_DIR="$tmp/live" DEPLOY_ROOT="$tmp/root" \
     DEPLOY_LOCK_LOG="$tmp/lock-targets" bash "$script" 2>&1) || rc=$?
+  for expected in "${want_contains[@]}"; do
+    if [[ "$out" != *"$expected"* ]]; then
+      contains_missing=1
+    fi
+  done
   if [[ "$rc" != "$want_rc" || "${out##*$'\n'}" != "$want_last" || \
-      ( -n "$want_contains" && "$out" != *"$want_contains"* ) || \
+      "$contains_missing" != 0 || \
       ( -n "$want_omits" && "$out" == *"$want_omits"* ) ]]; then
     printf 'FAIL %s: want rc=%s last=%q, got rc=%s output:\n%s\n' "$*" "$want_rc" "$want_last" "$rc" "$out" >&2
     failures=$((failures + 1))
@@ -434,6 +440,7 @@ rollout_failure=$(commit rollout-failure)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 expect 1 'runner exit 86' --contains 'FAILURE_BLOCK_CAUSE=module proxy unavailable' \
   --contains 'rollout runner rejected: baseline checkout and tag restored' \
+  --omits 'BuildKit output before failure' \
   FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_ROLLOUT_FAILURE=1 DEPLOY_SHA="$rollout_failure"
 
 smoke_failure=$(commit smoke-failure)
