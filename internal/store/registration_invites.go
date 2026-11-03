@@ -68,13 +68,14 @@ type RegistrationInvitee struct {
 // record from the other invite types in the store.
 type Invite = RegistrationInvite
 
-// InviteAdmissionPolicy describes which invite kinds a signup transaction may
-// redeem. Operator invites remain available whenever RequireInvite is true;
+// InviteAdmissionPolicy describes constraints a username admission transaction
+// enforces. Operator invites remain available whenever RequireInvite is true;
 // user invites additionally require the explicit listener gate and quota.
 type InviteAdmissionPolicy struct {
-	RequireInvite    bool
-	UserInviteQuota  int
-	AllowUserInvites bool
+	RequireInvite        bool
+	UserInviteQuota      int
+	AllowUserInvites     bool
+	RequireTurnstileCode bool
 }
 
 // ErrInviteLive is returned when an unexpired, unrevoked and unconsumed invite

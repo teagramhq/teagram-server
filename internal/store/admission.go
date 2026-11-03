@@ -64,6 +64,10 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 	if err := validateCodeHash(codeRow); err != nil {
 		return User{}, err
 	}
+	if invitePolicy.RequireTurnstileCode && (codeRow.TurnstileAction == nil || *codeRow.TurnstileAction != "signup" ||
+		codeRow.TurnstileAuthKeyID == nil || *codeRow.TurnstileAuthKeyID != authKeyID) {
+		return User{}, ErrCodeInvalid
+	}
 	existingUser, err := qtx.GetUserByUsernameWithLoginMode(ctx, handle)
 	if err == nil {
 		if existingUser.Kind == UserKindBot {
@@ -89,12 +93,24 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 		}
 		inviteRow = &row
 	}
-	if rows, err := qtx.ConsumeCodeForUsername(ctx, db.ConsumeCodeForUsernameParams{
-		Phone:    handle,
-		CodeHash: phoneCodeHash,
-	}); err != nil {
+	var rows int64
+	if invitePolicy.RequireTurnstileCode {
+		challengeAuthKeyID := authKeyID
+		rows, err = qtx.ConsumeSignupTurnstileCodeForUsername(ctx, db.ConsumeSignupTurnstileCodeForUsernameParams{
+			Phone:              handle,
+			CodeHash:           phoneCodeHash,
+			TurnstileAuthKeyID: &challengeAuthKeyID,
+		})
+	} else {
+		rows, err = qtx.ConsumeCodeForUsername(ctx, db.ConsumeCodeForUsernameParams{
+			Phone:    handle,
+			CodeHash: phoneCodeHash,
+		})
+	}
+	if err != nil {
 		return User{}, fmt.Errorf("admit username: consume code: %w", err)
-	} else if rows != 1 {
+	}
+	if rows != 1 {
 		return User{}, ErrCodeInvalid
 	}
 
@@ -139,7 +155,7 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 		return User{}, fmt.Errorf("admit username: election: %w", err)
 	}
 
-	rows, err := qtx.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
+	rows, err = qtx.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
 		ID: authKeyID, UserID: &u.ID, DeviceModel: metadataParams.deviceModel, Platform: metadataParams.platform,
 		SystemVersion: metadataParams.systemVersion, ApiID: metadataParams.apiID,
 		AppVersion: metadataParams.appVersion, Ip: metadataParams.ip,

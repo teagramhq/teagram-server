@@ -103,6 +103,8 @@ func msgIDTimeError(msgID int64, now time.Time) int {
 
 type rpcRequestError struct {
 	method        string
+	typeID        uint32
+	typeIDKnown   bool
 	requestID     int64
 	errorCategory RPCResultClass
 	cause         requestFailureCause
@@ -115,13 +117,19 @@ func (e *rpcRequestError) Unwrap() error { return e.err }
 
 func requestFailureContext(req *Request, err error) *rpcRequestError {
 	method := UnknownRPCMethod
+	var typeID uint32
+	typeIDKnown := false
 	var requestID int64
 	if req != nil {
 		method = sanitizeRPCMethod(requestRPCMethod(req))
+		typeID = req.rpcTypeID
+		typeIDKnown = req.rpcTypeIDSet
 		requestID = req.MsgID
 	}
 	return &rpcRequestError{
 		method:        method,
+		typeID:        typeID,
+		typeIDKnown:   typeIDKnown,
 		requestID:     requestID,
 		errorCategory: requestRPCResult(req, err),
 		cause:         classifyRequestFailure(req, err),
@@ -162,6 +170,9 @@ func (e *rpcRequestError) logAttrs() []any {
 		"error_category", string(e.errorCategory),
 		"cause", string(e.cause),
 		"error", safeRPCErrorName(e.err),
+	}
+	if e.method == UnknownRPCMethod && e.typeIDKnown {
+		attrs = append(attrs, "rpc_type_id", e.typeID)
 	}
 	return withSafeRPCErrorCode(attrs, e.err)
 }
@@ -331,6 +342,8 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
 	}
+	req.rpcTypeID = id
+	req.rpcTypeIDSet = true
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
 		c.queueAcks(req.MsgID)
 	}

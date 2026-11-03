@@ -29,20 +29,27 @@ type smokeTurnstileVerifier struct {
 	verified chan smokeTurnstileVerification
 }
 
-func (v *smokeTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
+func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
 	v.mu.Lock()
 	if v.seen == nil {
 		v.seen = make(map[string]struct{})
 	}
 	if _, ok := v.seen[token]; ok {
 		v.mu.Unlock()
-		return errors.New("token was already consumed")
+		return "", errors.New("token was already consumed")
 	}
 	v.seen[token] = struct{}{}
 	v.mu.Unlock()
+	if len(allowedActions) == 0 {
+		return "", errors.New("no allowed Turnstile actions")
+	}
+	action := allowedActions[0]
+	if action != "signin" && action != "signup" {
+		return "", errors.New("unsupported Turnstile action")
+	}
 
 	v.verified <- smokeTurnstileVerification{token: token, action: action, remoteIP: remoteIP}
-	return nil
+	return action, nil
 }
 
 func testSmokeTurnstileSignUp(t *testing.T) {

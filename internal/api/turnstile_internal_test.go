@@ -52,8 +52,12 @@ func TestTurnstileVerifierPostsFormAndChecksActionAndHostname(t *testing.T) {
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), "token&part=one", "signup", "203.0.113.7"); err != nil {
+	verifiedAction, err := verifier.Verify(context.Background(), "token&part=one", []string{"signin", "signup"}, "203.0.113.7")
+	if err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+	if verifiedAction != "signup" {
+		t.Fatalf("verified action = %q, want signup", verifiedAction)
 	}
 	got := <-captured
 	if got.method != http.MethodPost || got.query != "" || got.contentType != "application/x-www-form-urlencoded" {
@@ -76,8 +80,25 @@ func TestTurnstileVerifierRejectsActionMismatch(t *testing.T) {
 	defer server.Close()
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), "signin-token", "signin", ""); !errors.Is(err, errTurnstileRejected) {
+	if _, err := verifier.Verify(context.Background(), "signin-token", []string{"signin"}, ""); !errors.Is(err, errTurnstileRejected) {
 		t.Fatalf("Verify mismatched action error = %v, want rejected", err)
+	}
+}
+
+func TestTurnstileVerifierRejectsActionOutsideSendCodeAllowlist(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeTurnstileBody(t, w, `{"success":true,"action":"password-reset","hostname":"web.teagram.io"}`)
+	}))
+	defer server.Close()
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
+	verifier.endpoint = server.URL
+	if _, err := verifier.Verify(context.Background(), "other-action-token", []string{"signin", "signup"}, ""); !errors.Is(err, errTurnstileRejected) {
+		t.Fatalf("Verify unsupported action error = %v, want rejected", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("unsupported action caused %d Siteverify requests, want one", got)
 	}
 }
 
@@ -120,7 +141,7 @@ func TestTurnstileVerifiersRejectTokensFromOtherServerKeys(t *testing.T) {
 		{name: "demo verifier rejects public token", verifier: demoVerifier, token: publicToken, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.verifier.Verify(context.Background(), tc.token, "signup", "")
+			_, err := tc.verifier.Verify(context.Background(), tc.token, []string{"signup"}, "")
 			if tc.wantErr {
 				if !errors.Is(err, errTurnstileRejected) {
 					t.Fatalf("Verify error = %v, want rejection", err)
@@ -157,7 +178,7 @@ func TestTurnstileVerifierFailsClosedForInvalidSiteverifyResponses(t *testing.T)
 
 			verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 			verifier.endpoint = server.URL
-			if err := verifier.Verify(context.Background(), "token", "signup", ""); err == nil {
+			if _, err := verifier.Verify(context.Background(), "token", []string{"signup"}, ""); err == nil {
 				t.Fatal("Verify accepted an invalid Siteverify response")
 			}
 		})
@@ -184,7 +205,7 @@ func TestTurnstileVerifierDoesNotSendRemoteIPWhenUnavailable(t *testing.T) {
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+	if _, err := verifier.Verify(context.Background(), "token", []string{"signup"}, ""); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	gotForm := <-captured
@@ -204,14 +225,14 @@ func TestTurnstileVerifierRejectsTokenBoundsBeforeNetwork(t *testing.T) {
 	verifier.endpoint = server.URL
 
 	for _, token := range []string{"", strings.Repeat("x", turnstileMaxTokenBytes+1)} {
-		if err := verifier.Verify(context.Background(), token, "signup", ""); !errors.Is(err, errTurnstileRejected) {
+		if _, err := verifier.Verify(context.Background(), token, []string{"signup"}, ""); !errors.Is(err, errTurnstileRejected) {
 			t.Fatalf("Verify token length %d error = %v, want rejected", len(token), err)
 		}
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("invalid token bounds caused %d Siteverify requests, want 0", got)
 	}
-	if err := verifier.Verify(context.Background(), strings.Repeat("x", turnstileMaxTokenBytes), "signup", ""); err != nil {
+	if _, err := verifier.Verify(context.Background(), strings.Repeat("x", turnstileMaxTokenBytes), []string{"signup"}, ""); err != nil {
 		t.Fatalf("Verify token at maximum length: %v", err)
 	}
 	if got := requests.Load(); got != 1 {
@@ -229,7 +250,7 @@ func TestTurnstileVerifierHonorsCallerDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	err := verifier.Verify(ctx, "token", "signup", "")
+	_, err := verifier.Verify(ctx, "token", []string{"signup"}, "")
 	if !errors.Is(err, errTurnstileUnavailable) {
 		t.Fatalf("Verify error = %v, want fail-closed unavailable result", err)
 	}
@@ -253,9 +274,12 @@ func TestTurnstileVerifierBoundsConcurrentSiteverifyCalls(t *testing.T) {
 	verifier.semaphore = make(chan struct{}, 1)
 
 	first := make(chan error, 1)
-	go func() { first <- verifier.Verify(context.Background(), "first-token", "signup", "") }()
+	go func() {
+		_, err := verifier.Verify(context.Background(), "first-token", []string{"signup"}, "")
+		first <- err
+	}()
 	<-entered
-	if err := verifier.Verify(context.Background(), "second-token", "signup", ""); !errors.Is(err, ErrTurnstileBusy) {
+	if _, err := verifier.Verify(context.Background(), "second-token", []string{"signup"}, ""); !errors.Is(err, ErrTurnstileBusy) {
 		t.Fatalf("second Verify error = %v, want capacity refusal", err)
 	}
 	close(release)
@@ -285,7 +309,7 @@ func TestTurnstileVerifierRefusesRedirectsWithoutForwardingCredentials(t *testin
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{turnstileHostname}, "", nil)
 	verifier.endpoint = origin.URL
-	if err := verifier.Verify(context.Background(), "token", "signup", ""); err == nil {
+	if _, err := verifier.Verify(context.Background(), "token", []string{"signup"}, ""); err == nil {
 		t.Fatal("Verify accepted a redirect response")
 	}
 	if got := forwarded.Load(); got != 0 {
@@ -301,7 +325,7 @@ func TestTurnstileVerifierUsesConfiguredHostnameAllowlist(t *testing.T) {
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"LOCALHOST", " qa.stack.test."}, "", nil)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+	if _, err := verifier.Verify(context.Background(), "token", []string{"signup"}, ""); err != nil {
 		t.Fatalf("Verify with configured hostname: %v", err)
 	}
 }
@@ -316,7 +340,7 @@ func TestTurnstileVerifierAcceptsDemoAndWebHostnames(t *testing.T) {
 
 			verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io", "demo.teagram.io"}, "", nil)
 			verifier.endpoint = server.URL
-			if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+			if _, err := verifier.Verify(context.Background(), "token", []string{"signup"}, ""); err != nil {
 				t.Fatalf("Verify with configured hostname %q: %v", hostname, err)
 			}
 		})
@@ -336,7 +360,7 @@ func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, logger)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), bypassToken, "signup", ""); err != nil {
+	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin", "signup"}, ""); err != nil || action != "signup" {
 		t.Fatalf("Verify with QA bypass: %v", err)
 	}
 	if got := requests.Load(); got != 0 {
@@ -361,7 +385,7 @@ func TestTurnstileVerifierDoesNotApplyQABypassToSignin(t *testing.T) {
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, nil)
 	verifier.endpoint = server.URL
-	if err := verifier.Verify(context.Background(), bypassToken, "signin", ""); err != nil {
+	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin"}, ""); err != nil || action != "signin" {
 		t.Fatalf("Verify signin with QA token through Siteverify: %v", err)
 	}
 	if got := requests.Load(); got != 1 {

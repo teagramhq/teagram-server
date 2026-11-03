@@ -93,6 +93,34 @@ func (q *Queries) ConsumeCodeForUsername(ctx context.Context, arg ConsumeCodeFor
 	return result.RowsAffected(), nil
 }
 
+const consumeSignupTurnstileCodeForUsername = `-- name: ConsumeSignupTurnstileCodeForUsername :execrows
+UPDATE phone_codes
+SET consumed_at = now(), code = ''
+WHERE phone = $1
+  AND code_hash = $2
+  AND turnstile_action = 'signup'
+  AND turnstile_auth_key_id = $3
+  AND consumed_at IS NULL
+  AND expires_at >= now()
+  AND attempts < 3
+  AND code <> ''
+`
+
+type ConsumeSignupTurnstileCodeForUsernameParams struct {
+	Phone              string
+	CodeHash           string
+	TurnstileAuthKeyID *int64
+}
+
+// Marks the code-bound signup challenge single-use inside account admission.
+func (q *Queries) ConsumeSignupTurnstileCodeForUsername(ctx context.Context, arg ConsumeSignupTurnstileCodeForUsernameParams) (int64, error) {
+	result, err := q.db.Exec(ctx, consumeSignupTurnstileCodeForUsername, arg.Phone, arg.CodeHash, arg.TurnstileAuthKeyID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredCodes = `-- name: DeleteExpiredCodes :execrows
 DELETE FROM phone_codes WHERE expires_at < now()
 `
@@ -106,7 +134,7 @@ func (q *Queries) DeleteExpiredCodes(ctx context.Context) (int64, error) {
 }
 
 const getCodeByHash = `-- name: GetCodeByHash :one
-SELECT phone, code_hash, code, expires_at, attempts, consumed_at, created_at, id FROM phone_codes WHERE code_hash = $1
+SELECT phone, code_hash, code, expires_at, attempts, consumed_at, created_at, id, turnstile_action, turnstile_auth_key_id FROM phone_codes WHERE code_hash = $1
 `
 
 // Looks up a code row by its hash. Used by VerifyCode to find the exact row
@@ -124,12 +152,16 @@ func (q *Queries) GetCodeByHash(ctx context.Context, codeHash string) (PhoneCode
 		&i.ConsumedAt,
 		&i.CreatedAt,
 		&i.ID,
+		&i.TurnstileAction,
+		&i.TurnstileAuthKeyID,
 	)
 	return i, err
 }
 
 const getCodeByHashAndPhone = `-- name: GetCodeByHashAndPhone :one
-SELECT code_hash, phone, code, consumed_at, expires_at, attempts FROM phone_codes
+SELECT code_hash, phone, code, consumed_at, expires_at, attempts,
+       turnstile_action, turnstile_auth_key_id
+FROM phone_codes
 WHERE code_hash = $1 AND phone = $2
 `
 
@@ -139,12 +171,14 @@ type GetCodeByHashAndPhoneParams struct {
 }
 
 type GetCodeByHashAndPhoneRow struct {
-	CodeHash   string
-	Phone      string
-	Code       string
-	ConsumedAt pgtype.Timestamptz
-	ExpiresAt  pgtype.Timestamptz
-	Attempts   int32
+	CodeHash           string
+	Phone              string
+	Code               string
+	ConsumedAt         pgtype.Timestamptz
+	ExpiresAt          pgtype.Timestamptz
+	Attempts           int32
+	TurnstileAction    *string
+	TurnstileAuthKeyID *int64
 }
 
 // Looks up a code row by hash AND phone binding. Used by username-mode signIn
@@ -161,12 +195,14 @@ func (q *Queries) GetCodeByHashAndPhone(ctx context.Context, arg GetCodeByHashAn
 		&i.ConsumedAt,
 		&i.ExpiresAt,
 		&i.Attempts,
+		&i.TurnstileAction,
+		&i.TurnstileAuthKeyID,
 	)
 	return i, err
 }
 
 const getLatestCode = `-- name: GetLatestCode :one
-SELECT phone, code_hash, code, expires_at, attempts, consumed_at, created_at, id FROM phone_codes
+SELECT phone, code_hash, code, expires_at, attempts, consumed_at, created_at, id, turnstile_action, turnstile_auth_key_id FROM phone_codes
 WHERE phone = $1
 ORDER BY created_at DESC
 LIMIT 1
@@ -187,6 +223,8 @@ func (q *Queries) GetLatestCode(ctx context.Context, phone string) (PhoneCode, e
 		&i.ConsumedAt,
 		&i.CreatedAt,
 		&i.ID,
+		&i.TurnstileAction,
+		&i.TurnstileAuthKeyID,
 	)
 	return i, err
 }
@@ -204,15 +242,17 @@ func (q *Queries) IncrementCodeAttempts(ctx context.Context, codeHash string) er
 }
 
 const insertCode = `-- name: InsertCode :exec
-INSERT INTO phone_codes (phone, code_hash, code, expires_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO phone_codes (phone, code_hash, code, expires_at, turnstile_action, turnstile_auth_key_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertCodeParams struct {
-	Phone     string
-	CodeHash  string
-	Code      string
-	ExpiresAt pgtype.Timestamptz
+	Phone              string
+	CodeHash           string
+	Code               string
+	ExpiresAt          pgtype.Timestamptz
+	TurnstileAction    *string
+	TurnstileAuthKeyID *int64
 }
 
 // Inserts a new code row. Each IssueCode call creates its own row keyed by
@@ -223,6 +263,8 @@ func (q *Queries) InsertCode(ctx context.Context, arg InsertCodeParams) error {
 		arg.CodeHash,
 		arg.Code,
 		arg.ExpiresAt,
+		arg.TurnstileAction,
+		arg.TurnstileAuthKeyID,
 	)
 	return err
 }

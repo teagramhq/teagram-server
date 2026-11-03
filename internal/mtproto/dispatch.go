@@ -71,9 +71,11 @@ type Request struct {
 	// rpcMethod and rpcResult are set by the dispatcher and reply path for the
 	// optional RPC tracing boundary. They stay inside this package so request
 	// data can never become trace data by accident.
-	rpcMethod string
-	rpcResult RPCResultClass
-	rpcStart  func(string)
+	rpcMethod    string
+	rpcTypeID    uint32
+	rpcTypeIDSet bool
+	rpcResult    RPCResultClass
+	rpcStart     func(string)
 }
 
 // Handler processes decrypted MTProto requests.
@@ -155,6 +157,8 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
 	}
+	req.rpcTypeID = id
+	req.rpcTypeIDSet = true
 
 	d.mux.Lock()
 	h, ok := d.reqs[id]
