@@ -1129,6 +1129,8 @@ jobs:
           bash -n deploy/teagram/test-target-failure-report.sh
           bash -n deploy/teagram/ops/apply-user-invite-quota.sh
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
+          bash -n deploy/teagram/ops/start-server.sh
+          bash -n deploy/teagram/test-start-server.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -1178,6 +1180,8 @@ jobs:
             deploy/teagram/test-target-failure-report.sh \
             deploy/teagram/ops/apply-user-invite-quota.sh \
             deploy/teagram/test-apply-user-invite-quota.sh \
+            deploy/teagram/ops/start-server.sh \
+            deploy/teagram/test-start-server.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1232,6 +1236,9 @@ jobs:
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
+
+      - name: Check teagram server start operation
+        run: bash deploy/teagram/test-start-server.sh
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
