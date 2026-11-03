@@ -105,6 +105,86 @@ func TestRemovedCustomEmojiCannotBeReferencedByMessagesOrChannelPosts(t *testing
 	}
 }
 
+// A stored custom emoji entity keeps its document downloadable for the caller
+// who can see the message, after the item is removed or its set is deleted.
+// The sticker_document_id and file_id download branches never see these
+// references, so FileForDownload must find them in the entities themselves.
+func TestCustomEmojiEntityKeepsRemovedDocumentDownloadable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559201011")
+	sender := mustUser(t, s, "+15559201012")
+	recipient := mustUser(t, s, "+15559201013")
+	stranger := mustUser(t, s, "+15559201014")
+	removedItem := storedFile(t, s, owner.ID)
+	removedKept := storedFile(t, s, owner.ID)
+	deletedItem := storedFile(t, s, owner.ID)
+	deletedKept := storedFile(t, s, owner.ID)
+	emojiItem := func(f store.File) store.UserStickerSetItem {
+		return store.UserStickerSetItem{FileID: f.ID, AccessHash: f.AccessHash, Size: f.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100}
+	}
+	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Removed", ShortName: "emoji_entity_removed", Kind: "emojis",
+	}, []store.UserStickerSetItem{emojiItem(removedItem), emojiItem(removedKept)})
+	if err != nil {
+		t.Fatalf("create removed emoji set: %v", err)
+	}
+	deletedSet, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Deleted", ShortName: "emoji_entity_deleted", Kind: "emojis",
+	}, []store.UserStickerSetItem{emojiItem(deletedItem), emojiItem(deletedKept)})
+	if err != nil {
+		t.Fatalf("create deleted emoji set: %v", err)
+	}
+	channel := mustChannel(t, s, sender.ID, "emoji entity download")
+	removedEntities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: removedItem.ID,
+	}}
+	deletedEntities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: deletedItem.ID,
+	}}
+	sentRemoved, _, _, duplicate, err := s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92100, 0, 0, removedEntities)
+	if err != nil || duplicate {
+		t.Fatalf("send removed emoji message: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, _, _, duplicate, err = s.SendMessageWithEntities(ctx, sender.ID, recipient.ID, "⭐", 92101, 0, 0, deletedEntities); err != nil || duplicate {
+		t.Fatalf("send deleted emoji message: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, _, duplicate, err = s.PostChannelMessageAsWithEntities(ctx, channel.ID, sender.ID, "⭐", 92102, nil, 0, removedEntities); err != nil || duplicate {
+		t.Fatalf("post removed emoji channel message: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove emoji item: %v", err)
+	}
+	if err = s.DeleteUserStickerSet(ctx, owner.ID, deletedSet.ID); err != nil {
+		t.Fatalf("delete emoji set: %v", err)
+	}
+
+	for _, f := range []store.File{removedItem, deletedItem} {
+		if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, recipient.ID); err != nil {
+			t.Fatalf("recipient download of file %d: %v", f.ID, err)
+		}
+		if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, sender.ID); err != nil {
+			t.Fatalf("sender download of file %d: %v", f.ID, err)
+		}
+		if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, stranger.ID); !errors.Is(err, store.ErrFileNotFound) {
+			t.Fatalf("stranger download of file %d: want ErrFileNotFound, got %v", f.ID, err)
+		}
+	}
+
+	// Revoking the private message leaves the channel post as the only route,
+	// so the sender keeps the document through channel visibility alone.
+	if _, err = s.DeleteMessages(ctx, sender.ID, []int64{sentRemoved.LocalID}, true); err != nil {
+		t.Fatalf("delete private emoji message: %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, removedItem.ID, removedItem.AccessHash, recipient.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("recipient after revoke: want ErrFileNotFound, got %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, removedItem.ID, removedItem.AccessHash, sender.ID); err != nil {
+		t.Fatalf("sender download through channel post: %v", err)
+	}
+}
+
 func TestMessageEditsRejectOnlyNewRemovedCustomEmojiReferences(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

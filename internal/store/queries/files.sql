@@ -91,6 +91,30 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
             AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
+      -- A custom emoji entity is stored in the message's entities, not in
+      -- sticker_document_id, and it outlives the item: removing an item or
+      -- deleting its set only stops future use. Only the caller's own stored
+      -- message or channel post keeps the document downloadable.
+      OR EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = $3 AND m.deleted = false
+            AND m.entities IS NOT NULL
+            AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
+            AND message_custom_emoji_document_ids(m.entities) && ARRAY[f.id::text]
+            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+          WHERE cm.deleted = false
+            AND cm.entities IS NOT NULL
+            AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+            AND message_custom_emoji_document_ids(cm.entities) && ARRAY[f.id::text]
+            AND cm.local_id > cp.available_min_id
+            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
       OR (
           NOT EXISTS (
               SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
