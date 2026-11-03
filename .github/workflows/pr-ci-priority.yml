@@ -1,0 +1,131 @@
+name: PR CI priority
+
+on:
+  pull_request_target:
+    branches: [main]
+  workflow_run:
+    workflows: [CI, RPC performance, Real-client browser flow]
+    types: [requested, in_progress, completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-priority-${{ (github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number && format('pr-{0}', github.event.workflow_run.pull_requests[0].number)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && format('main-run-{0}-{1}', github.event.workflow_run.id, github.event.action)) || (github.event_name == 'workflow_run' && format('run-{0}', github.event.workflow_run.id)) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  ops-cancel-pr-checks:
+    name: 'ops: cancel-pr-checks'
+    if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_run' && ((github.event.workflow_run.event == 'pull_request' && (github.event.action == 'requested' || github.event.action == 'in_progress')) || (github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress'))) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      statuses: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_sha) || github.sha }}
+          persist-credentials: false
+
+      - name: Gate this pull request while main CI is active
+        if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+          PR_WORKFLOW_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
+        run: bash .github/scripts/gate-pr-checks-during-main.sh
+
+      - name: Mark main priority pending
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          MAIN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$MAIN_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$MAIN_HEAD_SHA" =~ ^[[:xdigit:]]{40}$ ]]
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${MAIN_HEAD_SHA}" \
+            -f state=pending \
+            -f "context=main-priority-${MAIN_RUN_ID}-${MAIN_RUN_ATTEMPT}" \
+            -f "description=Waiting for trusted PR cancellation before main CI fan-out"
+
+      - name: Cancel active pull request checks for main
+        id: cancel-pr-checks
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: bash .github/scripts/cancel-pr-checks-for-main.sh
+
+      - name: Write cancelled PR run targets
+        if: ${{ always() && github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
+        env:
+          CANCELLED_PR_RUN_TARGETS: ${{ steps.cancel-pr-checks.outputs.cancelled_pr_run_targets }}
+        run: printf '%s\n' "$CANCELLED_PR_RUN_TARGETS" > "$RUNNER_TEMP/cancelled-pr-run-targets.txt"
+
+      - name: Save cancelled PR run targets
+        id: save-cancelled-pr-run-targets
+        if: ${{ always() && github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cancelled-pr-run-targets-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/cancelled-pr-run-targets.txt
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Publish main priority result
+        if: ${{ always() && github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'in_progress' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          MAIN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANCEL_STEP_RESULT: ${{ steps.cancel-pr-checks.outcome }}
+          ARTIFACT_STEP_RESULT: ${{ steps.save-cancelled-pr-run-targets.outcome }}
+          MAIN_CI_COMPLETED: ${{ steps.cancel-pr-checks.outputs.main_ci_completed }}
+        run: |
+          set -euo pipefail
+          state=success
+          description='PR checks cancelled before main CI fan-out'
+          if [[ "$MAIN_CI_COMPLETED" == true ]]; then
+            description='Main CI aggregate completed before cancellation; no sweep needed'
+          elif [[ "$CANCEL_STEP_RESULT" != success || "$ARTIFACT_STEP_RESULT" != success ]]; then
+            state=failure
+            description='Trusted PR cancellation or target persistence failed'
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${MAIN_HEAD_SHA}" \
+            -f "state=$state" \
+            -f "context=main-priority-${MAIN_RUN_ID}-${MAIN_RUN_ATTEMPT}" \
+            -f "description=$description"
+          [[ "$state" == success ]]
+
+  ops-dispatch-pr-ci-recovery:
+    name: 'ops: dispatch-pr-ci-recovery'
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.action == 'completed' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Dispatch recovery with the main sweep's cancelled runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          MAIN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ISSUE: MAIN-3126
+        run: bash .github/scripts/dispatch-pr-ci-recovery.sh
