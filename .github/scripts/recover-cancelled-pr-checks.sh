@@ -60,6 +60,23 @@ latest_workflow_run_attempt_for_head() {
   printf '%s\t%s\n' "$latest_id" "$latest_attempt"
 }
 
+has_open_pull_request_with_head_sha() {
+  local head_sha="$1"
+  local matching_pull_request_numbers pull_request_number
+
+  if ! matching_pull_request_numbers="$(gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/pulls?per_page=100" \
+    --jq ".[] | select(.state == \"open\" and .head.sha == \"${head_sha}\") | .number" 2>/dev/null)"; then
+    return 2
+  fi
+  [[ -n "$matching_pull_request_numbers" ]] || return 1
+
+  while IFS= read -r pull_request_number; do
+    [[ "$pull_request_number" =~ ^[0-9]+$ ]] || return 2
+  done <<< "$matching_pull_request_numbers"
+  return 0
+}
+
 for workflow_file in "${workflow_files[@]}"; do
   oldest_created_at_by_workflow["$workflow_file"]="$main_started_at"
 done
@@ -245,6 +262,21 @@ for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; statu
             echo "::error::No ${workflow_file} run was found for fork head ${run_head_sha}; skipping rerun. Issue: $ISSUE"
           fi
           recovery_failure_count=$((recovery_failure_count + 1))
+          continue
+        fi
+
+        if has_open_pull_request_with_head_sha "$run_head_sha"; then
+          :
+        else
+          open_pull_request_lookup_status=$?
+          if (( open_pull_request_lookup_status == 1 )); then
+            unset "outstanding_pr_run_ids[$run_key]"
+            handled_pr_run_ids["$run_key"]=1
+            echo "::notice::Skipping cancelled fork check ${workflow_file} run ${run_id}; no open PR has head ${run_head_sha}."
+          else
+            echo "::error::Could not confirm an open PR still has fork head ${run_head_sha}; retrying ${workflow_file} run ${run_id}. Issue: $ISSUE"
+            recovery_failure_count=$((recovery_failure_count + 1))
+          fi
           continue
         fi
       fi

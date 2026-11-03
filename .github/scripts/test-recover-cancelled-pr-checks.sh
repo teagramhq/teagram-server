@@ -34,6 +34,19 @@ gh() {
     case "$RECOVERY_MODE" in
       fork-run) printf '101\t1\t2026-10-28T00:00:00Z\n' ;;
       fork-stale) printf '999\t1\t2026-10-29T00:00:00Z\n' ;;
+      fork-head-moved) printf '101\t1\t2026-10-28T00:00:00Z\n' ;;
+      *) return 2 ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == api && "$2" == --paginate && "$3" == "repos/${GITHUB_REPOSITORY}/commits/"*"/pulls?per_page=100" ]]; then
+    case "$RECOVERY_MODE" in
+      fork-run) printf '1\n' ;;
+      fork-head-moved)
+        if [[ "$5" != *'.state == "open"'* || "$5" != *'.head.sha == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'* ]]; then
+          printf '1\n'
+        fi
+        ;;
       *) return 2 ;;
     esac
     return 0
@@ -46,7 +59,7 @@ gh() {
         run_head_sha="${CI_HEAD_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
         run_pr_number=1
         run_created_at=2026-10-28T00:00:00Z
-        if [[ "$RECOVERY_MODE" == fork-run || "$RECOVERY_MODE" == fork-stale ]]; then
+        if [[ "$RECOVERY_MODE" == fork-run || "$RECOVERY_MODE" == fork-stale || "$RECOVERY_MODE" == fork-head-moved ]]; then
           run_pr_number=-
         fi
         ;;
@@ -166,6 +179,11 @@ rm "$test_tmp/reruns"
 env "${common_env[@]}" RECOVERY_MODE=fork-stale RECOVERY_MAX_STATUS_CHECKS=2 bash "$recovery_script" > "$test_tmp/fork-stale-output" || fail 'recovery must safely skip a fork run when a newer run exists for the same head'
 [[ "$(<"$test_tmp/reruns")" == $'202\n303' ]] || { cat "$test_tmp/reruns" >&2; cat "$test_tmp/fork-stale-output" >&2; fail 'recovery must not rerun an older fork run when a newer run exists for its head'; }
 [[ "$(<"$test_tmp/fork-stale-output")" == *'latest run for head'* ]] || fail 'recovery must explain when a newer fork run supersedes a cancelled run'
+
+rm "$test_tmp/reruns"
+env "${common_env[@]}" RECOVERY_MODE=fork-head-moved RECOVERY_MAX_STATUS_CHECKS=2 bash "$recovery_script" > "$test_tmp/fork-head-moved-output" || fail 'recovery must handle a fork run whose head is no longer the open PR head'
+[[ "$(<"$test_tmp/reruns")" == $'202\n303' ]] || { cat "$test_tmp/reruns" >&2; cat "$test_tmp/fork-head-moved-output" >&2; fail 'recovery must not rerun a fork check after its PR advances to another head'; }
+[[ "$(<"$test_tmp/fork-head-moved-output")" == *'no open PR has head'* ]] || fail 'recovery must explain when a fork run is stale because its PR head moved'
 
 rm "$test_tmp/reruns"
 if env "${common_env[@]}" RECOVERY_MODE=rerun-failure RECOVERY_MAX_STATUS_CHECKS=2 bash "$recovery_script" > "$test_tmp/rerun-failure-output" 2>&1; then
