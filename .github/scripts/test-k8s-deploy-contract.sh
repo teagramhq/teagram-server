@@ -37,12 +37,22 @@ check_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Check Ru
   fail 'the RustFS Job creation wait must target the initializer with a bounded timeout'
 
 bootstrap_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Bootstrap the server identity explicitly") | .run' .github/workflows/ci.yml)"
+create_identity_pvc_wait="$(grep -F -A 1 'kubectl wait --for=create pvc/key-data-teagramd-0' <<< "$bootstrap_step")"
+bound_identity_pvc_wait="$(grep -F -A 1 'kubectl wait --for=jsonpath=' <<< "$bootstrap_step")"
+create_identity_pvc_wait_line="$(grep -n -m 1 -F 'kubectl wait --for=create pvc/key-data-teagramd-0' <<< "$bootstrap_step" | cut -d: -f1)"
+bound_identity_pvc_wait_line="$(grep -n -m 1 -F 'kubectl wait --for=jsonpath=' <<< "$bootstrap_step" | cut -d: -f1)"
 [[ -n "$bootstrap_step" && "$bootstrap_step" != null &&
    "$bootstrap_step" == *'kubectl apply -k deploy/k8s/bootstrap/ci'* &&
    "$bootstrap_step" == *'kubectl wait --for=condition=complete job/teagramd-identity-bootstrap'* &&
    "$bootstrap_step" == *'kubectl scale statefulset/teagramd --replicas=0'* &&
    "$bootstrap_step" == *'kubectl scale statefulset/teagramd --replicas=1'* ]] ||
   fail 'the deployment test must run the separately applied first-install identity bootstrap Job'
+[[ "$create_identity_pvc_wait" == *'--namespace teagram --timeout=180s'* &&
+   "$bound_identity_pvc_wait" == *'--namespace teagram --timeout=180s'* &&
+   "$create_identity_pvc_wait_line" =~ ^[0-9]+$ &&
+   "$bound_identity_pvc_wait_line" =~ ^[0-9]+$ &&
+   "$create_identity_pvc_wait_line" -lt "$bound_identity_pvc_wait_line" ]] ||
+  fail 'the deployment test must wait for the identity PVC to be created before waiting for it to bind'
 
 bootstrap_job=deploy/k8s/bootstrap/ci/identity-job.yaml
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "bootstrap-identity") | .command | join(" ")' "$bootstrap_job")" == '/usr/local/bin/teagramd bootstrap-identity' ]] ||
