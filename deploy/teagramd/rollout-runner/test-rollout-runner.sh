@@ -399,7 +399,7 @@ if [ "${1:-}" = inspect ]; then
             fi
             ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -413,7 +413,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID")
       id=$MOCK_ROLLBACK_ID
@@ -631,7 +631,8 @@ fi
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]] || \
-             [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ]; then
+             [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || \
+             [ "${MOCK_SCENARIO:-}" = target-local-restart-policy-rollback ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
@@ -1474,7 +1475,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-restart-policy-rollback|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-env-addition-preflight-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -4639,21 +4640,21 @@ else
   fail 'restart-only preflight exception must reject when another Compose field changes'
 fi
 
-prepare_apply_fixture restart-policy-rollback old-target-image
-state=$(cat "$TMP/restart-policy-rollback-state-path")
+prepare_target_local_apply_fixture target-local-restart-policy-rollback target-local-restart-policy-rollback
+state=$(cat "$TMP/target-local-restart-policy-rollback-state-path")
 jq -c '.services.postgres.restart="no" | .services.teagramd.restart="no"' \
   "$state/base-compose.json" > "$state/base-compose.next.json"
 mv -- "$state/base-compose.next.json" "$state/base-compose.json"
 jq -c '.services.postgres.restart="unless-stopped" | .services.teagramd.restart="unless-stopped"' \
   "$state/target-compose.json" > "$state/target-compose.next.json"
 mv -- "$state/target-compose.next.json" "$state/target-compose.json"
-status=$(run_fixture restart-policy-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
-root=$(cat "$TMP/restart-policy-rollback-root-path")
-events="$TMP/restart-policy-rollback-events"
+status=$(run_fixture target-local-restart-policy-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/target-local-restart-policy-rollback-root-path")
+events="$TMP/target-local-restart-policy-rollback-events"
 if [ "$status" != 0 ] && \
    grep -q 'reason=target_comparison_rejected' "$root.target/target-failure.txt" && \
    [ "$(jq -er '.container_restart_policies.postgres' "$root.target/target.snapshot.json")" = unless-stopped ] && \
-   grep -q 'rollback=verified' "$TMP/restart-policy-rollback.stdout" && \
+   grep -q 'rollback=verified' "$TMP/target-local-restart-policy-rollback.stdout" && \
    [ "$(jq -er '.container_restart_policies.postgres' "$root.rollback/rollback.snapshot.json")" = no ] && \
    awk '/compose up -d --no-build --no-deps --wait --wait-timeout 2 postgres$/ {postgres=NR} \
         /compose up -d --no-build --no-deps teagramd$/ {teagramd=NR} \
