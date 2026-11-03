@@ -32,9 +32,10 @@ func needsAck(seqNo int, typeID uint32) bool {
 }
 
 type queuedAck struct {
-	messageID   int64
-	rpcTypeID   uint32
-	typeIDKnown bool
+	messageID           int64
+	rpcTypeID           uint32
+	typeIDKnown         bool
+	typeIDAuthoritative bool
 }
 
 // containerAcks returns the ids of the content messages in container, so a
@@ -66,6 +67,17 @@ func (c *Conn) queueAcks(msgIDs ...int64) {
 }
 
 func (c *Conn) queueRPCAck(messageID int64, rpcTypeID uint32) {
+	c.queueAckRecords(queuedAck{
+		messageID:           messageID,
+		rpcTypeID:           rpcTypeID,
+		typeIDKnown:         true,
+		typeIDAuthoritative: true,
+	})
+}
+
+// queueInitialRPCAck records the top-level constructor before wrapper decoding.
+// Dispatch replaces it with the authoritative leaf RPC constructor.
+func (c *Conn) queueInitialRPCAck(messageID int64, rpcTypeID uint32) {
 	c.queueAckRecords(queuedAck{messageID: messageID, rpcTypeID: rpcTypeID, typeIDKnown: true})
 }
 
@@ -98,7 +110,9 @@ func (c *Conn) queueAcksLocked(acks ...queuedAck) {
 		found := false
 		for i := range c.pendingAcks {
 			if c.pendingAcks[i].messageID == ack.messageID {
-				if ack.typeIDKnown {
+				// Read-ahead sees an outer wrapper, while dispatch resolves it to
+				// the leaf RPC. A late read-ahead enqueue must not replace that ID.
+				if ack.typeIDKnown && (!c.pendingAcks[i].typeIDKnown || ack.typeIDAuthoritative) {
 					c.pendingAcks[i] = ack
 				}
 				found = true

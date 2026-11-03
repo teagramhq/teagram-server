@@ -348,7 +348,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	req.rpcTypeID = id
 	req.rpcTypeIDSet = true
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
-		c.queueRPCAck(req.MsgID, id)
+		c.queueInitialRPCAck(req.MsgID, id)
 	}
 
 	// Containers and acknowledgements are not executed; a container's entries

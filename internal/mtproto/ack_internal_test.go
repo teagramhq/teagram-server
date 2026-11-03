@@ -355,3 +355,38 @@ func TestFailedAckWriteLogIncludesRPCTypeForNilRequest(t *testing.T) {
 	}
 	t.Fatalf("no server failure logged for the failed msgs_ack write: %+v", sink.records)
 }
+
+func TestLateReadAheadAckKeepsDispatchedLeafType(t *testing.T) {
+	t.Parallel()
+
+	key := ackTestKey()
+	const messageID = 1 << 32
+	c := &Conn{authKey: key, sessionID: 42}
+	t.Cleanup(func() {
+		c.stopAcks()
+		c.writeMu.Lock()
+		if c.ackTimer != nil {
+			c.ackTimer.Stop()
+		}
+		c.writeMu.Unlock()
+	})
+
+	// handleWithHandler records the top-level ID, then dispatch unwraps to the
+	// leaf. A delayed read-ahead enqueue must not restore that outer wrapper.
+	c.queueInitialRPCAck(messageID, tg.InvokeWithLayerRequestTypeID)
+	c.queueRPCAck(messageID, tg.AuthSignUpRequestTypeID)
+	c.queueBoundAckRecords(key.ID, 42, queuedAck{
+		messageID:   messageID,
+		rpcTypeID:   tg.InvokeWithLayerRequestTypeID,
+		typeIDKnown: true,
+	})
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if len(c.pendingAcks) != 1 {
+		t.Fatalf("pending acks = %+v, want one ack", c.pendingAcks)
+	}
+	if got, want := c.pendingAcks[0].rpcTypeID, uint32(tg.AuthSignUpRequestTypeID); got != want {
+		t.Fatalf("RPC type ID = %#x, want dispatched leaf %#x", got, want)
+	}
+}
