@@ -33,6 +33,33 @@ fi
 main_started_at="${main_started_at%Z}"
 main_started_at="${main_started_at%%.*}Z"
 
+latest_workflow_run_attempt_for_head() {
+  local workflow_file="$1"
+  local head_sha="$2"
+  local matching_runs candidate_id candidate_attempt candidate_created_at latest_id="" latest_attempt="" latest_created_at=""
+
+  if ! matching_runs="$(gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?event=pull_request&head_sha=${head_sha}&per_page=100" \
+    --jq '.workflow_runs[]? | [.id, (.run_attempt // 1), .created_at] | @tsv' 2>/dev/null)"; then
+    return 2
+  fi
+
+  while IFS=$'\t' read -r candidate_id candidate_attempt candidate_created_at; do
+    [[ "$candidate_id" =~ ^[0-9]+$ && "$candidate_attempt" =~ ^[0-9]+$ ]] || continue
+    [[ "$candidate_created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$ ]] || continue
+    candidate_created_at="${candidate_created_at%Z}"
+    candidate_created_at="${candidate_created_at%%.*}Z"
+    if [[ -z "$latest_id" || "$candidate_created_at" > "$latest_created_at" || ( "$candidate_created_at" == "$latest_created_at" && "$candidate_id" -gt "$latest_id" ) ]]; then
+      latest_id="$candidate_id"
+      latest_attempt="$candidate_attempt"
+      latest_created_at="$candidate_created_at"
+    fi
+  done <<< "$matching_runs"
+
+  [[ -n "$latest_id" ]] || return 1
+  printf '%s\t%s\n' "$latest_id" "$latest_attempt"
+}
+
 for workflow_file in "${workflow_files[@]}"; do
   oldest_created_at_by_workflow["$workflow_file"]="$main_started_at"
 done
@@ -63,13 +90,14 @@ fi
 for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
   for workflow_file in "${workflow_files[@]}"; do
     oldest_created_at="${oldest_created_at_by_workflow[$workflow_file]}"
+    # Preserve missing PR associations as a sentinel because Bash read collapses empty tab-delimited fields.
     if ! runs="$(gh api --paginate \
       --method GET \
       "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
       -f event=pull_request \
       -f "created=>=$oldest_created_at" \
       -F per_page=100 \
-      --jq '.workflow_runs[]? | [.id, .status, (.conclusion // "none"), .head_sha, ([.pull_requests // [] | .[] | .number] | join(",")), .created_at, (.run_attempt // 1)] | @tsv' 2>/dev/null)"; then
+      --jq '.workflow_runs[]? | [.id, .status, (.conclusion // "none"), .head_sha, ([.pull_requests // [] | .[] | .number] | join(",") | if . == "" then "-" else . end), .created_at, (.run_attempt // 1)] | @tsv' 2>/dev/null)"; then
       echo "::error::Could not list pull request checks for ${workflow_file}; retrying."
       recovery_failure_count=$((recovery_failure_count + 1))
       runs=""
@@ -127,50 +155,52 @@ for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; statu
         continue
       fi
 
-      if [[ ! "$run_head_sha" =~ ^[[:xdigit:]]{40}$ || -z "$run_pr_numbers" ]]; then
+      if [[ ! "$run_head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
         unset "outstanding_pr_run_ids[$run_key]"
         handled_pr_run_ids["$run_key"]=1
-        echo "::error::Skipping cancelled pull request check ${workflow_file} run ${run_id}: its head SHA or pull request number is unavailable; rerun it manually if its check remains cancelled. Issue: $ISSUE"
+        echo "::error::Skipping cancelled pull request check ${workflow_file} run ${run_id}: its head SHA is unavailable; rerun it manually if its check remains cancelled. Issue: $ISSUE"
         recovery_failure_count=$((recovery_failure_count + 1))
         continue
       fi
 
-      IFS=',' read -r -a pull_request_numbers <<< "$run_pr_numbers"
       should_rerun=true
       pull_request_lookup_failed=false
       stale_pull_request_number=""
       stale_pull_request_state=""
       stale_pull_request_head_sha=""
-      for pull_request_number in "${pull_request_numbers[@]}"; do
-        if [[ ! "$pull_request_number" =~ ^[0-9]+$ ]]; then
-          echo "::error::Could not validate pull request number for cancelled check ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
-          recovery_failure_count=$((recovery_failure_count + 1))
-          pull_request_lookup_failed=true
-          break
-        fi
-        if ! pull_request_state_and_head="$(gh api \
-          "repos/${GITHUB_REPOSITORY}/pulls/${pull_request_number}" \
-          --jq '[.state, .head.sha] | @tsv' 2>/dev/null)"; then
-          echo "::error::Could not check pull request #${pull_request_number} before re-running ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
-          recovery_failure_count=$((recovery_failure_count + 1))
-          pull_request_lookup_failed=true
-          break
-        fi
-        IFS=$'\t' read -r pull_request_state pull_request_head_sha <<< "$pull_request_state_and_head"
-        if [[ "$pull_request_state" != open && "$pull_request_state" != closed ]] || [[ ! "$pull_request_head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
-          echo "::error::Could not validate pull request #${pull_request_number} state or head before re-running ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
-          recovery_failure_count=$((recovery_failure_count + 1))
-          pull_request_lookup_failed=true
-          break
-        fi
-        if [[ "$pull_request_state" != open || "$pull_request_head_sha" != "$run_head_sha" ]]; then
-          should_rerun=false
-          stale_pull_request_number="$pull_request_number"
-          stale_pull_request_state="$pull_request_state"
-          stale_pull_request_head_sha="$pull_request_head_sha"
-          break
-        fi
-      done
+      if [[ "$run_pr_numbers" != - ]]; then
+        IFS=',' read -r -a pull_request_numbers <<< "$run_pr_numbers"
+        for pull_request_number in "${pull_request_numbers[@]}"; do
+          if [[ ! "$pull_request_number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not validate pull request number for cancelled check ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
+            recovery_failure_count=$((recovery_failure_count + 1))
+            pull_request_lookup_failed=true
+            break
+          fi
+          if ! pull_request_state_and_head="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pull_request_number}" \
+            --jq '[.state, .head.sha] | @tsv' 2>/dev/null)"; then
+            echo "::error::Could not check pull request #${pull_request_number} before re-running ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
+            recovery_failure_count=$((recovery_failure_count + 1))
+            pull_request_lookup_failed=true
+            break
+          fi
+          IFS=$'\t' read -r pull_request_state pull_request_head_sha <<< "$pull_request_state_and_head"
+          if [[ "$pull_request_state" != open && "$pull_request_state" != closed ]] || [[ ! "$pull_request_head_sha" =~ ^[[:xdigit:]]{40}$ ]]; then
+            echo "::error::Could not validate pull request #${pull_request_number} state or head before re-running ${workflow_file} run ${run_id}; skipping rerun. Issue: $ISSUE"
+            recovery_failure_count=$((recovery_failure_count + 1))
+            pull_request_lookup_failed=true
+            break
+          fi
+          if [[ "$pull_request_state" != open || "$pull_request_head_sha" != "$run_head_sha" ]]; then
+            should_rerun=false
+            stale_pull_request_number="$pull_request_number"
+            stale_pull_request_state="$pull_request_state"
+            stale_pull_request_head_sha="$pull_request_head_sha"
+            break
+          fi
+        done
+      fi
 
       if [[ "$pull_request_lookup_failed" == true ]]; then
         continue
@@ -193,6 +223,27 @@ for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; statu
         main_ci_state_status=$?
         if (( main_ci_state_status != 1 )); then
           echo "::error::Could not check whether main CI is active before re-running ${workflow_file} run ${run_id}; retrying. Issue: $ISSUE"
+          recovery_failure_count=$((recovery_failure_count + 1))
+          continue
+        fi
+      fi
+
+      if [[ "$run_pr_numbers" == - ]]; then
+        if latest_run_attempt="$(latest_workflow_run_attempt_for_head "$workflow_file" "$run_head_sha")"; then
+          IFS=$'\t' read -r latest_run_id latest_run_attempt_number <<< "$latest_run_attempt"
+          if [[ "$latest_run_id" != "$run_id" || "$latest_run_attempt_number" != "$run_attempt" ]]; then
+            unset "outstanding_pr_run_ids[$run_key]"
+            handled_pr_run_ids["$run_key"]=1
+            echo "::notice::Skipping cancelled fork check ${workflow_file} run ${run_id}; latest run for head ${run_head_sha} is ${latest_run_id} attempt ${latest_run_attempt_number}."
+            continue
+          fi
+        else
+          latest_run_lookup_status=$?
+          if (( latest_run_lookup_status != 1 )); then
+            echo "::error::Could not confirm the latest ${workflow_file} run for fork head ${run_head_sha}; skipping rerun. Issue: $ISSUE"
+          else
+            echo "::error::No ${workflow_file} run was found for fork head ${run_head_sha}; skipping rerun. Issue: $ISSUE"
+          fi
           recovery_failure_count=$((recovery_failure_count + 1))
           continue
         fi

@@ -30,6 +30,14 @@ gh() {
     printf 'in_progress\n'
     return 0
   fi
+  if [[ "$1" == api && "$2" == --paginate && "$3" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100" ]]; then
+    case "$RECOVERY_MODE" in
+      fork-run) printf '101\t1\t2026-10-28T00:00:00Z\n' ;;
+      fork-stale) printf '999\t1\t2026-10-29T00:00:00Z\n' ;;
+      *) return 2 ;;
+    esac
+    return 0
+  fi
   if [[ "$1" == api && "$2" == --paginate && "$3" == --method && "$4" == GET ]]; then
     path="$5"
     case "$path" in
@@ -38,6 +46,9 @@ gh() {
         run_head_sha="${CI_HEAD_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
         run_pr_number=1
         run_created_at=2026-10-28T00:00:00Z
+        if [[ "$RECOVERY_MODE" == fork-run || "$RECOVERY_MODE" == fork-stale ]]; then
+          run_pr_number=-
+        fi
         ;;
       "repos/${GITHUB_REPOSITORY}/actions/workflows/perf.yml/runs")
         run_id=202
@@ -146,6 +157,15 @@ rm "$test_tmp/reruns" "$test_tmp/main-active-seen" 2>/dev/null || true
 env "${common_env[@]}" RECOVERY_MODE=cancel-once RECOVERY_MAX_STATUS_CHECKS=10 bash "$recovery_script" > "$test_tmp/cancel-once-output" || fail 'recovery must retry runs cancelled again while main CI is active'
 [[ "$(<"$test_tmp/reruns")" == $'101\n303\n101\n202\n303\n202' ]] || fail 'recovery must retry cancelled reruns after main CI becomes idle'
 [[ "$(<"$test_tmp/cancel-once-output")" == *'Deferring rerun of perf.yml run 202 until main CI run 900 completes'* ]] || fail 'recovery must wait when another main aggregate is active'
+
+rm "$test_tmp/reruns" "$test_tmp/main-active-seen" 2>/dev/null || true
+env "${common_env[@]}" RECOVERY_MODE=fork-run RECOVERY_MAX_STATUS_CHECKS=10 bash "$recovery_script" > "$test_tmp/fork-run-output" || { cat "$test_tmp/fork-run-output" >&2; fail 'recovery must rerun cancelled fork checks by run ID'; }
+[[ "$(<"$test_tmp/reruns")" == $'101\n202\n303' ]] || fail 'recovery must include the fork run when its ID and head are the latest attempt'
+
+rm "$test_tmp/reruns"
+env "${common_env[@]}" RECOVERY_MODE=fork-stale RECOVERY_MAX_STATUS_CHECKS=2 bash "$recovery_script" > "$test_tmp/fork-stale-output" || fail 'recovery must safely skip a fork run when a newer run exists for the same head'
+[[ "$(<"$test_tmp/reruns")" == $'202\n303' ]] || { cat "$test_tmp/reruns" >&2; cat "$test_tmp/fork-stale-output" >&2; fail 'recovery must not rerun an older fork run when a newer run exists for its head'; }
+[[ "$(<"$test_tmp/fork-stale-output")" == *'latest run for head'* ]] || fail 'recovery must explain when a newer fork run supersedes a cancelled run'
 
 rm "$test_tmp/reruns"
 if env "${common_env[@]}" RECOVERY_MODE=rerun-failure RECOVERY_MAX_STATUS_CHECKS=2 bash "$recovery_script" > "$test_tmp/rerun-failure-output" 2>&1; then
