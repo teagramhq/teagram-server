@@ -3862,7 +3862,7 @@ class Drill(Docker):
             entrypoint="/run/app/atlas",
         )
         output = self.utility(atlas_version, "fixture_generation", "fixture_failure")
-        if output.decode("utf-8", "ignore").splitlines()[:1] != ["atlas version v1.2.0"]:
+        if output.decode("utf-8", "ignore").splitlines()[:1] != ["atlas version v1.3.0"]:
             raise DrillFailure("fixture_generation", "fixture_failure")
 
     def inspect_container(self, identifier: str, phase: str) -> dict[str, Any]:
