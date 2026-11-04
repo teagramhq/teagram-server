@@ -2,8 +2,12 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -11,7 +15,12 @@ import (
 
 func openStickerOrderStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(context.Background(), pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	return openStickerOrderStoreDSN(t, pgtest.DSN(t))
+}
+
+func openStickerOrderStoreDSN(t *testing.T, dsn string) *store.Store {
+	t.Helper()
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithoutBlobStore())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -143,5 +152,60 @@ func TestReorderInstalledStickerSetsWithoutInstalledSetsIsEmpty(t *testing.T) {
 	}
 	if len(order) != 0 {
 		t.Fatalf("reorder without installs returned %v, want empty", order)
+	}
+}
+
+func TestStickerSetOrderNotificationUsesLatestOrderWhenCallbacksReverse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStickerOrderStoreDSN(t, dsn)
+	owner, err := s.CreateUser(ctx, "+15551830005")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	const first, second = int64(-10), int64(-20)
+	installStickerOrderSets(t, s, owner.ID, first, second)
+	if _, err := s.ReorderInstalledStickerSets(ctx, owner.ID, []int64{second, first}); err != nil {
+		t.Fatalf("commit first reorder: %v", err)
+	}
+	if _, err := s.ReorderInstalledStickerSets(ctx, owner.ID, []int64{first, second}); err != nil {
+		t.Fatalf("commit second reorder: %v", err)
+	}
+	catalogKinds := map[int64]string{first: "regular", second: "regular"}
+	callbacks := []func() error{
+		func() error { return s.NotifyStickerSetOrderChanged(ctx, owner.ID, 19, 11, "regular", catalogKinds) },
+		func() error { return s.NotifyStickerSetOrderChanged(ctx, owner.ID, 19, 22, "regular", catalogKinds) },
+	}
+
+	listener, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect notification listener: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(ctx); err != nil {
+			t.Errorf("close notification listener: %v", err)
+		}
+	})
+	if _, err := listener.Exec(ctx, "LISTEN tg_sticker_sets"); err != nil {
+		t.Fatalf("listen for sticker-set order: %v", err)
+	}
+
+	// The second reorder's callback runs first; the older first callback is delayed.
+	for _, callbackIndex := range []int{1, 0} {
+		sessionID := []int64{11, 22}[callbackIndex]
+		if err := callbacks[callbackIndex](); err != nil {
+			t.Fatalf("publish callback for session %d: %v", sessionID, err)
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		notification, err := listener.WaitForNotification(waitCtx)
+		cancel()
+		if err != nil {
+			t.Fatalf("wait for callback notification: %v", err)
+		}
+		want := fmt.Sprintf("%d|19|%d|regular:%d,%d", owner.ID, sessionID, first, second)
+		if notification.Channel != "tg_sticker_sets" || notification.Payload != want {
+			t.Fatalf("callback notification = %s/%q, want tg_sticker_sets/%q", notification.Channel, notification.Payload, want)
+		}
 	}
 }

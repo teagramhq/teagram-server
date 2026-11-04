@@ -869,9 +869,12 @@ func (h *handlers) notifyStickerSetChanged(r *mtproto.Request) {
 	h.publishStickerSetPayload(r, payload)
 }
 
-func (h *handlers) notifyStickerSetOrderChanged(r *mtproto.Request, kind string, ids []int64) {
-	payload := store.StickerSetOrderChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID, kind, ids)
-	h.publishStickerSetPayload(r, payload)
+func (h *handlers) notifyStickerSetOrderChanged(r *mtproto.Request, kind string, catalogKinds map[int64]string) {
+	ctx, cancel := store.NotificationContext(r.Ctx)
+	defer cancel()
+	if err := h.store.NotifyStickerSetOrderChanged(ctx, r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID, kind, catalogKinds); err != nil {
+		h.log.Info("notify sticker set order update", "user_id", r.UserID, "err", err)
+	}
 }
 
 func (h *handlers) publishStickerSetPayload(r *mtproto.Request, payload string) {
@@ -960,24 +963,16 @@ func (h *handlers) handleReorderStickerSets(_ *mtproto.Conn, r *mtproto.Request)
 			listed = append(listed, id)
 		}
 	}
-	order, err := h.store.ReorderInstalledStickerSets(r.Ctx, r.UserID, listed)
+	_, err = h.store.ReorderInstalledStickerSets(r.Ctx, r.UserID, listed)
 	if err != nil {
 		h.log.Error("reorder sticker sets", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	kindOrder := make([]int64, 0, len(order))
-	for _, set := range order {
-		setKind := set.Kind
-		if set.ID < 0 {
-			if builtIn, ok := catalog.byID[set.ID]; ok {
-				setKind = builtInStickerSetKind(builtIn)
-			}
-		}
-		if setKind == kind {
-			kindOrder = append(kindOrder, set.ID)
-		}
+	catalogKinds := make(map[int64]string, len(catalog.byID))
+	for id, set := range catalog.byID {
+		catalogKinds[id] = builtInStickerSetKind(set)
 	}
 	return &tg.BoolTrue{}, func() {
-		h.notifyStickerSetOrderChanged(r, kind, kindOrder)
+		h.notifyStickerSetOrderChanged(r, kind, catalogKinds)
 	}, nil
 }

@@ -181,3 +181,72 @@ func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, l
 	}
 	return order, nil
 }
+
+// NotifyStickerSetOrderChanged publishes the current installed order for kind.
+// It holds the same owner lock as reorders until the notification transaction
+// commits, so a delayed post-reorder callback cannot publish an older snapshot.
+func (s *Store) NotifyStickerSetOrderChanged(
+	ctx context.Context,
+	ownerID, authKeyID, sessionID int64,
+	kind string,
+	catalogKinds map[int64]string,
+) error {
+	if ownerID <= 0 || authKeyID == 0 {
+		return errors.New("notify sticker-set order: invalid owner or auth key")
+	}
+	switch kind {
+	case "regular", "mask", "emojis":
+	default:
+		return errors.New("notify sticker-set order: invalid kind")
+	}
+
+	notifyCtx, cancel := context.WithTimeout(ctx, notificationTimeout)
+	defer cancel()
+	tx, err := s.pool.Begin(notifyCtx)
+	if err != nil {
+		return fmt.Errorf("begin sticker-set order notification: %w", err)
+	}
+	defer func() { _ = tx.Rollback(notifyCtx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = qtx.LockUserStickerSetOwner(notifyCtx, ownerID); err != nil {
+		return fmt.Errorf("lock sticker-set owner %d for notification: %w", ownerID, err)
+	}
+	rows, err := qtx.StickerSetsByOwner(notifyCtx, ownerID)
+	if err != nil {
+		return fmt.Errorf("list sticker sets for notification: %w", err)
+	}
+	userSetIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if row.SetID > 0 {
+			userSetIDs = append(userSetIDs, row.SetID)
+		}
+	}
+	userSetKinds := make(map[int64]string, len(userSetIDs))
+	if len(userSetIDs) > 0 {
+		userSets, lookupErr := qtx.UserCreatedStickerSetsByInstalledIDs(notifyCtx, userSetIDs)
+		if lookupErr != nil {
+			return fmt.Errorf("list user-created sticker-set kinds for notification: %w", lookupErr)
+		}
+		for _, set := range userSets {
+			userSetKinds[set.ID] = set.Kind
+		}
+	}
+	order := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		setKind := userSetKinds[row.SetID]
+		if row.SetID < 0 {
+			setKind = catalogKinds[row.SetID]
+		}
+		if setKind == kind {
+			order = append(order, row.SetID)
+		}
+	}
+	payload := StickerSetOrderChangedPayload(ownerID, authKeyID, sessionID, kind, order)
+	if _, err = tx.Exec(notifyCtx, `SELECT pg_notify($1, $2)`, ChannelStickerSets, payload); err != nil {
+		return fmt.Errorf("notify sticker-set order: %w", err)
+	}
+	if err = tx.Commit(notifyCtx); err != nil {
+		return fmt.Errorf("commit sticker-set order notification: %w", err)
+	}
+	return nil
+}
