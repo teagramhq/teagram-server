@@ -371,7 +371,8 @@ WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = 
 UPDATE user_created_sticker_set_items
 SET is_active = true, position = sqlc.arg(position), emoji = sqlc.arg(emoji),
     keywords = sqlc.arg(keywords), format = sqlc.arg(format), width = sqlc.arg(width),
-    height = sqlc.arg(height), duration_ns = sqlc.arg(duration_ns), mask_coords = sqlc.arg(mask_coords)
+    height = sqlc.arg(height), duration_ns = sqlc.arg(duration_ns), mask_coords = sqlc.arg(mask_coords),
+    content_sha256 = sqlc.arg(content_sha256)
 WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = false;
 
 -- name: UpdateUserCreatedStickerSetItemDetails :execrows
@@ -462,8 +463,8 @@ SELECT EXISTS (
 -- may omit a class but must not acquire an earlier class after a later one.
 -- Fingerprinting is done before opening the transaction; the shared/exclusive
 -- modes serialize the final blocked-content check with takedown hash publication.
--- Create transactions share this gate. Takedown and restore use the exclusive
--- lock below, so they wait for in-flight creations before publishing state.
+-- Create and add transactions share this gate. Takedown and restore use the
+-- exclusive lock below, so they wait before publishing blocked-content state.
 -- name: LockStickerSetCreateInterlock :exec
 SELECT pg_advisory_xact_lock_shared(1145132116, 237731251);
 
@@ -475,7 +476,14 @@ SELECT EXISTS (
     SELECT 1
     FROM user_created_sticker_set_items i
     JOIN user_created_sticker_sets s ON s.id = i.set_id
-    WHERE s.is_live = false
+    WHERE s.is_live = false AND i.is_active = true
+      AND (
+          SELECT e.action
+          FROM admin_sticker_set_events e
+          WHERE e.set_id = s.id
+          ORDER BY e.id DESC
+          LIMIT 1
+      ) = 'takedown'
       AND i.content_sha256 = ANY(sqlc.arg(content_sha256)::bytea[])
 );
 
@@ -483,7 +491,7 @@ SELECT EXISTS (
 SELECT f.id AS file_id, f.access_hash, f.size, f.stored
 FROM user_created_sticker_set_items i
 JOIN files f ON f.id = i.file_id
-WHERE i.set_id = sqlc.arg(set_id)
+WHERE i.set_id = sqlc.arg(set_id) AND i.is_active = true
 ORDER BY f.id;
 
 -- name: UpdateUserStickerSetItemContentSHA256 :execrows
@@ -512,6 +520,15 @@ FOR UPDATE;
 SELECT *
 FROM user_created_sticker_sets
 WHERE lower(short_name) = lower(sqlc.arg(short_name));
+
+-- Owner deletion writes no admin event. A latest takedown event distinguishes
+-- an administratively removed, non-live set from one deleted by its owner.
+-- name: AdminLatestUserStickerSetEventAction :one
+SELECT action
+FROM admin_sticker_set_events
+WHERE set_id = sqlc.arg(set_id)
+ORDER BY id DESC
+LIMIT 1;
 
 -- name: AdminSetUserStickerSetLive :execrows
 UPDATE user_created_sticker_sets

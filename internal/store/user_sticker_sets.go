@@ -393,10 +393,12 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 }
 
 // AddUserStickerSetItem appends a validated owner upload to a live set. It
-// repeats file ownership checks after taking the M17 interlock and serializes
-// count and order changes on the set row.
-func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64, item UserStickerSetItem) (UserStickerSet, error) {
-	if ownerID <= 0 || setID <= 0 || !validStoredStickerItem(item) {
+// repeats file ownership and blocked-content checks under the creation
+// interlock, then serializes count and order changes on the set row.
+func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64, item UserStickerSetItem, fingerprint StickerFileFingerprint) (UserStickerSet, error) {
+	if ownerID <= 0 || setID <= 0 || !validStoredStickerItem(item) ||
+		!fingerprint.valid || fingerprint.store != s || fingerprint.fileID != item.FileID ||
+		fingerprint.accessHash != item.AccessHash || fingerprint.size != item.Size {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -405,6 +407,9 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
+	if err = qtx.LockStickerSetCreateInterlock(ctx); err != nil {
+		return UserStickerSet{}, fmt.Errorf("lock sticker-set add interlock: %w", err)
+	}
 	row, err := qtx.LockOwnedLiveUserStickerSet(ctx, db.LockOwnedLiveUserStickerSetParams{ID: setID, CreatorID: ownerID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UserStickerSet{}, ErrStickerSetNotFound
@@ -442,6 +447,13 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 	if len(files) != 1 || files[0].Size != item.Size {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
+	blocked, err := qtx.UserStickerBlockedContentExists(ctx, [][]byte{fingerprint.digest[:]})
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("check blocked sticker content before add: %w", err)
+	}
+	if blocked {
+		return UserStickerSet{}, ErrStickerFileBlocked
+	}
 	removedItem, err := qtx.UserCreatedStickerSetItemExistsInSet(ctx, db.UserCreatedStickerSetItemExistsInSetParams{
 		SetID: set.ID, FileID: item.FileID,
 	})
@@ -466,7 +478,7 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 			Format:     item.Format,
 			Width:      int32(item.Width),  //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
 			Height:     int32(item.Height), //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
-			DurationNs: item.Duration, MaskCoords: maskCoords,
+			DurationNs: item.Duration, MaskCoords: maskCoords, ContentSha256: fingerprint.digest[:],
 		})
 		if updateErr != nil {
 			return UserStickerSet{}, fmt.Errorf("reactivate removed sticker set item: %w", updateErr)
@@ -480,10 +492,11 @@ func (s *Store) AddUserStickerSetItem(ctx context.Context, ownerID, setID int64,
 			Position: int32(len(activeIDs)), //nolint:gosec // The active count is bounded by MaxUserEmojiCount.
 			FileID:   item.FileID,
 			Emoji:    item.Emoji, Keywords: item.Keywords, Format: item.Format,
-			Width:      int32(item.Width),  //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
-			Height:     int32(item.Height), //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
-			DurationNs: item.Duration,
-			MaskCoords: maskCoords,
+			Width:         int32(item.Width),  //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
+			Height:        int32(item.Height), //nolint:gosec // validStoredStickerItem bounds dimensions before this transaction.
+			DurationNs:    item.Duration,
+			MaskCoords:    maskCoords,
+			ContentSha256: fingerprint.digest[:],
 		})
 		if insertErr != nil {
 			return UserStickerSet{}, fmt.Errorf("insert sticker set item: %w", insertErr)

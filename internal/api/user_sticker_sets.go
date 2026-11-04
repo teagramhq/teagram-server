@@ -508,7 +508,7 @@ func (h *handlers) handleAddStickerToSet(_ *mtproto.Conn, r *mtproto.Request) (b
 	if files[0].Size > store.MaxStoredStickerBytes {
 		return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
 	}
-	data, err := h.store.ReadStickerFileForSet(r.Ctx, files[0])
+	data, fingerprint, err := h.store.ReadStickerFileForSetWithFingerprint(r.Ctx, files[0])
 	if errors.Is(err, store.ErrStickerFileTooLarge) {
 		return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
 	}
@@ -530,14 +530,14 @@ func (h *handlers) handleAddStickerToSet(_ *mtproto.Conn, r *mtproto.Request) (b
 		FileID: files[0].ID, AccessHash: files[0].AccessHash, Size: files[0].Size, Date: files[0].Date,
 		Emoji: req.Sticker.Emoji, Keywords: keywords, Format: string(metadata.Format),
 		Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskCoords,
-	})
+	}, fingerprint)
 	if errors.Is(err, store.ErrStickerSetNotFound) {
 		return nil, nil, errStickerSetInvalid
 	}
 	if errors.Is(err, store.ErrStickerSetLimit) {
 		return nil, nil, errStickersTooMuch
 	}
-	if errors.Is(err, store.ErrStickerDocumentInvalid) || errors.Is(err, store.ErrStickerFileAlreadyUsed) {
+	if errors.Is(err, store.ErrStickerDocumentInvalid) || errors.Is(err, store.ErrStickerFileAlreadyUsed) || errors.Is(err, store.ErrStickerFileBlocked) {
 		return nil, nil, errStickerDocumentInvalid
 	}
 	if err != nil {

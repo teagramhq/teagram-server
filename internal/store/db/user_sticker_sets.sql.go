@@ -11,6 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adminLatestUserStickerSetEventAction = `-- name: AdminLatestUserStickerSetEventAction :one
+SELECT action
+FROM admin_sticker_set_events
+WHERE set_id = $1
+ORDER BY id DESC
+LIMIT 1
+`
+
+// Owner deletion writes no admin event. A latest takedown event distinguishes
+// an administratively removed, non-live set from one deleted by its owner.
+func (q *Queries) AdminLatestUserStickerSetEventAction(ctx context.Context, setID int64) (string, error) {
+	row := q.db.QueryRow(ctx, adminLatestUserStickerSetEventAction, setID)
+	var action string
+	err := row.Scan(&action)
+	return action, err
+}
+
 const adminLockUserStickerSetByID = `-- name: AdminLockUserStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind, text_color, item_count, set_hash, is_live, created_at, thumb_file_id, thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns, thumb_version, thumb_document_id
 FROM user_created_sticker_sets
@@ -599,8 +616,8 @@ SELECT pg_advisory_xact_lock_shared(1145132116, 237731251)
 // may omit a class but must not acquire an earlier class after a later one.
 // Fingerprinting is done before opening the transaction; the shared/exclusive
 // modes serialize the final blocked-content check with takedown hash publication.
-// Create transactions share this gate. Takedown and restore use the exclusive
-// lock below, so they wait for in-flight creations before publishing state.
+// Create and add transactions share this gate. Takedown and restore use the
+// exclusive lock below, so they wait before publishing blocked-content state.
 func (q *Queries) LockStickerSetCreateInterlock(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, lockStickerSetCreateInterlock)
 	return err
@@ -632,21 +649,23 @@ const reactivateUserCreatedStickerSetItem = `-- name: ReactivateUserCreatedStick
 UPDATE user_created_sticker_set_items
 SET is_active = true, position = $1, emoji = $2,
     keywords = $3, format = $4, width = $5,
-    height = $6, duration_ns = $7, mask_coords = $8
-WHERE set_id = $9 AND file_id = $10 AND is_active = false
+    height = $6, duration_ns = $7, mask_coords = $8,
+    content_sha256 = $9
+WHERE set_id = $10 AND file_id = $11 AND is_active = false
 `
 
 type ReactivateUserCreatedStickerSetItemParams struct {
-	Position   int32
-	Emoji      string
-	Keywords   string
-	Format     string
-	Width      int32
-	Height     int32
-	DurationNs int64
-	MaskCoords []byte
-	SetID      int64
-	FileID     int64
+	Position      int32
+	Emoji         string
+	Keywords      string
+	Format        string
+	Width         int32
+	Height        int32
+	DurationNs    int64
+	MaskCoords    []byte
+	ContentSha256 []byte
+	SetID         int64
+	FileID        int64
 }
 
 func (q *Queries) ReactivateUserCreatedStickerSetItem(ctx context.Context, arg ReactivateUserCreatedStickerSetItemParams) (int64, error) {
@@ -659,6 +678,7 @@ func (q *Queries) ReactivateUserCreatedStickerSetItem(ctx context.Context, arg R
 		arg.Height,
 		arg.DurationNs,
 		arg.MaskCoords,
+		arg.ContentSha256,
 		arg.SetID,
 		arg.FileID,
 	)
@@ -869,7 +889,7 @@ const takedownUserStickerSetFiles = `-- name: TakedownUserStickerSetFiles :many
 SELECT f.id AS file_id, f.access_hash, f.size, f.stored
 FROM user_created_sticker_set_items i
 JOIN files f ON f.id = i.file_id
-WHERE i.set_id = $1
+WHERE i.set_id = $1 AND i.is_active = true
 ORDER BY f.id
 `
 
@@ -1867,7 +1887,14 @@ SELECT EXISTS (
     SELECT 1
     FROM user_created_sticker_set_items i
     JOIN user_created_sticker_sets s ON s.id = i.set_id
-    WHERE s.is_live = false
+    WHERE s.is_live = false AND i.is_active = true
+      AND (
+          SELECT e.action
+          FROM admin_sticker_set_events e
+          WHERE e.set_id = s.id
+          ORDER BY e.id DESC
+          LIMIT 1
+      ) = 'takedown'
       AND i.content_sha256 = ANY($1::bytea[])
 )
 `

@@ -199,6 +199,121 @@ func TestStickerSetTakedownInvalidDocumentRetainsHashAndBlocksReupload(t *testin
 	}
 }
 
+func TestStickerSetAddBlocksReuploadedTakenDownContent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	takedownOwner := mustUser(t, s, "+15559310031")
+	addOwner := mustUser(t, s, "+15559310032")
+	blockedBytes := []byte("blockedfile")
+	blockedFile := stickerSetFileWithBytes(t, s, takedownOwner, blockedBytes)
+	takenDown, err := createOneFileStickerSet(ctx, s, takedownOwner, blockedFile, "Blocked", "blocked_for_add", blockedBytes)
+	if err != nil {
+		t.Fatalf("create sticker set for takedown: %v", err)
+	}
+	if _, err = s.TakedownUserStickerSet(ctx, stickerSetAdminRefByID(t, takenDown.ID), "blocked", make([]byte, sha256.Size)); err != nil {
+		t.Fatalf("take down sticker set: %v", err)
+	}
+
+	seedFile := stickerSetFileWithBytes(t, s, addOwner, []byte("destination"))
+	destination, err := createOneFileStickerSet(ctx, s, addOwner, seedFile, "Destination", "destination_for_add", []byte("destination"))
+	if err != nil {
+		t.Fatalf("create destination sticker set: %v", err)
+	}
+	reupload := stickerSetFileWithBytes(t, s, addOwner, blockedBytes)
+	_, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, reupload)
+	if err != nil {
+		t.Fatalf("fingerprint reuploaded sticker: %v", err)
+	}
+	_, err = s.AddUserStickerSetItem(ctx, addOwner.ID, destination.ID, store.UserStickerSetItem{
+		FileID: reupload.ID, AccessHash: reupload.AccessHash, Size: reupload.Size,
+		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
+	}, fingerprint)
+	if !errors.Is(err, store.ErrStickerFileBlocked) {
+		t.Fatalf("add taken-down sticker bytes to a live set = %v, want ErrStickerFileBlocked", err)
+	}
+}
+
+func TestStickerSetTakedownOnlyFingerprintsActiveItems(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559310033")
+	reuploadOwner := mustUser(t, s, "+15559310034")
+	activeBytes := []byte("active data")
+	removedBytes := []byte("old dataxxx")
+	activeFile := stickerSetFileWithBytes(t, s, owner, activeBytes)
+	removedFile := stickerSetFileWithBytes(t, s, owner, removedBytes)
+	set, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Edited before takedown", ShortName: "edited_before_takedown", Kind: "regular",
+	}, []store.UserStickerSetItem{
+		{FileID: activeFile.ID, AccessHash: activeFile.AccessHash, Size: activeFile.Size, Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512},
+		{FileID: removedFile.ID, AccessHash: removedFile.AccessHash, Size: removedFile.Size, Emoji: "✨", Format: "WEBP", Width: 512, Height: 512},
+	}, activeFile, removedFile)
+	if err != nil {
+		t.Fatalf("create two-item sticker set: %v", err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedFile.ID, removedFile.AccessHash); err != nil {
+		t.Fatalf("remove item before takedown: %v", err)
+	}
+	unhashed, err := s.TakedownUserStickerSet(ctx, stickerSetAdminRefByID(t, set.ID), "blocked", make([]byte, sha256.Size))
+	if err != nil {
+		t.Fatalf("take down set with archived item history: %v", err)
+	}
+	if len(unhashed) != 0 {
+		t.Fatalf("unhashed active files = %+v, want none", unhashed)
+	}
+
+	reupload := stickerSetFileWithBytes(t, s, reuploadOwner, removedBytes)
+	if _, err = createOneFileStickerSet(ctx, s, reuploadOwner, reupload, "Removed bytes", "removed_bytes_allowed", removedBytes); err != nil {
+		t.Fatalf("create set from content removed before takedown: %v", err)
+	}
+	blocked := stickerSetFileWithBytes(t, s, reuploadOwner, activeBytes)
+	if _, err = createOneFileStickerSet(ctx, s, reuploadOwner, blocked, "Active bytes", "active_bytes_blocked", activeBytes); !errors.Is(err, store.ErrStickerFileBlocked) {
+		t.Fatalf("create set from active taken-down content = %v, want ErrStickerFileBlocked", err)
+	}
+}
+
+func TestOwnerDeletedStickerContentIsNotTakedownBlockedOrRestorable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559310035")
+	newOwner := mustUser(t, s, "+15559310036")
+	data := []byte("deletedfile")
+	file := stickerSetFileWithBytes(t, s, owner, data)
+	deletedSet, err := createOneFileStickerSet(ctx, s, owner, file, "Owner deleted", "owner_deleted_source", data)
+	if err != nil {
+		t.Fatalf("create sticker set: %v", err)
+	}
+	adminRef := stickerSetAdminRefByID(t, deletedSet.ID)
+	if _, err = s.TakedownUserStickerSet(ctx, adminRef, "first takedown", make([]byte, sha256.Size)); err != nil {
+		t.Fatalf("take down sticker set: %v", err)
+	}
+	if err = s.RestoreUserStickerSet(ctx, adminRef, "restore before owner delete", make([]byte, sha256.Size)); err != nil {
+		t.Fatalf("restore administratively removed set: %v", err)
+	}
+	if err = s.DeleteUserStickerSet(ctx, owner.ID, deletedSet.ID); err != nil {
+		t.Fatalf("owner delete sticker set: %v", err)
+	}
+
+	reupload := stickerSetFileWithBytes(t, s, newOwner, data)
+	if _, err = createOneFileStickerSet(ctx, s, newOwner, reupload, "New set", "owner_deleted_content_reused", data); err != nil {
+		t.Errorf("create set from owner-deleted content: %v, want success", err)
+	}
+	restoreErr := s.RestoreUserStickerSet(ctx, adminRef, "restore deleted", make([]byte, sha256.Size))
+	if !errors.Is(restoreErr, store.ErrStickerSetStateConflict) {
+		t.Errorf("restore owner-deleted set = %v, want ErrStickerSetStateConflict", restoreErr)
+	}
+	var isLive bool
+	if err := store.StorePool(s).QueryRow(ctx, `SELECT is_live FROM user_created_sticker_sets WHERE id = $1`, deletedSet.ID).Scan(&isLive); err != nil {
+		t.Fatalf("read owner-deleted set state: %v", err)
+	}
+	if isLive {
+		t.Error("owner-deleted set became live after admin restore")
+	}
+}
+
 func stickerSetAdminRefByID(t *testing.T, id int64) store.StickerSetAdminRef {
 	t.Helper()
 	ref, err := store.StickerSetAdminRefByID(id)
