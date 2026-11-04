@@ -523,7 +523,7 @@ wait_healthy() {
 
 wait_healthy "$DATABASE"
 docker create --rm --name "$ATLAS" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --network "$SERVER_NET" \
-	mirror.gcr.io/arigaio/atlas:1.2.0-alpine migrate apply --dir file:///migrations --url "$DSN" >/dev/null
+	mirror.gcr.io/arigaio/atlas:1.3.0-alpine migrate apply --dir file:///migrations --url "$DSN" >/dev/null
 docker cp "$SERVER_WORKTREE/migrations/." "$ATLAS:/migrations"
 docker start --attach "$ATLAS" >/dev/null
 

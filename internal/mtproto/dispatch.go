@@ -69,11 +69,13 @@ type Request struct {
 	ackQueued bool
 
 	// rpcMethod and rpcResult are set by the dispatcher and reply path for the
-	// optional RPC tracing boundary. They stay inside this package so request
-	// data can never become trace data by accident.
+	// optional RPC tracing boundary. rpcTypeID supports acknowledgement failure
+	// diagnostics, while rpcLogMethod preserves a decoded method before dispatch.
+	// They stay inside this package so request data cannot become trace data.
 	rpcMethod    string
 	rpcTypeID    uint32
 	rpcTypeIDSet bool
+	rpcLogMethod string
 	rpcResult    RPCResultClass
 	rpcStart     func(string)
 }
@@ -174,6 +176,13 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 		method = unknownRPCMethod
 	}
 	req.rpcMethod = method
+	logMethod := method
+	if logMethod == unknownRPCMethod {
+		if decoded := compiledMethodName(id); decoded != "" {
+			logMethod = decoded
+		}
+	}
+	req.rpcLogMethod = logMethod
 	if req.rpcStart != nil {
 		req.rpcStart(method)
 	}
@@ -185,6 +194,25 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 		return fallback.OnMessage(c, req)
 	}
 	return markRequestFailureCause(requestFailureUnknownMethod, fmt.Errorf("unexpected type %#x", id))
+}
+
+func setRPCMethodForHandler(req *Request, id uint32, handler Handler) {
+	if req == nil {
+		return
+	}
+	method := ""
+	if d, ok := handler.(*Dispatcher); ok {
+		d.mux.Lock()
+		method = d.methods[id]
+		d.mux.Unlock()
+	}
+	if method == "" {
+		method = compiledMethodName(id)
+	}
+	if method == "" {
+		method = unknownRPCMethod
+	}
+	req.rpcLogMethod = method
 }
 
 // compiledMethodName resolves an id through gotd's generated type registry.
@@ -237,6 +265,7 @@ func UnpackInvoke(next Handler) Handler {
 		obj := &peekIDObject{}
 		var r bin.Decoder
 		for {
+			setRPCMethodForHandler(req, id, next)
 			switch id {
 			case tg.InvokeWithLayerRequestTypeID:
 				r = &tg.InvokeWithLayerRequest{Query: obj}
@@ -347,9 +376,11 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 			}
+			setRPCMethodForHandler(req, innerID, next)
 			return refuse(innerID, InvokeAfterMsgWaitTimeout, true)
 		}
 		for {
+			setRPCMethodForHandler(req, id, next)
 			switch id {
 			case tg.InvokeWithLayerRequestTypeID:
 				if err := (&tg.InvokeWithLayerRequest{Query: obj}).Decode(req.Buf); err != nil {
@@ -373,6 +404,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				if isInvokeWrapper(id) {
 					return refuseUnsupported(id)
 				}
@@ -394,6 +426,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			case tg.InvokeWithTakeoutRequestTypeID:
 				var wrapper tg.InvokeWithTakeoutRequest
@@ -402,6 +435,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			case tg.InvokeWithGooglePlayIntegrityRequestTypeID:
 				var wrapper tg.InvokeWithGooglePlayIntegrityRequest
@@ -410,6 +444,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			case tg.InvokeWithBusinessConnectionRequestTypeID:
 				var wrapper tg.InvokeWithBusinessConnectionRequest
@@ -418,6 +453,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			case tg.InvokeWithReCaptchaRequestTypeID:
 				var wrapper tg.InvokeWithReCaptchaRequest
@@ -426,6 +462,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				if !allowReCaptcha || (id != tg.AuthSendCodeRequestTypeID && id != tg.AuthCheckPasswordRequestTypeID && id != tg.AuthSignUpRequestTypeID) {
 					return refuseUnsupported(id)
 				}
@@ -438,6 +475,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			case tg.InvokeWithMessagesRangeRequestTypeID:
 				var wrapper tg.InvokeWithMessagesRangeRequest
@@ -446,6 +484,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
+				setRPCMethodForHandler(req, id, next)
 				return refuseUnsupported(id)
 			default:
 				if req.ReCaptchaToken != "" {

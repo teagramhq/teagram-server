@@ -69,4 +69,5 @@ SMOKE_SCENARIOS=(
   secret-chat-blocked-message
   provisioned-account-login
   admin-proxy-login
+  admin-sticker-takedown
 )

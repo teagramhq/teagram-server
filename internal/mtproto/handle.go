@@ -124,6 +124,9 @@ func requestFailureContext(req *Request, err error) *rpcRequestError {
 		method = sanitizeRPCMethod(requestRPCMethod(req))
 		typeID = req.rpcTypeID
 		typeIDKnown = req.rpcTypeIDSet
+		if method == UnknownRPCMethod && req.rpcLogMethod != "" {
+			method = sanitizeRPCMethod(req.rpcLogMethod)
+		}
 		requestID = req.MsgID
 	}
 	return &rpcRequestError{
@@ -347,6 +350,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	}
 	req.rpcTypeID = id
 	req.rpcTypeIDSet = true
+	setRPCMethodForHandler(req, id, handler)
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
 		c.queueInitialRPCAck(req.MsgID, id)
 	}
