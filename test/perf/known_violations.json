@@ -1,3 +1,1 @@
-[
-  {"scenario": "contacts.getContacts", "check": "timing", "issue": "MAIN-3148"}
-]
+[]

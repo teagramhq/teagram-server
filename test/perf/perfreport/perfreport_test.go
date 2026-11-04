@@ -292,6 +292,38 @@ func TestEvaluateExemptsFullSetScenarioFromSizeInvarianceOnly(t *testing.T) {
 	}
 }
 
+func TestEvaluateGivesGetContactsAt100xItsOwnBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		p95    float64
+		budget string // reason fragment expected at 100x; empty means no budget reason
+	}{
+		{"contacts.getContacts", 44, ""},
+		{"contacts.getContacts", 46, "budget 45 ms"},
+		{"messages.getDialogs", 21, "budget 20 ms"},
+	} {
+		rs := pair(tc.name, perfreport.Read, result(2, 3, 5, 100), result(10, tc.p95, 5, 100))
+		rs[1].FullSet = tc.name == "contacts.getContacts"
+		v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
+		got := reasons(v.Failures) + reasons(v.TimingFailures) + reasons(v.Reported)
+		if tc.budget == "" && strings.Contains(got, "budget ") {
+			t.Errorf("%s at p95 %.0f ms: got %q, want no budget reason", tc.name, tc.p95, got)
+		}
+		if tc.budget != "" && !strings.Contains(got, tc.budget) {
+			t.Errorf("%s at p95 %.0f ms: got %q, want %q", tc.name, tc.p95, got, tc.budget)
+		}
+	}
+}
+
+func TestMarkdownShowsGetContactsBudgetAt100x(t *testing.T) {
+	rs := pair("contacts.getContacts", perfreport.Read, result(2, 3, 5, 100), result(10, 44, 5, 10_000))
+	rs[1].FullSet = true
+	md := perfreport.Markdown(perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}))
+	if want := "| contacts.getContacts (full set) | read | 2.0 | 10.0 | 44.0 | 45 |"; !strings.Contains(md, want) {
+		t.Errorf("markdown = %s\nwant %q", md, want)
+	}
+}
+
 func TestEvaluateTakesMedianAcrossRounds(t *testing.T) {
 	head := make([]perfreport.Report, 0, 3)
 	for _, q := range []int{5, 40, 5} {
@@ -359,21 +391,6 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"contacts.getContacts": "MAIN-3148",
-	}
-	for scenario, issue := range want {
-		found := false
-		for _, waiver := range waivers {
-			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming && waiver.Issue == issue {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("known_violations.json has no timing waiver for %s (%s)", scenario, issue)
-		}
-	}
 	for _, removed := range []struct {
 		scenario string
 		check    string
@@ -388,7 +405,7 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 			}
 		}
 	}
-	for _, scenario := range []string{"contacts.search", "messages.getDialogs", "messages.search"} {
+	for _, scenario := range []string{"contacts.getContacts", "contacts.search", "messages.getDialogs", "messages.search"} {
 		for _, waiver := range waivers {
 			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming {
 				t.Errorf("known_violations.json still has a timing waiver for %s (%s)", scenario, waiver.Issue)
