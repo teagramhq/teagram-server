@@ -27,7 +27,7 @@ done
 
 cutover_image='ghcr.io/teagramhq/teagramd@sha256:e307d5d93ab000d61dc77251a599b00e031e6dac7cdf026ef8d2d621734e7c3f'
 cutover_digest=${cutover_image#*@}
-if ! rg --fixed-strings --quiet "digest: $cutover_digest" deploy/k8s/prod-cutover/kustomization.yaml; then
+if ! grep --fixed-strings --quiet "digest: $cutover_digest" deploy/k8s/prod-cutover/kustomization.yaml; then
   printf 'alpha cutover does not pin the CI-verified blob-migration image\n' >&2
   exit 1
 fi
@@ -37,19 +37,19 @@ for path in \
   '/admin' \
   '/.well-known/teagramd/client' \
   '/.well-known/telegramd/client'; do
-  if ! rg --fixed-strings --quiet "$path" deploy/k8s/cutover-alpha.sh; then
+  if ! grep --fixed-strings --quiet "$path" deploy/k8s/cutover-alpha.sh; then
     printf 'alpha cutover does not route Serve path: %s\n' "$path" >&2
     exit 1
   fi
 done
 
-if ! rg --quiet 'backend_type.*client backend.*pg_backend_pid' deploy/k8s/cutover-alpha.sh; then
+if ! grep --extended-regexp --quiet 'backend_type.*client backend.*pg_backend_pid' deploy/k8s/cutover-alpha.sh; then
   printf 'alpha cutover does not verify source PostgreSQL client sessions are fenced\n' >&2
   exit 1
 fi
 
-if ! rg --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/cutover-alpha.sh ||
-  ! rg --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/prod-cutover/teagramd-cutover-listeners.yaml; then
+if ! grep --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/cutover-alpha.sh ||
+  ! grep --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/prod-cutover/teagramd-cutover-listeners.yaml; then
   printf 'alpha cutover does not preserve the existing admin origin configuration\n' >&2
   exit 1
 fi
