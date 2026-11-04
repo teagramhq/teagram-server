@@ -27,6 +27,28 @@ if (require_no_match_status 2 'yq') >/dev/null 2>&1; then
   fail 'yq parse errors must not pass an absence check'
 fi
 
+manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Render and validate production and CI overlays") | .run' .github/workflows/ci.yml)"
+[[ "$manifest_step" == *'.github/scripts/check-k8s-migration-version.sh migrations deploy/k8s/base/migration-version'* &&
+   "$manifest_step" != *'latest_migration'* ]] ||
+  fail 'manifest validation must accept an unchanged base pin when a new migration is added'
+
+migration_fixture="$(mktemp -d)"
+trap 'rm -rf "$migration_fixture"' EXIT
+mkdir -p "$migration_fixture/migrations"
+printf 'fixture\n' > "$migration_fixture/migrations/20261102000002_existing.sql"
+printf 'fixture\n' > "$migration_fixture/migrations/20261104000001_new.sql"
+printf '20261102000002\n' > "$migration_fixture/migration-version"
+bash .github/scripts/check-k8s-migration-version.sh \
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" >/dev/null ||
+  fail 'a new migration must not require an immediate base migration-version edit'
+
+printf '20261103000001\n' > "$migration_fixture/migration-version"
+if bash .github/scripts/check-k8s-migration-version.sh \
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" \
+  >"$migration_fixture/invalid-output" 2>"$migration_fixture/invalid-error"; then
+  fail 'the base migration version must refer to a migration in the repository'
+fi
+
 check_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Check RustFS initializer secret mounts") | .run' .github/workflows/ci.yml)"
 [[ -n "$check_step" && "$check_step" != null ]] ||
   fail 'the RustFS secret mount check must remain in the deployment test'

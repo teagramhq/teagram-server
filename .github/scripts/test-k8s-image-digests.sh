@@ -37,7 +37,7 @@ jq --exit-status '
 migrations_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
 rustfs_init_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
 production_migration_version="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").literals[] | sub("^migration-version="; "")' deploy/k8s/prod/kustomization.yaml)"
-[[ "$production_migration_version" =~ ^[0-9]+$ ]] ||
+[[ "$production_migration_version" =~ ^[0-9]{14}$ ]] ||
   fail 'production must pin a migration version alongside its image digests'
 production_migration_behavior="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").behavior' deploy/k8s/prod/kustomization.yaml)"
 [[ "$production_migration_behavior" == replace ]] ||
@@ -113,7 +113,11 @@ case "$1" in
     [[ "$2" == inspect ]] || exit 2
     format="${@: -1}"
     [[ "$format" == *'org.opencontainers.image.revision'* ]] || exit 2
-    printf '%s\n' "$EXPECTED_MIGRATION_REVISION"
+    case "$3" in
+      ghcr.io/teagramhq/teagramd@*) printf '%s\n' "$EXPECTED_SERVER_REVISION" ;;
+      ghcr.io/teagramhq/teagram-migrations@*) printf '%s\n' "$EXPECTED_MIGRATION_REVISION" ;;
+      *) printf 'unexpected image revision request: %s\n' "$3" >&2; exit 2 ;;
+    esac
     ;;
   *)
     printf 'unexpected docker command: %s\n' "$*" >&2
@@ -130,7 +134,15 @@ set -euo pipefail
 case "$1" in
   cat-file) exit 1 ;;
   fetch) exit 0 ;;
-  show) printf '%s\n' "$EXPECTED_IMAGE_MIGRATION_VERSION" ;;
+  ls-tree)
+    revision="$4"
+    case "$revision" in
+      "$EXPECTED_SERVER_REVISION") version="$EXPECTED_SERVER_MIGRATION_VERSION" ;;
+      "$EXPECTED_MIGRATION_REVISION") version="$EXPECTED_IMAGE_MIGRATION_VERSION" ;;
+      *) printf 'unexpected source revision: %s\n' "$revision" >&2; exit 2 ;;
+    esac
+    printf 'migrations/%s_fixture.sql\n' "$version"
+    ;;
   *)
     printf 'unexpected git command: %s\n' "$*" >&2
     exit 2
@@ -146,6 +158,11 @@ rustfs_init_digest="$(printf '3%.0s' {1..64})"
 landing_digest="$(printf '4%.0s' {1..64})"
 selector_digest="$(printf '5%.0s' {1..64})"
 expected_migration_revision=abcdef0123456789abcdef0123456789abcdef01
+expected_server_revision=abcdef0123456789abcdef0123456789abcdef02
+export EXPECTED_MIGRATION_REVISION="$expected_migration_revision"
+export EXPECTED_SERVER_REVISION="$expected_server_revision"
+export EXPECTED_SERVER_MIGRATION_VERSION="$production_migration_version"
+export EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version"
 printf '%s\n' \
   'apiVersion: v1' \
   'kind: Pod' \
@@ -221,6 +238,20 @@ if PATH="$test_dir/bin:$PATH" \
 fi
 grep --fixed-strings --quiet 'migration Job name' "$test_dir/wrong-job-error" ||
   fail 'a migration Job suffix rejection must identify the mismatch'
+
+older_migration_prod_manifest="$test_dir/k8s-prod-older-migrations.yaml"
+older_migration_version=20261101000001
+sed "s|migration-version: \"$production_migration_version\"|migration-version: \"$older_migration_version\"|" \
+  "$valid_prod_manifest" > "$older_migration_prod_manifest"
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_MIGRATION_VERSION=20261104000001 \
+  EXPECTED_IMAGE_MIGRATION_VERSION="$older_migration_version" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$older_migration_prod_manifest" \
+  >"$test_dir/older-migration-output" 2>"$test_dir/older-migration-error"; then
+  fail 'the production migration image must contain every migration required by the pinned teagramd image'
+fi
+grep --fixed-strings --quiet 'older than teagramd image source' "$test_dir/older-migration-error" ||
+  fail 'an older migration image rejection must identify the teagramd requirement'
 
 unpullable_digest="$(printf '9%.0s' {1..64})"
 unpullable_reference="ghcr.io/teagramhq/teagramd@sha256:$unpullable_digest"

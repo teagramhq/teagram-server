@@ -1088,6 +1088,8 @@ jobs:
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/check-k8s-migration-version.sh
+          shellcheck .github/scripts/check-k8s-migration-version.sh
           bash -n .github/scripts/check-k8s-prod-image-pins.sh
           shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
@@ -1403,9 +1405,7 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
-          required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
-          test "$required_migration" = "$latest_migration"
+          bash .github/scripts/check-k8s-migration-version.sh migrations deploy/k8s/base/migration-version
           for overlay in prod ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
