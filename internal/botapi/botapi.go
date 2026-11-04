@@ -325,6 +325,14 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int6
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 		return
 	}
+	h.log.Info("direct message outcome",
+		"sender_id", botID,
+		"recipient_id", chatID,
+		"message_id", message.LocalID,
+		"recipient_copy", "stored",
+		"recipient_pts", recipientPts,
+		"duplicate", false,
+	)
 	if recipientPts > 0 {
 		notifyCtx, cancel := store.NotificationContext(r.Context())
 		defer cancel()

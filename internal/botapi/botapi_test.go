@@ -3,6 +3,7 @@ package botapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -474,7 +475,8 @@ func TestGetMeReturnsServerLookedUpBot(t *testing.T) {
 
 func TestSendMessageReturnsBotMessageUsingTokenIdentity(t *testing.T) {
 	st := newFakeStore()
-	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	var logs strings.Builder
+	handler := botapi.NewHandler(st, slog.New(slog.NewJSONHandler(&logs, nil)), store.RateLimitConfig{})
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/bot999999:secret-sentinel/sendMessage", strings.NewReader(`{"chat_id":42,"text":"hi"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.RemoteAddr = "100.64.1.2:3456"
@@ -492,6 +494,31 @@ func TestSendMessageReturnsBotMessageUsingTokenIdentity(t *testing.T) {
 	}
 	if st.notifyCount != 1 || st.notifyChannel != store.ChannelUpdates || st.notifyPayload != "42" {
 		t.Fatalf("update notification = count:%d channel:%q payload:%q", st.notifyCount, st.notifyChannel, st.notifyPayload)
+	}
+	var outcome map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode Bot API log line %q: %v", line, err)
+		}
+		if record["msg"] == "direct message outcome" {
+			outcome = record
+			break
+		}
+	}
+	if outcome == nil {
+		t.Fatalf("successful Bot API send emitted no direct message outcome: %q", logs.String())
+	}
+	for key, want := range map[string]any{
+		"level": "INFO", "sender_id": float64(123456), "recipient_id": float64(42),
+		"message_id": float64(7), "recipient_copy": "stored", "recipient_pts": float64(4), "duplicate": false,
+	} {
+		if got := outcome[key]; got != want {
+			t.Errorf("Bot API outcome %s = %v, want %v", key, got, want)
+		}
+	}
+	if strings.Contains(logs.String(), "hi") {
+		t.Errorf("Bot API logs exposed message text: %q", logs.String())
 	}
 }
 

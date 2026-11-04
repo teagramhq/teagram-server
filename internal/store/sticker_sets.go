@@ -72,9 +72,28 @@ func (s *Store) UninstallStickerSet(ctx context.Context, userID, setID int64) (b
 	if userID <= 0 || setID == 0 {
 		return false, errors.New("uninstall sticker set: invalid user or set identity")
 	}
-	rows, err := s.q.UninstallStickerSet(ctx, db.UninstallStickerSetParams{UserID: userID, SetID: setID})
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin uninstall sticker set: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = qtx.LockUserStickerSetOwner(ctx, userID); err != nil {
+		return false, fmt.Errorf("lock sticker set owner %d: %w", userID, err)
+	}
+	if setID > 0 {
+		if _, err = qtx.LockLiveUserStickerSet(ctx, setID); errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrStickerSetNotFound
+		} else if err != nil {
+			return false, fmt.Errorf("lock live user sticker set: %w", err)
+		}
+	}
+	rows, err := qtx.UninstallStickerSet(ctx, db.UninstallStickerSetParams{UserID: userID, SetID: setID})
 	if err != nil {
 		return false, fmt.Errorf("uninstall sticker set for user %d: %w", userID, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit sticker set uninstall: %w", err)
 	}
 	return rows != 0, nil
 }
