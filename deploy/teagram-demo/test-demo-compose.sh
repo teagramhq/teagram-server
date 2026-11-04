@@ -141,7 +141,7 @@ jq -e \
   and (.services.migrate.mem_limit | tostring) == "268435456"
   and (.services.postgres.image | endswith("@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66"))
   and .services.migrate.platform == "linux/amd64"
-  and (.services.migrate.image | endswith("@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f"))
+  and (.services.migrate.image | endswith("@sha256:bb21d31eaf260e43513a35b87be575cecf8ab556795aa8c039e7bb3b43bdd3fe"))
   and any(.services.postgres.volumes[]; .target == "/var/lib/postgresql")
   and .volumes.tgblobs.driver == "local"
   and .volumes.tgblobs.driver_opts.type == "none"

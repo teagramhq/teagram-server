@@ -90,6 +90,11 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 				h.log.Error("read poll retry pts", "user_id", r.UserID, "local_id", existing.LocalID, "err", ptsErr)
 				return nil, nil, nil, errInternal
 			}
+			if peerType == store.PeerTypeUser {
+				h.logDirectMessageOutcome(
+					r.UserID, peerID, existing.LocalID, 0, directRecipientCopyStored(r.UserID, peerID, existing), true,
+				)
+			}
 			return h.pollSendResponse(c, r, existing, poll, pts, req.RandomID, nil)
 		}
 	}
@@ -144,6 +149,12 @@ func (h *handlers) sendPrivatePoll(
 	if !duplicate && h.afterSenderCommit != nil {
 		h.afterSenderCommit()
 	}
+	recipientPts := perOwner[peerID]
+	recipientCopyStored := recipientPts > 0
+	if duplicate {
+		recipientCopyStored = directRecipientCopyStored(r.UserID, peerID, sender)
+	}
+	h.logDirectMessageOutcome(r.UserID, peerID, sender.LocalID, recipientPts, recipientCopyStored, duplicate)
 	if !duplicate {
 		h.notifyOwners(r.Ctx, perOwner, r.UserID)
 	}
@@ -574,7 +585,7 @@ func (h *handlers) sendSavedPoll(
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	attempt := beginSenderRPC(c, r)
-	sender, pts, poll, _, err := h.store.SendSavedPollMessage(r.Ctx, r.UserID, req.RandomID, req.Message, draft)
+	sender, pts, poll, duplicate, err := h.store.SendSavedPollMessage(r.Ctx, r.UserID, req.RandomID, req.Message, draft)
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send Saved Messages poll", "user_id", r.UserID, "err", err)
@@ -584,6 +595,7 @@ func (h *handlers) sendSavedPoll(
 		return nil, nil, nil, pollStoreError(err)
 	}
 	setSenderRPCPts(attempt, pts)
+	h.logDirectMessageOutcome(r.UserID, r.UserID, sender.LocalID, pts, true, duplicate)
 	return h.pollSendResponseWithAttempt(c, r, sender, poll, pts, req.RandomID, attempt)
 }
 

@@ -168,8 +168,8 @@ class PullBaseImagesTests(unittest.TestCase):
         cases = (
             ("mirror.gcr.io/library/postgres:18-alpine", "postgres:18-alpine"),
             (
-                "mirror.gcr.io/arigaio/atlas:1.2.0-alpine",
-                "arigaio/atlas:1.2.0-alpine",
+                "mirror.gcr.io/arigaio/atlas:1.3.0-alpine",
+                "arigaio/atlas:1.3.0-alpine",
             ),
         )
         for image, fallback in cases:
@@ -225,7 +225,7 @@ class PullBaseImagesTests(unittest.TestCase):
         self.assertIn("- name: Preload Compose service images", body)
         for image in (
             "mirror.gcr.io/library/postgres:18-alpine",
-            "mirror.gcr.io/arigaio/atlas:1.2.0-alpine",
+            "mirror.gcr.io/arigaio/atlas:1.3.0-alpine",
         ):
             with self.subTest(image=image):
                 self.assertIn(f"--image {image}", body)
@@ -250,7 +250,7 @@ class PullBaseImagesTests(unittest.TestCase):
         pull_step = (
             "run: bash .github/scripts/pull-base-images.sh "
             "--image mirror.gcr.io/library/postgres:18-alpine "
-            "--image mirror.gcr.io/arigaio/atlas:1.2.0-alpine "
+            "--image mirror.gcr.io/arigaio/atlas:1.3.0-alpine "
             "test/e2e/real_server_fixture/Dockerfile"
         )
         fixture_step = (

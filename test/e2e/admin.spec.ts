@@ -1382,6 +1382,8 @@ test.describe('admin dashboard acceptance states', () => {
     expect(await page.locator('a.skip').evaluate((el) => el.matches(':focus-visible'))).toBe(true);
 
     await page.keyboard.press('Tab');
+    await expect(page.getByRole('link', { name: 'Sticker sets' })).toBeFocused();
+    await page.keyboard.press('Tab');
     await expect(page.locator('#refresh-btn')).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(page.locator('form.logout-form button')).toBeFocused();

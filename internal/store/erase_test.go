@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strconv"
@@ -28,6 +29,7 @@ var blobBody = []byte("the bytes of one media file")
 func storedFileWithBytes(t *testing.T, s *store.Store, uploaderID int64) store.File {
 	t.Helper()
 	f := storedFile(t, s, uploaderID)
+	f.Stored = true
 	if _, err := store.BlobsOf(s).Put(context.Background(), blob.Key(f.ID), bytes.NewReader(blobBody)); err != nil {
 		t.Fatalf("put blob for file %d: %v", f.ID, err)
 	}
@@ -112,12 +114,16 @@ func TestErasureRetainsStickerSetFileAfterSetIsNotLive(t *testing.T) {
 	s := openStore(t, dsn)
 	owner := mustUser(t, s, "+15559200021")
 	file := storedFileWithBytes(t, s, owner.ID)
+	_, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, file)
+	if err != nil {
+		t.Fatalf("read sticker file for validation: %v", err)
+	}
 	set, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Retained", ShortName: "retained_file", Kind: "regular",
 	}, []store.UserStickerSetItem{{
 		FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
 		Emoji: "⭐", Format: "WEBP", Width: 512, Height: 512,
-	}})
+	}}, []store.StickerFileFingerprint{fingerprint})
 	if err != nil {
 		t.Fatalf("create sticker set: %v", err)
 	}
@@ -130,6 +136,14 @@ func TestErasureRetainsStickerSetFileAfterSetIsNotLive(t *testing.T) {
 			t.Errorf("close set fixture: %v", err)
 		}
 	})
+	var storedDigest []byte
+	if err := conn.QueryRow(ctx, `SELECT content_sha256 FROM user_created_sticker_set_items WHERE set_id = $1 AND file_id = $2`, set.ID, file.ID).Scan(&storedDigest); err != nil {
+		t.Fatalf("read sticker content fingerprint: %v", err)
+	}
+	wantDigest := sha256.Sum256(blobBody[:file.Size])
+	if !bytes.Equal(storedDigest, wantDigest[:]) {
+		t.Fatalf("stored sticker content fingerprint = %x, want %x", storedDigest, wantDigest)
+	}
 	if _, err := conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, set.ID); err != nil {
 		t.Fatalf("take set out of live state: %v", err)
 	}
