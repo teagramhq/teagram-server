@@ -10,6 +10,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ZERO_SHA = "0" * 40
+EXPECTED_POSTGRES_IMAGE = (
+    "mirror.gcr.io/library/postgres:18-alpine@sha256:"
+    "10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
+)
 
 
 class PrePushHookTests(unittest.TestCase):
@@ -20,6 +24,7 @@ class PrePushHookTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.capture = self.root / "calls.log"
+        self.postgres_capture = self.root / "postgres-image.log"
         self.tools = self.root / "tools"
         self.tools.mkdir()
 
@@ -99,6 +104,9 @@ class PrePushHookTests(unittest.TestCase):
             "#!/bin/sh\n"
             'tool="${0##*/}"\n'
             'printf \'%s\\t%s\\t%s\\n\' "$tool" "$PWD" "$*" >> "$HOOK_CAPTURE"\n'
+            'if [ "$tool" = bash ] && [ "$*" = ".github/scripts/test-migrations.sh" ]; then\n'
+            '  printf \'%s\\n\' "${POSTGRES_IMAGE:-}" >> "$HOOK_POSTGRES_CAPTURE"\n'
+            "fi\n"
             '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n',
             encoding="utf-8",
         )
@@ -116,6 +124,7 @@ class PrePushHookTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{self.tools}{os.pathsep}{environment['PATH']}"
         environment["HOOK_CAPTURE"] = str(self.capture)
+        environment["HOOK_POSTGRES_CAPTURE"] = str(self.postgres_capture)
         environment["GIT_HOOK_BASE_REF"] = "main"
         if fail_tool:
             environment["HOOK_FAIL"] = fail_tool
@@ -177,6 +186,10 @@ class PrePushHookTests(unittest.TestCase):
                 for tool, _, args in calls
             ),
             calls,
+        )
+        self.assertEqual(
+            self.postgres_capture.read_text(encoding="utf-8").splitlines(),
+            [EXPECTED_POSTGRES_IMAGE],
         )
         self.assertTrue(
             any(
