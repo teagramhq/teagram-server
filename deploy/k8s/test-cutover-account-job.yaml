@@ -24,9 +24,10 @@ spec:
         - name: create-account
           image: ghcr.io/teagramhq/teagramd:ci
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-ec"]
-          args:
-            - cat /run/secrets/cutover/password | /usr/local/bin/teagramd admin create-user --username cutover_smoke
+          command: ["/usr/local/bin/teagramd"]
+          args: ["admin", "create-user", "--username", "cutover_smoke"]
+          stdin: true
+          stdinOnce: true
           env:
             - name: TG_POSTGRES_DSN
               valueFrom:
@@ -55,9 +56,6 @@ spec:
             - name: key-data
               mountPath: /var/lib/teagramd
               readOnly: true
-            - name: cutover-credentials
-              mountPath: /run/secrets/cutover
-              readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -65,9 +63,5 @@ spec:
           persistentVolumeClaim:
             claimName: key-data-teagramd-0
             readOnly: true
-        - name: cutover-credentials
-          secret:
-            secretName: cutover-smoke-credentials
-            defaultMode: 0400
         - name: tmp
           emptyDir: {}

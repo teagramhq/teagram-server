@@ -10,7 +10,6 @@ cd "$repo_root"
 readonly SOURCE_NAMESPACE=teagram
 readonly TARGET_NAMESPACE=teagram-cutover
 readonly CUTOVER_IMAGE=ghcr.io/teagramhq/teagramd@sha256:e307d5d93ab000d61dc77251a599b00e031e6dac7cdf026ef8d2d621734e7c3f
-readonly PASSWORD_SECRET=cutover-smoke-credentials
 tmp_dir=$(mktemp -d "$RUNNER_TEMP/teagram-cutover.XXXXXX")
 port_forward_pid=''
 linkselector_forward_pid=''
@@ -36,7 +35,6 @@ cleanup() {
     kubectl delete namespace "$TARGET_NAMESPACE" --wait=false >/dev/null 2>&1 || true
   fi
   kubectl delete job cutover-account-seed --namespace "$SOURCE_NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  kubectl delete secret "$PASSWORD_SECRET" --namespace "$SOURCE_NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
   rm -rf -- "$tmp_dir"
   exit "$status"
 }
@@ -123,9 +121,14 @@ smoke_restored_account() {
 printf 'cutover_smoke\n' > "$tmp_dir/username"
 openssl rand -hex 24 > "$tmp_dir/password"
 chmod 0600 "$tmp_dir/username" "$tmp_dir/password"
-kubectl create secret generic "$PASSWORD_SECRET" --namespace "$SOURCE_NAMESPACE" \
-  --from-file=password="$tmp_dir/password" >/dev/null
 kubectl apply --filename deploy/k8s/test-cutover-account-job.yaml >/dev/null
+seed_pod=$(kubectl get pods --namespace "$SOURCE_NAMESPACE" --selector=job-name=cutover-account-seed \
+  --output 'jsonpath={.items[0].metadata.name}')
+[[ -n $seed_pod ]]
+kubectl wait --for=jsonpath='{.status.phase}'=Running "pod/$seed_pod" \
+  --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
+kubectl attach "$seed_pod" --namespace "$SOURCE_NAMESPACE" \
+  --stdin --container create-account < "$tmp_dir/password" >/dev/null
 kubectl wait --for=condition=complete job/cutover-account-seed \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
 
@@ -193,6 +196,7 @@ kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-volume-importer -c impo
   sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
 kubectl delete pod cutover-volume-importer --namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
 
+# shellcheck disable=SC2016 # The inner shell expands POSTGRES_PASSWORD in the pod.
 kubectl exec --namespace "$TARGET_NAMESPACE" postgres-0 -c postgres -- \
   sh -ec 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore --clean --if-exists --no-owner --no-acl --exit-on-error --username=postgres --dbname=teagram /var/lib/postgresql/cutover-backups/source.dump' >/dev/null
 migration_job=$(kubectl get jobs --namespace "$TARGET_NAMESPACE" \

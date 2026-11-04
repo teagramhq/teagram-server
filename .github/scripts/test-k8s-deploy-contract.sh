@@ -72,6 +72,16 @@ cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq
   fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||
   fail 'the cutover blob migration must encrypt the private manifest and migrated media'
+cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .command | join(" ")' "$cutover_seed_job")" == '/usr/local/bin/teagramd' ]] ||
+  fail 'the cutover account seed Job must invoke teagramd directly for its distroless image'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .args | join(" ")' "$cutover_seed_job")" == 'admin create-user --username cutover_smoke' ]] ||
+  fail 'the cutover account seed Job must create the disposable smoke account'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdin' "$cutover_seed_job")" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdinOnce' "$cutover_seed_job")" == true ]] ||
+  fail 'the cutover account seed Job must accept the password through one stdin attachment'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.runAsUser' "$cutover_seed_job")" == 0 ]] ||
+  fail 'the cutover account seed Job must run as root for the guarded admin command'
 for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
   yq -e "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$pvc\")" \
     deploy/k8s/prod-cutover/persistentvolumeclaims.yaml >/dev/null 2>&1 ||
