@@ -293,6 +293,112 @@ func TestSendMediaLogsDirectRecipientOutcome(t *testing.T) {
 	assertDirectSendReplayLog(t, directSendLogRecords(t, logs), sender.ID, recipient.ID, message.LocalID, 0, true, caption)
 }
 
+func TestSendMediaReplayLogsStoredPeer(t *testing.T) {
+	t.Parallel()
+	ctx, s, h, logs := newDirectSendLogHarness(t)
+	sender, err := s.CreateUser(ctx, "+15551232760")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	storedRecipient, err := s.CreateUser(ctx, "+15551232761")
+	if err != nil {
+		t.Fatalf("create stored recipient: %v", err)
+	}
+	requestedRecipient, err := s.CreateUser(ctx, "+15551232762")
+	if err != nil {
+		t.Fatalf("create requested recipient: %v", err)
+	}
+	const (
+		randomID = int64(3273160)
+		bodyText = "private message that owns this retry token"
+	)
+	var seed bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer: InputPeerUser(sender.ID, storedRecipient.ID), Message: bodyText, RandomID: randomID,
+	}).Encode(&seed); err != nil {
+		t.Fatalf("encode seed sendMessage: %v", err)
+	}
+	if _, _, _, err := h.handleSendMessageAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &seed}); err != nil {
+		t.Fatalf("seed sendMessage: %v", err)
+	}
+	stored, ok, err := s.MessageByRandomID(ctx, sender.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("stored message: found=%v err=%v", ok, err)
+	}
+	logs.Reset()
+
+	var retry bin.Buffer
+	if err := (&tg.MessagesSendMediaRequest{
+		Peer:    InputPeerUser(sender.ID, requestedRecipient.ID),
+		Message: "private retry caption",
+		Media: &tg.InputMediaUploadedDocument{
+			File:     &tg.InputFile{ID: 3273161, Parts: 1, Name: "retry.bin"},
+			MimeType: "application/octet-stream",
+		},
+		RandomID: randomID,
+	}).Encode(&retry); err != nil {
+		t.Fatalf("encode sendMedia retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retry}); err != nil {
+		t.Fatalf("sendMedia retry: %v", err)
+	}
+	assertDirectSendReplayLog(t, directOutcomeRecords(t, directSendLogRecords(t, logs)), sender.ID, stored.PeerID, stored.LocalID, 0, true, "private retry caption")
+}
+
+func TestSendMediaReplayDoesNotLabelGroupAsUser(t *testing.T) {
+	t.Parallel()
+	ctx, s, h, logs := newDirectSendLogHarness(t)
+	sender, err := s.CreateUser(ctx, "+15551232763")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551232764")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, sender.ID, "retry group", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	const (
+		randomID = int64(3273162)
+		bodyText = "private group message"
+	)
+	var seed bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer: InputPeerChat(sender.ID, chat.ID), Message: bodyText, RandomID: randomID,
+	}).Encode(&seed); err != nil {
+		t.Fatalf("encode group sendMessage: %v", err)
+	}
+	if _, _, _, err := h.handleSendMessageAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &seed}); err != nil {
+		t.Fatalf("seed group sendMessage: %v", err)
+	}
+	stored, ok, err := s.MessageByRandomID(ctx, sender.ID, randomID)
+	if err != nil || !ok || stored.PeerType != store.PeerTypeChat {
+		t.Fatalf("stored group message: found=%v peer_type=%v err=%v", ok, stored.PeerType, err)
+	}
+	logs.Reset()
+
+	var retry bin.Buffer
+	if err := (&tg.MessagesSendMediaRequest{
+		Peer:    InputPeerUser(sender.ID, member.ID),
+		Message: "private retry caption",
+		Media: &tg.InputMediaUploadedDocument{
+			File:     &tg.InputFile{ID: 3273163, Parts: 1, Name: "retry.bin"},
+			MimeType: "application/octet-stream",
+		},
+		RandomID: randomID,
+	}).Encode(&retry); err != nil {
+		t.Fatalf("encode sendMedia retry: %v", err)
+	}
+	if _, _, _, err := h.handleSendMediaAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retry}); err != nil {
+		t.Fatalf("sendMedia retry: %v", err)
+	}
+	if records := directOutcomeRecords(t, directSendLogRecords(t, logs)); len(records) != 0 {
+		t.Errorf("group replay produced private-message outcomes: %#v", records)
+	}
+}
+
 func TestSendCatalogueStickerLogsDirectRecipientOutcome(t *testing.T) {
 	t.Parallel()
 	ctx, s, h, logs := newDirectSendLogHarness(t)
@@ -577,6 +683,17 @@ func TestForwardMessagesLogsEachDirectOutcome(t *testing.T) {
 func assertDirectSendLog(t *testing.T, records []map[string]any, senderID, recipientID, messageID int64, recipientPts int, stored bool, privateText string) {
 	t.Helper()
 	assertDirectSendLogWithDuplicate(t, records, senderID, recipientID, messageID, recipientPts, stored, false, privateText)
+}
+
+func directOutcomeRecords(t *testing.T, records []map[string]any) []map[string]any {
+	t.Helper()
+	var outcomes []map[string]any
+	for _, record := range records {
+		if record["msg"] == "direct message outcome" {
+			outcomes = append(outcomes, record)
+		}
+	}
+	return outcomes
 }
 
 func assertDirectSendReplayLog(t *testing.T, records []map[string]any, senderID, recipientID, messageID int64, recipientPts int, stored bool, privateText string) {
