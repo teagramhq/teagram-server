@@ -370,7 +370,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	case "initialize-message-search-postings":
 		flagSet := flag.NewFlagSet("initialize-message-search-postings", flag.ContinueOnError)
 		flagSet.SetOutput(io.Discard)
-		batchSize := flagSet.Int("batch-size", 100, "dialogs per scan batch (1-1000)")
+		batchSize := flagSet.Int("batch-size", 100, "messages per dialog transaction (1-1000)")
 		if err := flagSet.Parse(args[1:]); err != nil || flagSet.NArg() != 0 || *batchSize < 1 || *batchSize > store.MessageSearchPostingsInitializationMaxBatchSize {
 			return maintenanceUsageError()
 		}

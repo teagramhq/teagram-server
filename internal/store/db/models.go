@@ -614,9 +614,10 @@ type MessageSearchPostingCount struct {
 }
 
 type MessageSearchUnreadyDialog struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+	LastLocalID int64
 }
 
 type NotifySettingsDifferenceCursor struct {

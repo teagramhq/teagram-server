@@ -288,44 +288,60 @@ ORDER BY owner_id, peer_type, peer_id
 LIMIT sqlc.arg(batch_size)::int;
 
 -- name: LockMessageSearchUnreadyDialog :one
-SELECT owner_id
+SELECT last_local_id
 FROM message_search_unready_dialogs
 WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND peer_type = sqlc.arg(peer_type)::smallint
   AND peer_id = sqlc.arg(peer_id)::bigint
 FOR UPDATE;
 
--- Rebuild a marked dialog from one locked source snapshot. The materialized
--- source CTE locks rows by local_id before deleting postings; the delete and
--- insert share its statement snapshot, so later inserts keep their trigger
--- postings rather than being cleared or backfilled from stale text.
--- name: BackfillMessageSearchDialogPostings :exec
+-- Rebuild one bounded range of a marked dialog. The source CTE locks at most
+-- batch_size message rows in local_id order before clearing their postings.
+-- Deletes and inserts update posting counts in this transaction; the source
+-- snapshot and row locks keep concurrent edits from restoring stale terms.
+-- name: BackfillMessageSearchDialogPostings :one
 WITH source_messages AS MATERIALIZED (
-    SELECT message.local_id, message.message_tsv
+    SELECT message.local_id, message.message_tsv, message.deleted
     FROM messages AS message
     WHERE message.owner_id = sqlc.arg(owner_id)::bigint
       AND message.peer_type = sqlc.arg(peer_type)::smallint
       AND message.peer_id = sqlc.arg(peer_id)::bigint
-      AND message.deleted = false
+      AND message.local_id > sqlc.arg(last_local_id)::bigint
     ORDER BY message.local_id
+    LIMIT sqlc.arg(batch_size)::int
     FOR SHARE OF message
 ),
 cleared_postings AS (
     DELETE FROM message_search_postings AS posting
-    USING (SELECT count(*) AS source_count FROM source_messages) AS locked_source
+    USING source_messages AS source
     WHERE posting.owner_id = sqlc.arg(owner_id)::bigint
       AND posting.peer_type = sqlc.arg(peer_type)::smallint
       AND posting.peer_id = sqlc.arg(peer_id)::bigint
-      AND locked_source.source_count >= 0
+      AND posting.local_id = source.local_id
     RETURNING 1
-)
+),
+inserted_postings AS (
 INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
 SELECT sqlc.arg(owner_id)::bigint, source.local_id,
        sqlc.arg(peer_type)::smallint, sqlc.arg(peer_id)::bigint, term.lexeme
 FROM source_messages AS source
 CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
 CROSS JOIN (SELECT count(*) FROM cleared_postings) AS cleared
-ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING;
+WHERE source.deleted = false
+ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
+RETURNING 1
+)
+SELECT COALESCE(MAX(source.local_id), sqlc.arg(last_local_id)::bigint)::bigint AS next_local_id,
+       COUNT(source.local_id)::bigint AS processed_count
+FROM source_messages AS source
+CROSS JOIN (SELECT count(*) FROM inserted_postings) AS inserted;
+
+-- name: UpdateMessageSearchUnreadyDialogProgress :exec
+UPDATE message_search_unready_dialogs
+SET last_local_id = sqlc.arg(last_local_id)::bigint
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
 
 -- name: MarkMessageSearchDialogReady :exec
 DELETE FROM message_search_unready_dialogs

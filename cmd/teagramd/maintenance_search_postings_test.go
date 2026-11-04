@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,8 @@ func TestRunCommandMaintenanceInitializesMessageSearchPostings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send second message: %v", err)
 	}
-	if _, _, _, _, err := s.SendMessage(ctx, owner.ID, secondPeer.ID, "amber fox elsewhere", 30003, 0, 0); err != nil {
+	secondDialog, _, _, _, err := s.SendMessage(ctx, owner.ID, secondPeer.ID, "amber fox elsewhere", 30003, 0, 0) //nolint:dogsled // only the stored message is needed here
+	if err != nil {
 		t.Fatalf("send other-dialog message: %v", err)
 	}
 	thirdPeer, err := s.CreateUsernameUser(ctx, "searchpeerthree", "Search", "Peer Three")
@@ -135,10 +137,20 @@ func TestRunCommandMaintenanceInitializesMessageSearchPostings(t *testing.T) {
 		SELECT count(*) FROM message_search_postings
 		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
 	`, owner.ID, int16(store.PeerTypeUser), secondPeer.ID).Scan(&remainingAfterInterruption); err != nil {
-		t.Fatalf("count rolled-back postings: %v", err)
+		t.Fatalf("count committed postings: %v", err)
 	}
-	if remainingAfterInterruption != 0 {
-		t.Fatalf("postings from failed batch = %d, want 0", remainingAfterInterruption)
+	if remainingAfterInterruption != 3 {
+		t.Fatalf("committed postings before interruption = %d, want 3", remainingAfterInterruption)
+	}
+	var savedCursor int64
+	if err := pool.QueryRow(ctx, `
+		SELECT last_local_id FROM message_search_unready_dialogs
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), secondPeer.ID).Scan(&savedCursor); err != nil {
+		t.Fatalf("read progress cursor after interruption: %v", err)
+	}
+	if savedCursor != secondDialog.LocalID {
+		t.Fatalf("saved progress cursor = %d, want %d", savedCursor, secondDialog.LocalID)
 	}
 	if _, err := pool.Exec(ctx, `
 		DROP TRIGGER test_reject_message_search_ready ON message_search_unready_dialogs;
@@ -504,7 +516,7 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		AFTER DELETE ON message_search_postings
 		FOR EACH ROW EXECUTE FUNCTION public.test_pause_message_search_posting_clear();
 	`); err != nil {
-		t.Fatalf("install posting clear pause fixture: %v", err)
+		t.Fatalf("install posting insert pause fixture: %v", err)
 	}
 	defer func() {
 		if _, err := pool.Exec(context.Background(), `
@@ -584,7 +596,17 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		return done
 	}
 	seedEditDone := startEdit(seed.LocalID, "newseedterm")
-	insertedEditDone := startEdit(inserted.LocalID, "seedterm")
+	insertedEditDone := startEdit(inserted.LocalID, "insertedfreshterm")
+	select {
+	case err := <-insertedEditDone:
+		if err != nil {
+			t.Fatalf("edit message inserted after the backfill snapshot: %v", err)
+		}
+	case result := <-commandDone:
+		t.Fatalf("initializer ended before the post-snapshot edit completed: %v", result.err)
+	case <-time.After(time.Second):
+		t.Fatal("edit of a post-snapshot insert waited for the whole backfill")
+	}
 
 	deadline = time.Now().Add(5 * time.Second)
 	for {
@@ -599,7 +621,7 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		`).Scan(&waitingEdits); err != nil {
 			t.Fatalf("check concurrent edit waits: %v", err)
 		}
-		if waitingEdits >= 2 {
+		if waitingEdits >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -608,8 +630,6 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 				t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
 			case err := <-seedEditDone:
 				t.Fatalf("seed edit completed before initializer released its locks: %v", err)
-			case err := <-insertedEditDone:
-				t.Fatalf("inserted-message edit completed before initializer released its locks: %v", err)
 			default:
 				t.Fatalf("only %d concurrent edits waited for the initializer", waitingEdits)
 			}
@@ -619,8 +639,6 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 			t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
 		case err := <-seedEditDone:
 			t.Fatalf("seed edit completed before initializer released its locks: %v", err)
-		case err := <-insertedEditDone:
-			t.Fatalf("inserted-message edit completed before initializer released its locks: %v", err)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -632,26 +650,23 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 	if err := <-seedEditDone; err != nil {
 		t.Fatalf("commit seed edit: %v", err)
 	}
-	if err := <-insertedEditDone; err != nil {
-		t.Fatalf("commit inserted-message edit: %v", err)
-	}
 
 	var oldPostingCount, freshPostingCount int64
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE lexeme = 'legacyterm'),
-		       count(*) FILTER (WHERE lexeme = 'seedterm')
+		       count(*) FILTER (WHERE lexeme = 'insertedfreshterm')
 		FROM message_search_postings
 		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3 AND local_id = $4
 	`, owner.ID, int16(store.PeerTypeUser), peer.ID, inserted.LocalID).Scan(&oldPostingCount, &freshPostingCount); err != nil {
 		t.Fatalf("count message postings: %v", err)
 	}
 	if oldPostingCount != 0 || freshPostingCount != 1 {
-		t.Fatalf("message postings = old %d, fresh %d; want old 0, fresh 1", oldPostingCount, freshPostingCount)
+		t.Fatalf("post-snapshot message postings = old %d, fresh %d; want old 0, fresh 1", oldPostingCount, freshPostingCount)
 	}
 	var oldLexemeCount, freshLexemeCount int64
 	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(max(posting_count) FILTER (WHERE lexeme = 'legacyterm'), 0),
-		       COALESCE(max(posting_count) FILTER (WHERE lexeme = 'seedterm'), 0)
+		       COALESCE(max(posting_count) FILTER (WHERE lexeme = 'insertedfreshterm'), 0)
 		FROM message_search_posting_counts
 		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
 	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&oldLexemeCount, &freshLexemeCount); err != nil {
@@ -671,5 +686,300 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 	}
 	if !ready {
 		t.Fatal("dialog remained unready after initialization")
+	}
+}
+
+func TestRunCommandMaintenanceBoundsWritersForLargeDialog(t *testing.T) {
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("2a", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_STATEMENT_TIMEOUT", "3s")
+	t.Setenv("TG_REGISTRATION", "closed")
+	t.Setenv("TG_RSA_KEY_PATH", filepath.Join(t.TempDir(), "must-not-be-created.pem"))
+	t.Setenv("TG_BLOB_DIR", filepath.Join(t.TempDir(), "must-not-be-created"))
+
+	ctx := context.Background()
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create fixture blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open fixture store: %v", err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close fixture store: %v", err)
+		}
+	}()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open fixture database pool: %v", err)
+	}
+	defer pool.Close()
+
+	owner, err := s.CreateUsernameUser(ctx, "searchlargeowner", "Search", "Large Owner")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUsernameUser(ctx, "searchlargepeer", "Search", "Large Peer")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	otherPeer, err := s.CreateUsernameUser(ctx, "searchlargeother", "Search", "Large Other")
+	if err != nil {
+		t.Fatalf("create other peer: %v", err)
+	}
+
+	const historySize = 1000
+	const chunkSize = 25
+	fixtureTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin large history fixture: %v", err)
+	}
+	var firstLocalID int64
+	if err := fixtureTx.QueryRow(ctx, `SELECT next_local_id FROM update_state WHERE user_id = $1`, owner.ID).Scan(&firstLocalID); err != nil {
+		if rollbackErr := fixtureTx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback large history fixture: %v", rollbackErr)
+		}
+		t.Fatalf("read owner's next local ID: %v", err)
+	}
+	if _, err := fixtureTx.Exec(ctx, `
+		INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		SELECT $1, $2 + sample.n, $3, $4, $1, 'commonterm archive', true
+		FROM generate_series(0, $5::bigint - 1) AS sample(n)
+	`, owner.ID, firstLocalID, int16(store.PeerTypeUser), peer.ID, historySize); err != nil {
+		if rollbackErr := fixtureTx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback large history fixture: %v", rollbackErr)
+		}
+		t.Fatalf("insert large message history: %v", err)
+	}
+	if _, err := fixtureTx.Exec(ctx, `
+		UPDATE update_state SET next_local_id = $2 WHERE user_id = $1
+	`, owner.ID, firstLocalID+historySize); err != nil {
+		if rollbackErr := fixtureTx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback large history fixture: %v", rollbackErr)
+		}
+		t.Fatalf("advance owner's local ID: %v", err)
+	}
+	if err := fixtureTx.Commit(ctx); err != nil {
+		t.Fatalf("commit large history fixture: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("remove legacy postings: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $2, $3)
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("mark dialog unready: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION public.test_pause_large_message_search_posting_insert() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF NEW.owner_id = %d AND NEW.peer_id = %d AND NEW.lexeme = 'commonterm' AND (NEW.local_id - %d) %% %d = 0 THEN
+				IF NEW.local_id = %d THEN
+					PERFORM pg_sleep(0.5);
+				ELSE
+					PERFORM pg_sleep(0.1);
+				END IF;
+			END IF;
+			RETURN NEW;
+		END;
+		$function$;
+		CREATE TRIGGER test_pause_large_message_search_posting_insert
+		AFTER INSERT ON message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_large_message_search_posting_insert();
+	`, owner.ID, peer.ID, firstLocalID, chunkSize, firstLocalID)); err != nil {
+		t.Fatalf("install posting clear pause fixture: %v", err)
+	}
+
+	type commandResult struct {
+		err error
+	}
+	commandDone := make(chan commandResult, 1)
+	commandFinished := false
+	go func() {
+		var stdout, stderr bytes.Buffer
+		commandDone <- commandResult{err: runCommand([]string{"maintenance", "initialize-message-search-postings", "--batch-size", strconv.Itoa(chunkSize)}, slog.New(slog.DiscardHandler), &stdout, &stderr)}
+	}()
+	defer func() {
+		if !commandFinished {
+			select {
+			case <-commandDone:
+			case <-time.After(10 * time.Second):
+				t.Error("initializer did not stop during cleanup")
+			}
+		}
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS test_pause_large_message_search_posting_insert ON message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_large_message_search_posting_insert();
+		`); err != nil {
+			t.Errorf("remove posting clear pause fixture: %v", err)
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%INSERT INTO message_search_postings%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check initializer pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-commandDone:
+				commandFinished = true
+				t.Fatalf("initializer returned before backfill pause: %v", result.err)
+			default:
+				t.Fatal("initializer did not enter the backfill pause")
+			}
+		}
+		select {
+		case result := <-commandDone:
+			commandFinished = true
+			t.Fatalf("initializer returned before backfill pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	type sendResult struct {
+		localID int64
+		err     error
+	}
+	sameDialogSendDone := make(chan sendResult, 1)
+	go func() {
+		message, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "commonterm live send", 30301, 0, 0)
+		sameDialogSendDone <- sendResult{localID: message.LocalID, err: err}
+	}()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND query ILIKE '%INSERT INTO messages%'
+			)
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("check concurrent send wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("send into the rebuilding dialog did not wait on its posting count")
+		}
+		select {
+		case result := <-sameDialogSendDone:
+			t.Fatalf("send completed before the posting count was locked: %v", result.err)
+		case result := <-commandDone:
+			commandFinished = true
+			t.Fatalf("initializer finished before the send waited: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	otherDialogSendDone := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := s.SendMessage(ctx, owner.ID, otherPeer.ID, "separate dialog", 30302, 0, 0)
+		otherDialogSendDone <- err
+	}()
+	editDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.EditMessage(ctx, owner.ID, firstLocalID, "editedterm")
+		editDone <- err
+	}()
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := s.DeleteMessages(ctx, owner.ID, []int64{firstLocalID + 1}, false)
+		deleteDone <- err
+	}()
+
+	select {
+	case result := <-sameDialogSendDone:
+		if result.err != nil {
+			t.Fatalf("send to the rebuilding dialog: %v", result.err)
+		}
+		if result.localID <= firstLocalID+historySize-1 {
+			t.Fatalf("new message local ID = %d, want above backfill history", result.localID)
+		}
+	case result := <-commandDone:
+		commandFinished = true
+		t.Fatalf("initializer completed before the first bounded writer was released: %v", result.err)
+	case <-time.After(time.Second):
+		t.Fatal("send into the large dialog waited for the whole history rebuild")
+	}
+	for _, writer := range []struct {
+		name string
+		done <-chan error
+	}{{"other-dialog send", otherDialogSendDone}, {"edit", editDone}, {"delete", deleteDone}} {
+		select {
+		case err := <-writer.done:
+			if err != nil {
+				t.Fatalf("%s after one backfill chunk: %v", writer.name, err)
+			}
+		case result := <-commandDone:
+			commandFinished = true
+			t.Fatalf("initializer completed before %s was released by a chunk boundary: %v", writer.name, result.err)
+		case <-time.After(time.Second):
+			t.Fatalf("%s waited for the whole history rebuild", writer.name)
+		}
+	}
+	select {
+	case result := <-commandDone:
+		commandFinished = true
+		t.Fatalf("initializer completed before finishing the large-history contention assertions: %v", result.err)
+	default:
+	}
+
+	select {
+	case result := <-commandDone:
+		commandFinished = true
+		if result.err != nil {
+			t.Fatalf("initialize large dialog: %v", result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("initializer did not finish the large dialog")
+	}
+
+	var commonCount, editedCount int64
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE lexeme = 'commonterm'),
+		       count(*) FILTER (WHERE lexeme = 'editedterm')
+		FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&commonCount, &editedCount); err != nil {
+		t.Fatalf("count final postings: %v", err)
+	}
+	if commonCount != historySize-2+1 || editedCount != 1 {
+		t.Fatalf("final lexeme counts = common %d, edited %d; want %d and 1", commonCount, editedCount, historySize-1)
+	}
+	results, err := s.SearchMessages(ctx, owner.ID, store.PeerTypeUser, peer.ID, "commonterm", 0, 10)
+	if err != nil {
+		t.Fatalf("search initialized large dialog: %v", err)
+	}
+	if len(results) != 10 {
+		t.Fatalf("large dialog search returned %d results, want 10", len(results))
+	}
+	if results[0].LocalID != firstLocalID+historySize {
+		t.Fatalf("large dialog search first local ID = %d, want newest %d", results[0].LocalID, firstLocalID+historySize)
 	}
 }

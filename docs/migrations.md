@@ -91,33 +91,39 @@ Initialize the existing dialogs with:
 teagramd maintenance initialize-message-search-postings [--batch-size <n>]
 ```
 
-The default batch size is 100 dialogs; `n` can be from 1 to 1000 and bounds the
-number of dialog keys fetched per scan. Each dialog is initialized in its own
-transaction. In key order by owner, peer type, and peer ID, the initializer
-locks that dialog's unready marker, then its current message rows by `local_id`,
-then postings and counts. One materialized backfill statement takes the row
-locks before it clears postings and rebuilds them from the same statement
-snapshot. Inserts after that snapshot are covered by the message triggers, but
-they wait for the initializer too: the backfill's posting deletes and inserts
-fire the count trigger, which row-locks that dialog's
-`message_search_posting_counts` rows until the dialog's transaction commits. A
-send into the dialog therefore blocks while it holds its owners' advisory locks,
-which also blocks that owner's other sends until the dialog's backfill commits.
-Edits and deletes of rows in the snapshot wait for the initializer's row locks.
+The default batch size is 100 messages per dialog transaction; `n` can be from
+1 to 1000 and bounds the message rows locked and rebuilt in each chunk. The
+initializer scans dialog keys in owner, peer type, and peer ID order. For each
+dialog it locks the unready marker, then up to `n` message rows by `local_id`,
+then that chunk's postings and posting-count rows. Each chunk has its own
+transaction. Its commit advances the marker's `last_local_id`; after the final
+empty chunk, the marker is deleted and the dialog becomes ready.
 
-Existing send, edit, and delete transactions acquire their existing owner or
-chat locks before changing message rows; the message triggers then update
-postings and counts. Some message mutations can touch rows in multiple dialogs
-in one transaction, so the initializer holds message rows for only one dialog
-at a time. This avoids a cross-dialog message-row lock cycle. The initializer
-does not use the configured Postgres statement timeout: clearing and backfilling
-a large dialog can take longer than the normal request statement ceiling. The
-blocked sends, edits, and deletes are bounded by that request timeout, so they
-fail for as long as the dialog takes to commit. Run the command in a low-traffic
-window; the stall grows with the dialog's message count. If a
-dialog transaction fails or the command stops, its marker and postings roll
-back together, while previously committed dialogs stay ready; running the
-command again continues from the remaining markers.
+The source rows are locked before their postings are cleared and rebuilt from
+the same statement snapshot. A chunk only clears postings for its selected
+message IDs, so inserts outside that chunk keep the postings maintained by the
+message triggers. Edits and deletes of selected rows wait for the chunk to
+commit; later chunks see their committed state. The marker remains until all
+chunks complete, so searches use the legacy query during a partial rebuild.
+If the process stops or a chunk fails, that chunk's postings and cursor update
+roll back together. Earlier chunks remain committed and the marker stays
+unready; a rerun resumes at its saved cursor.
+
+Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
+A send with an overlapping lexeme can wait on the chunk's posting-count row
+while holding its owner advisory locks, which queues that owner's other sends
+until the chunk commits. This stall is limited to one chunk, rather than the
+dialog's full history; choose `--batch-size` for the write delay the deployment
+can tolerate. The initializer omits the configured Postgres statement timeout
+so it can finish a chunk; message writers still use their normal request
+timeout. Run it in a low-traffic window when large dialogs are expected.
+
+Existing send, edit, and delete transactions acquire their owner or chat locks
+before changing message rows, then their message triggers update postings and
+counts. Some message mutations can touch rows in multiple dialogs in one
+transaction. The initializer holds rows for only one dialog in one chunk and
+releases them before starting another chunk, so it cannot form a cross-dialog
+message-row lock cycle with those mutations.
 
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain

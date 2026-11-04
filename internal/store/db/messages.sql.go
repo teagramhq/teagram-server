@@ -74,48 +74,72 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 	return i, err
 }
 
-const backfillMessageSearchDialogPostings = `-- name: BackfillMessageSearchDialogPostings :exec
+const backfillMessageSearchDialogPostings = `-- name: BackfillMessageSearchDialogPostings :one
 WITH source_messages AS MATERIALIZED (
-    SELECT message.local_id, message.message_tsv
+    SELECT message.local_id, message.message_tsv, message.deleted
     FROM messages AS message
-    WHERE message.owner_id = $1::bigint
-      AND message.peer_type = $2::smallint
-      AND message.peer_id = $3::bigint
-      AND message.deleted = false
+    WHERE message.owner_id = $2::bigint
+      AND message.peer_type = $3::smallint
+      AND message.peer_id = $4::bigint
+      AND message.local_id > $1::bigint
     ORDER BY message.local_id
+    LIMIT $5::int
     FOR SHARE OF message
 ),
 cleared_postings AS (
     DELETE FROM message_search_postings AS posting
-    USING (SELECT count(*) AS source_count FROM source_messages) AS locked_source
-    WHERE posting.owner_id = $1::bigint
-      AND posting.peer_type = $2::smallint
-      AND posting.peer_id = $3::bigint
-      AND locked_source.source_count >= 0
+    USING source_messages AS source
+    WHERE posting.owner_id = $2::bigint
+      AND posting.peer_type = $3::smallint
+      AND posting.peer_id = $4::bigint
+      AND posting.local_id = source.local_id
     RETURNING 1
-)
+),
+inserted_postings AS (
 INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
-SELECT $1::bigint, source.local_id,
-       $2::smallint, $3::bigint, term.lexeme
+SELECT $2::bigint, source.local_id,
+       $3::smallint, $4::bigint, term.lexeme
 FROM source_messages AS source
 CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
 CROSS JOIN (SELECT count(*) FROM cleared_postings) AS cleared
+WHERE source.deleted = false
 ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
+RETURNING 1
+)
+SELECT COALESCE(MAX(source.local_id), $1::bigint)::bigint AS next_local_id,
+       COUNT(source.local_id)::bigint AS processed_count
+FROM source_messages AS source
+CROSS JOIN (SELECT count(*) FROM inserted_postings) AS inserted
 `
 
 type BackfillMessageSearchDialogPostingsParams struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
+	LastLocalID int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+	BatchSize   int32
 }
 
-// Rebuild a marked dialog from one locked source snapshot. The materialized
-// source CTE locks rows by local_id before deleting postings; the delete and
-// insert share its statement snapshot, so later inserts keep their trigger
-// postings rather than being cleared or backfilled from stale text.
-func (q *Queries) BackfillMessageSearchDialogPostings(ctx context.Context, arg BackfillMessageSearchDialogPostingsParams) error {
-	_, err := q.db.Exec(ctx, backfillMessageSearchDialogPostings, arg.OwnerID, arg.PeerType, arg.PeerID)
-	return err
+type BackfillMessageSearchDialogPostingsRow struct {
+	NextLocalID    int64
+	ProcessedCount int64
+}
+
+// Rebuild one bounded range of a marked dialog. The source CTE locks at most
+// batch_size message rows in local_id order before clearing their postings.
+// Deletes and inserts update posting counts in this transaction; the source
+// snapshot and row locks keep concurrent edits from restoring stale terms.
+func (q *Queries) BackfillMessageSearchDialogPostings(ctx context.Context, arg BackfillMessageSearchDialogPostingsParams) (BackfillMessageSearchDialogPostingsRow, error) {
+	row := q.db.QueryRow(ctx, backfillMessageSearchDialogPostings,
+		arg.LastLocalID,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.BatchSize,
+	)
+	var i BackfillMessageSearchDialogPostingsRow
+	err := row.Scan(&i.NextLocalID, &i.ProcessedCount)
+	return i, err
 }
 
 const botHasStartedPrivateChat = `-- name: BotHasStartedPrivateChat :one
@@ -904,7 +928,7 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 }
 
 const lockMessageSearchUnreadyDialog = `-- name: LockMessageSearchUnreadyDialog :one
-SELECT owner_id
+SELECT last_local_id
 FROM message_search_unready_dialogs
 WHERE owner_id = $1::bigint
   AND peer_type = $2::smallint
@@ -920,9 +944,9 @@ type LockMessageSearchUnreadyDialogParams struct {
 
 func (q *Queries) LockMessageSearchUnreadyDialog(ctx context.Context, arg LockMessageSearchUnreadyDialogParams) (int64, error) {
 	row := q.db.QueryRow(ctx, lockMessageSearchUnreadyDialog, arg.OwnerID, arg.PeerType, arg.PeerID)
-	var owner_id int64
-	err := row.Scan(&owner_id)
-	return owner_id, err
+	var last_local_id int64
+	err := row.Scan(&last_local_id)
+	return last_local_id, err
 }
 
 const markMessageSearchDialogReady = `-- name: MarkMessageSearchDialogReady :exec
@@ -1095,17 +1119,23 @@ ORDER BY owner_id, peer_type, peer_id
 LIMIT $1::int
 `
 
+type MessageSearchUnreadyDialogsRow struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
 // MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
 // The initializer locks and rechecks each marker inside its dialog transaction.
-func (q *Queries) MessageSearchUnreadyDialogs(ctx context.Context, batchSize int32) ([]MessageSearchUnreadyDialog, error) {
+func (q *Queries) MessageSearchUnreadyDialogs(ctx context.Context, batchSize int32) ([]MessageSearchUnreadyDialogsRow, error) {
 	rows, err := q.db.Query(ctx, messageSearchUnreadyDialogs, batchSize)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []MessageSearchUnreadyDialog
+	var items []MessageSearchUnreadyDialogsRow
 	for rows.Next() {
-		var i MessageSearchUnreadyDialog
+		var i MessageSearchUnreadyDialogsRow
 		if err := rows.Scan(&i.OwnerID, &i.PeerType, &i.PeerID); err != nil {
 			return nil, err
 		}
@@ -1939,6 +1969,31 @@ func (q *Queries) SetEditedTextWithEntities(ctx context.Context, arg SetEditedTe
 		arg.LocalID,
 		arg.Message,
 		arg.Entities,
+	)
+	return err
+}
+
+const updateMessageSearchUnreadyDialogProgress = `-- name: UpdateMessageSearchUnreadyDialogProgress :exec
+UPDATE message_search_unready_dialogs
+SET last_local_id = $1::bigint
+WHERE owner_id = $2::bigint
+  AND peer_type = $3::smallint
+  AND peer_id = $4::bigint
+`
+
+type UpdateMessageSearchUnreadyDialogProgressParams struct {
+	LastLocalID int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+}
+
+func (q *Queries) UpdateMessageSearchUnreadyDialogProgress(ctx context.Context, arg UpdateMessageSearchUnreadyDialogProgressParams) error {
+	_, err := q.db.Exec(ctx, updateMessageSearchUnreadyDialogProgress,
+		arg.LastLocalID,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
 	)
 	return err
 }

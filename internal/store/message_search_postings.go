@@ -10,13 +10,13 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-// MessageSearchPostingsInitializationMaxBatchSize bounds the number of unready
-// dialogs fetched for one maintenance scan.
+// MessageSearchPostingsInitializationMaxBatchSize bounds the number of messages
+// rebuilt in one dialog transaction.
 const MessageSearchPostingsInitializationMaxBatchSize = 1000
 
 // InitializeMessageSearchPostings rebuilds unready message-search postings in
-// bounded scans, with one transaction per dialog. Each committed dialog becomes
-// a durable checkpoint, so a later invocation resumes at the remaining markers.
+// bounded scans and message chunks. Each committed chunk advances the marker's
+// cursor, so a later invocation resumes at the remaining history.
 func (s *Store) InitializeMessageSearchPostings(ctx context.Context, batchSize int) (int64, error) {
 	if batchSize < 1 || batchSize > MessageSearchPostingsInitializationMaxBatchSize {
 		return 0, fmt.Errorf("initialize message search postings: batch size must be between 1 and %d", MessageSearchPostingsInitializationMaxBatchSize)
@@ -33,7 +33,7 @@ func (s *Store) InitializeMessageSearchPostings(ctx context.Context, batchSize i
 		}
 
 		for _, dialog := range dialogs {
-			completed, err := s.initializeMessageSearchPostingsDialog(ctx, dialog)
+			completed, err := s.initializeMessageSearchPostingsDialog(ctx, dialog, int32(batchSize))
 			if err != nil {
 				return initialized, err
 			}
@@ -46,37 +46,80 @@ func (s *Store) InitializeMessageSearchPostings(ctx context.Context, batchSize i
 
 func (s *Store) initializeMessageSearchPostingsDialog(
 	ctx context.Context,
-	dialog db.MessageSearchUnreadyDialog,
+	dialog db.MessageSearchUnreadyDialogsRow,
+	batchSize int32,
 ) (completed bool, resultErr error) {
+	for {
+		done, found, err := s.initializeMessageSearchPostingsDialogChunk(ctx, dialog, batchSize)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			// Another initializer completed this dialog after the candidate scan.
+			return false, nil
+		}
+		if done {
+			return true, nil
+		}
+	}
+}
+
+func (s *Store) initializeMessageSearchPostingsDialogChunk(
+	ctx context.Context,
+	dialog db.MessageSearchUnreadyDialogsRow,
+	batchSize int32,
+) (done, found bool, resultErr error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin message search postings dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+		return false, false, fmt.Errorf("begin message search postings dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
 	}
 	defer func() {
 		rollbackErr := tx.Rollback(context.WithoutCancel(ctx))
 		if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
-			resultErr = errors.Join(resultErr, fmt.Errorf("rollback message search postings dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, rollbackErr))
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback message search postings chunk %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, rollbackErr))
 		}
 	}()
 
 	qtx := s.q.WithTx(tx)
 	params := db.LockMessageSearchUnreadyDialogParams(dialog)
-	if _, err := qtx.LockMessageSearchUnreadyDialog(ctx, params); errors.Is(err, pgx.ErrNoRows) {
-		// Another initializer committed this dialog after the candidate scan.
-		return false, nil
+	lastLocalID, err := qtx.LockMessageSearchUnreadyDialog(ctx, params)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
 	} else if err != nil {
-		return false, fmt.Errorf("lock unready message search dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+		return false, true, fmt.Errorf("lock unready message search dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
 	}
 
-	backfillParams := db.BackfillMessageSearchDialogPostingsParams(dialog)
-	if err := qtx.BackfillMessageSearchDialogPostings(ctx, backfillParams); err != nil {
-		return false, fmt.Errorf("backfill search postings for dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+	backfillParams := db.BackfillMessageSearchDialogPostingsParams{
+		OwnerID:     dialog.OwnerID,
+		PeerType:    dialog.PeerType,
+		PeerID:      dialog.PeerID,
+		LastLocalID: lastLocalID,
+		BatchSize:   batchSize,
 	}
-	if err := qtx.MarkMessageSearchDialogReady(ctx, db.MarkMessageSearchDialogReadyParams(dialog)); err != nil {
-		return false, fmt.Errorf("mark message search dialog %d/%d/%d ready: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+	progress, err := qtx.BackfillMessageSearchDialogPostings(ctx, backfillParams)
+	if err != nil {
+		return false, true, fmt.Errorf("backfill search postings for dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+	}
+
+	done = progress.ProcessedCount == 0
+	if done {
+		markParams := db.MarkMessageSearchDialogReadyParams(dialog)
+		if err := qtx.MarkMessageSearchDialogReady(ctx, markParams); err != nil {
+			return false, true, fmt.Errorf("mark message search dialog %d/%d/%d ready: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+		}
+	} else {
+		updateParams := db.UpdateMessageSearchUnreadyDialogProgressParams{
+			OwnerID:     dialog.OwnerID,
+			PeerType:    dialog.PeerType,
+			PeerID:      dialog.PeerID,
+			LastLocalID: progress.NextLocalID,
+		}
+		if err := qtx.UpdateMessageSearchUnreadyDialogProgress(ctx, updateParams); err != nil {
+			return false, true, fmt.Errorf("advance message search dialog cursor %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit message search postings dialog %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
+		return false, true, fmt.Errorf("commit message search postings chunk %d/%d/%d: %w", dialog.OwnerID, dialog.PeerType, dialog.PeerID, err)
 	}
-	return true, nil
+	return done, true, nil
 }
