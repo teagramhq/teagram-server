@@ -161,7 +161,9 @@ expected_migration_revision=abcdef0123456789abcdef0123456789abcdef01
 expected_server_revision=abcdef0123456789abcdef0123456789abcdef02
 export EXPECTED_MIGRATION_REVISION="$expected_migration_revision"
 export EXPECTED_SERVER_REVISION="$expected_server_revision"
-export EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql'
+fixture_migration_path="migrations/${production_migration_version}_existing.sql"
+export EXPECTED_SERVER_TREE="$(printf '100644 blob %s\t%s' \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path")"
 export EXPECTED_MIGRATION_TREE="$EXPECTED_SERVER_TREE"
 printf '%s\n' \
   'apiVersion: v1' \
@@ -200,6 +202,22 @@ PATH="$test_dir/bin:$PATH" \
   EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
   fail 'the production image pin validator must accept valid images and matching Job suffixes'
+
+valid_later_migration_version="$(printf '%014d' "$((10#$production_migration_version + 1))")"
+[[ "$valid_later_migration_version" =~ ^[0-9]{14}$ ]] ||
+  fail 'the later migration fixture must remain a 14-digit version'
+valid_later_migration_path="migrations/${valid_later_migration_version}_later.sql"
+valid_later_server_tree="$(printf '100644 blob %s\t%s\n100644 blob %s\t%s' \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path" \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$valid_later_migration_path")"
+valid_later_prod_manifest="$test_dir/k8s-prod-later-migration.yaml"
+sed "s|migration-version: \"$production_migration_version\"|migration-version: \"$valid_later_migration_version\"|" \
+  "$valid_prod_manifest" > "$valid_later_prod_manifest"
+PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_TREE="$valid_later_server_tree" \
+  EXPECTED_MIGRATION_TREE="$valid_later_server_tree" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_later_prod_manifest" >/dev/null ||
+  fail 'the production image pin validator must accept compatible images with a later migration version'
 
 drifted_migration_manifest="$test_dir/k8s-prod-drifted-migration.yaml"
 sed "s|migration-version: \"$production_migration_version\"|migration-version: \"99999999999999\"|" \
