@@ -35,6 +35,7 @@ trap bootstrap_exit EXIT
 git -C "$BOOTSTRAP_REPO" show "$OPS_SHA:deploy/teagram/ops/blob-encryption-common.inc" \
   > "$OPS_TEMP_DIR/common.inc" || { printf '%s\n' 'cannot stage the reviewed media operation helpers' >&2; exit 1; }
 chmod 600 -- "$OPS_TEMP_DIR/common.inc" || { printf '%s\n' 'cannot protect reviewed media operation helpers' >&2; exit 1; }
+# shellcheck disable=SC1091
 source "$OPS_TEMP_DIR/common.inc"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${OPS_SHA:0:7}"
@@ -46,7 +47,7 @@ SERVER_STOPPED=0
 RUSTFS_STOPPED=0
 
 recover_runtime() {
-  local authority_json outcome container_state health healthy attempt
+  local authority_json outcome container_state health healthy
   if [[ "$RUSTFS_STOPPED" == 1 ]]; then
     if docker inspect --format '{{.State.Status}}' "$RUSTFS_CONTAINER" >/dev/null 2>&1; then
       container_state=$(docker inspect --format '{{.State.Status}}' "$RUSTFS_CONTAINER") || return 1
@@ -54,7 +55,7 @@ recover_runtime() {
         docker start "$RUSTFS_CONTAINER" >/dev/null || return 1
       fi
       healthy=0
-      for attempt in {1..60}; do
+      for _ in {1..60}; do
         health=$(docker inspect --format '{{.State.Health.Status}}' "$RUSTFS_CONTAINER") || return 1
         if [[ "$health" == healthy ]]; then healthy=1; break; fi
         sleep 1
@@ -74,7 +75,7 @@ recover_runtime() {
     if [[ "$container_state" != running ]]; then
       docker start "$SERVER_CONTAINER" >/dev/null || return 1
     fi
-    for attempt in {1..60}; do
+    for _ in {1..60}; do
       container_state=$(docker inspect --format '{{.State.Status}}' "$SERVER_CONTAINER") || return 1
       if [[ "$container_state" == running ]]; then
         SERVER_STOPPED=0
@@ -222,7 +223,7 @@ else
 fi
 chmod 600 -- "$restore_start" || ops_fail 'cannot protect isolated restore diagnostics'
 ready=0
-for attempt in {1..60}; do
+for _ in {1..60}; do
   if docker exec "$RESTORE_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -d teagram >/dev/null 2>&1; then
     ready=1
     break

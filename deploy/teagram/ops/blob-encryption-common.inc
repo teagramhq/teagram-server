@@ -293,7 +293,7 @@ start_server_and_smoke() {
     SERVER_STOPPED=1
     docker start "$SERVER_CONTAINER" >/dev/null || ops_fail 'could not start teagramd'
   fi
-  for attempt in {1..60}; do
+  for _ in {1..60}; do
     inspect_container "$SERVER_CONTAINER" teagramd
     [[ "$INSPECT_STATE" == running ]] && break
     sleep 1
