@@ -39,8 +39,8 @@ spec:
             - name: HOME
               value: /tmp
           securityContext:
-            runAsUser: 0
-            runAsGroup: 0
+            runAsUser: 65532
+            runAsGroup: 65532
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
