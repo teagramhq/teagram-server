@@ -315,6 +315,21 @@ func TestEvaluateGivesGetContactsAt100xItsOwnBudget(t *testing.T) {
 	}
 }
 
+func TestEvaluateBlocksGetContactsBudgetDuringCalibration(t *testing.T) {
+	rs := pair("contacts.getContacts", perfreport.Read, result(2, 3, 5, 100), result(10, 46, 5, 10_000))
+	rs[1].FullSet = true
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: rounds(rs...), History: calibrated("contacts.getContacts", perfreport.Calibration-7, 10, 0.1),
+	})
+	if len(v.Failures) != 1 || v.Failures[0].Check != perfreport.CheckBudget {
+		t.Fatalf("failures = %s, want a blocking budget failure during calibration", reasons(v.Failures))
+	}
+	if len(v.Reported) != 0 || len(v.TimingFailures) != 0 {
+		t.Fatalf("reported = %s, timing failures = %s, want the budget failure to block directly",
+			reasons(v.Reported), reasons(v.TimingFailures))
+	}
+}
+
 func TestMarkdownShowsGetContactsBudgetAt100x(t *testing.T) {
 	rs := pair("contacts.getContacts", perfreport.Read, result(2, 3, 5, 100), result(10, 44, 5, 10_000))
 	rs[1].FullSet = true

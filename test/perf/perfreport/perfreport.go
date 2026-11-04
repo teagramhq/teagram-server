@@ -39,9 +39,11 @@ const (
 var budgetMs = map[Kind]float64{Read: 20, Write: 50, FanOut: 2000}
 
 // scenarioBudgetMs replaces a kind's budget for one scenario on the 100x
-// fixture. contacts.getContacts returns the whole contact list by protocol, so
-// its server time is bounded by the Postgres floor of the required columns
-// (about 15 ms on the CI runner) plus runner variance, not by the read budget.
+// fixture. These scenario-specific budgets block even before timing
+// calibration. contacts.getContacts returns the whole contact list by
+// protocol, so its server time is bounded by the Postgres floor of the required
+// columns (about 15 ms on the CI runner) plus runner variance, not by the read
+// budget.
 var scenarioBudgetMs = map[string]float64{"contacts.getContacts": 45}
 
 // budgetFor returns the p95 ceiling on the 100x fixture for one scenario.
@@ -204,7 +206,7 @@ type Row struct {
 // Verdict is the outcome of Evaluate.
 type Verdict struct {
 	Rows []Row
-	// Failures are deterministic checks that failed; they block.
+	// Failures are deterministic or hard-budget checks that failed; they block.
 	Failures []Failure
 	// TimingFailures are timing checks that failed on a calibrated scenario;
 	// they block once a rerun confirms them.
@@ -313,6 +315,9 @@ func Evaluate(in Input) Verdict {
 				row.MeasurementFailed = true
 			}
 			switch {
+			case check == CheckBudget && name == "contacts.getContacts":
+				row.Failed = true
+				v.Failures = append(v.Failures, f)
 			case !timing(check):
 				row.Failed = true
 				v.Failures = append(v.Failures, f)
@@ -590,7 +595,7 @@ func Markdown(v Verdict) string {
 		base = fmt.Sprintf("%d interleaved base rounds", v.BaseRounds)
 	}
 	fmt.Fprintf(&b, "Medians of %d rounds; %s. Reference budgets are p95 on the 100x fixture. "+
-		"Query counts, rows read and sequential scans block. P50 regressions compare with the interleaved base or calibrated main history; p95 and 1x/100x checks also block after %d main runs unless a timing waiver names the scenario.\n\n",
+		"Query counts, rows read and sequential scans block. P50 regressions compare with the interleaved base or calibrated main history; hard scenario budgets block immediately, while other p95 and 1x/100x timing checks block after %d main runs unless a timing waiver names the scenario.\n\n",
 		v.Rounds, base, Calibration)
 	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Reference p95 (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
