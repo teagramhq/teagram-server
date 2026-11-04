@@ -143,90 +143,90 @@ func (q *Queries) EvaluateLastSeenPrivacy(ctx context.Context, arg EvaluateLastS
 }
 
 const evaluateLastSeenPrivacyForViewer = `-- name: EvaluateLastSeenPrivacyForViewer :many
-SELECT requested.owner_id::BIGINT AS owner_id,
-       COALESCE(owner_rule.base_rule, 'everybody') AS owner_base_rule,
-       EXISTS (
-           SELECT 1 FROM blocked_users bu
-           WHERE bu.blocker_id = requested.owner_id
-             AND bu.blocked_id = $1
-       ) AS owner_blocked,
-       EXISTS (
-           SELECT 1 FROM user_privacy_rule_users pru
-           WHERE pru.owner_id = requested.owner_id
-             AND pru.privacy_key = 'status_timestamp'
-             AND pru.user_id = $1
-             AND pru.entry_type = 'disallow'
-       ) AS owner_disallowed,
-       EXISTS (
-           SELECT 1 FROM user_privacy_rule_users pru
-           WHERE pru.owner_id = requested.owner_id
-             AND pru.privacy_key = 'status_timestamp'
-             AND pru.user_id = $1
-             AND pru.entry_type = 'allow'
-       ) AS owner_allowed,
-       EXISTS (
-           SELECT 1 FROM user_contacts uc
-           WHERE uc.owner_id = requested.owner_id
-             AND uc.contact_id = $1
-       ) AS owner_contact,
-       COALESCE((
-           EXISTS (
-               SELECT 1 FROM blocked_users bu
-               WHERE bu.blocker_id = $1
-                 AND bu.blocked_id = requested.owner_id
-           )
-           OR EXISTS (
-               SELECT 1 FROM user_privacy_rules viewer_rule
-               WHERE viewer_rule.owner_id = $1
-                 AND viewer_rule.privacy_key = 'status_timestamp'
-                 AND (
-                     EXISTS (
-                         SELECT 1 FROM user_privacy_rule_users pru
-                         WHERE pru.owner_id = $1
-                           AND pru.privacy_key = 'status_timestamp'
-                           AND pru.user_id = requested.owner_id
-                           AND pru.entry_type = 'disallow'
-                     )
-                     OR (
-                         NOT EXISTS (
-                             SELECT 1 FROM user_privacy_rule_users pru
-                             WHERE pru.owner_id = $1
-                               AND pru.privacy_key = 'status_timestamp'
-                               AND pru.user_id = requested.owner_id
-                               AND pru.entry_type = 'allow'
-                         )
-                         AND (
-                             viewer_rule.base_rule = 'nobody'
-                             OR (
-                                 viewer_rule.base_rule = 'contacts'
-                                 AND NOT EXISTS (
-                                     SELECT 1 FROM user_contacts uc
-                                     WHERE uc.owner_id = $1
-                                       AND uc.contact_id = requested.owner_id
-                                 )
-                             )
-                         )
-                     )
-                 )
-           )
-       ), FALSE)::BOOLEAN AS viewer_hides_from_owner
-FROM UNNEST($2::BIGINT[]) AS requested(owner_id)
-CROSS JOIN LATERAL (
+WITH owner_users AS MATERIALIZED (
+    -- Look up only the requested primary keys so a large user table is never
+    -- scanned; the missing-owner check stays in the join.
     SELECT users.id
     FROM users
-    WHERE users.id = requested.owner_id
-    LIMIT 1
-) AS owner_user
+    WHERE users.id = ANY ($1::BIGINT[])
+),
+viewer_rule AS MATERIALIZED (
+    SELECT rule.base_rule
+    FROM user_privacy_rules rule
+    WHERE rule.owner_id = $2
+      AND rule.privacy_key = 'status_timestamp'
+)
+SELECT requested.owner_id::BIGINT AS owner_id,
+       COALESCE(owner_rule.base_rule, 'everybody') AS owner_base_rule,
+       (owner_blocks_viewer.blocked_id IS NOT NULL)::BOOLEAN AS owner_blocked,
+       (owner_disallows_viewer.user_id IS NOT NULL)::BOOLEAN AS owner_disallowed,
+       (owner_allows_viewer.user_id IS NOT NULL)::BOOLEAN AS owner_allowed,
+       (owner_contact_of_viewer.contact_id IS NOT NULL)::BOOLEAN AS owner_contact,
+       (
+           viewer_blocks_owner.blocked_id IS NOT NULL
+           OR (
+               viewer_rule.base_rule IS NOT NULL
+               AND (
+                   viewer_disallows_owner.user_id IS NOT NULL
+                   OR (
+                       viewer_allows_owner.user_id IS NULL
+                       AND (
+                           viewer_rule.base_rule = 'nobody'
+                           OR (
+                               viewer_rule.base_rule = 'contacts'
+                               AND viewer_contact_of_owner.contact_id IS NULL
+                           )
+                       )
+                   )
+               )
+           )
+       )::BOOLEAN AS viewer_hides_from_owner
+FROM UNNEST($1::BIGINT[]) AS requested(owner_id)
+JOIN owner_users owner_user
+  ON owner_user.id = requested.owner_id
 JOIN users viewer_user
-  ON viewer_user.id = $1
+  ON viewer_user.id = $2
 LEFT JOIN user_privacy_rules owner_rule
   ON owner_rule.owner_id = owner_user.id
  AND owner_rule.privacy_key = 'status_timestamp'
+LEFT JOIN blocked_users owner_blocks_viewer
+  ON owner_blocks_viewer.blocker_id = owner_user.id
+ AND owner_blocks_viewer.blocked_id = $2
+LEFT JOIN user_privacy_rule_users owner_disallows_viewer
+  ON owner_disallows_viewer.owner_id = owner_user.id
+ AND owner_disallows_viewer.privacy_key = 'status_timestamp'
+ AND owner_disallows_viewer.user_id = $2
+ AND owner_disallows_viewer.entry_type = 'disallow'
+LEFT JOIN user_privacy_rule_users owner_allows_viewer
+  ON owner_allows_viewer.owner_id = owner_user.id
+ AND owner_allows_viewer.privacy_key = 'status_timestamp'
+ AND owner_allows_viewer.user_id = $2
+ AND owner_allows_viewer.entry_type = 'allow'
+LEFT JOIN user_contacts owner_contact_of_viewer
+  ON owner_contact_of_viewer.owner_id = owner_user.id
+ AND owner_contact_of_viewer.contact_id = $2
+LEFT JOIN blocked_users viewer_blocks_owner
+  ON viewer_blocks_owner.blocker_id = $2
+ AND viewer_blocks_owner.blocked_id = owner_user.id
+LEFT JOIN viewer_rule ON TRUE
+LEFT JOIN user_privacy_rule_users viewer_disallows_owner
+  ON viewer_disallows_owner.owner_id = $2
+ AND viewer_disallows_owner.privacy_key = 'status_timestamp'
+ AND viewer_disallows_owner.user_id = owner_user.id
+ AND viewer_disallows_owner.entry_type = 'disallow'
+LEFT JOIN user_privacy_rule_users viewer_allows_owner
+  ON viewer_allows_owner.owner_id = $2
+ AND viewer_allows_owner.privacy_key = 'status_timestamp'
+ AND viewer_allows_owner.user_id = owner_user.id
+ AND viewer_allows_owner.entry_type = 'allow'
+LEFT JOIN user_contacts viewer_contact_of_owner
+  ON viewer_contact_of_owner.owner_id = $2
+ AND viewer_contact_of_owner.contact_id = owner_user.id
 `
 
 type EvaluateLastSeenPrivacyForViewerParams struct {
-	ViewerID int64
 	OwnerIds []int64
+	ViewerID int64
 }
 
 type EvaluateLastSeenPrivacyForViewerRow struct {
@@ -240,10 +240,11 @@ type EvaluateLastSeenPrivacyForViewerRow struct {
 }
 
 // Resolve every owner's status visibility to one viewer in a single query.
-// A direct join can scan all users for large batches; make each selected owner
-// drive its primary-key lookup while preserving the missing-owner check.
+// Each edge is a left join on its primary key, so every owner resolves to one
+// row and the planner can hash the set-valued sides instead of running a
+// subplan per owner.
 func (q *Queries) EvaluateLastSeenPrivacyForViewer(ctx context.Context, arg EvaluateLastSeenPrivacyForViewerParams) ([]EvaluateLastSeenPrivacyForViewerRow, error) {
-	rows, err := q.db.Query(ctx, evaluateLastSeenPrivacyForViewer, arg.ViewerID, arg.OwnerIds)
+	rows, err := q.db.Query(ctx, evaluateLastSeenPrivacyForViewer, arg.OwnerIds, arg.ViewerID)
 	if err != nil {
 		return nil, err
 	}

@@ -173,6 +173,20 @@ func changedLastSeenAccessViewers(inputsByViewer map[int64]lastSeenPrivacyInputs
 	return ascendingUnique(changed), nil
 }
 
+// lastSeenPrivacyQueries picks how the visibility batch is planned. A cached
+// statement settles on a generic plan that cannot size the owner array, which
+// is several times slower for large batches; those plan per call instead.
+func lastSeenPrivacyQueries(s *Store, owners int) *db.Queries {
+	if owners >= largeLastSeenPrivacyBatch {
+		return db.New(unnamedPlanDB{s.pool})
+	}
+	return s.q
+}
+
+// largeLastSeenPrivacyBatch is the owner count from which a visibility batch is
+// planned per call rather than through the cached generic plan.
+const largeLastSeenPrivacyBatch = 1000
+
 // EvaluateLastSeenPrivacyForViewer resolves status visibility for a viewer
 // across a set of owners in one query. The zero value for an invalid owner is
 // hidden; a missing database row makes the batch fail instead of granting
@@ -207,7 +221,7 @@ func (s *Store) EvaluateLastSeenPrivacyForViewer(ctx context.Context, viewerID i
 		return results, nil
 	}
 
-	rows, err := s.q.EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
+	rows, err := lastSeenPrivacyQueries(s, len(queryOwnerIDs)).EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
 		ViewerID: viewerID,
 		OwnerIds: queryOwnerIDs,
 	})
