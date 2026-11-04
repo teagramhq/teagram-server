@@ -122,6 +122,7 @@ class PrePushHookTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         self.capture.unlink(missing_ok=True)
         environment = os.environ.copy()
+        environment.pop("POSTGRES_IMAGE", None)
         environment["PATH"] = f"{self.tools}{os.pathsep}{environment['PATH']}"
         environment["HOOK_CAPTURE"] = str(self.capture)
         environment["HOOK_POSTGRES_CAPTURE"] = str(self.postgres_capture)
