@@ -90,7 +90,11 @@ cat > "$bin/hostname" <<'EOF'
 #!/usr/bin/env bash
 printf 'alpha\n'
 EOF
-chmod 0755 "$bin/incus" "$bin/tailscale" "$bin/hostname"
+cat > "$bin/k3s" <<EOF
+#!/usr/bin/env bash
+exec python3 "$mock" k3s "\$@"
+EOF
+chmod 0755 "$bin/incus" "$bin/tailscale" "$bin/hostname" "$bin/k3s"
 
 export MOCK_STATE="$work/state"
 export MOCK_SRC="$src"
@@ -204,6 +208,10 @@ if grep -Eq 'could not apply|no objects passed to apply|mock kubectl create seco
 fi
 if [[ $(grep -Fc 'mock kubectl create first diagnostic' "$work/create-failure.out") -ne 1 ]]; then
   fail 'kubectl create failure printed its stderr outside the named error'
+fi
+# Namespace, RBAC, and the two ConfigMaps are applied before the first Secret create.
+if [[ $(grep -Fc 'kubectl-apply-attempt' "$work/create-failure-actions") -ne 4 ]]; then
+  fail 'kubectl apply did not stop at the failed create'
 fi
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
   "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do

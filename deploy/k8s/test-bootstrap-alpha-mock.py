@@ -208,27 +208,16 @@ def create_from_env(args, text):
     return obj
 
 
-def apply_env_resource(args, state):
-    try:
-        obj = create_from_env(args, sys.stdin.read())
-    except SystemExit as error:
-        print(f"K3S_BOOTSTRAP_FAILURE create {error.code}", file=sys.stderr)
-        raise
-    try:
-        assert_no_host_secret_temp_files()
-        store_manifest(json.dumps(obj), state)
-    except SystemExit as error:
-        print(f"K3S_BOOTSTRAP_FAILURE apply {error.code}", file=sys.stderr)
-        raise
-    exit_saved(state, 0)
-
-
 def kubectl(args, state):
     if args[0].startswith("--as="):
         args = args[1:]
     if args[0] == "apply":
+        log_action("kubectl-apply-attempt")
+        manifest = sys.stdin.read()
+        if not manifest.strip():
+            fail("no objects passed to apply")
         assert_no_host_secret_temp_files()
-        store_manifest(sys.stdin.read(), state)
+        store_manifest(manifest, state)
         exit_saved(state, 0)
     if args[0] == "create" and "--dry-run=server" in args:
         pod = sys.stdin.read()
@@ -310,14 +299,23 @@ def kubectl(args, state):
     fail(f"unexpected kubectl command: {args}")
 
 
+def k3s(args):
+    state = load_state()
+    if args[0] == "kubectl":
+        kubectl(args[1:], state)
+    fail(f"unexpected k3s command: {args}")
+
+
 def lxc(cmd):
     state = load_state()
     if cmd[0] == "bash" and cmd[1:2] == ["-s"]:
         sys.stdin.read()
         sys.exit(0)
     if (cmd[0] == "bash" and cmd[1:2] == ["-c"] and
-            "K3S_BOOTSTRAP_FAILURE" in cmd[2]):
-        apply_env_resource(cmd[4:], state)
+            'manifest=$(k3s kubectl "$@")' in cmd[2]):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(subprocess.run(["bash", "-c", *cmd[2:]]).returncode)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "command -v k3s" in cmd[2]:
         sys.exit(0 if state["k3s_installed"] else 1)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "install.sh" in cmd[2]:
@@ -453,6 +451,8 @@ def main():
         incus(args)
     if tool == "tailscale":
         tailscale(args)
+    if tool == "k3s":
+        k3s(args)
     fail(f"unknown mock tool: {tool}")
 
 
