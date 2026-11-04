@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/arigaio/atlas:1.2.0-alpine@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f
+FROM mirror.gcr.io/arigaio/atlas:1.3.0-alpine@sha256:bb21d31eaf260e43513a35b87be575cecf8ab556795aa8c039e7bb3b43bdd3fe
 
 WORKDIR /app
 COPY migrations/ /migrations/

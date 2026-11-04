@@ -324,6 +324,9 @@ func TestSmoke(t *testing.T) {
 	t.Run("admin-proxy-login", func(t *testing.T) {
 		testSmokeAdminProxyLogin(t)
 	})
+	t.Run("admin-sticker-takedown", func(t *testing.T) {
+		testSmokeAdminStickerTakedown(t)
+	})
 }
 
 func testSmokeOneToOne(t *testing.T) {
