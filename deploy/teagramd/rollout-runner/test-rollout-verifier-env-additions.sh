@@ -43,7 +43,7 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}},"migrate":{"image":"mirror.gcr.io/arigaio/atlas:1.3.0-alpine"}}}'
 
 inspect_json() {
   local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
@@ -1817,6 +1817,120 @@ if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-compar
   exit 1
 fi
 printf '%s\n' 'PASS exact safe Turnstile control additions pass resolved Compose preflight'
+
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+atlas_baseline_compose=$(jq -c \
+  '.services.migrate={image:"mirror.gcr.io/arigaio/atlas:1.2.0-alpine"} |
+   .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  <<< "$COMPOSE_JSON")
+atlas_target_compose=$(jq -c \
+  '.services.migrate.image="mirror.gcr.io/arigaio/atlas:1.3.0-alpine"' \
+  <<< "$atlas_baseline_compose")
+atlas_baseline_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_baseline_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render baseline)
+atlas_target_preflight=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+atlas_target_inspect=$(jq -c '
+  .Id="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  | .Image="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+' <<< "$(inspect_json '')")
+atlas_target_snapshot=$(snapshot_from_json \
+  "$atlas_target_inspect" "$atlas_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target)
+BASELINE_DIR="$TMP/atlas-image.baseline"
+TARGET_DIR="$TMP/atlas-image.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_target_preflight" > "$TARGET_DIR/preflight.snapshot.json"
+printf '%s\n' "$atlas_target_snapshot" > "$TARGET_DIR/target.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL reviewed Atlas 1.2.0 to 1.3.0 image update was rejected by resolved Compose preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL reviewed Atlas image update did not record its config digest as approved' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TARGET_DIR/target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL reviewed Atlas image update was rejected by target verification' >&2
+  cat "$TARGET_DIR/target-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS reviewed Atlas 1.2.0 to 1.3.0 image update passes preflight and target verification'
+
+atlas_unapproved_version='1.4.0'
+atlas_unapproved_compose=$(jq -c --arg version "$atlas_unapproved_version" \
+  '.services.migrate.image=("mirror.gcr.io/arigaio/atlas:" + $version + "-alpine")' \
+  <<< "$atlas_baseline_compose")
+atlas_unapproved_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_unapproved_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+BASELINE_DIR="$TMP/atlas-unapproved.baseline"
+TARGET_DIR="$TMP/atlas-unapproved.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_unapproved_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was accepted by resolved Compose preflight' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was not rejected by its config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unreviewed Atlas image updates remain rejected by resolved Compose preflight'
+
+atlas_unapproved_target=$(snapshot_from_json \
+  "$atlas_target_inspect" "$atlas_unapproved_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target)
+printf '%s\n' "$atlas_unapproved_target" > "$TARGET_DIR/unapproved-target.snapshot.json"
+chmod 600 "$TARGET_DIR/unapproved-target.snapshot.json"
+if compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/unapproved-target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TARGET_DIR/unapproved-target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was accepted by target verification' >&2
+  exit 1
+fi
+if ! grep -q $'config_sha256\t.*\tfail' "$TARGET_DIR/unapproved-target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was not rejected by target config comparison' >&2
+  cat "$TARGET_DIR/unapproved-target-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target verification rejects unreviewed Atlas image updates'
+
+atlas_config_drift_compose=$(jq -c \
+  '.services.migrate.image="mirror.gcr.io/arigaio/atlas:1.3.0-alpine" |
+   .services.teagramd.environment.TG_SYNTHETIC_FLAG="unapproved"' \
+  <<< "$atlas_baseline_compose")
+atlas_config_drift_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_config_drift_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+BASELINE_DIR="$TMP/atlas-config-drift.baseline"
+TARGET_DIR="$TMP/atlas-config-drift.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_config_drift_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL Atlas image update combined with unrelated config drift was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated config drift combined with Atlas image update was not rejected' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Atlas image update does not admit unrelated Compose drift'
+unset INSPECT_LOG_CONFIG
 
 media_key_initial_local_baseline=$(jq -c '
   .provenance.compose_source="live-container-inspection"

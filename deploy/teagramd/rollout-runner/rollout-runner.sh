@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=237139a2cbe3a5594f2cf28883d02673b760d246bce39a8f3413fe1080185dd8
+readonly APPROVED_VERIFIER_SHA=378bda038f0abe27f538ea04837a3252e33d61c9b14784c4501bc4408ae15a5b
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -2460,6 +2460,13 @@ compare_resolved_preflight() {
         if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
       elif [ "$field" = compose_log_login_codes ]; then
         if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$field" = config_sha256 ]; then
+        if [ "$before" = "$after" ] || bash "$VERIFIER" migration-image-transition "$render_file" "$target_file" >/dev/null 2>&1; then
+          result=pass
+        else
+          result=fail
+          failures=$((failures + 1))
+        fi
       elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
@@ -2502,8 +2509,9 @@ compare_resolved_preflight() {
           fail 'resolved target is missing a restart-neutral Compose digest'
           return 1
         }
-        if [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
-           bash "$VERIFIER" restart-policy-transition "$old_file" "$target_file" >/dev/null 2>&1; then
+        if { [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+             bash "$VERIFIER" restart-policy-transition "$old_file" "$target_file" >/dev/null 2>&1; } || \
+           bash "$VERIFIER" migration-image-transition "$old_file" "$target_file" >/dev/null 2>&1; then
           result=pass
         else
           result=fail
