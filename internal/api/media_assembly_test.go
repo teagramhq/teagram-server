@@ -264,9 +264,7 @@ func TestAssembleMissingUploadPayloadWhenPutReturnsBeforeReadFinishes(t *testing
 	select {
 	case err := <-assembled:
 		h.partBlob.releaseRead <- struct{}{}
-		if err := <-blobs.readerDone; err != nil {
-			t.Errorf("active part read: %v", err)
-		}
+		<-blobs.readerDone
 		t.Fatalf("assembly returned %s before the active part read finished", mediaAssemblyRPCCode(err))
 	case <-timer.C:
 	}
