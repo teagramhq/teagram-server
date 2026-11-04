@@ -174,8 +174,8 @@ func TestStickerSetTakedownInvalidDocumentRetainsHashAndBlocksReupload(t *testin
 	if err != nil {
 		t.Fatalf("takedown with an invalid document: %v", err)
 	}
-	if unhashedFiles != 1 {
-		t.Fatalf("unhashed file count = %d, want 1", unhashedFiles)
+	if len(unhashedFiles) != 1 || unhashedFiles[0].FileID != file.ID || !errors.Is(unhashedFiles[0].Err, store.ErrStickerDocumentInvalid) {
+		t.Fatalf("unhashed files = %+v, want file %d with ErrStickerDocumentInvalid", unhashedFiles, file.ID)
 	}
 
 	var isLive bool
