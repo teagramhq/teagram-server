@@ -84,10 +84,10 @@ validate_source_and_runtime() {
 inspect_container() {
   local name=$1 expected_service=$2 inspection
   inspection=$(docker inspect --format \
-    '{{.State.Status}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{.Image}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.StartedAt}}' \
+    '{{.State.Status}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{.Image}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
     "$name") || ops_fail "cannot inspect $expected_service container"
   IFS='|' read -r INSPECT_STATE INSPECT_PROJECT INSPECT_SERVICE INSPECT_FILES INSPECT_IMAGE \
-    INSPECT_REVISION INSPECT_HEALTH INSPECT_STARTED_AT <<< "$inspection"
+    INSPECT_REVISION INSPECT_HEALTH <<< "$inspection"
   [[ -n "$INSPECT_STATE" && "$INSPECT_PROJECT" == teagram && "$INSPECT_SERVICE" == "$expected_service" && \
      "$INSPECT_FILES" == "$EXPECTED_COMPOSE_FILES" ]] || ops_fail "$expected_service container identity is not the live S3 stack"
 }
