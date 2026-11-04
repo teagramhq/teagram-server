@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -20,6 +22,12 @@ import (
 )
 
 func newDirectSendLogHarness(t *testing.T) (context.Context, *store.Store, *handlers, *strings.Builder) {
+	t.Helper()
+	ctx, s, h, logs, _ := newDirectSendLogHarnessWithDSN(t)
+	return ctx, s, h, logs
+}
+
+func newDirectSendLogHarnessWithDSN(t *testing.T) (context.Context, *store.Store, *handlers, *strings.Builder, string) {
 	t.Helper()
 	ctx := context.Background()
 	blobs, err := blob.NewLocal(t.TempDir())
@@ -31,7 +39,8 @@ func newDirectSendLogHarness(t *testing.T) (context.Context, *store.Store, *hand
 			t.Errorf("close blob store: %v", err)
 		}
 	})
-	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(blobs))
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -44,7 +53,7 @@ func newDirectSendLogHarness(t *testing.T) (context.Context, *store.Store, *hand
 	h := testHandlersWithBlobs(s, blobs)
 	h.uploadGrantTTL, h.maxUserStorageBytes = time.Hour, TestMaxUserStorageBytes
 	h.log = slog.New(slog.NewJSONHandler(&logs, nil))
-	return ctx, s, h, &logs
+	return ctx, s, h, &logs, dsn
 }
 
 func directSendLogRecords(t *testing.T, logs *strings.Builder) []map[string]any {
@@ -231,6 +240,218 @@ func TestSendMessageLogsDirectRecipientOutcome(t *testing.T) {
 				t.Errorf("retry log lines = %d, want one: %q", got, logs.String())
 			}
 		})
+	}
+}
+
+func TestSendMessageRetryLogsStoredPeerAcrossRecipients(t *testing.T) {
+	t.Parallel()
+	ctx, s, h, logs := newDirectSendLogHarness(t)
+	sender, err := s.CreateUser(ctx, "+15551232770")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	storedRecipient, err := s.CreateUser(ctx, "+15551232771")
+	if err != nil {
+		t.Fatalf("create stored recipient: %v", err)
+	}
+	requestedRecipient, err := s.CreateUser(ctx, "+15551232772")
+	if err != nil {
+		t.Fatalf("create requested recipient: %v", err)
+	}
+	if _, err := s.BlockUser(ctx, requestedRecipient.ID, sender.ID); err != nil {
+		t.Fatalf("block sender at requested recipient: %v", err)
+	}
+	const (
+		randomID = int64(3273170)
+		bodyText = "private text owned by the stored peer"
+	)
+	var seed bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer: InputPeerUser(sender.ID, storedRecipient.ID), Message: bodyText, RandomID: randomID,
+	}).Encode(&seed); err != nil {
+		t.Fatalf("encode seed sendMessage: %v", err)
+	}
+	if _, _, _, err := h.handleSendMessageAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &seed}); err != nil {
+		t.Fatalf("seed sendMessage: %v", err)
+	}
+	stored, ok, err := s.MessageByRandomID(ctx, sender.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("stored message: found=%v err=%v", ok, err)
+	}
+	logs.Reset()
+
+	var retry bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer: InputPeerUser(sender.ID, requestedRecipient.ID), Message: "private retry body", RandomID: randomID,
+	}).Encode(&retry); err != nil {
+		t.Fatalf("encode retry sendMessage: %v", err)
+	}
+	if _, _, _, err := h.handleSendMessageAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &retry}); err != nil {
+		t.Fatalf("retry sendMessage: %v", err)
+	}
+	records := directOutcomeRecords(t, directSendLogRecords(t, logs))
+	if len(records) != 1 {
+		t.Fatalf("direct retry outcome records = %d, want one: %q", len(records), logs.String())
+	}
+	for key, want := range map[string]any{
+		"msg": "direct message outcome", "level": "INFO",
+		"sender_id": float64(sender.ID), "recipient_id": float64(stored.PeerID),
+		"message_id": float64(stored.LocalID), "recipient_copy": "stored",
+		"recipient_pts": float64(0), "duplicate": true,
+	} {
+		if got := records[0][key]; got != want {
+			t.Errorf("retry outcome %s = %v, want %v", key, got, want)
+		}
+	}
+	if strings.Contains(logs.String(), bodyText) || strings.Contains(logs.String(), "private retry body") {
+		t.Errorf("retry log exposed message text: %q", logs.String())
+	}
+}
+
+func TestConcurrentSendMessageDuplicateLogsStoredPeer(t *testing.T) {
+	t.Parallel()
+	ctx, s, h, logs, dsn := newDirectSendLogHarnessWithDSN(t)
+	sender, err := s.CreateUser(ctx, "+15551232773")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	firstRecipient, err := s.CreateUser(ctx, "+15551232774")
+	if err != nil {
+		t.Fatalf("create first recipient: %v", err)
+	}
+	secondRecipient, err := s.CreateUser(ctx, "+15551232775")
+	if err != nil {
+		t.Fatalf("create second recipient: %v", err)
+	}
+	witness, err := s.CreateUser(ctx, "+15551232776")
+	if err != nil {
+		t.Fatalf("create witness: %v", err)
+	}
+	for i, recipient := range []store.User{firstRecipient, secondRecipient} {
+		if _, _, _, _, err := s.SendMessage(ctx, witness.ID, recipient.ID, "existing recipient activity", int64(3273171+i), 0, 0); err != nil {
+			t.Fatalf("seed recipient state for %d: %v", recipient.ID, err)
+		}
+		if _, err := s.BlockUser(ctx, recipient.ID, sender.ID); err != nil {
+			t.Fatalf("block sender at recipient %d: %v", recipient.ID, err)
+		}
+	}
+
+	lockConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect advisory lock holder: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lockConn.Close(ctx); err != nil {
+			t.Errorf("close advisory lock holder: %v", err)
+		}
+	})
+	ownerIDs := []int64{sender.ID, firstRecipient.ID, secondRecipient.ID}
+	slices.Sort(ownerIDs)
+	lockedOwners := make([]int64, 0, len(ownerIDs))
+	releaseOwnerLocks := func() {
+		for _, ownerID := range slices.Backward(lockedOwners) {
+			var released bool
+			if err := lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, ownerID).Scan(&released); err != nil {
+				t.Errorf("release owner lock %d: %v", ownerID, err)
+				continue
+			}
+			if !released {
+				t.Errorf("owner lock %d was not held", ownerID)
+			}
+		}
+		lockedOwners = nil
+	}
+	defer releaseOwnerLocks()
+	for _, ownerID := range ownerIDs {
+		if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock($1)`, ownerID); err != nil {
+			t.Fatalf("hold owner lock %d: %v", ownerID, err)
+		}
+		lockedOwners = append(lockedOwners, ownerID)
+	}
+
+	const randomID = int64(3273173)
+	results := make(chan error, 2)
+	for _, recipient := range []store.User{firstRecipient, secondRecipient} {
+		go func() {
+			var body bin.Buffer
+			if err := (&tg.MessagesSendMessageRequest{
+				Peer: InputPeerUser(sender.ID, recipient.ID), Message: "private concurrent send", RandomID: randomID,
+			}).Encode(&body); err != nil {
+				results <- err
+				return
+			}
+			_, _, _, err := h.handleSendMessageAfterReplyOnConn(nil, &mtproto.Request{Ctx: ctx, UserID: sender.ID, Buf: &body})
+			results <- err
+		}()
+	}
+	waitForDirectSendLockWaiters(t, ctx, lockConn, 2)
+	releaseOwnerLocks()
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Errorf("concurrent sendMessage: %v; logs: %s", err, logs.String())
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for concurrent sendMessage calls")
+		}
+	}
+
+	stored, ok, err := s.MessageByRandomID(ctx, sender.ID, randomID)
+	if err != nil || !ok || stored.PeerType != store.PeerTypeUser || stored.PeerLocalID != 0 {
+		t.Fatalf("stored withheld message: found=%v peer_type=%v peer_local_id=%d err=%v", ok, stored.PeerType, stored.PeerLocalID, err)
+	}
+	records := directOutcomeRecords(t, directSendLogRecords(t, logs))
+	if len(records) != 2 {
+		t.Fatalf("direct outcome records = %d, want two: %q", len(records), logs.String())
+	}
+	duplicates := 0
+	for _, record := range records {
+		for key, want := range map[string]any{
+			"msg": "direct message outcome", "level": "INFO",
+			"sender_id": float64(sender.ID), "recipient_id": float64(stored.PeerID),
+			"message_id": float64(stored.LocalID), "recipient_copy": "withheld",
+			"recipient_pts": float64(0), "recipient_copy_reason": "recipient_blocked_sender",
+		} {
+			if got := record[key]; got != want {
+				t.Errorf("outcome %s = %v, want %v", key, got, want)
+			}
+		}
+		if duplicate, ok := record["duplicate"].(bool); ok && duplicate {
+			duplicates++
+		} else if record["duplicate"] != false {
+			t.Errorf("duplicate = %v, want boolean", record["duplicate"])
+		}
+		if strings.Contains(fmt.Sprint(record), "private concurrent send") {
+			t.Errorf("outcome log exposed message text: %#v", record)
+		}
+	}
+	if duplicates != 1 {
+		t.Errorf("duplicate outcomes = %d, want one: %#v", duplicates, records)
+	}
+}
+
+func waitForDirectSendLockWaiters(t *testing.T, ctx context.Context, conn *pgx.Conn, want int) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiters int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'`).Scan(&waiters); err != nil {
+			t.Fatalf("count direct send lock waiters: %v", err)
+		}
+		if waiters >= want {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %d direct send lock waiters; saw %d", want, waiters)
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("waiting for direct send lock waiters: %v", ctx.Err())
+		}
 	}
 }
 

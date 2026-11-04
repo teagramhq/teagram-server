@@ -464,8 +464,11 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
-			if existing.PeerType == store.PeerTypeUser && existing.PeerID == toID {
-				h.logDirectMessageOutcome(r.UserID, toID, existing.LocalID, 0, toID == r.UserID || existing.PeerLocalID > 0, true)
+			if existing.PeerType == store.PeerTypeUser {
+				h.logDirectMessageOutcome(
+					r.UserID, existing.PeerID, existing.LocalID, 0,
+					directRecipientCopyStored(r.UserID, existing.PeerID, existing), true,
+				)
 			}
 			attempt := beginSenderRPCAt(c, r, pts)
 			users, err := h.twoUsers(r.Ctx, r.UserID, toID)
@@ -524,7 +527,16 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 
 	// recipientPts is 0 when the send was withheld from a recipient who
 	// blocked the sender: there is nothing for them to fetch.
-	h.logDirectMessageOutcome(r.UserID, toID, sender.LocalID, recipientPts, toID == r.UserID || recipientPts > 0, duplicate)
+	if sender.PeerType == store.PeerTypeUser {
+		logRecipientPts := recipientPts
+		if duplicate {
+			logRecipientPts = 0
+		}
+		h.logDirectMessageOutcome(
+			r.UserID, sender.PeerID, sender.LocalID, logRecipientPts,
+			directRecipientCopyStored(r.UserID, sender.PeerID, sender), duplicate,
+		)
+	}
 	if toID != r.UserID && recipientPts > 0 {
 		h.notify(r.Ctx, toID)
 	}
