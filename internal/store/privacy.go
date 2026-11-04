@@ -183,9 +183,10 @@ func (s *Store) EvaluateLastSeenPrivacyForViewer(ctx context.Context, viewerID i
 	}
 
 	results := make(map[int64]LastSeenVisibility, len(owners))
-	ownersByID := make(map[int64]User, len(owners))
+	ownersByID := make(map[int64]*User, len(owners))
 	queryOwnerIDs := make([]int64, 0, len(owners))
-	for _, owner := range owners {
+	for i := range owners {
+		owner := &owners[i]
 		if _, exists := ownersByID[owner.ID]; exists {
 			continue
 		}
@@ -221,7 +222,7 @@ func (s *Store) EvaluateLastSeenPrivacyForViewer(ctx context.Context, viewerID i
 		if !ok {
 			return nil, fmt.Errorf("evaluate last-seen privacy for viewer: unexpected owner %d", row.OwnerID)
 		}
-		visibility, err := lastSeenVisibility(owner, lastSeenPrivacyInputs{
+		visibility, err := lastSeenVisibility(*owner, lastSeenPrivacyInputs{
 			baseRule:        row.OwnerBaseRule,
 			ownerBlocked:    row.OwnerBlocked,
 			ownerDisallowed: row.OwnerDisallowed,
