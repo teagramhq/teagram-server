@@ -45,10 +45,9 @@ table above 10,000 rows.
 - Blocking from the first run: statement count and rows read against the base
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
   of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
-  scenario.
-- Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s;
-  `contacts.getContacts` at 100x 45 ms, since it returns the whole list) and the
-  1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
+  scenario, and the `contacts.getContacts` 100x p95 budget of 45 ms.
+- Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s)
+  and the 1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
   scenario has a `timing` waiver. Independently, p50 regressions compare with
   the interleaved base or calibrated `main` history from the same fixture
   version and remain blocking even when a scenario has a timing waiver. That
