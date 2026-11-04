@@ -19,6 +19,7 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 0
+  - path: teagramd-cutover-listeners.yaml
   - target:
       group: apps
       version: v1
@@ -49,4 +50,4 @@ patches:
 
 images:
   - name: ghcr.io/teagramhq/teagramd
-    digest: sha256:e20ef26b80cf3ce1a3ff1cc501111c3403befa7b2a0e94506ab14fa24ed474eb
+    digest: sha256:e307d5d93ab000d61dc77251a599b00e031e6dac7cdf026ef8d2d621734e7c3f

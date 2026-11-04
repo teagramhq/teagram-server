@@ -196,6 +196,12 @@ spec:
             - name: mtproto
               containerPort: 2443
               protocol: TCP
+            - name: websocket
+              containerPort: 2444
+              protocol: TCP
+            - name: admin
+              containerPort: 2445
+              protocol: TCP
           startupProbe:
             tcpSocket:
               port: mtproto

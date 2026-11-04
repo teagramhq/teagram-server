@@ -64,8 +64,10 @@ bootstrap_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagram
 [[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$bootstrap_teagramd_digest" ]] ||
   fail 'the production bootstrap Job must use the same pinned teagramd digest as the workload'
 cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' deploy/k8s/prod-cutover/kustomization.yaml)"
-[[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$cutover_teagramd_digest" ]] ||
-  fail 'the cutover blob migration Job must use the same pinned teagramd digest as production'
+[[ "$cutover_teagramd_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+  fail 'the cutover workload must use a pinned teagramd image digest'
+[[ "$cutover_teagramd_digest" != "sha256:$(printf '%064d' 0)" ]] ||
+  fail 'the cutover workload must not use a placeholder teagramd image digest'
 [[ "$(yq -r '.spec.suspend' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == true ]] ||
   fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||

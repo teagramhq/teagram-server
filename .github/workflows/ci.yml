@@ -1094,7 +1094,8 @@ jobs:
       - name: Check deploy script syntax
         run: |
           ./deploy/k8s/cutover-alpha.sh --dry-run
-          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
+          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha-k3s.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1148,6 +1149,7 @@ jobs:
           shellcheck \
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha-k3s.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1735,6 +1737,12 @@ jobs:
             sleep 2
           done
 
+      - name: Exercise the pinned alpha cutover migration and rollback
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash deploy/k8s/test-cutover-alpha-k3s.sh
+
       - name: Collect k3s diagnostics on failure
         if: failure()
         run: |
@@ -1745,6 +1753,12 @@ jobs:
           kubectl describe pods --namespace teagram
           for pod in $(kubectl get pods --namespace teagram --output name); do
             kubectl logs --namespace teagram "$pod" --all-containers --tail=100
+          done
+          kubectl get pods,jobs,persistentvolumeclaims --namespace teagram-cutover --output wide
+          kubectl get events --namespace teagram-cutover --sort-by=.lastTimestamp
+          kubectl describe pods --namespace teagram-cutover
+          for pod in $(kubectl get pods --namespace teagram-cutover --output name); do
+            kubectl logs --namespace teagram-cutover "$pod" --all-containers --tail=100
           done
           docker logs --tail 100 teagram-k3s
 

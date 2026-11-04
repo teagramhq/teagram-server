@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: teagramd
+spec:
+  template:
+    spec:
+      containers:
+        - name: teagramd
+          env:
+            - name: TG_WEBSOCKET_LISTEN_ADDR
+              value: ":2444"
+            - name: TG_ADMIN_LISTEN_ADDR
+              value: ":2445"
+            - name: TG_ADMIN_TOKEN_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: teagramd-admin
+                  key: TG_ADMIN_TOKEN_HASH
+            - name: TG_ADMIN_ORIGIN
+              valueFrom:
+                secretKeyRef:
+                  name: teagramd-admin
+                  key: TG_ADMIN_ORIGIN
+                  optional: true

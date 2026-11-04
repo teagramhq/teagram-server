@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,48 @@ import (
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
+
+func TestReadSmokeCredentialRequiresProtectedSingleLineFile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{name: "private line with newline", value: "cutover_smoke\n", mode: 0o600},
+		{name: "empty", value: "", mode: 0o600, wantErr: true},
+		{name: "multiple lines", value: "first\nsecond", mode: 0o600, wantErr: true},
+		{name: "world readable", value: "cutover_smoke", mode: 0o644, wantErr: true},
+		{name: "too large", value: strings.Repeat("x", maxSmokeCredential+1), mode: 0o600, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "credential")
+			if err := os.WriteFile(path, []byte(test.value), test.mode); err != nil {
+				t.Fatalf("write credential fixture: %v", err)
+			}
+			if err := os.Chmod(path, test.mode); err != nil {
+				t.Fatalf("set credential permissions: %v", err)
+			}
+			got, err := readSmokeCredential(path, "username")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("readSmokeCredential succeeded, want failure")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readSmokeCredential: %v", err)
+			}
+			if string(got) != "cutover_smoke" {
+				t.Fatalf("credential = %q, want cutover_smoke", got)
+			}
+			clear(got)
+		})
+	}
+}
 
 func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 	t.Parallel()

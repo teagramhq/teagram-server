@@ -36,6 +36,10 @@ by the cluster's secret and configuration management before it is applied:
 | `cloudflared-token` Secret | `token` |
 | `ghcr-pull` Secret | Docker config for the private GHCR packages |
 
+The alpha cutover runner creates the `teagramd-admin` Secret from the existing
+Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
+either value. The Secret is specific to the cutover overlay.
+
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The
 server's RSA identity and auth-key encryption key live on the `key-data` PVC;
@@ -123,21 +127,32 @@ volumes are recovery points for at least seven days. A fresh smoke test dumps
 and restores a provisioned account, then completes a new SRP login with the
 same password and RSA identity; CI runs it in `test: smoke`.
 
-The script runs a restartable `systemd` port-forward in `teagram-k3s` and
-changes only the Tailscale Serve `/` handler. It verifies the other four Serve
-handlers are unchanged and Funnel remains off. The old `teagram` LXC stays
-running; its only container change is stopping `teagram-web-cloudflared` during
-the switch. The cutover pauses at that point and prints the Cloudflare route
-change `http://selector:8081` to `http://linkselector:8081`. No Cloudflare API
-credential is provisioned, so make that route change in the dashboard and
-confirm the prompt before the k8s connector scales to one.
+Before the final snapshot, the script stops every running Compose service other
+than PostgreSQL, including `teagramd` and any active database or blob writer,
+and stops `teagram-web-cloudflared`. It verifies PostgreSQL has no remaining
+client connections. Compose volumes and PostgreSQL data are left intact. The
+fence-to-switch interval is planned downtime; a failure before the complete
+edge switch restarts the stopped Compose services.
+
+The cutover keeps the k8s app and connector at zero while it restores the
+database, identity and blobs. It then starts the WebSocket and admin listeners
+on the k3s teagramd Service and installs restartable `systemd` port-forwards in
+`teagram-k3s`. Tailscale Serve keeps all five existing paths and sends `/` to
+linkselector, `/apiws`, both client discovery paths, and `/admin` to the
+matching teagramd Service ports. Funnel remains off. The Cloudflare connector
+stays at zero until the dashboard route changes from `http://selector:8081` to
+`http://linkselector:8081`; confirm that change before the k8s connector starts.
+No Cloudflare API credential is provisioned.
 
 The script prints the exact rollback command after the cutover. Rollback scales
-the k8s connector to zero, restores the Cloudflare route to
-`http://selector:8081`, starts `teagram-web-cloudflared`, restores only Serve
-`/` to `http://127.0.0.1:8081`, and stops the new port-forward. It leaves all
-PostgreSQL and PVC data intact.
+the k8s app and connector to zero and verifies that no k8s connector pod
+remains before restoring the Cloudflare route and all five Serve paths. It then
+restarts the stopped Compose services and stops both port-forwards. PostgreSQL
+and PVC data remain intact. Writes made on k3s after the switch are not carried
+back to Compose.
 
-This repository's CI renders the production, CI, and bootstrap overlays and
-deploys `ci/` to a disposable k3s cluster. It does not apply production
-manifests to a live cluster.
+CI runs the migration Job from the same pinned teagramd image used by
+`prod-cutover` in a disposable k3s namespace, restores a seeded account and
+signs in with its original password, then shuts off the cutover Services and
+verifies sign-in against the untouched source. No production manifests reach a
+live cluster.

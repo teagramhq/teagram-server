@@ -9,11 +9,15 @@ readonly NAMESPACE=teagram
 readonly KUBECONFIG_PATH=/root/teagram-k3s-deploy.kubeconfig
 readonly EVIDENCE_DIR=/var/lib/teagram-k3s-cutover
 readonly PHASE_FILE=$EVIDENCE_DIR/phase
-readonly PORT_FORWARD_UNIT=teagram-linkselector-port-forward.service
-readonly PORT_FORWARD_PORT=18081
+readonly LINKSELECTOR_PORT_FORWARD_UNIT=teagram-linkselector-port-forward.service
+readonly TEAGRAMD_PORT_FORWARD_UNIT=teagramd-port-forward.service
+readonly LINKSELECTOR_PORT=18081
+readonly WEBSOCKET_PORT=18444
+readonly ADMIN_PORT=18445
 readonly POSTGRES_DUMP_DIR=/var/lib/postgresql/cutover-backups
 readonly CLOUDFLARE_BEFORE=http://selector:8081
 readonly CLOUDFLARE_AFTER=http://linkselector:8081
+readonly COMPOSE_STOPPED_FILE=$EVIDENCE_DIR/source-compose-stopped
 readonly MAX_LEGACY_BLOB_BYTES=$((20 * 1024 * 1024 * 1024))
 readonly MAX_ENCRYPTED_BLOB_BYTES=$((18 * 1024 * 1024 * 1024))
 readonly POSTGRES_PVC_BYTES=$((8 * 1024 * 1024 * 1024))
@@ -42,15 +46,17 @@ dry_run() {
   cat <<'EOF'
 Would verify alpha, the bootstrap kubeconfig, source Compose containers, the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
-Would wait for PostgreSQL and RustFS, save a mode-0600 pg_dump on the PostgreSQL PVC, restore it into k3s, then run the pinned Atlas migration Job.
+Would wait for PostgreSQL and RustFS, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
+Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before that switch restarts every stopped Compose service.
+Would save a mode-0600 pg_dump on the PostgreSQL PVC, restore it into k3s, then run the pinned Atlas migration Job.
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
 Would stream server_key.pem, enc_key.hex, and local blobs from the old container into the new PVCs without a host-side plaintext copy; key hashes are compared silently.
 Would verify the old blob tree and its encrypted envelopes fit their PVCs and the target disk can hold both copies, encrypt and checksum-copy its objects to RustFS with the migrated media key, and keep a read-only source copy for recovery.
-Would start teagramd, linklanding, and linkselector; install a restartable, journal-logged port-forward in teagram-k3s and verify it from both LXCs.
-Would save the old Serve table, change only HTTPS / to the k3s linkselector, and verify the other four handlers and Funnel-off state.
-Would stop only teagram-web-cloudflared on the old LXC, print the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081, wait for operator confirmation, then scale k8s cloudflared to 1.
-Would leave all old Compose data and workloads running, with the old connector stopped; retain the database dump and recovery evidence for at least seven days.
-Rollback order: k8s cloudflared=0, Cloudflare route back to http://selector:8081, start teagram-web-cloudflared, restore only Serve / to http://127.0.0.1:8081, stop the new port-forward.
+Would start teagramd, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, teagramd WebSocket, and admin Services, then verify them from both LXCs.
+Would save all five tailnet-only Serve handlers, route / to linkselector and /apiws, /admin, and both discovery paths to the corresponding k3s Services, and verify Funnel remains off.
+Would keep k8s cloudflared at zero until the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081; then start and verify the k3s connector.
+Would keep all old Compose services stopped after cutover without modifying their volumes; retain the database dump and recovery evidence for at least seven days.
+Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five Serve handlers and Cloudflare to the old targets, restart the stopped Compose services, then stop both port-forwards. k3s writes since the switch are not carried back.
 EOF
   printf 'Rollback command after review: sudo bash %q --rollback\n' "$SCRIPT_PATH"
 }
@@ -70,7 +76,7 @@ esac
 [[ $(hostname -s) == alpha ]] || fail "run $ACTION on alpha"
 [[ -t 0 ]] || fail "$ACTION requires an interactive terminal for the manual Cloudflare route change"
 
-for command_name in incus kubectl readlink stat install sha256sum python3 awk grep tar flock date; do
+for command_name in incus kubectl readlink stat install sha256sum python3 awk grep sed tar flock date sleep; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 
@@ -110,6 +116,126 @@ check_source_container() {
   [[ $(container_status "$container") == running ]] || fail "old Compose container is not running: $container"
 }
 
+record_stopped_compose_container() {
+  local container=$1
+  if ! grep --fixed-strings --line-regexp --quiet -- "$container" "$COMPOSE_STOPPED_FILE"; then
+    printf '%s\n' "$container" >> "$COMPOSE_STOPPED_FILE"
+  fi
+}
+
+restart_stopped_compose_services() {
+  local container status=0 index
+  local -a containers=()
+  [[ -f $COMPOSE_STOPPED_FILE && ! -L $COMPOSE_STOPPED_FILE ]] ||
+    fail 'stopped Compose service evidence is missing; refusing an incomplete rollback'
+  [[ $(stat -c '%a:%u' "$COMPOSE_STOPPED_FILE") == 600:0 ]] ||
+    fail 'stopped Compose service evidence is not root-owned mode 0600'
+
+  mapfile -t containers < "$COMPOSE_STOPPED_FILE"
+  for ((index = ${#containers[@]} - 1; index >= 0; index--)); do
+    container=${containers[index]}
+    [[ -z $container || $container == teagram-web-cloudflared ]] && continue
+    [[ $container =~ ^[[:alnum:]_.-]+$ ]] || {
+      printf 'k3s cutover: invalid Compose container name in recovery evidence\n' >&2
+      status=1
+      continue
+    }
+    if ! incus exec "$SOURCE_INSTANCE" -- docker start "$container" >/dev/null; then
+      printf 'k3s cutover: could not restart a stopped Compose service\n' >&2
+      status=1
+    fi
+  done
+
+  if grep --fixed-strings --line-regexp --quiet -- teagram-web-cloudflared "$COMPOSE_STOPPED_FILE"; then
+    if ! incus exec "$SOURCE_INSTANCE" -- docker start teagram-web-cloudflared >/dev/null; then
+      printf 'k3s cutover: could not restart the old Cloudflare connector\n' >&2
+      status=1
+    fi
+  fi
+  return "$status"
+}
+
+verify_no_source_postgres_clients() {
+  local connections attempt
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    connections=$(incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
+      psql --username=postgres --dbname=postgres --tuples-only --no-align \
+        --command="SELECT count(*) FROM pg_stat_activity WHERE datname = 'teagram' AND backend_type = 'client backend' AND pid <> pg_backend_pid()") ||
+      fail 'could not verify source PostgreSQL client connections'
+    [[ $connections =~ ^[0-9]+$ ]] || fail 'source PostgreSQL client connection count is invalid'
+    [[ $connections == 0 ]] && return 0
+    sleep 1
+  done
+  fail 'source PostgreSQL still has client connections after the Compose write fence'
+}
+
+fence_source_writes() {
+  local running_ids container_id service container_name
+  install -d -o root -g root -m 0700 "$EVIDENCE_DIR"
+  : > "$COMPOSE_STOPPED_FILE"
+  chmod 0600 "$COMPOSE_STOPPED_FILE"
+
+  record_stopped_compose_container teagram-web-cloudflared
+  incus exec "$SOURCE_INSTANCE" -- docker stop --time 30 teagram-web-cloudflared >/dev/null
+
+  running_ids=$(incus exec "$SOURCE_INSTANCE" -- docker ps --quiet \
+    --filter label=com.docker.compose.project=teagram) || fail 'could not enumerate running Compose services'
+  [[ -n $running_ids ]] || fail 'no running teagram Compose services were found for the write fence'
+  while IFS= read -r container_id; do
+    [[ -n $container_id ]] || continue
+    service=$(incus exec "$SOURCE_INSTANCE" -- docker inspect \
+      --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id") ||
+      fail 'could not identify a running teagram Compose service'
+    [[ -n $service ]] || fail 'a running teagram Compose container has no service label'
+    [[ $service == postgres ]] && continue
+    container_name=$(incus exec "$SOURCE_INSTANCE" -- docker inspect --format '{{.Name}}' "$container_id" | sed 's#^/##') ||
+      fail 'could not read a running teagram Compose container name'
+    [[ $container_name =~ ^[[:alnum:]_.-]+$ ]] || fail 'a running teagram Compose container has an invalid name'
+    record_stopped_compose_container "$container_name"
+    incus exec "$SOURCE_INSTANCE" -- docker stop --time 120 "$container_name" >/dev/null ||
+      fail 'could not stop every running Compose writer before the PostgreSQL snapshot'
+  done <<< "$running_ids"
+
+  check_source_container teagram-postgres-1
+  [[ $(container_status teagram-web-cloudflared) == exited ]] ||
+    fail 'the old Cloudflare connector is not stopped'
+  while IFS= read -r container_name; do
+    [[ -z $container_name ]] && continue
+    [[ $(container_status "$container_name") == exited ]] ||
+      fail 'a Compose service restarted unexpectedly while the source write fence is active'
+  done < "$COMPOSE_STOPPED_FILE"
+  verify_no_source_postgres_clients
+  record_phase fenced
+}
+
+capture_admin_token_hash() {
+  incus exec "$SOURCE_INSTANCE" -- docker inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' teagram-teagramd-1 |
+    awk -F= '$1 == "TG_ADMIN_TOKEN_HASH" { print substr($0, index($0, "=") + 1) }'
+}
+
+capture_admin_origin() {
+  incus exec "$SOURCE_INSTANCE" -- docker inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' teagram-teagramd-1 |
+    awk -F= '$1 == "TG_ADMIN_ORIGIN" { print substr($0, index($0, "=") + 1) }'
+}
+
+install_admin_secret() {
+  local admin_hash_file=$1 admin_origin_file=$2 admin_hash admin_origin
+  admin_hash=$(capture_admin_token_hash)
+  admin_origin=$(capture_admin_origin)
+  [[ $admin_hash =~ ^[0-9a-f]{64}$ ]] ||
+    fail 'the old teagramd has no valid TG_ADMIN_TOKEN_HASH for the preserved /admin handler'
+  printf '%s' "$admin_hash" > "$admin_hash_file"
+  printf '%s' "$admin_origin" > "$admin_origin_file"
+  chmod 0600 "$admin_hash_file"
+  chmod 0600 "$admin_origin_file"
+  kubectl create secret generic teagramd-admin --namespace "$NAMESPACE" \
+    --from-file=TG_ADMIN_TOKEN_HASH="$admin_hash_file" \
+    --from-file=TG_ADMIN_ORIGIN="$admin_origin_file" --dry-run=client --output yaml |
+    kubectl apply --filename - >/dev/null
+}
+
 serve_status_file() {
   local destination=$1
   incus exec "$SOURCE_INSTANCE" -- tailscale serve status --json > "$destination"
@@ -117,7 +243,7 @@ serve_status_file() {
 }
 
 check_serve_status() {
-  local status_file=$1 expected_root=$2
+  local status_file=$1 expected_root=$2 websocket_base=$3 admin_base=$4
   python3 -c '
 import json
 import pathlib
@@ -125,12 +251,14 @@ import sys
 
 status = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 expected_root = sys.argv[2]
+websocket_base = sys.argv[3]
+admin_base = sys.argv[4]
 expected = {
     "/": expected_root,
-    "/apiws": "http://127.0.0.1:2444/apiws",
-    "/admin": "http://127.0.0.1:2445/admin",
-    "/.well-known/teagramd/client": "http://127.0.0.1:2444/.well-known/teagramd/client",
-    "/.well-known/telegramd/client": "http://127.0.0.1:2444/.well-known/telegramd/client",
+    "/apiws": websocket_base + "/apiws",
+    "/admin": admin_base + "/admin",
+    "/.well-known/teagramd/client": websocket_base + "/.well-known/teagramd/client",
+    "/.well-known/telegramd/client": websocket_base + "/.well-known/telegramd/client",
 }
 web = status.get("Web")
 if not isinstance(web, dict):
@@ -150,7 +278,48 @@ if "AllowFunnel" not in status or not isinstance(status["AllowFunnel"], dict):
 funnel = status["AllowFunnel"]
 if any(value is not False for value in funnel.values()):
     raise SystemExit("k3s cutover: Tailscale Funnel is enabled or its state is unknown")
-' "$status_file" "$expected_root"
+' "$status_file" "$expected_root" "$websocket_base" "$admin_base"
+}
+
+set_serve_routes() {
+  local root=$1 websocket_base=$2 admin_base=$3
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ "$root" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/apiws \
+    "$websocket_base/apiws" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/admin \
+    "$admin_base/admin" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 \
+    --set-path=/.well-known/teagramd/client "$websocket_base/.well-known/teagramd/client" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 \
+    --set-path=/.well-known/telegramd/client "$websocket_base/.well-known/telegramd/client" >/dev/null
+}
+
+wait_for_no_pods() {
+  local selector=$1 timeout_seconds=$2 elapsed=0 pods
+  while (( elapsed < timeout_seconds )); do
+    pods=$(kubectl get pods --namespace "$NAMESPACE" --selector="$selector" \
+      --output 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}') || return 1
+    [[ -z $pods ]] && return 0
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
+
+stop_k8s_connector() {
+  if kubectl get deployment cloudflared --namespace "$NAMESPACE" >/dev/null 2>&1; then
+    kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null
+    wait_for_no_pods app.kubernetes.io/name=cloudflared 180 ||
+      fail 'k8s cloudflared pods did not stop; refusing to change the route or start the old connector'
+  fi
+}
+
+stop_k8s_application() {
+  if kubectl get statefulset teagramd --namespace "$NAMESPACE" >/dev/null 2>&1; then
+    kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null
+    wait_for_no_pods app.kubernetes.io/name=teagramd 180 ||
+      fail 'k8s teagramd pods did not stop; refusing to restart the old Compose writers'
+  fi
 }
 
 confirm() {
@@ -166,62 +335,145 @@ print_rollback_command() {
 }
 
 unit_file=''
-print_rollback_on_failure() {
-  local status=$?
-  [[ -z ${unit_file:-} ]] || rm -f -- "$unit_file"
-  if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
-    print_rollback_command >&2
+admin_hash_file=''
+admin_origin_file=''
+restore_old_serve() {
+  local serve_after
+  set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 || return 1
+  serve_after=$(mktemp) || return 1
+  if ! serve_status_file "$serve_after" ||
+    ! check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445; then
+    rm -f -- "$serve_after"
+    return 1
+  fi
+  rm -f -- "$serve_after"
+}
+
+stop_port_forward_units() {
+  local unit
+  for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT"; do
+    if incus exec "$TARGET_INSTANCE" -- systemctl cat "$unit" >/dev/null 2>&1; then
+      incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$unit" >/dev/null || return 1
+    fi
+  done
+}
+
+recover_before_edge_switch() {
+  local phase=${1:-} recovery_failed=false route_may_have_changed=false
+  if kubectl get deployment cloudflared --namespace "$NAMESPACE" >/dev/null 2>&1; then
+    if ! kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null ||
+      ! wait_for_no_pods app.kubernetes.io/name=cloudflared 180; then
+      printf 'k3s cutover: failed to stop and verify the k8s Cloudflare connector during recovery\n' >&2
+      recovery_failed=true
+    fi
+  fi
+  if kubectl get statefulset teagramd --namespace "$NAMESPACE" >/dev/null 2>&1; then
+    if ! kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null ||
+      ! wait_for_no_pods app.kubernetes.io/name=teagramd 180; then
+      printf 'k3s cutover: failed to stop k8s teagramd during recovery\n' >&2
+      recovery_failed=true
+    fi
+  fi
+
+  case "$phase" in
+    route-change-requested|route-switched|k8s-connector-started)
+      route_may_have_changed=true
+      ;;
+  esac
+  if [[ $phase == serve-switch-started || $phase == serve-switched || $route_may_have_changed == true ]]; then
+    if ! restore_old_serve; then
+      printf 'k3s cutover: failed to restore the five old Tailscale Serve handlers\n' >&2
+      recovery_failed=true
+    fi
+  fi
+  if [[ $route_may_have_changed == true ]]; then
+    printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
+    if ! confirm ROUTE-RESTORED 'Restore the Cloudflare route to the before value before Compose services restart.'; then
+      printf 'k3s cutover: Cloudflare route restoration was not confirmed\n' >&2
+      recovery_failed=true
+    fi
+  fi
+  if ! stop_port_forward_units; then
+    printf 'k3s cutover: failed to stop target port-forward units during recovery\n' >&2
+    recovery_failed=true
+  fi
+  if [[ -f $COMPOSE_STOPPED_FILE && $recovery_failed == false ]]; then
+    if ! restart_stopped_compose_services; then
+      printf 'k3s cutover: one or more old Compose services need manual restart\n' >&2
+      recovery_failed=true
+    fi
+  fi
+  if [[ $recovery_failed == true ]]; then
+    printf 'k3s cutover: recovery was incomplete; inspect the phase and stopped-service evidence before proceeding\n' >&2
   fi
 }
-trap print_rollback_on_failure EXIT
+
+handle_exit() {
+  local status=$? phase=''
+  trap - EXIT
+  [[ -z ${unit_file:-} ]] || rm -f -- "$unit_file"
+  [[ -z ${admin_hash_file:-} ]] || rm -f -- "$admin_hash_file"
+  [[ -z ${admin_origin_file:-} ]] || rm -f -- "$admin_origin_file"
+  if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
+    phase=$(<"$PHASE_FILE")
+    if [[ $phase != complete && $phase != rolled-back ]]; then
+      recover_before_edge_switch "$phase"
+      print_rollback_command >&2
+    fi
+  fi
+  exit "$status"
+}
+trap handle_exit EXIT
 
 rollback() {
-  local deployment_exists=false current_serve target_serve
+  local current_serve target_root target_websocket target_admin target_ip serve_after
   current_serve=$(mktemp)
   serve_status_file "$current_serve"
-  if ! check_serve_status "$current_serve" http://127.0.0.1:8081 2>/dev/null; then
+  if ! check_serve_status "$current_serve" http://127.0.0.1:8081 \
+    http://127.0.0.1:2444 http://127.0.0.1:2445 2>/dev/null; then
     [[ -f $EVIDENCE_DIR/serve-target && ! -L $EVIDENCE_DIR/serve-target ]] ||
-      fail 'Tailscale Serve does not match the old root, and no verified cutover root was recorded'
-    target_serve=$(<"$EVIDENCE_DIR/serve-target")
-    [[ $target_serve =~ ^http://([0-9]{1,3}\.){3}[0-9]{1,3}:$PORT_FORWARD_PORT$ ]] ||
+      fail 'Tailscale Serve is not on the old routes, and no verified cutover routes were recorded'
+    mapfile -t target_routes < "$EVIDENCE_DIR/serve-target"
+    [[ ${#target_routes[@]} -eq 3 ]] || fail 'recorded Tailscale Serve cutover routes are incomplete'
+    target_root=${target_routes[0]}
+    target_websocket=${target_routes[1]}
+    target_admin=${target_routes[2]}
+    [[ $target_root =~ ^http://(([0-9]{1,3}\.){3}[0-9]{1,3}):$LINKSELECTOR_PORT$ ]] ||
       fail 'recorded Tailscale Serve cutover root is invalid'
-    check_serve_status "$current_serve" "$target_serve"
+    target_ip=${BASH_REMATCH[1]}
+    [[ $target_websocket == "http://$target_ip:$WEBSOCKET_PORT" &&
+      $target_admin == "http://$target_ip:$ADMIN_PORT" ]] ||
+      fail 'recorded Tailscale Serve cutover service addresses are invalid'
+    check_serve_status "$current_serve" "$target_root" "$target_websocket" "$target_admin"
   fi
   rm -f -- "$current_serve"
 
-  if kubectl get deployment cloudflared --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    deployment_exists=true
-    kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null
-    kubectl rollout status deployment/cloudflared --namespace "$NAMESPACE" --timeout=180s >/dev/null 2>&1 || true
-  fi
+  stop_k8s_connector
+  stop_k8s_application
+  set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+  serve_after=$(mktemp)
+  serve_status_file "$serve_after"
+  check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+  rm -f -- "$serve_after"
 
   printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
   confirm ROUTE-RESTORED 'If the route is already on the before value, leave it there. Otherwise restore the before value now.'
-
-  incus exec "$SOURCE_INSTANCE" -- docker start teagram-web-cloudflared >/dev/null
-  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
-    http://127.0.0.1:8081 >/dev/null
-  if incus exec "$TARGET_INSTANCE" -- systemctl cat "$PORT_FORWARD_UNIT" >/dev/null 2>&1; then
-    incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$PORT_FORWARD_UNIT" >/dev/null 2>&1 || true
+  stop_port_forward_units || fail 'could not stop all target port-forwards before restarting Compose'
+  if [[ -f $COMPOSE_STOPPED_FILE ]]; then
+    restart_stopped_compose_services
   fi
-  local serve_after
-  serve_after=$(mktemp)
-  serve_status_file "$serve_after"
-  check_serve_status "$serve_after" http://127.0.0.1:8081
-  rm -f -- "$serve_after"
+  check_source_container teagram-teagramd-1
+  check_source_container teagram-postgres-1
+  check_source_container teagram-web-cloudflared
   record_phase rolled-back
-  if [[ $deployment_exists == true ]]; then
-    printf 'Rollback complete: the old connector and Serve root are restored; k8s cloudflared is scaled to 0.\n'
-  else
-    printf 'Rollback complete: the old connector and Serve root are restored.\n'
-  fi
+  printf 'Rollback complete: all five Serve handlers, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
 }
 
 if [[ $ACTION == --rollback ]]; then
   [[ -f $PHASE_FILE && ! -L $PHASE_FILE ]] || fail 'no recorded cutover phase exists to roll back'
   kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || fail 'teagram namespace is unavailable; cannot verify the rollback target'
-  check_source_container teagram-teagramd-1
   check_source_container teagram-postgres-1
+  trap - EXIT
   rollback
   exit 0
 fi
@@ -264,7 +516,35 @@ incus exec "$SOURCE_INSTANCE" -- docker exec teagram-teagramd-1 test -d /var/lib
 
 SERVE_BEFORE=$(mktemp)
 serve_status_file "$SERVE_BEFORE"
-check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081
+check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+
+record_phase prepared
+install -d -o root -g root -m 0700 "$EVIDENCE_DIR"
+install -o root -g root -m 0600 "$SERVE_BEFORE" "$EVIDENCE_DIR/serve-before.json"
+rm -f -- "$SERVE_BEFORE"
+if kubectl get secret teagramd-admin --namespace "$NAMESPACE" >/dev/null 2>&1; then
+  fail 'target teagramd-admin Secret already exists; refusing to overwrite the cutover identity'
+fi
+admin_hash_file=$(mktemp)
+admin_origin_file=$(mktemp)
+install_admin_secret "$admin_hash_file" "$admin_origin_file"
+rm -f -- "$admin_hash_file" "$admin_origin_file"
+admin_hash_file=''
+admin_origin_file=''
+kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+record_phase applying
+kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+
+kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=600s >/dev/null
+kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
+kubectl rollout status deployment/linklanding --namespace "$NAMESPACE" --timeout=300s >/dev/null
+kubectl rollout status deployment/linkselector --namespace "$NAMESPACE" --timeout=300s >/dev/null
+kubectl wait --for=condition=complete jobs \
+  --selector=app.kubernetes.io/name=rustfs-init --namespace "$NAMESPACE" --timeout=600s >/dev/null
+[[ $(kubectl get deployment cloudflared --namespace "$NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]] ||
+  fail 'k8s cloudflared must remain at zero replicas until the edge switch'
+
+fence_source_writes
 
 blob_sizes=$(incus exec "$SOURCE_INSTANCE" -- docker cp \
   teagram-teagramd-1:/var/lib/teagramd-blobs/. - |
@@ -294,29 +574,11 @@ try:
 except (tarfile.TarError, OSError, ValueError):
     raise SystemExit("k3s cutover: legacy blob tree contains an unsupported entry")
 print(f"{total}\t{encrypted_total}\t{objects}")
-') || fail 'could not inspect the source blob volume safely'
+') || fail 'could not inspect the source blob volume safely after the write fence'
 [[ $blob_sizes =~ ^[0-9]+$'\t'[0-9]+$'\t'[0-9]+$ ]] || fail 'source blob size is unavailable'
 IFS=$'\t' read -r blob_bytes encrypted_blob_bytes blob_objects <<< "$blob_sizes"
 (( blob_bytes <= MAX_LEGACY_BLOB_BYTES )) || fail 'source blob volume exceeds the 20 GiB retained PVC'
 (( encrypted_blob_bytes <= MAX_ENCRYPTED_BLOB_BYTES )) || fail 'encrypted blob volume exceeds the 18 GiB cutover budget for the 20 GiB RustFS PVC'
-
-kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
-record_phase prepared
-mkdir -p "$EVIDENCE_DIR"
-chmod 0700 "$EVIDENCE_DIR"
-install -o root -g root -m 0600 "$SERVE_BEFORE" "$EVIDENCE_DIR/serve-before.json"
-rm -f -- "$SERVE_BEFORE"
-record_phase applying
-kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
-
-kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=600s >/dev/null
-kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
-kubectl rollout status deployment/linklanding --namespace "$NAMESPACE" --timeout=300s >/dev/null
-kubectl rollout status deployment/linkselector --namespace "$NAMESPACE" --timeout=300s >/dev/null
-kubectl wait --for=condition=complete jobs \
-  --selector=app.kubernetes.io/name=rustfs-init --namespace "$NAMESPACE" --timeout=600s >/dev/null
-[[ $(kubectl get deployment cloudflared --namespace "$NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]] ||
-  fail 'k8s cloudflared must remain at zero replicas until the edge switch'
 
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- pg_isready -U postgres -d teagram >/dev/null
 source_database_bytes=$(incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
@@ -432,17 +694,19 @@ kubectl rollout status deployment/linkselector --namespace "$NAMESPACE" --timeou
 linkselector_ip=$(incus exec "$TARGET_INSTANCE" -- sh -ec \
   'ip -o -4 addr show dev eth0 scope global | awk "NR == 1 {split(\$4, a, \"/\"); print a[1]}"')
 [[ $linkselector_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail 'could not identify the private teagram-k3s LXC address'
-unit_file=$(mktemp)
-cat > "$unit_file" <<EOF
+install_port_forward_unit() {
+  local unit=$1 description=$2 target=$3 ports=$4
+  unit_file=$(mktemp)
+  cat > "$unit_file" <<EOF
 [Unit]
-Description=Loopback-to-k3s linkselector port-forward
+Description=$description
 After=k3s.service
 Requires=k3s.service
 
 [Service]
 Type=simple
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-ExecStart=/usr/local/bin/k3s kubectl port-forward --namespace teagram --address $linkselector_ip service/linkselector $PORT_FORWARD_PORT:8081
+ExecStart=/usr/local/bin/k3s kubectl port-forward --namespace teagram --address $linkselector_ip $target $ports
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true
@@ -456,39 +720,64 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-incus exec "$TARGET_INSTANCE" -- install -o root -g root -m 0644 /dev/stdin \
-  "/etc/systemd/system/$PORT_FORWARD_UNIT" < "$unit_file"
-incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
-incus exec "$TARGET_INSTANCE" -- systemctl enable --now "$PORT_FORWARD_UNIT" >/dev/null
+  incus exec "$TARGET_INSTANCE" -- install -o root -g root -m 0644 /dev/stdin \
+    "/etc/systemd/system/$unit" < "$unit_file"
+  rm -f -- "$unit_file"
+  unit_file=''
+  incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
+  incus exec "$TARGET_INSTANCE" -- systemctl enable --now "$unit" >/dev/null
+}
+
+install_port_forward_unit "$LINKSELECTOR_PORT_FORWARD_UNIT" \
+  'Loopback-to-k3s linkselector port-forward' service/linkselector "$LINKSELECTOR_PORT:8081"
+install_port_forward_unit "$TEAGRAMD_PORT_FORWARD_UNIT" \
+  'Tailnet-only teagramd WebSocket and admin port-forward' service/teagramd \
+  "$WEBSOCKET_PORT:2444 $ADMIN_PORT:2445"
 incus exec "$TARGET_INSTANCE" -- curl --fail --silent --show-error --max-time 10 \
-  "http://$linkselector_ip:$PORT_FORWARD_PORT/+k3s-smoke" --output /dev/null
+  "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --output /dev/null
 incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
-  "http://$linkselector_ip:$PORT_FORWARD_PORT/+k3s-smoke" |
+  "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" |
   grep --fixed-strings --quiet 'Open this in Teagram' || fail 'old LXC cannot reach the new selector privately'
+websocket_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --output /dev/null \
+  --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$WEBSOCKET_PORT/apiws") ||
+  fail 'the new WebSocket Service is not reachable from teagram-k3s'
+[[ $websocket_status != 000 ]] || fail 'the new WebSocket Service returned no HTTP response'
+incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
+  "http://$linkselector_ip:$WEBSOCKET_PORT/.well-known/teagramd/client" |
+  grep --fixed-strings --quiet 'rsa_spki' || fail 'the old LXC cannot reach k3s client discovery privately'
+admin_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --output /dev/null \
+  --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$ADMIN_PORT/admin") ||
+  fail 'the new admin Service is not reachable from teagram-k3s'
+[[ $admin_status =~ ^(200|302|401|403)$ ]] || fail 'the new admin Service returned an unexpected HTTP status'
 
 record_phase ready-for-edge
-printf '%s\n' "http://$linkselector_ip:$PORT_FORWARD_PORT" > "$EVIDENCE_DIR/serve-target"
+printf '%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
-incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
-  "http://$linkselector_ip:$PORT_FORWARD_PORT" >/dev/null
+record_phase serve-switch-started
+set_serve_routes "http://$linkselector_ip:$LINKSELECTOR_PORT" \
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT"
 SERVE_AFTER=$(mktemp)
 serve_status_file "$SERVE_AFTER"
-check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$PORT_FORWARD_PORT"
+check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$LINKSELECTOR_PORT" \
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT"
 install -o root -g root -m 0600 "$SERVE_AFTER" "$EVIDENCE_DIR/serve-after.json"
 rm -f -- "$SERVE_AFTER"
 
 record_phase serve-switched
-incus exec "$SOURCE_INSTANCE" -- docker stop --time 30 teagram-web-cloudflared >/dev/null
-record_phase old-connector-stopped
+[[ $(container_status teagram-web-cloudflared) == exited ]] ||
+  fail 'the old Cloudflare connector restarted unexpectedly while the k8s connector is still off'
+wait_for_no_pods app.kubernetes.io/name=cloudflared 1 ||
+  fail 'k8s Cloudflare connector pods exist before the Cloudflare route switch'
+record_phase route-change-requested
 confirm ROUTE-SWITCHED "Change the Cloudflare tunnel route from $CLOUDFLARE_BEFORE to $CLOUDFLARE_AFTER. The old Compose connector is stopped; this change is manual because no API credential is provisioned."
 record_phase route-switched
 kubectl scale deployment/cloudflared --replicas=1 --namespace "$NAMESPACE" >/dev/null
 kubectl rollout status deployment/cloudflared --namespace "$NAMESPACE" --timeout=600s >/dev/null
 [[ $(container_status teagram-web-cloudflared) == exited ]] || fail 'the old Cloudflare connector restarted unexpectedly'
-check_source_container teagram-teagramd-1
 check_source_container teagram-postgres-1
-check_source_container teagram-link-edge-selector-1
+record_phase k8s-connector-started
 
 record_phase complete
 printf 'k3s cutover complete: postgres_dump=%s legacy_blob_bytes=%s encrypted_blob_bytes=%s blob_objects=%s evidence=%s\n' \
