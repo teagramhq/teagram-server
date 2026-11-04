@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
@@ -278,12 +279,32 @@ func (s *Store) Contacts(ctx context.Context, ownerID int64) ([]Contact, int, er
 	return contacts, total, nil
 }
 
+// unnamedPlanDB runs statements as unnamed prepared statements in binary
+// format. Postgres plans each call with its own arguments and nothing is cached
+// on the pooled connection, so a generic plan never replaces the custom one.
+type unnamedPlanDB struct {
+	db.DBTX
+}
+
+func (c unnamedPlanDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return c.DBTX.Exec(ctx, sql, append([]any{pgx.QueryExecModeDescribeExec}, args...)...)
+}
+
+func (c unnamedPlanDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return c.DBTX.Query(ctx, sql, append([]any{pgx.QueryExecModeDescribeExec}, args...)...)
+}
+
+func (c unnamedPlanDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return c.DBTX.QueryRow(ctx, sql, append([]any{pgx.QueryExecModeDescribeExec}, args...)...)
+}
+
 // ContactsWithUsers loads a full contact page, user records, and visible
 // current profile photos in one query. Results are ordered by contact ID for
 // deterministic contacts hashes. Hash-only checks should use Contacts so they
-// do not hydrate users unnecessarily.
+// do not hydrate users unnecessarily. The page query runs unnamed: a cached
+// generic plan is several times slower for owners with large contact lists.
 func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]ContactWithUser, int, error) {
-	rows, err := s.q.ContactsWithUsers(ctx, ownerID)
+	rows, err := db.New(unnamedPlanDB{s.pool}).ContactsWithUsers(ctx, ownerID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list contacts with users: %w", err)
 	}
