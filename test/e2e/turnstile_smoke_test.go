@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -25,13 +26,16 @@ type smokeTurnstileVerification struct {
 }
 
 type smokeTurnstileVerifier struct {
-	mu            sync.Mutex
-	seen          map[string]struct{}
-	issuedActions map[string]string
-	verified      chan smokeTurnstileVerification
+	mu                  sync.Mutex
+	seen                map[string]struct{}
+	issuedActions       map[string]string
+	verificationDelay   time.Duration
+	verificationStart   chan struct{}
+	verificationRelease chan struct{}
+	verified            chan smokeTurnstileVerification
 }
 
-func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
+func (v *smokeTurnstileVerifier) Verify(ctx context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
 	v.mu.Lock()
 	if v.seen == nil {
 		v.seen = make(map[string]struct{})
@@ -51,6 +55,25 @@ func (v *smokeTurnstileVerifier) Verify(_ context.Context, token string, allowed
 	}
 	if !slices.Contains(allowedActions, action) {
 		return "", errors.New("token action is not allowed")
+	}
+	if v.verificationStart != nil {
+		close(v.verificationStart)
+	}
+	if v.verificationRelease != nil {
+		select {
+		case <-v.verificationRelease:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if v.verificationDelay > 0 {
+		timer := time.NewTimer(v.verificationDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 
 	v.verified <- smokeTurnstileVerification{token: token, action: action, remoteIP: remoteIP}
@@ -128,21 +151,19 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 	t.Helper()
 	const sendCodeToken = "smoke-turnstile-signup-send-code"
 	verifier := &smokeTurnstileVerifier{
-		issuedActions: map[string]string{sendCodeToken: "signup"},
-		verified:      make(chan smokeTurnstileVerification, 8),
+		issuedActions:       map[string]string{sendCodeToken: "signup"},
+		verificationStart:   make(chan struct{}),
+		verificationRelease: make(chan struct{}),
+		verified:            make(chan smokeTurnstileVerification, 8),
 	}
 	const siteKey = "smoke-signup-site-key"
-	f := newSmokeFixtureWithSetup(t, config.RegistrationInvite, func(f *smokeFixture) {
+	f := newSmokeFixtureWithSetup(t, config.RegistrationOpen, func(f *smokeFixture) {
 		f.turnstileSiteKey = siteKey
 		f.turnstileVerifier = verifier
 		f.turnstileSignInEnabled = true
 	})
 
 	const username = "turnstile_smoke_send_code_user"
-	_, inviteSecret, err := f.store.IssueInvite(f.ctx, username)
-	if err != nil {
-		t.Fatalf("issue sign-up invite: %v", err)
-	}
 	client := telegram.NewClient(1, "hash", telegram.Options{
 		DC:             f.dcID,
 		DCList:         dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
@@ -153,20 +174,81 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 
 	if err := client.Run(f.ctx, func(ctx context.Context) error {
 		apiClient := client.API()
-		sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: 1, APIHash: "hash"}
-		var sent tg.AuthSentCodeBox
-		if err := apiClient.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{
-			Token: sendCodeToken,
-			Query: sendCode,
-		}, &sent); err != nil {
-			return fmt.Errorf("wrapped auth.sendCode with signup action: %w", err)
+		appConfig, err := apiClient.HelpGetAppConfig(ctx, 0)
+		if err != nil {
+			return fmt.Errorf("help.getAppConfig for fresh guest signup: %w", err)
 		}
+		var registrationMode, turnstileSiteKey string
+		configValue, ok := appConfig.AsModified()
+		if !ok {
+			return fmt.Errorf("help.getAppConfig response = %T, want *tg.HelpAppConfig", appConfig)
+		}
+		if configObject, ok := configValue.Config.(*tg.JSONObject); ok {
+			for _, value := range configObject.Value {
+				switch value.Key {
+				case "registration_mode":
+					if stringValue, ok := value.Value.(*tg.JSONString); ok {
+						registrationMode = stringValue.Value
+					}
+				case "turnstile":
+					if turnstile, ok := value.Value.(*tg.JSONObject); ok {
+						for _, nested := range turnstile.Value {
+							if nested.Key == "site_key" {
+								if stringValue, ok := nested.Value.(*tg.JSONString); ok {
+									turnstileSiteKey = stringValue.Value
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if registrationMode != string(config.RegistrationOpen) || turnstileSiteKey != siteKey {
+			return fmt.Errorf("fresh guest signup app config = registration_mode %q, Turnstile site key %q; want %q and %q",
+				registrationMode, turnstileSiteKey, config.RegistrationOpen, siteKey)
+		}
+		available, err := apiClient.AccountCheckUsername(ctx, username)
+		if err != nil {
+			return fmt.Errorf("account.checkUsername before guest signup: %w", err)
+		}
+		if !available {
+			return errors.New("account.checkUsername reported the fresh guest username as unavailable")
+		}
+
+		sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: 1, APIHash: "hash"}
+		type sendCodeResult struct {
+			sent tg.AuthSentCodeBox
+			err  error
+		}
+		resultCh := make(chan sendCodeResult, 1)
+		go func() {
+			var sent tg.AuthSentCodeBox
+			err := apiClient.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{
+				Token: sendCodeToken,
+				Query: sendCode,
+			}, &sent)
+			resultCh <- sendCodeResult{sent: sent, err: err}
+		}()
+		select {
+		case <-verifier.verificationStart:
+		case <-ctx.Done():
+			return fmt.Errorf("wait for delayed sendCode verification: %w", ctx.Err())
+		}
+		if err := f.codes.waitForSuccessfulAck(ctx, uint64(tg.AuthSendCodeRequestTypeID)); err != nil {
+			return fmt.Errorf("wait for an actual msgs_ack send while sendCode is blocked: %w", err)
+		}
+		close(verifier.verificationRelease)
+		result := <-resultCh
+		if result.err != nil {
+			return fmt.Errorf("wrapped auth.sendCode with signup action: %w", result.err)
+		}
+		sent := result.sent
 		sentCode, ok := sent.SentCode.(*tg.AuthSentCode)
 		if !ok {
 			return fmt.Errorf("wrapped auth.sendCode response = %T, want *tg.AuthSentCode", sent.SentCode)
 		}
 
-		response, err := signInUsername(ctx, apiClient, username, sentCode.PhoneCodeHash, inviteSecret)
+		response, err := signInUsername(ctx, apiClient, username, sentCode.PhoneCodeHash, "")
 		if err != nil {
 			if !isSignUpRequired(err) {
 				return fmt.Errorf("signIn: expected SIGN_UP_REQUIRED, got %w", err)
@@ -190,6 +272,9 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 	assertSmokeTurnstileVerifications(t, verifier,
 		smokeTurnstileVerification{token: sendCodeToken, action: "signup"},
 	)
+	if sent := f.codes.successfulAckRPCTypeRecords(); !slices.Contains(sent, uint64(tg.AuthSendCodeRequestTypeID)) {
+		t.Fatalf("successful msgs_ack logs = %v, want auth.sendCode constructor %d", sent, tg.AuthSendCodeRequestTypeID)
+	}
 	if failures := f.codes.internalAckFailureRecords(); len(failures) != 0 {
 		t.Fatalf("guest sign-up logged internal msgs_ack send failures: %v", failures)
 	}

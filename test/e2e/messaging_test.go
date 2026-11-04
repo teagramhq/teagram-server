@@ -31,12 +31,19 @@ import (
 // --- per-phone code sink (two clients log in at once) ---
 
 type multiCodeSink struct {
-	mu                  sync.Mutex
-	chans               map[string]chan string
-	internalAckFailures []string
+	mu                      sync.Mutex
+	chans                   map[string]chan string
+	internalAckFailures     []string
+	successfulAckRPCTypeIDs []uint64
+	successfulAckEvents     chan uint64
 }
 
-func newMultiCodeSink() *multiCodeSink { return &multiCodeSink{chans: map[string]chan string{}} }
+func newMultiCodeSink() *multiCodeSink {
+	return &multiCodeSink{
+		chans:               map[string]chan string{},
+		successfulAckEvents: make(chan uint64, 32),
+	}
+}
 
 func (m *multiCodeSink) chFor(phone string) chan string {
 	m.mu.Lock()
@@ -65,6 +72,8 @@ func (m *multiCodeSink) WithGroup(string) slog.Handler            { return m }
 
 func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
 	var identity, code, operation, errorName string
+	var rpcTypeID uint64
+	var hasRPCTypeID bool
 	r.Attrs(func(a slog.Attr) bool {
 		switch a.Key {
 		case "phone":
@@ -75,9 +84,21 @@ func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
 			operation = a.Value.String()
 		case "error":
 			errorName = a.Value.String()
+		case "rpc_type_id":
+			rpcTypeID = a.Value.Uint64()
+			hasRPCTypeID = true
 		}
 		return true
 	})
+	if r.Message == "server operation succeeded" && operation == "msgs_ack" && hasRPCTypeID {
+		m.mu.Lock()
+		m.successfulAckRPCTypeIDs = append(m.successfulAckRPCTypeIDs, rpcTypeID)
+		m.mu.Unlock()
+		select {
+		case m.successfulAckEvents <- rpcTypeID:
+		default:
+		}
+	}
 	if r.Message == "server operation failed" && operation == "msgs_ack" && errorName == "internal" {
 		m.mu.Lock()
 		m.internalAckFailures = append(m.internalAckFailures, "msgs_ack error=internal")
@@ -102,6 +123,25 @@ func (m *multiCodeSink) internalAckFailureRecords() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.internalAckFailures...)
+}
+
+func (m *multiCodeSink) successfulAckRPCTypeRecords() []uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]uint64(nil), m.successfulAckRPCTypeIDs...)
+}
+
+func (m *multiCodeSink) waitForSuccessfulAck(ctx context.Context, want uint64) error {
+	for {
+		select {
+		case rpcTypeID := <-m.successfulAckEvents:
+			if rpcTypeID == want {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // --- client-side update collector ---

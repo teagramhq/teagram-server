@@ -16,13 +16,13 @@ jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 0a36b3b2a40a715e4db8e1ce82f5f9b5be08c16c
+      REAL_CLIENT_WEB_REVISION: d0ca92ff235976bf9d4cf9a1034bcd0decf1c03d
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -103,6 +103,30 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Run fresh-browser guest signup with the sign-in gate enabled
+        id: guest-signup-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+        run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload guest-signup Playwright failure trace
+        if: ${{ always() && steps.guest-signup-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload guest-signup run report
+        if: ${{ always() && steps.guest-signup-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Report complete job duration
         if: always()
         run: |
@@ -110,7 +134,7 @@ jobs:
           finished="$(date +%s)"
           elapsed=$((finished - started))
           printf 'Complete job duration: %dm %02ds\n' "$((elapsed / 60))" "$((elapsed % 60))" | tee -a "$GITHUB_STEP_SUMMARY"
-          if ((elapsed >= 900)); then
-            echo "::error::real-client browser-flow job exceeded 15 minutes"
+          if ((elapsed >= 1800)); then
+            echo "::error::real-client browser-flow job exceeded 30 minutes"
             exit 1
           fi

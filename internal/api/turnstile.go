@@ -24,6 +24,10 @@ const (
 	turnstileVerifyTimeout       = 5 * time.Second
 )
 
+// turnstileSiteverifyEndpoint is overridden only by the fixtureturnstile test
+// build. Production builds always use Cloudflare Siteverify.
+var turnstileSiteverifyEndpoint = turnstileSiteverifyURL
+
 var (
 	errTurnstileRejected    = errors.New("turnstile verification rejected")
 	errTurnstileUnavailable = errors.New("turnstile verification unavailable")
@@ -74,7 +78,7 @@ func newTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypa
 	return &turnstileVerifier{
 		secretKey:     secretKey,
 		qaBypassToken: qaBypassToken,
-		endpoint:      turnstileSiteverifyURL,
+		endpoint:      turnstileSiteverifyEndpoint,
 		client: &http.Client{
 			Timeout: turnstileVerifyTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {

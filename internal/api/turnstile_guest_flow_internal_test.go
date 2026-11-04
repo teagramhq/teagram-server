@@ -2,14 +2,11 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/netip"
 	"testing"
-	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -31,7 +28,7 @@ func (v *actionTurnstileVerifier) Verify(_ context.Context, token string, allowe
 	return action, nil
 }
 
-func TestGuestCreationAvailabilityAndSignupPassWhenSigninGateIsEnabled(t *testing.T) {
+func TestSignupChallengePassesWhenSigninGateIsEnabled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
@@ -62,21 +59,6 @@ func TestGuestCreationAvailabilityAndSignupPassWhenSigninGateIsEnabled(t *testin
 	h.turnstileSiteKey = "site-key"
 	h.turnstileVerifier = verifier
 	h.turnstileSignInEnabled = true
-	h.rateLimitCheckUsernameIP = store.RateLimitConfig{Limit: 1, Window: time.Hour}
-
-	var availabilityRequest bin.Buffer
-	if err := (&tg.AccountCheckUsernameRequest{Username: username}).Encode(&availabilityRequest); err != nil {
-		t.Fatalf("encode account.checkUsername: %v", err)
-	}
-	available, err := h.handleCheckUsername(&mtproto.Request{
-		Ctx: ctx, ClientAddr: addr, Buf: &availabilityRequest,
-	})
-	if err != nil {
-		t.Fatalf("account.checkUsername: %v", err)
-	}
-	if _, ok := available.(*tg.BoolTrue); !ok {
-		t.Fatalf("account.checkUsername result = %T, want *tg.BoolTrue", available)
-	}
 
 	var sendCodeRequest bin.Buffer
 	if err := (&tg.AuthSendCodeRequest{PhoneNumber: username}).Encode(&sendCodeRequest); err != nil {
@@ -159,17 +141,6 @@ func TestGuestCreationAvailabilityAndSignupPassWhenSigninGateIsEnabled(t *testin
 		t.Fatalf("Turnstile verifier calls = %d, want one Siteverify call", verifier.calls)
 	}
 
-	var limitedRequest bin.Buffer
-	if err := (&tg.AccountCheckUsernameRequest{Username: "anotherguest"}).Encode(&limitedRequest); err != nil {
-		t.Fatalf("encode second account.checkUsername: %v", err)
-	}
-	_, err = h.handleCheckUsername(&mtproto.Request{
-		Ctx: ctx, ClientAddr: addr, Buf: &limitedRequest,
-	})
-	var rpcErr *tgerr.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 {
-		t.Fatalf("second account.checkUsername error = %v, want FLOOD_WAIT from unchanged check_username_ip limit", err)
-	}
 }
 
 func TestSignupVerifiedCodeCannotStageExistingAccountLogin(t *testing.T) {

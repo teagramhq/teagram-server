@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 9)); then
-	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
+if (($# != 10)); then
+	printf 'fixture runner requires revisions, a run ID, and fixture mode options\n' >&2
 	exit 2
 fi
 SERVER_REVISION=$1
@@ -16,6 +16,7 @@ AUTH_PROGRESS_OUTPUT=$6
 PAIR_KEY_INPUT=$7
 PAIR_KEY_OUTPUT=$8
 AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
+GUEST_SIGNUP=${10}
 AUTH_PROGRESS_RUNNER_REVISION=097794ab18ef853ca09c3491b9df4e9a702d0ca6
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
@@ -33,6 +34,11 @@ fi
 if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH_CONTROLS != 1 ||
 	$AUTH_PROGRESS_PREBASELINE_CONTROLS != 0 && $AUTH_PROGRESS_PREBASELINE_CONTROLS != 1 ]]; then
 	printf 'fixture auth-progress options are invalid\n' >&2
+	exit 2
+fi
+if [[ $GUEST_SIGNUP != 0 && $GUEST_SIGNUP != 1 ||
+	$GUEST_SIGNUP == 1 && ( $AUTH_PROGRESS == 1 || $AUTH_CONTROLS == 1 || $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 ) ]]; then
+	printf 'fixture guest signup mode is invalid or combined with auth controls\n' >&2
 	exit 2
 fi
 if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
@@ -447,7 +453,12 @@ SERVER_PACKAGE=./cmd/teagramd
 if [[ ! -d "$SERVER_WORKTREE/cmd/teagramd" && -d "$SERVER_WORKTREE/cmd/telegramd" ]]; then
 	SERVER_PACKAGE=./cmd/telegramd
 fi
-if [[ $AUTH_PROGRESS == 1 ]]; then
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -tags fixtureturnstile -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
+	)
+elif [[ $AUTH_PROGRESS == 1 ]]; then
 	(
 		cd "$SERVER_WORKTREE"
 		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
@@ -539,6 +550,22 @@ if [[ $FINGERPRINT == fbb62871f07fae2a ]]; then
 	exit 1
 fi
 
+SERVER_AUTH_ENV=(--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false)
+SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/)
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	SERVER_AUTH_ENV=(
+		--env TG_REGISTRATION=open
+		--env TG_LOG_LOGIN_CODES=false
+		--env TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+		--env TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
+		--env TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
+		--env TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		--env TG_TURNSTILE_SIGNIN_ENABLED=true
+		--env TG_FIXTURE_TURNSTILE_SITEVERIFY=1
+	)
+	SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/)
+fi
+
 docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" \
 	--network "$SERVER_NET" --network-alias teagramd --log-driver none \
 	--read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges:true \
@@ -549,10 +576,10 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
 	--tmpfs /var/lib/teagramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
-	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem --env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/ \
+	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem "${SERVER_PUBLIC_LINK_ENV[@]}" \
 	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd:2443 \
 	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
-	--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false \
+	"${SERVER_AUTH_ENV[@]}" \
 	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:18-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/teagramd' < "$BUILD_DIR/teagramd"
@@ -702,11 +729,15 @@ wait_healthy "$FRONT"
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/tls.crt' < "$SECRET_DIR/tls.crt"
 docker exec "$CLIENT" chown 1001:1001 /run/secrets/tls.crt
 docker exec "$CLIENT" chmod 0400 /run/secrets/tls.crt
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_A" --password-file /run/secrets/a-password >/dev/null
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_B" --password-file /run/secrets/b-password >/dev/null
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
+if [[ $GUEST_SIGNUP == 0 ]]; then
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_A" --password-file /run/secrets/a-password >/dev/null
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_B" --password-file /run/secrets/b-password >/dev/null
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
+fi
 
-if [[ $(admin_state) != 'true|NULL' || $(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL') != 2 ]]; then
+EXPECTED_AUTH_KEYS=2
+if [[ $GUEST_SIGNUP == 1 ]]; then EXPECTED_AUTH_KEYS=0; fi
+if [[ $(admin_state) != 'true|NULL' || $(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL') != "$EXPECTED_AUTH_KEYS" ]]; then
 	printf 'administrator election or authenticated-session state changed unexpectedly\n' >&2
 	exit 1
 fi
@@ -719,7 +750,22 @@ if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_C
 	exit 1
 fi
 SERVER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND")"
-for expected in 'TG_REGISTRATION=closed' 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test'; do
+EXPECTED_SERVER_ENV=(TG_REGISTRATION=closed TG_LOG_LOGIN_CODES=false TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test)
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	EXPECTED_SERVER_ENV=(
+		TG_REGISTRATION=open
+		TG_LOG_LOGIN_CODES=false
+		TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test
+		TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+		TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
+		TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
+		TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		TG_TURNSTILE_SIGNIN_ENABLED=true
+		TG_FIXTURE_TURNSTILE_SITEVERIFY=1
+		TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
+	)
+fi
+for expected in "${EXPECTED_SERVER_ENV[@]}"; do
 	if ! printf '%s\n' "$SERVER_ENV" | grep -Fxq "$expected"; then
 		printf 'teagramd security environment assertion failed\n' >&2
 		exit 1
@@ -843,12 +889,24 @@ fi
 [[ $(docker inspect --format '{{.State.Status}}' "$BROWSER") == running ]]
 
 FINAL_AUTH_KEYS="$(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL')"
-[[ $FINAL_AUTH_KEYS == 2 ]]
+EXPECTED_FINAL_AUTH_KEYS=2
+if [[ $GUEST_SIGNUP == 1 ]]; then EXPECTED_FINAL_AUTH_KEYS=0; fi
+[[ $FINAL_AUTH_KEYS == "$EXPECTED_FINAL_AUTH_KEYS" ]]
+REGISTRATION_CLOSED=true
+GUEST_SIGNUP_ENABLED=false
+TURNSTILE_SIGNIN_ENABLED=false
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	REGISTRATION_CLOSED=false
+	GUEST_SIGNUP_ENABLED=true
+	TURNSTILE_SIGNIN_ENABLED=true
+fi
 SECURITY_JSON="$(jq -cn \
+	--argjson registrationClosed "$REGISTRATION_CLOSED" --argjson guestSignUpEnabled "$GUEST_SIGNUP_ENABLED" \
+	--argjson turnstileSignInEnabled "$TURNSTILE_SIGNIN_ENABLED" \
 	--argjson ordinaryUsers "${USER_COUNTS%%|*}" --argjson usernameAccounts "$(cut -d '|' -f 2 <<<"$USER_COUNTS")" \
 	--argjson passwordVerifiers "$(cut -d '|' -f 3 <<<"$USER_COUNTS")" \
 	--argjson initialAuthKeys "$INITIAL_AUTH_KEYS" --argjson initialMessages "$INITIAL_MESSAGES" --argjson finalAuthKeys "$FINAL_AUTH_KEYS" \
-	'{registrationClosed:true,loginCodeLogging:false,electionClosed:true,administratorIsNull:true,ordinaryUsers:$ordinaryUsers,usernameAccounts:$usernameAccounts,passwordVerifiers:$passwordVerifiers,initialAuthKeys:$initialAuthKeys,initialMessages:$initialMessages,finalAuthKeys:$finalAuthKeys}')"
+	'{registrationClosed:$registrationClosed,guestSignUpEnabled:$guestSignUpEnabled,turnstileSignInEnabled:$turnstileSignInEnabled,turnstileTestMode:false,loginCodeLogging:false,electionClosed:true,administratorIsNull:true,ordinaryUsers:$ordinaryUsers,usernameAccounts:$usernameAccounts,passwordVerifiers:$passwordVerifiers,initialAuthKeys:$initialAuthKeys,initialMessages:$initialMessages,finalAuthKeys:$finalAuthKeys}')"
 EVIDENCE_JSON="$(jq -c --argjson detected true '{httpStatus:.http_status,wssUpgradeStatus:.wss_upgrade_status,allowedWssObserved:.observed_allowed_wss,workerProbes:.worker_probes,observerControlledAttempts:.observer_controlled_attempts,directTCP:.direct_tcp,unexpectedAttempts:(.observer_unexpected_attempts|length),unexpectedDetectionVerified:$detected}' "$SECRET_DIR/browser-positive.json")"
 READY_JSON="$(jq -cn \
 	--arg event server-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
@@ -1107,4 +1165,18 @@ if [[ $AUTH_CONTROLS == 1 ]]; then
 		--argjson identity "$ENDED_IDENTITY" --arg legDigestBefore "$LEG_DIGEST_BEFORE" --arg legDigestAfter "$LEG_DIGEST_AFTER" \
 		'{event:$event,status:$status,identity:$identity,legDigestBefore:$legDigestBefore,legDigestAfter:$legDigestAfter}')"
 	printf '%s\n' "$ARTIFACT_ENDED_JSON" >&3
+fi
+
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	POST_GUEST_COUNTS="$(db_count "SELECT count(*) || '|' || count(*) FILTER (WHERE login_mode = 'username') || '|' || (SELECT count(*) FROM user_passwords) FROM users")"
+	GUEST_HANDLE_COUNT="$(db_count "SELECT count(*) FROM usernames WHERE handle ~ '^guest_[a-z2-7]{16}$'")"
+	GUEST_AUTH_KEYS="$(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL')"
+	if [[ $POST_GUEST_COUNTS != '3|3|3' || $GUEST_HANDLE_COUNT != 1 || $GUEST_AUTH_KEYS != 1 ]]; then
+		printf 'fresh-browser guest signup did not persist one complete guest account\n' >&2
+		exit 1
+	fi
+	if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "rpc_method=unknown[[:space:]].*error=internal|operation=msgs_ack.*error=internal" /run/log/teagramd.log'; then
+		printf 'fresh-browser guest signup logged an internal RPC or msgs_ack failure\n' >&2
+		exit 1
+	fi
 fi

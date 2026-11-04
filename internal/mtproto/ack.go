@@ -185,6 +185,13 @@ func (c *Conn) flushAcks() {
 	err := c.sendLocked(ctx, proto.MessageFromServer, &b)
 	c.writeMu.Unlock()
 	if err == nil {
+		attrs := []any{"operation", "msgs_ack"}
+		if len(typeIDs) == 1 {
+			attrs = append(attrs, "rpc_type_id", typeIDs[0])
+		} else if len(typeIDs) > 1 {
+			attrs = append(attrs, "rpc_type_ids", typeIDs)
+		}
+		c.log.Debug("server operation succeeded", attrs...)
 		return
 	}
 	if c.ackFailed != nil {
