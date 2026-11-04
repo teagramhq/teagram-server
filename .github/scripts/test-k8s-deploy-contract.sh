@@ -31,9 +31,19 @@ manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "R
 base_migration_check_line="$(grep -n -m 1 -F '.github/scripts/check-k8s-migration-version.sh' <<< "$manifest_step" | cut -d: -f1)"
 ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$manifest_step" | cut -d: -f1)"
 overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+base_sha_else_line="$(grep -n -m 1 -F 'else' <<< "$manifest_step" | cut -d: -f1)"
+base_sha_error_line="$(grep -n -m 1 -F 'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA' <<< "$manifest_step" | cut -d: -f1)"
+base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f1)"
 [[ "$manifest_step" == *'K8S_MIGRATION_BASE_SHA'* &&
    "$manifest_step" == *'git show'* &&
    "$manifest_step" == *"migrations deploy/k8s/base/migration-version \"\$previous_migration_version\""* &&
+   "$manifest_step" == *'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA'* &&
+   "$manifest_step" == *'>&2'* &&
+   "$base_sha_else_line" =~ ^[0-9]+$ &&
+   "$base_sha_error_line" =~ ^[0-9]+$ &&
+   "$base_sha_exit_line" =~ ^[0-9]+$ &&
+   "$base_sha_else_line" -lt "$base_sha_error_line" &&
+   "$base_sha_error_line" -lt "$base_sha_exit_line" &&
    "$base_migration_check_line" =~ ^[0-9]+$ &&
    "$ci_migration_prepare_line" =~ ^[0-9]+$ &&
    "$overlay_render_line" =~ ^[0-9]+$ &&
@@ -58,12 +68,16 @@ if bash .github/scripts/check-k8s-migration-version.sh \
   >"$migration_fixture/invalid-output" 2>"$migration_fixture/invalid-error"; then
   fail 'a changed base migration version must match the newest migration'
 fi
+grep --fixed-strings --quiet 'must match newest migration' "$migration_fixture/invalid-error" ||
+  fail 'a changed base pin rejection must explain that it must match the newest migration'
 printf '20261103000001\n' > "$migration_fixture/migration-version"
 if bash .github/scripts/check-k8s-migration-version.sh \
   "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 \
   >"$migration_fixture/missing-output" 2>"$migration_fixture/missing-error"; then
   fail 'the base migration version must refer to a migration in the repository'
 fi
+grep --fixed-strings --quiet 'does not exist in' "$migration_fixture/missing-error" ||
+  fail 'a missing base pin rejection must identify that the migration does not exist'
 printf '20261104000001\n' > "$migration_fixture/migration-version"
 bash .github/scripts/check-k8s-migration-version.sh \
   "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 >/dev/null ||

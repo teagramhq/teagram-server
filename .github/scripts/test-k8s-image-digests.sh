@@ -251,6 +251,17 @@ grep --fixed-strings --quiet 'lacks the exact migration migrations/2026110400000
   "$test_dir/divergent-migration-error" ||
   fail 'a divergent migration image rejection must identify the missing server migration'
 
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql' \
+  EXPECTED_MIGRATION_TREE=$'100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tmigrations/20261102000002_existing.sql' \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" \
+  >"$test_dir/different-migration-blob-output" 2>"$test_dir/different-migration-blob-error"; then
+  fail 'the production migration image must contain the exact migration contents required by the pinned teagramd image'
+fi
+grep --fixed-strings --quiet 'lacks the exact migration migrations/20261102000002_existing.sql' \
+  "$test_dir/different-migration-blob-error" ||
+  fail 'a differing migration blob rejection must identify the changed migration path'
+
 unpullable_digest="$(printf '9%.0s' {1..64})"
 unpullable_reference="ghcr.io/teagramhq/teagramd@sha256:$unpullable_digest"
 unpullable_prod_manifest="$test_dir/k8s-prod-unpullable.yaml"

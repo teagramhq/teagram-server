@@ -1419,6 +1419,10 @@ jobs:
             previous_migration_version="$(git show \
               "${K8S_MIGRATION_BASE_SHA}:deploy/k8s/base/migration-version")"
             previous_migration_version="$(tr -d '\r\n' <<< "$previous_migration_version")"
+          else
+            printf 'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA: %s\n' \
+              "$K8S_MIGRATION_BASE_SHA" >&2
+            exit 1
           fi
           bash .github/scripts/check-k8s-migration-version.sh \
             migrations deploy/k8s/base/migration-version "$previous_migration_version"
