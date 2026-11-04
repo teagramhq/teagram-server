@@ -472,6 +472,55 @@ func TestFileForDownloadGate(t *testing.T) {
 	}
 }
 
+func TestLegacyCustomEmojiEntityDoesNotGrantPlainFileDownload(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	alice := mustUser(t, s, "+15559100034")
+	sender := mustUser(t, s, "+15559100035")
+	recipient := mustUser(t, s, "+15559100036")
+
+	f := allocate(t, s, alice.ID, 11)
+	if err := s.MarkFileStored(ctx, f.ID); err != nil {
+		t.Fatalf("mark stored: %v", err)
+	}
+	original, _, _, _, err := s.SendMessage(ctx, alice.ID, sender.ID, "photo", 1, f.ID, 0) //nolint:dogsled // only message row needed
+	if err != nil {
+		t.Fatalf("send original file: %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, sender.ID); err != nil {
+		t.Fatalf("recipient download before revocation: %v", err)
+	}
+
+	legacy, _, _, _, err := s.SendMessage(ctx, sender.ID, recipient.ID, "x", 2, 0, 0) //nolint:dogsled // only message row needed
+	if err != nil {
+		t.Fatalf("send legacy message: %v", err)
+	}
+	encoded, err := store.EncodeMessageEntities([]store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: f.ID,
+	}})
+	if err != nil {
+		t.Fatalf("encode legacy custom emoji entity: %v", err)
+	}
+	result, err := store.StorePool(s).Exec(ctx,
+		`UPDATE messages SET entities = $1::jsonb WHERE owner_id = $2 AND local_id = $3`,
+		encoded, sender.ID, legacy.LocalID,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy entity row: %v", err)
+	}
+	if result.RowsAffected() != 1 {
+		t.Fatalf("legacy entity update affected %d rows, want 1", result.RowsAffected())
+	}
+
+	if _, err := s.DeleteMessages(ctx, alice.ID, []int64{original.LocalID}, true); err != nil {
+		t.Fatalf("revoke original file message: %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, sender.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("legacy entity after revocation: want ErrFileNotFound, got %v", err)
+	}
+}
+
 func TestFileForDownloadRejectsUnstoredFile(t *testing.T) {
 	t.Parallel()
 	s := open(t)

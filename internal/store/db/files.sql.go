@@ -480,6 +480,9 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
                   SELECT 1 FROM messages m
                   WHERE m.owner_id = $3 AND m.deleted = false
                     AND m.entities IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
                     AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
                     AND message_custom_emoji_document_ids(m.entities) && ARRAY[f.id::text]
                     AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
@@ -490,6 +493,9 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
                     ON cp.channel_id = cm.channel_id AND cp.user_id = $3
                   WHERE cm.deleted = false
                     AND cm.entities IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
                     AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
                     AND message_custom_emoji_document_ids(cm.entities) && ARRAY[f.id::text]
                     AND cm.local_id > cp.available_min_id
