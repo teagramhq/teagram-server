@@ -108,6 +108,12 @@ only because their exact before and after values are compared separately.
 Syslog targets require `TG_LOG_LOGIN_CODES=false`, so the retained sink cannot
 be enabled while the legacy diagnostic emits phone numbers and codes.
 
+Preflight also admits the reviewed one-time migration image update from
+`mirror.gcr.io/arigaio/atlas:1.2.0-alpine` to
+`mirror.gcr.io/arigaio/atlas:1.3.0-alpine` when every other resolved Compose
+field matches. Any other migration image change or concurrent Compose drift
+remains rejected.
+
 ### Retained log threat model
 
 Application diagnostics are sensitive: they can include account identifiers
