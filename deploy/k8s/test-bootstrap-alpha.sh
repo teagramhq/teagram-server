@@ -101,6 +101,8 @@ run_bootstrap() {
 # First apply: builds the LXC and writes the deploy kubeconfig.
 run_bootstrap "$work/run1.out" "$work/run1.actions"
 grep -Fq 'k3s bootstrap complete' "$work/run1.out" || fail 'first run did not report completion'
+grep -Fq "Warning: resource 'namespaces' is not namespace scoped" "$work/run1.out" ||
+  fail 'cluster-scoped can-i warning was not exercised'
 [[ $(stat -c '%a:%u' "$kubeconfig_path") == 600:0 ]] || fail 'kubeconfig is not a root-only file'
 grep -Fq "$deployer_token" "$kubeconfig_path" || fail 'kubeconfig does not contain the deploy token'
 grep -Fxq 'k3s-install' "$work/run1.actions" || fail 'first run did not install k3s'

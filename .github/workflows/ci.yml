@@ -1482,6 +1482,20 @@ jobs:
           kubectl auth can-i create pods \
             --as=system:serviceaccount:teagram:teagram-deployer \
             --namespace teagram | grep -Fx yes
+          namespace_scope_stderr="$RUNNER_TEMP/teagram-deployer-namespaces.stderr"
+          if namespace_scope_answer=$(kubectl auth can-i '*' namespaces \
+            --as=system:serviceaccount:teagram:teagram-deployer \
+            2>"$namespace_scope_stderr"); then
+            namespace_scope_status=0
+          else
+            namespace_scope_status=$?
+          fi
+          if [[ "$namespace_scope_status:$namespace_scope_answer" != 1:no ]]; then
+            cat "$namespace_scope_stderr" >&2
+            echo "the deployer cluster-scoped authorization check did not return the expected denial" >&2
+            exit 1
+          fi
+          grep -Fq 'not namespace scoped' "$namespace_scope_stderr"
           pod="$RUNNER_TEMP/teagram-deployer-escape-check.yaml"
           cat > "$pod" <<'EOF'
           apiVersion: v1

@@ -768,12 +768,12 @@ except BaseException:
     raise
 ' "$TAILNET_IP" "$KUBECONFIG_PATH"
 
-# `kubectl auth can-i` uses exit 1 for an expected denial; compare both status and text.
+# `can-i` warns on stderr for cluster-scoped resources; compare stdout and status.
 expect_deployer_can_i() {
   local expected=$1 verb=$2 resource=$3 answer status
   shift 3
   if answer=$(incus exec "$INSTANCE" -- k3s kubectl auth can-i "$verb" "$resource" \
-    --as=system:serviceaccount:teagram:teagram-deployer "$@" 2>&1); then
+    --as=system:serviceaccount:teagram:teagram-deployer "$@"); then
     status=0
   else
     status=$?

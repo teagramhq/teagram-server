@@ -201,6 +201,10 @@ def kubectl(args, state):
         create_from_env(args, sys.stdin.read())
     if args[:2] == ["auth", "can-i"]:
         if "namespaces" in args:
+            print(
+                "Warning: resource 'namespaces' is not namespace scoped",
+                file=sys.stderr,
+            )
             answer = "no"
         elif "--namespace" in args and args[args.index("--namespace") + 1] == NAMESPACE:
             answer = "yes"
