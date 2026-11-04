@@ -152,12 +152,13 @@ func TestCreateUserStickerSetStoresFingerprintFromBlob(t *testing.T) {
 	}
 }
 
-func TestStickerSetTakedownUnavailableDocumentLeavesHashNull(t *testing.T) {
+func TestStickerSetTakedownInvalidDocumentRetainsHashAndBlocksReupload(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := &stickerSetReadGate{Store: testBlobs(t)}
 	s := openStickerSetReadGateStore(t, blobs)
 	owner := mustUser(t, s, "+15559310013")
+	reuploadOwner := mustUser(t, s, "+15559310014")
 	data := []byte("hello world")
 	file := stickerSetFileWithBytes(t, s, owner, data)
 	set, err := createOneFileStickerSet(ctx, s, owner, file, "Invalid blob", "invalid_blob", data)
@@ -187,8 +188,14 @@ func TestStickerSetTakedownUnavailableDocumentLeavesHashNull(t *testing.T) {
 	`, set.ID, file.ID).Scan(&isLive, &contentSHA256); err != nil {
 		t.Fatalf("read set after invalid-document takedown: %v", err)
 	}
-	if isLive || contentSHA256 != nil {
-		t.Fatalf("set after invalid-document takedown is_live=%t content_sha256=%x, want down with NULL hash", isLive, contentSHA256)
+	wantHash := sha256.Sum256(data)
+	if isLive || !bytes.Equal(contentSHA256, wantHash[:]) {
+		t.Fatalf("set after invalid-document takedown is_live=%t content_sha256=%x, want down with retained hash %x", isLive, contentSHA256, wantHash)
+	}
+
+	reuploadFile := stickerSetFileWithBytes(t, s, reuploadOwner, data)
+	if _, err := createOneFileStickerSet(ctx, s, reuploadOwner, reuploadFile, "Reupload", "reupload_same_bytes", data); !errors.Is(err, store.ErrStickerFileBlocked) {
+		t.Fatalf("create set with bytes from taken-down set = %v, want ErrStickerFileBlocked", err)
 	}
 }
 

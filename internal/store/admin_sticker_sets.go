@@ -208,14 +208,12 @@ func (s *Store) setUserStickerSetLive(
 				item.Size != fingerprint.size || item.Stored != fingerprint.stored {
 				return 0, ErrStickerSetStateConflict
 			}
-			var contentSHA256 []byte
-			if fingerprint.hasHash {
-				contentSHA256 = fingerprint.digest[:]
-			} else {
+			if !fingerprint.hasHash {
 				unhashedFileCount++
+				continue
 			}
 			updated, updateErr := qtx.UpdateUserStickerSetItemContentSHA256(ctx, db.UpdateUserStickerSetItemContentSHA256Params{
-				ContentSha256: contentSHA256, SetID: row.ID, FileID: item.FileID,
+				ContentSha256: fingerprint.digest[:], SetID: row.ID, FileID: item.FileID,
 			})
 			if updateErr != nil {
 				return 0, fmt.Errorf("store blocked sticker content hash for file %d: %w", item.FileID, updateErr)

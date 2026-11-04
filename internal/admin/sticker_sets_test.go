@@ -3,6 +3,7 @@ package admin_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -120,11 +121,12 @@ func TestStickerSetTakedownUnavailableFilesSucceedsAndAuditsUnhashedCount(t *tes
 	if action != "takedown" || reason != "missing stored bytes" {
 		t.Fatalf("takedown event action/reason = %q/%q, want takedown/original operator reason", action, reason)
 	}
-	var hasContentHash bool
-	if err := conn.QueryRow(ctx, `SELECT content_sha256 IS NOT NULL FROM user_created_sticker_set_items WHERE set_id = $1 AND file_id = $2`, set.ID, file.ID).Scan(&hasContentHash); err != nil {
+	var contentSHA256 []byte
+	if err := conn.QueryRow(ctx, `SELECT content_sha256 FROM user_created_sticker_set_items WHERE set_id = $1 AND file_id = $2`, set.ID, file.ID).Scan(&contentSHA256); err != nil {
 		t.Fatalf("read unavailable item's content hash: %v", err)
 	}
-	if hasContentHash {
-		t.Fatal("unavailable item has a content hash")
+	wantHash := sha256.Sum256(data)
+	if !bytes.Equal(contentSHA256, wantHash[:]) {
+		t.Fatalf("unavailable item hash = %x, want retained creation hash %x", contentSHA256, wantHash)
 	}
 }
