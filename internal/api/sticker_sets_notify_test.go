@@ -29,6 +29,30 @@ type stickerSetNotifyTransport struct {
 	sent  [][]byte
 }
 
+type blockingStickerSetNotifyTransport struct {
+	stickerSetNotifyTransport
+
+	entered chan struct{}
+	release <-chan struct{}
+	first   sync.Once
+}
+
+func (t *blockingStickerSetNotifyTransport) Send(ctx context.Context, b *bin.Buffer) error {
+	blocked := false
+	t.first.Do(func() {
+		blocked = true
+		close(t.entered)
+	})
+	if blocked {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.release:
+		}
+	}
+	return t.stickerSetNotifyTransport.Send(ctx, b)
+}
+
 func (t *stickerSetNotifyTransport) Send(_ context.Context, b *bin.Buffer) error {
 	t.sends.Add(1)
 	t.mu.Lock()
@@ -201,7 +225,7 @@ func TestStickerSetInstallPushesAcrossReplicasToOtherSessions(t *testing.T) {
 	}
 }
 
-func TestStickerSetReorderPushesKindOrderToOtherSessions(t *testing.T) {
+func TestStickerSetReorderPushesKindOrderToSessions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := testBlobs(t)
@@ -245,13 +269,10 @@ func TestStickerSetReorderPushesKindOrderToOtherSessions(t *testing.T) {
 	if got := reorderStickerSets(t, fullChannelDispatcher(s), owner.ID, false, false, []int64{ids[1], ids[0]}); got != "" {
 		t.Fatalf("reorder = %q, want boolTrue", got)
 	}
-	if !waitStickerSetNotifyWrites(1, localTransport, remoteTransport) {
-		t.Fatalf("sticker-set order writes: local=%d remote=%d, want one on both replicas", localTransport.sends.Load(), remoteTransport.sends.Load())
+	if !waitStickerSetNotifyWrites(1, callerTransport, localTransport, remoteTransport) {
+		t.Fatalf("sticker-set order writes: caller=%d local=%d remote=%d, want one on every session", callerTransport.sends.Load(), localTransport.sends.Load(), remoteTransport.sends.Load())
 	}
-	if got := callerTransport.sends.Load(); got != 0 {
-		t.Errorf("originating session writes = %d, want 0", got)
-	}
-	for name, transport := range map[string]*stickerSetNotifyTransport{"local sibling": localTransport, "remote session": remoteTransport} {
+	for name, transport := range map[string]*stickerSetNotifyTransport{"originating session": callerTransport, "local sibling": localTransport, "remote session": remoteTransport} {
 		update := decodeStickerSetOrder(t, transport.lastSent())
 		if update.Masks || update.Emojis {
 			t.Errorf("%s update flags = masks:%t emojis:%t, want regular flags false", name, update.Masks, update.Emojis)
@@ -263,6 +284,87 @@ func TestStickerSetReorderPushesKindOrderToOtherSessions(t *testing.T) {
 		if bytes.Contains(body, littleEndianUint32(tg.UpdateStickerSetsTypeID)) {
 			t.Errorf("%s frame carries plain updateStickerSets, want only the order update", name)
 		}
+	}
+}
+
+func TestStickerSetReorderReconcilesOriginAfterOlderPush(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551830022")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	ids := createInstalledUserStickerSets(t, s, fullChannelDispatcher(s), blobs, owner.ID, "push_race_alpha", "push_race_bravo")
+
+	registry := mtproto.NewSessionRegistry()
+	release := make(chan struct{})
+	transport := &blockingStickerSetNotifyTransport{entered: make(chan struct{}), release: release}
+	conn := mtproto.NewTestConn(transport, testKey())
+	conn.SetOwner(owner.ID)
+	conn.SetSession(22)
+	if !registry.Add(owner.ID, conn) {
+		t.Fatal("register originating session")
+	}
+	var releaseOnce sync.Once
+	releaseFirstPush := func() { releaseOnce.Do(func() { close(release) }) }
+	firstDone := make(chan struct{})
+	firstStarted := false
+	t.Cleanup(func() {
+		releaseFirstPush()
+		if firstStarted {
+			select {
+			case <-firstDone:
+			case <-time.After(5 * time.Second):
+				t.Error("older sticker-set order push did not finish after release")
+			}
+		}
+		registry.Remove(owner.ID, conn)
+	})
+
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	olderOrder := []int64{ids[1], ids[0]}
+	if _, err := s.ReorderInstalledStickerSets(ctx, owner.ID, olderOrder); err != nil {
+		t.Fatalf("commit older reorder: %v", err)
+	}
+	authKeyID := conn.AuthKeyID()
+	firstStarted = true
+	go func() {
+		updater.DeliverStickerSets(ctx, owner.ID, authKeyID, 11, &store.StickerSetOrder{Kind: "regular", IDs: olderOrder})
+		close(firstDone)
+	}()
+	select {
+	case <-transport.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("older order push did not reach the originating session")
+	}
+
+	latestOrder := []int64{ids[0], ids[1]}
+	committed, err := s.ReorderInstalledStickerSets(ctx, owner.ID, latestOrder)
+	if err != nil {
+		t.Fatalf("commit newer reorder: %v", err)
+	}
+	if len(committed) != len(latestOrder) || committed[0].ID != latestOrder[0] || committed[1].ID != latestOrder[1] {
+		t.Fatalf("newer committed order = %v, want %v", committed, latestOrder)
+	}
+	releaseFirstPush()
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("older order push did not finish after release")
+	}
+	if got := decodeStickerSetOrder(t, transport.lastSent()).Order; !slices.Equal(got, olderOrder) {
+		t.Fatalf("delayed older order = %v, want %v", got, olderOrder)
+	}
+
+	updater.DeliverStickerSets(ctx, owner.ID, authKeyID, 22, &store.StickerSetOrder{Kind: "regular", IDs: latestOrder})
+	if got := transport.sends.Load(); got != 2 {
+		t.Fatalf("originating session order writes = %d, want older and reconciliation updates", got)
+	}
+	if got := decodeStickerSetOrder(t, transport.lastSent()).Order; !slices.Equal(got, latestOrder) {
+		t.Errorf("originating session's final order = %v, want committed order %v", got, latestOrder)
 	}
 }
 
@@ -305,18 +407,17 @@ func TestStickerSetReorderPushesMaskAndEmojiFlags(t *testing.T) {
 			if got := reorderStickerSets(t, h, owner.ID, tc.masks, tc.emojis, wantOrder); got != "" {
 				t.Fatalf("%s reorder = %q, want boolTrue", tc.name, got)
 			}
-			if !waitStickerSetNotifyWrites(1, siblingTransport) {
-				t.Fatalf("sibling writes = %d, want one", siblingTransport.sends.Load())
+			if !waitStickerSetNotifyWrites(1, callerTransport, siblingTransport) {
+				t.Fatalf("session writes: caller=%d sibling=%d, want one on both", callerTransport.sends.Load(), siblingTransport.sends.Load())
 			}
-			if got := callerTransport.sends.Load(); got != 0 {
-				t.Errorf("originating session writes = %d, want 0", got)
-			}
-			update := decodeStickerSetOrder(t, siblingTransport.lastSent())
-			if update.Masks != tc.masks || update.Emojis != tc.emojis {
-				t.Errorf("%s update flags = masks:%t emojis:%t, want masks:%t emojis:%t", tc.name, update.Masks, update.Emojis, tc.masks, tc.emojis)
-			}
-			if !slices.Equal(update.Order, wantOrder) {
-				t.Errorf("%s update order = %v, want %v", tc.name, update.Order, wantOrder)
+			for name, transport := range map[string]*stickerSetNotifyTransport{"originating session": callerTransport, "sibling": siblingTransport} {
+				update := decodeStickerSetOrder(t, transport.lastSent())
+				if update.Masks != tc.masks || update.Emojis != tc.emojis {
+					t.Errorf("%s %s update flags = masks:%t emojis:%t, want masks:%t emojis:%t", tc.name, name, update.Masks, update.Emojis, tc.masks, tc.emojis)
+				}
+				if !slices.Equal(update.Order, wantOrder) {
+					t.Errorf("%s %s update order = %v, want %v", tc.name, name, update.Order, wantOrder)
+				}
 			}
 		})
 	}
