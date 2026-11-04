@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: cloudflared
+          image: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ec"]
+          args: ["exec sleep 3600"]
+          env:
+            - $patch: replace
+          startupProbe:
+            $patch: replace
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            $patch: replace
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            $patch: replace
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3

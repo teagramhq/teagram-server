@@ -42,7 +42,7 @@ on:
 permissions:
   contents: read
 
-# PR updates supersede older checks for that PR; main runs stay separate.
+# PR updates supersede older checks; main keeps its runs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -54,23 +54,12 @@ env:
   PERF_HISTORY: ${{ github.workspace }}/.perf-history
 
 jobs:
-  ops-gate-pr-during-main:
-    name: 'ops: gate-pr-during-main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 1
-    permissions:
-      contents: read
-    steps:
-      - name: Defer privileged priority operations to trusted workflow
-        run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
-
   # Main always looks up and refills the snapshot cache, even when its public
   # release already exists. V2 adds seed provenance; v1 caches predate that
   # metadata and cannot be published safely. PRs prefer v2, reuse v1 for
   # measurement only, and seed when both miss.
   test-perf-fixture-snapshot:
     name: 'test: perf-fixture-snapshot'
-    needs: ops-gate-pr-during-main
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 150
@@ -272,10 +261,8 @@ jobs:
   # the server's CI.
   test-rpc-performance:
     name: 'test: rpc-performance'
-    needs:
-      - ops-gate-pr-during-main
-      - test-perf-fixture-snapshot
-    if: ${{ !cancelled() && needs.ops-gate-pr-during-main.result == 'success' && needs.test-perf-fixture-snapshot.result != 'failure' }}
+    needs: test-perf-fixture-snapshot
+    if: ${{ !cancelled() && needs.test-perf-fixture-snapshot.result != 'failure' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 150
     permissions:
