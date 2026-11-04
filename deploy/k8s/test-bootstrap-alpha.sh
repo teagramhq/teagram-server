@@ -119,6 +119,25 @@ if state["pod_security_enforce_version"] != "v1.37":
     raise SystemExit("namespace Pod Security baseline version was not pinned")
 if state["token_wait_polls"] < 3 or state["ca_wait_polls"] < 3:
     raise SystemExit("the token and CA waits did not cover delayed population")
+required_data = {
+    "configmap/teagramd-runtime": {"TG_PUBLIC_LINK_PREFIX", "TG_ADVERTISE_ADDR"},
+    "configmap/link-edge-runtime": {"TG_INVITE_WEB_SIGNUP_URL", "TG_INVITE_DESKTOP_URL"},
+    "secret/postgres-credentials": {"POSTGRES_PASSWORD", "TG_POSTGRES_DSN"},
+    "secret/rustfs-credentials": {"RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY"},
+    "secret/teagramd-blob-credentials": {"TG_BLOB_S3_ACCESS_KEY_ID", "TG_BLOB_S3_SECRET_ACCESS_KEY"},
+    "secret/cloudflared-token": {"token"},
+    "secret/ghcr-pull": {".dockerconfigjson"},
+    "secret/teagramd-media-keys": {"1.key", "2.key"},
+}
+missing_resources = required_data.keys() - state["objects"].keys()
+if missing_resources:
+    raise SystemExit(f"bootstrap did not apply expected resources: {sorted(missing_resources)}")
+if "secret/teagram-deployer-token" not in state["objects"]:
+    raise SystemExit("bootstrap did not apply the deployer token Secret")
+for resource, expected_keys in required_data.items():
+    actual_keys = set(state.get("resource_data", {}).get(resource, {}))
+    if actual_keys != expected_keys:
+        raise SystemExit(f"{resource} data keys differ: {sorted(actual_keys)}")
 if "pod/teagram-deployer-escape-check" in state["objects"]:
     raise SystemExit("the server-side escape probe created a pod")
 PY
@@ -140,6 +159,25 @@ for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustf
   "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
   if grep -Fq -- "$secret" "$work/run1.out" "$work/run2.out"; then
     fail 'the script printed a secret value'
+  fi
+done
+
+mkdir -p "$work/failure-state"
+: > "$work/failure-actions"
+if MOCK_STATE="$work/failure-state" MOCK_ACTIONS="$work/failure-actions" \
+  MOCK_FAIL_APPLY_RESOURCE=secret/postgres-credentials PATH="$bin:$PATH" \
+  "$bootstrap" --apply > "$work/failure.out" 2>&1; then
+  fail 'the injected kubectl apply failure was ignored'
+fi
+grep -Fq 'k3s could not apply secret/postgres-credentials (exit 1): mock kubectl first diagnostic' \
+  "$work/failure.out" || fail 'kubectl apply failure did not name the resource and first error line'
+if grep -Fq 'mock kubectl second diagnostic' "$work/failure.out"; then
+  fail 'kubectl apply failure printed more than the first stderr line'
+fi
+for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
+  if grep -Fq -- "$secret" "$work/failure.out"; then
+    fail 'the script printed a secret value on an apply failure'
   fi
 done
 

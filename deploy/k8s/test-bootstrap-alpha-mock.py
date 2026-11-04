@@ -53,6 +53,7 @@ def load_state():
             "ssh_active": False,
             "serve": {"TCP": {}},
             "objects": {},
+            "resource_data": {},
             "token_populated": False,
             "ca_populated": False,
             "token_wait_polls": 0,
@@ -133,8 +134,10 @@ def store_manifest(text, state):
     if text.lstrip().startswith("{"):
         obj = json.loads(text)
         documents = [(obj["kind"], obj["metadata"]["name"], json.dumps(obj, sort_keys=True))]
+        resource_data = obj.get("data", {})
     else:
         documents = []
+        resource_data = None
         for part in re.split(r"^---$", text, flags=re.M):
             kind = re.search(r"^kind: (\S+)$", part, re.M)
             name = re.search(r"^  name: (\S+)$", part, re.M)
@@ -142,10 +145,14 @@ def store_manifest(text, state):
                 documents.append((kind.group(1), name.group(1), part.strip()))
     for kind, name, document in documents:
         key = kind.lower() + "/" + name
+        if os.environ.get("MOCK_FAIL_APPLY_RESOURCE") == key:
+            fail("mock kubectl first diagnostic\nmock kubectl second diagnostic", 1)
         digest = hashlib.sha256(document.encode()).hexdigest()
         if state["objects"].get(key) != digest:
             state["objects"][key] = digest
             log_action("kubectl-apply " + key)
+        if resource_data is not None and kind.lower() in ("configmap", "secret"):
+            state.setdefault("resource_data", {})[key] = resource_data
         if key == "namespace/teagram":
             label = re.search(
                 r"^\s+pod-security\.kubernetes\.io/enforce:\s*(\S+)\s*$",
@@ -162,7 +169,16 @@ def store_manifest(text, state):
 
 
 def create_from_env(args, text):
-    kind, name = args[1], args[2]
+    if len(args) < 3:
+        fail("kubectl create requires a resource type and name")
+    if args[1] == "secret":
+        if len(args) < 4 or args[2] != "generic":
+            fail('kubectl create secret requires the "generic" subcommand')
+        kind, name = "secret", args[3]
+    elif args[1] == "configmap":
+        kind, name = "configmap", args[2]
+    else:
+        fail(f"unexpected kubectl create resource: {args[1]}")
     values = {}
     for line in text.splitlines():
         if "=" in line:

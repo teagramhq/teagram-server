@@ -250,17 +250,28 @@ install_file_if_changed() {
 }
 
 apply_manifest() {
-  incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl apply -f - \
-    >/dev/null 2>/dev/null || fail 'k3s could not apply a bootstrap resource'
+  local resource=$1 kubectl_error status
+  if kubectl_error=$(incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl apply -f - \
+    2>&1 >/dev/null); then
+    return 0
+  else
+    status=$?
+  fi
+  kubectl_error=${kubectl_error%%$'\n'*}
+  fail "k3s could not apply $resource (exit $status): ${kubectl_error:-kubectl returned no stderr output}"
 }
 
 apply_env_resource() {
   local kind=$1 name=$2
+  local -a create_args=(create "$kind")
   shift 2
+  if [[ $kind == secret ]]; then
+    create_args+=(generic)
+  fi
+  create_args+=("$name" --namespace "$NAMESPACE" --from-env-file=/dev/stdin --dry-run=client -o json)
   printf '%s\n' "$@" |
-    incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl create "$kind" "$name" \
-      --namespace "$NAMESPACE" --from-env-file=/dev/stdin --dry-run=client -o json 2>/dev/null |
-    apply_manifest
+    incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${create_args[@]}" |
+    apply_manifest "$kind/$name"
 }
 
 assert_env_line() {
@@ -554,7 +565,7 @@ ensure_serve_port "$K3S_API_TAILNET_PORT" "$K3S_API_HOST_PORT"
 ensure_serve_port "$OPS_SSH_TAILNET_PORT" "$OPS_SSH_HOST_PORT"
 
 namespace_file="$REPO_ROOT/deploy/k8s/base/namespace.yaml"
-apply_manifest < "$namespace_file"
+apply_manifest "namespace/$NAMESPACE" < "$namespace_file"
 namespace_json=$(incus exec "$INSTANCE" -- k3s kubectl get namespace "$NAMESPACE" --output json)
 if ! printf '%s' "$namespace_json" | python3 -c '
 import json
@@ -571,7 +582,7 @@ if (not isinstance(labels, dict) or
 '; then
   fail 'the teagram namespace does not enforce the Pod Security baseline'
 fi
-apply_manifest <<'EOF'
+apply_manifest 'deployer RBAC and token manifest' <<'EOF'
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -629,7 +640,7 @@ apply_env_resource secret teagramd-blob-credentials \
   "TG_BLOB_S3_ACCESS_KEY_ID=$TG_BLOB_S3_ACCESS_KEY_ID" \
   "TG_BLOB_S3_SECRET_ACCESS_KEY=$TG_BLOB_S3_SECRET_ACCESS_KEY"
 apply_env_resource secret cloudflared-token "token=$CLOUDFLARED_TOKEN"
-printf '%s' "$GHCR_SECRET_JSON" | apply_manifest
+printf '%s' "$GHCR_SECRET_JSON" | apply_manifest secret/ghcr-pull
 incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:"$MEDIA_KEYS_PATH/." - |
   python3 -c '
 import base64
@@ -658,7 +669,7 @@ secret = {
     "data": data,
 }
 json.dump(secret, sys.stdout, separators=(",", ":"))
-' | apply_manifest
+' | apply_manifest secret/teagramd-media-keys
 
 admission_result=$(incus exec "$INSTANCE" -- k3s kubectl \
   --as=system:serviceaccount:teagram:teagram-deployer \
