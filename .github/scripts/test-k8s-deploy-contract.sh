@@ -33,7 +33,7 @@ ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migrati
 overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
 [[ "$manifest_step" == *'K8S_MIGRATION_BASE_SHA'* &&
    "$manifest_step" == *'git show'* &&
-   "$manifest_step" == *'migrations deploy/k8s/base/migration-version "$previous_migration_version"'* &&
+   "$manifest_step" == *"migrations deploy/k8s/base/migration-version \"\$previous_migration_version\""* &&
    "$base_migration_check_line" =~ ^[0-9]+$ &&
    "$ci_migration_prepare_line" =~ ^[0-9]+$ &&
    "$overlay_render_line" =~ ^[0-9]+$ &&
@@ -89,8 +89,8 @@ bash .github/scripts/set-k8s-ci-migration-version.sh \
 apply_ci_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Apply the rendered CI overlay to k3s") | .run' .github/workflows/ci.yml)"
 prepare_ci_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
 render_ci_line="$(grep -n -m 1 -F 'kubectl kustomize deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
-dry_run_ci_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"' <<< "$apply_ci_step" | cut -d: -f1)"
-apply_ci_line="$(grep -n -m 1 -F 'kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"' <<< "$apply_ci_step" | cut -d: -f1)"
+dry_run_ci_line="$(grep -n -m 1 -F "kubectl apply --dry-run=server --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
+apply_ci_line="$(grep -n -m 1 -F "kubectl apply --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
 [[ "$prepare_ci_line" =~ ^[0-9]+$ &&
    "$render_ci_line" =~ ^[0-9]+$ &&
    "$dry_run_ci_line" =~ ^[0-9]+$ &&
