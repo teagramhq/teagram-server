@@ -80,6 +80,10 @@ cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdin' "$cutover_seed_job")" == true &&
    "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdinOnce' "$cutover_seed_job")" == true ]] ||
   fail 'the cutover account seed Job must accept the password through one stdin attachment'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.capabilities.add // [] | join(",")' "$cutover_seed_job")" == 'DAC_READ_SEARCH' ]] ||
+  fail 'the cutover account seed Job must grant only DAC_READ_SEARCH to read the runtime-owned key as root'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.capabilities.drop // [] | join(",")' "$cutover_seed_job")" == 'ALL' ]] ||
+  fail 'the cutover account seed Job must drop every other capability'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.runAsUser' "$cutover_seed_job")" == 0 ]] ||
   fail 'the cutover account seed Job must run as root for the guarded admin command'
 for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
