@@ -219,8 +219,9 @@ kubectl patch job/local-blob-migration --namespace "$TARGET_NAMESPACE" --type=me
   --patch '{"spec":{"suspend":false}}' >/dev/null
 kubectl wait --for=condition=complete job/local-blob-migration \
   --namespace "$TARGET_NAMESPACE" --timeout=21600s >/dev/null
+# Drain the log stream; grep -q can SIGPIPE kubectl under pipefail.
 kubectl logs --namespace "$TARGET_NAMESPACE" job/local-blob-migration -c migrate |
-  grep --fixed-strings --quiet 'blob_copy=pass mode=encrypted objects=1 bytes=32'
+  grep --fixed-strings 'blob_copy=pass mode=encrypted objects=1 bytes=32' >/dev/null
 
 kubectl scale statefulset/teagramd --replicas=1 --namespace "$TARGET_NAMESPACE" >/dev/null
 kubectl rollout status statefulset/teagramd --namespace "$TARGET_NAMESPACE" --timeout=900s >/dev/null
@@ -234,7 +235,7 @@ chmod 0600 "$tmp_dir/client.json"
 start_port_forward "$TARGET_NAMESPACE"
 start_linkselector_forward "$TARGET_NAMESPACE"
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12881/+k3s-smoke |
-  grep --fixed-strings --quiet 'Open this in Teagram'
+  grep --fixed-strings 'Open this in Teagram' >/dev/null
 websocket_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --max-time 10 http://127.0.0.1:12444/apiws)
 [[ $websocket_status != 000 ]]
