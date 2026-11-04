@@ -263,24 +263,43 @@ apply_manifest() {
 
 apply_env_resource() {
   local kind=$1 name=$2
-  local kubectl_error status
+  local kubectl_error status operation kubectl_status
   local -a create_args=(create "$kind")
   shift 2
   if [[ $kind == secret ]]; then
     create_args+=(generic)
   fi
   create_args+=("$name" --namespace "$NAMESPACE" --from-env-file=/dev/stdin --dry-run=client -o json)
+  # The remote shell keeps the generated Secret manifest in LXC memory only.
+  # shellcheck disable=SC2016
   if kubectl_error=$(printf '%s\n' "$@" |
-    incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${create_args[@]}" \
-      2>&1 > "$kubectl_manifest_file"); then
-    :
+    incus exec --mode=non-interactive "$INSTANCE" -- bash -c '
+      manifest=$(k3s kubectl "$@")
+      create_status=$?
+      if (( create_status != 0 )); then
+        printf "K3S_BOOTSTRAP_FAILURE create %s\n" "$create_status" >&2
+        exit "$create_status"
+      fi
+      printf "%s" "$manifest" | k3s kubectl apply -f -
+      apply_status=$?
+      if (( apply_status != 0 )); then
+        printf "K3S_BOOTSTRAP_FAILURE apply %s\n" "$apply_status" >&2
+        exit "$apply_status"
+      fi
+    ' -- "${create_args[@]}" 2>&1 >/dev/null); then
+    return 0
   else
     status=$?
-    kubectl_error=${kubectl_error%%$'\n'*}
-    fail "k3s could not create $kind/$name (exit $status): ${kubectl_error:-kubectl returned no stderr output}"
   fi
-  apply_manifest "$kind/$name" < "$kubectl_manifest_file"
-  : > "$kubectl_manifest_file"
+  operation='create or apply'
+  kubectl_status=$status
+  if [[ $kubectl_error =~ K3S_BOOTSTRAP_FAILURE[[:space:]]+(create|apply)[[:space:]]+([0-9]+) ]]; then
+    operation=${BASH_REMATCH[1]}
+    kubectl_status=${BASH_REMATCH[2]}
+  fi
+  kubectl_error=${kubectl_error%%$'\n'*}
+  [[ $kubectl_error != K3S_BOOTSTRAP_FAILURE* ]] || kubectl_error=''
+  fail "k3s could not $operation $kind/$name (exit $kubectl_status): ${kubectl_error:-kubectl returned no stderr output}"
 }
 
 assert_env_line() {
@@ -503,8 +522,7 @@ fi
 
 sysctl_file=$(mktemp)
 ops_ssh_config=$(mktemp)
-kubectl_manifest_file=$(mktemp)
-trap 'rm -f -- "$sysctl_file" "$ops_ssh_config" "$kubectl_manifest_file"' EXIT
+trap 'rm -f -- "$sysctl_file" "$ops_ssh_config"' EXIT
 cat > "$sysctl_file" <<'EOF'
 net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables = 1

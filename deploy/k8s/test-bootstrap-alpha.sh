@@ -35,6 +35,14 @@ media_key='tgtest-media-key-body-1'
 ghcr_auth=$(printf 'tgtest:ghcr-read' | base64 -w0)
 deployer_token='tgtest-deployer-token-7f3a9c'
 dsn="postgres://postgres:${pg_password}@postgres:5432/teagram?sslmode=disable"
+host_tmp="$work/host-tmp"
+mkdir -p "$host_tmp"
+export TMPDIR="$host_tmp"
+export MOCK_HOST_TMP="$host_tmp"
+export MOCK_SECRET_VALUES
+MOCK_SECRET_VALUES=$(printf '%s\n' "$pg_password" "$dsn" "$tunnel_token" \
+  "$rustfs_access_key" "$rustfs_secret_key" "$blob_access_key_id" "$blob_secret_key" \
+  "$media_key" "$ghcr_auth" "$deployer_token")
 
 src="$work/src"
 containers="$src/containers"
