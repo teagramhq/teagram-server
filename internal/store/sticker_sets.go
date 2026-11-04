@@ -17,6 +17,13 @@ type InstalledStickerSet struct {
 	InstalledAt time.Time
 }
 
+// ReorderedStickerSet is one set in a committed reorder result. Kind is set
+// for user-created sets and empty for catalogue sets.
+type ReorderedStickerSet struct {
+	ID   int64
+	Kind string
+}
+
 // InstallStickerSet adds one resolved catalogue set to one account. The
 // composite primary key makes repeated installs a no-op.
 func (s *Store) InstallStickerSet(ctx context.Context, userID, setID int64) (bool, error) {
@@ -104,8 +111,9 @@ func (s *Store) InstalledStickerSets(ctx context.Context, userID int64) ([]Insta
 // listed order, and keeps every other installed set in its current relative
 // order. Ids the account has not installed are ignored, and a repeated id is
 // placed once. The owner row lock serialises the reorder with installs. It
-// returns the resulting order.
-func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, listed []int64) ([]int64, error) {
+// returns the resulting order and each user-created set's kind from the same
+// locked transaction.
+func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, listed []int64) ([]ReorderedStickerSet, error) {
 	if userID <= 0 {
 		return nil, errors.New("reorder sticker sets: invalid user identity")
 	}
@@ -122,28 +130,49 @@ func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, l
 	if err != nil {
 		return nil, fmt.Errorf("list sticker sets for reorder: %w", err)
 	}
-	installed := make(map[int64]bool, len(rows))
+	userSetIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if row.SetID > 0 {
+			userSetIDs = append(userSetIDs, row.SetID)
+		}
+	}
+	userSetKinds := make(map[int64]string, len(userSetIDs))
+	if len(userSetIDs) > 0 {
+		userSets, lookupErr := qtx.UserCreatedStickerSetsByInstalledIDs(ctx, userSetIDs)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("list user-created sticker-set kinds for reorder: %w", lookupErr)
+		}
+		for _, set := range userSets {
+			userSetKinds[set.ID] = set.Kind
+		}
+	}
+	installed := make(map[int64]ReorderedStickerSet, len(rows))
 	current := make([]int64, 0, len(rows))
 	for _, row := range rows {
-		installed[row.SetID] = true
+		installed[row.SetID] = ReorderedStickerSet{ID: row.SetID, Kind: userSetKinds[row.SetID]}
 		current = append(current, row.SetID)
 	}
-	order := make([]int64, 0, len(current))
+	order := make([]ReorderedStickerSet, 0, len(current))
 	placed := make(map[int64]bool, len(listed))
 	for _, id := range listed {
-		if !installed[id] || placed[id] {
+		set, ok := installed[id]
+		if !ok || placed[id] {
 			continue
 		}
 		placed[id] = true
-		order = append(order, id)
+		order = append(order, set)
 	}
 	for _, id := range current {
 		if !placed[id] {
-			order = append(order, id)
+			order = append(order, installed[id])
 		}
 	}
 	if len(order) > 0 {
-		if _, err = qtx.SetInstalledStickerSetPositions(ctx, db.SetInstalledStickerSetPositionsParams{UserID: userID, SetIds: order}); err != nil {
+		orderIDs := make([]int64, 0, len(order))
+		for _, set := range order {
+			orderIDs = append(orderIDs, set.ID)
+		}
+		if _, err = qtx.SetInstalledStickerSetPositions(ctx, db.SetInstalledStickerSetPositionsParams{UserID: userID, SetIds: orderIDs}); err != nil {
 			return nil, fmt.Errorf("set sticker set positions for user %d: %w", userID, err)
 		}
 	}

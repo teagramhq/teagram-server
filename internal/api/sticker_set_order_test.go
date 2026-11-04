@@ -91,6 +91,60 @@ func TestReorderStickerSetsIsScopedByKind(t *testing.T) {
 	}
 }
 
+func TestReorderStickerSetsReordersMaskAndEmojiSets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551830013")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	regularIDs := createInstalledUserStickerSets(t, s, h, blobs, owner.ID, "kind_regular_alpha", "kind_regular_bravo")
+	maskIDs := createInstalledUserStickerSetsOfKind(t, s, h, blobs, owner.ID, true, false, "kind_mask_alpha", "kind_mask_bravo")
+	emojiIDs := createInstalledUserStickerSetsOfKind(t, s, h, blobs, owner.ID, false, true, "kind_emoji_alpha", "kind_emoji_bravo")
+
+	beforeMasks := getAllStickerSets(t, h, owner.ID, 0)
+	if got, want := stickerSetIDs(beforeMasks.Sets), append(append([]int64(nil), regularIDs...), maskIDs...); !slices.Equal(got, want) {
+		t.Fatalf("all-sticker order before mask reorder = %v, want %v", got, want)
+	}
+	if got, want := stickerSetIDs(getEmojiStickerSets(t, h, owner.ID, 0).Sets), emojiIDs; !slices.Equal(got, want) {
+		t.Fatalf("emoji order before reorder = %v, want %v", got, want)
+	}
+	if got := reorderStickerSets(t, h, owner.ID, true, false, []int64{maskIDs[1], maskIDs[0]}); got != "" {
+		t.Fatalf("mask reorder = %q, want boolTrue", got)
+	}
+	wantMaskOrder := []int64{maskIDs[1], maskIDs[0], regularIDs[0], regularIDs[1]}
+	afterMasks := getAllStickerSets(t, h, owner.ID, beforeMasks.Hash)
+	if got := stickerSetIDs(afterMasks.Sets); !slices.Equal(got, wantMaskOrder) {
+		t.Fatalf("all-sticker order after mask reorder = %v, want %v", got, wantMaskOrder)
+	}
+	if afterMasks.Hash == beforeMasks.Hash {
+		t.Fatalf("all-sticker hash %d did not change after mask reorder", afterMasks.Hash)
+	}
+	if got := stickerSetIDs(getEmojiStickerSets(t, h, owner.ID, 0).Sets); !slices.Equal(got, emojiIDs) {
+		t.Fatalf("emoji order after mask reorder = %v, want unchanged %v", got, emojiIDs)
+	}
+
+	beforeEmojis := getEmojiStickerSets(t, h, owner.ID, 0)
+	if got := reorderStickerSets(t, h, owner.ID, false, true, []int64{emojiIDs[1], emojiIDs[0]}); got != "" {
+		t.Fatalf("emoji reorder = %q, want boolTrue", got)
+	}
+	wantEmojiOrder := []int64{emojiIDs[1], emojiIDs[0]}
+	afterEmojis := getEmojiStickerSets(t, h, owner.ID, beforeEmojis.Hash)
+	if got := stickerSetIDs(afterEmojis.Sets); !slices.Equal(got, wantEmojiOrder) {
+		t.Fatalf("emoji order after reorder = %v, want %v", got, wantEmojiOrder)
+	}
+	if afterEmojis.Hash == beforeEmojis.Hash {
+		t.Fatalf("emoji hash %d did not change after reorder", afterEmojis.Hash)
+	}
+	if got := stickerSetIDs(getAllStickerSets(t, h, owner.ID, 0).Sets); !slices.Equal(got, wantMaskOrder) {
+		t.Fatalf("all-sticker order after emoji reorder = %v, want unchanged %v", got, wantMaskOrder)
+	}
+}
+
 func TestReorderStickerSetsRequiresAuthenticatedAccount(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
@@ -103,10 +157,19 @@ func TestReorderStickerSetsRequiresAuthenticatedAccount(t *testing.T) {
 // createInstalledUserStickerSets creates one regular set per name for ownerID and installs each, in the order given.
 func createInstalledUserStickerSets(t *testing.T, s *store.Store, h mtproto.Handler, blobs blob.Store, ownerID int64, names ...string) []int64 {
 	t.Helper()
+	return createInstalledUserStickerSetsOfKind(t, s, h, blobs, ownerID, false, false, names...)
+}
+
+func createInstalledUserStickerSetsOfKind(t *testing.T, s *store.Store, h mtproto.Handler, blobs blob.Store, ownerID int64, masks, emojis bool, names ...string) []int64 {
+	t.Helper()
 	ids := make([]int64, 0, len(names))
 	for _, name := range names {
-		file := storedStickerDocument(t, s, blobs, ownerID, validStickerTGS(t))
-		set := createStickerSet(t, h, ownerID, createStickerRequest(name, file, false, false))
+		sticker := validStickerTGS(t)
+		if emojis {
+			sticker = validStickerTGSSize(t, 100, 100)
+		}
+		file := storedStickerDocument(t, s, blobs, ownerID, sticker)
+		set := createStickerSet(t, h, ownerID, createStickerRequest(name, file, masks, emojis))
 		if got := installStickerSet(t, h, ownerID, &tg.InputStickerSetID{ID: set.Set.ID, AccessHash: set.Set.AccessHash}); got != "success" {
 			t.Fatalf("install %s = %q, want success", name, got)
 		}

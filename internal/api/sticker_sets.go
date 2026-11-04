@@ -965,15 +965,16 @@ func (h *handlers) handleReorderStickerSets(_ *mtproto.Conn, r *mtproto.Request)
 		h.log.Error("reorder sticker sets", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	orderKinds, err := h.stickerSetKinds(r, catalog, order)
-	if err != nil {
-		h.log.Error("resolve reordered sticker set kinds", "user_id", r.UserID, "err", err)
-		return nil, nil, errInternal
-	}
 	kindOrder := make([]int64, 0, len(order))
-	for _, id := range order {
-		if orderKinds[id] == kind {
-			kindOrder = append(kindOrder, id)
+	for _, set := range order {
+		setKind := set.Kind
+		if set.ID < 0 {
+			if builtIn, ok := catalog.byID[set.ID]; ok {
+				setKind = builtInStickerSetKind(builtIn)
+			}
+		}
+		if setKind == kind {
+			kindOrder = append(kindOrder, set.ID)
 		}
 	}
 	return &tg.BoolTrue{}, func() {

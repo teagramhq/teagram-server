@@ -45,6 +45,14 @@ func installedStickerOrder(t *testing.T, s *store.Store, userID int64) []int64 {
 	return ids
 }
 
+func reorderedStickerSetIDs(sets []store.ReorderedStickerSet) []int64 {
+	ids := make([]int64, 0, len(sets))
+	for _, set := range sets {
+		ids = append(ids, set.ID)
+	}
+	return ids
+}
+
 func TestReorderInstalledStickerSetsPlacesListedSetsFirst(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -64,8 +72,8 @@ func TestReorderInstalledStickerSetsPlacesListedSetsFirst(t *testing.T) {
 		t.Fatalf("reorder: %v", err)
 	}
 	want := []int64{-10, -20, -40, -30}
-	if !slices.Equal(order, want) {
-		t.Fatalf("reorder returned %v, want %v", order, want)
+	if got := reorderedStickerSetIDs(order); !slices.Equal(got, want) {
+		t.Fatalf("reorder returned %v, want %v", got, want)
 	}
 	if got := installedStickerOrder(t, s, owner.ID); !slices.Equal(got, want) {
 		t.Fatalf("installed order after reorder = %v, want %v", got, want)

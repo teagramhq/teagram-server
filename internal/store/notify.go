@@ -1084,9 +1084,8 @@ func (l *Listener) dispatch(
 					strconv.FormatInt(payload.authKeyID, 10) + ":" + strconv.FormatInt(payload.sessionID, 10)
 				routeKey := "sticker-sets:" + session
 				if payload.order != nil {
-					// An order update carries the whole kind order, so it gets its own lane
-					// per kind. Coalescing it with a plain change would drop the order.
-					routeKey = "sticker-set-order:" + payload.order.Kind + ":" + session
+					// Keep one owner's same-kind order fan-outs in sequence across sessions.
+					routeKey = "sticker-set-order:" + strconv.FormatInt(payload.ownerID, 10) + ":" + payload.order.Kind
 				}
 				l.schedule(routeKey, notificationTask{
 					ctx:      ctx,

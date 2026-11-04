@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,17 +252,88 @@ func TestStickerSetReorderPushesKindOrderToOtherSessions(t *testing.T) {
 		t.Errorf("originating session writes = %d, want 0", got)
 	}
 	for name, transport := range map[string]*stickerSetNotifyTransport{"local sibling": localTransport, "remote session": remoteTransport} {
-		body := decryptPushedFrame(t, transport.lastSent())
-		if !bytes.Contains(body, littleEndianUint32(tg.UpdateStickerSetsOrderTypeID)) {
-			t.Errorf("%s frame lacks updateStickerSetsOrder: %x", name, body)
+		update := decodeStickerSetOrder(t, transport.lastSent())
+		if update.Masks || update.Emojis {
+			t.Errorf("%s update flags = masks:%t emojis:%t, want regular flags false", name, update.Masks, update.Emojis)
 		}
+		if !slices.Equal(update.Order, []int64{ids[1], ids[0]}) {
+			t.Errorf("%s update order = %v, want %v", name, update.Order, []int64{ids[1], ids[0]})
+		}
+		body := decryptPushedFrame(t, transport.lastSent())
 		if bytes.Contains(body, littleEndianUint32(tg.UpdateStickerSetsTypeID)) {
 			t.Errorf("%s frame carries plain updateStickerSets, want only the order update", name)
 		}
-		if !bytes.Contains(body, littleEndianInt64(t, ids[1])) || !bytes.Contains(body, littleEndianInt64(t, ids[0])) {
-			t.Errorf("%s frame lacks the reordered set ids %v", name, ids)
-		}
 	}
+}
+
+func TestStickerSetReorderPushesMaskAndEmojiFlags(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		masks  bool
+		emojis bool
+	}{
+		{name: "mask", masks: true},
+		{name: "emoji", emojis: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			blobs := testBlobs(t)
+			dsn := pgtest.DSN(t)
+			s := openStickerStore(t, blobs, dsn)
+			owner, err := s.CreateUser(ctx, "+15551830021")
+			if err != nil {
+				t.Fatalf("create owner: %v", err)
+			}
+			h := fullChannelDispatcher(s)
+			ids := createInstalledUserStickerSetsOfKind(t, s, h, blobs, owner.ID, tc.masks, tc.emojis, "push_kind_alpha", "push_kind_bravo")
+
+			registry := mtproto.NewSessionRegistry()
+			caller, callerTransport := newStickerSetNotifyConn(t, registry, owner.ID, 0)
+			_, siblingTransport := newStickerSetNotifyConn(t, registry, owner.ID, 12)
+			if caller.AuthKeyID() == 0 {
+				t.Fatal("test caller must have an auth key")
+			}
+			startStickerSetNotifyListener(t, ctx, dsn, api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver()))
+			if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+				t.Fatalf("wait for sticker-set listener: %v", err)
+			}
+
+			wantOrder := []int64{ids[1], ids[0]}
+			if got := reorderStickerSets(t, h, owner.ID, tc.masks, tc.emojis, wantOrder); got != "" {
+				t.Fatalf("%s reorder = %q, want boolTrue", tc.name, got)
+			}
+			if !waitStickerSetNotifyWrites(1, siblingTransport) {
+				t.Fatalf("sibling writes = %d, want one", siblingTransport.sends.Load())
+			}
+			if got := callerTransport.sends.Load(); got != 0 {
+				t.Errorf("originating session writes = %d, want 0", got)
+			}
+			update := decodeStickerSetOrder(t, siblingTransport.lastSent())
+			if update.Masks != tc.masks || update.Emojis != tc.emojis {
+				t.Errorf("%s update flags = masks:%t emojis:%t, want masks:%t emojis:%t", tc.name, update.Masks, update.Emojis, tc.masks, tc.emojis)
+			}
+			if !slices.Equal(update.Order, wantOrder) {
+				t.Errorf("%s update order = %v, want %v", tc.name, update.Order, wantOrder)
+			}
+		})
+	}
+}
+
+func decodeStickerSetOrder(t *testing.T, frame []byte) *tg.UpdateStickerSetsOrder {
+	t.Helper()
+	body := decryptPushedFrame(t, frame)
+	start := bytes.Index(body, littleEndianUint32(tg.UpdateStickerSetsOrderTypeID))
+	if start < 0 {
+		t.Fatalf("frame lacks updateStickerSetsOrder: %x", body)
+	}
+	var update tg.UpdateStickerSetsOrder
+	if err := update.Decode(&bin.Buffer{Buf: body[start:]}); err != nil {
+		t.Fatalf("decode updateStickerSetsOrder: %v", err)
+	}
+	return &update
 }
 
 // decryptPushedFrame returns the plaintext TL message of a frame the server
@@ -279,13 +351,4 @@ func littleEndianUint32(v uint32) []byte {
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], v)
 	return b[:]
-}
-
-func littleEndianInt64(t *testing.T, v int64) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
-		t.Fatalf("encode %d: %v", v, err)
-	}
-	return buf.Bytes()
 }
