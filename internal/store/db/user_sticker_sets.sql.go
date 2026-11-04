@@ -11,6 +11,255 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adminLockUserStickerSetByID = `-- name: AdminLockUserStickerSetByID :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind, text_color, item_count, set_hash, is_live, created_at, thumb_file_id, thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns, thumb_version, thumb_document_id
+FROM user_created_sticker_sets
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) AdminLockUserStickerSetByID(ctx context.Context, id int64) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminLockUserStickerSetByID, id)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+		&i.ThumbFileID,
+		&i.ThumbFormat,
+		&i.ThumbSize,
+		&i.ThumbWidth,
+		&i.ThumbHeight,
+		&i.ThumbDurationNs,
+		&i.ThumbVersion,
+		&i.ThumbDocumentID,
+	)
+	return i, err
+}
+
+const adminLockUserStickerSetByShortName = `-- name: AdminLockUserStickerSetByShortName :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind, text_color, item_count, set_hash, is_live, created_at, thumb_file_id, thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns, thumb_version, thumb_document_id
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower($1)
+FOR UPDATE
+`
+
+func (q *Queries) AdminLockUserStickerSetByShortName(ctx context.Context, shortName string) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminLockUserStickerSetByShortName, shortName)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+		&i.ThumbFileID,
+		&i.ThumbFormat,
+		&i.ThumbSize,
+		&i.ThumbWidth,
+		&i.ThumbHeight,
+		&i.ThumbDurationNs,
+		&i.ThumbVersion,
+		&i.ThumbDocumentID,
+	)
+	return i, err
+}
+
+const adminReadUserStickerSetByID = `-- name: AdminReadUserStickerSetByID :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind, text_color, item_count, set_hash, is_live, created_at, thumb_file_id, thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns, thumb_version, thumb_document_id
+FROM user_created_sticker_sets
+WHERE id = $1
+`
+
+func (q *Queries) AdminReadUserStickerSetByID(ctx context.Context, id int64) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminReadUserStickerSetByID, id)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+		&i.ThumbFileID,
+		&i.ThumbFormat,
+		&i.ThumbSize,
+		&i.ThumbWidth,
+		&i.ThumbHeight,
+		&i.ThumbDurationNs,
+		&i.ThumbVersion,
+		&i.ThumbDocumentID,
+	)
+	return i, err
+}
+
+const adminReadUserStickerSetByShortName = `-- name: AdminReadUserStickerSetByShortName :one
+SELECT id, access_hash, creator_id, title, short_name, software, kind, text_color, item_count, set_hash, is_live, created_at, thumb_file_id, thumb_format, thumb_size, thumb_width, thumb_height, thumb_duration_ns, thumb_version, thumb_document_id
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower($1)
+`
+
+func (q *Queries) AdminReadUserStickerSetByShortName(ctx context.Context, shortName string) (UserCreatedStickerSet, error) {
+	row := q.db.QueryRow(ctx, adminReadUserStickerSetByShortName, shortName)
+	var i UserCreatedStickerSet
+	err := row.Scan(
+		&i.ID,
+		&i.AccessHash,
+		&i.CreatorID,
+		&i.Title,
+		&i.ShortName,
+		&i.Software,
+		&i.Kind,
+		&i.TextColor,
+		&i.ItemCount,
+		&i.SetHash,
+		&i.IsLive,
+		&i.CreatedAt,
+		&i.ThumbFileID,
+		&i.ThumbFormat,
+		&i.ThumbSize,
+		&i.ThumbWidth,
+		&i.ThumbHeight,
+		&i.ThumbDurationNs,
+		&i.ThumbVersion,
+		&i.ThumbDocumentID,
+	)
+	return i, err
+}
+
+const adminSetUserStickerSetLive = `-- name: AdminSetUserStickerSetLive :execrows
+UPDATE user_created_sticker_sets
+SET is_live = $1
+WHERE id = $2
+`
+
+type AdminSetUserStickerSetLiveParams struct {
+	IsLive bool
+	ID     int64
+}
+
+func (q *Queries) AdminSetUserStickerSetLive(ctx context.Context, arg AdminSetUserStickerSetLiveParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adminSetUserStickerSetLive, arg.IsLive, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const adminStickerSetEventsPage = `-- name: AdminStickerSetEventsPage :many
+SELECT id, action, set_id, set_title, set_short_name, reason,
+       session_fingerprint, created_at
+FROM admin_sticker_set_events
+ORDER BY created_at DESC, id DESC
+LIMIT $2 OFFSET $1
+`
+
+type AdminStickerSetEventsPageParams struct {
+	OffsetCount int32
+	LimitCount  int32
+}
+
+func (q *Queries) AdminStickerSetEventsPage(ctx context.Context, arg AdminStickerSetEventsPageParams) ([]AdminStickerSetEvent, error) {
+	rows, err := q.db.Query(ctx, adminStickerSetEventsPage, arg.OffsetCount, arg.LimitCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AdminStickerSetEvent
+	for rows.Next() {
+		var i AdminStickerSetEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.Action,
+			&i.SetID,
+			&i.SetTitle,
+			&i.SetShortName,
+			&i.Reason,
+			&i.SessionFingerprint,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const adminUserStickerSetsPage = `-- name: AdminUserStickerSetsPage :many
+SELECT id, title, short_name, creator_id, created_at, software, is_live
+FROM user_created_sticker_sets
+ORDER BY created_at DESC, id DESC
+LIMIT $2 OFFSET $1
+`
+
+type AdminUserStickerSetsPageParams struct {
+	OffsetCount int32
+	LimitCount  int32
+}
+
+type AdminUserStickerSetsPageRow struct {
+	ID        int64
+	Title     string
+	ShortName string
+	CreatorID int64
+	CreatedAt pgtype.Timestamptz
+	Software  string
+	IsLive    bool
+}
+
+func (q *Queries) AdminUserStickerSetsPage(ctx context.Context, arg AdminUserStickerSetsPageParams) ([]AdminUserStickerSetsPageRow, error) {
+	rows, err := q.db.Query(ctx, adminUserStickerSetsPage, arg.OffsetCount, arg.LimitCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AdminUserStickerSetsPageRow
+	for rows.Next() {
+		var i AdminUserStickerSetsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Title,
+			&i.ShortName,
+			&i.CreatorID,
+			&i.CreatedAt,
+			&i.Software,
+			&i.IsLive,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const archiveUserCreatedStickerSetItem = `-- name: ArchiveUserCreatedStickerSetItem :execrows
 UPDATE user_created_sticker_set_items
 SET is_active = false, position = $1
@@ -151,24 +400,55 @@ func (q *Queries) DeleteUserCreatedStickerSet(ctx context.Context, id int64) (in
 	return result.RowsAffected(), nil
 }
 
+const insertAdminStickerSetEvent = `-- name: InsertAdminStickerSetEvent :exec
+INSERT INTO admin_sticker_set_events
+    (action, set_id, set_title, set_short_name, reason, session_fingerprint)
+VALUES (
+    $1, $2, $3,
+    $4, $5, $6
+)
+`
+
+type InsertAdminStickerSetEventParams struct {
+	Action             string
+	SetID              int64
+	SetTitle           string
+	SetShortName       string
+	Reason             string
+	SessionFingerprint []byte
+}
+
+func (q *Queries) InsertAdminStickerSetEvent(ctx context.Context, arg InsertAdminStickerSetEventParams) error {
+	_, err := q.db.Exec(ctx, insertAdminStickerSetEvent,
+		arg.Action,
+		arg.SetID,
+		arg.SetTitle,
+		arg.SetShortName,
+		arg.Reason,
+		arg.SessionFingerprint,
+	)
+	return err
+}
+
 const insertUserCreatedStickerSetItem = `-- name: InsertUserCreatedStickerSetItem :execrows
 INSERT INTO user_created_sticker_set_items
-    (set_id, position, file_id, emoji, keywords, format, width, height, duration_ns, mask_coords)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (set_id, position, file_id, emoji, keywords, format, width, height, duration_ns, mask_coords, content_sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (file_id) DO NOTHING
 `
 
 type InsertUserCreatedStickerSetItemParams struct {
-	SetID      int64
-	Position   int32
-	FileID     int64
-	Emoji      string
-	Keywords   string
-	Format     string
-	Width      int32
-	Height     int32
-	DurationNs int64
-	MaskCoords []byte
+	SetID         int64
+	Position      int32
+	FileID        int64
+	Emoji         string
+	Keywords      string
+	Format        string
+	Width         int32
+	Height        int32
+	DurationNs    int64
+	MaskCoords    []byte
+	ContentSha256 []byte
 }
 
 func (q *Queries) InsertUserCreatedStickerSetItem(ctx context.Context, arg InsertUserCreatedStickerSetItemParams) (int64, error) {
@@ -183,6 +463,7 @@ func (q *Queries) InsertUserCreatedStickerSetItem(ctx context.Context, arg Inser
 		arg.Height,
 		arg.DurationNs,
 		arg.MaskCoords,
+		arg.ContentSha256,
 	)
 	if err != nil {
 		return 0, err
@@ -307,6 +588,31 @@ func (q *Queries) LockOwnedLiveUserStickerSetBySticker(ctx context.Context, arg 
 		&i.ThumbDocumentID,
 	)
 	return i, err
+}
+
+const lockStickerSetCreateInterlock = `-- name: LockStickerSetCreateInterlock :exec
+SELECT pg_advisory_xact_lock_shared(1145132116, 237731251)
+`
+
+// Lock order for sticker-set writes is owner users FOR UPDATE, this interlock,
+// set-row locks, then file-reference locks in ascending file ID order. A path
+// may omit a class but must not acquire an earlier class after a later one.
+// Fingerprinting is done before opening the transaction; the shared/exclusive
+// modes serialize the final blocked-content check with takedown hash publication.
+// Create transactions share this gate. Takedown and restore use the exclusive
+// lock below, so they wait for in-flight creations before publishing state.
+func (q *Queries) LockStickerSetCreateInterlock(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockStickerSetCreateInterlock)
+	return err
+}
+
+const lockStickerTakedownInterlock = `-- name: LockStickerTakedownInterlock :exec
+SELECT pg_advisory_xact_lock(1145132116, 237731251)
+`
+
+func (q *Queries) LockStickerTakedownInterlock(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockStickerTakedownInterlock)
+	return err
 }
 
 const lockUserStickerSetOwner = `-- name: LockUserStickerSetOwner :one
@@ -559,6 +865,46 @@ func (q *Queries) StickerFilesForUserSet(ctx context.Context, arg StickerFilesFo
 	return items, nil
 }
 
+const takedownUserStickerSetFiles = `-- name: TakedownUserStickerSetFiles :many
+SELECT f.id AS file_id, f.access_hash, f.size, f.stored
+FROM user_created_sticker_set_items i
+JOIN files f ON f.id = i.file_id
+WHERE i.set_id = $1
+ORDER BY f.id
+`
+
+type TakedownUserStickerSetFilesRow struct {
+	FileID     int64
+	AccessHash int64
+	Size       int64
+	Stored     bool
+}
+
+func (q *Queries) TakedownUserStickerSetFiles(ctx context.Context, setID int64) ([]TakedownUserStickerSetFilesRow, error) {
+	rows, err := q.db.Query(ctx, takedownUserStickerSetFiles, setID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TakedownUserStickerSetFilesRow
+	for rows.Next() {
+		var i TakedownUserStickerSetFilesRow
+		if err := rows.Scan(
+			&i.FileID,
+			&i.AccessHash,
+			&i.Size,
+			&i.Stored,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateUserCreatedStickerSetCountAndHash = `-- name: UpdateUserCreatedStickerSetCountAndHash :execrows
 UPDATE user_created_sticker_sets
 SET item_count = $2, set_hash = $3
@@ -668,6 +1014,26 @@ func (q *Queries) UpdateUserCreatedStickerSetThumb(ctx context.Context, arg Upda
 		arg.SetHash,
 		arg.ID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateUserStickerSetItemContentSHA256 = `-- name: UpdateUserStickerSetItemContentSHA256 :execrows
+UPDATE user_created_sticker_set_items
+SET content_sha256 = $1
+WHERE set_id = $2 AND file_id = $3
+`
+
+type UpdateUserStickerSetItemContentSHA256Params struct {
+	ContentSha256 []byte
+	SetID         int64
+	FileID        int64
+}
+
+func (q *Queries) UpdateUserStickerSetItemContentSHA256(ctx context.Context, arg UpdateUserStickerSetItemContentSHA256Params) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserStickerSetItemContentSHA256, arg.ContentSha256, arg.SetID, arg.FileID)
 	if err != nil {
 		return 0, err
 	}
@@ -1494,6 +1860,23 @@ func (q *Queries) UserCreatedStickerSetsBySearchCandidates(ctx context.Context, 
 		return nil, err
 	}
 	return items, nil
+}
+
+const userStickerBlockedContentExists = `-- name: UserStickerBlockedContentExists :one
+SELECT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_set_items i
+    JOIN user_created_sticker_sets s ON s.id = i.set_id
+    WHERE s.is_live = false
+      AND i.content_sha256 = ANY($1::bytea[])
+)
+`
+
+func (q *Queries) UserStickerBlockedContentExists(ctx context.Context, contentSha256 [][]byte) (bool, error) {
+	row := q.db.QueryRow(ctx, userStickerBlockedContentExists, contentSha256)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const userStickerDocumentExists = `-- name: UserStickerDocumentExists :one

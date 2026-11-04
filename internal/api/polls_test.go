@@ -832,7 +832,8 @@ func TestSendPollInvalidDescriptionUsesMessageErrors(t *testing.T) {
 func TestSendChatPollRejectsRemovedEmojiDescriptionAsInputInvalid(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := openStore(t)
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
 	creator, err := s.CreateUser(ctx, "+15551401065")
 	if err != nil {
 		t.Fatalf("create creator: %v", err)
@@ -841,14 +842,22 @@ func TestSendChatPollRejectsRemovedEmojiDescriptionAsInputInvalid(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
-	file := storedStickerDocument(t, s, newBlobs(t), creator.ID, validStickerTGSSize(t, 100, 100))
-	otherFile := storedStickerDocument(t, s, newBlobs(t), creator.ID, validStickerTGSSize(t, 100, 100))
+	file := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGSSize(t, 100, 100))
+	otherFile := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGSSize(t, 100, 100))
+	fingerprints := make([]store.StickerFileFingerprint, 0, 2)
+	for _, stickerFile := range []store.File{file, otherFile} {
+		_, fingerprint, readErr := s.ReadStickerFileForSetWithFingerprint(ctx, stickerFile)
+		if readErr != nil {
+			t.Fatalf("read sticker file for set: %v", readErr)
+		}
+		fingerprints = append(fingerprints, fingerprint)
+	}
 	_, err = s.CreateUserStickerSet(ctx, store.UserStickerSet{
 		CreatorID: creator.ID, Title: "Poll emoji", ShortName: "removed_poll_emoji", Kind: "emojis",
 	}, []store.UserStickerSetItem{
 		{FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
 		{FileID: otherFile.ID, AccessHash: otherFile.AccessHash, Size: otherFile.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
-	})
+	}, fingerprints)
 	if err != nil {
 		t.Fatalf("create emoji sticker set: %v", err)
 	}

@@ -2,7 +2,7 @@
 
 ## Synthetic mode
 
-Run the gate on a Linux Docker host with Docker, Go modules already downloaded, Atlas v1.2.0, and passwordless `sudo`. Existing unrelated containers, volumes, and user-defined networks may remain on the host. From the repository root, run:
+Run the gate on a Linux Docker host with Docker, Go modules already downloaded, Atlas v1.3.0 on the host `PATH` (`atlas version` must print `atlas version v1.3.0` as its first line), and passwordless `sudo`. Existing unrelated containers, volumes, and user-defined networks may remain on the host. From the repository root, run:
 
 ```sh
 timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh

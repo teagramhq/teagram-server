@@ -26,8 +26,8 @@ WHERE id = $1;
 
 -- name: InsertUserCreatedStickerSetItem :execrows
 INSERT INTO user_created_sticker_set_items
-    (set_id, position, file_id, emoji, keywords, format, width, height, duration_ns, mask_coords)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (set_id, position, file_id, emoji, keywords, format, width, height, duration_ns, mask_coords, content_sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (file_id) DO NOTHING;
 
 -- Sticker inputs are resolved together through caller-owned, stored document
@@ -456,6 +456,88 @@ SELECT EXISTS (
     SELECT 1 FROM user_created_sticker_set_items
     WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id) AND is_active = true
 );
+
+-- Lock order for sticker-set writes is owner users FOR UPDATE, this interlock,
+-- set-row locks, then file-reference locks in ascending file ID order. A path
+-- may omit a class but must not acquire an earlier class after a later one.
+-- Fingerprinting is done before opening the transaction; the shared/exclusive
+-- modes serialize the final blocked-content check with takedown hash publication.
+-- Create transactions share this gate. Takedown and restore use the exclusive
+-- lock below, so they wait for in-flight creations before publishing state.
+-- name: LockStickerSetCreateInterlock :exec
+SELECT pg_advisory_xact_lock_shared(1145132116, 237731251);
+
+-- name: LockStickerTakedownInterlock :exec
+SELECT pg_advisory_xact_lock(1145132116, 237731251);
+
+-- name: UserStickerBlockedContentExists :one
+SELECT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_set_items i
+    JOIN user_created_sticker_sets s ON s.id = i.set_id
+    WHERE s.is_live = false
+      AND i.content_sha256 = ANY(sqlc.arg(content_sha256)::bytea[])
+);
+
+-- name: TakedownUserStickerSetFiles :many
+SELECT f.id AS file_id, f.access_hash, f.size, f.stored
+FROM user_created_sticker_set_items i
+JOIN files f ON f.id = i.file_id
+WHERE i.set_id = sqlc.arg(set_id)
+ORDER BY f.id;
+
+-- name: UpdateUserStickerSetItemContentSHA256 :execrows
+UPDATE user_created_sticker_set_items
+SET content_sha256 = sqlc.arg(content_sha256)
+WHERE set_id = sqlc.arg(set_id) AND file_id = sqlc.arg(file_id);
+
+-- name: AdminLockUserStickerSetByID :one
+SELECT *
+FROM user_created_sticker_sets
+WHERE id = sqlc.arg(id)
+FOR UPDATE;
+
+-- name: AdminReadUserStickerSetByID :one
+SELECT *
+FROM user_created_sticker_sets
+WHERE id = sqlc.arg(id);
+
+-- name: AdminLockUserStickerSetByShortName :one
+SELECT *
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower(sqlc.arg(short_name))
+FOR UPDATE;
+
+-- name: AdminReadUserStickerSetByShortName :one
+SELECT *
+FROM user_created_sticker_sets
+WHERE lower(short_name) = lower(sqlc.arg(short_name));
+
+-- name: AdminSetUserStickerSetLive :execrows
+UPDATE user_created_sticker_sets
+SET is_live = sqlc.arg(is_live)
+WHERE id = sqlc.arg(id);
+
+-- name: InsertAdminStickerSetEvent :exec
+INSERT INTO admin_sticker_set_events
+    (action, set_id, set_title, set_short_name, reason, session_fingerprint)
+VALUES (
+    sqlc.arg(action), sqlc.arg(set_id), sqlc.arg(set_title),
+    sqlc.arg(set_short_name), sqlc.arg(reason), sqlc.arg(session_fingerprint)
+);
+
+-- name: AdminUserStickerSetsPage :many
+SELECT id, title, short_name, creator_id, created_at, software, is_live
+FROM user_created_sticker_sets
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
+
+-- name: AdminStickerSetEventsPage :many
+SELECT id, action, set_id, set_title, set_short_name, reason,
+       session_fingerprint, created_at
+FROM admin_sticker_set_events
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 
 -- name: InstalledStickerSetCount :one
 SELECT count(*)::bigint

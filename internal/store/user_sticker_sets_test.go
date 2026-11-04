@@ -8,20 +8,44 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func createStickerSetWithTestFingerprints(
+	t *testing.T,
+	ctx context.Context,
+	s *store.Store,
+	set store.UserStickerSet,
+	items []store.UserStickerSetItem,
+	files ...store.File,
+) (store.UserStickerSet, error) {
+	t.Helper()
+	if len(items) != len(files) {
+		t.Fatalf("sticker item count = %d, file count = %d", len(items), len(files))
+	}
+	fingerprints := make([]store.StickerFileFingerprint, 0, len(files))
+	for _, file := range files {
+		_, fingerprint, err := s.ReadStickerFileForSetWithFingerprint(ctx, file)
+		if err != nil {
+			t.Fatalf("read sticker file for set: %v", err)
+		}
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	return s.CreateUserStickerSet(ctx, set, items, fingerprints)
+}
+
 func TestRemoveStickerSetThumbnailItemClearsReferenceAndChangesHash(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := open(t)
 	owner := mustUser(t, s, "+15559201001")
-	thumbnailItem := storedFile(t, s, owner.ID)
-	remainingItem := storedFile(t, s, owner.ID)
+	thumbnailItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	remainingItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
 
-	set, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
-		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_thumb", Kind: "emojis",
-	}, []store.UserStickerSetItem{
+	items := []store.UserStickerSetItem{
 		{FileID: thumbnailItem.ID, AccessHash: thumbnailItem.AccessHash, Size: thumbnailItem.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
 		{FileID: remainingItem.ID, AccessHash: remainingItem.AccessHash, Size: remainingItem.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
-	})
+	}
+	set, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_thumb", Kind: "emojis",
+	}, items, thumbnailItem, remainingItem)
 	if err != nil {
 		t.Fatalf("create emoji sticker set: %v", err)
 	}
@@ -63,14 +87,15 @@ func TestRemovedCustomEmojiCannotBeReferencedByMessagesOrChannelPosts(t *testing
 	owner := mustUser(t, s, "+15559201002")
 	sender := mustUser(t, s, "+15559201003")
 	recipient := mustUser(t, s, "+15559201004")
-	removedItem := storedFile(t, s, owner.ID)
-	remainingItem := storedFile(t, s, owner.ID)
-	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
-		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_removed_reference", Kind: "emojis",
-	}, []store.UserStickerSetItem{
+	removedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	remainingItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	items := []store.UserStickerSetItem{
 		{FileID: removedItem.ID, AccessHash: removedItem.AccessHash, Size: removedItem.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
 		{FileID: remainingItem.ID, AccessHash: remainingItem.AccessHash, Size: remainingItem.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
-	})
+	}
+	_, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_removed_reference", Kind: "emojis",
+	}, items, removedItem, remainingItem)
 	if err != nil {
 		t.Fatalf("create emoji sticker set: %v", err)
 	}
@@ -117,22 +142,24 @@ func TestCustomEmojiEntityKeepsRemovedDocumentDownloadable(t *testing.T) {
 	sender := mustUser(t, s, "+15559201012")
 	recipient := mustUser(t, s, "+15559201013")
 	stranger := mustUser(t, s, "+15559201014")
-	removedItem := storedFile(t, s, owner.ID)
-	removedKept := storedFile(t, s, owner.ID)
-	deletedItem := storedFile(t, s, owner.ID)
-	deletedKept := storedFile(t, s, owner.ID)
+	removedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	removedKept := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedKept := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
 	emojiItem := func(f store.File) store.UserStickerSetItem {
 		return store.UserStickerSetItem{FileID: f.ID, AccessHash: f.AccessHash, Size: f.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100}
 	}
-	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+	removedItems := []store.UserStickerSetItem{emojiItem(removedItem), emojiItem(removedKept)}
+	_, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Removed", ShortName: "emoji_entity_removed", Kind: "emojis",
-	}, []store.UserStickerSetItem{emojiItem(removedItem), emojiItem(removedKept)})
+	}, removedItems, removedItem, removedKept)
 	if err != nil {
 		t.Fatalf("create removed emoji set: %v", err)
 	}
-	deletedSet, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
+	deletedItems := []store.UserStickerSetItem{emojiItem(deletedItem), emojiItem(deletedKept)}
+	deletedSet, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
 		CreatorID: owner.ID, Title: "Deleted", ShortName: "emoji_entity_deleted", Kind: "emojis",
-	}, []store.UserStickerSetItem{emojiItem(deletedItem), emojiItem(deletedKept)})
+	}, deletedItems, deletedItem, deletedKept)
 	if err != nil {
 		t.Fatalf("create deleted emoji set: %v", err)
 	}
@@ -192,16 +219,17 @@ func TestMessageEditsRejectOnlyNewRemovedCustomEmojiReferences(t *testing.T) {
 	owner := mustUser(t, s, "+15559201005")
 	sender := mustUser(t, s, "+15559201006")
 	recipient := mustUser(t, s, "+15559201007")
-	priorItem := storedFile(t, s, owner.ID)
-	removedItem := storedFile(t, s, owner.ID)
-	remainingItem := storedFile(t, s, owner.ID)
-	_, err := s.CreateUserStickerSet(ctx, store.UserStickerSet{
-		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_edit_removed_reference", Kind: "emojis",
-	}, []store.UserStickerSetItem{
+	priorItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	removedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	remainingItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	items := []store.UserStickerSetItem{
 		{FileID: priorItem.ID, AccessHash: priorItem.AccessHash, Size: priorItem.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
 		{FileID: removedItem.ID, AccessHash: removedItem.AccessHash, Size: removedItem.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
 		{FileID: remainingItem.ID, AccessHash: remainingItem.AccessHash, Size: remainingItem.Size, Emoji: "🌙", Format: "TGS", Width: 100, Height: 100},
-	})
+	}
+	_, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
+		CreatorID: owner.ID, Title: "Emoji", ShortName: "emoji_edit_removed_reference", Kind: "emojis",
+	}, items, priorItem, removedItem, remainingItem)
 	if err != nil {
 		t.Fatalf("create emoji sticker set: %v", err)
 	}

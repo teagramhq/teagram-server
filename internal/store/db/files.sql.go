@@ -435,52 +435,68 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
           SELECT 1 FROM user_created_sticker_set_items i
-          JOIN user_created_sticker_sets s ON s.id = i.set_id
-          WHERE i.file_id = f.id AND i.is_active = true AND s.is_live = true
+          JOIN live_user_created_sticker_sets s ON s.id = i.set_id
+          WHERE i.file_id = f.id AND i.is_active = true
       )
       OR EXISTS (
           SELECT 1 FROM user_created_sticker_sets s
           WHERE s.thumb_file_id = f.id AND s.is_live = true
       )
-      OR EXISTS (
-          SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.sticker_document_id = f.id
-            AND m.deleted = false
-            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-      )
-      OR EXISTS (
-          SELECT 1 FROM channel_messages cm
-          JOIN channel_participants cp
-            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
-          WHERE cm.sticker_document_id = f.id
-            AND cm.deleted = false
-            AND cm.local_id > cp.available_min_id
-            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
-      )
-      -- A custom emoji entity is stored in the message's entities, not in
-      -- sticker_document_id, and it outlives the item: removing an item or
-      -- deleting its set only stops future use. Only the caller's own stored
-      -- message or channel post keeps the document downloadable.
-      OR EXISTS (
-          SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.deleted = false
-            AND m.entities IS NOT NULL
-            AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
-            AND message_custom_emoji_document_ids(m.entities) && ARRAY[f.id::text]
-            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-      )
-      OR EXISTS (
-          SELECT 1 FROM channel_messages cm
-          JOIN channel_participants cp
-            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
-          WHERE cm.deleted = false
-            AND cm.entities IS NOT NULL
-            AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
-            AND message_custom_emoji_document_ids(cm.entities) && ARRAY[f.id::text]
-            AND cm.local_id > cp.available_min_id
-            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      OR (
+          NOT EXISTS (
+              SELECT 1
+              FROM user_created_sticker_set_items i
+              JOIN user_created_sticker_sets s ON s.id = i.set_id
+              WHERE i.file_id = f.id AND s.is_live = false
+                AND (
+                    SELECT e.action
+                    FROM admin_sticker_set_events e
+                    WHERE e.set_id = s.id
+                    ORDER BY e.id DESC
+                    LIMIT 1
+                ) = 'takedown'
+          )
+          AND (
+          EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.owner_id = $3 AND m.sticker_document_id = f.id
+                    AND m.deleted = false
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+              )
+              OR EXISTS (
+                  SELECT 1 FROM channel_messages cm
+                  JOIN channel_participants cp
+                    ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+                  WHERE cm.sticker_document_id = f.id
+                    AND cm.deleted = false
+                    AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+              )
+              -- Custom emoji references live in message entities, not in
+              -- sticker_document_id. Only caller-visible history keeps those
+              -- bytes reachable after an owner removes the item or its set.
+              OR EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.owner_id = $3 AND m.deleted = false
+                    AND m.entities IS NOT NULL
+                    AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
+                    AND message_custom_emoji_document_ids(m.entities) && ARRAY[f.id::text]
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+              )
+              OR EXISTS (
+                  SELECT 1 FROM channel_messages cm
+                  JOIN channel_participants cp
+                    ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+                  WHERE cm.deleted = false
+                    AND cm.entities IS NOT NULL
+                    AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+                    AND message_custom_emoji_document_ids(cm.entities) && ARRAY[f.id::text]
+                    AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+          )
+          )
       )
       OR (
           NOT EXISTS (
@@ -518,8 +534,10 @@ type FileForDownloadParams struct {
 
 // FileForDownload is the one-query download authorization gate. Matching (id,
 // access_hash) is wire compatibility and defence in depth. A live user sticker
-// set is a public entitlement; once a file has any set-item reference, the
-// ordinary message entitlement cannot bypass that set's live-state check.
+// set is a public entitlement; once a file has any set-item reference, ordinary
+// file-message entitlement cannot bypass its live-state check. A caller's own
+// visible message retains removed-item bytes after an owner edit; the latest
+// admin takedown event suppresses that historical entitlement.
 // messages is per-owner — one row per entitled account, and one per member on a
 // chat fan-out — so the set of accounts allowed to read a file is already
 // enumerated on disk and needs no separate membership model. Channels are the

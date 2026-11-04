@@ -464,6 +464,12 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
+			if existing.PeerType == store.PeerTypeUser {
+				h.logDirectMessageOutcome(
+					r.UserID, existing.PeerID, existing.LocalID, 0,
+					directRecipientCopyStored(r.UserID, existing.PeerID, existing), true,
+				)
+			}
 			attempt := beginSenderRPCAt(c, r, pts)
 			users, err := h.twoUsers(r.Ctx, r.UserID, toID)
 			if err != nil {
@@ -499,7 +505,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, recipientPts, _, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID, messageEntities)
+	sender, senderPts, recipientPts, duplicate, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID, messageEntities)
 	if err != nil {
 		if errors.Is(err, store.ErrRandomIDExpired) {
 			clearSenderRPC(attempt)
@@ -528,6 +534,16 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 
 	// recipientPts is 0 when the send was withheld from a recipient who
 	// blocked the sender: there is nothing for them to fetch.
+	if sender.PeerType == store.PeerTypeUser {
+		logRecipientPts := recipientPts
+		if duplicate {
+			logRecipientPts = 0
+		}
+		h.logDirectMessageOutcome(
+			r.UserID, sender.PeerID, sender.LocalID, logRecipientPts,
+			directRecipientCopyStored(r.UserID, sender.PeerID, sender), duplicate,
+		)
+	}
 	if toID != r.UserID && recipientPts > 0 {
 		h.notify(r.Ctx, toID)
 	}
@@ -559,6 +575,29 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		h.notifySendAfterReply(r, senderPts)
 	}
 	return res, update, afterReply, nil
+}
+
+func (h *handlers) logDirectMessageOutcome(senderID, recipientID, messageID int64, recipientPts int, recipientCopyStored, duplicate bool) {
+	copyStatus := "stored"
+	if !recipientCopyStored {
+		copyStatus = "withheld"
+	}
+	attrs := []any{
+		"sender_id", senderID,
+		"recipient_id", recipientID,
+		"message_id", messageID,
+		"recipient_copy", copyStatus,
+		"recipient_pts", recipientPts,
+		"duplicate", duplicate,
+	}
+	if !recipientCopyStored {
+		attrs = append(attrs, "recipient_copy_reason", "recipient_blocked_sender")
+	}
+	h.log.Info("direct message outcome", attrs...)
+}
+
+func directRecipientCopyStored(senderID, recipientID int64, message store.Message) bool {
+	return recipientID == senderID || message.PeerLocalID > 0
 }
 
 // requireMember is the authorization boundary for a client-supplied chat id.
@@ -1564,7 +1603,7 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
-			sentMsgs = append(sentMsgs, store.ForwardedMessage{Message: m, Pts: pts})
+			sentMsgs = append(sentMsgs, store.ForwardedMessage{Message: m, Pts: pts, Duplicate: true})
 			perOwner[m.OwnerID] = pts
 			// A forward withheld from a recipient who blocked the sender has
 			// no mirror (peer_local_id 0), so its retry gives them nothing.
@@ -1580,6 +1619,7 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		h.logDirectForwardOutcomes(r.UserID, destPeerType, sentMsgs)
 		pts, suppress := forwardSenderPts(r.UserID, destPeerType, srcPeerType, sentMsgs)
 		var attempt senderRPCAttempt
 		if suppress {
@@ -1676,6 +1716,7 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			h.log.Error("forward messages", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
 		}
+		h.logDirectForwardOutcomes(r.UserID, destPeerType, sentMsgs)
 		return h.finishForwardReply(r, destPeerType, destPeerID, srcPeerType, perOwner, sentMsgs, randomIDs, senderRPCAttempt{})
 	}
 
@@ -1781,7 +1822,33 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 	} else if attempt.conn != nil {
 		clearSenderRPC(attempt)
 	}
+	h.logDirectForwardOutcomes(r.UserID, destPeerType, sentMsgs)
 	return h.finishForwardReply(r, destPeerType, destPeerID, srcPeerType, perOwner, sentMsgs, randomIDs, attempt)
+}
+
+func (h *handlers) logDirectForwardOutcomes(
+	senderID int64,
+	destPeerType store.PeerType,
+	sentMsgs []store.ForwardedMessage,
+) {
+	if destPeerType != store.PeerTypeUser {
+		return
+	}
+	for _, forwarded := range sentMsgs {
+		if forwarded.Message.PeerType != store.PeerTypeUser {
+			continue
+		}
+		recipientID := forwarded.Message.PeerID
+		recipientPts := forwarded.RecipientPts
+		recipientCopyStored := recipientPts > 0
+		if forwarded.Duplicate {
+			recipientPts = 0
+			recipientCopyStored = directRecipientCopyStored(senderID, recipientID, forwarded.Message)
+		}
+		h.logDirectMessageOutcome(
+			senderID, recipientID, forwarded.Message.LocalID, recipientPts, recipientCopyStored, forwarded.Duplicate,
+		)
+	}
 }
 
 func forwardSenderPts(userID int64, destPeerType, srcPeerType store.PeerType, sentMsgs []store.ForwardedMessage) (int, bool) {
