@@ -864,6 +864,40 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 	}, nil
 }
 
+func (h *handlers) handleReorderStickerSets(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	if r.UserID == 0 {
+		return nil, nil, errAuthKeyUnreg
+	}
+	var req tg.MessagesReorderStickerSetsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
+		return nil, nil, err
+	}
+	accepted, err := h.store.ReorderInstalledStickerSets(r.Ctx, r.UserID, req.Order)
+	if err != nil {
+		h.log.Error("reorder sticker sets", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	if len(accepted) == 0 {
+		return &tg.BoolTrue{}, nil, nil
+	}
+	order := &store.StickerSetOrderUpdate{Masks: req.Masks, Emojis: req.Emojis, SetIDs: accepted}
+	return &tg.BoolTrue{}, func() {
+		h.notifyStickerSetOrderChanged(r, order)
+	}, nil
+}
+
+func (h *handlers) notifyStickerSetOrderChanged(r *mtproto.Request, order *store.StickerSetOrderUpdate) {
+	ctx, cancel := store.NotificationContext(r.Ctx)
+	defer cancel()
+	payload := store.StickerSetOrderChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID, order)
+	if err := h.store.Notify(ctx, store.ChannelStickerSets, payload); err != nil {
+		h.log.Info("notify sticker set order update", "user_id", r.UserID, "err", err)
+	}
+}
+
 func (h *handlers) notifyStickerSetChanged(r *mtproto.Request) {
 	ctx, cancel := store.NotificationContext(r.Ctx)
 	defer cancel()

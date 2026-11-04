@@ -79,8 +79,71 @@ func (s *Store) UninstallStickerSet(ctx context.Context, userID, setID int64) (b
 	return rows != 0, nil
 }
 
+// StickerSetOrderUpdate is one accepted reorder: the kinds it was requested
+// for, and the installed set IDs it placed first, in their accepted order.
+type StickerSetOrderUpdate struct {
+	Masks  bool
+	Emojis bool
+	SetIDs []int64
+}
+
+// ReorderInstalledStickerSets saves the account's installed-set order. setIDs
+// are placed first in the order given; IDs not installed by userID and repeats
+// are ignored, and every other installed set keeps its current relative order
+// after them. It returns the accepted leading IDs, which are empty when none of
+// setIDs is installed, and then writes nothing.
+func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, setIDs []int64) ([]int64, error) {
+	if userID <= 0 {
+		return nil, errors.New("reorder sticker sets: invalid user identity")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin reorder sticker sets: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = qtx.LockUserStickerSetOwner(ctx, userID); err != nil {
+		return nil, fmt.Errorf("lock sticker set owner %d: %w", userID, err)
+	}
+	rows, err := qtx.StickerSetsByOwner(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list sticker sets for reorder: %w", err)
+	}
+	installed := make(map[int64]bool, len(rows))
+	current := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		installed[row.SetID] = true
+		current = append(current, row.SetID)
+	}
+	accepted := make([]int64, 0, len(setIDs))
+	placed := make(map[int64]bool, len(setIDs))
+	for _, id := range setIDs {
+		if !installed[id] || placed[id] {
+			continue
+		}
+		placed[id] = true
+		accepted = append(accepted, id)
+	}
+	if len(accepted) == 0 {
+		return nil, nil
+	}
+	order := accepted
+	for _, id := range current {
+		if !placed[id] {
+			order = append(order, id)
+		}
+	}
+	if _, err = qtx.SetUserStickerSetOrder(ctx, db.SetUserStickerSetOrderParams{UserID: userID, SetIds: order}); err != nil {
+		return nil, fmt.Errorf("save sticker set order for user %d: %w", userID, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sticker set reorder: %w", err)
+	}
+	return accepted, nil
+}
+
 // InstalledStickerSets returns only the installed-set state for userID, in
-// stable order. Callers resolve each set_id against the current static
+// saved order. Callers resolve each set_id against the current static
 // catalogue and skip rows that no longer have a catalogue entry.
 func (s *Store) InstalledStickerSets(ctx context.Context, userID int64) ([]InstalledStickerSet, error) {
 	if userID <= 0 {

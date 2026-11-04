@@ -30,11 +30,35 @@ func (q *Queries) InstallStickerSet(ctx context.Context, arg InstallStickerSetPa
 	return result.RowsAffected(), nil
 }
 
+const setUserStickerSetOrder = `-- name: SetUserStickerSetOrder :execrows
+UPDATE user_sticker_sets AS sticker_sets
+SET sort_position = ordered.position::int
+FROM unnest($2::bigint[]) WITH ORDINALITY AS ordered(set_id, position)
+WHERE sticker_sets.user_id = $1
+  AND sticker_sets.set_id = ordered.set_id
+`
+
+type SetUserStickerSetOrderParams struct {
+	UserID int64
+	SetIds []int64
+}
+
+// SetUserStickerSetOrder writes the caller's full installed order in one
+// statement: set_ids lists every installed set in its new order, and each
+// position is that set's 1-based index.
+func (q *Queries) SetUserStickerSetOrder(ctx context.Context, arg SetUserStickerSetOrderParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserStickerSetOrder, arg.UserID, arg.SetIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const stickerSetsByOwner = `-- name: StickerSetsByOwner :many
 SELECT set_id, installed_at
 FROM user_sticker_sets
 WHERE user_id = $1
-ORDER BY set_id
+ORDER BY sort_position ASC NULLS LAST, set_id
 `
 
 type StickerSetsByOwnerRow struct {
@@ -42,8 +66,9 @@ type StickerSetsByOwnerRow struct {
 	InstalledAt pgtype.Timestamptz
 }
 
-// StickerSetsByOwner is ordered by the table's composite primary key and only
-// returns install state for the authenticated account named by the caller.
+// StickerSetsByOwner returns install state for the authenticated account named
+// by the caller, in its saved order. Sets without a saved position follow the
+// placed sets in set_id order.
 func (q *Queries) StickerSetsByOwner(ctx context.Context, userID int64) ([]StickerSetsByOwnerRow, error) {
 	rows, err := q.db.Query(ctx, stickerSetsByOwner, userID)
 	if err != nil {

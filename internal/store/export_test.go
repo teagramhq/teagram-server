@@ -1070,3 +1070,9 @@ func ProfilePartsSnapshotHook(s *Store, hook func(ownerID, clientFileID int64)) 
 	s.profilePartsSnapshotHook = hook
 	return prev
 }
+
+// ParseStickerSetChangedPayloadForTest exposes the tg_sticker_sets NOTIFY parser.
+func ParseStickerSetChangedPayloadForTest(payload string) (ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate, err error) {
+	parsed, err := parseStickerSetChangedPayload(payload)
+	return parsed.ownerID, parsed.authKeyID, parsed.sessionID, parsed.order, err
+}

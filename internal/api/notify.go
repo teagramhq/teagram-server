@@ -140,18 +140,15 @@ func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
 	u.pushTransientFanout(ctx, pushes)
 }
 
-// DeliverStickerSets fans out the account's transient sticker-set invalidation
-// to live sessions on this replica, omitting the session that made the RPC.
+// DeliverStickerSets fans out the account's transient sticker-set update to
+// live sessions on this replica, omitting the session that made the RPC. A nil
+// order sends updateStickerSets; a saved order sends updateStickerSetsOrder.
 // The snapshotted binding is checked again under the conn's write lock.
-func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64) {
+func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64, order *store.StickerSetOrderUpdate) {
 	if ownerID <= 0 || authKeyID == 0 || u.registry == nil {
 		return
 	}
-	update := &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateStickerSets{}},
-		Date:    int(time.Now().Unix()),
-		Seq:     0,
-	}
+	update := stickerSetsUpdate(order)
 	pushes := make([]transientPush, 0)
 	for _, conn := range u.registry.Conns(ownerID) {
 		connAuthKeyID, connSessionID := conn.SessionIdentity()
@@ -169,6 +166,22 @@ func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, se
 		})
 	}
 	u.pushTransientFanout(ctx, pushes)
+}
+
+// stickerSetsUpdate builds the transient update for a sticker-set change. The
+// Seq stays zero: these updates have no pts and are never replayed.
+func stickerSetsUpdate(order *store.StickerSetOrderUpdate) *tg.Updates {
+	var update tg.UpdateClass = &tg.UpdateStickerSets{}
+	if order != nil {
+		orderUpdate := &tg.UpdateStickerSetsOrder{Masks: order.Masks, Emojis: order.Emojis, Order: order.SetIDs}
+		orderUpdate.SetFlags()
+		update = orderUpdate
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{update},
+		Date:    int(time.Now().Unix()),
+		Seq:     0,
+	}
 }
 
 // DialogFilterListenerReconnected advances the replica-wide recovery epoch.

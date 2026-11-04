@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -296,4 +297,145 @@ func smokeCustomEmojiTGS(t *testing.T) []byte {
 		t.Fatal("smoke custom emoji TGS file is empty")
 	}
 	return output.Bytes()
+}
+
+// testSmokeStickerSetReorder saves a new installed-set order through a real
+// client and reads it back through getAllStickers.
+func testSmokeStickerSetReorder(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, nil)
+	const phone = "+15551049931"
+	seedSmokeUsers(t, f, phone)
+	owner := newSmokeClient(t, f, "sticker set order owner", phone)
+	first := createSmokeRegularStickerSet(t, f, owner, "smoke_order_one", 1049931)
+	second := createSmokeRegularStickerSet(t, f, owner, "smoke_order_two", 1049932)
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		for _, set := range []*tg.MessagesStickerSet{first, second} {
+			result, err := client.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{
+				Stickerset: &tg.InputStickerSetID{ID: set.Set.ID, AccessHash: set.Set.AccessHash},
+			})
+			if err != nil {
+				return err
+			}
+			if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+				return fmt.Errorf("installStickerSet result = %T, want success", result)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("install sticker sets: %v", err)
+	}
+
+	before := smokeAllStickers(t, f, owner)
+	wantBefore := []int64{first.Set.ID, second.Set.ID}
+	if first.Set.ID > second.Set.ID {
+		wantBefore = []int64{second.Set.ID, first.Set.ID}
+	}
+	if got := smokeStickerSetIDs(before); !slices.Equal(got, wantBefore) {
+		t.Fatalf("getAllStickers before reorder = %v, want set-id order %v", got, wantBefore)
+	}
+
+	wantAfter := []int64{second.Set.ID, first.Set.ID}
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		saved, err := client.MessagesReorderStickerSets(ctx, &tg.MessagesReorderStickerSetsRequest{Order: wantAfter})
+		if err != nil {
+			return err
+		}
+		if !saved {
+			return errors.New("reorderStickerSets returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reorder sticker sets: %v", err)
+	}
+
+	after := smokeAllStickers(t, f, owner)
+	if got := smokeStickerSetIDs(after); !slices.Equal(got, wantAfter) {
+		t.Fatalf("getAllStickers after reorder = %v, want %v", got, wantAfter)
+	}
+	if after.Hash == before.Hash {
+		t.Fatalf("getAllStickers hash stayed %d after reorder", after.Hash)
+	}
+}
+
+func createSmokeRegularStickerSet(t *testing.T, f *smokeFixture, owner *smokeClient, shortName string, uploadID int64) *tg.MessagesStickerSet {
+	t.Helper()
+	stickerBytes := smokeStickerTGS(t)
+	parts := uploadSmokeMediaParts(t, f.ctx, owner, uploadID, stickerBytes, len(stickerBytes))
+	var document *tg.Document
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+			Peer: &tg.InputPeerSelf{},
+			Media: &tg.InputMediaUploadedDocument{
+				File:       &tg.InputFile{ID: uploadID, Parts: parts, Name: shortName + ".tgs"},
+				MimeType:   "application/x-tgsticker",
+				Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: shortName + ".tgs"}, &tg.DocumentAttributeAnimated{}},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		media, ok := result.(*tg.MessageMediaDocument)
+		if !ok {
+			return fmt.Errorf("uploadMedia result = %T, want *tg.MessageMediaDocument", result)
+		}
+		document, ok = media.Document.(*tg.Document)
+		if !ok || document.ID <= 0 || document.AccessHash == 0 {
+			return fmt.Errorf("uploaded sticker document = %#v, want stored document identity", media.Document)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("upload sticker document %q: %v", shortName, err)
+	}
+
+	var created *tg.MessagesStickerSet
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.StickersCreateStickerSet(ctx, &tg.StickersCreateStickerSetRequest{
+			UserID: &tg.InputUserSelf{}, Title: shortName, ShortName: shortName,
+			Stickers: []tg.InputStickerSetItem{{
+				Document: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash, FileReference: document.FileReference},
+				Emoji:    "⭐",
+			}},
+		})
+		if err != nil {
+			return err
+		}
+		var ok bool
+		created, ok = result.(*tg.MessagesStickerSet)
+		if !ok || created.Set.ShortName != shortName {
+			return fmt.Errorf("createStickerSet result = %#v, want set %q", result, shortName)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("create sticker set %q: %v", shortName, err)
+	}
+	return created
+}
+
+func smokeAllStickers(t *testing.T, f *smokeFixture, client *smokeClient) *tg.MessagesAllStickers {
+	t.Helper()
+	var all *tg.MessagesAllStickers
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAllStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesAllStickers)
+		if !ok {
+			return fmt.Errorf("getAllStickers result = %T, want *tg.MessagesAllStickers", result)
+		}
+		all = full
+		return nil
+	}); err != nil {
+		t.Fatalf("getAllStickers: %v", err)
+	}
+	return all
+}
+
+func smokeStickerSetIDs(all *tg.MessagesAllStickers) []int64 {
+	ids := make([]int64, 0, len(all.Sets))
+	for _, set := range all.Sets {
+		ids = append(ids, set.ID)
+	}
+	return ids
 }

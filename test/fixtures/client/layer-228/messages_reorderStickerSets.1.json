@@ -1,0 +1,16 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_reorderStickerSets.1.txt",
+  "method": "messages.reorderStickerSets",
+  "request": {
+    "type": "messages.reorderStickerSets",
+    "fields": {
+      "order": [
+        "<N>",
+        "<N>"
+      ]
+    },
+    "flags": 0
+  }
+}

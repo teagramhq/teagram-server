@@ -1,0 +1,5 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.reorderStickerSets#78337739
+  flags: 0 [INT],
+  order: [<N>, <N>],
+},

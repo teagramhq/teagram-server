@@ -553,7 +553,7 @@ func StartListenerWithDialogPinsAndStickerSets(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
-	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate),
 	reconnected func(),
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
@@ -575,7 +575,7 @@ func startListener(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
-	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate),
 	reconnected func(),
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
@@ -645,7 +645,7 @@ func (l *Listener) run(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
-	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate),
 	reconnected func(),
 ) {
 	backoff := listenerBackoffMin
@@ -699,7 +699,7 @@ func (l *Listener) dispatch(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
-	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate),
 ) error {
 	for {
 		n, err := conn.WaitForNotification(ctx)
@@ -1082,11 +1082,13 @@ func (l *Listener) dispatch(
 			if stickerSets != nil {
 				routeKey := "sticker-sets:" + strconv.FormatInt(payload.ownerID, 10) + ":" +
 					strconv.FormatInt(payload.authKeyID, 10) + ":" + strconv.FormatInt(payload.sessionID, 10)
+				// A saved order is never coalesced: a later task would replace the queued
+				// order and drop the kind it was requested for.
 				l.schedule(routeKey, notificationTask{
 					ctx:      ctx,
-					coalesce: true,
+					coalesce: payload.order == nil,
 					run: func(ctx context.Context) {
-						stickerSets(ctx, payload.ownerID, payload.authKeyID, payload.sessionID)
+						stickerSets(ctx, payload.ownerID, payload.authKeyID, payload.sessionID, payload.order)
 					},
 				})
 			}
@@ -1459,15 +1461,39 @@ func StickerSetChangedPayload(ownerID, authKeyID, sessionID int64) string {
 		strconv.FormatInt(sessionID, 10)
 }
 
+// StickerSetOrderChangedPayload extends StickerSetChangedPayload with a saved
+// order for a transient updateStickerSetsOrder fan-out. A nil order yields the
+// plain payload. Payload: "ownerID|authKeyID|sessionID|kinds|setID,setID", where
+// kinds is 1 for masks and 2 for emojis, as in the TL flags.
+func StickerSetOrderChangedPayload(ownerID, authKeyID, sessionID int64, order *StickerSetOrderUpdate) string {
+	base := StickerSetChangedPayload(ownerID, authKeyID, sessionID)
+	if order == nil {
+		return base
+	}
+	kinds := 0
+	if order.Masks {
+		kinds |= 1
+	}
+	if order.Emojis {
+		kinds |= 2
+	}
+	ids := make([]string, 0, len(order.SetIDs))
+	for _, id := range order.SetIDs {
+		ids = append(ids, strconv.FormatInt(id, 10))
+	}
+	return base + "|" + strconv.Itoa(kinds) + "|" + strings.Join(ids, ",")
+}
+
 type stickerSetChangedPayload struct {
 	ownerID   int64
 	authKeyID int64
 	sessionID int64
+	order     *StickerSetOrderUpdate
 }
 
 func parseStickerSetChangedPayload(payload string) (stickerSetChangedPayload, error) {
 	parts := strings.Split(payload, "|")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 5 {
 		return stickerSetChangedPayload{}, errors.New("invalid sticker-set payload fields")
 	}
 	ownerID, err := strconv.ParseInt(parts[0], 10, 64)
@@ -1482,7 +1508,24 @@ func parseStickerSetChangedPayload(payload string) (stickerSetChangedPayload, er
 	if err != nil {
 		return stickerSetChangedPayload{}, errors.New("invalid sticker-set session")
 	}
-	return stickerSetChangedPayload{ownerID: ownerID, authKeyID: authKeyID, sessionID: sessionID}, nil
+	if len(parts) == 3 {
+		return stickerSetChangedPayload{ownerID: ownerID, authKeyID: authKeyID, sessionID: sessionID}, nil
+	}
+	kinds, err := strconv.Atoi(parts[3])
+	if err != nil || kinds < 0 || kinds > 3 {
+		return stickerSetChangedPayload{}, errors.New("invalid sticker-set order kinds")
+	}
+	idParts := strings.Split(parts[4], ",")
+	setIDs := make([]int64, 0, len(idParts))
+	for _, part := range idParts {
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || id == 0 {
+			return stickerSetChangedPayload{}, errors.New("invalid sticker-set order id")
+		}
+		setIDs = append(setIDs, id)
+	}
+	order := &StickerSetOrderUpdate{Masks: kinds&1 != 0, Emojis: kinds&2 != 0, SetIDs: setIDs}
+	return stickerSetChangedPayload{ownerID: ownerID, authKeyID: authKeyID, sessionID: sessionID, order: order}, nil
 }
 
 // PinnedPayload formats a tg_pinned NOTIFY payload naming the peer whose

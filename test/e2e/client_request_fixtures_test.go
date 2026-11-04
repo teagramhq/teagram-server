@@ -534,6 +534,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.gif.1",
 		"stickers_createStickerSet.1",
 		"messages_getCustomEmojiDocuments.1",
+		"messages_reorderStickerSets.1",
 		"messages_sendMessage.customEmoji.private.1",
 		"messages_sendMessage.customEmoji.group.1",
 		"messages_sendMessage.customEmoji.channel.1",
@@ -775,6 +776,19 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay install-sticker-set-by-id fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_reorderStickerSets.1", func(ctx context.Context, api *tg.Client) error {
+		// stickerSet.ID+1 is not installed, so the server ignores it and still answers true.
+		saved, err := api.MessagesReorderStickerSets(ctx, &tg.MessagesReorderStickerSetsRequest{Order: []int64{stickerSet.ID, stickerSet.ID + 1}})
+		if err != nil {
+			return err
+		}
+		if !saved {
+			return errors.New("reorderStickerSets returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay reorder-sticker-sets fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_getArchivedStickers.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetArchivedStickers(ctx, &tg.MessagesGetArchivedStickersRequest{
