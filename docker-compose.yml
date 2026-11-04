@@ -64,7 +64,7 @@ services:
   migrate:
     # Pinned to the version the ariga/setup-atlas steps in ci.yml use, so the
     # stack and CI cannot apply migrations with different atlas versions.
-    image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
+    image: mirror.gcr.io/arigaio/atlas:1.3.0-alpine
     # The image entrypoint is already atlas, so the command starts at `migrate`.
     # Not `--env local`: that env's dev database is docker://postgres/18, which
     # would need a Docker daemon inside this container. Three slashes in
