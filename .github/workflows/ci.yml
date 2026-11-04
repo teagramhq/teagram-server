@@ -1090,6 +1090,8 @@ jobs:
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
           bash -n .github/scripts/check-k8s-migration-version.sh
           shellcheck .github/scripts/check-k8s-migration-version.sh
+          bash -n .github/scripts/set-k8s-ci-migration-version.sh
+          shellcheck .github/scripts/set-k8s-ci-migration-version.sh
           bash -n .github/scripts/check-k8s-prod-image-pins.sh
           shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
@@ -1346,6 +1348,7 @@ jobs:
       KUBECTL_VERSION: v1.37.1
       KUBECONFORM_VERSION: v0.8.0
       KUBERNETES_VERSION: 1.37.1
+      K8S_MIGRATION_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1405,7 +1408,18 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          bash .github/scripts/check-k8s-migration-version.sh migrations deploy/k8s/base/migration-version
+          previous_migration_version="$(tr -d '\r\n' < deploy/k8s/base/migration-version)"
+          if [[ "$K8S_MIGRATION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if ! git cat-file -e "${K8S_MIGRATION_BASE_SHA}^{commit}" 2>/dev/null; then
+              git fetch --quiet --no-tags --depth=1 origin "$K8S_MIGRATION_BASE_SHA"
+            fi
+            previous_migration_version="$(git show \
+              "${K8S_MIGRATION_BASE_SHA}:deploy/k8s/base/migration-version")"
+            previous_migration_version="$(tr -d '\r\n' <<< "$previous_migration_version")"
+          fi
+          bash .github/scripts/check-k8s-migration-version.sh \
+            migrations deploy/k8s/base/migration-version "$previous_migration_version"
+          bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           for overlay in prod ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
@@ -1607,6 +1621,7 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"

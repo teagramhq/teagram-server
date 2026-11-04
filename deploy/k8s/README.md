@@ -20,7 +20,9 @@ earlier migration while a new migration is being developed; CI checks that it
 names a migration that exists, rather than requiring every migration PR to edit
 `deploy/k8s/`. The production validator checks that the required version matches
 the newest migration in the pinned migration image and that this image contains
-every migration present in the pinned teagramd image.
+every migration, with identical contents, present in the pinned teagramd image.
+The CI workflow sets its disposable overlay to the newest migration before
+rendering and applying it, so teagramd waits until that migration has run.
 
 After a migration merges and CI publishes the corresponding images, update the
 production teagramd and migration image digests, required migration version,

@@ -28,26 +28,77 @@ if (require_no_match_status 2 'yq') >/dev/null 2>&1; then
 fi
 
 manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Render and validate production and CI overlays") | .run' .github/workflows/ci.yml)"
-[[ "$manifest_step" == *'.github/scripts/check-k8s-migration-version.sh migrations deploy/k8s/base/migration-version'* &&
-   "$manifest_step" != *'latest_migration'* ]] ||
-  fail 'manifest validation must accept an unchanged base pin when a new migration is added'
+base_migration_check_line="$(grep -n -m 1 -F '.github/scripts/check-k8s-migration-version.sh' <<< "$manifest_step" | cut -d: -f1)"
+ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$manifest_step" | cut -d: -f1)"
+overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+[[ "$manifest_step" == *'K8S_MIGRATION_BASE_SHA'* &&
+   "$manifest_step" == *'git show'* &&
+   "$manifest_step" == *'migrations deploy/k8s/base/migration-version "$previous_migration_version"'* &&
+   "$base_migration_check_line" =~ ^[0-9]+$ &&
+   "$ci_migration_prepare_line" =~ ^[0-9]+$ &&
+   "$overlay_render_line" =~ ^[0-9]+$ &&
+   "$base_migration_check_line" -lt "$ci_migration_prepare_line" &&
+   "$ci_migration_prepare_line" -lt "$overlay_render_line" ]] ||
+  fail 'manifest validation must accept unchanged base pins and render CI against the newest migration'
 
 migration_fixture="$(mktemp -d)"
 trap 'rm -rf "$migration_fixture"' EXIT
 mkdir -p "$migration_fixture/migrations"
+printf 'fixture\n' > "$migration_fixture/migrations/20261101000001_older.sql"
 printf 'fixture\n' > "$migration_fixture/migrations/20261102000002_existing.sql"
 printf 'fixture\n' > "$migration_fixture/migrations/20261104000001_new.sql"
 printf '20261102000002\n' > "$migration_fixture/migration-version"
 bash .github/scripts/check-k8s-migration-version.sh \
-  "$migration_fixture/migrations" "$migration_fixture/migration-version" >/dev/null ||
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 >/dev/null ||
   fail 'a new migration must not require an immediate base migration-version edit'
 
+printf '20261101000001\n' > "$migration_fixture/migration-version"
+if bash .github/scripts/check-k8s-migration-version.sh \
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 \
+  >"$migration_fixture/invalid-output" 2>"$migration_fixture/invalid-error"; then
+  fail 'a changed base migration version must match the newest migration'
+fi
 printf '20261103000001\n' > "$migration_fixture/migration-version"
 if bash .github/scripts/check-k8s-migration-version.sh \
-  "$migration_fixture/migrations" "$migration_fixture/migration-version" \
-  >"$migration_fixture/invalid-output" 2>"$migration_fixture/invalid-error"; then
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 \
+  >"$migration_fixture/missing-output" 2>"$migration_fixture/missing-error"; then
   fail 'the base migration version must refer to a migration in the repository'
 fi
+printf '20261104000001\n' > "$migration_fixture/migration-version"
+bash .github/scripts/check-k8s-migration-version.sh \
+  "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 >/dev/null ||
+  fail 'an intentional base migration-version update to the newest migration must pass'
+
+mkdir -p "$migration_fixture/ci"
+cat > "$migration_fixture/ci/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: required-migration-version
+    behavior: replace
+    literals:
+      - migration-version=20261102000002
+YAML
+bash .github/scripts/set-k8s-ci-migration-version.sh \
+  "$migration_fixture/migrations" "$migration_fixture/ci" >/dev/null ||
+  fail 'the CI overlay must be configured to wait for the newest migration'
+[[ "$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").literals[0]' \
+  "$migration_fixture/ci/kustomization.yaml")" == 'migration-version=20261104000001' ]] ||
+  fail 'the CI overlay must require the newest migration version'
+
+apply_ci_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Apply the rendered CI overlay to k3s") | .run' .github/workflows/ci.yml)"
+prepare_ci_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
+render_ci_line="$(grep -n -m 1 -F 'kubectl kustomize deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
+dry_run_ci_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"' <<< "$apply_ci_step" | cut -d: -f1)"
+apply_ci_line="$(grep -n -m 1 -F 'kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"' <<< "$apply_ci_step" | cut -d: -f1)"
+[[ "$prepare_ci_line" =~ ^[0-9]+$ &&
+   "$render_ci_line" =~ ^[0-9]+$ &&
+   "$dry_run_ci_line" =~ ^[0-9]+$ &&
+   "$apply_ci_line" =~ ^[0-9]+$ &&
+   "$prepare_ci_line" -lt "$render_ci_line" &&
+   "$render_ci_line" -lt "$dry_run_ci_line" &&
+   "$dry_run_ci_line" -lt "$apply_ci_line" ]] ||
+  fail 'the CI migration version must be updated before rendering and applying the overlay'
 
 check_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Check RustFS initializer secret mounts") | .run' .github/workflows/ci.yml)"
 [[ -n "$check_step" && "$check_step" != null ]] ||

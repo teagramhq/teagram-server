@@ -61,7 +61,7 @@ image_revision() {
   printf '%s' "$revision"
 }
 
-latest_migration_version() {
+migration_tree_at_revision() {
   local revision="$1"
   local fetch_output
   if ! git cat-file -e "${revision}^{commit}" 2>/dev/null; then
@@ -70,31 +70,58 @@ latest_migration_version() {
     fi
   fi
 
-  local migration_paths
-  if ! migration_paths="$(git ls-tree -r --name-only "$revision" -- migrations 2>&1)"; then
-    fail "could not read migrations at image source ${revision}: ${migration_paths:-no Git response}"
+  local migration_tree
+  if ! migration_tree="$(git ls-tree -r "$revision" -- migrations 2>&1)"; then
+    fail "could not read migrations at image source ${revision}: ${migration_tree:-no Git response}"
   fi
+  printf '%s' "$migration_tree"
+}
 
+latest_migration_version() {
+  local migration_tree="$1"
+  local revision="$2"
   local latest=''
   local version
-  local filename
   local migration_path
-  while IFS= read -r migration_path; do
-    filename="${migration_path##*/}"
-    if [[ "$filename" =~ ^([0-9]{14})_.+\.sql$ ]]; then
+  while IFS=$'\t' read -r _ migration_path; do
+    if [[ "$migration_path" =~ ^migrations/([0-9]{14})_.+\.sql$ ]]; then
       version="${BASH_REMATCH[1]}"
       [[ "$version" > "$latest" ]] && latest="$version"
     fi
-  done <<< "$migration_paths"
+  done <<< "$migration_tree"
   [[ "$latest" =~ ^[0-9]{14}$ ]] ||
     fail "image source ${revision} has no valid SQL migrations"
   printf '%s' "$latest"
 }
 
+validate_required_migrations() {
+  local server_tree="$1"
+  local migration_image_tree="$2"
+  local server_revision="$3"
+  local migrations_revision="$4"
+  local migration_entry
+  local migration_path
+  local server_migrations=0
+  while IFS=$'\t' read -r migration_entry migration_path; do
+    [[ "$migration_path" =~ ^migrations/[0-9]{14}_.+\.sql$ ]] || continue
+    server_migrations=$((server_migrations + 1))
+    if ! grep --fixed-strings --line-regexp --quiet -- \
+      "${migration_entry}"$'\t'"${migration_path}" <<< "$migration_image_tree"; then
+      fail "pinned migration image source ${migrations_revision} lacks the exact migration ${migration_path} required by teagramd image source ${server_revision}"
+    fi
+  done <<< "$server_tree"
+  ((server_migrations > 0)) ||
+    fail "teagramd image source ${server_revision} has no valid SQL migrations"
+}
+
 teagramd_revision="$(image_revision ghcr.io/teagramhq/teagramd "$teagramd_digest")"
 migrations_revision="$(image_revision ghcr.io/teagramhq/teagram-migrations "$migrations_digest")"
-teagramd_migration_version="$(latest_migration_version "$teagramd_revision")"
-migrations_image_version="$(latest_migration_version "$migrations_revision")"
+teagramd_migration_tree="$(migration_tree_at_revision "$teagramd_revision")"
+migrations_image_tree="$(migration_tree_at_revision "$migrations_revision")"
+migrations_image_version="$(latest_migration_version "$migrations_image_tree" "$migrations_revision")"
+validate_required_migrations \
+  "$teagramd_migration_tree" "$migrations_image_tree" \
+  "$teagramd_revision" "$migrations_revision"
 
 if ! production_migration_version="$(yq -r \
   'select(.kind == "ConfigMap" and (.metadata.name | test("^required-migration-version-"))) | .data["migration-version"]' \
@@ -105,9 +132,6 @@ fi
   fail "rendered production migration version is invalid: ${production_migration_version:-<empty>}"
 [[ "$production_migration_version" == "$migrations_image_version" ]] ||
   fail "production migration version ${production_migration_version} does not match the newest migration in pinned image source ${migrations_revision} (${migrations_image_version})"
-[[ "$migrations_image_version" > "$teagramd_migration_version" ||
-   "$migrations_image_version" == "$teagramd_migration_version" ]] ||
-  fail "pinned migration image source ${migrations_revision} only contains migrations through ${migrations_image_version}, older than teagramd image source ${teagramd_revision} requiring ${teagramd_migration_version}"
 
 grep --fixed-strings --line-regexp --quiet \
   "  name: db-migrations-${migrations_digest:0:16}" "$manifest" ||
