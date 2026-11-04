@@ -24,7 +24,6 @@ SERVER_STOPPED=0
 RUSTFS_STOPPED=0
 SERVER_IMAGE_ID=
 LIVE_IMAGE_SHA=
-LIVE_STARTED_AT=
 
 ops_fail() {
   printf 'media encryption operation rejected: %s\n' "$1" >&2
@@ -117,7 +116,6 @@ validate_live_stack() {
      "$INSPECT_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || ops_fail 'teagramd is not running a verified image'
   SERVER_IMAGE_ID=$INSPECT_IMAGE
   LIVE_IMAGE_SHA=$INSPECT_REVISION
-  LIVE_STARTED_AT=$INSPECT_STARTED_AT
 
   inspect_container "$POSTGRES_CONTAINER" postgres
   [[ "$INSPECT_STATE" == running && "$INSPECT_HEALTH" == healthy ]] || \
@@ -228,6 +226,7 @@ verify_encrypted_inventory() {
   ' "$inventory_path") || ops_fail 'encrypted inventory invalid-envelope count is invalid'
   INVENTORY_MISSING=$(jq -er '.encrypted.classes.missing.count | select(type == "number" and . >= 0)' "$inventory_path") || \
     ops_fail 'encrypted inventory missing-object count is invalid'
+  # shellcheck disable=SC2034
   INVENTORY_PLAINTEXT=$(jq -er '.plaintext.classes.no_valid_envelope.count | select(type == "number" and . >= 0)' "$inventory_path") || \
     ops_fail 'plaintext inventory source count is invalid'
   INVENTORY_PLAINTEXT_MISSING=$(jq -er '.plaintext.classes.missing.count | select(type == "number" and . >= 0)' "$inventory_path") || \
@@ -235,7 +234,6 @@ verify_encrypted_inventory() {
   [[ "$INVENTORY_REFERENCED" == "$INVENTORY_ENCRYPTED" && "$INVENTORY_NO_VALID" == 0 && \
      "$INVENTORY_MISSING" == 0 && "$INVENTORY_PLAINTEXT_MISSING" == 0 ]] || \
     ops_fail 'encrypted inventory does not account for every referenced object'
-  INVENTORY_PATH=$inventory_path
 }
 
 run_migration_job() {
@@ -283,6 +281,8 @@ restart_rustfs() {
     docker restart --time 30 "$RUSTFS_CONTAINER" >/dev/null || ops_fail 'RustFS restart failed'
   fi
   wait_healthy "$RUSTFS_CONTAINER" rustfs 60
+  # Caller EXIT traps use this flag to avoid restarting an already recovered service.
+  # shellcheck disable=SC2034
   RUSTFS_STOPPED=0
 }
 
@@ -299,6 +299,8 @@ start_server_and_smoke() {
     sleep 1
   done
   [[ "$INSPECT_STATE" == running ]] || ops_fail 'teagramd did not enter the running state'
+  # Caller EXIT traps use this flag to avoid restarting an already recovered service.
+  # shellcheck disable=SC2034
   SERVER_STOPPED=0
   SERVER_IMAGE_ID=$INSPECT_IMAGE
   [[ "$INSPECT_REVISION" == "$LIVE_IMAGE_SHA" ]] || ops_fail 'teagramd restarted with a different image revision'
