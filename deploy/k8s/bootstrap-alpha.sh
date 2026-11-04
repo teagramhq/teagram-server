@@ -46,10 +46,11 @@ Would start the LXC, install ca-certificates, curl, iptables, nftables, and Open
 Would install /etc/sysctl.d/90-teagram-k3s.conf in the LXC and enable IP forwarding plus bridge netfilter.
 Would install pinned k3s v1.37.1+k3s1 with Traefik, ServiceLB, and metrics-server disabled, then enable it and wait for a Ready node.
 Would install the agents' forced-command SSH menu and the existing Multica public key, restrict root SSH to that command, disable password login and forwarding, and restart sshd only if its files change.
-Would create the teagram namespace, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
+Would create the teagram namespace with enforced Pod Security baseline, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
 Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, cloudflared-token, and ghcr-pull from the live teagram LXC (values are not displayed).
 Would configure Tailscale Serve TCP routes on alpha ports 6443 and 2222 to the loopback proxies; no public listener is configured.
 Would write /root/teagram-k3s-deploy.kubeconfig with mode 0600 and verify the k3s node, disabled components, namespace boundary, Serve routes, and kubeconfig permissions.
+Would verify Pod Security Admission rejects a privileged pod that mounts a hostPath.
 EOF
 }
 
@@ -494,7 +495,7 @@ if [[ $INSTALL_CHANGED == true ]]; then
   incus exec "$INSTANCE" -- sysctl --load=/etc/sysctl.d/90-teagram-k3s.conf >/dev/null
 fi
 
-if ! incus exec "$INSTANCE" -- command -v k3s >/dev/null 2>&1; then
+if ! incus exec "$INSTANCE" -- bash -c 'command -v k3s >/dev/null 2>&1'; then
   k3s_release_tag=${K3S_VERSION//+/%2B}
   incus exec "$INSTANCE" -- bash -c \
     "set -o pipefail; curl --fail --silent --show-error --location https://raw.githubusercontent.com/k3s-io/k3s/$k3s_release_tag/install.sh | INSTALL_K3S_VERSION='$K3S_VERSION' INSTALL_K3S_EXEC='server --disable=traefik --disable=servicelb --disable=metrics-server --tls-san=$TAILNET_IP --write-kubeconfig-mode=0600' sh -"
@@ -554,6 +555,22 @@ ensure_serve_port "$OPS_SSH_TAILNET_PORT" "$OPS_SSH_HOST_PORT"
 
 namespace_file="$REPO_ROOT/deploy/k8s/base/namespace.yaml"
 apply_manifest < "$namespace_file"
+namespace_json=$(incus exec "$INSTANCE" -- k3s kubectl get namespace "$NAMESPACE" --output json)
+if ! printf '%s' "$namespace_json" | python3 -c '
+import json
+import sys
+
+try:
+    labels = json.load(sys.stdin).get("metadata", {}).get("labels", {})
+except (json.JSONDecodeError, AttributeError):
+    raise SystemExit(1)
+if (not isinstance(labels, dict) or
+        labels.get("pod-security.kubernetes.io/enforce") != "baseline" or
+        labels.get("pod-security.kubernetes.io/enforce-version") != "v1.37"):
+    raise SystemExit(1)
+'; then
+  fail 'the teagram namespace does not enforce the Pod Security baseline'
+fi
 apply_manifest <<'EOF'
 apiVersion: v1
 kind: ServiceAccount
@@ -643,6 +660,36 @@ secret = {
 json.dump(secret, sys.stdout, separators=(",", ":"))
 ' | apply_manifest
 
+admission_result=$(incus exec "$INSTANCE" -- k3s kubectl \
+  --as=system:serviceaccount:teagram:teagram-deployer \
+  create --dry-run=server -f - 2>&1 <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: teagram-deployer-escape-check
+  namespace: teagram
+spec:
+  hostPID: true
+  containers:
+    - name: escape
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /
+        type: Directory
+EOF
+) && fail 'Pod Security Admission accepted a privileged hostPath pod'
+[[ $admission_result == *'violates PodSecurity'* && $admission_result == *'hostPath'* && \
+  $admission_result == *'privileged'* ]] ||
+  fail 'the unsafe pod was not rejected by the Pod Security baseline'
+
 incus exec "$INSTANCE" -- k3s kubectl wait --for=create secret/teagram-deployer-token \
   --namespace "$NAMESPACE" --timeout=60s >/dev/null
 # The controller fills token and ca.crt after the Secret object exists, so wait for both keys.
@@ -721,14 +768,25 @@ except BaseException:
     raise
 ' "$TAILNET_IP" "$KUBECONFIG_PATH"
 
-api_can_manage_namespace=$(incus exec "$INSTANCE" -- k3s kubectl auth can-i '*' '*' \
-  --as=system:serviceaccount:teagram:teagram-deployer --namespace teagram)
-api_can_manage_other_namespace=$(incus exec "$INSTANCE" -- k3s kubectl auth can-i '*' '*' \
-  --as=system:serviceaccount:teagram:teagram-deployer --namespace default)
-api_can_manage_cluster_scope=$(incus exec "$INSTANCE" -- k3s kubectl auth can-i '*' namespaces \
-  --as=system:serviceaccount:teagram:teagram-deployer)
-[[ $api_can_manage_namespace == yes && $api_can_manage_other_namespace == no && \
-  $api_can_manage_cluster_scope == no ]] || fail 'the deploy ServiceAccount RBAC boundary is incorrect'
+# `kubectl auth can-i` uses exit 1 for an expected denial; compare both status and text.
+expect_deployer_can_i() {
+  local expected=$1 verb=$2 resource=$3 answer status
+  shift 3
+  if answer=$(incus exec "$INSTANCE" -- k3s kubectl auth can-i "$verb" "$resource" \
+    --as=system:serviceaccount:teagram:teagram-deployer "$@" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  case "$expected:$status:$answer" in
+    yes:0:yes|no:1:no) ;;
+    *) fail 'the deploy ServiceAccount RBAC boundary is incorrect' ;;
+  esac
+}
+
+expect_deployer_can_i yes '*' '*' --namespace teagram
+expect_deployer_can_i no '*' '*' --namespace default
+expect_deployer_can_i no '*' namespaces
 
 test "$(incus exec "$INSTANCE" -- k3s kubectl get nodes --no-headers | wc -l)" -ge 1 ||
   fail 'the k3s node list is empty'

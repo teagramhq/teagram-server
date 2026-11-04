@@ -28,24 +28,21 @@ port (it still needs the token, but the port is reachable).
 
 The Role is `*` on `*` inside `teagram` only. The bootstrap's `can-i` checks
 confirm that the token cannot manage cluster-scoped resources or the `default`
-namespace. They do not confirm that the token cannot escape the namespace
-through a workload.
+namespace. Because a workload could otherwise use `hostPath` and privileged
+mode to reach the node, the namespace enforces Pod Security Admission's
+`baseline` profile at Kubernetes `v1.37`. That profile blocks privileged
+containers, host namespaces, and `hostPath` volumes while allowing the current
+workload manifests. The bootstrap verifies the namespace label and submits a
+server-side dry-run of a privileged `hostPath` pod as the deploy ServiceAccount;
+it fails unless admission rejects that pod for both violations.
+See Kubernetes' [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+and [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+references for the namespace enforcement and baseline rules.
 
-The namespace has no Pod Security Admission label and no manifest in
-`deploy/k8s` mounts a `hostPath`. Nothing stops the token from creating a pod
-that mounts the node filesystem or runs privileged. On the LXC that reaches
-root, the k3s datastore and every Secret, including Secrets in other
-namespaces. This is the largest residual risk in the design. It is not closed
-by this change, because the verbs the deploy workflow actually needs are not
-yet defined (sibling ticket), and a narrower Role would break that workflow.
-
-Required before the deploy workflow ships or the kubeconfig is stored in
-GitHub, whichever comes first: either (a) Tech Lead records acceptance of the
-pod-creation risk on the issue, or (b) the namespace gets a Pod Security
-Admission label (`baseline` enforce is the candidate, since the manifests use
-no `hostPath` and the only added capabilities are `CHOWN` and `FOWNER`),
-introduced first in `warn` and `audit` mode and checked against the live
-workloads, and the Role is narrowed to the verbs the deploy job uses.
+The credential can still read every Secret in `teagram` and change any
+namespace workload. The profile prevents the direct node-root escape described
+above; it does not reduce the namespace-wide data and availability impact of a
+compromised deploy job.
 
 ## GitHub secret storage
 
@@ -102,8 +99,8 @@ rotation.
 
 ## Residual risk
 
-- A holder of the token can reach node root through a pod, as described above,
-  until the namespace is hardened or the risk is accepted on the issue.
+- A holder of the token can read namespace Secrets and change or disrupt
+  production workloads.
 - The token does not expire and is valid until its Secret is deleted.
 - Secrets sit in plaintext in the k3s datastore until encryption at rest is
   enabled.

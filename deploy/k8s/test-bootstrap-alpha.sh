@@ -104,16 +104,33 @@ grep -Fq 'k3s bootstrap complete' "$work/run1.out" || fail 'first run did not re
 [[ $(stat -c '%a:%u' "$kubeconfig_path") == 600:0 ]] || fail 'kubeconfig is not a root-only file'
 grep -Fq "$deployer_token" "$kubeconfig_path" || fail 'kubeconfig does not contain the deploy token'
 grep -Fxq 'k3s-install' "$work/run1.actions" || fail 'first run did not install k3s'
+grep -Fxq 'podsecurity-deny' "$work/run1.actions" || fail 'the escape pod was not rejected by admission'
+python3 - "$MOCK_STATE/state.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    state = json.load(handle)
+if state["pod_security_enforce"] != "baseline":
+    raise SystemExit("namespace Pod Security baseline was not enabled")
+if state["pod_security_enforce_version"] != "v1.37":
+    raise SystemExit("namespace Pod Security baseline version was not pinned")
+if state["token_wait_polls"] < 3 or state["ca_wait_polls"] < 3:
+    raise SystemExit("the token and CA waits did not cover delayed population")
+if "pod/teagram-deployer-escape-check" in state["objects"]:
+    raise SystemExit("the server-side escape probe created a pod")
+PY
 
 cp "$kubeconfig_path" "$work/kubeconfig.before"
 
 # Second apply: must change nothing and still exit 0.
 run_bootstrap "$work/run2.out" "$work/run2.actions"
 grep -Fq 'k3s bootstrap complete' "$work/run2.out" || fail 'rerun did not report completion'
-if grep -E '^(init|device-add|device-override|start|serve |k3s-install|sysctl|systemctl|file-write )' \
+if grep -E '^(init|device-add|device-override|start|serve |k3s-install|sysctl|systemctl|file-write |kubectl-apply )' \
   "$work/run2.actions"; then
   fail 'rerun performed a mutating action'
 fi
+grep -Fxq 'k3s-version-check' "$work/run2.actions" || fail 'rerun skipped the installed k3s version check'
 cmp -s "$work/kubeconfig.before" "$kubeconfig_path" || fail 'rerun changed the deploy kubeconfig'
 
 # No fixture secret may appear in what the script prints, on either run.

@@ -8,6 +8,7 @@ action is appended to MOCK_ACTIONS so the test can assert a rerun changes
 nothing.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,10 @@ def load_state():
             "objects": {},
             "token_populated": False,
             "ca_populated": False,
+            "token_wait_polls": 0,
+            "ca_wait_polls": 0,
+            "pod_security_enforce": "",
+            "pod_security_enforce_version": "",
         }
 
 
@@ -127,14 +132,33 @@ def install_k3s(state):
 def store_manifest(text, state):
     if text.lstrip().startswith("{"):
         obj = json.loads(text)
-        state["objects"][obj["kind"].lower() + "/" + obj["metadata"]["name"]] = True
+        documents = [(obj["kind"], obj["metadata"]["name"], json.dumps(obj, sort_keys=True))]
     else:
+        documents = []
         for part in re.split(r"^---$", text, flags=re.M):
             kind = re.search(r"^kind: (\S+)$", part, re.M)
             name = re.search(r"^  name: (\S+)$", part, re.M)
             if kind and name:
-                state["objects"][kind.group(1).lower() + "/" + name.group(1)] = True
-    log_action("kubectl-apply")
+                documents.append((kind.group(1), name.group(1), part.strip()))
+    for kind, name, document in documents:
+        key = kind.lower() + "/" + name
+        digest = hashlib.sha256(document.encode()).hexdigest()
+        if state["objects"].get(key) != digest:
+            state["objects"][key] = digest
+            log_action("kubectl-apply " + key)
+        if key == "namespace/teagram":
+            label = re.search(
+                r"^\s+pod-security\.kubernetes\.io/enforce:\s*(\S+)\s*$",
+                document,
+                re.M,
+            )
+            state["pod_security_enforce"] = label.group(1) if label else ""
+            version = re.search(
+                r"^\s+pod-security\.kubernetes\.io/enforce-version:\s*(\S+)\s*$",
+                document,
+                re.M,
+            )
+            state["pod_security_enforce_version"] = version.group(1) if version else ""
 
 
 def create_from_env(args, text):
@@ -156,9 +180,23 @@ def create_from_env(args, text):
 
 
 def kubectl(args, state):
+    if args[0].startswith("--as="):
+        args = args[1:]
     if args[0] == "apply":
         store_manifest(sys.stdin.read(), state)
         exit_saved(state, 0)
+    if args[0] == "create" and "--dry-run=server" in args:
+        pod = sys.stdin.read()
+        if (state["pod_security_enforce"] == "baseline" and
+                "privileged: true" in pod and "hostPath:" in pod):
+            log_action("podsecurity-deny")
+            fail(
+                'Error from server (Forbidden): pods "teagram-deployer-escape-check" '
+                'violates PodSecurity "baseline:v1.37": privileged container, hostPath volumes',
+                1,
+            )
+        print("pod/teagram-deployer-escape-check created (server dry run)")
+        sys.exit(0)
     if args[0] == "create":
         create_from_env(args, sys.stdin.read())
     if args[:2] == ["auth", "can-i"]:
@@ -169,6 +207,16 @@ def kubectl(args, state):
         else:
             answer = "no"
         print(answer)
+        sys.exit(0 if answer == "yes" else 1)
+    if args[0] == "get" and args[1] == "namespace":
+        print(json.dumps({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": NAMESPACE, "labels": {
+                "pod-security.kubernetes.io/enforce": state["pod_security_enforce"],
+                "pod-security.kubernetes.io/enforce-version": state["pod_security_enforce_version"],
+            }},
+        }))
         sys.exit(0)
     if args[0] == "get" and args[1] == "nodes":
         print("teagram-k3s Ready control-plane 1m v1.37.1+k3s1")
@@ -196,9 +244,14 @@ def kubectl(args, state):
             sys.exit(0 if target in state["objects"] else 1)
         if condition.startswith("jsonpath="):
             jsonpath = condition[len("jsonpath="):]
+            # The token controller populates each key only after several wait polls.
             if jsonpath == TOKEN_JSONPATH:
+                for _ in range(3):
+                    state["token_wait_polls"] += 1
                 state["token_populated"] = True
             elif jsonpath == CA_JSONPATH:
+                for _ in range(3):
+                    state["ca_wait_polls"] += 1
                 state["ca_populated"] = True
             else:
                 fail(f"unexpected jsonpath wait: {jsonpath}")
@@ -212,11 +265,14 @@ def lxc(cmd):
     if cmd[0] == "bash" and cmd[1:2] == ["-s"]:
         sys.stdin.read()
         sys.exit(0)
+    if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "command -v k3s" in cmd[2]:
+        sys.exit(0 if state["k3s_installed"] else 1)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "install.sh" in cmd[2]:
         install_k3s(state)
     if cmd[0] == "command":
-        sys.exit(0 if state["k3s_installed"] else 1)
+        fail("command -v must be invoked through a shell")
     if cmd[0] == "k3s" and cmd[1] == "--version":
+        log_action("k3s-version-check")
         print(f"k3s version {K3S_VERSION} (test)")
         sys.exit(0)
     if cmd[0] == "k3s" and cmd[1] == "kubectl":

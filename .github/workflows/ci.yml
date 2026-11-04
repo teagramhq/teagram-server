@@ -1425,6 +1425,96 @@ jobs:
           done
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
+      - name: Verify Pod Security blocks deployer host escape
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl apply --filename deploy/k8s/base/namespace.yaml
+          kubectl apply --filename - <<'EOF'
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: teagram-deployer
+            namespace: teagram
+          automountServiceAccountToken: false
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: teagram-deployer
+            namespace: teagram
+          rules:
+            - apiGroups: ["*"]
+              resources: ["*"]
+              verbs: ["*"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: teagram-deployer
+            namespace: teagram
+          subjects:
+            - kind: ServiceAccount
+              name: teagram-deployer
+              namespace: teagram
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: teagram-deployer
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: teagram-deployer-token
+            namespace: teagram
+            annotations:
+              kubernetes.io/service-account.name: teagram-deployer
+          type: kubernetes.io/service-account-token
+          EOF
+          kubectl wait --for=create secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl wait --for="jsonpath={.data.token}" secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl wait --for='jsonpath={.data.ca\.crt}' secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl get secret teagram-deployer-token --namespace teagram --output json |
+            python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", {}); sys.exit(0 if data.get("token") and data.get("ca.crt") else 1)'
+          kubectl auth can-i create pods \
+            --as=system:serviceaccount:teagram:teagram-deployer \
+            --namespace teagram | grep -Fx yes
+          pod="$RUNNER_TEMP/teagram-deployer-escape-check.yaml"
+          cat > "$pod" <<'EOF'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: teagram-deployer-escape-check
+            namespace: teagram
+          spec:
+            hostPID: true
+            containers:
+              - name: escape
+                image: busybox:1.36
+                command: ["sleep", "3600"]
+                securityContext:
+                  privileged: true
+                volumeMounts:
+                  - name: host-root
+                    mountPath: /host
+            volumes:
+              - name: host-root
+                hostPath:
+                  path: /
+                  type: Directory
+          EOF
+          if output=$(kubectl --as=system:serviceaccount:teagram:teagram-deployer \
+            create --dry-run=server --filename "$pod" 2>&1); then
+            echo "Pod Security Admission accepted the privileged hostPath pod" >&2
+            exit 1
+          fi
+          grep -F 'violates PodSecurity' <<<"$output"
+          grep -F 'privileged' <<<"$output"
+          grep -F 'hostPath' <<<"$output"
+
       - name: Remove k3s manifest-check server
         if: always()
         run: docker rm --force --volumes k8s-manifest-check || true

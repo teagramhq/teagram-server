@@ -42,6 +42,10 @@ the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
+Read the [deploy credential threat model](deploy-token-threat-model.md) before
+storing, using, or rotating the production kubeconfig. The bootstrap enforces
+the Pod Security `baseline` profile on `teagram` and verifies it rejects a
+privileged `hostPath` pod.
 
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an

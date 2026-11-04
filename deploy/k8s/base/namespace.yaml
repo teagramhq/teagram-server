@@ -4,3 +4,5 @@ metadata:
   name: teagram
   labels:
     app.kubernetes.io/part-of: teagram
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.37
