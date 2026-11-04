@@ -179,6 +179,8 @@ def create_from_env(args, text):
         kind, name = "configmap", args[2]
     else:
         fail(f"unexpected kubectl create resource: {args[1]}")
+    if os.environ.get("MOCK_FAIL_CREATE_RESOURCE") == kind + "/" + name:
+        fail("mock kubectl create first diagnostic\nmock kubectl create second diagnostic", 1)
     values = {}
     for line in text.splitlines():
         if "=" in line:

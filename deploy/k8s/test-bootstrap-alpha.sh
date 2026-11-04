@@ -181,4 +181,27 @@ for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustf
   fi
 done
 
+mkdir -p "$work/create-failure-state"
+: > "$work/create-failure-actions"
+if MOCK_STATE="$work/create-failure-state" MOCK_ACTIONS="$work/create-failure-actions" \
+  MOCK_FAIL_CREATE_RESOURCE=secret/postgres-credentials PATH="$bin:$PATH" \
+  "$bootstrap" --apply > "$work/create-failure.out" 2>&1; then
+  fail 'the injected kubectl create failure was ignored'
+fi
+grep -Fq 'k3s could not create secret/postgres-credentials (exit 1): mock kubectl create first diagnostic' \
+  "$work/create-failure.out" || fail 'kubectl create failure did not name the resource and first error line'
+if grep -Eq 'could not apply|no objects passed to apply|mock kubectl create second diagnostic' \
+  "$work/create-failure.out"; then
+  fail 'kubectl create failure was replaced by an apply error or printed more than the first stderr line'
+fi
+if [[ $(grep -Fc 'mock kubectl create first diagnostic' "$work/create-failure.out") -ne 1 ]]; then
+  fail 'kubectl create failure printed its stderr outside the named error'
+fi
+for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
+  if grep -Fq -- "$secret" "$work/create-failure.out"; then
+    fail 'the script printed a secret value on a create failure'
+  fi
+done
+
 printf 'bootstrap-alpha apply test passed: first apply, no-op rerun, no secret output\n'

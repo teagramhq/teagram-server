@@ -263,15 +263,24 @@ apply_manifest() {
 
 apply_env_resource() {
   local kind=$1 name=$2
+  local kubectl_error status
   local -a create_args=(create "$kind")
   shift 2
   if [[ $kind == secret ]]; then
     create_args+=(generic)
   fi
   create_args+=("$name" --namespace "$NAMESPACE" --from-env-file=/dev/stdin --dry-run=client -o json)
-  printf '%s\n' "$@" |
-    incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${create_args[@]}" |
-    apply_manifest "$kind/$name"
+  if kubectl_error=$(printf '%s\n' "$@" |
+    incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${create_args[@]}" \
+      2>&1 > "$kubectl_manifest_file"); then
+    :
+  else
+    status=$?
+    kubectl_error=${kubectl_error%%$'\n'*}
+    fail "k3s could not create $kind/$name (exit $status): ${kubectl_error:-kubectl returned no stderr output}"
+  fi
+  apply_manifest "$kind/$name" < "$kubectl_manifest_file"
+  : > "$kubectl_manifest_file"
 }
 
 assert_env_line() {
@@ -494,7 +503,8 @@ fi
 
 sysctl_file=$(mktemp)
 ops_ssh_config=$(mktemp)
-trap 'rm -f -- "$sysctl_file" "$ops_ssh_config"' EXIT
+kubectl_manifest_file=$(mktemp)
+trap 'rm -f -- "$sysctl_file" "$ops_ssh_config" "$kubectl_manifest_file"' EXIT
 cat > "$sysctl_file" <<'EOF'
 net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables = 1
