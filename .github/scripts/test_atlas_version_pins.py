@@ -18,6 +18,7 @@ FROZEN_ROLLOUT_ARTIFACTS = re.compile(
     r"|test-qualify-rustfs-transition\.py)$"
 )
 IMAGE_PIN = re.compile(r"arigaio/atlas:(\d+\.\d+\.\d+)-alpine")
+ESCAPED_IMAGE_PIN = re.compile(r"arigaio/atlas:(\d+\\\.\d+\\\.\d+)-alpine")
 LINT_PIN = re.compile(r"ATLAS_VERSION=v?(\d+\.\d+\.\d+)")
 BINARY_PIN = re.compile(r"atlas version v(\d+\.\d+\.\d+)")
 SETUP_ATLAS = re.compile(r"ariga/setup-atlas@")
@@ -61,11 +62,13 @@ def collect_pins() -> list[tuple[str, str, str]]:
             continue
         for pattern, source in (
             (IMAGE_PIN, "image"),
+            (ESCAPED_IMAGE_PIN, "image"),
             (LINT_PIN, "lint"),
             (BINARY_PIN, "binary"),
         ):
             for match in pattern.finditer(text):
-                pins.append((relative_path, match.group(1), source))
+                version = match.group(1).replace(r"\.", ".")
+                pins.append((relative_path, version, source))
         if not relative_path.startswith(".github/workflows/"):
             continue
         lines = text.splitlines()
@@ -91,6 +94,12 @@ class AtlasVersionPinTests(unittest.TestCase):
             mismatched,
             "Atlas pins must all name "
             f"{EXPECTED_VERSION}: {mismatched}",
+        )
+
+    def test_scans_escaped_mirror_image_pin(self) -> None:
+        self.assertIn(
+            (".github/scripts/test_docker_image_mirror.py", EXPECTED_VERSION, "image"),
+            collect_pins(),
         )
 
     def test_scan_covers_compose_dockerfile_and_ci_pins(self) -> None:
