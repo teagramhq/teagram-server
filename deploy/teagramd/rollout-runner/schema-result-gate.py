@@ -233,7 +233,7 @@ def revision_status(record: dict[str, str], expected_hash: str) -> str:
     failures: list[str] = []
     if record["hash"] != expected_hash:
         failures.append("hash_mismatch")
-    # Atlas CLI v1.3.0 records successful applied revisions as type 2.
+    # Atlas CLI v1.2.0 records successful applied revisions as type 2.
     if (
         record["type"] != "2"
         or record["applied"] != record["total"]
