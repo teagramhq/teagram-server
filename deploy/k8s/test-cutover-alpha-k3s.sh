@@ -51,11 +51,21 @@ copy_secret() {
 }
 
 copy_configmap() {
-  local name=$1
-  kubectl get configmap "$name" --namespace "$SOURCE_NAMESPACE" --output json |
-    jq --arg namespace "$TARGET_NAMESPACE" '
+  local name=$1 source_name
+  source_name=$(kubectl get configmaps --namespace "$SOURCE_NAMESPACE" --output json |
+    jq -er --arg name "$name" '
+      [.items[].metadata.name | select(. == $name or startswith($name + "-"))]
+      | if index($name) then $name
+        elif length == 1 then .[0]
+        elif length == 0 then error("ConfigMap not found: " + $name)
+        else error("multiple generated ConfigMaps found for: " + $name)
+        end
+    ')
+  kubectl get configmap "$source_name" --namespace "$SOURCE_NAMESPACE" --output json |
+    jq --arg namespace "$TARGET_NAMESPACE" --arg name "$name" '
       del(.metadata.creationTimestamp, .metadata.managedFields, .metadata.resourceVersion, .metadata.uid)
       | .metadata.namespace = $namespace
+      | .metadata.name = $name
     ' |
     kubectl apply --filename - >/dev/null
 }
