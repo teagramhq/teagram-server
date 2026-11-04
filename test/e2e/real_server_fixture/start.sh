@@ -551,8 +551,10 @@ if [[ $FINGERPRINT == fbb62871f07fae2a ]]; then
 fi
 
 SERVER_AUTH_ENV=(--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false)
+SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd:2443)
 SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/)
 if [[ $GUEST_SIGNUP == 1 ]]; then
+	SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd.test:2444)
 	SERVER_AUTH_ENV=(
 		--env TG_REGISTRATION=open
 		--env TG_LOG_LOGIN_CODES=false
@@ -576,8 +578,8 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
 	--tmpfs /var/lib/teagramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
-	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem "${SERVER_PUBLIC_LINK_ENV[@]}" \
-	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd:2443 \
+	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem "${SERVER_ADVERTISE_ENV[@]}" "${SERVER_PUBLIC_LINK_ENV[@]}" \
+	--env TG_LISTEN_ADDR=:2443 \
 	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
 	"${SERVER_AUTH_ENV[@]}" \
 	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
@@ -1075,6 +1077,39 @@ PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-
 BROWSER_EVIDENCE="$(jq -c \
 	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
 	"$SECRET_DIR/browser-artifact.json")"
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
+	guest_front_stopped=0
+	for attempt in $(seq 1 50); do
+		if ! front_listening; then guest_front_stopped=1; break; fi
+		sleep 0.1
+	done
+	if ((guest_front_stopped == 0)); then
+		printf 'front server kept listening before guest-signup discovery was enabled\n' >&2
+		exit 1
+	fi
+	guest_leg_digest_before="$(measure_front_artifact guest-before)" || exit 1
+	if [[ $guest_leg_digest_before != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed before guest-signup discovery: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$guest_leg_digest_before" >&2
+		exit 1
+	fi
+	docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact --guest-signup >/run/front.log 2>&1 & echo $! > /run/front.pid'
+	guest_front_serving=0
+	for attempt in $(seq 1 100); do
+		if front_listening; then guest_front_serving=1; break; fi
+		sleep 0.1
+	done
+	if ((guest_front_serving == 0)); then
+		printf 'front server did not enable guest-signup discovery\n' >&2
+		docker exec "$FRONT" cat /run/front.log >&2 2>/dev/null || true
+		exit 1
+	fi
+	guest_leg_digest_after="$(measure_front_artifact guest-after)" || exit 1
+	if [[ $guest_leg_digest_after != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed after guest-signup discovery was enabled: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$guest_leg_digest_after" >&2
+		exit 1
+	fi
+fi
 run_auth_progress_controls() {
 	local account username password_file control_output
 	for account in a b; do

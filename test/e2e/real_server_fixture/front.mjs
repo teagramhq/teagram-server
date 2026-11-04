@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 
@@ -9,6 +10,7 @@ const probeTarget = fs.readFileSync('/run/mtproto-target.json');
 const args = process.argv.slice(2);
 const artifactIndex = args.indexOf('--artifact-dir');
 const artifactRoot = artifactIndex === -1 ? null : args[artifactIndex + 1];
+const guestSignup = args.includes('--guest-signup');
 const artifactFiles = new Map();
 const contentTypes = new Map([
   ['.avif', 'image/avif'],
@@ -77,6 +79,33 @@ const server = https.createServer({
     response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify({ status: 'ready', websocket_101_count: websocket101Count, route_errors: websocketRouteErrors, route_error_details: websocketRouteErrorDetails }));
+    return;
+  }
+
+  if (guestSignup && request.url === '/teagram-config.json') {
+    response.setHeader('content-security-policy', PRIVATE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(JSON.stringify({ server: 'teagramd.test', autoGuest: false }));
+    return;
+  }
+
+  if (guestSignup && request.url === '/.well-known/teagramd/client') {
+    const upstream = http.request({ hostname: 'teagramd', port: 2444, path: request.url, method: 'GET' }, (upstreamResponse) => {
+      response.setHeader('content-security-policy', PRIVATE_CSP);
+      response.setHeader('x-content-type-options', 'nosniff');
+      response.writeHead(upstreamResponse.statusCode || 502, {
+        'content-type': upstreamResponse.headers['content-type'] || 'application/json',
+        'cache-control': 'no-store'
+      });
+      upstreamResponse.pipe(response);
+    });
+    upstream.on('error', () => {
+      if (!response.headersSent) response.writeHead(502);
+      response.end();
+    });
+    request.on('aborted', () => upstream.destroy());
+    upstream.end();
     return;
   }
 
