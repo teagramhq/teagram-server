@@ -3,14 +3,15 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the five current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `apply-user-invite-quota`, and `start-server`. A
-script's presence in an older main commit does not authorize a retired
-operation. The allowlist lives in `teagram-ops.sh`; tests cover retired names
+the seven current operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
+`encrypt-media`, and `cleanup-media`. A script's presence in an older main
+commit does not authorize a retired operation. The allowlist lives in
+`teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
 secrets in arguments, logs, or output.
@@ -29,7 +30,7 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the five
+therefore become host-root execution. The dispatcher limits `run` to the seven
 current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs
@@ -160,3 +161,52 @@ an existing different or duplicate target, or any `TG_INVITE_DESKTOP_URL`
 assignment. The target is the live Web app root at
 `https://web.teagram.io/`; the `/signup` path is not the app route. To undo the
 addition, run `ssh teagram run <main-sha> invite-web-signup-url --rollback`.
+
+## Encrypting and cleaning up media
+
+`encrypt-media` converts the accepted S3 media authority to encrypted media.
+It requires the deployed image and checkout to match, the live stack to use
+the verified S3 Compose selection, the current media key to match the recorded
+root-only backup, and healthy Postgres and RustFS containers. It stops the
+existing `teagramd` writer, creates a custom-format `pg_dump`, and restores
+that archive into an isolated PostgreSQL container with no network before
+accepting the backup. It then migrates and reads back every referenced object,
+publishes encrypted authority, restarts RustFS, repeats encrypted readback,
+starts `teagramd`, and runs the deployed image's MTProto smoke probe.
+
+Run it only from the exact deployed `main` SHA after the reviewed migration
+code is live:
+
+```sh
+ssh teagram run <deployed-main-sha> encrypt-media
+```
+
+The private evidence directory `/root/teagram-media-encryption` stores the
+verified database dump and manifest, migration JSON results, and smoke output.
+The command reports reference counts, the backup path, and the recorded media
+key backup path without printing key material. If interrupted before encrypted
+authority is published, the operation restarts the existing server under the
+still-authoritative S3 mode. After publication, the plaintext source objects
+remain intact and a repeated invocation verifies/resumes encrypted copies;
+keep encrypted authority and use that forward-recovery path rather than
+restoring an older application image.
+
+Plaintext deletion is a separate operation and requires an explicit
+`--acceptance-passed` argument. Before invoking it, verify old and new media
+downloads, including a range read, after restarting `teagramd` and RustFS, and
+complete the requested Linux QA media probe. The cleanup operation independently
+checks encrypted authority, the verified database dump and key backup, the
+stopped-writer progress journal, and every encrypted reference. It removes only
+verified plaintext copies, runs a second cleanup pass that must remove zero
+objects, repeats encrypted readback across a RustFS restart, restarts
+`teagramd`, and runs the MTProto smoke probe.
+
+```sh
+ssh teagram run <deployed-main-sha> cleanup-media --acceptance-passed
+```
+
+The encrypted copies and encrypted authority remain in place after cleanup.
+If cleanup stops partway through, retain encrypted authority and rerun it only
+after the acceptance checks still pass; cleanup revalidates the encrypted
+copies before removing any remaining source. The verified pre-migration dump
+and media key backup remain in `/root` as recovery evidence.
