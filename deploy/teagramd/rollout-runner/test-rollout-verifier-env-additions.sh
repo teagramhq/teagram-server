@@ -43,7 +43,7 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}},"migrate":{"image":"mirror.gcr.io/arigaio/atlas:1.2.0-alpine"}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}},"migrate":{"image":"mirror.gcr.io/arigaio/atlas:1.3.0-alpine"}}}'
 
 inspect_json() {
   local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
@@ -1865,8 +1865,9 @@ if ! compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/targe
 fi
 printf '%s\n' 'PASS reviewed Atlas 1.2.0 to 1.3.0 image update passes preflight and target verification'
 
-atlas_unapproved_compose=$(jq -c \
-  '.services.migrate.image="mirror.gcr.io/arigaio/atlas:1.4.0-alpine"' \
+atlas_unapproved_version='1.4.0'
+atlas_unapproved_compose=$(jq -c --arg version "$atlas_unapproved_version" \
+  '.services.migrate.image=("mirror.gcr.io/arigaio/atlas:" + $version + "-alpine")' \
   <<< "$atlas_baseline_compose")
 atlas_unapproved_snapshot=$(snapshot_from_json \
   "$(inspect_json '')" "$atlas_unapproved_compose" "$ENV_FILE" "$OVERRIDE_FILE" \

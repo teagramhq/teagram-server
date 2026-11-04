@@ -937,7 +937,7 @@ write_compose_fixture() {
           network_mode:"",networks:{teagram_server:{}}
         },
         postgres:{image:"mirror.gcr.io/library/postgres:16-alpine",environment:{POSTGRES_DB:"teagram"},volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]},
-        migrate:{image:"mirror.gcr.io/arigaio/atlas:1.2.0-alpine",volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}
+        migrate:{image:"mirror.gcr.io/arigaio/atlas:1.3.0-alpine",volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}
       },
       volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"},pgdata:{name:"fixture_pgdata"}},
       networks:{teagram_server:{name:"fixture_teagram_server"}}
