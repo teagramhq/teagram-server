@@ -105,7 +105,7 @@ jobs:
       - uses: ariga/setup-atlas@v0.3
         if: steps.snapshot.outputs.cache-hit != 'true'
         with:
-          version: v1.2.0
+          version: v1.3.0
 
       - name: Start Postgres
         if: steps.snapshot.outputs.cache-hit != 'true'
@@ -321,7 +321,7 @@ jobs:
 
       - uses: ariga/setup-atlas@v0.3
         with:
-          version: v1.2.0
+          version: v1.3.0
 
       # Earlier main runs, one aggregated report each, set the noise bands.
       - name: Restore main's history

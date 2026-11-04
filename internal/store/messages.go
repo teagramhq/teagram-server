@@ -1862,8 +1862,10 @@ type ForwardSource struct {
 // ForwardedMessage is one forwarded message returned by ForwardMessages, carrying
 // the stored row and the pts at which it was inserted for the caller.
 type ForwardedMessage struct {
-	Message Message
-	Pts     int
+	Message      Message
+	Pts          int
+	RecipientPts int
+	Duplicate    bool
 }
 
 // ForwardMessages forwards one or more messages owned by userID to a destination.
@@ -2031,7 +2033,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 				if e2 != nil {
 					return nil, nil, e2
 				}
-				sentMsgs = append(sentMsgs, ForwardedMessage{Message: messageFromRow(existing), Pts: pts})
+				sentMsgs = append(sentMsgs, ForwardedMessage{Message: messageFromRow(existing), Pts: pts, Duplicate: true})
 				continue
 			case !errors.Is(e, pgx.ErrNoRows):
 				return nil, nil, fmt.Errorf("random_id lookup: %w", e)
@@ -2120,7 +2122,13 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			if err != nil {
 				return nil, nil, fmt.Errorf("reload sender forward: %w", err)
 			}
-			sentMsgs = append(sentMsgs, ForwardedMessage{Message: messageFromRow(stored), Pts: int(sb.Pts)})
+			recipientPts := 0
+			if !withhold {
+				recipientPts = int(rb.Pts)
+			}
+			sentMsgs = append(sentMsgs, ForwardedMessage{
+				Message: messageFromRow(stored), Pts: int(sb.Pts), RecipientPts: recipientPts,
+			})
 		} else {
 			// Chat forward: fan out to all members.
 			fanoutID, err := qtx.NextFanoutID(ctx)

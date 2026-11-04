@@ -110,6 +110,9 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 			return nil, nil, nil, errInternal
 		}
 		if replay.Duplicate {
+			if peerType == store.PeerTypeUser {
+				h.logDirectAlbumReplay(r, toID, replay)
+			}
 			return h.userAlbumReplay(c, r, peerType, toID, replay)
 		}
 	}
@@ -162,12 +165,29 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if result.Duplicate {
 		// A concurrent send with the same tokens committed first.
 		clearSenderRPC(attempt)
+		if peerType == store.PeerTypeUser {
+			h.logDirectAlbumReplay(r, toID, result)
+		}
 		return h.userAlbumReplay(c, r, peerType, toID, result)
 	}
 	senderPts := result.Pts[len(result.Pts)-1]
 	setSenderRPCPts(attempt, senderPts)
 	if h.afterSenderCommit != nil {
 		h.afterSenderCommit()
+	}
+	if peerType == store.PeerTypeUser {
+		recipientFinalPts, recipientDelivered := result.PerOwner[toID]
+		for i, message := range result.Messages {
+			recipientPts := 0
+			recipientCopyStored := toID == r.UserID
+			if recipientCopyStored {
+				recipientPts = result.Pts[i]
+			} else if recipientDelivered {
+				recipientCopyStored = true
+				recipientPts = recipientFinalPts - len(result.Messages) + i + 1
+			}
+			h.logDirectMessageOutcome(r.UserID, toID, message.LocalID, recipientPts, recipientCopyStored, false)
+		}
 	}
 	notifyCommitted := func() {
 		clearSenderRPC(attempt)
@@ -282,6 +302,15 @@ func (h *handlers) channelAlbumError(r *mtproto.Request, channelID int64, err er
 	}
 	h.log.Error("send channel album", "user_id", r.UserID, "channel_id", channelID, "err", err)
 	return errInternal
+}
+
+func (h *handlers) logDirectAlbumReplay(r *mtproto.Request, recipientID int64, replay store.AlbumResult) {
+	for _, message := range replay.Messages {
+		h.logDirectMessageOutcome(
+			r.UserID, recipientID, message.LocalID, 0,
+			directRecipientCopyStored(r.UserID, recipientID, message), true,
+		)
+	}
 }
 
 // userAlbumReplay answers a resend of a whole committed album with the stored
