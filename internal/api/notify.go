@@ -142,13 +142,25 @@ func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
 
 // DeliverStickerSets fans out the account's transient sticker-set invalidation
 // to live sessions on this replica, omitting the session that made the RPC.
-// The snapshotted binding is checked again under the conn's write lock.
-func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64) {
+// A nil order sends updateStickerSets; otherwise it sends the kind's new order
+// as updateStickerSetsOrder. The snapshotted binding is checked again under the
+// conn's write lock.
+func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64, order *store.StickerSetOrder) {
 	if ownerID <= 0 || authKeyID == 0 || u.registry == nil {
 		return
 	}
+	var change tg.UpdateClass = &tg.UpdateStickerSets{}
+	if order != nil {
+		orderUpdate := &tg.UpdateStickerSetsOrder{
+			Masks:  order.Kind == "mask",
+			Emojis: order.Kind == "emojis",
+			Order:  order.IDs,
+		}
+		orderUpdate.SetFlags()
+		change = orderUpdate
+	}
 	update := &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateStickerSets{}},
+		Updates: []tg.UpdateClass{change},
 		Date:    int(time.Now().Unix()),
 		Seq:     0,
 	}

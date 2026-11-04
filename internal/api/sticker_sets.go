@@ -865,10 +865,118 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 }
 
 func (h *handlers) notifyStickerSetChanged(r *mtproto.Request) {
+	payload := store.StickerSetChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID)
+	h.publishStickerSetPayload(r, payload)
+}
+
+func (h *handlers) notifyStickerSetOrderChanged(r *mtproto.Request, kind string, ids []int64) {
+	payload := store.StickerSetOrderChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID, kind, ids)
+	h.publishStickerSetPayload(r, payload)
+}
+
+func (h *handlers) publishStickerSetPayload(r *mtproto.Request, payload string) {
 	ctx, cancel := store.NotificationContext(r.Ctx)
 	defer cancel()
-	payload := store.StickerSetChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID)
 	if err := h.store.Notify(ctx, store.ChannelStickerSets, payload); err != nil {
 		h.log.Info("notify sticker set update", "user_id", r.UserID, "err", err)
 	}
+}
+
+// stickerSetKinds maps each id that resolves to a catalogue set or a live user
+// set onto its kind: "regular", "mask" or "emojis". Other ids are left out.
+func (h *handlers) stickerSetKinds(r *mtproto.Request, catalog *stickerSetCatalog, ids []int64) (map[int64]string, error) {
+	kinds := make(map[int64]string, len(ids))
+	userIDs := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		switch {
+		case id < 0:
+			if set, ok := catalog.byID[id]; ok {
+				kinds[id] = builtInStickerSetKind(set)
+			}
+		case id > 0:
+			userIDs = append(userIDs, id)
+		}
+	}
+	userSets, err := h.store.UserStickerSetSummariesByInstalledIDs(r.Ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for id, set := range userSets {
+		kinds[id] = set.Kind
+	}
+	return kinds, nil
+}
+
+func builtInStickerSetKind(set *builtInStickerSet) string {
+	switch {
+	case set.set.GetEmojis():
+		return "emojis"
+	case set.set.GetMasks():
+		return "mask"
+	default:
+		return "regular"
+	}
+}
+
+// handleReorderStickerSets stores the caller's order for installed sets of one
+// kind. Listed ids of other kinds, and ids not installed, are ignored.
+func (h *handlers) handleReorderStickerSets(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
+	if r.UserID == 0 {
+		return nil, nil, errAuthKeyUnreg
+	}
+	var req tg.MessagesReorderStickerSetsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, nil, errMethodNotImpl
+	}
+	if req.Masks && req.Emojis {
+		return nil, nil, errStickerSetInvalid
+	}
+	if len(req.Order) > store.MaxInstalledStickerSets {
+		return nil, nil, errStickerSetInvalid
+	}
+	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
+		return nil, nil, err
+	}
+	catalog, err := h.stickerSetCatalog()
+	if err != nil {
+		h.log.Error("load sticker set catalogue", "err", err)
+		return nil, nil, errInternal
+	}
+	kind := "regular"
+	switch {
+	case req.Masks:
+		kind = "mask"
+	case req.Emojis:
+		kind = "emojis"
+	}
+	requestKinds, err := h.stickerSetKinds(r, catalog, req.Order)
+	if err != nil {
+		h.log.Error("resolve reordered sticker set kinds", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	listed := make([]int64, 0, len(req.Order))
+	for _, id := range req.Order {
+		if requestKinds[id] == kind {
+			listed = append(listed, id)
+		}
+	}
+	order, err := h.store.ReorderInstalledStickerSets(r.Ctx, r.UserID, listed)
+	if err != nil {
+		h.log.Error("reorder sticker sets", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	orderKinds, err := h.stickerSetKinds(r, catalog, order)
+	if err != nil {
+		h.log.Error("resolve reordered sticker set kinds", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	kindOrder := make([]int64, 0, len(order))
+	for _, id := range order {
+		if orderKinds[id] == kind {
+			kindOrder = append(kindOrder, id)
+		}
+	}
+	return &tg.BoolTrue{}, func() {
+		h.notifyStickerSetOrderChanged(r, kind, kindOrder)
+	}, nil
 }

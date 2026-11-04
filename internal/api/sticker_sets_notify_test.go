@@ -1,14 +1,18 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
 
@@ -20,11 +24,25 @@ import (
 
 type stickerSetNotifyTransport struct {
 	sends atomic.Int32
+	mu    sync.Mutex
+	sent  [][]byte
 }
 
-func (t *stickerSetNotifyTransport) Send(context.Context, *bin.Buffer) error {
+func (t *stickerSetNotifyTransport) Send(_ context.Context, b *bin.Buffer) error {
 	t.sends.Add(1)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sent = append(t.sent, bytes.Clone(b.Buf))
 	return nil
+}
+
+func (t *stickerSetNotifyTransport) lastSent() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.sent) == 0 {
+		return nil
+	}
+	return t.sent[len(t.sent)-1]
 }
 
 func (*stickerSetNotifyTransport) Recv(context.Context, *bin.Buffer) error {
@@ -180,4 +198,94 @@ func TestStickerSetInstallPushesAcrossReplicasToOtherSessions(t *testing.T) {
 			t.Errorf("%s pts watermark = %d, want 0", name, got)
 		}
 	}
+}
+
+func TestStickerSetReorderPushesKindOrderToOtherSessions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551830020")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	ids := createInstalledUserStickerSets(t, s, h, blobs, owner.ID, "push_alpha", "push_bravo")
+
+	listener, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect notification listener: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(ctx); err != nil {
+			t.Errorf("close notification listener: %v", err)
+		}
+	})
+	if _, err := listener.Exec(ctx, "LISTEN tg_sticker_sets"); err != nil {
+		t.Fatalf("listen for sticker-set update: %v", err)
+	}
+
+	firstRegistry := mtproto.NewSessionRegistry()
+	secondRegistry := mtproto.NewSessionRegistry()
+	caller, callerTransport := newStickerSetNotifyConn(t, firstRegistry, owner.ID, 0)
+	_, localTransport := newStickerSetNotifyConn(t, firstRegistry, owner.ID, 12)
+	_, remoteTransport := newStickerSetNotifyConn(t, secondRegistry, owner.ID, 23)
+	if caller.AuthKeyID() == 0 {
+		t.Fatal("test caller must have an auth key")
+	}
+
+	startStickerSetNotifyListener(t, ctx, dsn, api.NewUpdater(s, 2, firstRegistry, nil, pgtest.PeerDeriver()))
+	startStickerSetNotifyListener(t, ctx, dsn, api.NewUpdater(s, 2, secondRegistry, nil, pgtest.PeerDeriver()))
+	if err := store.WaitForNotificationListener(ctx, s, 2); err != nil {
+		t.Fatalf("wait for two replica listeners: %v", err)
+	}
+
+	if got := reorderStickerSets(t, fullChannelDispatcher(s), owner.ID, false, false, []int64{ids[1], ids[0]}); got != "" {
+		t.Fatalf("reorder = %q, want boolTrue", got)
+	}
+	if !waitStickerSetNotifyWrites(1, localTransport, remoteTransport) {
+		t.Fatalf("sticker-set order writes: local=%d remote=%d, want one on both replicas", localTransport.sends.Load(), remoteTransport.sends.Load())
+	}
+	if got := callerTransport.sends.Load(); got != 0 {
+		t.Errorf("originating session writes = %d, want 0", got)
+	}
+	for name, transport := range map[string]*stickerSetNotifyTransport{"local sibling": localTransport, "remote session": remoteTransport} {
+		body := decryptPushedFrame(t, transport.lastSent())
+		if !bytes.Contains(body, littleEndianUint32(tg.UpdateStickerSetsOrderTypeID)) {
+			t.Errorf("%s frame lacks updateStickerSetsOrder: %x", name, body)
+		}
+		if bytes.Contains(body, littleEndianUint32(tg.UpdateStickerSetsTypeID)) {
+			t.Errorf("%s frame carries plain updateStickerSets, want only the order update", name)
+		}
+		if !bytes.Contains(body, littleEndianInt64(t, ids[1])) || !bytes.Contains(body, littleEndianInt64(t, ids[0])) {
+			t.Errorf("%s frame lacks the reordered set ids %v", name, ids)
+		}
+	}
+}
+
+// decryptPushedFrame returns the plaintext TL message of a frame the server
+// wrote, decrypted with the test auth key as a client would.
+func decryptPushedFrame(t *testing.T, frame []byte) []byte {
+	t.Helper()
+	data, err := crypto.NewClientCipher(crypto.DefaultRand()).DecryptFromBuffer(testKey(), &bin.Buffer{Buf: frame})
+	if err != nil {
+		t.Fatalf("decrypt pushed frame: %v", err)
+	}
+	return data.MessageDataWithPadding[:data.MessageDataLen]
+}
+
+func littleEndianUint32(v uint32) []byte {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], v)
+	return b[:]
+}
+
+func littleEndianInt64(t *testing.T, v int64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
+		t.Fatalf("encode %d: %v", v, err)
+	}
+	return buf.Bytes()
 }

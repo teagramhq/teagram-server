@@ -1053,6 +1053,16 @@ func TestStickerSetChangedPayloadFormat(t *testing.T) {
 	}
 }
 
+func TestStickerSetOrderChangedPayloadFormat(t *testing.T) {
+	t.Parallel()
+	if got := store.StickerSetOrderChangedPayload(42, -17, 9, "mask", []int64{-3, 5}); got != "42|-17|9|mask:-3,5" {
+		t.Fatalf("StickerSetOrderChangedPayload(mask) = %q, want 42|-17|9|mask:-3,5", got)
+	}
+	if got := store.StickerSetOrderChangedPayload(42, -17, 9, "regular", nil); got != "42|-17|9|regular:" {
+		t.Fatalf("StickerSetOrderChangedPayload(regular, empty) = %q, want 42|-17|9|regular:", got)
+	}
+}
+
 // terminateListenBackends kills every Postgres backend holding a LISTEN on this
 // test's database, the server-side equivalent of the connection dropping.
 func terminateListenBackends(t *testing.T, dsn string) {

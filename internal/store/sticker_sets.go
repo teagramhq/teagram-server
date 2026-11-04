@@ -79,8 +79,8 @@ func (s *Store) UninstallStickerSet(ctx context.Context, userID, setID int64) (b
 	return rows != 0, nil
 }
 
-// InstalledStickerSets returns only the installed-set state for userID, in
-// stable order. Callers resolve each set_id against the current static
+// InstalledStickerSets returns only the installed-set state for userID, in the
+// account's chosen order. Callers resolve each set_id against the current static
 // catalogue and skip rows that no longer have a catalogue entry.
 func (s *Store) InstalledStickerSets(ctx context.Context, userID int64) ([]InstalledStickerSet, error) {
 	if userID <= 0 {
@@ -98,4 +98,57 @@ func (s *Store) InstalledStickerSets(ctx context.Context, userID int64) ([]Insta
 		result = append(result, InstalledStickerSet{ID: row.SetID, InstalledAt: row.InstalledAt.Time})
 	}
 	return result, nil
+}
+
+// ReorderInstalledStickerSets places the listed installed sets first, in the
+// listed order, and keeps every other installed set in its current relative
+// order. Ids the account has not installed are ignored, and a repeated id is
+// placed once. The owner row lock serialises the reorder with installs. It
+// returns the resulting order.
+func (s *Store) ReorderInstalledStickerSets(ctx context.Context, userID int64, listed []int64) ([]int64, error) {
+	if userID <= 0 {
+		return nil, errors.New("reorder sticker sets: invalid user identity")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin reorder sticker sets: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = qtx.LockUserStickerSetOwner(ctx, userID); err != nil {
+		return nil, fmt.Errorf("lock sticker set owner %d: %w", userID, err)
+	}
+	rows, err := qtx.StickerSetsByOwner(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list sticker sets for reorder: %w", err)
+	}
+	installed := make(map[int64]bool, len(rows))
+	current := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		installed[row.SetID] = true
+		current = append(current, row.SetID)
+	}
+	order := make([]int64, 0, len(current))
+	placed := make(map[int64]bool, len(listed))
+	for _, id := range listed {
+		if !installed[id] || placed[id] {
+			continue
+		}
+		placed[id] = true
+		order = append(order, id)
+	}
+	for _, id := range current {
+		if !placed[id] {
+			order = append(order, id)
+		}
+	}
+	if len(order) > 0 {
+		if _, err = qtx.SetInstalledStickerSetPositions(ctx, db.SetInstalledStickerSetPositionsParams{UserID: userID, SetIds: order}); err != nil {
+			return nil, fmt.Errorf("set sticker set positions for user %d: %w", userID, err)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sticker set reorder: %w", err)
+	}
+	return order, nil
 }
