@@ -1032,6 +1032,64 @@ func TestWebSocketReadFrameFailuresLogAllowlistedCause(t *testing.T) {
 	}
 }
 
+func TestWebSocketExchangeFailuresLogAllowlistedCause(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	tests := []struct {
+		name      string
+		err       error
+		wantError string
+	}{
+		{name: "connection reset", err: syscall.ECONNRESET, wantError: "connection reset by peer"},
+		{name: "connection aborted", err: syscall.ECONNABORTED, wantError: "connection aborted"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &serverErrorLogSink{}
+			server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+			conn := &serverLoopFailureConn{frame: exchangeRequestFrame(t), err: tt.err}
+			peerAddr := netip.MustParseAddr("203.0.113.37")
+			diagnostics := newTransportCloseDiagnostics(websocketPath)
+			err := server.serveConnModeWithDiagnostics(
+				context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
+			)
+			if err == nil {
+				t.Fatal("WebSocket exchange succeeded after forced transport failure")
+			}
+			if diagnostic, ok := errors.AsType[*exchangeFailureError](err); !ok || diagnostic == nil {
+				t.Fatalf("error = %T, want exchangeFailureError", err)
+			}
+			server.logConnectionFailure(err)
+
+			var record *serverErrorLogRecord
+			for i := range sink.records {
+				if sink.records[i].message != "server operation failed" {
+					continue
+				}
+				if record != nil {
+					t.Fatalf("multiple server operation failure records: %+v", sink.records)
+				}
+				record = &sink.records[i]
+			}
+			if record == nil {
+				t.Fatalf("no server operation failure record in %+v", sink.records)
+			}
+			for key, want := range map[string]any{
+				"stage": "read_req_dh",
+				"cause": "exchange",
+				"error": tt.wantError,
+			} {
+				if got := record.attrs[key]; got != want {
+					t.Errorf("failure %s = %v, want %v", key, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestUnknownMethodDecodeFailureLogsDecodeCause(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))

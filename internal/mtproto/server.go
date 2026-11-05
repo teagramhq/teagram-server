@@ -923,7 +923,7 @@ func safeWebSocketErrorText(err error, cause string) string {
 	case errors.Is(err, errAuthKeyPersistenceFailure):
 		return "auth key persistence failed"
 	case errors.Is(err, errAuthKeyExchangeFailure):
-		return "auth key exchange failed"
+		return safeExchangeErrorText(err)
 	case errors.Is(err, errRequestHandlingFailure):
 		return "request handling failed"
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
@@ -962,6 +962,44 @@ func safeWebSocketErrorText(err error, cause string) string {
 	default:
 		return "internal error"
 	}
+}
+
+func safeExchangeErrorText(err error) string {
+	if detail := safeTransportErrorText(err); detail != "" {
+		return detail
+	}
+	if errors.Is(err, errAuthKeyLookupFailure) {
+		if detail := safeAuthKeyLookupErrorText(err); detail != "" {
+			return detail
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "peer closed the connection"
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return "connection closed"
+	}
+	if unexpected, ok := errors.AsType[*bin.UnexpectedIDErr](err); ok && unexpected != nil {
+		return "unexpected protocol constructor"
+	}
+	if invalidLength, ok := errors.AsType[*bin.InvalidLengthError](err); ok && invalidLength != nil {
+		return "invalid protocol length"
+	}
+	if diagnostic, ok := errors.AsType[*exchangeFailureError](err); ok && diagnostic != nil {
+		switch diagnostic.cause {
+		case exchangeCauseTimeout:
+			return "transport timeout"
+		case exchangeCausePeerClose:
+			return "peer closed the connection"
+		case exchangeCauseUnexpected:
+			return "unexpected protocol constructor"
+		case exchangeCauseDecode:
+			return "protocol decode failure"
+		case exchangeCauseWrite:
+			return "transport failure"
+		}
+	}
+	return "auth key exchange failed"
 }
 
 func safeAuthKeyLookupErrorText(err error) string {
