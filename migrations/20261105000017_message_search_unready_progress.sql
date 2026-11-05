@@ -3,8 +3,10 @@
 ALTER TABLE public.message_search_unready_dialogs
     ADD COLUMN last_local_id BIGINT NOT NULL DEFAULT 0;
 
--- Serialize posting updates with a bounded set of dialog lock buckets. This
--- avoids a lock-table entry for every distinct dialog/lexeme in bulk writes.
+-- Serialize posting updates with initialization only while a dialog is
+-- unready. Markers are removed after the full backfill, so ready-dialog writes
+-- do not contend on shared buckets. The bounded set avoids a lock-table entry
+-- for every distinct dialog/lexeme in bulk writes.
 CREATE FUNCTION public.lock_message_search_posting_dialogs(
     p_owner_ids BIGINT[],
     p_peer_types SMALLINT[],
@@ -35,6 +37,10 @@ BEGIN
             COALESCE(p_peer_types, ARRAY[]::SMALLINT[]),
             COALESCE(p_peer_ids, ARRAY[]::BIGINT[])
         ) AS dialog(owner_id, peer_type, peer_id)
+        JOIN public.message_search_unready_dialogs AS unready
+          ON unready.owner_id = dialog.owner_id
+         AND unready.peer_type = dialog.peer_type
+         AND unready.peer_id = dialog.peer_id
         ORDER BY bucket
     LOOP
         PERFORM pg_advisory_xact_lock(lock_class, lock_bucket);

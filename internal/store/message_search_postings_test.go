@@ -530,7 +530,7 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 	}
 }
 
-func TestConcurrentDisjointChatFanoutsWithReversedPostingBucketCollisions(t *testing.T) {
+func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *testing.T) {
 	t.Parallel()
 	s := open(t)
 	ctx := context.Background()
@@ -598,6 +598,17 @@ func TestConcurrentDisjointChatFanoutsWithReversedPostingBucketCollisions(t *tes
 		`, participant.chatID, participant.ownerID, participant.inviterID); err != nil {
 			t.Fatalf("add group posting participant %d: %v", participant.ownerID, err)
 		}
+	}
+	var unreadyDialogs int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM message_search_unready_dialogs
+		WHERE peer_type = $1 AND peer_id = ANY($2::bigint[])
+	`, int16(store.PeerTypeChat), []int64{chatA.ID, chatB.ID}).Scan(&unreadyDialogs); err != nil {
+		t.Fatalf("check chat search readiness: %v", err)
+	}
+	if unreadyDialogs != 0 {
+		t.Fatalf("test chats have %d unready dialogs, want both chats ready", unreadyDialogs)
 	}
 
 	sourceA, _, _, _, err := s.SendMessage(ctx, ownerAFirst, ownerALater, "groupforwardalpha", 720001, 0, 0) //nolint:dogsled // only the stored source is needed for forwarding.
@@ -678,22 +689,22 @@ func TestConcurrentDisjointChatFanoutsWithReversedPostingBucketCollisions(t *tes
 
 		deadline = time.Now().Add(5 * time.Second)
 		for {
-			var activeFanouts int
+			var sleepingFanouts int
 			if err := pool.QueryRow(ctx, `
 				SELECT count(*)
 				FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
 				  AND state = 'active'
-				  AND (wait_event = 'PgSleep' OR wait_event_type = 'Lock')
-				  AND (query ILIKE '%INSERT INTO messages%' OR query ILIKE '%lock_message_search_posting_dialogs%')
-			`).Scan(&activeFanouts); err != nil {
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%INSERT INTO messages%'
+			`).Scan(&sleepingFanouts); err != nil {
 				t.Fatalf("check %s overlapping fanouts: %v", name, err)
 			}
-			if activeFanouts >= 2 {
+			if sleepingFanouts >= 2 {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("%s second fanout did not overlap the first fanout's posting lock", name)
+				t.Fatalf("%s second fanout waited instead of reaching its message insert alongside the first", name)
 			}
 			select {
 			case result := <-results:
