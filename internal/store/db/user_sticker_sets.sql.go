@@ -1982,13 +1982,13 @@ func (q *Queries) UserStickerSetAlreadyInstalled(ctx context.Context, arg UserSt
 
 const userStickerSetMessageReferencedFileIDs = `-- name: UserStickerSetMessageReferencedFileIDs :many
 WITH requested AS (
-    SELECT DISTINCT unnest($2::text[]) AS file_id
-), -- Filter channel memberships before materializing message candidates.
+    SELECT DISTINCT unnest($1::text[]) AS file_id
+), -- Filter channel memberships before resolving channel history.
 visible_channels AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
     FROM channel_participants cp
     JOIN channels c ON c.id = cp.channel_id
-    WHERE cp.user_id = $3
+    WHERE cp.user_id = $2
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND c.deleted_at IS NULL
 ), visible_channel_ids AS MATERIALIZED (
@@ -2009,50 +2009,19 @@ visible_channels AS MATERIALIZED (
       AND cm.entities IS NOT NULL
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
-      AND message_custom_emoji_document_ids(cm.entities) && $2::text[]
-), poll_candidates AS MATERIALIZED (
-    SELECT p.id, p.description_entities AS entities
-    FROM polls p
-    WHERE cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
-      AND message_custom_emoji_document_ids(p.description_entities) && $2::text[]
-), channel_poll_candidates AS MATERIALIZED (
-    SELECT pc.entities
-    FROM poll_candidates pc
-    CROSS JOIN LATERAL (
-        SELECT cpm.channel_id, cpm.local_id
-        FROM channel_poll_messages cpm
-        WHERE cpm.poll_id = pc.id
-        LIMIT 1
-    ) cpm
-    JOIN visible_channels vc ON vc.channel_id = cpm.channel_id
-    JOIN channel_messages cm
-      ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
-    WHERE cm.local_id > vc.available_min_id
-      AND cm.deleted = false
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND message_custom_emoji_document_ids(cm.entities) && $1::text[]
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
-    WHERE m.owner_id = $3
+    WHERE m.owner_id = $2
       AND m.deleted = false
       AND m.entities IS NOT NULL
       AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
-      AND message_custom_emoji_document_ids(m.entities) && $2::text[]
+      AND message_custom_emoji_document_ids(m.entities) && $1::text[]
     UNION ALL
     SELECT cm.entities
     FROM channel_candidates cm
-    UNION ALL
-    SELECT pc.entities
-    FROM poll_candidates pc
-    JOIN poll_message_copies pmc ON pmc.poll_id = pc.id
-    JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
-    WHERE pmc.owner_id = $3
-      AND m.deleted = false
-      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-    UNION ALL
-    SELECT cpc.entities
-    FROM channel_poll_candidates cpc
 )
 SELECT DISTINCT requested.file_id::bigint
 FROM visible_entities
@@ -2065,20 +2034,44 @@ CROSS JOIN LATERAL jsonb_array_elements(
 ) AS entity(value)
 JOIN requested ON entity.value->>'argument' = requested.file_id
 WHERE jsonb_typeof(entity.value->'type') = 'number'
-  AND entity.value->>'type' = $1::int::text
+  AND entity.value->>'type' = $3::int::text
   AND jsonb_typeof(entity.value->'argument') = 'number'
+UNION
+SELECT requested.file_id::bigint
+FROM poll_message_copies copy
+JOIN messages m ON m.owner_id = copy.owner_id AND m.local_id = copy.local_id
+CROSS JOIN LATERAL unnest(copy.custom_emoji_document_ids) AS document(file_id)
+JOIN requested ON requested.file_id = document.file_id
+WHERE copy.owner_id = $2
+  AND cardinality(copy.custom_emoji_document_ids) > 0
+  AND copy.custom_emoji_document_ids && $1::text[]
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+UNION
+SELECT requested.file_id::bigint
+FROM visible_channels vc
+JOIN channel_poll_messages copy ON copy.channel_id = vc.channel_id
+JOIN channel_messages cm
+  ON cm.channel_id = copy.channel_id AND cm.local_id = copy.local_id
+CROSS JOIN LATERAL unnest(copy.custom_emoji_document_ids) AS document(file_id)
+JOIN requested ON requested.file_id = document.file_id
+WHERE copy.custom_emoji_document_ids && $1::text[]
+  AND cardinality(copy.custom_emoji_document_ids) > 0
+  AND cm.local_id > vc.available_min_id
+  AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
 `
 
 type UserStickerSetMessageReferencedFileIDsParams struct {
-	EntityType int32
 	FileIds    []string
 	OwnerID    int64
+	EntityType int32
 }
 
 // Only a caller-visible stored message or poll copy keeps a removed or deleted
 // custom emoji document resolvable. Current set members are served from set state.
 func (q *Queries) UserStickerSetMessageReferencedFileIDs(ctx context.Context, arg UserStickerSetMessageReferencedFileIDsParams) ([]int64, error) {
-	rows, err := q.db.Query(ctx, userStickerSetMessageReferencedFileIDs, arg.EntityType, arg.FileIds, arg.OwnerID)
+	rows, err := q.db.Query(ctx, userStickerSetMessageReferencedFileIDs, arg.FileIds, arg.OwnerID, arg.EntityType)
 	if err != nil {
 		return nil, err
 	}

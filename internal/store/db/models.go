@@ -173,9 +173,10 @@ type ChannelParticipantCount struct {
 }
 
 type ChannelPollMessage struct {
-	ChannelID int64
-	LocalID   int64
-	PollID    int64
+	ChannelID              int64
+	LocalID                int64
+	PollID                 int64
+	CustomEmojiDocumentIds []string
 }
 
 type ChannelPostMarker struct {
@@ -724,9 +725,10 @@ type Poll struct {
 }
 
 type PollMessageCopy struct {
-	OwnerID int64
-	LocalID int64
-	PollID  int64
+	OwnerID                int64
+	LocalID                int64
+	PollID                 int64
+	CustomEmojiDocumentIds []string
 }
 
 type PollOption struct {

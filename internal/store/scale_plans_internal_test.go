@@ -44,6 +44,7 @@ type scalePlan struct {
 	Rows                  float64     `json:"Actual Rows"`
 	Loops                 float64     `json:"Actual Loops"`
 	RemovedByFilter       float64     `json:"Rows Removed by Filter"`
+	RemovedByJoinFilter   float64     `json:"Rows Removed by Join Filter"`
 	RemovedByIndexRecheck float64     `json:"Rows Removed by Index Recheck"`
 	Hits                  int64       `json:"Shared Hit Blocks"`
 	Reads                 int64       `json:"Shared Read Blocks"`
@@ -100,7 +101,7 @@ func (p scalePlan) sortsOn(key string) bool {
 func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
-		rows += (p.Rows + p.RemovedByFilter + p.RemovedByIndexRecheck) * p.Loops
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
 	}
 	for _, child := range p.Plans {
 		rows += child.rowsReadFrom(table)
@@ -313,13 +314,14 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 		t.Fatalf("close scale election: %v", err)
 	}
 
-	var ownerID, peerID int64
+	var ownerID, peerID, unrelatedOwnerID int64
 	for _, user := range []struct {
 		phone  string
 		target *int64
 	}{
 		{phone: "+poll-emoji-scale-owner", target: &ownerID},
 		{phone: "+poll-emoji-scale-peer", target: &peerID},
+		{phone: "+poll-emoji-scale-unrelated", target: &unrelatedOwnerID},
 	} {
 		if err := pool.QueryRow(ctx,
 			"INSERT INTO users (phone, first_name) VALUES ($1, 'Poll emoji scale') RETURNING id", user.phone,
@@ -340,6 +342,23 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, "INSERT INTO channel_state (channel_id) VALUES ($1)", channelID); err != nil {
 		t.Fatalf("seed scale channel state: %v", err)
+	}
+	const unrelatedScopeCount = 200
+	const unrelatedOwnerBase int64 = 8_000_000_000_000_000_000
+	const unrelatedChannelBase int64 = 9_000_000_000_001_000_000
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, phone, first_name)
+		SELECT $1::bigint + n, '+poll-emoji-scale-unrelated-' || n, 'Unrelated poll scale'
+		FROM generate_series(1, $2::int) AS n`, unrelatedOwnerBase, unrelatedScopeCount,
+	); err != nil {
+		t.Fatalf("create unrelated scale users: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO channels (id, title, creator_id)
+		SELECT $1::bigint + n, 'Unrelated poll emoji scale ' || n, $2
+		FROM generate_series(1, $3::int) AS n`, unrelatedChannelBase, unrelatedOwnerID, unrelatedScopeCount,
+	); err != nil {
+		t.Fatalf("create unrelated scale channels: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
 		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2), ($1, $3)", channelID, ownerID, peerID,
@@ -371,7 +390,7 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 		t.Fatalf("seed removed custom emoji item: %v", err)
 	}
 
-	const pollCount = 20_000
+	const pollCount = 30_001
 	const pollIDBase int64 = 7_000_000_000_000_000_000
 	seeds := []struct {
 		query string
@@ -381,25 +400,37 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
 		 SELECT $1, n, 1, $2, $1, 'poll scale copy', true
 		 FROM generate_series(1, 10000) AS n`, args: []any{ownerID, peerID}},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		 SELECT $1::bigint + ((n - 1) / 50) + 1, ((n - 1) % 50) + 1, 1, $2,
+		        $1::bigint + ((n - 1) / 50) + 1, 'unrelated poll scale copy', true
+		 FROM generate_series(1, 10000) AS n`, args: []any{unrelatedOwnerBase, peerID}},
 		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
 		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message)
 		 SELECT $1, n, $2, 'poll scale channel copy'
 		 FROM generate_series(10001, 20000) AS n`, args: []any{channelID, ownerID}},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message)
+		 SELECT $1::bigint + ((n - 1) / 50) + 1, ((n - 1) % 50) + 1,
+		        $2, 'unrelated poll scale channel copy'
+		 FROM generate_series(1, 10000) AS n`, args: []any{unrelatedChannelBase, unrelatedOwnerID}},
 		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
 		{query: `INSERT INTO polls (id, creator_id, source_local_id, question, description_entities)
 		 SELECT $1::bigint + n, $2, n, convert_to('scale poll', 'UTF8'),
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
 		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE WHEN n IN (1, 10001) THEN $3::bigint ELSE 70000000 + n END
+		            'argument', CASE WHEN n = 10000 OR n = 10001 OR n > 10001 THEN $3::bigint ELSE 70000000 + n END
 		        )))
 		 FROM generate_series(1, $4::bigint) AS n`, args: []any{pollIDBase, ownerID, fileID, int64(pollCount)}},
 		{query: `INSERT INTO poll_message_copies (owner_id, local_id, poll_id)
-		 SELECT $1, n, $2::bigint + n
-		 FROM generate_series(1, 10000) AS n`, args: []any{ownerID, pollIDBase}},
+		 VALUES ($1, 10000, $2)`, args: []any{ownerID, pollIDBase + 10000}},
+		{query: `INSERT INTO poll_message_copies (owner_id, local_id, poll_id)
+		 SELECT $1::bigint + ((n - 10002) / 50) + 1, ((n - 10002) % 50) + 1, $2::bigint + n
+		 FROM generate_series(10002, 20001) AS n`, args: []any{unrelatedOwnerBase, pollIDBase}},
 		{query: `INSERT INTO channel_poll_messages (channel_id, local_id, poll_id)
-		 SELECT $1, n, $2::bigint + n
-		 FROM generate_series(10001, 20000) AS n`, args: []any{channelID, pollIDBase}},
+		 SELECT $1::bigint + ((n - 20002) / 50) + 1, ((n - 20002) % 50) + 1, $2::bigint + n
+		 FROM generate_series(20002, 30001) AS n`, args: []any{unrelatedChannelBase, pollIDBase}},
+		{query: `INSERT INTO channel_poll_messages (channel_id, local_id, poll_id)
+		 VALUES ($1, 10001, $2)`, args: []any{channelID, pollIDBase + 10001}},
 		{query: "ANALYZE messages"},
 		{query: "ANALYZE channel_messages"},
 		{query: "ANALYZE channel_participants"},
@@ -442,6 +473,18 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 	if len(queries) != 3 {
 		t.Fatalf("poll emoji lookup query count = %d, want resolver and two download queries", len(queries))
 	}
+	for _, index := range []string{
+		"poll_message_copies_owner_custom_emoji_document_ids_gin_idx",
+		"channel_poll_messages_channel_custom_emoji_document_ids_gin_idx",
+	} {
+		var exists bool
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", index).Scan(&exists); err != nil {
+			t.Fatalf("check scoped poll emoji index %s: %v", index, err)
+		}
+		if !exists {
+			t.Errorf("scoped poll emoji index %s is missing", index)
+		}
+	}
 	for _, query := range queries {
 		_, sql, ok := strings.Cut(query.SQL, "\n")
 		if !ok {
@@ -461,10 +504,9 @@ func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
 			t.Fatalf("poll emoji explain returned %d plans, want 1", len(plans))
 		}
 		plan := plans[0].Plan
-		if !plan.usesIndex("polls_custom_emoji_document_ids_gin_idx") {
-			t.Errorf("poll emoji query does not use document-ID index: %s", strings.Join(plan.accessSummary(), "; "))
-		}
-		for _, table := range []string{"polls", "poll_message_copies", "channel_poll_messages"} {
+		for _, table := range []string{
+			"polls", "poll_message_copies", "channel_poll_messages", "messages", "channel_messages",
+		} {
 			if rows := plan.rowsReadFrom(table); rows > 800 {
 				t.Errorf("poll emoji query read %.0f %s rows for one requested ID: %s",
 					rows, table, strings.Join(plan.accessSummary(), "; "))

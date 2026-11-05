@@ -276,7 +276,7 @@ ORDER BY i.file_id;
 -- name: UserStickerSetMessageReferencedFileIDs :many
 WITH requested AS (
     SELECT DISTINCT unnest(sqlc.arg(file_ids)::text[]) AS file_id
-), -- Filter channel memberships before materializing message candidates.
+), -- Filter channel memberships before resolving channel history.
 visible_channels AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
     FROM channel_participants cp
@@ -303,26 +303,6 @@ visible_channels AS MATERIALIZED (
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
       AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
-), poll_candidates AS MATERIALIZED (
-    SELECT p.id, p.description_entities AS entities
-    FROM polls p
-    WHERE cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
-      AND message_custom_emoji_document_ids(p.description_entities) && sqlc.arg(file_ids)::text[]
-), channel_poll_candidates AS MATERIALIZED (
-    SELECT pc.entities
-    FROM poll_candidates pc
-    CROSS JOIN LATERAL (
-        SELECT cpm.channel_id, cpm.local_id
-        FROM channel_poll_messages cpm
-        WHERE cpm.poll_id = pc.id
-        LIMIT 1
-    ) cpm
-    JOIN visible_channels vc ON vc.channel_id = cpm.channel_id
-    JOIN channel_messages cm
-      ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
-    WHERE cm.local_id > vc.available_min_id
-      AND cm.deleted = false
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
@@ -335,17 +315,6 @@ visible_channels AS MATERIALIZED (
     UNION ALL
     SELECT cm.entities
     FROM channel_candidates cm
-    UNION ALL
-    SELECT pc.entities
-    FROM poll_candidates pc
-    JOIN poll_message_copies pmc ON pmc.poll_id = pc.id
-    JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
-    WHERE pmc.owner_id = sqlc.arg(owner_id)
-      AND m.deleted = false
-      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-    UNION ALL
-    SELECT cpc.entities
-    FROM channel_poll_candidates cpc
 )
 SELECT DISTINCT requested.file_id::bigint
 FROM visible_entities
@@ -359,7 +328,31 @@ CROSS JOIN LATERAL jsonb_array_elements(
 JOIN requested ON entity.value->>'argument' = requested.file_id
 WHERE jsonb_typeof(entity.value->'type') = 'number'
   AND entity.value->>'type' = sqlc.arg(entity_type)::int::text
-  AND jsonb_typeof(entity.value->'argument') = 'number';
+  AND jsonb_typeof(entity.value->'argument') = 'number'
+UNION
+SELECT requested.file_id::bigint
+FROM poll_message_copies copy
+JOIN messages m ON m.owner_id = copy.owner_id AND m.local_id = copy.local_id
+CROSS JOIN LATERAL unnest(copy.custom_emoji_document_ids) AS document(file_id)
+JOIN requested ON requested.file_id = document.file_id
+WHERE copy.owner_id = sqlc.arg(owner_id)
+  AND cardinality(copy.custom_emoji_document_ids) > 0
+  AND copy.custom_emoji_document_ids && sqlc.arg(file_ids)::text[]
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+UNION
+SELECT requested.file_id::bigint
+FROM visible_channels vc
+JOIN channel_poll_messages copy ON copy.channel_id = vc.channel_id
+JOIN channel_messages cm
+  ON cm.channel_id = copy.channel_id AND cm.local_id = copy.local_id
+CROSS JOIN LATERAL unnest(copy.custom_emoji_document_ids) AS document(file_id)
+JOIN requested ON requested.file_id = document.file_id
+WHERE copy.custom_emoji_document_ids && sqlc.arg(file_ids)::text[]
+  AND cardinality(copy.custom_emoji_document_ids) > 0
+  AND cm.local_id > vc.available_min_id
+  AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp());
 
 -- name: UserStickerSetShortNameExists :one
 SELECT EXISTS (

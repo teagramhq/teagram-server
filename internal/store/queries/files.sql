@@ -63,13 +63,14 @@ VALUES ($1, $2, $3, $4, $5, $6);
 -- The messages file index is partial on file_id <> 0. files.id's positive
 -- check makes that predicate redundant for a matching file, but Postgres
 -- cannot prove it from file_id = f.id while f is an outer row. Keep the
--- explicit predicate in each message or poll entitlement check below.
+-- explicit predicate in each message entitlement check below.
 -- name: FileForDownload :one
-WITH poll_candidates AS MATERIALIZED (
-    SELECT p.id
-    FROM polls p
-    WHERE cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
-      AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[($1::bigint)::text]
+WITH visible_poll_channels AS MATERIALIZED (
+    SELECT cp.channel_id, cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c ON c.id = cp.channel_id AND c.deleted_at IS NULL
+    WHERE cp.user_id = $3
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
 )
 SELECT f.* FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
@@ -116,10 +117,12 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
               )
               OR EXISTS (
                   SELECT 1
-                  FROM poll_candidates pc
-                  JOIN poll_message_copies pmc ON pmc.poll_id = pc.id
-                  JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
-                  WHERE pmc.owner_id = $3 AND m.deleted = false
+                  FROM poll_message_copies copy
+                  JOIN messages m ON m.owner_id = copy.owner_id AND m.local_id = copy.local_id
+                  WHERE copy.owner_id = $3
+                    AND cardinality(copy.custom_emoji_document_ids) > 0
+                    AND copy.custom_emoji_document_ids && ARRAY[($1::bigint)::text]
+                    AND m.deleted = false
                     AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
                     AND EXISTS (
                         SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
@@ -127,20 +130,16 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
               )
               OR EXISTS (
                   SELECT 1
-                  FROM poll_candidates pc
-                  CROSS JOIN LATERAL (
-                      SELECT cpm.channel_id, cpm.local_id
-                      FROM channel_poll_messages cpm
-                      WHERE cpm.poll_id = pc.id
-                      LIMIT 1
-                  ) cpm
+                  FROM visible_poll_channels cp
+                  JOIN channel_poll_messages copy
+                    ON copy.channel_id = cp.channel_id
+                   AND cardinality(copy.custom_emoji_document_ids) > 0
+                   AND copy.custom_emoji_document_ids && ARRAY[($1::bigint)::text]
                   JOIN channel_messages cm
-                    ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
-                  JOIN channel_participants cp ON cp.channel_id = cpm.channel_id AND cp.user_id = $3
-                  JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
-                  WHERE cm.deleted = false AND cm.local_id > cp.available_min_id
+                    ON cm.channel_id = copy.channel_id AND cm.local_id = copy.local_id
+                  WHERE cm.local_id > cp.available_min_id
+                    AND cm.deleted = false
                     AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
                     AND EXISTS (
                         SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
                     )
