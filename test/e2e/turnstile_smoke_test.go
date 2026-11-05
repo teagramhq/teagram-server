@@ -235,7 +235,11 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 		case <-ctx.Done():
 			return fmt.Errorf("wait for delayed sendCode verification: %w", ctx.Err())
 		}
-		if err := f.codes.waitForSuccessfulAck(ctx); err != nil {
+		if err := f.codes.waitForSuccessfulAck(
+			ctx,
+			uint32(tg.InvokeWithReCaptchaRequestTypeID),
+			uint32(tg.AuthSendCodeRequestTypeID),
+		); err != nil {
 			return fmt.Errorf("wait for an actual msgs_ack send while sendCode is blocked: %w", err)
 		}
 		close(verifier.verificationRelease)
