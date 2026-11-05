@@ -290,7 +290,7 @@ func (q *Queries) ChatAdminSnapshotsForMember(ctx context.Context, arg ChatAdmin
 }
 
 const chatAvailableReactionsByIDs = `-- name: ChatAvailableReactionsByIDs :many
-SELECT chat_id, mode, reactions
+SELECT chat_id, mode, reactions, allow_custom, custom_emoji_ids
 FROM chat_available_reactions
 WHERE chat_id = ANY($1::bigint[])
 ORDER BY chat_id
@@ -307,7 +307,13 @@ func (q *Queries) ChatAvailableReactionsByIDs(ctx context.Context, chatIds []int
 	var items []ChatAvailableReaction
 	for rows.Next() {
 		var i ChatAvailableReaction
-		if err := rows.Scan(&i.ChatID, &i.Mode, &i.Reactions); err != nil {
+		if err := rows.Scan(
+			&i.ChatID,
+			&i.Mode,
+			&i.Reactions,
+			&i.AllowCustom,
+			&i.CustomEmojiIds,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1359,20 +1365,30 @@ func (q *Queries) SetChatAbout(ctx context.Context, arg SetChatAboutParams) erro
 }
 
 const setChatAvailableReactions = `-- name: SetChatAvailableReactions :exec
-INSERT INTO chat_available_reactions (chat_id, mode, reactions)
-VALUES ($1::bigint, $2::text, $3::text[])
+INSERT INTO chat_available_reactions (chat_id, mode, reactions, allow_custom, custom_emoji_ids)
+VALUES ($1::bigint, $2::text, $3::text[],
+        $4::boolean, $5::bigint[])
 ON CONFLICT (chat_id)
-DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions
+DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions,
+              allow_custom = EXCLUDED.allow_custom, custom_emoji_ids = EXCLUDED.custom_emoji_ids
 `
 
 type SetChatAvailableReactionsParams struct {
-	ChatID    int64
-	Mode      string
-	Reactions []string
+	ChatID         int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 func (q *Queries) SetChatAvailableReactions(ctx context.Context, arg SetChatAvailableReactionsParams) error {
-	_, err := q.db.Exec(ctx, setChatAvailableReactions, arg.ChatID, arg.Mode, arg.Reactions)
+	_, err := q.db.Exec(ctx, setChatAvailableReactions,
+		arg.ChatID,
+		arg.Mode,
+		arg.Reactions,
+		arg.AllowCustom,
+		arg.CustomEmojiIds,
+	)
 	return err
 }
 

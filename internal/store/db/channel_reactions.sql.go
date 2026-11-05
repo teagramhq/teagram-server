@@ -25,7 +25,7 @@ func (q *Queries) BumpChannelVersionForAvailableReactions(ctx context.Context, c
 }
 
 const channelAvailableReactionsByIDs = `-- name: ChannelAvailableReactionsByIDs :many
-SELECT channel_id, mode, reactions
+SELECT channel_id, mode, reactions, allow_custom, custom_emoji_ids
 FROM channel_available_reactions
 WHERE channel_id = ANY($1::bigint[])
 ORDER BY channel_id
@@ -42,7 +42,13 @@ func (q *Queries) ChannelAvailableReactionsByIDs(ctx context.Context, channelIds
 	var items []ChannelAvailableReaction
 	for rows.Next() {
 		var i ChannelAvailableReaction
-		if err := rows.Scan(&i.ChannelID, &i.Mode, &i.Reactions); err != nil {
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.Mode,
+			&i.Reactions,
+			&i.AllowCustom,
+			&i.CustomEmojiIds,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -366,20 +372,30 @@ func (q *Queries) LockChannelForReaction(ctx context.Context, channelID int64) (
 }
 
 const setChannelAvailableReactions = `-- name: SetChannelAvailableReactions :exec
-INSERT INTO channel_available_reactions (channel_id, mode, reactions)
-VALUES ($1::bigint, $2::text, $3::text[])
+INSERT INTO channel_available_reactions (channel_id, mode, reactions, allow_custom, custom_emoji_ids)
+VALUES ($1::bigint, $2::text, $3::text[],
+        $4::boolean, $5::bigint[])
 ON CONFLICT (channel_id)
-DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions
+DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions,
+              allow_custom = EXCLUDED.allow_custom, custom_emoji_ids = EXCLUDED.custom_emoji_ids
 `
 
 type SetChannelAvailableReactionsParams struct {
-	ChannelID int64
-	Mode      string
-	Reactions []string
+	ChannelID      int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 func (q *Queries) SetChannelAvailableReactions(ctx context.Context, arg SetChannelAvailableReactionsParams) error {
-	_, err := q.db.Exec(ctx, setChannelAvailableReactions, arg.ChannelID, arg.Mode, arg.Reactions)
+	_, err := q.db.Exec(ctx, setChannelAvailableReactions,
+		arg.ChannelID,
+		arg.Mode,
+		arg.Reactions,
+		arg.AllowCustom,
+		arg.CustomEmojiIds,
+	)
 	return err
 }
 

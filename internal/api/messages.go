@@ -1925,15 +1925,25 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	reactions, hasReactions := req.GetReaction()
 	if peerType == store.PeerTypeChannel {
 		reaction := ""
+		customDocumentID := int64(0)
 		if hasReactions && len(reactions) > 0 {
 			if len(reactions) != 1 {
 				return nil, errReactionInvalid
 			}
-			emoji, ok := reactions[0].(*tg.ReactionEmoji)
-			if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+			var ok bool
+			reaction, customDocumentID, ok = reactionValueFromTL(reactions[0])
+			if !ok {
 				return nil, errReactionInvalid
 			}
-			reaction = emoji.Emoticon
+			if customDocumentID < 0 {
+				live, err := h.liveCustomEmojiDocument(r.Ctx, r.UserID, customDocumentID)
+				if err != nil {
+					return nil, err
+				}
+				if !live {
+					return nil, errReactionInvalid
+				}
+			}
 		}
 		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
@@ -1943,7 +1953,12 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 			h.log.Error("load channel kind for reaction", "user_id", r.UserID, "channel_id", peerID, "err", err)
 			return nil, errInternal
 		}
-		counts, err := h.store.SetChannelMessageReaction(r.Ctx, peerID, r.UserID, localID, reaction)
+		var counts []store.ChannelReactionCount
+		if customDocumentID != 0 {
+			counts, err = h.store.SetChannelCustomEmojiReaction(r.Ctx, peerID, r.UserID, localID, customDocumentID)
+		} else {
+			counts, err = h.store.SetChannelMessageReaction(r.Ctx, peerID, r.UserID, localID, reaction)
+		}
 		switch {
 		case errors.Is(err, store.ErrMessageInvalid):
 			return nil, errMessageIDInvalid
@@ -1975,15 +1990,29 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 		// Clear reaction.
 		affected, err = h.store.ClearReaction(r.Ctx, r.UserID, localID)
 	} else {
-		// One standard emoji is the only reaction this server can store per user.
+		// One standard or custom emoji is the only reaction this server can
+		// store per user.
 		if len(reactions) != 1 {
 			return nil, errReactionInvalid
 		}
-		emoji, ok := reactions[0].(*tg.ReactionEmoji)
-		if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+		value, customDocumentID, ok := reactionValueFromTL(reactions[0])
+		if !ok {
 			return nil, errReactionInvalid
 		}
-		affected, err = h.store.SendReaction(r.Ctx, r.UserID, localID, emoji.Emoticon)
+		if customDocumentID < 0 {
+			live, liveErr := h.liveCustomEmojiDocument(r.Ctx, r.UserID, customDocumentID)
+			if liveErr != nil {
+				return nil, liveErr
+			}
+			if !live {
+				return nil, errReactionInvalid
+			}
+		}
+		if customDocumentID != 0 {
+			affected, err = h.store.SendCustomEmojiReaction(r.Ctx, r.UserID, localID, customDocumentID)
+		} else {
+			affected, err = h.store.SendReaction(r.Ctx, r.UserID, localID, value)
+		}
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, errMessageIDInvalid
