@@ -668,7 +668,7 @@ admin_origin_file=''
 if [[ $TEST_MODE == true ]]; then
   cutover_manifest=$(mktemp "$RUNNER_TEMP/cutover-alpha.XXXXXX.yaml")
   kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
-    sed "s/^namespace: teagram$/namespace: $NAMESPACE/" > "$cutover_manifest"
+    sed "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" > "$cutover_manifest"
   kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
   record_phase applying
   kubectl apply --filename "$cutover_manifest" >/dev/null
