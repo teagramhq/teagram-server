@@ -1117,6 +1117,8 @@ jobs:
           bash -n deploy/teagram/test-target-failure-report.sh
           bash -n deploy/teagram/ops/apply-user-invite-quota.sh
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
+          bash -n deploy/teagram/ops/bot-api-qa.sh
+          bash -n deploy/teagram/test-bot-api-qa.sh
           bash -n deploy/teagram/ops/start-server.sh
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
@@ -1172,6 +1174,8 @@ jobs:
             deploy/teagram/test-target-failure-report.sh \
             deploy/teagram/ops/apply-user-invite-quota.sh \
             deploy/teagram/test-apply-user-invite-quota.sh \
+            deploy/teagram/ops/bot-api-qa.sh \
+            deploy/teagram/test-bot-api-qa.sh \
             deploy/teagram/ops/start-server.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
@@ -1223,6 +1227,9 @@ jobs:
 
       - name: Check user invite quota operation
         run: deploy/teagram/test-apply-user-invite-quota.sh
+
+      - name: Check Bot API QA operation
+        run: deploy/teagram/test-bot-api-qa.sh
 
       - name: Check invite signup URL operation fixtures
         run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh

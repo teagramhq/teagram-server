@@ -3,12 +3,12 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|bot-api-qa|start-server|encrypt-media|cleanup-media> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the seven current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
+the eight current operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, `apply-user-invite-quota`, `bot-api-qa`, `start-server`,
 `encrypt-media`, and `cleanup-media`. A script's presence in an older main
 commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
@@ -94,6 +94,28 @@ ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
 It checks that the recorded environment is exactly the saved `.env` plus the
 quota setting, then reruns the probe against the current live image without
 applying another rollout.
+
+`bot-api-qa apply` adds `TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447` and
+`TEAGRAM_BOT_API_HOST_IP=100.124.236.66` through the rollout runner's named
+environment path. The app listener stays on loopback; the same-network-namespace
+forwarder accepts only tailnet peers and the Docker gateway used by the host
+port proxy, and forwards only to `127.0.0.1:2447`.
+`bot-api-qa provision` creates `teagram_test_bot` once and rotates its token,
+returning the revoked and active tokens only on the SSH result channel for the
+QA workflow. It stores only the numeric bot ID on the server. Run both from the
+deployed main SHA after the PR deploys:
+
+```sh
+ssh teagram run <reviewed-main-sha> bot-api-qa apply
+ssh teagram run <reviewed-main-sha> bot-api-qa provision
+ssh teagram run <reviewed-main-sha> bot-api-qa verify
+```
+
+The workflow transfers the active token to the Linux QA box through its
+restricted credential writer, encoded as the 32-byte secret hex under the
+`bot_<id>` handle in `.qa-accounts-invite`. It keeps the revoked token only long
+enough to verify the Bot API returns HTTP 401. Neither token is written to the
+server's state directory, logs, comments, workflow output, or committed files.
 
 ## Restarting the existing server containers
 

@@ -1590,7 +1590,7 @@ named_env_addition_requested() {
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   for name in "${requested[@]}"; do
     case "$name" in
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA)
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA|TG_BOT_API_LISTEN_ADDR|TEAGRAM_BOT_API_HOST_IP)
         return 0
         ;;
     esac
@@ -3145,6 +3145,11 @@ run_apply() {
   if docker compose up -d </dev/null; then :; else
     rc=$?
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
+    return 1
+  fi
+  if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then :; else
+    rc=$?
+    rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
     return 1
   fi
   target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
