@@ -13,9 +13,13 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/clock"
@@ -25,6 +29,7 @@ import (
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -77,6 +82,8 @@ var (
 	errAuthKeyExchangeFailure    = errors.New("auth key exchange failed")
 	errRequestHandlingFailure    = errors.New("request handling failed")
 	errIdleReadTimeout           = errors.New("connection idle timeout")
+	webSocketSensitiveErrorValue = regexp.MustCompile(`(?i)\b(auth[_ -]?key(?:[_ -]?(?:id|bytes))?|payload|token|password|secret|authorization)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	webSocketLongHexValue        = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
 )
 
 type webSocketServeFailureError struct {
@@ -903,8 +910,8 @@ func classifyWebSocketServeCause(stage string, err error) string {
 	}
 }
 
-// safeWebSocketErrorText exposes fixed summaries so arbitrary errors cannot
-// leak auth-key, payload, or token bytes embedded in their messages.
+// safeWebSocketErrorText exposes fixed summaries for arbitrary errors and only
+// selected, redacted database diagnostics.
 func safeWebSocketErrorText(err error, cause string) string {
 	switch {
 	case errors.Is(err, errIdleReadTimeout):
@@ -914,6 +921,9 @@ func safeWebSocketErrorText(err error, cause string) string {
 	case errors.Is(err, context.Canceled):
 		return "operation canceled"
 	case errors.Is(err, errAuthKeyLookupFailure):
+		if detail := safeAuthKeyLookupErrorText(err); detail != "" {
+			return detail
+		}
 		return "auth key lookup failed"
 	case errors.Is(err, errAuthKeyPersistenceFailure):
 		return "auth key persistence failed"
@@ -954,6 +964,71 @@ func safeWebSocketErrorText(err error, cause string) string {
 	default:
 		return "internal error"
 	}
+}
+
+func safeAuthKeyLookupErrorText(err error) string {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if ok && pgErr != nil {
+		code := pgErr.Code
+		if len(code) != 5 {
+			code = "unknown"
+		} else {
+			for _, r := range code {
+				if (r < '0' || r > '9') && (r < 'A' || r > 'Z') {
+					code = "unknown"
+					break
+				}
+			}
+		}
+
+		message := redactWebSocketDiagnosticText(pgErr.Message)
+		if message == "" {
+			return "PostgreSQL SQLSTATE " + code
+		}
+		return "PostgreSQL SQLSTATE " + code + ": " + message
+	}
+
+	return safePostgreSQLConnectErrorText(err)
+}
+
+func safePostgreSQLConnectErrorText(err error) string {
+	connectErr, isConnectErr := errors.AsType[*pgconn.ConnectError](err)
+	opErr, isOpErr := errors.AsType[*net.OpError](err)
+	if (!isConnectErr || connectErr == nil) && (!isOpErr || opErr == nil) {
+		return ""
+	}
+
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok && dnsErr != nil {
+		return "PostgreSQL DNS lookup failed"
+	}
+	if networkErr, ok := errors.AsType[net.Error](err); ok && networkErr.Timeout() {
+		return "PostgreSQL connection timed out"
+	}
+	if isOpErr && opErr.Err != nil {
+		if syscallErr, ok := errors.AsType[*os.SyscallError](opErr.Err); ok && syscallErr.Err != nil {
+			message := redactWebSocketDiagnosticText(syscallErr.Err.Error())
+			if message != "" {
+				return "PostgreSQL connection failure: " + message
+			}
+		}
+	}
+	return "PostgreSQL connection failure"
+}
+
+func redactWebSocketDiagnosticText(message string) string {
+	message = webSocketSensitiveErrorValue.ReplaceAllString(message, "$1=[redacted]")
+	message = webSocketLongHexValue.ReplaceAllString(message, "[redacted]")
+	message = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, message)
+	message = strings.Join(strings.Fields(message), " ")
+	if runes := []rune(message); len(runes) > 256 {
+		message = string(runes[:256])
+	}
+	return strings.TrimSpace(message)
 }
 
 func isWebSocketProtocolDecodeError(err error) bool {

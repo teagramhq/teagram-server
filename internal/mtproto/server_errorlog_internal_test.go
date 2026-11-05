@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/gotd/td/transport"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type serverErrorLogRecord struct {
@@ -888,6 +891,82 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 		if strings.Contains(logged, forbidden) {
 			t.Errorf("WebSocket failure logs exposed secret material %q: %s", forbidden, logged)
 		}
+	}
+}
+
+func TestWebSocketAuthKeyLookupFailureLogsRedactedDatabaseDetails(t *testing.T) {
+	const (
+		privateKey     = "PRIVATE_AUTH_KEY_BYTES"
+		privatePayload = "PRIVATE_PAYLOAD_BYTES"
+		privateToken   = "PRIVATE_TOKEN_BYTES"
+	)
+	privateKeyHex := strings.Repeat("a1", 32)
+	tests := []struct {
+		name      string
+		err       error
+		want      string
+		forbidden []string
+	}{
+		{
+			name: "database unavailable",
+			err: &pgconn.PgError{
+				Code:    "08006",
+				Message: "connection refused auth_key=" + privateKey + " payload=" + privatePayload + " token=" + privateToken + " raw=" + privateKeyHex,
+				Detail:  "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken,
+			},
+			want:      "PostgreSQL SQLSTATE 08006: connection refused auth_key=[redacted] payload=[redacted] token=[redacted] raw=[redacted]",
+			forbidden: []string{privateKey, privateKeyHex, privatePayload, privateToken, "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken},
+		},
+		{
+			name: "serialization conflict",
+			err: &pgconn.PgError{
+				Code:    "40001",
+				Message: "serialization failure",
+				Detail:  "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken,
+			},
+			want:      "PostgreSQL SQLSTATE 40001: serialization failure",
+			forbidden: []string{privateKey, privatePayload, privateToken},
+		},
+		{
+			name: "connection refused",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Addr: &net.TCPAddr{
+					IP:   netip.MustParseAddr("203.0.113.37").AsSlice(),
+					Port: 5432,
+				},
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+			},
+			want:      "PostgreSQL connection failure: connection refused",
+			forbidden: []string{"203.0.113.37:5432"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &serverErrorLogSink{}
+			server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+			lookupErr := errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), tt.err))
+			server.logWebSocketServeFailure(&webSocketServeFailureError{
+				stage: "auth_key_lookup",
+				cause: "auth_key_lookup",
+				err:   lookupErr,
+			})
+
+			if len(sink.records) != 1 {
+				t.Fatalf("failure records = %d, want 1", len(sink.records))
+			}
+			if got := sink.records[0].attrs["error"]; got != tt.want {
+				t.Fatalf("error = %v, want %q", got, tt.want)
+			}
+			logged := fmt.Sprint(sink.records[0])
+			for _, secret := range tt.forbidden {
+				if strings.Contains(logged, secret) {
+					t.Errorf("failure log exposed secret material %q: %s", secret, logged)
+				}
+			}
+		})
 	}
 }
 
