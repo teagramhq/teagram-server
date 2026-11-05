@@ -118,13 +118,19 @@ message rows by `local_id`, dialog buckets, then posting and count rows.
 Writers take their existing owner or chat locks first. Before a user-to-user
 send inserts its first copy, a trigger locks both reciprocal dialog buckets in
 ascending order; the second copy reuses those locks. Message updates and hard
-deletes lock their affected message row before dialog buckets, then posting and
-count rows. The initializer does not take owner or chat locks, and each chunk
-holds message rows for only one dialog.
+deletes lock any operation-specific poll rows, then the complete affected
+message-copy set in `(owner_id, local_id)` order, then all affected dialog
+buckets in ascending bucket order, and finally posting and count rows. This
+transaction-wide row-before-bucket order covers revokes and batches that touch
+several dialogs; their triggers reuse the already-held bucket set. The
+initializer does not take owner or chat locks, and each chunk holds message
+rows for only one dialog.
 
 Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
 A send into that dialog can wait on its advisory bucket while holding its owner
-locks, which queues other sends from that owner until the chunk commits. This
+locks, which queues other sends from that owner until the chunk commits. An
+edit or delete that needs a row locked by the chunk waits before acquiring any
+posting bucket, so it does not hold a bucket needed by the initializer. This
 stall is limited to one chunk, rather than the dialog's full history; choose
 `--batch-size` for the write delay the deployment can tolerate. The initializer
 omits the configured Postgres statement timeout so it can finish a chunk;
@@ -133,10 +139,11 @@ window when large dialogs are expected.
 
 Existing send, edit, and delete transactions acquire their owner or chat locks
 before changing message rows, then their message triggers update postings and
-counts. Some message mutations can touch rows in multiple dialogs in one
-transaction. The initializer holds rows for only one dialog in one chunk and
-releases them before starting another chunk, so it cannot form a cross-dialog
-message-row lock cycle with those mutations.
+counts. A batch may touch rows in multiple dialogs: it locks the complete row
+set by `(owner_id, local_id)` before taking any posting bucket, so it cannot
+hold a bucket while waiting for a row in the initializer's current chunk. The
+initializer holds rows for only one dialog in one chunk and releases them
+before starting another chunk.
 
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain

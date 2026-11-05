@@ -219,6 +219,32 @@ UPDATE messages
 SET message = $3, edit_date = now(), entities = NULLIF(sqlc.arg(entities)::text, '')::jsonb
 WHERE owner_id = $1 AND local_id = $2;
 
+-- Lock all existing copies before acquiring any posting buckets. Callers pass
+-- the full mutation set so multi-copy edits and deletes use one stable row
+-- order before their transaction-wide bucket lock set.
+-- name: LockMessageCopiesForSearchPostings :many
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT owner_values.owner_id, local_values.local_id
+    FROM unnest(sqlc.arg(owner_ids)::bigint[]) WITH ORDINALITY
+        AS owner_values(owner_id, ordinal)
+    JOIN unnest(sqlc.arg(local_ids)::bigint[]) WITH ORDINALITY
+        AS local_values(local_id, ordinal) USING (ordinal)
+)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
+FROM messages AS message
+JOIN requested USING (owner_id, local_id)
+ORDER BY message.owner_id, message.local_id
+FOR UPDATE OF message;
+
+-- Lock the complete affected dialog-bucket set in one sorted helper call,
+-- after all message rows have been locked.
+-- name: LockMessageSearchPostingDialogBuckets :one
+SELECT public.lock_message_search_posting_dialogs(
+    sqlc.arg(owner_ids)::bigint[],
+    sqlc.arg(peer_types)::smallint[],
+    sqlc.arg(peer_ids)::bigint[]
+);
+
 -- SetDeleted marks one owner-local message deleted and reports how many rows
 -- it changed. The `AND NOT deleted` predicate is the whole point: it makes the
 -- write the authority on whether the row was already gone, so a caller decides

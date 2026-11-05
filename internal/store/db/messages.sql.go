@@ -941,6 +941,84 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 	return err
 }
 
+const lockMessageCopiesForSearchPostings = `-- name: LockMessageCopiesForSearchPostings :many
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT owner_values.owner_id, local_values.local_id
+    FROM unnest($1::bigint[]) WITH ORDINALITY
+        AS owner_values(owner_id, ordinal)
+    JOIN unnest($2::bigint[]) WITH ORDINALITY
+        AS local_values(local_id, ordinal) USING (ordinal)
+)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
+FROM messages AS message
+JOIN requested USING (owner_id, local_id)
+ORDER BY message.owner_id, message.local_id
+FOR UPDATE OF message
+`
+
+type LockMessageCopiesForSearchPostingsParams struct {
+	OwnerIds []int64
+	LocalIds []int64
+}
+
+type LockMessageCopiesForSearchPostingsRow struct {
+	OwnerID  int64
+	LocalID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// Lock all existing copies before acquiring any posting buckets. Callers pass
+// the full mutation set so multi-copy edits and deletes use one stable row
+// order before their transaction-wide bucket lock set.
+func (q *Queries) LockMessageCopiesForSearchPostings(ctx context.Context, arg LockMessageCopiesForSearchPostingsParams) ([]LockMessageCopiesForSearchPostingsRow, error) {
+	rows, err := q.db.Query(ctx, lockMessageCopiesForSearchPostings, arg.OwnerIds, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockMessageCopiesForSearchPostingsRow
+	for rows.Next() {
+		var i LockMessageCopiesForSearchPostingsRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerType,
+			&i.PeerID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockMessageSearchPostingDialogBuckets = `-- name: LockMessageSearchPostingDialogBuckets :one
+SELECT public.lock_message_search_posting_dialogs(
+    $1::bigint[],
+    $2::smallint[],
+    $3::bigint[]
+)
+`
+
+type LockMessageSearchPostingDialogBucketsParams struct {
+	OwnerIds  []int64
+	PeerTypes []int16
+	PeerIds   []int64
+}
+
+// Lock the complete affected dialog-bucket set in one sorted helper call,
+// after all message rows have been locked.
+func (q *Queries) LockMessageSearchPostingDialogBuckets(ctx context.Context, arg LockMessageSearchPostingDialogBucketsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, lockMessageSearchPostingDialogBuckets, arg.OwnerIds, arg.PeerTypes, arg.PeerIds)
+	var lock_message_search_posting_dialogs bool
+	err := row.Scan(&lock_message_search_posting_dialogs)
+	return lock_message_search_posting_dialogs, err
+}
+
 const lockMessageSearchUnreadyDialog = `-- name: LockMessageSearchUnreadyDialog :one
 SELECT last_local_id
 FROM message_search_unready_dialogs

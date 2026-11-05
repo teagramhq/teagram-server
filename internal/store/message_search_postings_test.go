@@ -529,3 +529,331 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 		t.Fatalf("disjoint sends with reversed posting bucket collisions failed: %v", sendErrors)
 	}
 }
+
+func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	const userCount = 100
+	users := make([]store.User, userCount)
+	userIDs := make([]int64, userCount)
+	for i := range users {
+		users[i] = mustUser(t, s, fmt.Sprintf("+155514%05d", i))
+		userIDs[i] = users[i].ID
+	}
+
+	type revokePair struct {
+		fromID, toID         int64
+		fromBucket, toBucket int
+	}
+	rows, err := store.StorePool(s).Query(ctx, `
+		SELECT sender.id,
+		       recipient.id,
+		       ((hashtextextended(
+		           'message-search-posting-dialog/v1:' || sender.id::text || ':' || $2::smallint::text || ':' || recipient.id::text,
+		           73194627
+		       ) % 1024 + 1024) % 1024)::int AS sender_bucket,
+		       ((hashtextextended(
+		           'message-search-posting-dialog/v1:' || recipient.id::text || ':' || $2::smallint::text || ':' || sender.id::text,
+		           73194627
+		       ) % 1024 + 1024) % 1024)::int AS recipient_bucket
+		FROM unnest($1::bigint[]) AS sender(id)
+		CROSS JOIN unnest($1::bigint[]) AS recipient(id)
+		WHERE sender.id <> recipient.id
+	`, userIDs, int16(store.PeerTypeUser))
+	if err != nil {
+		t.Fatalf("find revoke posting buckets: %v", err)
+	}
+	candidatesByBuckets := make(map[[2]int][]revokePair)
+	var candidates []revokePair
+	for rows.Next() {
+		var candidate revokePair
+		if err := rows.Scan(&candidate.fromID, &candidate.toID, &candidate.fromBucket, &candidate.toBucket); err != nil {
+			rows.Close()
+			t.Fatalf("scan revoke posting buckets: %v", err)
+		}
+		candidates = append(candidates, candidate)
+		key := [2]int{candidate.fromBucket, candidate.toBucket}
+		candidatesByBuckets[key] = append(candidatesByBuckets[key], candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("read revoke posting buckets: %v", err)
+	}
+	rows.Close()
+
+	var first, second revokePair
+	found := false
+	for _, candidate := range candidates {
+		if candidate.fromBucket == candidate.toBucket {
+			continue
+		}
+		for _, reversed := range candidatesByBuckets[[2]int{candidate.toBucket, candidate.fromBucket}] {
+			if candidate.fromID == reversed.fromID || candidate.fromID == reversed.toID ||
+				candidate.toID == reversed.fromID || candidate.toID == reversed.toID {
+				continue
+			}
+			first, second, found = candidate, reversed, true
+			break
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no disjoint revoke pairs with reversed bucket collisions among %d users", len(users))
+	}
+
+	firstMessage, _, _, _, err := s.SendMessage(ctx, first.fromID, first.toID, "revokefirstterm", 710001, 0, 0) //nolint:dogsled // only the stored message is needed here.
+	if err != nil {
+		t.Fatalf("send first revoke fixture: %v", err)
+	}
+	secondMessage, _, _, _, err := s.SendMessage(ctx, second.fromID, second.toID, "revokesecondterm", 710002, 0, 0) //nolint:dogsled // only the stored message is needed here.
+	if err != nil {
+		t.Fatalf("send second revoke fixture: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		CREATE FUNCTION public.test_pause_revoke_search_posting_delete() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF OLD.lexeme IN ('revokefirstterm', 'revokesecondterm') AND EXISTS (
+				SELECT 1 FROM public.messages
+				WHERE owner_id = OLD.owner_id AND local_id = OLD.local_id AND out
+			) THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN OLD;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_revoke_search_posting_delete
+		AFTER DELETE ON public.message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_revoke_search_posting_delete();
+	`); err != nil {
+		t.Fatalf("install revoke pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := store.StorePool(s).Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_revoke_search_posting_delete ON public.message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_revoke_search_posting_delete();
+		`); err != nil {
+			t.Errorf("remove revoke pause fixture: %v", err)
+		}
+	}()
+
+	type revokeResult struct {
+		name string
+		err  error
+	}
+	results := make(chan revokeResult, 2)
+	revokeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	revoke := func(name string, pair revokePair, localID int64) {
+		_, err := s.DeleteMessages(revokeCtx, pair.fromID, []int64{localID}, true)
+		results <- revokeResult{name: name, err: err}
+	}
+	go revoke("first", first, firstMessage.LocalID)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := store.StorePool(s).QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%UPDATE messages SET deleted%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check first revoke pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-results:
+				t.Fatalf("first revoke returned before its posting pause: %v", result.err)
+			default:
+				t.Fatal("first revoke did not pause after locking its first posting bucket")
+			}
+		}
+		select {
+		case result := <-results:
+			t.Fatalf("first revoke returned before its posting pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	go revoke("second", second, secondMessage.LocalID)
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var activeRevokes int
+		if err := store.StorePool(s).QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND state = 'active'
+			  AND (query ILIKE '%UPDATE messages SET deleted%'
+			       OR query ILIKE '%lock_message_search_posting_dialogs%')
+			  AND (wait_event = 'PgSleep' OR wait_event_type = 'Lock')
+		`).Scan(&activeRevokes); err != nil {
+			t.Fatalf("check overlapping revokes: %v", err)
+		}
+		if activeRevokes >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second revoke did not overlap the first revoke's posting lock")
+		}
+		select {
+		case result := <-results:
+			t.Fatalf("revoke %s returned before both revokes overlapped: %v", result.name, result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Errorf("%s revoke failed: %v", result.name, result.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("disjoint revokes did not complete")
+		}
+	}
+}
+
+func TestBatchDeleteLocksAllRowsBeforePostingBuckets(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551500001")
+	peer := mustUser(t, s, "+15551500002")
+
+	chunkMessage, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "chunklockterm", 720001, 0, 0) //nolint:dogsled // only the stored message is needed here.
+	if err != nil {
+		t.Fatalf("send initializer chunk fixture: %v", err)
+	}
+	outsideMessage, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "outsidelockterm", 720002, 0, 0) //nolint:dogsled // only the stored message is needed here.
+	if err != nil {
+		t.Fatalf("send outside chunk fixture: %v", err)
+	}
+	pool := store.StorePool(s)
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION public.test_pause_outside_chunk_posting_delete() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF OLD.lexeme = 'outsidelockterm' THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN OLD;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_outside_chunk_posting_delete
+		AFTER DELETE ON public.message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_outside_chunk_posting_delete();
+	`); err != nil {
+		t.Fatalf("install outside chunk pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_outside_chunk_posting_delete ON public.message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_outside_chunk_posting_delete();
+		`); err != nil {
+			t.Errorf("remove outside chunk pause fixture: %v", err)
+		}
+	}()
+
+	initTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin initializer chunk transaction: %v", err)
+	}
+	defer func() { _ = initTx.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
+	var lockedLocalID int64
+	if err := initTx.QueryRow(ctx, `
+		SELECT local_id
+		FROM messages
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+		ORDER BY local_id
+		LIMIT 1
+		FOR SHARE
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&lockedLocalID); err != nil {
+		t.Fatalf("lock first initializer chunk row: %v", err)
+	}
+	if lockedLocalID != chunkMessage.LocalID {
+		t.Fatalf("initializer locked local_id %d, want first chunk row %d", lockedLocalID, chunkMessage.LocalID)
+	}
+
+	deleteCtx, cancelDelete := context.WithTimeout(ctx, 8*time.Second)
+	defer cancelDelete()
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := s.DeleteMessages(deleteCtx, owner.ID,
+			[]int64{outsideMessage.LocalID, chunkMessage.LocalID}, false)
+		deleteDone <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var writerWaiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND query ILIKE '%messages%'
+			)
+		`).Scan(&writerWaiting); err != nil {
+			t.Fatalf("check delete wait on chunk row: %v", err)
+		}
+		if writerWaiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case err := <-deleteDone:
+				t.Fatalf("batch delete returned before row-lock interleaving: %v", err)
+			default:
+				t.Fatal("batch delete did not block on the initializer's row lock")
+			}
+		}
+		select {
+		case err := <-deleteDone:
+			t.Fatalf("batch delete returned before row-lock interleaving: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	initLockDone := make(chan error, 1)
+	go func() {
+		_, err := initTx.Exec(ctx, `
+			SELECT public.lock_message_search_posting_dialogs(
+				ARRAY[$1::bigint], ARRAY[$2::smallint], ARRAY[$3::bigint]
+			)
+		`, owner.ID, int16(store.PeerTypeUser), peer.ID)
+		initLockDone <- err
+	}()
+	select {
+	case err := <-initLockDone:
+		if err != nil {
+			t.Fatalf("initializer lock bucket after row locks: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("initializer could not acquire posting bucket after the writer's row-lock wait")
+	}
+	if err := initTx.Commit(ctx); err != nil {
+		t.Fatalf("commit initializer chunk lock fixture: %v", err)
+	}
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("batch delete after initializer chunk: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("batch delete did not finish after initializer released its chunk row")
+	}
+}

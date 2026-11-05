@@ -39,8 +39,9 @@ WHERE deleted = false
 ORDER BY expires_at, owner_id, local_id
 LIMIT sqlc.arg(lim)::int;
 
--- ExpiredMessageCopyRowsForDelete rechecks eligibility after the owner locks
--- and takes message row locks in a stable order.
+-- ExpiredMessageCopyRowsForDelete rechecks eligibility after the owner locks.
+-- The caller takes any poll locks, then locks all selected message rows and
+-- their posting buckets together before changing them.
 -- name: ExpiredMessageCopyRowsForDelete :many
 SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
 FROM messages AS message
@@ -48,5 +49,4 @@ WHERE message.owner_id = sqlc.arg(owner_id)::bigint
   AND message.local_id = ANY(sqlc.arg(local_ids)::bigint[])
   AND message.deleted = false
   AND message.expires_at <= statement_timestamp()
-ORDER BY message.local_id
-FOR UPDATE OF message;
+ORDER BY message.local_id;
