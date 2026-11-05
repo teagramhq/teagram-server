@@ -10,6 +10,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ZERO_SHA = "0" * 40
+EXPECTED_POSTGRES_IMAGE = (
+    "mirror.gcr.io/library/postgres:18-alpine@sha256:"
+    "10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
+)
 
 
 class PrePushHookTests(unittest.TestCase):
@@ -20,6 +24,10 @@ class PrePushHookTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.capture = self.root / "calls.log"
+        self.postgres_capture = self.root / "postgres-image.log"
+        self.home = self.root / "home"
+        self.home.mkdir()
+        (self.home / ".atlas" / "cache").mkdir(parents=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
 
@@ -32,6 +40,19 @@ class PrePushHookTests(unittest.TestCase):
         hooks.mkdir()
         shutil.copy2(REPO_ROOT / ".githooks/pre-push", hooks / "pre-push")
         self.git("config", "core.hooksPath", ".githooks")
+
+        scripts = self.repo / ".github/scripts"
+        scripts.mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / ".github/scripts/test-migrations.sh",
+            scripts / "test-migrations.sh",
+        )
+        lint_fixtures = scripts / "testdata/migrations/atlas-lint"
+        lint_fixtures.parent.mkdir(parents=True)
+        shutil.copytree(
+            REPO_ROOT / ".github/scripts/testdata/migrations/atlas-lint",
+            lint_fixtures,
+        )
 
         for path in (
             "internal/example",
@@ -95,13 +116,54 @@ class PrePushHookTests(unittest.TestCase):
 
     def write_tool(self, name: str) -> None:
         path = self.tools / name
-        path.write_text(
+        script = (
             "#!/bin/sh\n"
             'tool="${0##*/}"\n'
             'printf \'%s\\t%s\\t%s\\n\' "$tool" "$PWD" "$*" >> "$HOOK_CAPTURE"\n'
-            '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n',
-            encoding="utf-8",
         )
+        if name == "atlas":
+            script += (
+                '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n'
+                'if [ "${1:-}" = whoami ]; then\n'
+                '  if [ "${ATLAS_FIXTURE_LOGIN:-false}" = true ]; then exit 0; fi\n'
+                '  printf "Error: command requires \'atlas login\'\\n" >&2\n'
+                "  exit 1\n"
+                "fi\n"
+                'if [ "${1:-}" = migrate ] && [ "${2:-}" = lint ]; then\n'
+                '  if [ "${ATLAS_FIXTURE_LOGIN:-false}" != true ]; then\n'
+                '    printf "Error: command requires \'atlas login\'\\n" >&2\n'
+                "    exit 1\n"
+                "  fi\n"
+                '  [ "${ATLAS_FAIL_LINT:-}" != true ] || exit 23\n'
+                '  case "$*" in\n'
+                '    *atlas-lint-destructive*) printf \'%s\\n\' "destructive changes detected"; exit 1 ;;\n'
+                '    *atlas-lint-out-of-order*) printf \'%s\\n\' "20260102000000" "destructive changes detected"; exit 1 ;;\n'
+                "  esac\n"
+                "fi\n"
+            )
+        elif name == "docker":
+            script += (
+                '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n'
+                'if [ "${1:-}" = port ]; then printf \'%s\\n\' "0.0.0.0:5432"; fi\n'
+                'if [ "${1:-}" = exec ]; then\n'
+                '  case "$*" in\n'
+                '    *"SELECT first_name"*) printf \'%s\\n\' "migration-ci-fixture|upgrade" ;;\n'
+                "  esac\n"
+                "fi\n"
+            )
+        elif name == "bash":
+            script += (
+                'if [ "$*" = ".github/scripts/test-migrations.sh" ]; then\n'
+                '  printf \'%s\\n\' "${POSTGRES_IMAGE:-}" >> "$HOOK_POSTGRES_CAPTURE"\n'
+                "fi\n"
+                '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n'
+                'if [ "$*" = ".github/scripts/test-migrations.sh" ]; then\n'
+                '  exec /bin/bash "$@"\n'
+                "fi\n"
+            )
+        else:
+            script += '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n'
+        path.write_text(script, encoding="utf-8")
         path.chmod(0o755)
 
     def run_hook(
@@ -111,12 +173,24 @@ class PrePushHookTests(unittest.TestCase):
         remote_sha: str = ZERO_SHA,
         ref_name: str = "feature",
         fail_tool: str = "",
+        atlas_login: bool = False,
+        fail_atlas_lint: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         self.capture.unlink(missing_ok=True)
         environment = os.environ.copy()
+        environment.pop("POSTGRES_IMAGE", None)
+        environment.pop("DATA_DIR", None)
+        environment.pop("ATLAS_TOKEN", None)
         environment["PATH"] = f"{self.tools}{os.pathsep}{environment['PATH']}"
         environment["HOOK_CAPTURE"] = str(self.capture)
+        environment["HOOK_POSTGRES_CAPTURE"] = str(self.postgres_capture)
+        environment["HOME"] = str(self.home)
         environment["GIT_HOOK_BASE_REF"] = "main"
+        environment["ATLAS_FIXTURE_LOGIN"] = "true" if atlas_login else "false"
+        if fail_atlas_lint:
+            environment["ATLAS_FAIL_LINT"] = "true"
+        else:
+            environment.pop("ATLAS_FAIL_LINT", None)
         if fail_tool:
             environment["HOOK_FAIL"] = fail_tool
         else:
@@ -145,7 +219,7 @@ class PrePushHookTests(unittest.TestCase):
         ]
 
     def test_changed_go_sql_and_migration_paths_run_their_checks(self) -> None:
-        result = self.run_hook()
+        result = self.run_hook(atlas_login=True)
 
         self.assertEqual(result.returncode, 0, result.stdout)
         calls = self.calls()
@@ -178,9 +252,77 @@ class PrePushHookTests(unittest.TestCase):
             ),
             calls,
         )
+        self.assertEqual(
+            self.postgres_capture.read_text(encoding="utf-8").splitlines(),
+            [EXPECTED_POSTGRES_IMAGE],
+        )
+        self.assertNotIn("Atlas login not found", result.stdout)
+        self.assertTrue(
+            any(
+                tool == "atlas" and args.startswith("migrate lint ")
+                for tool, _, args in calls
+            ),
+            calls,
+        )
         self.assertTrue(
             any(
                 tool == "gitleaks" and f"--log-opts=main..{self.feature_sha}" in args
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+
+    def test_migration_checks_skip_atlas_lint_without_login(self) -> None:
+        result = self.run_hook()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Atlas login not found; skipping atlas migrate lint", result.stdout)
+        calls = self.calls()
+        self.assertTrue(
+            any(tool == "atlas" and args == "whoami" for tool, _, args in calls), calls
+        )
+        self.assertTrue(
+            (self.home / ".atlas" / "cache").is_dir(),
+            "fixture must contain Atlas cache state without login credentials",
+        )
+        self.assertEqual(
+            {path.name for path in (self.home / ".atlas").iterdir()}, {"cache"}
+        )
+        self.assertFalse(
+            any(
+                tool == "atlas" and args.startswith("migrate lint ")
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+        self.assertTrue(
+            any(
+                tool == "python" and ".github/scripts/sql_lint.py" in args
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+        self.assertTrue(
+            any(
+                tool == "bash" and args == ".github/scripts/test-migrations.sh"
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+        self.assertTrue(any(tool == "gitleaks" for tool, _, _ in calls), calls)
+
+    def test_logged_in_atlas_lint_failure_blocks_the_push(self) -> None:
+        result = self.run_hook(atlas_login=True, fail_atlas_lint=True)
+
+        self.assertNotEqual(result.returncode, 0, "Atlas lint failure was ignored")
+        self.assertNotIn("Atlas login not found", result.stdout)
+        calls = self.calls()
+        self.assertTrue(
+            any(tool == "atlas" and args == "whoami" for tool, _, args in calls), calls
+        )
+        self.assertTrue(
+            any(
+                tool == "atlas" and args.startswith("migrate lint ")
                 for tool, _, args in calls
             ),
             calls,

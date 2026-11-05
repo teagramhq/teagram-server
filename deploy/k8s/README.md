@@ -50,11 +50,20 @@ privileged `hostPath` pod.
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
 immutable completed Job. `prod/kustomization.yaml` pins the required migration
-version with its image digests; the validator checks it against the source
-revision label on that pinned migration image. Update the version whenever the
-production image digests are repinned. CI overrides this value from
-`base/migration-version`, which CI checks against the newest migration filename
-before validating or deploying the overlay.
+version with its image digests. The base `migration-version` may remain at an
+earlier migration while a new migration is being developed; CI checks that it
+names a migration that exists, rather than requiring every migration PR to edit
+`deploy/k8s/`. The production validator checks that the required version matches
+the newest migration in the pinned migration image and that this image contains
+every migration, with identical contents, present in the pinned teagramd image.
+The CI workflow sets its disposable overlay to the newest migration before
+rendering and applying it, so teagramd waits until that migration has run.
+
+After a migration merges and CI publishes the corresponding images, update the
+production teagramd and migration image digests, required migration version,
+and migration Job name together. The production pin check must pass before
+applying that overlay. This keeps a server image that needs a new migration
+from being deployed with an older migration image.
 
 The production overlay expects these namespace-scoped resources to be supplied
 by the cluster's secret and configuration management before it is applied:

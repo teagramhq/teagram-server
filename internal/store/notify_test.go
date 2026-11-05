@@ -94,6 +94,88 @@ func TestNotifyReachesRawListener(t *testing.T) {
 	}
 }
 
+func TestStickerSetOrderNotificationsSerializeByOwnerAndKind(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s := openDSN(t, dsn)
+	metrics := store.NewNotificationMetrics()
+	started := make(chan int64, 2)
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	_, stop, err := store.StartListenerWithDialogPinsAndStickerSets(
+		ctx, dsn,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		func(_ context.Context, _, _, sessionID int64, _ *store.StickerSetOrder) {
+			started <- sessionID
+			if sessionID == 11 {
+				<-releaseFirst
+			}
+		},
+		nil, nil, metrics,
+	)
+	if err != nil {
+		t.Fatalf("start sticker-set listener: %v", err)
+	}
+	t.Cleanup(func() {
+		release()
+		if err := stop(); err != nil {
+			t.Errorf("stop sticker-set listener: %v", err)
+		}
+	})
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for sticker-set listener: %v", err)
+	}
+
+	first := store.StickerSetOrderChangedPayload(7, 19, 11, "regular", []int64{101, 102})
+	if err := s.Notify(ctx, store.ChannelStickerSets, first); err != nil {
+		t.Fatalf("notify first order: %v", err)
+	}
+	select {
+	case got := <-started:
+		if got != 11 {
+			t.Fatalf("first callback session = %d, want 11", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("first order callback did not start: %v", ctx.Err())
+	}
+
+	second := store.StickerSetOrderChangedPayload(7, 19, 22, "regular", []int64{102, 101})
+	if err := s.Notify(ctx, store.ChannelStickerSets, second); err != nil {
+		t.Fatalf("notify second order: %v", err)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for metrics.Snapshot().Channels.StickerSets < 2 {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("listener did not dispatch both sticker-set notifications")
+		case <-ctx.Done():
+			t.Fatalf("listener stopped before dispatching both notifications: %v", ctx.Err())
+		}
+	}
+	select {
+	case got := <-started:
+		t.Fatalf("second order callback session %d started before the first fan-out finished", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case got := <-started:
+		if got != 22 {
+			t.Fatalf("second callback session = %d, want 22", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("second order callback did not start after first finished: %v", ctx.Err())
+	}
+}
+
 func TestChatRecipientNotificationsSurviveCallerCancellationAfterCommit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1050,6 +1132,16 @@ func TestStickerSetChangedPayloadFormat(t *testing.T) {
 	t.Parallel()
 	if got := store.StickerSetChangedPayload(42, -17, 9); got != "42|-17|9" {
 		t.Fatalf("StickerSetChangedPayload(42, -17, 9) = %q, want 42|-17|9", got)
+	}
+}
+
+func TestStickerSetOrderChangedPayloadFormat(t *testing.T) {
+	t.Parallel()
+	if got := store.StickerSetOrderChangedPayload(42, -17, 9, "mask", []int64{-3, 5}); got != "42|-17|9|mask:-3,5" {
+		t.Fatalf("StickerSetOrderChangedPayload(mask) = %q, want 42|-17|9|mask:-3,5", got)
+	}
+	if got := store.StickerSetOrderChangedPayload(42, -17, 9, "regular", nil); got != "42|-17|9|regular:" {
+		t.Fatalf("StickerSetOrderChangedPayload(regular, empty) = %q, want 42|-17|9|regular:", got)
 	}
 }
 

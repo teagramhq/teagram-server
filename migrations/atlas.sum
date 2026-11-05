@@ -1,4 +1,4 @@
-h1:Gd4uWsxVPA/AT5UNrU8uvtCT2C2598anWm4A9HfUMAU=
+h1:ZrAoxj27tCFKLXjVmHDu9nJrmlvnZSd2BuKy4In2YUs=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -161,3 +161,6 @@ h1:Gd4uWsxVPA/AT5UNrU8uvtCT2C2598anWm4A9HfUMAU=
 20261102000002_message_search_postings_readiness.sql h1:zCA0hSLK0o03LdkPyu+IEJ6Af3DtTs/QcgUfKxZaE9U=
 20261103000001_user_sticker_takedown.sql h1:u8JwzQvtyJm4V3Hr7jwrZipWRVsf6RBtjQgU5teefVc=
 20261103000002_user_sticker_content_sha256_idx.sql h1:lX1k1qwNcRy752I8Fhv+PKet7eRYyn2+GJ1g+66xIH8=
+20261103000003_bot_update_offsets.sql h1:r90+8NVYsd6PDRcyLiSMgHqUioMSUKEIPNmcgKAB+5A=
+20261103000004_bot_update_poll_generation.sql h1:aWJucvMHfMVUIkB5Vp/P3ovg8ZnJqrT0NU1uK/eDtU4=
+20261104000001_user_sticker_set_order.sql h1:8uxAmWspw2EWQ2dVDJN5i1j2uGlZ7yVKuw4yv+Oouug=

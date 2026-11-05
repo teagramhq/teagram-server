@@ -24,6 +24,16 @@ BINARY_PIN = re.compile(r"atlas version v(\d+\.\d+\.\d+)")
 SETUP_ATLAS = re.compile(r"ariga/setup-atlas@")
 SETUP_VERSION = re.compile(r"^\s*version:\s*v?(\d+\.\d+\.\d+)\s*$")
 EXPECTED_VERSION = "1.3.0"
+# The rollout guard recognizes this exact live-baseline image to preflight the
+# one-time migration to the current pin; it is never an accepted target image.
+LEGACY_ROLLOUT_BASELINE_PINS = (
+    ("deploy/teagramd/rollout-runner/rollout-verifier.sh", "1.2.0", "image"),
+    (
+        "deploy/teagramd/rollout-runner/test-rollout-verifier-env-additions.sh",
+        "1.2.0",
+        "image",
+    ),
+)
 REQUIRED_PIN_FILES = (
     "docker-compose.yml",
     "deploy/k8s/Dockerfile.migrations",
@@ -88,13 +98,21 @@ def collect_pins() -> list[tuple[str, str, str]]:
 class AtlasVersionPinTests(unittest.TestCase):
     def test_every_atlas_pin_uses_one_version(self) -> None:
         pins = collect_pins()
-        mismatched = [pin for pin in pins if pin[1] != EXPECTED_VERSION]
+        mismatched = [
+            pin
+            for pin in pins
+            if pin[1] != EXPECTED_VERSION and pin not in LEGACY_ROLLOUT_BASELINE_PINS
+        ]
         self.assertEqual(
             [],
             mismatched,
             "Atlas pins must all name "
             f"{EXPECTED_VERSION}: {mismatched}",
         )
+
+    def test_legacy_rollout_baseline_allowlist_is_exact(self) -> None:
+        legacy_pins = [pin for pin in collect_pins() if pin[1] != EXPECTED_VERSION]
+        self.assertEqual(sorted(LEGACY_ROLLOUT_BASELINE_PINS), sorted(legacy_pins))
 
     def test_scans_escaped_mirror_image_pin(self) -> None:
         self.assertIn(

@@ -58,11 +58,13 @@ type BlockedUser struct {
 }
 
 type BotToken struct {
-	UserID    int64
-	UserKind  *string
-	TokenHash []byte
-	IssuedAt  pgtype.Timestamptz
-	RevokedAt pgtype.Timestamptz
+	UserID         int64
+	UserKind       *string
+	TokenHash      []byte
+	IssuedAt       pgtype.Timestamptz
+	RevokedAt      pgtype.Timestamptz
+	UpdateOffset   int64
+	PollGeneration int64
 }
 
 type BrowserAcceptanceBindingEvidence struct {
@@ -1059,9 +1061,10 @@ type UserPrivacyRuleUser struct {
 }
 
 type UserStickerSet struct {
-	UserID      int64
-	SetID       int64
-	InstalledAt pgtype.Timestamptz
+	UserID       int64
+	SetID        int64
+	InstalledAt  pgtype.Timestamptz
+	SortPosition *int32
 }
 
 type Username struct {
