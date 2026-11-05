@@ -53,6 +53,15 @@ cleanup() {
 trap cleanup EXIT
 trap 'printf "cutover test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
+expect_log() {
+  local expected=$1 log_file=$2
+  if ! grep --fixed-strings --quiet -- "$expected" "$log_file"; then
+    printf 'expected log message not found: %s\n' "$expected" >&2
+    cat "$log_file" >&2
+    return 1
+  fi
+}
+
 copy_secret() {
   local name=$1
   kubectl get secret "$name" --namespace "$SOURCE_NAMESPACE" --output json |
