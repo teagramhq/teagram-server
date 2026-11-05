@@ -1185,6 +1185,7 @@ async function proveSharedWorkerWss(t, {
   childSocketUrl,
   delayedChild = false,
   workerSockets = [],
+  expectedConnectionCount,
   contextInfo: suppliedContextInfo,
   progress: suppliedProgress,
   tracker: suppliedTracker,
@@ -1273,7 +1274,14 @@ async function proveSharedWorkerWss(t, {
   };
   const progress = suppliedProgress ?? createAcceptanceProgress({sourceCommit});
   try {
-    const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
+    const result = await proveWss(
+      contextInfo,
+      {url: `https://${targetHost}/private/`},
+      {endpoint},
+      progress,
+      tracker,
+      expectedConnectionCount === undefined ? undefined : {expectedConnectionCount},
+    );
     return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit, contextInfo};
   } catch (error) {
     return {code: error.code, wssDiagnostic: error.wssDiagnostic, browserSession, relatedSession};
@@ -1283,6 +1291,31 @@ async function proveSharedWorkerWss(t, {
 test("preflight WSS proof observes the client's SharedWorker socket", async (t) => {
   const {result} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws`});
   assert.deepEqual(result, {responseStatus: 200, connectionCount: 1, status101: true});
+});
+
+test("preflight WSS proof accepts all expected sockets after an early SharedWorker load", async (t) => {
+  const proof = await proveSharedWorkerWss(t, {
+    scriptLoaded: "before",
+    workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING),
+    expectedConnectionCount: WSS_ACCOUNT_SLOT_CEILING,
+  });
+  assert.equal(proof.code, undefined, JSON.stringify(proof));
+  const {result} = proof;
+  assert.deepEqual(result, {
+    responseStatus: 200,
+    connectionCount: WSS_ACCOUNT_SLOT_CEILING,
+    status101: true,
+  });
+});
+
+test("preflight WSS proof rejects an early SharedWorker load with a missing expected socket", async (t) => {
+  const proof = await proveSharedWorkerWss(t, {
+    scriptLoaded: "before",
+    workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING - 1),
+    expectedConnectionCount: WSS_ACCOUNT_SLOT_CEILING,
+  });
+  assert.equal(proof.code, "websocket-not-ready");
+  assert.equal(proof.wssDiagnostic.wss_diagnostic, "worker-unobservable");
 });
 
 test("preflight WSS proof watches a worker's descendants before attaching to it", async (t) => {

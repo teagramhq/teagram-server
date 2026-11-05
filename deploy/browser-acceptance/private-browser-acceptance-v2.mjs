@@ -913,7 +913,11 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
   });
 }
 
-async function makeWssAudit(contextInfo, progress) {
+async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
+  if (expectedConnectionCount !== undefined && (!Number.isInteger(expectedConnectionCount) ||
+      expectedConnectionCount < 1 || expectedConnectionCount > WSS_CONNECTION_CEILING)) {
+    fail("arguments-invalid");
+  }
   const connections = new Map();
   let accountSlotCount = null;
   let activeConnectionsBeforeBaseline = 0;
@@ -998,7 +1002,7 @@ async function makeWssAudit(contextInfo, progress) {
         if (finished) return;
         finished = true;
         pendingWorkers -= 1;
-        if (observable !== true) malformed = true;
+        if (observable !== true) workerUnobservable = true;
       };
     },
   };
@@ -1013,6 +1017,13 @@ async function makeWssAudit(contextInfo, progress) {
     if (!progress.isSignedIn()) return false;
     return activeConnections > WSS_ACCOUNT_SLOT_CEILING ||
       activeConnections < Math.min(activeConnectionsBeforeBaseline, WSS_ACCOUNT_SLOT_CEILING);
+  }
+
+  function completeExpectedSocketProof() {
+    const entries = [...connections.values()];
+    return expectedConnectionCount !== undefined && entries.length === expectedConnectionCount &&
+      pendingWorkers === 0 && handshakeCount === entries.length &&
+      entries.every((item) => item.matches && !item.closed && item.responses === 1 && item.status === 101);
   }
 
   function diagnostic() {
@@ -1031,9 +1042,14 @@ async function makeWssAudit(contextInfo, progress) {
 
     if (malformed) return result("observation-malformed");
     if (orphanHandshake) return result("untracked-handshake");
-    if (workerUnobservable) return result("worker-unobservable");
+    if (workerUnobservable && !completeExpectedSocketProof()) {
+      return result("worker-unobservable");
+    }
     if (pendingWorkers > 0) return result("worker-pending");
     if (targets === 0) return result("no-target");
+    if (expectedConnectionCount !== undefined && targets !== expectedConnectionCount) {
+      return result("worker-pending");
+    }
     const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
     if (targets > connectionCeiling) return result("observation-malformed");
     if (activeAccountSlotMismatch(activeConnections)) {
@@ -1068,7 +1084,9 @@ async function makeWssAudit(contextInfo, progress) {
     session,
     connections,
     isSettled() {
+      if (expectedConnectionCount !== undefined && connections.size > expectedConnectionCount) return true;
       return pendingWorkers === 0 && connections.size > 0 &&
+        (expectedConnectionCount === undefined || connections.size === expectedConnectionCount) &&
         [...connections.values()].every((item) => item.responses === 1);
     },
     validate() {
@@ -1076,7 +1094,9 @@ async function makeWssAudit(contextInfo, progress) {
       const activeConnections = entries.filter((item) => !item.closed).length;
       const signedIn = progress.isSignedIn();
       const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
-      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 ||
+      const workerUnobservableWithoutCompleteSocketProof = workerUnobservable && !completeExpectedSocketProof();
+      if (malformed || orphanHandshake || workerUnobservableWithoutCompleteSocketProof || pendingWorkers !== 0 ||
+          entries.length < 1 || (expectedConnectionCount !== undefined && entries.length !== expectedConnectionCount) ||
           activeConnections < 1 || entries.length > connectionCeiling ||
           activeAccountSlotMismatch(activeConnections) ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
@@ -1117,10 +1137,10 @@ async function makeWssAudit(contextInfo, progress) {
   };
 }
 
-export async function proveWss(contextInfo, release, manifest, progress, tracker) {
+export async function proveWss(contextInfo, release, manifest, progress, tracker, {expectedConnectionCount} = {}) {
   contextInfo.manifest = manifest;
   tracker.expectedEndpoint = manifest.endpoint;
-  const audit = await makeWssAudit(contextInfo, progress);
+  const audit = await makeWssAudit(contextInfo, progress, expectedConnectionCount);
   contextInfo.wssAudit = audit;
   let response;
   try {
