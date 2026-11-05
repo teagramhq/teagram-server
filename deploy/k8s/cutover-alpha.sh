@@ -8,6 +8,10 @@ readonly TARGET_INSTANCE=teagram-k3s
 TEST_MODE=false
 if [[ ${2:-} == --test-mode ]]; then
   TEST_MODE=true
+  # Name the failing command in the disposable-cluster log; many checks exit
+  # under set -e without a message of their own.
+  set -E
+  trap 'printf "k3s cutover: command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   readonly NAMESPACE=teagram-cutover
   readonly KUBECONFIG_PATH=${KUBECONFIG:?--test-mode requires a disposable KUBECONFIG}
   readonly EVIDENCE_DIR=${RUNNER_TEMP:?--test-mode requires RUNNER_TEMP}/teagram-cutover-runner
