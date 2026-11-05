@@ -252,6 +252,8 @@ def kubectl(args, state):
         if namespace == NAMESPACE:
             if group == "apps" and resource in ("deployments", "statefulsets"):
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
+            elif group == "apps" and resource in ("replicasets", "controllerrevisions"):
+                allowed = verb in {"get", "list"}
             elif group == "batch" and resource == "jobs":
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
             elif group == "" and resource in ("configmaps", "services"):

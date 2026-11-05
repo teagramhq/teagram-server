@@ -784,7 +784,17 @@ expect_deployer_can_i() {
 }
 
 expect_deployer_can_i yes create deployments.apps --namespace teagram
+expect_deployer_can_i yes patch deployments.apps --namespace teagram
 expect_deployer_can_i yes patch statefulsets.apps --namespace teagram
+expect_deployer_can_i yes get replicasets.apps --namespace teagram
+expect_deployer_can_i yes list replicasets.apps --namespace teagram
+expect_deployer_can_i yes get controllerrevisions.apps --namespace teagram
+expect_deployer_can_i yes list controllerrevisions.apps --namespace teagram
+for history_resource in replicasets.apps controllerrevisions.apps; do
+  for history_verb in create update patch delete; do
+    expect_deployer_can_i no "$history_verb" "$history_resource" --namespace teagram
+  done
+done
 expect_deployer_can_i yes create jobs.batch --namespace teagram
 expect_deployer_can_i yes patch services --namespace teagram
 expect_deployer_can_i yes create configmaps --namespace teagram

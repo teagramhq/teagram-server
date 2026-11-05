@@ -11,8 +11,9 @@ holds a copy of that kubeconfig. It does not cover the RSA server identity
 
 The token is the only credential a deploy job presents to the k3s API. Its
 Role can create, get, list, patch and watch Deployments and StatefulSets,
-Jobs, Services and ConfigMaps in `teagram`. It can read PVCs, Pods, events and
-Pod logs. It cannot read or write Secrets, create Pods, ServiceAccounts,
+Jobs, Services and ConfigMaps in `teagram`. It can read ReplicaSets and
+ControllerRevisions for rollout history and undo, PVCs, Pods, events and Pod
+logs. It cannot read or write Secrets, create Pods, ServiceAccounts,
 TokenRequests, Roles or RoleBindings. The production overlay's generated
 ConfigMaps and workload resources fit this allowlist.
 

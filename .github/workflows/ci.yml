@@ -1480,7 +1480,17 @@ jobs:
             esac
           }
           expect_deployer_can_i yes create deployments.apps --namespace teagram
+          expect_deployer_can_i yes patch deployments.apps --namespace teagram
           expect_deployer_can_i yes patch statefulsets.apps --namespace teagram
+          expect_deployer_can_i yes get replicasets.apps --namespace teagram
+          expect_deployer_can_i yes list replicasets.apps --namespace teagram
+          expect_deployer_can_i yes get controllerrevisions.apps --namespace teagram
+          expect_deployer_can_i yes list controllerrevisions.apps --namespace teagram
+          for history_resource in replicasets.apps controllerrevisions.apps; do
+            for history_verb in create update patch delete; do
+              expect_deployer_can_i no "$history_verb" "$history_resource" --namespace teagram
+            done
+          done
           expect_deployer_can_i yes create jobs.batch --namespace teagram
           expect_deployer_can_i yes patch services --namespace teagram
           expect_deployer_can_i yes create configmaps --namespace teagram
@@ -1498,6 +1508,93 @@ jobs:
           expect_deployer_can_i no create serviceaccounts --subresource=token --namespace teagram
           expect_deployer_can_i no '*' '*' --namespace teagram
           expect_deployer_can_i no '*' '*' --namespace default
+          rollback_as=system:serviceaccount:teagram:teagram-deployer
+          rollback_manifest="$RUNNER_TEMP/teagram-deployer-rollout-undo.yaml"
+          cat > "$rollback_manifest" <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            replicas: 0
+            selector:
+              matchLabels:
+                app: teagram-deployer-rollback-check
+            template:
+              metadata:
+                labels:
+                  app: teagram-deployer-rollback-check
+              spec:
+                containers:
+                  - name: check
+                    image: busybox:1.36
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            clusterIP: None
+            selector:
+              app: teagram-deployer-rollback-check
+            ports:
+              - name: web
+                port: 80
+                targetPort: 80
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            serviceName: teagram-deployer-rollback-check
+            replicas: 0
+            selector:
+              matchLabels:
+                app: teagram-deployer-rollback-check
+            template:
+              metadata:
+                labels:
+                  app: teagram-deployer-rollback-check
+              spec:
+                containers:
+                  - name: check
+                    image: busybox:1.36
+          EOF
+          kubectl apply --filename "$rollback_manifest" >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=1 \
+            deployment/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl set image deployment/teagram-deployer-rollback-check \
+            check=busybox:1.37 --namespace teagram >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
+            deployment/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl --as="$rollback_as" rollout undo \
+            deployment/teagram-deployer-rollback-check --to-revision=1 \
+            --namespace teagram
+          deployment_image=$(kubectl get deployment teagram-deployer-rollback-check \
+            --namespace teagram --output jsonpath='{.spec.template.spec.containers[0].image}')
+          test "$deployment_image" = busybox:1.36
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=1 \
+            statefulset/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl set image statefulset/teagram-deployer-rollback-check \
+            check=busybox:1.37 --namespace teagram >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
+            statefulset/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl --as="$rollback_as" rollout undo \
+            statefulset/teagram-deployer-rollback-check --to-revision=1 \
+            --namespace teagram
+          statefulset_image=$(kubectl get statefulset teagram-deployer-rollback-check \
+            --namespace teagram --output jsonpath='{.spec.template.spec.containers[0].image}')
+          test "$statefulset_image" = busybox:1.36
+          kubectl delete deployment,statefulset,service teagram-deployer-rollback-check \
+            --namespace teagram --ignore-not-found=true >/dev/null
           namespace_scope_stderr="$RUNNER_TEMP/teagram-deployer-namespaces.stderr"
           if namespace_scope_answer=$(kubectl auth can-i '*' namespaces \
             --as=system:serviceaccount:teagram:teagram-deployer \
