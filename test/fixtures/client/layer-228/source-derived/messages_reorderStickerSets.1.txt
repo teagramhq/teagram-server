@@ -1,0 +1,8 @@
+# source: source-derived from Teagram Desktop dev b70b98b (b70b98bddda61c6d7caa950e5ceca82194cea554), Telegram/SourceFiles/apiwrap.cpp:1638-1657; regular sticker-set order, identifiers redacted
+body: { messages.reorderStickerSets#78337739 flags:# order:Vector<long>
+  flags: 0 [FLAGS],
+  order: [
+    <N> [LONG],
+    <N> [LONG],
+  ],
+},

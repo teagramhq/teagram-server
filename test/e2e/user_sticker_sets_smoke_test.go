@@ -132,7 +132,24 @@ func testSmokeUserCreatedStickerSets(t *testing.T) {
 		if !ok || len(emojis.Sets) != 1 || emojis.Sets[0].ID != created.Set.ID {
 			return fmt.Errorf("getEmojiStickers result = %#v, want created set %d", emojiResult, created.Set.ID)
 		}
-		initialEmojiHash = emojis.Hash
+		reorder := &tg.MessagesReorderStickerSetsRequest{Emojis: true, Order: []int64{created.Set.ID}}
+		reorder.SetFlags()
+		reordered, err := client.MessagesReorderStickerSets(ctx, reorder)
+		if err != nil {
+			return err
+		}
+		if !reordered {
+			return errors.New("reorderStickerSets returned false, want true")
+		}
+		emojisAfterReorder, err := client.MessagesGetEmojiStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		orderedEmojis, ok := emojisAfterReorder.(*tg.MessagesAllStickers)
+		if !ok || len(orderedEmojis.Sets) != 1 || orderedEmojis.Sets[0].ID != created.Set.ID {
+			return fmt.Errorf("getEmojiStickers after reorder = %#v, want created set %d", emojisAfterReorder, created.Set.ID)
+		}
+		initialEmojiHash = orderedEmojis.Hash
 		allResult, err := client.MessagesGetAllStickers(ctx, 0)
 		if err != nil {
 			return err
