@@ -430,6 +430,12 @@ func (q *Queries) FileExistsForBlob(ctx context.Context, id int64) (bool, error)
 }
 
 const fileForDownload = `-- name: FileForDownload :one
+WITH poll_candidates AS MATERIALIZED (
+    SELECT p.id
+    FROM polls p
+    WHERE cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
+      AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[($1::bigint)::text]
+)
 SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
@@ -475,33 +481,34 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
               )
               OR EXISTS (
                   SELECT 1
-                  FROM poll_message_copies pmc
+                  FROM poll_candidates pc
+                  JOIN poll_message_copies pmc ON pmc.poll_id = pc.id
                   JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
-                  JOIN polls p ON p.id = pmc.poll_id
                   WHERE pmc.owner_id = $3 AND m.deleted = false
                     AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
                     AND EXISTS (
                         SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
                     )
-                    AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
-                    AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[f.id::text]
               )
               OR EXISTS (
                   SELECT 1
-                  FROM channel_poll_messages cpm
+                  FROM poll_candidates pc
+                  CROSS JOIN LATERAL (
+                      SELECT cpm.channel_id, cpm.local_id
+                      FROM channel_poll_messages cpm
+                      WHERE cpm.poll_id = pc.id
+                      LIMIT 1
+                  ) cpm
                   JOIN channel_messages cm
                     ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
                   JOIN channel_participants cp ON cp.channel_id = cpm.channel_id AND cp.user_id = $3
                   JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
-                  JOIN polls p ON p.id = cpm.poll_id
                   WHERE cm.deleted = false AND cm.local_id > cp.available_min_id
                     AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
                     AND (cp.banned_until IS NULL OR cp.banned_until <= now())
                     AND EXISTS (
                         SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
                     )
-                    AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
-                    AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[f.id::text]
               )
               -- Custom emoji references live in message entities or poll
               -- descriptions, not in sticker_document_id. Only caller-visible
