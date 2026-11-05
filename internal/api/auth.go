@@ -357,7 +357,7 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMethodNotImpl
 	}
 	verifiedAction := store.TurnstileAction("")
-	if h.turnstileSignInEnabled {
+	if h.turnstileSignInEnabled || r.ReCaptchaToken != "" {
 		verifiedActionString, err := h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
 		if err != nil {
 			if errors.Is(err, ErrTurnstileBusy) {

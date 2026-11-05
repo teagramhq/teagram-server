@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 10)); then
+if (($# != 11)); then
 	printf 'fixture runner requires revisions, a run ID, and fixture mode options\n' >&2
 	exit 2
 fi
@@ -17,6 +17,7 @@ PAIR_KEY_INPUT=$7
 PAIR_KEY_OUTPUT=$8
 AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
 GUEST_SIGNUP=${10}
+GUEST_SIGNUP_GATE_OFF=${11}
 AUTH_PROGRESS_RUNNER_REVISION=097794ab18ef853ca09c3491b9df4e9a702d0ca6
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
@@ -39,6 +40,11 @@ fi
 if [[ $GUEST_SIGNUP != 0 && $GUEST_SIGNUP != 1 ||
 	$GUEST_SIGNUP == 1 && ( $AUTH_PROGRESS == 1 || $AUTH_CONTROLS == 1 || $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 ) ]]; then
 	printf 'fixture guest signup mode is invalid or combined with auth controls\n' >&2
+	exit 2
+fi
+if [[ $GUEST_SIGNUP_GATE_OFF != 0 && $GUEST_SIGNUP_GATE_OFF != 1 ||
+	$GUEST_SIGNUP_GATE_OFF == 1 && $GUEST_SIGNUP != 1 ]]; then
+	printf 'fixture guest signup gate-off mode is invalid or missing guest signup mode\n' >&2
 	exit 2
 fi
 if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
@@ -553,8 +559,10 @@ fi
 SERVER_AUTH_ENV=(--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false)
 SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd:2443)
 SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/)
+TURNSTILE_SIGNIN_ENABLED=false
 if [[ $GUEST_SIGNUP == 1 ]]; then
 	SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd.test:2444)
+	if [[ $GUEST_SIGNUP_GATE_OFF == 0 ]]; then TURNSTILE_SIGNIN_ENABLED=true; fi
 	SERVER_AUTH_ENV=(
 		--env TG_REGISTRATION=open
 		--env TG_LOG_LOGIN_CODES=false
@@ -562,7 +570,7 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 		--env TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
 		--env TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
 		--env TG_TURNSTILE_HOSTNAMES=demo.teagram.io
-		--env TG_TURNSTILE_SIGNIN_ENABLED=true
+		--env "TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
 		--env TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 	)
 	SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/)
@@ -762,7 +770,7 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 		TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
 		TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
 		TG_TURNSTILE_HOSTNAMES=demo.teagram.io
-		TG_TURNSTILE_SIGNIN_ENABLED=true
+		"TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
 		TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 		TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 	)
@@ -900,7 +908,6 @@ TURNSTILE_SIGNIN_ENABLED=false
 if [[ $GUEST_SIGNUP == 1 ]]; then
 	REGISTRATION_CLOSED=false
 	GUEST_SIGNUP_ENABLED=true
-	TURNSTILE_SIGNIN_ENABLED=true
 fi
 SECURITY_JSON="$(jq -cn \
 	--argjson registrationClosed "$REGISTRATION_CLOSED" --argjson guestSignUpEnabled "$GUEST_SIGNUP_ENABLED" \

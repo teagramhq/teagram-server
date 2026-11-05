@@ -143,6 +143,68 @@ func TestSignupChallengePassesWhenSigninGateIsEnabled(t *testing.T) {
 
 }
 
+func TestSignupChallengeAtSendCodePassesWhenSigninGateIsOff(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	const username = "freshguestoff"
+	const signupToken = "signup-token-off"
+	authKeyID := [8]byte{1, 3, 5, 7, 2, 4, 6, 8}
+	if err := s.SaveAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID), make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+
+	verifier := &actionTurnstileVerifier{verified: map[string]string{signupToken: "signup"}}
+	h := testHandlers(s)
+	h.registrationMode = config.RegistrationOpen
+	h.turnstileSiteKey = "site-key"
+	h.turnstileVerifier = verifier
+	h.turnstileSignInEnabled = false
+
+	var sendCodeRequest bin.Buffer
+	if err := (&tg.AuthSendCodeRequest{PhoneNumber: username}).Encode(&sendCodeRequest); err != nil {
+		t.Fatalf("encode auth.sendCode: %v", err)
+	}
+	sent, err := h.handleSendCode(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ReCaptchaToken: signupToken, Buf: &sendCodeRequest,
+	})
+	if err != nil {
+		t.Fatalf("auth.sendCode with signup challenge while signin gate is off: %v", err)
+	}
+	sentCode, ok := sent.(*tg.AuthSentCode)
+	if !ok {
+		t.Fatalf("auth.sendCode result = %T, want *tg.AuthSentCode", sent)
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("Turnstile verifier calls = %d, want signup token checked once", verifier.calls)
+	}
+
+	var signUpRequest bin.Buffer
+	if err := (&tg.AuthSignUpRequest{
+		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, FirstName: "Fresh",
+	}).Encode(&signUpRequest); err != nil {
+		t.Fatalf("encode auth.signUp: %v", err)
+	}
+	created, err := h.handleSignUp(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, Buf: &signUpRequest,
+	})
+	if err != nil {
+		t.Fatalf("auth.signUp with signup challenge bound while signin gate is off: %v", err)
+	}
+	if _, ok := created.(*tg.AuthAuthorization); !ok {
+		t.Fatalf("auth.signUp result = %T, want *tg.AuthAuthorization", created)
+	}
+}
+
 func TestSignupVerifiedCodeCannotStageExistingAccountLogin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

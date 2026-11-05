@@ -243,8 +243,8 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly}) {
-  const scenarios = guestSignupOnly ? GUEST_SIGNUP_SCENARIOS : SCENARIOS;
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff}) {
+  const scenarios = guestSignupOnly ? (guestSignupGateOff ? 'guest-signup-gate-off' : GUEST_SIGNUP_SCENARIOS) : SCENARIOS;
   const result = {
     status,
     runId,
@@ -294,7 +294,15 @@ async function main() {
   if(guestSignupOnlyValue !== '0' && guestSignupOnlyValue !== '1') {
     throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_ONLY must be 0 or 1');
   }
+  const guestSignupGateOffValue = process.env.REAL_CLIENT_GUEST_SIGNUP_GATE_OFF || '0';
+  if(guestSignupGateOffValue !== '0' && guestSignupGateOffValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF must be 0 or 1');
+  }
   const guestSignupOnly = guestSignupOnlyValue === '1';
+  const guestSignupGateOff = guestSignupGateOffValue === '1';
+  if(guestSignupGateOff && !guestSignupOnly) {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF requires REAL_CLIENT_GUEST_SIGNUP_ONLY=1');
+  }
   const serverRevision = requiredRevision('REAL_CLIENT_SERVER_REVISION');
   const webRevision = requiredRevision('REAL_CLIENT_WEB_REVISION');
   const headRevision = requiredRevision('REAL_CLIENT_PR_HEAD');
@@ -328,7 +336,7 @@ async function main() {
       '--server-revision', serverRevision,
       '--web-revision', webRevision,
       '--run-id', runId,
-      ...(guestSignupOnly ? ['--guest-signup'] : [])
+      ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : [])
     ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe']});
     fixtureStarted = true;
     const output = createInterface({input: fixtureProcess.stdout});
@@ -402,7 +410,7 @@ async function main() {
         '--server-revision', serverRevision,
         '--web-revision', webRevision,
         '--run-id', runId,
-        ...(guestSignupOnly ? ['--guest-signup'] : ['--scenarios', SCENARIOS])
+        ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : ['--scenarios', SCENARIOS])
       ], {
         cwd: webRoot,
         env: runnerEnvironment,
@@ -447,7 +455,7 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly});
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
       status = 'failed';

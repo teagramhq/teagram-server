@@ -11,10 +11,11 @@ PAIR_KEY_INPUT=
 PAIR_KEY_OUTPUT=
 AUTH_PROGRESS_PREBASELINE_CONTROLS=0
 GUEST_SIGNUP=0
+GUEST_SIGNUP_GATE_OFF=0
 
 usage() {
 	cat >&2 <<'EOF'
-usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls | --guest-signup] [--auth-progress-prebaseline-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
+usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls | --guest-signup [--guest-signup-gate-off]] [--auth-progress-prebaseline-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
 
 The fixture always uses https://teagramd.test and wss://teagramd.test/apiws.
 It does not accept endpoints, environment files, or production credentials.
@@ -54,6 +55,10 @@ while (($#)); do
 			GUEST_SIGNUP=1
 			shift
 			;;
+		--guest-signup-gate-off)
+			GUEST_SIGNUP_GATE_OFF=1
+			shift
+			;;
 		--auth-progress-prebaseline-controls)
 			AUTH_PROGRESS_PREBASELINE_CONTROLS=1
 			shift
@@ -88,6 +93,10 @@ if [[ ! $RUN_ID =~ ^[0-9a-f]{32}$ ]]; then
 fi
 if ((GUEST_SIGNUP)) && ((AUTH_PROGRESS || AUTH_CONTROLS || AUTH_PROGRESS_PREBASELINE_CONTROLS)); then
 	printf 'guest signup mode cannot be combined with auth-progress or auth controls\n' >&2
+	exit 2
+fi
+if ((GUEST_SIGNUP_GATE_OFF)) && ((GUEST_SIGNUP == 0)); then
+	printf 'guest signup gate-off mode requires --guest-signup\n' >&2
 	exit 2
 fi
 if ((AUTH_PROGRESS)); then
@@ -149,4 +158,4 @@ done < <(env)
 
 printf 'fixture argument validation passed\n' >&2
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT" "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT" "$AUTH_PROGRESS_PREBASELINE_CONTROLS" "$GUEST_SIGNUP"
+exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT" "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT" "$AUTH_PROGRESS_PREBASELINE_CONTROLS" "$GUEST_SIGNUP" "$GUEST_SIGNUP_GATE_OFF"
