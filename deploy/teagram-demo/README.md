@@ -371,6 +371,43 @@ to restore it, use `turnstile-signin-on`. If a deployment fails, the script
 restores the prior `.env` snapshot and redeploys that flag state. It never prints
 Turnstile key values.
 
+The reviewed rotate-turnstile-qa-bypass-token operation snapshots the old
+token under the root-only /var/backups/teagram-demo-turnstile-qa-bypass
+directory, atomically installs a new random token with the existing runtime
+ownership and mode, then recreates the active server slot with the current
+pinned image. This briefly interrupts the public demo. If the new server does
+not become healthy, the operation stops it. If container stop commands fail,
+it tries a forced stop, then drains the slot from HAProxy and shuts down
+existing sessions in both public backends. The old container can retain the old
+token because its bind mount may pin the prior file inode. If stop, drain or
+session shutdown cannot be confirmed, the operation reports that the old token
+may still be live and leaves the compromised token snapshot untouched. Rerun
+the reviewed operation to generate another fresh token; never restore the
+snapshot, because the old value is compromised.
+On a rerun, it accepts healthy HAProxy checks in `UP` or `DRAIN` state and only
+enables the active slot after both checks pass. The operation prints only the
+snapshot path, token length, active slot and HAProxy readiness.
+Run it with ssh -T teagram-demo 'run <main-sha> rotate-turnstile-qa-bypass-token'.
+
+After rotation, an authorized workspace admin must copy the new value into
+QA's existing audited custom_env entry without printing it. QA should read
+TEAGRAM_DEMO_TURNSTILE_QA_BYPASS_TOKEN inside its Playwright Node process and
+pass it directly to page.evaluate for localStorage setup. Do not expand it in
+a shell command, echo it, list the process environment or log it.
+
+### QA bypass token threat model
+
+The token bypasses Turnstile for demo signup, so anyone who obtains it can
+create demo accounts without that challenge. Treat the active token and its
+root-only recovery snapshot as secrets. Demo host root can read both; the
+server and isolated probe services can read the mounted token as gid 65532. An
+authorized workspace admin transfers the new value into QA's audited custom_env
+entry, where the QA runtime is an intentional consumer. Keep it out of shell
+history and snapshots, CI output, logs and comments; QA reads it only from
+`process.env` and must not log it. The secret mount and runtime variable are
+demo-only; production has no bypass-token mount or configured token. Never
+restore the old snapshot because the old value is compromised.
+
 After enabling public signin, verify signin and signup challenges from the
 public web origin with
 `go run ./deploy/teagram-demo/turnstile-signin-probe.go active`. The probe reads

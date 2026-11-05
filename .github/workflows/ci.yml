@@ -1145,6 +1145,7 @@ jobs:
           sh -n deploy/teagram-demo/ops/install-qa-invite-command.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollback.sh
+          bash -n deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-on.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-off.sh
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
@@ -1227,6 +1228,7 @@ jobs:
             .github/scripts/test-perf-postgres.sh \
             .github/scripts/test-deploy-workflow-contract.sh
           shellcheck --shell=bash deploy/teagram/ops/blob-encryption-common.inc
+          shellcheck deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
@@ -1271,7 +1273,9 @@ jobs:
         run: python3 deploy/teagram-demo/test-web-artifact-pin.py
 
       - name: Check demo Turnstile secret access
-        run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
+        run: |
+          sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
+          sudo -n python3 deploy/teagram-demo/test-rotate-qa-bypass-token.py
 
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
