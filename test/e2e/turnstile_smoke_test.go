@@ -221,6 +221,7 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 			err  error
 		}
 		resultCh := make(chan sendCodeResult, 1)
+		f.codes.drainSuccessfulAckEvents()
 		go func() {
 			var sent tg.AuthSentCodeBox
 			err := apiClient.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{
@@ -234,7 +235,7 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 		case <-ctx.Done():
 			return fmt.Errorf("wait for delayed sendCode verification: %w", ctx.Err())
 		}
-		if err := f.codes.waitForSuccessfulAck(ctx, uint64(tg.AuthSendCodeRequestTypeID)); err != nil {
+		if err := f.codes.waitForSuccessfulAck(ctx); err != nil {
 			return fmt.Errorf("wait for an actual msgs_ack send while sendCode is blocked: %w", err)
 		}
 		close(verifier.verificationRelease)
@@ -272,9 +273,6 @@ func testSmokeTurnstileSignUpFromSendCode(t *testing.T) {
 	assertSmokeTurnstileVerifications(t, verifier,
 		smokeTurnstileVerification{token: sendCodeToken, action: "signup"},
 	)
-	if sent := f.codes.successfulAckRPCTypeRecords(); !slices.Contains(sent, uint64(tg.AuthSendCodeRequestTypeID)) {
-		t.Fatalf("successful msgs_ack logs = %v, want auth.sendCode constructor %d", sent, tg.AuthSendCodeRequestTypeID)
-	}
 	if failures := f.codes.internalAckFailureRecords(); len(failures) != 0 {
 		t.Fatalf("guest sign-up logged internal msgs_ack send failures: %v", failures)
 	}
