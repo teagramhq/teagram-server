@@ -32,9 +32,10 @@ trap 'report_failure "$LINENO" "$BASH_COMMAND"' ERR
 mkdir -p "$TMP/bin"
 FIXTURE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FIXTURE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FIXTURE_ORIGIN_REVISION=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 FIXTURE_IMAGE=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 FIXTURE_RETAGGED_IMAGE=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-export FIXTURE_SHA FIXTURE_REVISION FIXTURE_IMAGE FIXTURE_RETAGGED_IMAGE
+export FIXTURE_SHA FIXTURE_REVISION FIXTURE_ORIGIN_REVISION FIXTURE_IMAGE FIXTURE_RETAGGED_IMAGE
 
 cat > "$TMP/bin/id" <<'ID'
 #!/usr/bin/env bash
@@ -81,15 +82,31 @@ shift 2
 case "$1" in
   branch) [[ "$2" == --show-current ]] && printf 'main\n' ;;
   rev-parse)
-    case "$2" in
-      --verify) printf '%s\n' "$FIXTURE_REVISION" ;;
+    case "$2:$3" in
+      --verify:'HEAD^{commit}') printf '%s\n' "$FIXTURE_REVISION" ;;
+      --verify:'origin/main^{commit}') printf '%s\n' "$FIXTURE_ORIGIN_REVISION" ;;
+      --verify:*) exit 99 ;;
       HEAD) printf '%s\n' "$FIXTURE_REVISION" ;;
-      origin/main) printf '%s\n' "$FIXTURE_REVISION" ;;
+      origin/main) printf '%s\n' "$FIXTURE_ORIGIN_REVISION" ;;
       *) exit 99 ;;
     esac
     ;;
   fetch) exit 0 ;;
-  merge-base) exit 0 ;;
+  merge-base)
+    if [[ "$FIXTURE_SCENARIO" == ancestry-origin-failure && \
+      "$3" == "$FIXTURE_SHA" && "$4" == "$FIXTURE_ORIGIN_REVISION" ]]; then
+      exit 1
+    fi
+    if [[ "$FIXTURE_SCENARIO" == ancestry-live-failure && \
+      "$3" == "$FIXTURE_SHA" && "$4" == "$FIXTURE_REVISION" ]]; then
+      exit 1
+    fi
+    if [[ "$FIXTURE_SCENARIO" == ancestry-minimum-failure && \
+      "$3" == 91e50a0 && "$4" == "$FIXTURE_REVISION" ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   show)
     case "$2" in
       "$FIXTURE_SHA:deploy/teagram/ops/blob-encryption-common.inc")
@@ -262,14 +279,20 @@ case "$1" in
     ;;
   compose)
     if [[ "$*" == *' config --format json' ]]; then
+      if [[ "$FIXTURE_SCENARIO" == compose-render-failure ]]; then
+        echo 'fixture Compose render failure' >&2
+        exit 42
+      fi
       jq -cn --arg key "$FIXTURE_KEY_DIR" --arg evidence "$FIXTURE_EVIDENCE" \
+        --arg scenario "$FIXTURE_SCENARIO" \
         --arg state "$FIXTURE_REPO/.state/blob-mode" '
         {services:{
           "blob-encrypt-migrate":{
             image:"teagramd:local",entrypoint:["/usr/local/bin/blob-encrypt-migrate"],
             user:"0:0",read_only:true,profiles:["migration"],
             volumes:[
-              {source:$key,target:"/run/teagramd/media-keys",read_only:true},
+              {source:(if $scenario == "compose-mount-failure" then "/unexpected/media-keys" else $key end),
+                target:"/run/teagramd/media-keys",read_only:true},
               {source:$evidence,target:"/run/teagramd/reports"},
               {source:$state,target:"/run/teagramd/blob-mode"}
             ],networks:{default:{},rustfs_private:{}}},
@@ -294,7 +317,10 @@ case "$1" in
       elif [[ "$FIXTURE_SCENARIO" == encrypt-success ]]; then
         publish_encrypted_authority
         printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
-      elif [[ "$FIXTURE_SCENARIO" == cleanup-success && " $* " == *' --cleanup '* ]]; then
+      elif [[ "$FIXTURE_SCENARIO" == cleanup-success || \
+        "$FIXTURE_SCENARIO" == cleanup-recheck-removes || \
+        "$FIXTURE_SCENARIO" == cleanup-post-unaccounted ]] && \
+        [[ " $* " == *' --cleanup '* ]]; then
         cleanup_calls=0
         [[ ! -f "$FIXTURE_CLEANUP_CALLS" ]] || cleanup_calls=$(cat "$FIXTURE_CLEANUP_CALLS")
         cleanup_calls=$((cleanup_calls + 1))
@@ -303,8 +329,20 @@ case "$1" in
         if [[ "$cleanup_calls" == 1 ]]; then
           rm -- "$FIXTURE_PLAINTEXT_OBJECT"
           removed=1
+        elif [[ "$FIXTURE_SCENARIO" == cleanup-recheck-removes && "$cleanup_calls" == 2 ]]; then
+          removed=1
         fi
         printf '{"mode":"cleanup","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"plaintext_objects_removed":%s,"unaccounted":[]}\n' "$removed"
+      elif [[ "$FIXTURE_SCENARIO" == cleanup-post-unaccounted && " $* " != *' --cleanup '* ]]; then
+        encrypt_calls=0
+        [[ ! -f "$FIXTURE_ENCRYPT_CALLS" ]] || encrypt_calls=$(cat "$FIXTURE_ENCRYPT_CALLS")
+        encrypt_calls=$((encrypt_calls + 1))
+        printf '%s\n' "$encrypt_calls" > "$FIXTURE_ENCRYPT_CALLS"
+        if [[ "$encrypt_calls" == 2 ]]; then
+          printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[{"kind":"file","id":"999","key":"files/999"}]}\n'
+        else
+          printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
+        fi
       else
         printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
       fi
@@ -339,15 +377,15 @@ setup_case() {
   FIXTURE_AUTHORITY_FILE=$case_dir/authority
   FIXTURE_RESTORE_CONTAINER=$case_dir/restore-container
   FIXTURE_CLEANUP_CALLS=$case_dir/cleanup-calls
+  FIXTURE_ENCRYPT_CALLS=$case_dir/encrypt-calls
   FIXTURE_PLAINTEXT_OBJECT=$case_dir/plaintext-source
   FIXTURE_EVENTS=$case_dir/events
   FIXTURE_SCENARIO=$scenario
-  FIXTURE_AUTHORITY=$authority
   FIXTURE_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_POSTGRES_STATE \
     FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
-    FIXTURE_CLEANUP_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
-    FIXTURE_AUTHORITY FIXTURE_COMPOSE_FILES
+    FIXTURE_CLEANUP_CALLS FIXTURE_ENCRYPT_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
+    FIXTURE_COMPOSE_FILES
 
   mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE" "$FIXTURE_KEY_DIR"
   mkdir -m 700 "$FIXTURE_OPERATION_EVIDENCE"
@@ -364,8 +402,12 @@ setup_case() {
   printf 'running\n' > "$FIXTURE_SERVER_STATE"
   printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
   printf '%s\n' "$authority" > "$FIXTURE_AUTHORITY_FILE"
-  if [[ "$scenario" == cleanup-success ]]; then
+  if [[ "$scenario" == cleanup-success || "$scenario" == cleanup-recheck-removes || \
+    "$scenario" == cleanup-post-unaccounted ]]; then
     printf 'fixture plaintext source\n' > "$FIXTURE_PLAINTEXT_OBJECT"
+  fi
+  if [[ "$scenario" == key-backup-mismatch ]]; then
+    printf 'different fixture backup\n' > "$FIXTURE_EVIDENCE/teagram-media-key-v1-20261024T192020Z.key"
   fi
   : > "$FIXTURE_EVENTS"
 
@@ -507,3 +549,71 @@ output=$(run_encrypt)
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
 [[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nrestore:psql\nrestore:stop\nimage-check\nstart:server' ]]
 printf '%s\n' 'PASS migration refuses a retagged image and restores teagramd'
+
+setup_case cleanup-recheck-removes encrypted
+output=$(run_cleanup --acceptance-passed)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'referenced plaintext objects remained after cleanup verification'* ]]
+[[ ! -e "$FIXTURE_PLAINTEXT_OBJECT" ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nstart:server' ]]
+printf '%s\n' 'PASS cleanup rejects a nonzero removal recheck and restores the server'
+
+setup_case cleanup-post-unaccounted encrypted
+output=$(run_cleanup --acceptance-passed)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'media migration result contains 1 unaccounted objects'* ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nstart:server' ]]
+printf '%s\n' 'PASS cleanup refuses post-cleanup unaccounted objects and restores the server'
+
+setup_case already-encrypted-success encrypted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'migration=already_encrypted authority=encrypted'* ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+printf '%s\n' 'PASS already-encrypted migration resumes with verified readback and smoke'
+
+for scenario in ancestry-origin-failure ancestry-live-failure ancestry-minimum-failure; do
+  setup_case "$scenario" s3-accepted
+  output=$(run_encrypt)
+  [[ "$(cat "$TMP/operation-status")" == 1 ]]
+  case "$scenario" in
+    ancestry-origin-failure) [[ "$output" == *'reviewed operation source is not on origin/main'* ]] ;;
+    ancestry-live-failure) [[ "$output" == *'reviewed operation source has not been deployed'* ]] ;;
+    ancestry-minimum-failure) [[ "$output" == *'live image does not contain the media encryption operator'* ]] ;;
+  esac
+  [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+done
+printf '%s\n' 'PASS each source ancestry guard rejects before stopping teagramd'
+
+setup_case compose-mount-failure s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'Compose migration or media-key mount failed reviewed preflight'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS Compose media-key mount drift rejects before stopping teagramd'
+
+setup_case key-backup-mismatch s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'host-local media key backup differs from the mounted key'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS mismatched media-key backup rejects before stopping teagramd'
+
+setup_case compose-render-failure s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'live Compose render failed; private diagnostic retained at'* ]]
+diagnostic_count=0
+for diagnostic in "$FIXTURE_OPERATION_EVIDENCE"/compose-render-*.stderr; do
+  [[ -f "$diagnostic" ]] || continue
+  diagnostic_count=$((diagnostic_count + 1))
+  [[ "$(stat -c '%a' "$diagnostic")" == 600 ]]
+  [[ "$(cat "$diagnostic")" == 'fixture Compose render failure' ]]
+  [[ "$output" == *"private diagnostic retained at $diagnostic"* ]]
+done
+[[ "$diagnostic_count" == 1 ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS Compose render diagnostics persist privately after the operation exits'

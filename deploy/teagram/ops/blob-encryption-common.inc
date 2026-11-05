@@ -126,7 +126,7 @@ validate_live_stack() {
 }
 
 configure_compose() {
-  local authority_json env_file_lines legacy_parked
+  local authority_json env_file_lines legacy_parked compose_stderr
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-transition-runner.py" deployment-env \
     --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root /root --lock-path "$LOCK_FILE") || \
     ops_fail 'live S3 authority or credential selection is not verified'
@@ -156,8 +156,15 @@ configure_compose() {
     --file "$REPO/docker-compose.yml" --file "$REPO/docker-compose.override.yml" \
     --env-file "${COMPOSE_ENV_FILES[0]}" --env-file "${COMPOSE_ENV_FILES[1]}")
 
-  "${COMPOSE[@]}" config --format json </dev/null > "$OPS_TEMP_DIR/compose.json" 2> "$OPS_TEMP_DIR/compose.stderr" || \
-    ops_fail 'live Compose render failed; private diagnostic retained in the operation directory'
+  compose_stderr="$EVIDENCE_ROOT/compose-render-$RUN_ID.stderr"
+  [[ ! -e "$compose_stderr" && ! -L "$compose_stderr" ]] || \
+    ops_fail 'Compose render diagnostic path already exists'
+  if ! "${COMPOSE[@]}" config --format json </dev/null \
+    > "$OPS_TEMP_DIR/compose.json" 2> "$compose_stderr"; then
+    chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
+    ops_fail "live Compose render failed; private diagnostic retained at $compose_stderr"
+  fi
+  chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
   jq -e --arg key_dir "$KEY_DIR" '
     .services["blob-encrypt-migrate"] as $migration |
     .services.teagramd as $server |
