@@ -37,7 +37,6 @@ export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_START_SERVER_SCRIPT="$tmp/start-server.sh"
-export MOCK_BOT_API_QA_SCRIPT="$tmp/bot-api-qa.sh"
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_SHOW_LOG="$tmp/show.log"
@@ -93,9 +92,6 @@ case "$1" in
         ;;
       "$OPS_SHA:deploy/teagram/ops/start-server.sh")
         cat "$MOCK_START_SERVER_SCRIPT"
-        ;;
-      "$OPS_SHA:deploy/teagram/ops/bot-api-qa.sh")
-        cat "$MOCK_BOT_API_QA_SCRIPT"
         ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
@@ -175,14 +171,6 @@ printf ' <%s>' "$@"
 printf '\n'
 START_SERVER
 
-cat > "$MOCK_BOT_API_QA_SCRIPT" <<'BOT_API_QA'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'bot-api-qa-operation args:'
-printf ' <%s>' "$@"
-printf '\n'
-BOT_API_QA
-
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
   -e "s|0:700|$MOCK_OWNER_UID:700|g" \
@@ -221,7 +209,7 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|bot-api-qa|start-server|encrypt-media|cleanup-media'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media'* ]]
   [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
     "$help_output" == *'verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
@@ -260,10 +248,6 @@ invite_rollback=$(run_command "run $OPS_SHA invite-web-signup-url --rollback")
 [[ "$invite_rollback" == 'invite-operation args: <--rollback>' ]]
 start_server=$(run_command "run $OPS_SHA start-server")
 [[ "$start_server" == 'start-server-operation args: <>' ]]
-bot_api_apply=$(run_command "run $OPS_SHA bot-api-qa apply")
-[[ "$bot_api_apply" == 'bot-api-qa-operation args: <apply>' ]]
-bot_api_provision=$(run_command "run $OPS_SHA bot-api-qa provision")
-[[ "$bot_api_provision" == 'bot-api-qa-operation args: <provision>' ]]
 
 sentinel="$tmp/arbitrary-command-ran"
 expect_status 64 "touch $sentinel"
@@ -355,7 +339,7 @@ expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-expected_runner_temps=$((10 + active_operation_count))
+expected_runner_temps=$((8 + active_operation_count))
 [[ "${#runner_temps[@]}" == "$expected_runner_temps" && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
