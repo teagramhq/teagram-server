@@ -1108,8 +1108,13 @@ func isWebSocketProtocolDecodeError(err error) bool {
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
-	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout && isWebSocketDisconnect(err) {
-		reason = transportCloseReasonClientClose
+	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout {
+		failure, isFailure := errors.AsType[*webSocketServeFailureError](err)
+		if isFailure && failure != nil && failure.stage != "read_frame" && errors.Is(failure.err, io.ErrUnexpectedEOF) {
+			reason = transportCloseReasonServerError
+		} else if isWebSocketDisconnect(err) {
+			reason = transportCloseReasonClientClose
+		}
 	}
 	attrs := []any{
 		"transport", diagnostics.transport,
@@ -1280,6 +1285,10 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	failureStage := "connection_cleanup"
 	defer func() {
 		if closeDiagnostics.transport != websocketPath || rErr == nil || isWebSocketDisconnect(rErr) {
+			return
+		}
+		if failureStage == "read_frame" && errors.Is(rErr, io.ErrUnexpectedEOF) {
+			rErr = errors.Join(io.EOF, rErr)
 			return
 		}
 		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {

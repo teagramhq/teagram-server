@@ -50,6 +50,14 @@ type serverLoopFailureConn struct {
 	err   error
 }
 
+type unexpectedEOFAuthKeyStore struct{}
+
+func (unexpectedEOFAuthKeyStore) Save(context.Context, tdcrypto.AuthKey) error { return nil }
+func (unexpectedEOFAuthKeyStore) Get(context.Context, [8]byte, time.Duration) (tdcrypto.AuthKey, int64, bool, PendingLogin, bool, error) {
+	return tdcrypto.AuthKey{}, 0, false, PendingLogin{}, false, io.ErrUnexpectedEOF
+}
+func (unexpectedEOFAuthKeyStore) Touch(context.Context, [8]byte) error { return nil }
+
 func (c *serverLoopFailureConn) Recv(_ context.Context, b *bin.Buffer) error {
 	if c.frame != nil {
 		b.ResetTo(c.frame)
@@ -890,6 +898,79 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 	for _, forbidden := range []string{rawError, fmt.Sprintf("%x", keyBytes), payload, token} {
 		if strings.Contains(logged, forbidden) {
 			t.Errorf("WebSocket failure logs exposed secret material %q: %s", forbidden, logged)
+		}
+	}
+}
+
+func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, unexpectedEOFAuthKeyStore{}, nil, slog.New(sink))
+	peerAddr := netip.MustParseAddr("203.0.113.37")
+	frame := make([]byte, 16)
+	frame[0] = 1
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	err := server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), &serverLoopFailureConn{frame: frame}, peerAddr, nil, nil, false, nil, diagnostics,
+	)
+	if err == nil {
+		t.Fatal("WebSocket serve loop succeeded after auth-key lookup returned unexpected EOF")
+	}
+	server.logConnectionFailure(err)
+	server.logTransportClose(diagnostics, err)
+
+	var failureRecord, closeRecord *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		switch record.message {
+		case "server operation failed":
+			failureRecord = record
+		case "transport connection closed":
+			closeRecord = record
+		}
+	}
+	if failureRecord == nil {
+		t.Fatalf("no server operation failure record in %+v", sink.records)
+	}
+	for key, want := range map[string]any{
+		"category":  "websocket_serve",
+		"operation": "websocket_serve_loop",
+		"stage":     "auth_key_lookup",
+		"cause":     "auth_key_lookup",
+	} {
+		if got := failureRecord.attrs[key]; got != want {
+			t.Errorf("failure %s = %v, want %v", key, got, want)
+		}
+	}
+	if closeRecord == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	if got := closeRecord.attrs["reason"]; got != "server error" {
+		t.Errorf("transport close reason = %v, want server error", got)
+	}
+}
+
+func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	err := server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), &serverLoopFailureConn{err: io.ErrUnexpectedEOF},
+		netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
+	)
+	if err == nil {
+		t.Fatal("WebSocket serve loop succeeded after frame read returned unexpected EOF")
+	}
+	if !isWebSocketDisconnect(err) {
+		t.Fatalf("frame-read error = %v, want WebSocket disconnect", err)
+	}
+	server.logTransportClose(diagnostics, err)
+
+	for _, record := range sink.records {
+		if record.message == "server operation failed" {
+			t.Fatalf("frame-read EOF logged a server failure: %+v", record)
+		}
+		if record.message == "transport connection closed" && record.attrs["reason"] != "client close" {
+			t.Fatalf("transport close = %+v, want client close", record)
 		}
 	}
 }

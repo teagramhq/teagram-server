@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -43,7 +42,7 @@ type webSocketConnState struct {
 }
 
 func isWebSocketDisconnect(err error) bool {
-	if isDisconnect(err) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if isDisconnect(err) {
 		return true
 	}
 	return websocket.CloseStatus(err) != -1
