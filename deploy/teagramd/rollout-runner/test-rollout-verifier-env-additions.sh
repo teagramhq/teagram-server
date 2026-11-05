@@ -800,6 +800,15 @@ public_ws_cf_snapshot=$(snapshot_from_json \
   "$public_ws_cf_inspect" "$public_ws_cf_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
 [ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
 [ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
+public_ws_cf_preflight_snapshot=$(snapshot_from_json \
+  "$public_ws_loopback_inspect" "$public_ws_cf_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+[ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_cf_preflight_snapshot")" = cf-connecting-ip ]
+[ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_cf_preflight_snapshot")" = socket ]
+if snapshot_from_json "$public_ws_loopback_inspect" "$public_ws_cf_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>"$TMP/public-ws-cf-target-mismatch.err"; then
+  printf '%s\n' 'FAIL target snapshot accepted the still-running socket-mode container for CF trust' >&2
+  exit 1
+fi
 public_ws_unset_compose=$(jq -c 'del(.services.teagramd.environment.TG_CLIENT_ADDR_TRUST)' <<< "$public_ws_loopback_compose")
 public_ws_unset_inspect=$(printf '%s' "$public_ws_loopback_inspect" | jq -c \
   '.Config.Env |= map(select(startswith("TG_CLIENT_ADDR_TRUST=") | not))')

@@ -882,7 +882,7 @@ snapshot_from_json() {
   local require_restart_policies=${9:-false}
   local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart canonical_without_migrate_image_and_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
   local mounts_sha exposure_sha config_sha config_without_restart_sha config_without_migrate_image_and_restart_sha migrate_image compose_restart_policies container_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
-  local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
+  local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust preflight_socket_to_cf
   local compose_public_ws_2446 exposure_public_ws_2446
   local media_key_source media_key_current
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
@@ -1387,8 +1387,13 @@ snapshot_from_json() {
         else "unset" end
     ')
     if [ "$compose_client_addr_trust" = cf-connecting-ip ] || [ "$container_client_addr_trust" = cf-connecting-ip ]; then
+      preflight_socket_to_cf=false
+      if [ "$snapshot_name" = preflight ] && [ "$container_client_addr_trust" = socket ]; then
+        # Preflight inspects the old container before Compose replaces it.
+        preflight_socket_to_cf=true
+      fi
       if [ "$compose_client_addr_trust" != cf-connecting-ip ] || \
-         [ "$container_client_addr_trust" != cf-connecting-ip ] || \
+         { [ "$container_client_addr_trust" != cf-connecting-ip ] && [ "$preflight_socket_to_cf" != true ]; } || \
          [ "$compose_public_ws_2446" != true ] || [ "$exposure_public_ws_2446" != true ] || \
          ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se '
            def item: if type == "array" then .[0] else . end;
