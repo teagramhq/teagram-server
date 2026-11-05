@@ -36,6 +36,7 @@ const (
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
 	defaultActivityInventory = "/run/secrets/demo-activity-inventory.json"
+	defaultTurnstileQAToken  = "/run/secrets/teagram_demo_turnstile_qa_bypass"
 	trustedProxyHost         = "haproxy"
 	trustedProxyEndpoint     = trustedProxyHost + ":2443"
 	appID                    = 1
@@ -628,8 +629,8 @@ func newProbeUsername() (string, error) {
 
 type turnstileProbeAPI interface {
 	AuthSendCode(context.Context, *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error)
-	AuthSignIn(context.Context, *tg.AuthSignInRequest) (tg.AuthAuthorizationClass, error)
 	AuthSignUp(context.Context, *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error)
+	Invoker() tg.Invoker
 }
 
 func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
@@ -637,36 +638,49 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 	if err != nil {
 		return err
 	}
+	qaToken, err := readTurnstileQAToken(defaultTurnstileQAToken)
+	if err != nil {
+		return err
+	}
 	client := newTelegramClientAt(cfg, trustedProxyHost)
 	return client.Run(ctx, func(runCtx context.Context) error {
-		return verifyTurnstileWithAPI(runCtx, client.API(), username)
+		return verifyTurnstileWithAPI(runCtx, client.API(), username, qaToken)
 	})
 }
 
-func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username string) error {
-	sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash})
-	if err != nil {
+func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username, signupQAToken string) error {
+	sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash}
+	sent, err := api.AuthSendCode(ctx, sendCode)
+	if isSignInCaptchaRequired(err) {
+		if signupQAToken == "" {
+			return errors.New("sign-in gate is enabled but the signup QA token is unavailable")
+		}
+		var response tg.AuthSentCodeBox
+		if err := api.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{Token: signupQAToken, Query: sendCode}, &response); err != nil {
+			return fmt.Errorf("request sign-up probe code with signup action: %w", err)
+		}
+		sent = response.SentCode
+	} else if err != nil {
 		return fmt.Errorf("request sign-up probe code: %w", err)
 	}
 	sentCode, ok := sent.(*tg.AuthSentCode)
 	if !ok {
 		return fmt.Errorf("unexpected sign-up probe response %T", sent)
 	}
-	signIn, err := api.AuthSignIn(ctx, &tg.AuthSignInRequest{
-		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
-	})
-	_, responseRequiresSignup := signIn.(*tg.AuthAuthorizationSignUpRequired)
-	if err == nil {
-		if !responseRequiresSignup {
-			return errors.New("sign-up probe unexpectedly authenticated")
-		}
-	} else if !isSignUpRequired(err) {
-		return fmt.Errorf("sign-up probe did not reach registration: %w", err)
+	if sentCode.PhoneCodeHash == "" {
+		return errors.New("sign-up probe returned an empty code hash")
 	}
-	// Keep the probe non-creating if the CAPTCHA gate is ever missing.
+
+	// Use a separate identifier and unbound code hash so this check reaches the
+	// signup challenge without consuming the sendCode challenge or charging the
+	// signup IP limit.
+	signupUsername, err := newProbeUsername()
+	if err != nil {
+		return err
+	}
 	_, err = api.AuthSignUp(ctx, &tg.AuthSignUpRequest{
-		PhoneNumber:   username,
-		PhoneCodeHash: sentCode.PhoneCodeHash,
+		PhoneNumber:   signupUsername,
+		PhoneCodeHash: strings.Repeat("0", 32),
 		FirstName:     strings.Repeat("x", 65),
 		LastName:      "Probe",
 	})
@@ -680,6 +694,44 @@ func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username
 }
 
 func isSignupCaptchaRequired(err error) bool {
+	return isTurnstileChallengeRequired(err, "signup")
+}
+
+func isSignInCaptchaRequired(err error) bool {
+	return isTurnstileChallengeRequired(err, "signin")
+}
+
+func isTurnstileChallengeRequired(err error, action string) bool {
 	var rpcErr *tgerr.Error
-	return errors.As(err, &rpcErr) && strings.HasPrefix(rpcErr.Message, "RECAPTCHA_CHECK_signup__")
+	return errors.As(err, &rpcErr) && strings.HasPrefix(rpcErr.Message, "RECAPTCHA_CHECK_"+action+"__")
+}
+
+func readTurnstileQAToken(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect demo Turnstile QA token file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("demo Turnstile QA token file must be a regular file")
+	}
+	// #nosec G304 -- production passes only the fixed demo Compose secret path; the parameter lets unit tests use temporary files.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read demo Turnstile QA token file: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 32 || len(token) > 256 {
+		return "", errors.New("demo Turnstile QA token file has an invalid value")
+	}
+	for _, char := range []byte(token) {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case char == '_' || char == '-':
+		default:
+			return "", errors.New("demo Turnstile QA token file has an invalid value")
+		}
+	}
+	return token, nil
 }

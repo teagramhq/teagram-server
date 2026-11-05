@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -300,56 +301,148 @@ func (c *failAfterConn) Send(context.Context, *bin.Buffer) error {
 
 func (*failAfterConn) Close() error { return nil }
 
-// TestFailedAckWriteIsLogged fails the msgs_ack write while the connection
-// still closes cleanly. The failure must reach the server failure log rather
-// than vanish with the connection.
-func TestFailedAckWriteIsLogged(t *testing.T) {
+type failAckEncryptionReader struct {
+	reads int
+	err   error
+}
+
+func (r *failAckEncryptionReader) Read(p []byte) (int, error) {
+	if r.reads >= 2 {
+		return 0, r.err
+	}
+	r.reads++
+	clear(p)
+	return len(p), nil
+}
+
+// TestFailedAckLogPreservesSendClassification verifies that a failed ack
+// retains its RPC type without turning an encryption failure into a transport
+// failure. Only an error returned by the socket write is transport-classified.
+func TestFailedAckLogPreservesSendClassification(t *testing.T) {
 	t.Parallel()
-	const rawError = "PRIVATE-ACK-WRITE-DETAIL"
+	for _, test := range []struct {
+		name              string
+		writeErr          error
+		encryptErr        error
+		wantCause         requestFailureCause
+		wantError         string
+		wantErrorCategory RPCResultClass
+		wantSends         int
+	}{
+		{
+			name:              "write deadline",
+			writeErr:          os.ErrDeadlineExceeded,
+			wantCause:         requestFailureTransport,
+			wantError:         "transport",
+			wantErrorCategory: RPCResultTransportFailure,
+			wantSends:         3,
+		},
+		{
+			name:              "encryption failure",
+			encryptErr:        errors.New("PRIVATE-ACK-ENCRYPT-DETAIL"),
+			wantCause:         requestFailureOther,
+			wantError:         "internal",
+			wantErrorCategory: RPCResultInternal,
+			wantSends:         1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			const rawWriteError = "PRIVATE-ACK-WRITE-DETAIL"
+			const rawEncryptError = "PRIVATE-ACK-ENCRYPT-DETAIL"
+
+			key := ackTestKey()
+			store := NewMemoryAuthKeyStore()
+			if err := store.Save(context.Background(), key); err != nil {
+				t.Fatalf("save key: %v", err)
+			}
+			handler := HandlerFunc(func(c *Conn, req *Request) error {
+				time.Sleep(ackDelay + 250*time.Millisecond)
+				return c.SendResult(req, &tg.NearestDC{Country: "NL", ThisDC: 2, NearestDC: 2})
+			})
+			sink := &lockedLogSink{}
+			srv := New(exchange.PrivateKey{}, 2, store, handler, slog.New(sink))
+			if test.encryptErr != nil {
+				srv.cipher = tdcrypto.NewServerCipher(&failAckEncryptionReader{err: test.encryptErr})
+			}
+			conn := &failAfterConn{
+				frames:  [][]byte{ackTestFrame(t, key, 1<<32, &tg.HelpGetNearestDCRequest{})},
+				ok:      1,
+				sendErr: test.writeErr,
+			}
+			if err := srv.ServeConn(context.Background(), conn); err == nil {
+				t.Fatal("ServeConn returned nil after its writes failed")
+			}
+			conn.mu.Lock()
+			sends := conn.sends
+			conn.mu.Unlock()
+			if sends != test.wantSends {
+				t.Fatalf("transport sends = %d, want %d", sends, test.wantSends)
+			}
+
+			sink.mu.Lock()
+			defer sink.mu.Unlock()
+			for _, r := range sink.records {
+				if r.message != "server operation failed" || r.attrs["operation"] != "msgs_ack" {
+					continue
+				}
+				if r.attrs["category"] != string(serverFailureRequest) {
+					t.Fatalf("msgs_ack failure category = %v, want %s", r.attrs["category"], serverFailureRequest)
+				}
+				for key, want := range map[string]any{
+					"rpc_method":     UnknownRPCMethod,
+					"rpc_type_id":    uint64(tg.HelpGetNearestDCRequestTypeID),
+					"request_id":     int64(0),
+					"error_category": string(test.wantErrorCategory),
+					"cause":          string(test.wantCause),
+					"error":          test.wantError,
+				} {
+					if got := r.attrs[key]; got != want {
+						t.Errorf("msgs_ack %s = %v, want %v", key, got, want)
+					}
+				}
+				if strings.Contains(r.message+fmt.Sprint(r.attrs), rawWriteError) ||
+					strings.Contains(r.message+fmt.Sprint(r.attrs), rawEncryptError) {
+					t.Errorf("msgs_ack failure log exposed raw error: %+v", r)
+				}
+				return
+			}
+			t.Fatalf("no server failure logged for the failed msgs_ack write: %+v", sink.records)
+		})
+	}
+}
+
+func TestLateReadAheadAckKeepsDispatchedLeafType(t *testing.T) {
+	t.Parallel()
 
 	key := ackTestKey()
-	store := NewMemoryAuthKeyStore()
-	if err := store.Save(context.Background(), key); err != nil {
-		t.Fatalf("save key: %v", err)
-	}
-	handler := HandlerFunc(func(c *Conn, req *Request) error {
-		time.Sleep(1500 * time.Millisecond)
-		return c.SendResult(req, &tg.NearestDC{Country: "NL", ThisDC: 2, NearestDC: 2})
-	})
-	sink := &lockedLogSink{}
-	srv := New(exchange.PrivateKey{}, 2, store, handler, slog.New(sink))
-	// new_session_created goes through; the msgs_ack is the first write to fail.
-	conn := &failAfterConn{
-		frames:  [][]byte{ackTestFrame(t, key, 1<<32, &tg.HelpGetNearestDCRequest{})},
-		ok:      1,
-		sendErr: errors.New(rawError),
-	}
-	if err := srv.ServeConn(context.Background(), conn); err == nil {
-		t.Fatal("ServeConn returned nil after its writes failed")
-	}
-
-	sink.mu.Lock()
-	defer sink.mu.Unlock()
-	for _, r := range sink.records {
-		if r.message == "server operation failed" && r.attrs["operation"] == "msgs_ack" {
-			if r.attrs["category"] != string(serverFailureRequest) {
-				t.Fatalf("msgs_ack failure category = %v, want %s", r.attrs["category"], serverFailureRequest)
-			}
-			for key, want := range map[string]any{
-				"rpc_method":     UnknownRPCMethod,
-				"request_id":     int64(0),
-				"error_category": string(RPCResultTransportFailure),
-				"error":          "internal",
-			} {
-				if got := r.attrs[key]; got != want {
-					t.Errorf("msgs_ack %s = %v, want %v", key, got, want)
-				}
-			}
-			if strings.Contains(r.message+fmt.Sprint(r.attrs), rawError) {
-				t.Errorf("msgs_ack failure log exposed raw error: %+v", r)
-			}
-			return
+	const messageID = 1 << 32
+	c := &Conn{authKey: key, sessionID: 42}
+	t.Cleanup(func() {
+		c.stopAcks()
+		c.writeMu.Lock()
+		if c.ackTimer != nil {
+			c.ackTimer.Stop()
 		}
+		c.writeMu.Unlock()
+	})
+
+	// handleWithHandler records the top-level ID, then dispatch unwraps to the
+	// leaf. A delayed read-ahead enqueue must not restore that outer wrapper.
+	c.queueInitialRPCAck(messageID, tg.InvokeWithLayerRequestTypeID)
+	c.queueRPCAck(messageID, tg.AuthSignUpRequestTypeID)
+	c.queueBoundAckRecords(key.ID, 42, queuedAck{
+		messageID:   messageID,
+		rpcTypeID:   tg.InvokeWithLayerRequestTypeID,
+		typeIDKnown: true,
+	})
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if len(c.pendingAcks) != 1 {
+		t.Fatalf("pending acks = %+v, want one ack", c.pendingAcks)
 	}
-	t.Fatalf("no server failure logged for the failed msgs_ack write: %+v", sink.records)
+	if got, want := c.pendingAcks[0].rpcTypeID, uint32(tg.AuthSignUpRequestTypeID); got != want {
+		t.Fatalf("RPC type ID = %#x, want dispatched leaf %#x", got, want)
+	}
 }

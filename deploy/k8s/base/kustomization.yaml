@@ -4,7 +4,6 @@ kind: Kustomization
 namespace: teagram
 
 resources:
-  - namespace.yaml
   - postgres-service.yaml
   - postgres-statefulset.yaml
   - rustfs-service.yaml

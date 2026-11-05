@@ -38,26 +38,43 @@ func (h *handlers) verifyTurnstile(r *mtproto.Request, action string) error {
 	if action == "signin" && !h.turnstileSignInEnabled {
 		return nil
 	}
+	_, err := h.verifyTurnstileActions(r, action, []string{action})
+	if errors.Is(err, ErrTurnstileBusy) {
+		return FloodWaitError(1)
+	}
+	return err
+}
+
+func (h *handlers) verifyTurnstileActions(r *mtproto.Request, errorAction string, allowedActions []string) (string, error) {
+	verifiedAction, err := h.verifyTurnstileActionsRaw(r, allowedActions)
+	if errors.Is(err, ErrTurnstileBusy) {
+		return "", ErrTurnstileBusy
+	}
+	if err != nil {
+		return "", turnstileCheckRequiredError(errorAction, h.turnstileSiteKey)
+	}
+	return verifiedAction, nil
+}
+
+func (h *handlers) verifyTurnstileActionsRaw(r *mtproto.Request, allowedActions []string) (string, error) {
 	if h.turnstileVerifier == nil {
-		if action == "signin" {
-			return turnstileCheckRequiredError(action, h.turnstileSiteKey)
-		}
-		return nil
+		return "", errTurnstileUnavailable
 	}
 	if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
-		return turnstileCheckRequiredError(action, h.turnstileSiteKey)
+		return "", errTurnstileRejected
 	}
 	remoteIP := ""
 	if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
 		remoteIP = r.ClientAddr.Unmap().String()
 	}
-	if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, action, remoteIP); err != nil {
-		if errors.Is(err, ErrTurnstileBusy) {
-			return FloodWaitError(1)
-		}
-		return turnstileCheckRequiredError(action, h.turnstileSiteKey)
+	verifiedAction, err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, allowedActions, remoteIP)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if !turnstileActionAllowed(allowedActions, verifiedAction) {
+		return "", errTurnstileRejected
+	}
+	return verifiedAction, nil
 }
 
 func authorizationMetadata(r *mtproto.Request) store.AuthorizationMetadata {
@@ -180,20 +197,36 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		h.logSignUpRejection(signUpRegistrationModeUnavailable)
 		return nil, errInputRequestInvalid
 	}
+	challengeViaCode := false
 	if h.turnstileVerifier != nil {
-		if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
-			h.logSignUpRejection(signUpChallengeRequired)
-			return nil, turnstileCheckRequiredError("signup", h.turnstileSiteKey)
-		}
-		remoteIP := ""
-		if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
-			remoteIP = r.ClientAddr.Unmap().String()
-		}
-		if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, "signup", remoteIP); err != nil {
-			if errors.Is(err, ErrTurnstileBusy) {
-				h.logSignUpRejection(signUpVerifierBusy)
-				return nil, FloodWaitError(1)
+		switch {
+		case r.ReCaptchaToken != "":
+			if _, err := h.verifyTurnstileActions(r, "signup", []string{"signup"}); err != nil {
+				if errors.Is(err, ErrTurnstileBusy) {
+					h.logSignUpRejection(signUpVerifierBusy)
+					return nil, FloodWaitError(1)
+				}
+				h.logSignUpRejection(signUpChallengeRequired)
+				return nil, err
 			}
+		case validateUsername(req.PhoneNumber) && !isReservedAccountUsername(strings.ToLower(req.PhoneNumber)) && len(req.PhoneCodeHash) == 32:
+			var err error
+			challengeViaCode, err = h.store.CheckSignUpTurnstileCode(
+				r.Ctx,
+				strings.ToLower(req.PhoneNumber),
+				req.PhoneCodeHash,
+				mtproto.AuthKeyIDInt64(r.AuthKeyID),
+			)
+			if err != nil {
+				h.log.Error("sign up: check sendCode challenge", "err", err)
+				h.logSignUpRejection(signUpInternal)
+				return nil, errInternal
+			}
+			if !challengeViaCode {
+				h.logSignUpRejection(signUpChallengeRequired)
+				return nil, turnstileCheckRequiredError("signup", h.turnstileSiteKey)
+			}
+		default:
 			h.logSignUpRejection(signUpChallengeRequired)
 			return nil, turnstileCheckRequiredError("signup", h.turnstileSiteKey)
 		}
@@ -249,9 +282,10 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		req.FirstName,
 		req.LastName,
 		store.InviteAdmissionPolicy{
-			RequireInvite:    h.registrationMode == config.RegistrationInvite,
-			UserInviteQuota:  h.userInviteQuota,
-			AllowUserInvites: h.registrationMode == config.RegistrationInvite,
+			RequireInvite:        h.registrationMode == config.RegistrationInvite,
+			UserInviteQuota:      h.userInviteQuota,
+			AllowUserInvites:     h.registrationMode == config.RegistrationInvite,
+			RequireTurnstileCode: challengeViaCode,
 		},
 		authorizationMetadata(r),
 	)
@@ -330,8 +364,27 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	if err := h.verifyTurnstile(r, "signin"); err != nil {
-		return nil, err
+	verifiedAction := store.TurnstileAction("")
+	if h.turnstileSignInEnabled {
+		verifiedActionString, err := h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
+		if err != nil {
+			if errors.Is(err, ErrTurnstileBusy) {
+				return nil, FloodWaitError(1)
+			}
+			return nil, err
+		}
+		verifiedAction = store.TurnstileAction(verifiedActionString)
+	} else if r.ReCaptchaToken != "" {
+		verifiedActionString, err := h.verifyTurnstileActionsRaw(r, []string{"signin", "signup"})
+		if err != nil {
+			if errors.Is(err, ErrTurnstileBusy) || errors.Is(err, errTurnstileUnavailable) {
+				h.log.Warn("send code: optional Turnstile token not bound", "err", err)
+			} else {
+				h.log.Info("send code: optional Turnstile token not bound", "err", err)
+			}
+		} else {
+			verifiedAction = store.TurnstileAction(verifiedActionString)
+		}
 	}
 
 	// Phone-shaped identifiers are unsupported. Refuse them before applying
@@ -354,7 +407,9 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 
-	hash, code, err := h.store.IssueCodeForUsername(r.Ctx, input)
+	hash, code, err := h.store.IssueCodeForUsernameWithTurnstileAction(
+		r.Ctx, input, verifiedAction, mtproto.AuthKeyIDInt64(r.AuthKeyID),
+	)
 	if err != nil {
 		h.log.Error("issue code", "err", err)
 		return nil, errInternal
@@ -461,7 +516,8 @@ func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encode
 func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, username, phoneCodeHash, phoneCode string) (bin.Encoder, error) {
 	// Validate the code hash. In username mode the code field is ignored — only
 	// the hash is validated.
-	if err := h.store.CheckCodeHash(r.Ctx, username, phoneCodeHash); err != nil {
+	verifiedAction, err := h.store.CheckCodeHashWithTurnstileAction(r.Ctx, username, phoneCodeHash)
+	if err != nil {
 		rpc := verifyToRPC(err)
 		if rpc == errCodeExpired {
 			// Username path must return PHONE_CODE_INVALID for both missing and
@@ -496,6 +552,9 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 			}
 		}
 		return h.signUpRequired(), nil
+	}
+	if h.turnstileSignInEnabled && verifiedAction != store.TurnstileActionSignIn {
+		return nil, turnstileCheckRequiredError("signin", h.turnstileSiteKey)
 	}
 	if resolved.Kind == store.UserKindBot {
 		return nil, errBotAccount

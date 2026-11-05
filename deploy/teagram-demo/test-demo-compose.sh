@@ -573,6 +573,8 @@ jq -e '
   and (.services["demo-probe"].volumes | length) == 1
   and .services["demo-probe"].volumes[0].target == "/run/teagram-demo/client.json"
   and (.services["demo-probe"].volumes[0].read_only == true)
+  and (.services["demo-probe"].secrets | map(.source) | sort) == ["teagram_demo_turnstile_qa_bypass"]
+  and .services["demo-probe"].secrets[0].target == "/run/secrets/teagram_demo_turnstile_qa_bypass"
   and .services["demo-probe"].environment.GOMAXPROCS == "1"
   and .services["demo-probe"].environment.GOMEMLIMIT == "192MiB"
   and (.services["demo-probe"].networks | keys) == ["backend"]

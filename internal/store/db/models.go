@@ -681,14 +681,16 @@ type PeerSettingsBarDismissal struct {
 }
 
 type PhoneCode struct {
-	Phone      string
-	CodeHash   string
-	Code       string
-	ExpiresAt  pgtype.Timestamptz
-	Attempts   int32
-	ConsumedAt pgtype.Timestamptz
-	CreatedAt  pgtype.Timestamptz
-	ID         *int64
+	Phone              string
+	CodeHash           string
+	Code               string
+	ExpiresAt          pgtype.Timestamptz
+	Attempts           int32
+	ConsumedAt         pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	ID                 *int64
+	TurnstileAction    *string
+	TurnstileAuthKeyID *int64
 }
 
 type PhoneLookup struct {
