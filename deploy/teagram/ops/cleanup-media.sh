@@ -121,6 +121,7 @@ pre_cleanup_result="$EVIDENCE_ROOT/encryption-pre-cleanup-$RUN_ID.json"
 pre_cleanup_stderr="$EVIDENCE_ROOT/encryption-pre-cleanup-$RUN_ID.stderr"
 run_migration_job encrypt "$pre_cleanup_result" "$pre_cleanup_stderr"
 verify_authority encrypted
+require_no_unaccounted_objects "$pre_cleanup_result"
 verified_references=$(jq -er '.objects | select(type == "number" and . >= 0)' "$pre_cleanup_result") || \
   ops_fail 'pre-cleanup reference count is invalid'
 
@@ -140,6 +141,7 @@ verify_authority encrypted
 post_cleanup_result="$EVIDENCE_ROOT/encryption-post-cleanup-$RUN_ID.json"
 post_cleanup_stderr="$EVIDENCE_ROOT/encryption-post-cleanup-$RUN_ID.stderr"
 run_migration_job encrypt "$post_cleanup_result" "$post_cleanup_stderr"
+require_no_unaccounted_objects "$post_cleanup_result"
 post_cleanup_references=$(jq -er '.objects | select(type == "number" and . >= 0)' "$post_cleanup_result") || \
   ops_fail 'post-cleanup reference count is invalid'
 [[ "$post_cleanup_references" == "$verified_references" ]] || ops_fail 'media references changed while writers were stopped'

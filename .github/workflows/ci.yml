@@ -1112,6 +1112,7 @@ jobs:
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
           bash -n deploy/teagram/ops/blob-encryption-common.inc
+          bash -n deploy/teagram/test-media-encryption-ops.sh
           bash -n deploy/teagram/test-start-server.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
@@ -1202,6 +1203,7 @@ jobs:
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
+            deploy/teagram/test-media-encryption-ops.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
             .github/scripts/test-deploy-workflow-contract.sh
@@ -1221,6 +1223,9 @@ jobs:
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
+
+      - name: Check media encryption and cleanup operations
+        run: bash deploy/teagram/test-media-encryption-ops.sh
 
       - name: Check teagram server start operation
         run: bash deploy/teagram/test-start-server.sh

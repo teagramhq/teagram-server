@@ -198,7 +198,7 @@ verify_authority() {
 }
 
 verify_encrypted_inventory() {
-  local authority_json transition_id expected_sha actual_sha inventory_path
+  local authority_json transition_id expected_sha actual_sha inventory_path inventory_unaccounted_ids
   local record_path="$AUTHORITY_DIR/mode.json"
   private_file "$record_path" || ops_fail 'encrypted authority head is missing or unsafe'
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-mode-state.py" authority \
@@ -209,6 +209,7 @@ verify_encrypted_inventory() {
   expected_sha=$(jq -er '.evidence.encrypted_inventory_sha256 | select(test("^[0-9a-f]{64}$"))' "$record_path") || \
     ops_fail 'encrypted authority inventory digest is invalid'
   inventory_path="$REPORT_ROOT/teagramd-blob-encryption-inventory-$transition_id.json"
+  INVENTORY_REPORT_PATH=$inventory_path
   private_file "$inventory_path" || ops_fail 'encrypted inventory report is missing or unsafe'
   actual_sha=$(sha256sum -- "$inventory_path") || ops_fail 'cannot hash encrypted inventory report'
   actual_sha=${actual_sha%% *}
@@ -231,9 +232,31 @@ verify_encrypted_inventory() {
     ops_fail 'plaintext inventory source count is invalid'
   INVENTORY_PLAINTEXT_MISSING=$(jq -er '.plaintext.classes.missing.count | select(type == "number" and . >= 0)' "$inventory_path") || \
     ops_fail 'plaintext inventory missing-object count is invalid'
+  INVENTORY_PLAINTEXT_UNACCOUNTED=$(jq -er '
+    select(.schema == "teagram.blob-encryption-inventory/v1") |
+    .plaintext.classes.unaccounted.count | select(type == "number" and . >= 0)
+  ' "$inventory_path") || ops_fail 'plaintext inventory unaccounted-object count is invalid'
+  inventory_unaccounted_ids=$(jq -er '
+    .plaintext.classes.unaccounted.ids | select(type == "array") | length
+  ' "$inventory_path") || ops_fail 'plaintext inventory unaccounted-object IDs are invalid'
+  [[ "$INVENTORY_PLAINTEXT_UNACCOUNTED" == "$inventory_unaccounted_ids" ]] || \
+    ops_fail 'plaintext inventory unaccounted-object count does not match its IDs'
   [[ "$INVENTORY_REFERENCED" == "$INVENTORY_ENCRYPTED" && "$INVENTORY_NO_VALID" == 0 && \
      "$INVENTORY_MISSING" == 0 && "$INVENTORY_PLAINTEXT_MISSING" == 0 ]] || \
     ops_fail 'encrypted inventory does not account for every referenced object'
+}
+
+require_no_unaccounted_plaintext() {
+  [[ "${INVENTORY_PLAINTEXT_UNACCOUNTED:-}" == 0 ]] || \
+    ops_fail "encrypted migration inventory contains ${INVENTORY_PLAINTEXT_UNACCOUNTED:-unknown} unaccounted plaintext objects in $INVENTORY_REPORT_PATH; resolve them before reporting migration complete"
+}
+
+require_no_unaccounted_objects() {
+  local result_path=$1 unaccounted_count
+  unaccounted_count=$(jq -er '(.unaccounted // []) | select(type == "array") | length' "$result_path") || \
+    ops_fail "unaccounted object result is invalid: $result_path"
+  [[ "$unaccounted_count" == 0 ]] || \
+    ops_fail "media migration result contains $unaccounted_count unaccounted objects in $result_path; resolve them before reporting migration complete"
 }
 
 run_migration_job() {
@@ -254,7 +277,8 @@ run_migration_job() {
   fi
   jq -e --arg mode "$operation" '
     select(.mode == $mode and .authority == "encrypted" and .writes == "stopped" and
-      (.objects | type == "number" and . >= 0) and (.bytes | type == "number" and . >= 0))
+      (.objects | type == "number" and . >= 0) and (.bytes | type == "number" and . >= 0) and
+      ((.unaccounted // []) | type == "array"))
   ' "$OPS_TEMP_DIR/job.json" >/dev/null || ops_fail 'blob-encrypt-migrate returned an invalid result'
   cp -- "$OPS_TEMP_DIR/job.json" "$result_path" || ops_fail 'cannot preserve migration result'
   chmod 600 -- "$result_path" || ops_fail 'cannot protect migration result'

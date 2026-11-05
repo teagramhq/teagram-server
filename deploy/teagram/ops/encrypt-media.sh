@@ -151,12 +151,14 @@ case "$current_authority" in
     existing_result="$EVIDENCE_ROOT/encryption-existing-$RUN_ID.json"
     existing_stderr="$EVIDENCE_ROOT/encryption-existing-$RUN_ID.stderr"
     run_migration_job encrypt "$existing_result" "$existing_stderr"
+    require_no_unaccounted_objects "$existing_result"
     existing_objects=$(jq -er '.objects | select(type == "number" and . >= 0)' "$existing_result") || \
       ops_fail 'existing encrypted reference count is invalid'
     restart_rustfs
     existing_restart_result="$EVIDENCE_ROOT/encryption-existing-rustfs-restart-$RUN_ID.json"
     existing_restart_stderr="$EVIDENCE_ROOT/encryption-existing-rustfs-restart-$RUN_ID.stderr"
     run_migration_job encrypt "$existing_restart_result" "$existing_restart_stderr"
+    require_no_unaccounted_objects "$existing_restart_result"
     existing_restart_objects=$(jq -er '.objects | select(type == "number" and . >= 0)' "$existing_restart_result") || \
       ops_fail 'post-restart encrypted reference count is invalid'
     [[ "$existing_restart_objects" == "$existing_objects" ]] || \
@@ -285,6 +287,8 @@ migration_stderr="$EVIDENCE_ROOT/encryption-migration-$RUN_ID.stderr"
 run_migration_job encrypt "$migration_result" "$migration_stderr"
 verify_authority encrypted
 verify_encrypted_inventory
+require_no_unaccounted_plaintext
+require_no_unaccounted_objects "$migration_result"
 job_objects=$(jq -er '.objects | select(type == "number" and . >= 0)' "$migration_result") || \
   ops_fail 'migration reference count is invalid'
 [[ "$job_objects" == "$INVENTORY_REFERENCED" && "$INVENTORY_PLAINTEXT" == "$job_objects" ]] || \
@@ -294,6 +298,7 @@ restart_rustfs
 post_restart_result="$EVIDENCE_ROOT/encryption-rustfs-restart-$RUN_ID.json"
 post_restart_stderr="$EVIDENCE_ROOT/encryption-rustfs-restart-$RUN_ID.stderr"
 run_migration_job encrypt "$post_restart_result" "$post_restart_stderr"
+require_no_unaccounted_objects "$post_restart_result"
 post_restart_objects=$(jq -er '.objects | select(type == "number" and . >= 0)' "$post_restart_result") || \
   ops_fail 'post-RustFS-restart reference count is invalid'
 [[ "$post_restart_objects" == "$job_objects" ]] || ops_fail 'media references changed while writers were stopped'

@@ -173,6 +173,9 @@ that archive into an isolated PostgreSQL container with no network before
 accepting the backup. It then migrates and reads back every referenced object,
 publishes encrypted authority, restarts RustFS, repeats encrypted readback,
 starts `teagramd`, and runs the deployed image's MTProto smoke probe.
+The operation fails closed if the full-tree inventory reports an object with no
+database reference; its key is retained in the private inventory report for
+review, and the script does not claim migration completion.
 
 Run it only from the exact deployed `main` SHA after the reviewed migration
 code is live:
@@ -199,7 +202,11 @@ checks encrypted authority, the verified database dump and key backup, the
 stopped-writer progress journal, and every encrypted reference. It removes only
 verified plaintext copies, runs a second cleanup pass that must remove zero
 objects, repeats encrypted readback across a RustFS restart, restarts
-`teagramd`, and runs the MTProto smoke probe.
+`teagramd`, and runs the MTProto smoke probe. Before deleting referenced
+plaintext, it also rejects any unaccounted objects reported by the current
+full-tree inventory. These objects have no database reference and remain
+untouched for explicit operator review; cleanup cannot report success while
+they remain.
 
 ```sh
 ssh teagram run <deployed-main-sha> cleanup-media --acceptance-passed
@@ -210,3 +217,19 @@ If cleanup stops partway through, retain encrypted authority and rerun it only
 after the acceptance checks still pass; cleanup revalidates the encrypted
 copies before removing any remaining source. The verified pre-migration dump
 and media key backup remain in `/root` as recovery evidence.
+
+The transition's threat boundary is the reviewed `main` SHA, the single
+verified Compose stack, the root-owned media key and database backup, the
+Postgres reference inventory, and the private RustFS network. Migration stops
+the server writer and preserves plaintext until encrypted references pass
+readback. Cleanup is destructive: it requires the explicit acceptance flag,
+revalidates encrypted copies, and removes only database-referenced or
+journaled plaintext objects; an unaccounted object stops the operation for
+review. If interrupted, authority remains encrypted after publication and the
+script restores service under the recorded authority; rerun the operation to
+resume from its journal. The SSH forced command executes only an allowlisted
+script from a commit on `origin/main`; privileged work runs as root under the
+shared deployment lock, with secrets read from protected files and excluded
+from operation output. The private dump, key backup, journal, and inventory
+reports are the recovery evidence; do not roll back encrypted authority or
+restore an older server image.
