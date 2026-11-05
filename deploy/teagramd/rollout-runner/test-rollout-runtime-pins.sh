@@ -130,6 +130,89 @@ else
   fi
 fi
 
+MOCK_ROLLBACK_EVENTS=$(mktemp)
+ROLLBACK_DIR=$(mktemp -d)
+trap 'rm -f -- "$MOCK_ROLLBACK_EVENTS"; rm -rf -- "$ROLLBACK_DIR"' EXIT
+PREVIOUS_SHA=9999999999999999999999999999999999999999
+BASE_IMAGE_ID=sha256:0000000000000000000000000000000000000000000000000000000000000000
+ROLLOUT_COMPOSE_SERVICE=teagramd
+ADDED_ENV=''
+CHANGED_ENV=''
+MOCK_ROLLBACK_ORPHAN_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+MOCK_ROLLBACK_TEAGRAMD_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+restore_checkout_and_tag() { printf '%s\n' restore_checkout >> "$MOCK_ROLLBACK_EVENTS"; }
+validate_rollback_blob_authority() { return 0; }
+restore_removed_public_profile_services() { return 0; }
+wait_for_restored_public_profile_health() { return 0; }
+current_service_id() { printf '%s\n' "$MOCK_ROLLBACK_TEAGRAMD_ID"; }
+capture_snapshot() { printf 'capture_snapshot %s\n' "$3" >> "$MOCK_ROLLBACK_EVENTS"; }
+compare_rollback_to_baseline() { return 0; }
+run_rollback_readiness() { return 0; }
+record_verified_env() { return 0; }
+write_immutable() { return 0; }
+
+docker() {
+  case "$*" in
+    'compose up -d --no-build --no-deps --wait --wait-timeout 1 postgres'|\
+    'compose up -d --no-build --no-deps teagramd'|\
+    'compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 1 bot-api-forwarder'|\
+    'rm --force aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      printf 'docker %s\n' "$*" >> "$MOCK_ROLLBACK_EVENTS"
+      ;;
+    'compose config --services')
+      printf 'docker %s\n' "$*" >> "$MOCK_ROLLBACK_EVENTS"
+      printf '%s\n' "$MOCK_ROLLBACK_SERVICES"
+      ;;
+    'inspect bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --format {{ index .Config.Labels "com.docker.compose.project" }}')
+      printf 'docker %s\n' "$*" >> "$MOCK_ROLLBACK_EVENTS"
+      printf '%s\n' fixture
+      ;;
+    'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=fixture --filter label=com.docker.compose.service=bot-api-forwarder')
+      printf 'docker %s\n' "$*" >> "$MOCK_ROLLBACK_EVENTS"
+      printf '%s\n' "$MOCK_ROLLBACK_ORPHAN_ID"
+      ;;
+    *)
+      printf 'unexpected rollback docker call: %s\n' "$*" >&2
+      return 98
+      ;;
+  esac
+}
+
+MOCK_ROLLBACK_SERVICES=$'teagramd\nbot-api-forwarder'
+: > "$MOCK_ROLLBACK_EVENTS"
+if ! perform_rollback >/dev/null; then
+  printf '%s\n' 'FAIL rollback fixture with the forwarder enabled must succeed' >&2
+  exit 1
+fi
+teagramd_up_line=$(grep -nFx 'docker compose up -d --no-build --no-deps teagramd' "$MOCK_ROLLBACK_EVENTS" | cut -d: -f1 || true)
+forwarder_up_line=$(grep -nFx 'docker compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 1 bot-api-forwarder' "$MOCK_ROLLBACK_EVENTS" | cut -d: -f1 || true)
+if [ -n "$teagramd_up_line" ] && [ -n "$forwarder_up_line" ] && \
+   [ "$teagramd_up_line" -lt "$forwarder_up_line" ]; then
+  printf '%s\n' 'PASS rollback recreates the enabled Bot API forwarder after teagramd'
+else
+  printf '%s\n' 'FAIL rollback must recreate the enabled Bot API forwarder after teagramd' >&2
+  cat "$MOCK_ROLLBACK_EVENTS" >&2
+  exit 1
+fi
+
+MOCK_ROLLBACK_SERVICES=teagramd
+: > "$MOCK_ROLLBACK_EVENTS"
+if ! perform_rollback >/dev/null; then
+  printf '%s\n' 'FAIL rollback fixture without the forwarder must succeed' >&2
+  exit 1
+fi
+teagramd_up_line=$(grep -nFx 'docker compose up -d --no-build --no-deps teagramd' "$MOCK_ROLLBACK_EVENTS" | cut -d: -f1 || true)
+orphan_rm_line=$(grep -nFx "docker rm --force $MOCK_ROLLBACK_ORPHAN_ID" "$MOCK_ROLLBACK_EVENTS" | cut -d: -f1 || true)
+if [ -n "$teagramd_up_line" ] && [ -n "$orphan_rm_line" ] && \
+   [ "$teagramd_up_line" -lt "$orphan_rm_line" ]; then
+  printf '%s\n' 'PASS rollback removes an orphaned Bot API forwarder when baseline Compose omits it'
+else
+  printf '%s\n' 'FAIL rollback must remove the orphaned Bot API forwarder when baseline Compose omits it' >&2
+  cat "$MOCK_ROLLBACK_EVENTS" >&2
+  exit 1
+fi
+
 approved_verifier_sha=$(sed -n 's/^readonly APPROVED_VERIFIER_SHA=//p' "$RUNNER")
 actual_verifier_sha=$(sha256sum "$VERIFIER" | awk '{print $1}')
 

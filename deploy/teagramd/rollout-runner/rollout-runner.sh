@@ -909,6 +909,54 @@ wait_for_bot_api_forwarder() {
   fi
 }
 
+restore_bot_api_forwarder() {
+  local rollback_id=$1 services project container_ids container_id
+  local -a remove_ids=()
+  services=$(docker compose config --services </dev/null) || {
+    fail 'cannot inspect baseline Compose services before restoring the Bot API forwarder'
+    return 1
+  }
+  if printf '%s\n' "$services" | grep -Fxq -- bot-api-forwarder; then
+    docker compose up -d --no-build --no-deps --force-recreate --wait \
+      --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null || {
+      fail 'baseline Bot API forwarder recreation or health check failed'
+      return 1
+    }
+    return 0
+  fi
+
+  project=$(docker inspect "$rollback_id" \
+    --format '{{ index .Config.Labels "com.docker.compose.project" }}' </dev/null) || {
+    fail 'cannot read the baseline Compose project before removing the Bot API forwarder orphan'
+    return 1
+  }
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    fail 'baseline Compose project label is missing or invalid before Bot API forwarder cleanup'
+    return 1
+  }
+  container_ids=$(docker ps --all --quiet --no-trunc \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=bot-api-forwarder' </dev/null) || {
+    fail 'cannot list orphaned Bot API forwarder containers'
+    return 1
+  }
+  [ -n "$container_ids" ] || return 0
+  while IFS= read -r container_id; do
+    [ -n "$container_id" ] || continue
+    [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+      fail 'orphaned Bot API forwarder has an invalid container ID'
+      return 1
+    }
+    remove_ids+=("$container_id")
+  done <<< "$container_ids"
+  [ "${#remove_ids[@]}" -gt 0 ] || return 0
+  docker rm --force "${remove_ids[@]}" </dev/null >/dev/null || {
+    fail 'cannot remove the orphaned Bot API forwarder after restoring teagramd'
+    return 1
+  }
+  printf 'removed orphaned Bot API forwarder project=%s\n' "$project"
+}
+
 remove_orphaned_public_profile_services() {
   local baseline_container=$1 project target_services service container_ids container_id container_state stop_timeout found=0
   local -a observed_services=() remove_ids=()
@@ -2834,10 +2882,11 @@ perform_rollback() {
     return 1
   }
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
+  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
+  restore_bot_api_forwarder "$rollback_id" || return 1
   restore_removed_public_profile_services || return 1
   local public_profile_readiness_rc=0
   if wait_for_restored_public_profile_health; then :; else public_profile_readiness_rc=$?; fi
-  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
