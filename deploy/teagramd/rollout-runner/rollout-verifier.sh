@@ -880,8 +880,8 @@ snapshot_from_json() {
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
   local require_restart_policies=${9:-false}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
-  local mounts_sha exposure_sha config_sha config_without_restart_sha compose_restart_policies container_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
+  local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart canonical_without_migrate_image_and_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
+  local mounts_sha exposure_sha config_sha config_without_restart_sha config_without_migrate_image_and_restart_sha migrate_image compose_restart_policies container_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
   local media_key_source media_key_current
@@ -909,6 +909,8 @@ snapshot_from_json() {
   compose_logging_policy=not-captured
   compose_log_login_codes=not-captured
   config_without_restart_sha=not-captured
+  config_without_migrate_image_and_restart_sha=not-captured
+  migrate_image=not-captured
   compose_restart_policies='{}'
   container_restart_policies='{}'
   if [ "$compose_source" = selected-compose-render ]; then
@@ -1380,6 +1382,14 @@ snapshot_from_json() {
     config_sha=$(sha256_text "$canonical_compose")
     canonical_without_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart)') || return 1
     config_without_restart_sha=$(sha256_text "$canonical_without_restart")
+    migrate_image=$(printf '%s' "$compose_json" | jq -er '
+      .services.migrate.image | select(type == "string" and length > 0)
+    ') || {
+      printf '%s\n' 'resolved Compose migration image is missing or invalid' >&2
+      return 1
+    }
+    canonical_without_migrate_image_and_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart) | del(.services.migrate.image)') || return 1
+    config_without_migrate_image_and_restart_sha=$(sha256_text "$canonical_without_migrate_image_and_restart")
     compose_restart_policies=$(printf '%s' "$canonical_compose" | jq -ceS '
       .services | with_entries(.value = (.value.restart // "no"))
     ') || return 1
@@ -1443,6 +1453,8 @@ snapshot_from_json() {
     --arg exposure_sha "$exposure_sha" \
     --arg config_sha "$config_sha" \
     --arg config_without_restart_sha "$config_without_restart_sha" \
+    --arg config_without_migrate_image_and_restart_sha "$config_without_migrate_image_and_restart_sha" \
+    --arg migrate_image "$migrate_image" \
     --argjson compose_restart_policies "$compose_restart_policies" \
     --argjson container_restart_policies "$container_restart_policies" \
     --arg env_sha "$env_sha" \
@@ -1469,6 +1481,8 @@ snapshot_from_json() {
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
       config_without_restart_sha256:$config_without_restart_sha,
+      config_without_migrate_image_and_restart_sha256:$config_without_migrate_image_and_restart_sha,
+      migrate_image:$migrate_image,
       compose_restart_policies:$compose_restart_policies,
       container_restart_policies:$container_restart_policies,
       env_sha256:$env_sha,override_sha256:$override_sha,
@@ -1632,13 +1646,25 @@ approved_restart_policy_transition() {
   ' >/dev/null
 }
 
+approved_migration_image_transition() {
+  local before_file=$1 after_file=$2
+  jq -en --slurpfile before "$before_file" --slurpfile after "$after_file" '
+    ($before[0].migrate_image == "mirror.gcr.io/arigaio/atlas:1.2.0-alpine") and
+    ($after[0].migrate_image == "mirror.gcr.io/arigaio/atlas:1.3.0-alpine") and
+    ($before[0].compose_restart_policies == $after[0].compose_restart_policies) and
+    ($before[0].config_without_migrate_image_and_restart_sha256 | test("^[0-9a-f]{64}$")) and
+    ($after[0].config_without_migrate_image_and_restart_sha256 | test("^[0-9a-f]{64}$")) and
+    ($before[0].config_without_migrate_image_and_restart_sha256 == $after[0].config_without_migrate_image_and_restart_sha256)
+  ' >/dev/null
+}
+
 compare_snapshots() {
   local before_file=$1
   local after_file=$2
   local expected_image=$3
   local result_file=$4
   local field before_value after_value before_image after_image result before_logging_policy after_logging_policy before_config_without_restart after_config_without_restart
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 compose_restart_policies container_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 config_without_migrate_image_and_restart_sha256 migrate_image compose_restart_policies container_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -1669,6 +1695,8 @@ compare_snapshots() {
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.config_without_migrate_image_and_restart_sha256 | sha) and
+      (.migrate_image | type == "string" and length > 0) and
       (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.env_sha256 | sha) and (.override_sha256 | sha) and
@@ -1699,6 +1727,8 @@ compare_snapshots() {
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.config_without_migrate_image_and_restart_sha256 | sha) and
+      (.migrate_image | type == "string" and length > 0) and
       (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
       (.env_sha256 | sha) and (.override_sha256 | sha) and
@@ -1729,8 +1759,9 @@ compare_snapshots() {
       else
         before_config_without_restart=$(jq -er '.config_without_restart_sha256' "$before_file") || return 1
         after_config_without_restart=$(jq -er '.config_without_restart_sha256' "$after_file") || return 1
-        if [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
-           approved_restart_policy_transition "$before_file" "$after_file"; then
+        if { [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+             approved_restart_policy_transition "$before_file" "$after_file"; } || \
+           approved_migration_image_transition "$before_file" "$after_file"; then
           result=pass
         else
           result=fail
@@ -1746,6 +1777,14 @@ compare_snapshots() {
     elif [ "$field" = container_restart_policies ]; then
       if [ "$before_value" = "$after_value" ] || \
          approved_restart_policy_transition "$before_file" "$after_file"; then
+        result=pass
+      else
+        result=fail
+      fi
+    elif [ "$field" = config_without_restart_sha256 ] || [ "$field" = migrate_image ]; then
+      if approved_migration_image_transition "$before_file" "$after_file"; then
+        result=pass
+      elif [ "$before_value" = "$after_value" ]; then
         result=pass
       else
         result=fail
@@ -2079,6 +2118,15 @@ restart_policy_transition_command() {
   approved_restart_policy_transition "$before" "$after"
 }
 
+migration_image_transition_command() {
+  local before=$1 after=$2
+  [ -f "$before" ] && [ ! -L "$before" ] && [ -f "$after" ] && [ ! -L "$after" ] || {
+    printf '%s\n' 'migration-image snapshots are unavailable' >&2
+    return 1
+  }
+  approved_migration_image_transition "$before" "$after"
+}
+
 secure_replay_evidence_dir() {
   local dir=$1 canonical owner=0
   if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
@@ -2215,7 +2263,7 @@ preflight_snapshot_command() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, ready, ready-pair' >&2; return 64; }
+  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, migration-image-transition, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
   case "$command" in
@@ -2231,6 +2279,9 @@ main() {
     restart-policy-transition)
       [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-verifier.sh restart-policy-transition BEFORE AFTER' >&2; return 64; }
       restart_policy_transition_command "$@" ;;
+    migration-image-transition)
+      [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-verifier.sh migration-image-transition BEFORE AFTER' >&2; return 64; }
+      migration_image_transition_command "$@" ;;
     ready)
       [ "$#" -eq 3 ] || { printf '%s\n' 'usage: rollout-verifier.sh ready target|rollback CONTAINER_ID EVIDENCE_DIR' >&2; return 64; }
       live_ready_command "$@" ;;
@@ -2246,7 +2297,7 @@ main() {
       secure_evidence_dir "$(dirname "$3")"
       wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
-      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, ready, ready-pair' >&2
+      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, migration-image-transition, ready, ready-pair' >&2
       return 64 ;;
   esac
 }

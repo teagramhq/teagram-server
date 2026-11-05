@@ -91,11 +91,14 @@ check_ci_contract() {
     ci_fail 'the obsolete PostgreSQL schema gate must be removed'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'schema-gate-postgres'* ]] ||
     ci_fail 'the required CI gate must not include the obsolete PostgreSQL schema gate'
-  local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
+  local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5'
+  local expected_production_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
   [[ "$(ci_query '.jobs."test-migrations".env.POSTGRES_IMAGE')" == "$expected_postgres_image" ]] ||
-    ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
-  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
-    ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
+    ci_fail 'the migrations lane must use the digest-pinned multi-arch PostgreSQL image'
+  grep -Fq "POSTGRES_IMAGE=\"\${POSTGRES_IMAGE:-$expected_postgres_image}\"" .githooks/pre-push ||
+    ci_fail 'the pre-push migration check must use the migrations lane PostgreSQL image pin'
+  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_production_postgres_image" ]] ||
+    ci_fail 'the production PostgreSQL image pin changed outside the migration-check fix'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT // ""')" == '' ]] ||
     ci_fail 'the required CI gate must not receive the demo web pin result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
