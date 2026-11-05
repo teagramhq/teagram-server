@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the pinned teagram-web artifact against its upstream CI run."""
+"""Resolve the current teagram-web publication against its live manifest."""
 
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from typing import Any, Callable
 
 
 API_ROOT = "https://api.github.com/repos/teagramhq/teagram-web"
+PUBLICATION_RUNS_URL = (
+    f"{API_ROOT}/actions/workflows/private-artifact.yml/runs"
+    "?branch=master&event=push&head_sha={source_commit}&status=success&per_page=100"
+)
 LIVE_MANIFEST_URL = "https://web.teagram.io/mtproto-target.json"
-PIN_PATH = pathlib.Path(__file__).with_name("web-artifact-pin.json")
-PIN_REPO = "teagramhq/teagram-web"
-PR_VALIDATION_JOB = "Validate private artifact on pull request"
 MAX_FETCH_ATTEMPTS = 3
 MAX_RETRY_DELAY_SECONDS = 30
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
@@ -93,171 +94,146 @@ def fetch_json(url: str) -> Any:
     raise AssertionError("unreachable")
 
 
-def validate_pin_document(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("pin must be an object")
-    mode = value.get("mode")
-    fields = (
-        {"schemaVersion", "mode", "pullRequest", "runId", "sourceCommit", "artifactDigest"}
-        if mode == "candidate"
-        else {"schemaVersion", "mode", "runId", "sourceCommit", "artifactDigest"}
-        if mode == "published"
-        else set()
-    )
-    if not fields or set(value) != fields:
-        raise ValueError("pin fields or mode are invalid")
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
-        raise ValueError("pin schema version is invalid")
-    source_commit = value.get("sourceCommit")
-    artifact_digest = value.get("artifactDigest")
-    run_id = value.get("runId")
-    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
-        raise ValueError("source commit must be a full lowercase SHA")
-    if not isinstance(artifact_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
-        raise ValueError("artifact digest must be a full lowercase sha256")
-    if type(run_id) is not int or run_id < 1:
-        raise ValueError("upstream run ID is invalid")
-    if mode == "candidate" and (type(value["pullRequest"]) is not int or value["pullRequest"] != 121):
-        raise ValueError("candidate pin must reference teagram-web PR 121")
-    return dict(value)
-
-
 def _require_object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} response is invalid")
     return value
 
 
-def verify_upstream(
-    pin: dict[str, Any],
+def _validate_live_manifest(value: Any) -> tuple[str, str]:
+    manifest = _require_object(value, "live web manifest")
+    source_commit = manifest.get("sourceCommit")
+    artifact_digest = manifest.get("artifactDigest")
+    if manifest.get("mode") != "private":
+        raise ValueError("live web manifest is not a private publication")
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("live web manifest source commit is invalid")
+    if not isinstance(artifact_digest, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", artifact_digest
+    ):
+        raise ValueError("live web manifest artifact digest is invalid")
+    return source_commit, artifact_digest
+
+
+def verify_published_run(
+    run_id: int,
+    source_commit: str,
+    artifact_digest: str,
     *,
     fetch: Callable[[str], Any] = fetch_json,
-    require_live_manifest: bool = False,
 ) -> dict[str, Any]:
-    source_commit = pin["sourceCommit"]
-    artifact_digest = pin["artifactDigest"]
-    run_id = pin["runId"]
     run = _require_object(fetch(f"{API_ROOT}/actions/runs/{run_id}"), "workflow run")
     if (
         run.get("id") != run_id
         or run.get("path") != ".github/workflows/private-artifact.yml"
         or run.get("head_sha") != source_commit
+        or run.get("head_branch") != "master"
         or run.get("status") != "completed"
         or run.get("conclusion") != "success"
+        or run.get("event") != "push"
+        or run.get("pull_requests")
     ):
-        raise ValueError("pinned upstream run does not verify this completed artifact")
+        raise ValueError("upstream run is not a successful master publication for the live commit")
 
-    if pin["mode"] == "candidate":
-        if run.get("event") != "pull_request":
-            raise ValueError("candidate pin run is not a pull-request validation")
-        pull_request = _require_object(
-            fetch(f"{API_ROOT}/pulls/{pin['pullRequest']}"), "pull request"
-        )
-        head = _require_object(pull_request.get("head"), "pull-request head")
-        head_repo = _require_object(head.get("repo"), "pull-request head repository")
-        merged = pull_request.get("merged_at") is not None
-        if (
-            pull_request.get("state") not in ("open", "closed")
-            or (pull_request.get("state") == "closed" and not merged)
-            or head.get("sha") != source_commit
-            or head_repo.get("full_name") != PIN_REPO
-        ):
-            raise ValueError("candidate commit is no longer the reviewed PR 121 head")
-        jobs = _require_object(
-            fetch(f"{API_ROOT}/actions/runs/{run_id}/jobs?per_page=100"), "workflow jobs"
-        )
-        job_records = jobs.get("jobs")
-        if not isinstance(job_records, list):
-            raise ValueError("PR 121 validation jobs are invalid")
-        validation_jobs = [
-            job
-            for job in job_records
-            if isinstance(job, dict)
-            and job.get("name") == PR_VALIDATION_JOB
-            and job.get("head_sha") == source_commit
-            and job.get("status") == "completed"
-            and job.get("conclusion") == "success"
-        ]
-        if len(validation_jobs) != 1:
-            raise ValueError("PR 121 has no unique successful private-artifact validation job")
-        deployable = False
-    else:
-        if (
-            run.get("event") != "push"
-            or run.get("head_branch") != "master"
-            or run.get("pull_requests")
-        ):
-            raise ValueError("published pin run is not a master publication")
-        artifact_hex = artifact_digest.removeprefix("sha256:")
-        artifact_name = f"private-mtproto-{source_commit}-{artifact_hex}"
-        artifacts = _require_object(
-            fetch(f"{API_ROOT}/actions/runs/{run_id}/artifacts?per_page=100"),
-            "publication artifacts",
-        )
-        if not any(
-            isinstance(artifact, dict)
-            and artifact.get("name") == artifact_name
-            and artifact.get("expired") is False
-            for artifact in artifacts.get("artifacts", [])
-        ):
-            raise ValueError("published pin has no available matching upstream artifact")
-        deployable = False
-        if require_live_manifest:
-            manifest = _require_object(fetch(LIVE_MANIFEST_URL), "live web manifest")
-            if (
-                manifest.get("mode") != "private"
-                or manifest.get("sourceCommit") != source_commit
-                or manifest.get("artifactDigest") != artifact_digest
-            ):
-                raise ValueError("live web publication does not match the pinned artifact")
-            deployable = True
+    artifact_hex = artifact_digest.removeprefix("sha256:")
+    artifact_name = f"private-mtproto-{source_commit}-{artifact_hex}"
+    artifacts = _require_object(
+        fetch(f"{API_ROOT}/actions/runs/{run_id}/artifacts?per_page=100"),
+        "publication artifacts",
+    )
+    artifact_records = artifacts.get("artifacts")
+    if not isinstance(artifact_records, list):
+        raise ValueError("publication artifacts are invalid")
+    if not any(
+        isinstance(artifact, dict)
+        and artifact.get("name") == artifact_name
+        and artifact.get("expired") is False
+        for artifact in artifact_records
+    ):
+        raise ValueError("live web publication has no available matching upstream artifact")
 
     return {
         "schemaVersion": 1,
-        "mode": pin["mode"],
+        "mode": "published",
         "sourceCommit": source_commit,
         "artifactDigest": artifact_digest,
         "runId": run_id,
-        "deployable": deployable,
+        "deployable": True,
     }
 
 
-def resolve_for_deploy(
-    pin: dict[str, Any], *, fetch: Callable[[str], Any] = fetch_json
+def resolve_live_publication(
+    *, fetch: Callable[[str], Any] = fetch_json
 ) -> dict[str, Any]:
-    if pin["mode"] == "candidate":
-        return {
-            "schemaVersion": 1,
-            "mode": pin["mode"],
-            "sourceCommit": pin["sourceCommit"],
-            "artifactDigest": pin["artifactDigest"],
-            "runId": pin["runId"],
-            "deployable": False,
-        }
-    return verify_upstream(pin, fetch=fetch, require_live_manifest=True)
+    source_commit, artifact_digest = _validate_live_manifest(fetch(LIVE_MANIFEST_URL))
+    runs_url = PUBLICATION_RUNS_URL.format(source_commit=source_commit)
+    runs = _require_object(fetch(runs_url), "master publication runs")
+    records = runs.get("workflow_runs")
+    if not isinstance(records, list):
+        raise ValueError("master publication runs are invalid")
+
+    candidates = sorted(
+        (
+            record["run_number"],
+            record["id"],
+        )
+        for record in records
+        if isinstance(record, dict)
+        and record.get("head_sha") == source_commit
+        and type(record.get("run_number")) is int
+        and record.get("run_number", 0) > 0
+        and type(record.get("id")) is int
+        and record.get("id", 0) > 0
+    )
+    candidates.reverse()
+    if not candidates:
+        raise ValueError("live web publication has no successful master publication run")
+
+    last_error: ValueError | None = None
+    for _, run_id in candidates:
+        try:
+            resolved = verify_published_run(
+                run_id,
+                source_commit,
+                artifact_digest,
+                fetch=fetch,
+            )
+        except ValueError as error:
+            if str(error).startswith("upstream metadata request failed"):
+                raise
+            last_error = error
+            continue
+
+        current_commit, current_digest = _validate_live_manifest(fetch(LIVE_MANIFEST_URL))
+        if current_commit != source_commit or current_digest != artifact_digest:
+            raise ValueError("live web publication changed while resolving its artifact")
+        return resolved
+
+    reason = f": {last_error}" if last_error is not None else ""
+    raise ValueError(f"live web publication has no verified master artifact{reason}") from last_error
 
 
 def validate_release_identity(
-    pin: dict[str, Any], source_commit: str, artifact_digest: str
+    source_commit: str,
+    artifact_digest: str,
+    *,
+    fetch: Callable[[str], Any] = fetch_json,
 ) -> dict[str, Any]:
-    validated_pin = validate_pin_document(pin)
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise ValueError("web release source commit is invalid")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
         raise ValueError("web release artifact digest is invalid")
-    if validated_pin["mode"] != "published":
-        raise ValueError("only a published web pin can be deployed")
+    resolved = resolve_live_publication(fetch=fetch)
     if (
-        validated_pin["sourceCommit"] != source_commit
-        or validated_pin["artifactDigest"] != artifact_digest
+        resolved["sourceCommit"] != source_commit
+        or resolved["artifactDigest"] != artifact_digest
     ):
-        raise ValueError("web release identity does not match the checked-in pin")
-    return validated_pin
+        raise ValueError("web release identity does not match the live publication")
+    return resolved
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--require-live-manifest", action="store_true")
     parser.add_argument(
         "--verify-release-identity",
         nargs=2,
@@ -265,20 +241,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        pin = validate_pin_document(json.loads(PIN_PATH.read_text(encoding="utf-8")))
         if args.verify_release_identity:
-            validate_release_identity(pin, *args.verify_release_identity)
-            print("demo web release identity matches the published pin")
+            validate_release_identity(*args.verify_release_identity)
+            print("demo web release identity matches the live verified publication")
             return
-        result = (
-            resolve_for_deploy(pin)
-            if args.require_live_manifest
-            else verify_upstream(pin)
-        )
+        print(json.dumps(resolve_live_publication(), separators=(",", ":")))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        print(f"demo web pin rejected: {error}", file=sys.stderr)
+        print(f"demo web publication rejected: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    print(json.dumps(result, separators=(",", ":")))
 
 
 if __name__ == "__main__":

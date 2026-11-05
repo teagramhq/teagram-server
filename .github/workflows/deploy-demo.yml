@@ -137,15 +137,15 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
-      - name: Resolve the pinned web artifact
-        id: pin
+      - name: Resolve the current live web publication
+        id: publication
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         continue-on-error: true
         run: |
-          pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py --require-live-manifest)
-          deployable=$(jq -er '.deployable | tostring' <<<"$pin")
-          source_commit=$(jq -er '.sourceCommit' <<<"$pin")
-          artifact_digest=$(jq -er '.artifactDigest' <<<"$pin")
+          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
+          deployable=$(jq -er '.deployable | tostring' <<<"$publication")
+          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
           [[ "$deployable" == true || "$deployable" == false ]]
           [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
           [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -159,13 +159,13 @@ jobs:
         id: web-gate
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
-          DEMO_WEB_DEPLOYABLE: ${{ steps.pin.outputs.deployable }}
+          DEMO_WEB_DEPLOYABLE: ${{ steps.publication.outputs.deployable }}
         run: |
           if [[ "$DEMO_WEB_DEPLOYABLE" == 'true' ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Pinned web publication is unavailable; the public server deployment will continue"
+            echo "::notice::Live web publication is unavailable; the public server deployment will continue"
           fi
 
       - name: Resolve the tested image digest
@@ -230,9 +230,9 @@ jobs:
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
       - name: Fail after server deploy when web resolution failed
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && steps.pin.outcome == 'failure' && steps.server-deploy.outcome == 'success' }}
+        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && steps.publication.outcome == 'failure' && steps.server-deploy.outcome == 'success' }}
         run: |
-          echo "::error::Public server deployed, but pinned web artifact resolution failed"
+          echo "::error::Public server deployed, but live web publication resolution failed"
           exit 1
 
       - name: Download the web artifact from tested CI
@@ -241,7 +241,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ steps.target.outputs.ci_run_id }}
-          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
         run: |
           [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -261,18 +261,18 @@ jobs:
             printf 'archive_sha256=%s\n' "$archive_sha256"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Fail if the pinned web publication is not deployable
+      - name: Fail if the live web publication is not deployable
         if: ${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}
         run: |
-          echo "::error::Public server deployed, but the published web pin does not match the live web manifest"
+          echo "::error::Public server deployed, but the live web publication is not deployable"
           exit 1
 
-      - name: Publish the pinned web artifact on the demo origin
+      - name: Publish the verified web artifact on the demo origin
         if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.publication.outputs.artifact_digest }}
           WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
           WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
