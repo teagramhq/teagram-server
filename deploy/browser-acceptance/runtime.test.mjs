@@ -149,6 +149,23 @@ test("a later rejected handshake is identified while an earlier matching socket 
   });
 });
 
+test("a handshake arriving before its WebSocketCreated event is paired by request id", () => {
+  const mismatch = observation();
+  handshake(mismatch, "worker-request", 101);
+
+  assert.equal(mismatch.isSettled(), false);
+
+  createConnection(mismatch, "worker-request", `${expectedEndpoint}?private-value`);
+  assert.equal(mismatch.isSettled(), true);
+  assert.deepEqual(mismatch.diagnostic(), {
+    wss_diagnostic: "socket-1-target-mismatch",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: false,
+    wss_status: 101,
+  });
+});
+
 test("malformed CDP observations fail closed with a bounded reason", () => {
   const orphan = observation();
   handshake(orphan, "orphan", 101);

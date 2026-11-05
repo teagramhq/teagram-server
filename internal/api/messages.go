@@ -430,7 +430,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if textExceedsLimit(req.Message, messageLengthMax) {
 		return nil, nil, nil, errMessageTooLong
 	}
-	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	messageEntities, err := h.encodeMessageEntitiesWithURLsUnchecked(r.UserID, req.Message, req.Entities)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -495,6 +495,9 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			return nil, nil, nil, errInternal
 		}
 	}
+	if err := h.validateCustomEmojiDocumentReferences(r.UserID, messageEntities); err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Rate limit: new message, consume a token from the shared send budget.
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
@@ -507,6 +510,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		if errors.Is(err, store.ErrRandomIDExpired) {
 			clearSenderRPC(attempt)
 			return nil, nil, nil, errRandomIDDuplicate
+		}
+		if errors.Is(err, store.ErrMediaInvalid) {
+			clearSenderRPC(attempt)
+			return nil, nil, nil, errInputRequestInvalid
 		}
 		if errors.Is(err, store.ErrMessageInvalid) {
 			clearSenderRPC(attempt)
@@ -658,6 +665,9 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errInternal
 		}
 	}
+	if err := h.validateCustomEmojiDocumentReferences(r.UserID, entities); err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Rate limit: new message, consume a token.
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
@@ -676,6 +686,10 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if errors.Is(err, store.ErrRandomIDExpired) {
 		clearSenderRPC(attempt)
 		return nil, nil, nil, errRandomIDDuplicate
+	}
+	if errors.Is(err, store.ErrMediaInvalid) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errInputRequestInvalid
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		clearSenderRPC(attempt)
@@ -1250,7 +1264,7 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	} else if textExceedsLimit(req.Message, messageLengthMax) {
 		return nil, nil, nil, errMessageTooLong
 	}
-	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.Ctx, r.UserID, req.Message, req.Entities)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1265,6 +1279,12 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errMessageIDInvalid
+	}
+	if errors.Is(err, store.ErrMediaInvalid) {
+		if peerType == store.PeerTypeUser {
+			h.clearSenderAfterStoreFailure(attempt, r, err)
+		}
+		return nil, nil, nil, errInputRequestInvalid
 	}
 	if err != nil {
 		if peerType == store.PeerTypeUser {

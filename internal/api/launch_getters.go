@@ -235,7 +235,7 @@ func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, err
 			continue
 		}
 		coveredSets = append(coveredSets, &tg.StickerSetCovered{
-			Set: userStickerSetSummaryTL(set, r.UserID, nil), Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
+			Set: userStickerSetSummaryTL(set, r.UserID, h.dcID, nil), Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
 		})
 		userSetCount++
 	}
@@ -428,7 +428,7 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 			continue
 		}
 		if set.Kind == "emojis" {
-			sets = append(sets, userStickerSetSummaryTL(set, r.UserID, &item.InstalledAt))
+			sets = append(sets, userStickerSetSummaryTL(set, r.UserID, h.dcID, &item.InstalledAt))
 		}
 	}
 	hash := installedStickerSetsHash(sets)

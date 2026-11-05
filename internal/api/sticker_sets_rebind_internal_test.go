@@ -89,7 +89,7 @@ func TestDeliverStickerSetsDoesNotPushAfterSessionRebind(t *testing.T) {
 
 	updater := NewUpdater(nil, 2, registry, nil, nil)
 	go func() {
-		updater.DeliverStickerSets(context.Background(), ownerID, mtproto.AuthKeyIDInt64(key.ID), originSessionID)
+		updater.DeliverStickerSets(context.Background(), ownerID, mtproto.AuthKeyIDInt64(key.ID), originSessionID, nil)
 		close(done)
 	}()
 	for range transientFanoutWorkerCount {

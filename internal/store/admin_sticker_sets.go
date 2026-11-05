@@ -197,6 +197,15 @@ func (s *Store) setUserStickerSetLive(
 	if row.IsLive == live {
 		return nil, ErrStickerSetStateConflict
 	}
+	if live {
+		action, actionErr := qtx.AdminLatestUserStickerSetEventAction(ctx, row.ID)
+		if errors.Is(actionErr, pgx.ErrNoRows) || (actionErr == nil && action != "takedown") {
+			return nil, ErrStickerSetStateConflict
+		}
+		if actionErr != nil {
+			return nil, fmt.Errorf("read latest admin sticker-set action before restore: %w", actionErr)
+		}
+	}
 
 	var unhashedFiles []StickerSetUnhashedFile
 	if !live {

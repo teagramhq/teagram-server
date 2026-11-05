@@ -829,6 +829,60 @@ func TestSendPollInvalidDescriptionUsesMessageErrors(t *testing.T) {
 	}
 }
 
+func TestSendChatPollRejectsRemovedEmojiDescriptionAsInputInvalid(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newBlobs(t)
+	s := openStickerStore(t, blobs)
+	creator, err := s.CreateUser(ctx, "+15551401065")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Removed poll emoji", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGSSize(t, 100, 100))
+	otherFile := storedStickerDocument(t, s, blobs, creator.ID, validStickerTGSSize(t, 100, 100))
+	fingerprints := make([]store.StickerFileFingerprint, 0, 2)
+	for _, stickerFile := range []store.File{file, otherFile} {
+		_, fingerprint, readErr := s.ReadStickerFileForSetWithFingerprint(ctx, stickerFile)
+		if readErr != nil {
+			t.Fatalf("read sticker file for set: %v", readErr)
+		}
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	_, err = s.CreateUserStickerSet(ctx, store.UserStickerSet{
+		CreatorID: creator.ID, Title: "Poll emoji", ShortName: "removed_poll_emoji", Kind: "emojis",
+	}, []store.UserStickerSetItem{
+		{FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
+		{FileID: otherFile.ID, AccessHash: otherFile.AccessHash, Size: otherFile.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
+	}, fingerprints)
+	if err != nil {
+		t.Fatalf("create emoji sticker set: %v", err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, creator.ID, file.ID, file.AccessHash); err != nil {
+		t.Fatalf("remove emoji sticker: %v", err)
+	}
+
+	_, err = api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: fixedPollMedia("Question?", "A", "B"),
+		Message: "⭐", Entities: []tg.MessageEntityClass{
+			&tg.MessageEntityCustomEmoji{Offset: 0, Length: 1, DocumentID: file.ID},
+		}, RandomID: 1401066,
+	})
+	if !tgerr.Is(err, "INPUT_REQUEST_INVALID") {
+		t.Fatalf("send poll with removed emoji error = %v, want INPUT_REQUEST_INVALID", err)
+	}
+	history, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("chat history after rejected poll: %v", err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("rejected poll wrote %d chat messages", len(history))
+	}
+}
+
 func TestSendPollInSavedMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

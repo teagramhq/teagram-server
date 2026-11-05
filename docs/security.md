@@ -289,3 +289,38 @@ schema operation; dropping the postings table does not erase source messages or
 backup copies. See the
 [migration behavior](migrations.md#ordered-message-search-postings) for the
 additive schema details.
+
+# Threat model: WebSocket failure diagnostics
+
+## Assets and boundaries
+
+The `/apiws` failure and matching transport-close records can include an
+`auth_key_id` and `peer_addr` after the server has read an auth-key identifier.
+The identifier is a stable pseudonymous session reference, and the peer address
+is personal network data. Neither is a credential, but an operator with access
+to auth-key records can map an identifier to a stored session and its account.
+The records omit auth-key bytes, request payloads, tokens, and account IDs.
+Database lookup errors expose a PostgreSQL SQLSTATE and an allowlisted category,
+or a safe network failure summary. Arbitrary database messages, detail, and hint
+fields are omitted.
+
+## Abuse cases and controls
+
+| Abuse case | Control and remaining risk |
+|---|---|
+| A reader correlates a failure with a transport close or later failures | The shared auth-key ID and peer address intentionally match the failure and close records. This reveals connection timing, source network address, and repeated failure patterns; a reader with database access can associate the stable ID with a session and account. Restrict log access and treat these fields as sensitive personal data. |
+| A log reader obtains session or request secrets | These records do not include key bytes, payloads, or tokens. Auth-key lookup diagnostics include only a PostgreSQL SQLSTATE and allowlisted category or a safe network failure summary, not arbitrary database messages, wrapped error text, detail, or hint. Continue to treat the identifier and peer address as sensitive even with those omissions. |
+
+## Log access and retention
+
+On the production host, the QA SSH key is limited to the forced log reader and
+can retrieve up to 5,000 matching lines, but any valid cutoff can be requested;
+that is a volume bound rather than an age limit. Host root and Docker
+administrators can read raw application logs and the legacy archive. The host
+syslog rotation is size-based, with an 8 GiB maximum and no fixed age limit;
+the legacy archive can remain until replaced or deleted. Logs are not encrypted
+at rest. Keep the reader key and host access limited to trusted responders.
+The deployment's [retained log threat model](../deploy/teagram/README.md#retained-log-threat-model)
+documents the full reader, rotation, archive, and deletion boundaries. Forwarded
+copies inherit the same sensitivity and require their own access and retention
+controls.
