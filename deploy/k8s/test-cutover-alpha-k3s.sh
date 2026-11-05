@@ -249,9 +249,8 @@ if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" \
   printf 'cutover runner unexpectedly recovered after a Kubernetes resource lookup failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'could not determine whether the k8s Cloudflare connector exists during recovery' \
-  "$tmp_dir/recovery-lookup-failure.log"
-grep --fixed-strings --quiet 'recovery was incomplete' "$tmp_dir/recovery-lookup-failure.log"
+expect_log 'could not determine whether the k8s Cloudflare connector exists during recovery' "$tmp_dir/recovery-lookup-failure.log"
+expect_log 'recovery was incomplete' "$tmp_dir/recovery-lookup-failure.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
@@ -277,9 +276,8 @@ if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNE
   printf 'cutover runner unexpectedly passed the injected post-switch failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'injected disposable-cluster failure after the Cloudflare connector started' \
-  "$tmp_dir/post-switch-failure.log"
-grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/post-switch-failure.log"
+expect_log 'injected disposable-cluster failure after the Cloudflare connector started' "$tmp_dir/post-switch-failure.log"
+expect_log 'automatic recovery is disabled' "$tmp_dir/post-switch-failure.log"
 [[ $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == route-switched ]]
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
@@ -340,8 +338,7 @@ if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   printf 'rollback runner ignored a Kubernetes API lookup failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'could not determine whether deployment/cloudflared exists' \
-  "$tmp_dir/connector-lookup-failure.log"
+expect_log 'could not determine whether deployment/cloudflared exists' "$tmp_dir/connector-lookup-failure.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
@@ -360,8 +357,7 @@ if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   printf 'rollback runner ignored a Kubernetes teagramd lookup failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'could not determine whether statefulset/teagramd exists' \
-  "$tmp_dir/teagramd-lookup-failure.log"
+expect_log 'could not determine whether statefulset/teagramd exists' "$tmp_dir/teagramd-lookup-failure.log"
 [[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 [[ $(kubectl get statefulset teagramd --namespace "$TARGET_NAMESPACE" \
@@ -378,8 +374,7 @@ if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   printf 'rollback runner unexpectedly passed the injected partial Serve restore failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'injected disposable-cluster failure after the first Serve route changed' \
-  "$tmp_dir/partial-route-rollback.log"
+expect_log 'injected disposable-cluster failure after the first Serve route changed' "$tmp_dir/partial-route-rollback.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
