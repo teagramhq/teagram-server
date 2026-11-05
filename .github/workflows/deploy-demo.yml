@@ -62,13 +62,105 @@ jobs:
           [[ "$ISSUE_KEY" =~ ^MAIN-[0-9]+$ ]]
           echo "succeeded=true" >> "$GITHUB_OUTPUT"
 
+  build-demo-web:
+    name: 'build: demo-web'
+    needs: check-server-deploy-result
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
+      (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    # Let the server deploy proceed; the deploy job reports a failed web build.
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      source_commit: ${{ steps.publication.outputs.source_commit }}
+      artifact_digest: ${{ steps.publication.outputs.artifact_digest }}
+      artifact_name: ${{ steps.package.outputs.name }}
+      result: ${{ steps.build_result.outputs.result }}
+    steps:
+      - name: Check out the workflow source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Resolve the current live web publication
+        id: publication
+        run: |
+          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
+          deployable=$(jq -er '.deployable | tostring' <<<"$publication")
+          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
+          [[ "$deployable" == true ]]
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'source_commit=%s\nartifact_digest=%s\n' "$source_commit" "$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the resolved web source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: teagramhq/teagram-web
+          ref: ${{ steps.publication.outputs.source_commit }}
+          path: teagram-web
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
+        with:
+          version: 11.16.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+
+      - name: Rebuild and verify the live web artifact
+        working-directory: teagram-web
+        env:
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.publication.outputs.artifact_digest }}
+        run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
+
+      - name: Package the verified web artifact
+        id: package
+        env:
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
+        run: |
+          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
+          tar -czf "$archive" -C teagram-web/dist-private .
+          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s\n' "$archive_sha256" > "$archive.sha256"
+          printf 'name=demo-web-release-%s-%s\n' "$WEB_SOURCE_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the verified web artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz
+            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Expose the web build result
+        id: build_result
+        if: ${{ always() }}
+        env:
+          WEB_BUILD_STATUS: ${{ job.status }}
+        run: printf 'result=%s\n' "$WEB_BUILD_STATUS" >> "$GITHUB_OUTPUT"
+
   deploy-demo:
     name: 'deploy: demo'
     needs:
       - check-server-deploy-result
+      - build-demo-web
     if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
-      (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')
+      !cancelled() && needs.check-server-deploy-result.result == 'success' &&
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
+      (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: demo
@@ -137,31 +229,14 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
-      - name: Resolve the current live web publication
-        id: publication
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        continue-on-error: true
-        run: |
-          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
-          deployable=$(jq -er '.deployable | tostring' <<<"$publication")
-          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
-          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
-          [[ "$deployable" == true || "$deployable" == false ]]
-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          {
-            printf 'deployable=%s\n' "$deployable"
-            printf 'source_commit=%s\n' "$source_commit"
-            printf 'artifact_digest=%s\n' "$artifact_digest"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Check the web publication gate
         id: web-gate
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
-          DEMO_WEB_DEPLOYABLE: ${{ steps.publication.outputs.deployable }}
+          DEMO_WEB_BUILD_RESULT: ${{ needs.build-demo-web.outputs.result }}
+          DEMO_WEB_JOB_RESULT: ${{ needs.build-demo-web.result }}
         run: |
-          if [[ "$DEMO_WEB_DEPLOYABLE" == 'true' ]]; then
+          if [[ "$DEMO_WEB_BUILD_RESULT" == 'success' && "$DEMO_WEB_JOB_RESULT" == 'success' ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -229,26 +304,27 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
-      - name: Fail after server deploy when web resolution failed
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && steps.publication.outcome == 'failure' && steps.server-deploy.outcome == 'success' }}
+      - name: Fail after server deploy when web build failed
+        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && (needs.build-demo-web.result != 'success' || needs.build-demo-web.outputs.result != 'success') && steps.server-deploy.outcome == 'success' }}
         run: |
-          echo "::error::Public server deployed, but live web publication resolution failed"
+          echo "::error::Public server deployed, but the live web publication build failed"
           exit 1
 
-      - name: Download the web artifact from tested CI
+      - name: Download the web artifact from this deploy run
         id: demo-web-artifact
         if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ steps.target.outputs.ci_run_id }}
-          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
+          WEB_SOURCE_SHA: ${{ needs.build-demo-web.outputs.source_commit }}
+          WEB_ARTIFACT_NAME: ${{ needs.build-demo-web.outputs.artifact_name }}
         run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WEB_ARTIFACT_NAME" =~ ^demo-web-release-${WEB_SOURCE_SHA}-[1-9][0-9]*$ ]]
           artifact_dir="$RUNNER_TEMP/demo-web-artifact"
           mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-web-release-$WEB_SOURCE_SHA" --dir "$artifact_dir"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$WEB_ARTIFACT_NAME" --dir "$artifact_dir"
           archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
           checksum_file="$archive.sha256"
           [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
@@ -271,8 +347,8 @@ jobs:
         if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.publication.outputs.artifact_digest }}
+          WEB_SOURCE_SHA: ${{ needs.build-demo-web.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ needs.build-demo-web.outputs.artifact_digest }}
           WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
           WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}

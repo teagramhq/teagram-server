@@ -281,23 +281,22 @@ digest, then requires a successful `master` publication run and an available
 matching artifact from `.github/workflows/private-artifact.yml`. It reads the
 manifest again after those checks and fails if the live identity changed during
 resolution. There is no checked-in web pin or cross-repository write credential.
-The secret-free server CI web-artifact job checks out the resolved web source
-and rebuilds it with `build-web-artifact.sh`, which requires the result
-to reproduce the published digest. It uploads the archive and SHA-256 sidecar
-with the successful server CI run. At deployment time the workflow resolves
-the live publication again and downloads only the matching archive from that
-server CI run; if the manifest advanced after CI, no matching archive exists
-and the web deployment fails closed. The credentialed deploy job only verifies
-the archive checksum and streams it to the LXC. The forced command checks the
-release identity against the current live publication, and the LXC recomputes
-the artifact content digest before activation. The LXC never installs Node or
-builds the web app. The web source commit and artifact digest are stored in
-`.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
-server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
-only the supplied server digest and checks both its repository digest and
-revision label before touching the database. It revalidates the blob authority and
-running containers, then takes and validates a root-only PostgreSQL dump while
-the existing server and public edge keep running. It applies migrations while
+At deployment time a separate secret-free job resolves the live publication,
+checks out its source, and rebuilds it with `build-web-artifact.sh`, which
+requires the result to reproduce the published digest. It uploads the archive
+and SHA-256 sidecar to the current demo deploy run, so a publication after the
+server CI run can still be deployed. The credentialed deploy job downloads
+that archive, verifies its checksum and streams it to the LXC. If the live
+identity changes during the rollout, the web deployment fails closed. The
+forced command checks the release identity against the current live publication,
+and the LXC recomputes the artifact content digest before activation. The LXC
+never installs Node or builds the web app. The web source commit and artifact
+digest are stored in `.state/teagram-demo/active-release.json`. A PR workflow
+cannot influence the server image digest by overwriting the package's SHA tag.
+`deploy-main.sh` pulls only the supplied server digest and checks both its
+repository digest and revision label before touching the database. It revalidates
+the blob authority and running containers, then takes and validates a root-only
+PostgreSQL dump while the existing server and public edge keep running. It applies migrations while
 the old server remains live, starts the candidate in the inactive slot,
 verifies seeded API reads and both HAProxy listener checks, then sends new
 sessions to the candidate and drains the old server before stopping it.
