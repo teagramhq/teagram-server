@@ -100,11 +100,18 @@ create_target_namespace() {
 
 start_port_forward() {
   local namespace=$1 attempt
+  local -a ports=(12443:2443)
+  # Only the cutover overlay adds the web and admin listeners; the source
+  # deployment serves MTProto on 2443 alone.
+  [[ $namespace == "$TARGET_NAMESPACE" ]] && ports+=(12444:2444 12445:2445)
   kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
-    service/teagramd 12443:2443 12444:2444 12445:2445 > "$tmp_dir/port-forward-$namespace.log" 2>&1 &
+    service/teagramd "${ports[@]}" > "$tmp_dir/port-forward-$namespace.log" 2>&1 &
   port_forward_pid=$!
   for ((attempt = 1; attempt <= 30; attempt++)); do
-    if curl --silent --output /dev/null --max-time 2 http://127.0.0.1:12444/.well-known/teagramd/client; then
+    if [[ $namespace == "$TARGET_NAMESPACE" ]]; then
+      curl --silent --output /dev/null --max-time 2 \
+        http://127.0.0.1:12444/.well-known/teagramd/client && return 0
+    elif grep --fixed-strings --quiet 'Forwarding from 127.0.0.1:12443' "$tmp_dir/port-forward-$namespace.log"; then
       return 0
     fi
     sleep 2
@@ -418,7 +425,11 @@ PY
 kubectl rollout status statefulset/teagramd --namespace "$SOURCE_NAMESPACE" --timeout=300s >/dev/null
 kubectl rollout status deployment/cloudflared --namespace "$SOURCE_NAMESPACE" --timeout=300s >/dev/null
 start_port_forward "$SOURCE_NAMESPACE"
-smoke_restored_account
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  smoke_restored_account && break
+  [[ $attempt -lt 10 ]]
+  sleep 3
+done
 printf 'restored-account sign-in passed after the actual cutover runner rollback\n'
 stop_port_forward
 
