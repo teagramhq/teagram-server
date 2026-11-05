@@ -224,15 +224,17 @@ type Conn struct {
 	rpcOutcomeSize int
 
 	// pendingAcks holds the client content messages still owed an
-	// acknowledgement, and ackTimer the flush armed for them. Both are guarded
-	// by writeMu, which every response write already holds when it answers one.
-	pendingAcks []int64
+	// acknowledgement, with their RPC constructor for failure diagnostics, and
+	// ackTimer the flush armed for them. Both are guarded by writeMu, which every
+	// response write already holds when it answers one.
+	pendingAcks []queuedAck
 	ackTimer    *time.Timer
 	// acksStopped is set once the connection stops serving, so a flush that
 	// fires afterwards writes nothing.
 	acksStopped atomic.Bool
-	// ackFailed reports a msgs_ack write that failed; nil reports nothing.
-	ackFailed func(error)
+	// ackFailed reports a msgs_ack write that failed and the RPC constructors
+	// whose messages were awaiting acknowledgement; nil reports nothing.
+	ackFailed func(error, []uint32)
 	// rpcReplay answers retransmitted requests without running them again.
 	// It is guarded by writeMu and, unlike rpcOutcomes, survives owner changes.
 	rpcReplay rpcReplayCache
@@ -1113,7 +1115,7 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 	writeDeadlineExpired := !time.Now().Before(writeDeadline)
 	c.finishWriteDeadline(writeGeneration, err != nil && writeDeadlineExpired)
 	if err != nil {
-		wrapped := fmt.Errorf("send: %w", err)
+		wrapped := markRequestFailureCause(requestFailureTransport, fmt.Errorf("send: %w", err))
 		if (c.shutdown != nil && c.shutdown.outputExpired()) || writeDeadlineExpired || !time.Now().Before(serverWriteDeadline) {
 			return classifySendError(errServerWriteDeadline, wrapped)
 		}

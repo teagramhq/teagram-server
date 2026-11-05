@@ -1,8 +1,8 @@
 -- name: InsertCode :exec
 -- Inserts a new code row. Each IssueCode call creates its own row keyed by
 -- code_hash, so attempt counters are isolated between callers.
-INSERT INTO phone_codes (phone, code_hash, code, expires_at)
-VALUES ($1, $2, $3, $4);
+INSERT INTO phone_codes (phone, code_hash, code, expires_at, turnstile_action, turnstile_auth_key_id)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: GetLatestCode :one
 -- Returns the most recently created code row for a phone. Used by IssueCode
@@ -24,7 +24,9 @@ SELECT * FROM phone_codes WHERE code_hash = $1;
 -- to validate the hash alone (without the code value) while confirming the hash
 -- was issued for the expected identifier. Returns the hash-check fields and
 -- the code value that auth.signUp consumes as the invite secret.
-SELECT code_hash, phone, code, consumed_at, expires_at, attempts FROM phone_codes
+SELECT code_hash, phone, code, consumed_at, expires_at, attempts,
+       turnstile_action, turnstile_auth_key_id
+FROM phone_codes
 WHERE code_hash = $1 AND phone = $2;
 
 -- name: SetCodeByHashAndPhone :execrows
@@ -54,6 +56,19 @@ UPDATE phone_codes
 SET consumed_at = now(), code = ''
 WHERE phone = $1
   AND code_hash = $2
+  AND consumed_at IS NULL
+  AND expires_at >= now()
+  AND attempts < 3
+  AND code <> '';
+
+-- name: ConsumeSignupTurnstileCodeForUsername :execrows
+-- Marks the code-bound signup challenge single-use inside account admission.
+UPDATE phone_codes
+SET consumed_at = now(), code = ''
+WHERE phone = $1
+  AND code_hash = $2
+  AND turnstile_action = 'signup'
+  AND turnstile_auth_key_id = $3
   AND consumed_at IS NULL
   AND expires_at >= now()
   AND attempts < 3

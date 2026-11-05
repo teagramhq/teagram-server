@@ -28,6 +28,17 @@ const (
 	issueCodeLockClass = 0x7467434f // "tgCO" (code)
 )
 
+type TurnstileAction string
+
+const (
+	TurnstileActionSignIn TurnstileAction = "signin"
+	TurnstileActionSignUp TurnstileAction = "signup"
+)
+
+func (a TurnstileAction) Valid() bool {
+	return a == TurnstileActionSignIn || a == TurnstileActionSignUp
+}
+
 // IssueCode generates a 5-digit login code and hash for phone, storing it with
 // a TTL. It returns ErrResendTooSoon if an unconsumed prior code was issued
 // within resendCooldown. Each call inserts a new row keyed by code_hash, so
@@ -82,10 +93,12 @@ func (s *Store) IssueCode(ctx context.Context, phone string) (string, string, er
 		return "", "", err
 	}
 	err = qtx.InsertCode(ctx, db.InsertCodeParams{
-		Phone:     phone,
-		CodeHash:  hash,
-		Code:      code,
-		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		Phone:              phone,
+		CodeHash:           hash,
+		Code:               code,
+		ExpiresAt:          pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		TurnstileAction:    nil,
+		TurnstileAuthKeyID: nil,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("issue code: %w", err)
@@ -101,6 +114,16 @@ func (s *Store) IssueCode(ctx context.Context, phone string) (string, string, er
 // call inserts a new row keyed by code_hash, so attempt counters are isolated
 // between callers even for the same identifier.
 func (s *Store) IssueCodeForUsername(ctx context.Context, username string) (string, string, error) {
+	return s.IssueCodeForUsernameWithTurnstileAction(ctx, username, "", 0)
+}
+
+// IssueCodeForUsernameWithTurnstileAction stores the action and auth key of a
+// challenge verified by auth.sendCode. Empty action keeps the pre-existing
+// behavior when the sign-in gate is disabled.
+func (s *Store) IssueCodeForUsernameWithTurnstileAction(ctx context.Context, username string, action TurnstileAction, authKeyID int64) (string, string, error) {
+	if action != "" && !action.Valid() {
+		return "", "", errors.New("issue code for username: invalid Turnstile action")
+	}
 	code, err := randDigits5()
 	if err != nil {
 		return "", "", err
@@ -109,11 +132,20 @@ func (s *Store) IssueCodeForUsername(ctx context.Context, username string) (stri
 	if err != nil {
 		return "", "", err
 	}
+	var actionValue *string
+	var authKeyValue *int64
+	if action != "" {
+		actionString := string(action)
+		actionValue = &actionString
+		authKeyValue = &authKeyID
+	}
 	err = s.q.InsertCode(ctx, db.InsertCodeParams{
-		Phone:     username,
-		CodeHash:  hash,
-		Code:      code,
-		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		Phone:              username,
+		CodeHash:           hash,
+		Code:               code,
+		ExpiresAt:          pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		TurnstileAction:    actionValue,
+		TurnstileAuthKeyID: authKeyValue,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("issue code for username: %w", err)
@@ -195,6 +227,13 @@ func (s *Store) verifyCodeWith(ctx context.Context, q *db.Queries, phone, hash, 
 // consumed, not expired, and not exhausted. Used by username-mode signIn where
 // the code field is ignored — only the hash is validated.
 func (s *Store) CheckCodeHash(ctx context.Context, phone, hash string) error {
+	_, err := s.CheckCodeHashWithTurnstileAction(ctx, phone, hash)
+	return err
+}
+
+// CheckCodeHashWithTurnstileAction validates a username code hash and returns
+// the action verified by auth.sendCode, if any.
+func (s *Store) CheckCodeHashWithTurnstileAction(ctx context.Context, phone, hash string) (TurnstileAction, error) {
 	phone = NormalizePhone(phone)
 	row, err := s.q.GetCodeByHashAndPhone(ctx, db.GetCodeByHashAndPhoneParams{
 		CodeHash: hash,
@@ -202,11 +241,43 @@ func (s *Store) CheckCodeHash(ctx context.Context, phone, hash string) error {
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return ErrCodeInvalid
+		return "", ErrCodeInvalid
 	case err != nil:
-		return fmt.Errorf("check code hash: %w", err)
+		return "", fmt.Errorf("check code hash: %w", err)
 	}
-	return validateCodeHash(row)
+	if err := validateCodeHash(row); err != nil {
+		return "", err
+	}
+	if row.TurnstileAction != nil {
+		action := TurnstileAction(*row.TurnstileAction)
+		if !action.Valid() {
+			return "", errors.New("check code hash: invalid Turnstile action")
+		}
+		return action, nil
+	}
+	return "", nil
+}
+
+// CheckSignUpTurnstileCode checks whether a live code row carries a signup
+// challenge verified for this username, hash, and auth key. Admission repeats
+// this check and consumes the row transactionally after the sign-up IP limit is
+// charged.
+func (s *Store) CheckSignUpTurnstileCode(ctx context.Context, username, hash string, authKeyID int64) (bool, error) {
+	row, err := s.q.GetCodeByHashAndPhone(ctx, db.GetCodeByHashAndPhoneParams{
+		CodeHash: hash,
+		Phone:    NormalizePhone(username),
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("check signup Turnstile code: %w", err)
+	}
+	if !codeHashIsUsable(row) {
+		return false, nil
+	}
+	return row.TurnstileAction != nil && TurnstileAction(*row.TurnstileAction).Valid() && TurnstileAction(*row.TurnstileAction) == TurnstileActionSignUp &&
+		row.TurnstileAuthKeyID != nil && *row.TurnstileAuthKeyID == authKeyID, nil
 }
 
 // SetCodeForUsername stores the caller-supplied signIn code on its validated
@@ -242,6 +313,10 @@ func validateCodeHash(row db.GetCodeByHashAndPhoneRow) error {
 		return ErrCodeExhausted
 	}
 	return nil
+}
+
+func codeHashIsUsable(row db.GetCodeByHashAndPhoneRow) bool {
+	return validateCodeHash(row) == nil
 }
 
 // DeleteExpiredCodes removes all login codes past their expiry and returns

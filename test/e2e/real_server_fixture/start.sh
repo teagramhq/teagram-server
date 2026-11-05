@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 9)); then
-	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
+if (($# != 11)); then
+	printf 'fixture runner requires revisions, a run ID, and fixture mode options\n' >&2
 	exit 2
 fi
 SERVER_REVISION=$1
@@ -16,6 +16,8 @@ AUTH_PROGRESS_OUTPUT=$6
 PAIR_KEY_INPUT=$7
 PAIR_KEY_OUTPUT=$8
 AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
+GUEST_SIGNUP=${10}
+GUEST_SIGNUP_GATE_OFF=${11}
 AUTH_PROGRESS_RUNNER_REVISION=097794ab18ef853ca09c3491b9df4e9a702d0ca6
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
@@ -34,6 +36,24 @@ if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH
 	$AUTH_PROGRESS_PREBASELINE_CONTROLS != 0 && $AUTH_PROGRESS_PREBASELINE_CONTROLS != 1 ]]; then
 	printf 'fixture auth-progress options are invalid\n' >&2
 	exit 2
+fi
+if [[ $GUEST_SIGNUP != 0 && $GUEST_SIGNUP != 1 ||
+	$GUEST_SIGNUP == 1 && ( $AUTH_PROGRESS == 1 || $AUTH_CONTROLS == 1 || $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 ) ]]; then
+	printf 'fixture guest signup mode is invalid or combined with auth controls\n' >&2
+	exit 2
+fi
+if [[ $GUEST_SIGNUP_GATE_OFF != 0 && $GUEST_SIGNUP_GATE_OFF != 1 ||
+	$GUEST_SIGNUP_GATE_OFF == 1 && $GUEST_SIGNUP != 1 ]]; then
+	printf 'fixture guest signup gate-off mode is invalid or missing guest signup mode\n' >&2
+	exit 2
+fi
+GUEST_SIGNUP_QA_BYPASS=0
+if [[ -n ${REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN:-} ]]; then
+	if [[ $GUEST_SIGNUP != 1 || $GUEST_SIGNUP_GATE_OFF != 1 || ! $REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN =~ ^[0-9a-f]{64}$ ]]; then
+		printf 'fixture guest signup QA bypass requires gate-off guest signup mode and a 64-character test token\n' >&2
+		exit 2
+	fi
+	GUEST_SIGNUP_QA_BYPASS=1
 fi
 if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
 	printf 'prebaseline auth-progress controls require auth controls\n' >&2
@@ -248,7 +268,7 @@ auth_progress_server_pid() {
 	' | tail -n 1
 }
 signal_auth_progress_boundary() {
-	local boundary=$1 index=$2 count server_pid report attempt
+	local boundary=$1 index=$2 count server_pid report
 	count="$(front_websocket_accepted)" || {
 		printf 'fixture could not read the front websocket counter\n' >&2
 		return 1
@@ -263,7 +283,7 @@ signal_auth_progress_boundary() {
 		printf 'fixture could not signal its auth-progress server process\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		if report="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" 2>/dev/null)" &&
 			jq -e --arg boundary "$boundary" --arg source "$AUTH_PROGRESS_FRONT_SOURCE" --argjson count "$count" --argjson index "$index" \
 				'.boundaries | length >= $index and .[$index - 1].server.boundary == $boundary and .[$index - 1].front.ws_accepted == $count and .[$index - 1].front.source == $source' <<<"$report" >/dev/null 2>&1; then
@@ -275,14 +295,14 @@ signal_auth_progress_boundary() {
 	return 1
 }
 bind_auth_progress_identity() {
-	local identity=$1 server_pid status attempt
+	local identity=$1 server_pid status
 	printf '%s\n' "$identity" | docker exec -i --user 65532:65532 "$BACKEND" /bin/sh -c "umask 077; cat > /run/log/$AUTH_PROGRESS_BINDING_PATH" || return 1
 	server_pid="$(auth_progress_server_pid)"
 	if [[ ! $server_pid =~ ^[0-9]+$ ]] || ! docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -USR2 $server_pid"; then
 		printf 'fixture could not request auth-progress identity binding\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		if status="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_BINDING_STATUS" 2>/dev/null)"; then
 			case "$status" in
 				bound) docker exec --user 65532:65532 "$BACKEND" rm -f "/run/log/$AUTH_PROGRESS_BINDING_PATH" "/run/log/$AUTH_PROGRESS_BINDING_STATUS" || return 1; return 0 ;;
@@ -295,7 +315,7 @@ bind_auth_progress_identity() {
 	return 1
 }
 stop_auth_progress_server() {
-	local server_pid attempt stopped=0
+	local server_pid stopped=0
 	server_pid="$(auth_progress_server_pid)"
 	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
 		printf 'fixture could not identify its auth-progress server process for shutdown\n' >&2
@@ -305,7 +325,7 @@ stop_auth_progress_server() {
 		printf 'fixture could not request bounded auth-progress shutdown\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 150); do
+	for _ in $(seq 1 150); do
 		if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "test -d /proc/$server_pid"; then
 			stopped=1
 			break
@@ -447,7 +467,12 @@ SERVER_PACKAGE=./cmd/teagramd
 if [[ ! -d "$SERVER_WORKTREE/cmd/teagramd" && -d "$SERVER_WORKTREE/cmd/telegramd" ]]; then
 	SERVER_PACKAGE=./cmd/telegramd
 fi
-if [[ $AUTH_PROGRESS == 1 ]]; then
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -tags fixtureturnstile -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
+	)
+elif [[ $AUTH_PROGRESS == 1 ]]; then
 	(
 		cd "$SERVER_WORKTREE"
 		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
@@ -494,8 +519,8 @@ docker run --detach --name "$DATABASE" --label "$OWNER_LABEL=$OWNER_TOKEN" --lab
 	mirror.gcr.io/library/postgres:18-alpine >/dev/null
 
 wait_healthy() {
-	local container=$1 attempt status
-	for attempt in $(seq 1 60); do
+	local container=$1 status
+	for _ in $(seq 1 60); do
 		status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")"
 		if [[ $status == healthy ]]; then return 0; fi
 		if [[ $status == unhealthy || $status == missing ]]; then
@@ -539,6 +564,29 @@ if [[ $FINGERPRINT == fbb62871f07fae2a ]]; then
 	exit 1
 fi
 
+SERVER_AUTH_ENV=(--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false)
+SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd:2443)
+SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/)
+TURNSTILE_SIGNIN_ENABLED=false
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd.test:2444)
+	if [[ $GUEST_SIGNUP_GATE_OFF == 0 ]]; then TURNSTILE_SIGNIN_ENABLED=true; fi
+	SERVER_AUTH_ENV=(
+		--env TG_REGISTRATION=open
+		--env TG_LOG_LOGIN_CODES=false
+		--env TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+		--env TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
+		--env TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
+		--env TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		--env "TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
+		--env TG_FIXTURE_TURNSTILE_SITEVERIFY=1
+	)
+	if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+		SERVER_AUTH_ENV+=(--env TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass-token)
+	fi
+	SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/)
+fi
+
 docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" \
 	--network "$SERVER_NET" --network-alias teagramd --log-driver none \
 	--read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges:true \
@@ -549,10 +597,10 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
 	--tmpfs /var/lib/teagramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
-	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem --env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/ \
-	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd:2443 \
+	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem "${SERVER_ADVERTISE_ENV[@]}" "${SERVER_PUBLIC_LINK_ENV[@]}" \
+	--env TG_LISTEN_ADDR=:2443 \
 	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
-	--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false \
+	"${SERVER_AUTH_ENV[@]}" \
 	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:18-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/teagramd' < "$BUILD_DIR/teagramd"
@@ -566,6 +614,11 @@ if [[ -n $PHOTO_THUMB_BINARY ]]; then
 fi
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/server-key.pem' < "$SECRET_DIR/server-key.pem"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/authkey.hex' < "$SECRET_DIR/authkey.hex"
+if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+	printf '%s' "$REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN" | docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/qa-bypass-token'
+	docker exec "$BACKEND" chown 65532:65532 /run/secrets/qa-bypass-token
+	docker exec "$BACKEND" chmod 0440 /run/secrets/qa-bypass-token
+fi
 docker exec "$BACKEND" chown 65532:65532 /run/app/teagramd /run/secrets/server-key.pem /run/secrets/authkey.hex
 docker exec "$BACKEND" chmod 0755 /run/app/teagramd
 docker exec "$BACKEND" chmod 0440 /run/secrets/server-key.pem /run/secrets/authkey.hex
@@ -702,11 +755,15 @@ wait_healthy "$FRONT"
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/tls.crt' < "$SECRET_DIR/tls.crt"
 docker exec "$CLIENT" chown 1001:1001 /run/secrets/tls.crt
 docker exec "$CLIENT" chmod 0400 /run/secrets/tls.crt
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_A" --password-file /run/secrets/a-password >/dev/null
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_B" --password-file /run/secrets/b-password >/dev/null
-docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
+if [[ $GUEST_SIGNUP == 0 ]]; then
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_A" --password-file /run/secrets/a-password >/dev/null
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_B" --password-file /run/secrets/b-password >/dev/null
+	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
+fi
 
-if [[ $(admin_state) != 'true|NULL' || $(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL') != 2 ]]; then
+EXPECTED_AUTH_KEYS=2
+if [[ $GUEST_SIGNUP == 1 ]]; then EXPECTED_AUTH_KEYS=0; fi
+if [[ $(admin_state) != 'true|NULL' || $(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL') != "$EXPECTED_AUTH_KEYS" ]]; then
 	printf 'administrator election or authenticated-session state changed unexpectedly\n' >&2
 	exit 1
 fi
@@ -719,7 +776,25 @@ if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_C
 	exit 1
 fi
 SERVER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND")"
-for expected in 'TG_REGISTRATION=closed' 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test'; do
+EXPECTED_SERVER_ENV=(TG_REGISTRATION=closed TG_LOG_LOGIN_CODES=false TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test)
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	EXPECTED_SERVER_ENV=(
+		TG_REGISTRATION=open
+		TG_LOG_LOGIN_CODES=false
+		TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test
+		TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+		TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
+		TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
+		TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		"TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
+		TG_FIXTURE_TURNSTILE_SITEVERIFY=1
+		TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
+	)
+	if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+		EXPECTED_SERVER_ENV+=(TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass-token)
+	fi
+fi
+for expected in "${EXPECTED_SERVER_ENV[@]}"; do
 	if ! printf '%s\n' "$SERVER_ENV" | grep -Fxq "$expected"; then
 		printf 'teagramd security environment assertion failed\n' >&2
 		exit 1
@@ -843,12 +918,22 @@ fi
 [[ $(docker inspect --format '{{.State.Status}}' "$BROWSER") == running ]]
 
 FINAL_AUTH_KEYS="$(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL')"
-[[ $FINAL_AUTH_KEYS == 2 ]]
+EXPECTED_FINAL_AUTH_KEYS=2
+if [[ $GUEST_SIGNUP == 1 ]]; then EXPECTED_FINAL_AUTH_KEYS=0; fi
+[[ $FINAL_AUTH_KEYS == "$EXPECTED_FINAL_AUTH_KEYS" ]]
+REGISTRATION_CLOSED=true
+GUEST_SIGNUP_ENABLED=false
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	REGISTRATION_CLOSED=false
+	GUEST_SIGNUP_ENABLED=true
+fi
 SECURITY_JSON="$(jq -cn \
+	--argjson registrationClosed "$REGISTRATION_CLOSED" --argjson guestSignUpEnabled "$GUEST_SIGNUP_ENABLED" \
+	--argjson turnstileSignInEnabled "$TURNSTILE_SIGNIN_ENABLED" \
 	--argjson ordinaryUsers "${USER_COUNTS%%|*}" --argjson usernameAccounts "$(cut -d '|' -f 2 <<<"$USER_COUNTS")" \
 	--argjson passwordVerifiers "$(cut -d '|' -f 3 <<<"$USER_COUNTS")" \
 	--argjson initialAuthKeys "$INITIAL_AUTH_KEYS" --argjson initialMessages "$INITIAL_MESSAGES" --argjson finalAuthKeys "$FINAL_AUTH_KEYS" \
-	'{registrationClosed:true,loginCodeLogging:false,electionClosed:true,administratorIsNull:true,ordinaryUsers:$ordinaryUsers,usernameAccounts:$usernameAccounts,passwordVerifiers:$passwordVerifiers,initialAuthKeys:$initialAuthKeys,initialMessages:$initialMessages,finalAuthKeys:$finalAuthKeys}')"
+	'{registrationClosed:$registrationClosed,guestSignUpEnabled:$guestSignUpEnabled,turnstileSignInEnabled:$turnstileSignInEnabled,turnstileTestMode:false,loginCodeLogging:false,electionClosed:true,administratorIsNull:true,ordinaryUsers:$ordinaryUsers,usernameAccounts:$usernameAccounts,passwordVerifiers:$passwordVerifiers,initialAuthKeys:$initialAuthKeys,initialMessages:$initialMessages,finalAuthKeys:$finalAuthKeys}')"
 EVIDENCE_JSON="$(jq -c --argjson detected true '{httpStatus:.http_status,wssUpgradeStatus:.wss_upgrade_status,allowedWssObserved:.observed_allowed_wss,workerProbes:.worker_probes,observerControlledAttempts:.observer_controlled_attempts,directTCP:.direct_tcp,unexpectedAttempts:(.observer_unexpected_attempts|length),unexpectedDetectionVerified:$detected}' "$SECRET_DIR/browser-positive.json")"
 READY_JSON="$(jq -cn \
 	--arg event server-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
@@ -952,7 +1037,7 @@ front_listening() {
 }
 docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
 front_stopped=0
-for attempt in $(seq 1 50); do
+for _ in $(seq 1 50); do
 	if ! front_listening; then front_stopped=1; break; fi
 	sleep 0.1
 done
@@ -967,7 +1052,7 @@ if [[ $LEG_DIGEST_BEFORE != "$FROZEN_ARTIFACT_DIGEST" ]]; then
 fi
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
 front_serving=0
-for attempt in $(seq 1 100); do
+for _ in $(seq 1 100); do
 	if front_listening; then front_serving=1; break; fi
 	sleep 0.1
 done
@@ -1017,6 +1102,39 @@ PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-
 BROWSER_EVIDENCE="$(jq -c \
 	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
 	"$SECRET_DIR/browser-artifact.json")"
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
+	guest_front_stopped=0
+	for _ in $(seq 1 50); do
+		if ! front_listening; then guest_front_stopped=1; break; fi
+		sleep 0.1
+	done
+	if ((guest_front_stopped == 0)); then
+		printf 'front server kept listening before guest-signup discovery was enabled\n' >&2
+		exit 1
+	fi
+	guest_leg_digest_before="$(measure_front_artifact guest-before)" || exit 1
+	if [[ $guest_leg_digest_before != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed before guest-signup discovery: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$guest_leg_digest_before" >&2
+		exit 1
+	fi
+	docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact --guest-signup >/run/front.log 2>&1 & echo $! > /run/front.pid'
+	guest_front_serving=0
+	for _ in $(seq 1 100); do
+		if front_listening; then guest_front_serving=1; break; fi
+		sleep 0.1
+	done
+	if ((guest_front_serving == 0)); then
+		printf 'front server did not enable guest-signup discovery\n' >&2
+		docker exec "$FRONT" cat /run/front.log >&2 2>/dev/null || true
+		exit 1
+	fi
+	guest_leg_digest_after="$(measure_front_artifact guest-after)" || exit 1
+	if [[ $guest_leg_digest_after != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed after guest-signup discovery was enabled: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$guest_leg_digest_after" >&2
+		exit 1
+	fi
+fi
 run_auth_progress_controls() {
 	local account username password_file control_output
 	for account in a b; do
@@ -1107,4 +1225,18 @@ if [[ $AUTH_CONTROLS == 1 ]]; then
 		--argjson identity "$ENDED_IDENTITY" --arg legDigestBefore "$LEG_DIGEST_BEFORE" --arg legDigestAfter "$LEG_DIGEST_AFTER" \
 		'{event:$event,status:$status,identity:$identity,legDigestBefore:$legDigestBefore,legDigestAfter:$legDigestAfter}')"
 	printf '%s\n' "$ARTIFACT_ENDED_JSON" >&3
+fi
+
+if [[ $GUEST_SIGNUP == 1 ]]; then
+	POST_GUEST_COUNTS="$(db_count "SELECT count(*) || '|' || count(*) FILTER (WHERE login_mode = 'username') || '|' || (SELECT count(*) FROM user_passwords) FROM users")"
+	GUEST_HANDLE_COUNT="$(db_count "SELECT count(*) FROM usernames WHERE handle ~ '^guest_[a-z2-7]{16}$'")"
+	GUEST_AUTH_KEYS="$(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL')"
+	if [[ $POST_GUEST_COUNTS != '3|3|3' || $GUEST_HANDLE_COUNT != 1 || $GUEST_AUTH_KEYS != 1 ]]; then
+		printf 'fresh-browser guest signup did not persist one complete guest account\n' >&2
+		exit 1
+	fi
+	if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "rpc_method=unknown[[:space:]].*error=internal|operation=msgs_ack.*error=internal" /run/log/teagramd.log'; then
+		printf 'fresh-browser guest signup logged an internal RPC or msgs_ack failure\n' >&2
+		exit 1
+	fi
 fi

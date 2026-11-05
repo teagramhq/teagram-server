@@ -211,12 +211,13 @@ session-state, username, and invite checks.
 loaded at startup. Configuration permits it only when the advertised stack
 includes `demo.teagram.io` and no production Teagram hostname; it must contain
 32 to 256 allowed characters and must differ from the Siteverify secret. The
-demo deploy mounts this separate file only into `teagramd`. A constant-time
-exact match bypasses Siteverify only for the `signup` action. It is not
-one-use: anyone who obtains it can reuse it while it remains configured. The
-token is not logged, and use of it still requires the normal registration
-policy, signup IP limit, and account-admission checks. It is not a production
-credential or a recovery path.
+demo mounts this file into `teagramd` and the isolated, one-off `demo-probe`
+service used during deploy verification. The probe uses it only as a signup
+action token for `auth.sendCode`; it does not print or export the token. A
+constant-time exact match bypasses Siteverify only for the `signup` action. It
+is not one-use: anyone who obtains it can reuse it while it remains configured.
+Use of it still requires the normal registration policy, signup IP limit, and
+account-admission checks. It is not a production credential or a recovery path.
 
 ## Abuse cases and residual risk
 

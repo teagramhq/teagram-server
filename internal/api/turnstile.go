@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -23,6 +24,10 @@ const (
 	turnstileVerifyTimeout       = 5 * time.Second
 )
 
+// turnstileSiteverifyEndpoint is overridden only by the fixtureturnstile test
+// build. Production builds always use Cloudflare Siteverify.
+var turnstileSiteverifyEndpoint = turnstileSiteverifyURL
+
 var (
 	errTurnstileRejected    = errors.New("turnstile verification rejected")
 	errTurnstileUnavailable = errors.New("turnstile verification unavailable")
@@ -31,11 +36,12 @@ var (
 	ErrTurnstileBusy = errors.New("turnstile verification capacity reached")
 )
 
-// SignUpTurnstileVerifier checks a one-use auth challenge. remoteIP is empty
-// unless the request address came from an allowlisted PROXY v2 header.
-// Implementations return ErrTurnstileBusy when their bounded capacity is full.
+// SignUpTurnstileVerifier checks a one-use auth challenge against the allowed
+// actions and returns the verified action. remoteIP is empty unless the request
+// address came from an allowlisted PROXY v2 header. Implementations return
+// ErrTurnstileBusy when their bounded capacity is full.
 type SignUpTurnstileVerifier interface {
-	Verify(ctx context.Context, token, action, remoteIP string) error
+	Verify(ctx context.Context, token string, allowedActions []string, remoteIP string) (string, error)
 }
 
 type turnstileVerifier struct {
@@ -72,7 +78,7 @@ func newTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypa
 	return &turnstileVerifier{
 		secretKey:     secretKey,
 		qaBypassToken: qaBypassToken,
-		endpoint:      turnstileSiteverifyURL,
+		endpoint:      turnstileSiteverifyEndpoint,
 		client: &http.Client{
 			Timeout: turnstileVerifyTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -86,20 +92,23 @@ func newTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypa
 	}
 }
 
-func (v *turnstileVerifier) Verify(ctx context.Context, token, action, remoteIP string) error {
+func (v *turnstileVerifier) Verify(ctx context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
 	if token == "" || len(token) > turnstileMaxTokenBytes {
-		return errTurnstileRejected
+		return "", errTurnstileRejected
 	}
-	if action == "signup" && v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
+	if v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
 		subtle.ConstantTimeCompare([]byte(token), []byte(v.qaBypassToken)) == 1 {
-		v.logger.Info("turnstile QA bypass used", "action", action)
-		return nil
+		if !slices.Contains(allowedActions, "signup") {
+			return "", errTurnstileRejected
+		}
+		v.logger.Info("turnstile QA bypass used", "action", "signup")
+		return "signup", nil
 	}
 	select {
 	case v.semaphore <- struct{}{}:
 		defer func() { <-v.semaphore }()
 	default:
-		return ErrTurnstileBusy
+		return "", ErrTurnstileBusy
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, v.timeout)
@@ -113,20 +122,20 @@ func (v *turnstileVerifier) Verify(ctx context.Context, token, action, remoteIP 
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, v.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return errTurnstileUnavailable
+		return "", errTurnstileUnavailable
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := v.client.Do(request)
 	if err != nil {
-		return errTurnstileUnavailable
+		return "", errTurnstileUnavailable
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, turnstileMaxResponseBytes+1))
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil || len(body) > turnstileMaxResponseBytes {
-		return errTurnstileUnavailable
+		return "", errTurnstileUnavailable
 	}
 	if response.StatusCode != http.StatusOK {
-		return errTurnstileUnavailable
+		return "", errTurnstileUnavailable
 	}
 	var result struct {
 		Success  bool   `json:"success"`
@@ -134,13 +143,20 @@ func (v *turnstileVerifier) Verify(ctx context.Context, token, action, remoteIP 
 		Hostname string `json:"hostname"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return errTurnstileUnavailable
+		return "", errTurnstileUnavailable
 	}
-	if !result.Success || result.Action != action {
-		return errTurnstileRejected
+	if !result.Success || !turnstileActionAllowed(allowedActions, result.Action) {
+		return "", errTurnstileRejected
 	}
 	if _, ok := v.hostnames[strings.ToLower(strings.TrimSuffix(result.Hostname, "."))]; !ok {
-		return errTurnstileRejected
+		return "", errTurnstileRejected
 	}
-	return nil
+	return result.Action, nil
+}
+
+func turnstileActionAllowed(actions []string, action string) bool {
+	if action != "signin" && action != "signup" {
+		return false
+	}
+	return slices.Contains(actions, action)
 }
