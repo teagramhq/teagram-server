@@ -161,6 +161,10 @@ func floodWaitForDuration(wait time.Duration) error {
 type downloadLocation struct {
 	fileID          int64
 	accessHash      int64
+	stickerSetID    int64
+	setAccessHash   int64
+	thumbVersion    int
+	stickerSetThumb bool
 	thumbSize       string
 	photo           bool
 	peerPhoto       bool
@@ -195,6 +199,15 @@ func parseDownloadLocation(loc tg.InputFileLocationClass) (downloadLocation, err
 			photo:           true,
 			galleryOwnerID:  ownerID,
 			hasGalleryOwner: hasGalleryOwner,
+		}, nil
+	case *tg.InputStickerSetThumb:
+		set, ok := l.Stickerset.(*tg.InputStickerSetID)
+		if !ok || set == nil || set.ID <= 0 || set.AccessHash == 0 || l.ThumbVersion <= 0 {
+			return downloadLocation{}, errLocationInvalid
+		}
+		return downloadLocation{
+			stickerSetID: set.ID, setAccessHash: set.AccessHash,
+			thumbVersion: l.ThumbVersion, stickerSetThumb: true,
 		}, nil
 	case *tg.InputPeerPhotoFileLocation:
 		return downloadLocation{fileID: l.PhotoID, peerPhoto: true, peerPhotoBig: l.Big, peer: l.Peer}, nil
@@ -385,6 +398,9 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 		return h.handleGetPeerProfilePhotoFile(r, loc.peer, loc.fileID, loc.peerPhotoBig, req.Offset, req.Limit)
 	}
 	missingBlobIsFault := true
+	if loc.stickerSetThumb {
+		return h.serveFileChunk(r, 0, req.Offset, req.Limit, h.stickerSetThumbFileGate(loc), &missingBlobIsFault)
+	}
 	gate := h.messageFileGate(loc)
 	if loc.fileID < 0 && !loc.photo {
 		gate = h.builtInDocumentFileGate(loc)
@@ -401,6 +417,20 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 		}
 	}
 	return h.serveFileChunk(r, loc.fileID, req.Offset, req.Limit, gate, &missingBlobIsFault)
+}
+
+func (h *handlers) stickerSetThumbFileGate(loc downloadLocation) downloadGate {
+	return func(ctx context.Context, _, _ int64) (authorizedDownload, error) {
+		file, err := h.store.UserStickerSetThumbnailForDownload(ctx, loc.stickerSetID, loc.setAccessHash, loc.thumbVersion)
+		if errors.Is(err, store.ErrStickerSetNotFound) {
+			return authorizedDownload{}, errLocationInvalid
+		}
+		if err != nil {
+			h.log.Error("resolve user sticker set thumbnail for download", "set_id", loc.stickerSetID, "err", err)
+			return authorizedDownload{}, errInternal
+		}
+		return authorizedDownload{file: file}, nil
+	}
 }
 
 // messageFileGate is the message lane's entitlement: the raw files.access_hash

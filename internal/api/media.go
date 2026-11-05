@@ -319,13 +319,13 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMessageEmpty
 		}
 		var entityErr error
-		descriptionEntities, entityErr = h.encodeMessageEntities(r.UserID, req.Message, req.Entities)
+		descriptionEntities, entityErr = h.encodeMessageEntitiesUnchecked(r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}
 	} else {
 		var entityErr error
-		messageEntities, entityErr = h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+		messageEntities, entityErr = h.encodeMessageEntitiesWithURLsUnchecked(r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}
@@ -576,6 +576,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			update, afterReply := h.retryReplyAfterSuccess(attempt, r, peerType, pts)
 			return res, update, afterReply, nil
 		}
+	}
+	if err := h.validateCustomEmojiDocumentReferences(r.UserID, messageEntities); err != nil {
+		return nil, nil, nil, err
 	}
 
 	documentMedia, isDocument := req.Media.(*tg.InputMediaUploadedDocument)

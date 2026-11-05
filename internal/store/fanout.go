@@ -47,6 +47,8 @@ type FanOut struct {
 	// Entities are the canonical spans persisted with each ordinary message copy.
 	Entities []PollDescriptionEntity
 
+	additionalCustomEmojiDocumentIDs []int64
+
 	// ReplyToMsgID is the message-local-id the message should quote in this chat.
 	// Non-zero to link; 0 means the message is not a reply.
 	ReplyToMsgID int64
@@ -110,6 +112,7 @@ func (s *Store) SendChatPollMessage(ctx context.Context, f FanOut, draft PollDra
 	if _, err = normalizePollDraftShape(draft); err != nil {
 		return Message{}, nil, Poll{}, false, err
 	}
+	f.additionalCustomEmojiDocumentIDs = positiveCustomEmojiDocumentIDs(draft.DescriptionEntities)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("begin: %w", err)
@@ -273,21 +276,6 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	if err = lockOwners(ctx, tx, owners...); err != nil {
 		return Message{}, nil, false, err
 	}
-	if f.StickerDocumentID != nil {
-		if err = lockLiveUserStickerDocuments(ctx, qtx, *f.StickerDocumentID); err != nil {
-			return Message{}, nil, false, err
-		}
-	}
-
-	// One lock for the whole fan-out, taken before the first per-member insert,
-	// which is what makes the fan-out all-or-nothing with respect to the file:
-	// every copy carries the reference or the transaction writes none of them.
-	// Photo-edit service messages are the only service action that carries a
-	// file id, and SetChatPhoto has already checked its ownership and metadata.
-	if err = lockFileRefs(ctx, qtx, f.FileID); err != nil {
-		return Message{}, nil, false, err
-	}
-
 	// Idempotency: a resend with the same random_id returns the original. The
 	// token lives on the sender's copy only, so the 1:1 contract carries over
 	// unchanged — no new rows, no new events, no pts movement, and each owner
@@ -300,6 +288,11 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			if f.StickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *f.StickerDocumentID) {
 				return Message{}, nil, false, ErrMediaInvalid
 			}
+			// A duplicate can replay a removed custom emoji, but uploaded files
+			// must still exist on both the request and stored message references.
+			if err = lockFileRefs(ctx, qtx, f.FileID, existing.FileID); err != nil {
+				return Message{}, nil, false, err
+			}
 			pts, e2 := fanoutPts(ctx, qtx, log, f, existing, owners)
 			if e2 != nil {
 				return Message{}, nil, false, e2
@@ -308,6 +301,26 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 		case !errors.Is(e, pgx.ErrNoRows):
 			return Message{}, nil, false, fmt.Errorf("random_id lookup: %w", e)
 		}
+	}
+	customEmojiDocumentIDs := append(positiveCustomEmojiDocumentIDs(f.Entities), f.additionalCustomEmojiDocumentIDs...)
+	stickerDocumentIDs := append([]int64(nil), customEmojiDocumentIDs...)
+	if f.StickerDocumentID != nil {
+		stickerDocumentIDs = append(stickerDocumentIDs, *f.StickerDocumentID)
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return Message{}, nil, false, err
+	}
+	if err = validateLiveUserCustomEmojiDocuments(ctx, qtx, customEmojiDocumentIDs...); err != nil {
+		return Message{}, nil, false, err
+	}
+
+	// One lock for the whole fan-out, taken before the first per-member insert,
+	// which is what makes the fan-out all-or-nothing with respect to the file:
+	// every copy carries the reference or the transaction writes none of them.
+	// Photo-edit service messages are the only service action that carries a
+	// file id, and SetChatPhoto has already checked its ownership and metadata.
+	if err = lockFileRefs(ctx, qtx, f.FileID); err != nil {
+		return Message{}, nil, false, err
 	}
 	if f.ReplyToMsgID < 0 || f.ReplyToMsgID > int64(1<<31-1) {
 		return Message{}, nil, false, ErrMessageInvalid
