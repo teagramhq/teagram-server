@@ -78,8 +78,10 @@ catalogue packs remain available to install and send.
 secret to `/var/lib/teagram-demo/secrets/turnstile-secret-key`. The merged demo
 setup and deploy scripts provision a separate random QA bypass token at
 `/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token`; neither token is
-printed. Both files are root-owned, group-readable only by runtime gid 65532,
-and mounted only into teagramd. The demo sets
+printed. Both files are root-owned and group-readable only by runtime gid
+65532. The Siteverify secret is mounted only into teagramd. The QA bypass is
+mounted into teagramd and the isolated `demo-probe` service for the deploy-time
+signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 `TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
