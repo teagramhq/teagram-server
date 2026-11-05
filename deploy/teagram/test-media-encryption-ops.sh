@@ -15,6 +15,13 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+report_failure() {
+  local status=$? line=$1 command=$2
+  printf 'FAIL media ops fixture line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
+  [[ -z "${output:-}" ]] || printf 'last operation output: %s\n' "$output" >&2
+  exit "$status"
+}
+trap 'report_failure "$LINENO" "$BASH_COMMAND"' ERR
 
 mkdir -p "$TMP/bin"
 FIXTURE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
