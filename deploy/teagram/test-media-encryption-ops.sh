@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d /tmp/teagram-media-ops-test.XXXXXXXX)
+FIXTURE_TMP=$TMP
+export FIXTURE_TMP
 cleanup() {
   local status=$?
   trap - EXIT
@@ -89,7 +91,7 @@ case "$1" in
         sed -e "s|/opt/teagram|$FIXTURE_REPO|g" \
           -e "s|/root|$FIXTURE_EVIDENCE|g" \
           -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
-          -e "s|/tmp/teagram-deploy.lock|$TMP/deploy.lock|g" "$FIXTURE_COMMON"
+          -e "s|/tmp/teagram-deploy.lock|$FIXTURE_TMP/deploy.lock|g" "$FIXTURE_COMMON"
         ;;
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py")
