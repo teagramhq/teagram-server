@@ -891,8 +891,14 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
     } catch {
       // An unreleased hold leaves the worker unobservable.
     }
-    // A held worker only loads its script once released.
-    finish(ready && released && await loadedAfterEnable);
+    // A held worker only loads its script once released. Only the script-load
+    // signal arriving before Network.enable is waivable by the socket proof.
+    if (!ready || !released) {
+      finish(false);
+    } else {
+      const scriptLoadedAfterEnable = await loadedAfterEnable;
+      finish(scriptLoadedAfterEnable, !scriptLoadedAfterEnable);
+    }
   }
 
   browserSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(browserSession, event); });
@@ -930,6 +936,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
   let pendingWorkers = 0;
   let orphanHandshake = false;
   let workerUnobservable = false;
+  let earlyWorkerLoad = false;
   const handlers = {
     created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
@@ -998,11 +1005,14 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
     attached() {
       pendingWorkers += 1;
       let finished = false;
-      return (observable) => {
+      return (observable, earlyLoad = false) => {
         if (finished) return;
         finished = true;
         pendingWorkers -= 1;
-        if (observable !== true) workerUnobservable = true;
+        if (observable !== true) {
+          if (earlyLoad) earlyWorkerLoad = true;
+          else workerUnobservable = true;
+        }
       };
     },
   };
@@ -1026,6 +1036,10 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
       entries.every((item) => item.matches && !item.closed && item.responses === 1 && item.status === 101);
   }
 
+  function hasUnobservableWorker() {
+    return workerUnobservable || (earlyWorkerLoad && !completeExpectedSocketProof());
+  }
+
   function diagnostic() {
     const entries = [...connections.values()];
     const targets = connections.size;
@@ -1042,9 +1056,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
 
     if (malformed) return result("observation-malformed");
     if (orphanHandshake) return result("untracked-handshake");
-    if (workerUnobservable && !completeExpectedSocketProof()) {
-      return result("worker-unobservable");
-    }
+    if (hasUnobservableWorker()) return result("worker-unobservable");
     if (pendingWorkers > 0) return result("worker-pending");
     if (targets === 0) return result("no-target");
     if (expectedConnectionCount !== undefined && targets !== expectedConnectionCount) {
@@ -1094,7 +1106,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
       const activeConnections = entries.filter((item) => !item.closed).length;
       const signedIn = progress.isSignedIn();
       const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
-      const workerUnobservableWithoutCompleteSocketProof = workerUnobservable && !completeExpectedSocketProof();
+      const workerUnobservableWithoutCompleteSocketProof = hasUnobservableWorker();
       if (malformed || orphanHandshake || workerUnobservableWithoutCompleteSocketProof || pendingWorkers !== 0 ||
           entries.length < 1 || (expectedConnectionCount !== undefined && entries.length !== expectedConnectionCount) ||
           activeConnections < 1 || entries.length > connectionCeiling ||
@@ -1112,7 +1124,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
         ? entries.filter((item) => !item.closed).length
         : activeConnectionsAtContextTeardown + connectionsCreatedDuringContextTeardown;
       const expectedLogoutSocketLoss = Math.min(logoutSocketClosures, 1);
-      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+      if (malformed || orphanHandshake || hasUnobservableWorker() || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
           accountSlotCount === null || activeConnections < Math.max(0, accountSlotCount - expectedLogoutSocketLoss) ||
           activeConnections > accountSlotCount + 1 ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||

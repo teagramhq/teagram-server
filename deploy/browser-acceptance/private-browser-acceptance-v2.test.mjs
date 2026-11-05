@@ -1186,6 +1186,7 @@ async function proveSharedWorkerWss(t, {
   delayedChild = false,
   workerSockets = [],
   expectedConnectionCount,
+  unobservableAttach = false,
   contextInfo: suppliedContextInfo,
   progress: suppliedProgress,
   tracker: suppliedTracker,
@@ -1224,6 +1225,13 @@ async function proveSharedWorkerWss(t, {
         targetInfo: {targetId: "worker", type: "shared_worker"},
         waitingForDebugger: true,
       });
+      if (unobservableAttach) {
+        browserSession.emit("Target.attachedToTarget", {
+          sessionId: "orphan-worker",
+          targetInfo: {type: "shared_worker"},
+          waitingForDebugger: true,
+        });
+      }
       for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
       if (pageSocket) {
         pageSession.emit("Network.webSocketCreated", {requestId: "page-1", url: endpoint});
@@ -1316,6 +1324,38 @@ test("preflight WSS proof rejects an early SharedWorker load with a missing expe
   });
   assert.equal(proof.code, "websocket-not-ready");
   assert.equal(proof.wssDiagnostic.wss_diagnostic, "worker-unobservable");
+});
+
+test("preflight WSS proof never waives an attach event without a target id", async (t) => {
+  const proof = await proveSharedWorkerWss(t, {
+    scriptLoaded: "before",
+    workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING),
+    expectedConnectionCount: WSS_ACCOUNT_SLOT_CEILING,
+    unobservableAttach: true,
+  });
+  assert.equal(proof.code, "websocket-not-ready");
+  assert.equal(proof.wssDiagnostic.wss_diagnostic, "worker-unobservable");
+});
+
+test("preflight WSS proof rejects an early load with an extra socket or a non-101 socket", async (t) => {
+  const cases = {
+    "one socket over the expected count": {
+      workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING + 1),
+    },
+    "a non-101 socket": {
+      workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING, {2: {statuses: [503]}}),
+    },
+  };
+  for (const [name, options] of Object.entries(cases)) {
+    await t.test(name, async (t) => {
+      const proof = await proveSharedWorkerWss(t, {
+        ...options,
+        scriptLoaded: "before",
+        expectedConnectionCount: WSS_ACCOUNT_SLOT_CEILING,
+      });
+      assert.equal(proof.code, "websocket-not-ready");
+    });
+  }
 });
 
 test("preflight WSS proof watches a worker's descendants before attaching to it", async (t) => {

@@ -329,6 +329,16 @@ export async function captureQaWssProof(proveWss, ...args) {
   }
 }
 
+export async function captureQaScenarioWssProof(qa, scenario, contextInfo, release, manifest, progress, tracker) {
+  const options = scenario === "private-client-worker"
+    ? {expectedConnectionCount: PRIVATE_CLIENT_WORKER_SOCKET_COUNT}
+    : undefined;
+  return captureQaWssProof(
+    (...args) => qa.proveWss(...args, options),
+    contextInfo, release, manifest, progress, tracker,
+  );
+}
+
 export function assertQaWssProof(proof, expected, label) {
   if (proof.error) {
     const message = typeof proof.error.message === "string"
@@ -360,12 +370,8 @@ async function runQaScenario(directory, scenario, certificate, qa) {
     const tracker = await qa.installNetworkGuards(contextInfo, fixture.release, null);
     const progress = createAcceptanceProgress({ sourceCommit: SOURCE_COMMIT });
     const manifest = { endpoint: fixture.manifest.endpoint, fingerprint: fixture.manifest.fingerprint };
-    const expectedConnectionCount = scenario === "private-client-worker"
-      ? PRIVATE_CLIENT_WORKER_SOCKET_COUNT
-      : undefined;
-    const proof = await captureQaWssProof(
-      (...args) => qa.proveWss(...args, {expectedConnectionCount}),
-      contextInfo, fixture.release, manifest, progress, tracker,
+    const proof = await captureQaScenarioWssProof(
+      qa, scenario, contextInfo, fixture.release, manifest, progress, tracker,
     );
     return { ...proof, upgrades: fixture.upgrades() };
   } catch (error) {

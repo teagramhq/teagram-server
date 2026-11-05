@@ -9,6 +9,7 @@ const {
   assertSilentSharedWorkerError,
   assertSocketTargetMismatch,
   captureQaWssProof,
+  captureQaScenarioWssProof,
   formatSmokeFailure,
 } = smoke;
 
@@ -136,6 +137,36 @@ test("a failed QA WSS proof reports its original message and failed connection",
   assert.match(line, /forced proveWss failure/u);
   assert.match(line, /socket-4-no-handshake/u);
   assert.doesNotMatch(line, /result=undefined|observed=undefined/u);
+});
+
+test("QA scenarios pass expected socket count only to the private client worker", async () => {
+  const contextInfo = {};
+  const args = [contextInfo, {}, {}, {}, {}];
+  const scenarios = [
+    "shared-worker",
+    "private-client-worker",
+    "dedicated-worker",
+    "nested-worker",
+    "nested-worker-mismatch",
+    "nested-worker-mismatch-delayed",
+    "shared-worker-mismatch",
+    "shared-worker-silent",
+  ];
+
+  for (const scenario of scenarios) {
+    let received;
+    const qa = {
+      async proveWss(...receivedArgs) {
+        received = receivedArgs;
+        return {connectionCount: 1, status101: true};
+      },
+    };
+    await captureQaScenarioWssProof(qa, scenario, ...args);
+    assert.equal(received.length, 6, `${scenario} argument count`);
+    assert.deepEqual(received[5], scenario === "private-client-worker"
+      ? {expectedConnectionCount: 4}
+      : undefined, `${scenario} expected socket option`);
+  }
 });
 
 test("timing failures preserve the bound and the failed predicate", () => {
