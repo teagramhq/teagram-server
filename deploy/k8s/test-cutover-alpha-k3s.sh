@@ -34,6 +34,8 @@ cleanup() {
   if (( status == 0 )); then
     kubectl delete namespace "$TARGET_NAMESPACE" --wait=false >/dev/null 2>&1 || true
   fi
+  kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
   kubectl delete job cutover-account-seed --namespace "$SOURCE_NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1 || true
   rm -rf -- "$tmp_dir"
   exit "$status"
@@ -193,14 +195,18 @@ kubectl exec --namespace "$TARGET_NAMESPACE" --stdin postgres-0 -c postgres -- \
 source_pod=$(kubectl get pods --namespace "$SOURCE_NAMESPACE" \
   --selector=app.kubernetes.io/name=teagramd --output 'jsonpath={.items[0].metadata.name}')
 [[ -n $source_pod ]]
+kubectl apply --filename deploy/k8s/test-cutover-key-reader.yaml >/dev/null
+kubectl wait --for=condition=Ready pod/cutover-key-reader \
+  --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
 for file in server_key.pem enc_key.hex; do
-  kubectl exec --namespace "$SOURCE_NAMESPACE" "$source_pod" -- \
+  kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
     cat "/var/lib/teagramd/$file" > "$tmp_dir/$file"
   kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
     sh -ec "cat > /target/key-data/$file" < "$tmp_dir/$file"
 done
-kubectl exec --namespace "$SOURCE_NAMESPACE" "$source_pod" -- \
+kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
   tar -cf - -C /var/lib/teagramd-blobs . > "$tmp_dir/source-blobs.tar"
+kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
 kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
   tar -xpf - -C /target/legacy-blobs < "$tmp_dir/source-blobs.tar"
 mkdir -p "$tmp_dir/blob-fixture/parts/aa"
