@@ -18,7 +18,7 @@ if(!webRoot || !site || !username || !password || !profileRoot) {
   throw new Error('QA invite browser test inputs are incomplete');
 }
 
-const {chromium} = createRequire(join(webRoot, 'package.json'))('playwright');
+const {chromium} = createRequire(join(webRoot, 'package.json'))('@playwright/test');
 
 async function waitForChats(page, timeout = 45_000) {
   await page.waitForFunction(() => {

@@ -181,6 +181,8 @@ HOME="$TEST_HOME" \
 
 compose logs --no-color tls-edge > "$TMP_ROOT/tls-edge.log" 2>&1 || fail 'could not collect QA edge WebSocket upgrade logs'
 UPGRADES=$(grep -Ec '"GET /apiws HTTP/[0-9.]+" 101([[:space:]]|$)' "$TMP_ROOT/tls-edge.log" || true)
-[[ "$UPGRADES" =~ ^[0-9]+$ ]] && ((UPGRADES >= 3)) || fail "QA edge accepted only $UPGRADES API WebSocket connections; expected at least three"
+if [[ ! "$UPGRADES" =~ ^[0-9]+$ ]] || ((UPGRADES < 3)); then
+  fail "QA edge accepted only $UPGRADES API WebSocket connections; expected at least three"
+fi
 
 printf 'qa-invite browser flow passed: trusted TLS, discovery, Web configuration, three sign-ins, and %s accepted API WebSocket connections\n' "$UPGRADES"

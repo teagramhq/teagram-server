@@ -36,7 +36,9 @@ grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_W
 grep -Fq "certutil -d \"sql:\$TEST_HOME/.pki/nssdb\" -A -t 'C,,'" "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not trust the test CA in Chromium'
 ! grep -Eq 'ignoreHTTPSErrors|ignore-certificate-errors|--insecure' "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" || fail 'QA browser smoke bypasses TLS verification'
 grep -Fq 'attempt <= 3' "$QA_BROWSER_RUNNER" || fail 'QA Web browser smoke does not repeat sign-in three times'
-grep -Fq 'HTTP/[0-9.]+' "$QA_BROWSER_FLOW" && grep -Fq ' 101(' "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not assert accepted WebSocket upgrades'
+if ! grep -Fq 'HTTP/[0-9.]+' "$QA_BROWSER_FLOW" || ! grep -Fq ' 101(' "$QA_BROWSER_FLOW"; then
+  fail 'QA browser smoke does not assert accepted WebSocket upgrades'
+fi
 
 [[ $(grep -c '^[[:space:]]*ports:' "$COMPOSE") -eq 1 ]] || fail 'Compose must publish exactly one service port'
 grep -Fq 'TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70' "$SCRIPT_DIR/.env.example" || fail 'Compose bind is not private to the demo LXC address'
