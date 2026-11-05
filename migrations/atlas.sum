@@ -1,4 +1,4 @@
-h1:DScp15eT/6Z9jt/4sxP7nj6fkV6mCl9SnZxw21A/hgo=
+h1:PftkHVk3FiQOeoKr0ZRb2AwYzVCd0bMfpv9+wHtlNU8=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -163,5 +163,5 @@ h1:DScp15eT/6Z9jt/4sxP7nj6fkV6mCl9SnZxw21A/hgo=
 20261103000002_user_sticker_content_sha256_idx.sql h1:lX1k1qwNcRy752I8Fhv+PKet7eRYyn2+GJ1g+66xIH8=
 20261103000003_bot_update_offsets.sql h1:r90+8NVYsd6PDRcyLiSMgHqUioMSUKEIPNmcgKAB+5A=
 20261103000004_bot_update_poll_generation.sql h1:aWJucvMHfMVUIkB5Vp/P3ovg8ZnJqrT0NU1uK/eDtU4=
-20261103000005_phone_code_turnstile_binding.sql h1:oVWB40HqRfeG9M4ezP+cSaP9w+RbymO+RzWE9haSaOE=
-20261104000001_user_sticker_set_order.sql h1:f4FZZOqr2445vfpX160WpZQlcyg7y2zdQpZfGATqz/A=
+20261104000001_user_sticker_set_order.sql h1:8uxAmWspw2EWQ2dVDJN5i1j2uGlZ7yVKuw4yv+Oouug=
+20261105000001_phone_code_turnstile_binding.sql h1:VIPgN4rYWF+ditCl/bjUG3RftPiTsMYR54cqPWc86JQ=
