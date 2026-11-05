@@ -371,6 +371,24 @@ to restore it, use `turnstile-signin-on`. If a deployment fails, the script
 restores the prior `.env` snapshot and redeploys that flag state. It never prints
 Turnstile key values.
 
+The reviewed rotate-turnstile-qa-bypass-token operation snapshots the old
+token under the root-only /var/backups/teagram-demo-turnstile-qa-bypass
+directory, atomically installs a new random token with the existing runtime
+ownership and mode, then recreates the active server slot with the current
+pinned image. This briefly interrupts the public demo. If the new server does
+not become healthy, the operation leaves the server stopped so the old token
+cannot remain active. Rerun the reviewed operation to generate another fresh
+token; never restore the snapshot, because the old value is compromised. The
+operation prints only the snapshot path, token length, active slot and
+HAProxy readiness.
+Run it with ssh -T teagram-demo 'run <main-sha> rotate-turnstile-qa-bypass-token'.
+
+After rotation, an authorized workspace admin must copy the new value into
+QA's existing audited custom_env entry without printing it. QA should read
+TEAGRAM_DEMO_TURNSTILE_QA_BYPASS_TOKEN inside its Playwright Node process and
+pass it directly to page.evaluate for localStorage setup. Do not expand it in
+a shell command, echo it, list the process environment or log it.
+
 After enabling public signin, verify signin and signup challenges from the
 public web origin with
 `go run ./deploy/teagram-demo/turnstile-signin-probe.go active`. The probe reads
