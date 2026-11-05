@@ -51,7 +51,7 @@ readonly LOCK_PATH=$REPO/.state/deploy.lock
 exec 9> "$LOCK_PATH"
 flock -x 9
 
-# shellcheck source=deploy/teagram-demo/demo-common.sh
+# shellcheck disable=SC1091 # Loaded from the pinned demo checkout at runtime.
 source "$REPO/deploy/teagram-demo/demo-common.sh"
 ACTIVE_SERVER=$(demo_active_server) || fail 'active server slot is unavailable'
 INACTIVE_SERVER=$(demo_inactive_server) || fail 'inactive server slot is unavailable'
