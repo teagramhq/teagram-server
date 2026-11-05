@@ -222,43 +222,43 @@ configure_compose() {
   fi
   chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
   check_compose_invariant migration_image \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).image // null' \
+    '((.services // {})["blob-encrypt-migrate"] // {}).image // null' \
     '"teagramd:local"' || preflight_failed=1
   check_compose_invariant migration_entrypoint \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).entrypoint // null' \
+    '((.services // {})["blob-encrypt-migrate"] // {}).entrypoint // null' \
     '["/usr/local/bin/blob-encrypt-migrate"]' || preflight_failed=1
   check_compose_invariant migration_user \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).user // null' \
+    '((.services // {})["blob-encrypt-migrate"] // {}).user // null' \
     '"0:0"' || preflight_failed=1
   check_compose_invariant migration_read_only \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).read_only // null' \
+    '((.services // {})["blob-encrypt-migrate"] // {}).read_only // null' \
     'true' || preflight_failed=1
   check_compose_invariant migration_profile \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).profiles // null' \
+    '((.services // {})["blob-encrypt-migrate"] // {}).profiles // null' \
     '["migration"]' || preflight_failed=1
   check_compose_invariant migration_media_key_mount \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ])' \
+    '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   check_compose_invariant migration_reports_mount \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/reports") | {source:(.source // null),target:(.target // null)} ])' \
+    '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/reports") | {source:(.source // null),target:(.target // null)} ]' \
     '[{"source":"/root","target":"/run/teagramd/reports"}]' || preflight_failed=1
   check_compose_invariant migration_authority_mount \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/blob-mode") | {source:(.source // null),target:(.target // null)} ])' \
+    '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/blob-mode") | {source:(.source // null),target:(.target // null)} ]' \
     '[{"source":"/opt/teagram/.state/blob-mode","target":"/run/teagramd/blob-mode"}]' || preflight_failed=1
   check_compose_invariant migration_networks \
-    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).networks | if type == "object" then keys | sort else [] end' \
+    '((.services // {})["blob-encrypt-migrate"] // {} | .networks // {} | if type == "object" then keys | sort else [] end)' \
     '["default","rustfs_private"]' || preflight_failed=1
   check_compose_invariant server_image \
-    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end).image // null' \
+    '((.services // {}).teagramd // {}).image // null' \
     '"teagramd:local"' || preflight_failed=1
   check_compose_invariant server_media_key_current \
-    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | ($server.environment | if type == "object" then . else {} end).TG_MEDIA_KEY_CURRENT // null' \
+    '((.services // {}).teagramd // {} | .environment // {}).TG_MEDIA_KEY_CURRENT // null' \
     '"1"' || preflight_failed=1
   check_compose_invariant server_media_key_dir \
-    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | ($server.environment | if type == "object" then . else {} end).TG_MEDIA_KEY_DIR // null' \
+    '((.services // {}).teagramd // {} | .environment // {}).TG_MEDIA_KEY_DIR // null' \
     '"/run/teagramd/media-keys"' || preflight_failed=1
   check_compose_invariant server_media_key_mount \
-    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | (($server.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ])' \
+    '((.services // {}).teagramd // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   [[ "$preflight_failed" == 0 ]] || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
   REPORT_ROOT=/root
