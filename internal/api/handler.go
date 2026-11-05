@@ -533,6 +533,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesHidePeerSettingsBarRequestTypeID, h.handleHidePeerSettingsBar)
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
+	register(d, tg.MessagesReportRequestTypeID, h.handleReportMessage)
 	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
 	register(d, tg.MessagesGetSearchResultsCalendarRequestTypeID, h.handleGetSearchResultsCalendar)
