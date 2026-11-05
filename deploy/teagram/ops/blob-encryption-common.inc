@@ -30,6 +30,57 @@ ops_fail() {
   exit 1
 }
 
+sha256_text() {
+  local digest
+  digest=$(printf '%s' "$1" | sha256sum) || return 1
+  printf '%s' "${digest%% *}"
+}
+
+sha256_file_contents() {
+  local digest
+  digest=$(sha256sum < "$1") || return 1
+  printf '%s' "${digest%% *}"
+}
+
+report_hash_mismatch() {
+  local invariant=$1 expected=$2 actual=$3 expected_sha actual_sha
+  expected_sha=$(sha256_text "$expected") || ops_fail 'cannot fingerprint preflight invariant'
+  actual_sha=$(sha256_text "$actual") || ops_fail 'cannot fingerprint preflight invariant'
+  printf 'preflight mismatch invariant=%s expected_sha256=%s actual_sha256=%s\n' \
+    "$invariant" "$expected_sha" "$actual_sha" >&2
+}
+
+report_digest_mismatch() {
+  printf 'preflight mismatch invariant=%s expected_sha256=%s actual_sha256=%s\n' \
+    "$1" "$2" "$3" >&2
+}
+
+check_hash_value() {
+  local invariant=$1 expected=$2 actual=$3
+  [[ "$expected" == "$actual" ]] && return 0
+  report_hash_mismatch "$invariant" "$expected" "$actual"
+  return 1
+}
+
+check_compose_invariant() {
+  local invariant=$1 filter=$2 expected=$3 actual
+  actual=$(jq -cS "$filter" "$OPS_TEMP_DIR/compose.json" 2>/dev/null) || actual='invalid-compose-json'
+  [[ "$actual" == "$expected" ]] && return 0
+  report_hash_mismatch "$invariant" "$expected" "$actual"
+  return 1
+}
+
+media_path_metadata() {
+  local path=$1 kind=$2 format=$3 metadata
+  case "$kind" in
+    directory) [[ -d "$path" && ! -L "$path" ]] || { printf 'missing-or-unsafe-directory'; return; } ;;
+    file) [[ -f "$path" && ! -L "$path" ]] || { printf 'missing-or-unsafe-file'; return; } ;;
+    *) ops_fail 'invalid media metadata check' ;;
+  esac
+  metadata=$(stat -c "$format" -- "$path" 2>/dev/null) || { printf 'metadata-unavailable'; return; }
+  printf '%s:%s' "$kind" "$metadata"
+}
+
 private_dir() {
   local path=$1 mode
   [[ -d "$path" && ! -L "$path" ]] || return 1
@@ -131,7 +182,7 @@ validate_live_stack() {
 }
 
 configure_compose() {
-  local authority_json env_file_lines legacy_parked compose_stderr
+  local authority_json env_file_lines legacy_parked compose_stderr preflight_failed=0
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-transition-runner.py" deployment-env \
     --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root /root --lock-path "$LOCK_FILE") || \
     ops_fail 'live S3 authority or credential selection is not verified'
@@ -170,35 +221,78 @@ configure_compose() {
     ops_fail "live Compose render failed; private diagnostic retained at $compose_stderr"
   fi
   chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
-  jq -e --arg key_dir "$KEY_DIR" '
-    .services["blob-encrypt-migrate"] as $migration |
-    .services.teagramd as $server |
-    ($migration.image == "teagramd:local") and
-    ($migration.entrypoint == ["/usr/local/bin/blob-encrypt-migrate"]) and
-    ($migration.user == "0:0") and ($migration.read_only == true) and
-    ($migration.profiles == ["migration"]) and
-    (([$migration.volumes[] | select(.target == "/run/teagramd/media-keys" and .source == $key_dir and .read_only == true)] | length) == 1) and
-    (([$migration.volumes[] | select(.target == "/run/teagramd/reports" and .source == "/root")] | length) == 1) and
-    (([$migration.volumes[] | select(.target == "/run/teagramd/blob-mode" and .source == "/opt/teagram/.state/blob-mode")] | length) == 1) and
-    (([$migration.networks | keys[]] | sort) == ["default", "rustfs_private"]) and
-    ($server.image == "teagramd:local") and
-    ($server.environment.TG_MEDIA_KEY_CURRENT == "1") and
-    ($server.environment.TG_MEDIA_KEY_DIR == "/run/teagramd/media-keys") and
-    (([$server.volumes[] | select(.target == "/run/teagramd/media-keys" and .source == $key_dir and .read_only == true)] | length) == 1)
-  ' "$OPS_TEMP_DIR/compose.json" >/dev/null || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
+  check_compose_invariant migration_image \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).image // null' \
+    '"teagramd:local"' || preflight_failed=1
+  check_compose_invariant migration_entrypoint \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).entrypoint // null' \
+    '["/usr/local/bin/blob-encrypt-migrate"]' || preflight_failed=1
+  check_compose_invariant migration_user \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).user // null' \
+    '"0:0"' || preflight_failed=1
+  check_compose_invariant migration_read_only \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).read_only // null' \
+    'true' || preflight_failed=1
+  check_compose_invariant migration_profile \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).profiles // null' \
+    '["migration"]' || preflight_failed=1
+  check_compose_invariant migration_media_key_mount \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ])' \
+    "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
+  check_compose_invariant migration_reports_mount \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/reports") | {source:(.source // null),target:(.target // null)} ])' \
+    '[{"source":"/root","target":"/run/teagramd/reports"}]' || preflight_failed=1
+  check_compose_invariant migration_authority_mount \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end) as $migration | (($migration.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/blob-mode") | {source:(.source // null),target:(.target // null)} ])' \
+    '[{"source":"/opt/teagram/.state/blob-mode","target":"/run/teagramd/blob-mode"}]' || preflight_failed=1
+  check_compose_invariant migration_networks \
+    '(.services | if type == "object" then . else {} end) as $services | ($services["blob-encrypt-migrate"] | if type == "object" then . else {} end).networks | if type == "object" then keys | sort else [] end' \
+    '["default","rustfs_private"]' || preflight_failed=1
+  check_compose_invariant server_image \
+    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end).image // null' \
+    '"teagramd:local"' || preflight_failed=1
+  check_compose_invariant server_media_key_current \
+    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | ($server.environment | if type == "object" then . else {} end).TG_MEDIA_KEY_CURRENT // null' \
+    '"1"' || preflight_failed=1
+  check_compose_invariant server_media_key_dir \
+    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | ($server.environment | if type == "object" then . else {} end).TG_MEDIA_KEY_DIR // null' \
+    '"/run/teagramd/media-keys"' || preflight_failed=1
+  check_compose_invariant server_media_key_mount \
+    '(.services | if type == "object" then . else {} end) as $services | ($services.teagramd | if type == "object" then . else {} end) as $server | (($server.volumes | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ])' \
+    "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
+  [[ "$preflight_failed" == 0 ]] || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
   REPORT_ROOT=/root
 }
 
 check_media_key() {
-  [[ -d "$KEY_DIR" && ! -L "$KEY_DIR" && "$(stat -c '%u:%a:%g' -- "$KEY_DIR")" == 65532:700:65532 ]] || \
-    ops_fail 'media key directory metadata does not match MAIN-2476'
-  [[ -f "$KEY_FILE" && ! -L "$KEY_FILE" && "$(stat -c '%u:%a:%g' -- "$KEY_FILE")" == 65532:600:65532 ]] || \
-    ops_fail 'media key metadata does not match MAIN-2476'
-  private_file "$KEY_BACKUP" || ops_fail 'recorded host-local media key backup is missing or unsafe'
-  cmp -s -- "$KEY_FILE" "$KEY_BACKUP" || ops_fail 'host-local media key backup differs from the mounted key'
-  [[ "$(wc -c < "$KEY_FILE")" == 64 || "$(wc -c < "$KEY_FILE")" == 65 ]] || \
+  local invalid_metadata=0 key_sha backup_sha key_length key_length_valid
+  check_hash_value media_key_directory_metadata 'directory:65532:700:65532' \
+    "$(media_path_metadata "$KEY_DIR" directory '%u:%a:%g')" || invalid_metadata=1
+  check_hash_value media_key_file_metadata 'file:65532:600:65532' \
+    "$(media_path_metadata "$KEY_FILE" file '%u:%a:%g')" || invalid_metadata=1
+  check_hash_value media_key_backup_metadata 'file:0:600' \
+    "$(media_path_metadata "$KEY_BACKUP" file '%u:%a')" || invalid_metadata=1
+  [[ "$invalid_metadata" == 0 ]] || ops_fail 'media key metadata does not match reviewed preflight'
+
+  key_sha=$(sha256_file_contents "$KEY_FILE") || ops_fail 'cannot fingerprint mounted media key'
+  backup_sha=$(sha256_file_contents "$KEY_BACKUP") || ops_fail 'cannot fingerprint media key backup'
+  if [[ "$key_sha" != "$backup_sha" ]]; then
+    report_digest_mismatch media_key_backup_matches_mounted_key "$key_sha" "$backup_sha"
+    ops_fail 'host-local media key backup differs from the mounted key'
+  fi
+
+  key_length=$(wc -c < "$KEY_FILE") || ops_fail 'cannot inspect media key encoding length'
+  if [[ "$key_length" == 64 || "$key_length" == 65 ]]; then
+    key_length_valid=64-or-65-bytes
+  else
+    key_length_valid="${key_length}-bytes"
+  fi
+  check_hash_value media_key_hex_length '64-or-65-bytes' "$key_length_valid" || \
     ops_fail 'media key file does not have the expected hex encoding length'
-  LC_ALL=C grep -Eq '^[0-9a-fA-F]{64}\r?$' "$KEY_FILE" || ops_fail 'media key file is not hex encoded'
+  if ! LC_ALL=C grep -Eq '^[0-9a-fA-F]{64}\r?$' "$KEY_FILE"; then
+    report_hash_mismatch media_key_hex_encoding valid-64-character-hex invalid
+    ops_fail 'media key file is not hex encoded'
+  fi
 }
 
 verify_authority() {
