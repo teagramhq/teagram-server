@@ -58,7 +58,9 @@ def server_row(socket_path: pathlib.Path, backend: str, server: str) -> dict[str
     return None
 
 
-def wait_healthy(socket_path: pathlib.Path, slot: str, timeout: int) -> None:
+def wait_healthy(
+    socket_path: pathlib.Path, slot: str, timeout: int, allow_drained: bool = False
+) -> None:
     servers = (
         ("teagramd", slot),
         ("teagramd_mtproto", f"{slot}-mtproto"),
@@ -67,7 +69,7 @@ def wait_healthy(socket_path: pathlib.Path, slot: str, timeout: int) -> None:
     while time.monotonic() < deadline:
         if all(
             (row := server_row(socket_path, backend, server)) is not None
-            and row.get("status") == "UP"
+            and row.get("status") in ({"UP", "DRAIN"} if allow_drained else {"UP"})
             and row.get("check_status") in GOOD_CHECKS
             for backend, server in servers
         ):
@@ -94,9 +96,10 @@ def main() -> None:
     wait = subparsers.add_parser("wait-healthy")
     wait.add_argument("slot", choices=sorted(SLOTS))
     wait.add_argument("--timeout", type=int, default=60)
+    wait.add_argument("--allow-drained", action="store_true")
     args = parser.parse_args()
     if args.action == "wait-healthy":
-        wait_healthy(args.socket, args.slot, args.timeout)
+        wait_healthy(args.socket, args.slot, args.timeout, args.allow_drained)
         print(f"HAProxy server checks=passed slot={args.slot}")
         return
     slot_command(args.socket, args.action, args.slot)

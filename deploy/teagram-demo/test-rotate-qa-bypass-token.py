@@ -10,11 +10,13 @@ import os
 import pathlib
 import re
 import shlex
+import socket
 import stat
 import subprocess
 import sys
-import textwrap
 import tempfile
+import textwrap
+import threading
 import unittest
 
 
@@ -23,6 +25,11 @@ SPEC = importlib.util.spec_from_file_location("rotate_qa_bypass_token", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 ROTATION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ROTATION)
+CONTROL_SCRIPT = pathlib.Path(__file__).with_name("haproxy-control.py")
+CONTROL_SPEC = importlib.util.spec_from_file_location("demo_haproxy_control", CONTROL_SCRIPT)
+assert CONTROL_SPEC is not None and CONTROL_SPEC.loader is not None
+HAPROXY_CONTROL = importlib.util.module_from_spec(CONTROL_SPEC)
+CONTROL_SPEC.loader.exec_module(HAPROXY_CONTROL)
 
 
 @unittest.skipUnless(os.geteuid() == 0, "fixture ownership checks require root")
@@ -147,6 +154,78 @@ class RotateQABypassTokenTests(unittest.TestCase):
         self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
 
 
+class HaproxyControlTests(unittest.TestCase):
+    def test_wait_healthy_rejects_drained_status_without_opt_in(self) -> None:
+        original_server_row = HAPROXY_CONTROL.server_row
+        original_monotonic = HAPROXY_CONTROL.time.monotonic
+        original_sleep = HAPROXY_CONTROL.time.sleep
+        clock = iter((0.0, 0.0, 2.0))
+        HAPROXY_CONTROL.server_row = lambda *_args: {
+            "status": "DRAIN",
+            "check_status": "L7OK",
+        }
+        HAPROXY_CONTROL.time.monotonic = lambda: next(clock)
+        HAPROXY_CONTROL.time.sleep = lambda _seconds: None
+        self.addCleanup(setattr, HAPROXY_CONTROL, "server_row", original_server_row)
+        self.addCleanup(setattr, HAPROXY_CONTROL.time, "monotonic", original_monotonic)
+        self.addCleanup(setattr, HAPROXY_CONTROL.time, "sleep", original_sleep)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                HAPROXY_CONTROL.wait_healthy(pathlib.Path("unused.sock"), "teagramd-next", 1)
+
+    def test_wait_healthy_accepts_healthy_drained_server_rows(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="teagram-haproxy-drain-") as temporary:
+            socket_path = pathlib.Path(temporary) / "admin.sock"
+            admin_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            admin_socket.bind(str(socket_path))
+            admin_socket.listen(2)
+            admin_socket.settimeout(3)
+            errors: list[OSError] = []
+            stats = (
+                b"# pxname,svname,status,check_status\n"
+                b"teagramd,teagramd-next,DRAIN,L7OK\n"
+                b"teagramd_mtproto,teagramd-next-mtproto,DRAIN,L7OK\n"
+            )
+
+            def serve_stats() -> None:
+                try:
+                    for _ in range(2):
+                        client, _ = admin_socket.accept()
+                        with client:
+                            client.recv(1024)
+                            client.sendall(stats)
+                except OSError as error:
+                    errors.append(error)
+                finally:
+                    admin_socket.close()
+
+            thread = threading.Thread(target=serve_stats)
+            thread.start()
+            original_argv = sys.argv
+            sys.argv = [
+                str(CONTROL_SCRIPT),
+                "--socket",
+                str(socket_path),
+                "wait-healthy",
+                "teagramd-next",
+                "--timeout",
+                "2",
+                "--allow-drained",
+            ]
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    HAPROXY_CONTROL.main()
+            finally:
+                sys.argv = original_argv
+                thread.join(timeout=4)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertIn("HAProxy server checks=passed slot=teagramd-next", output.getvalue())
+
+
 class RotateQABypassOperationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="teagram-qa-bypass-operation-")
@@ -193,6 +272,8 @@ class RotateQABypassOperationTests(unittest.TestCase):
         self.calls = self.root / "calls"
         self.current_container = self.root / "current-container"
         self.current_container.write_text("old-container\n", encoding="ascii")
+        self.haproxy_state = self.root / "haproxy-state"
+        self.haproxy_state.write_text("UP\n", encoding="ascii")
         self.token_file = self.root / "installed-token"
         self.old_token = "compromised-demo-token-fixture"
         self.new_token = "f" * 64
@@ -297,12 +378,20 @@ demo_compose() {
 }
 demo_haproxy_control() {
   fixture_log "haproxy-$*"
-  if [[ ${1:-} == wait-healthy && ${FIXTURE_FAIL_HAPROXY:-0} == 1 ]]; then
-    return 1
-  fi
-  if [[ ${1:-} == drain && ${FIXTURE_FAIL_DRAIN:-0} == 1 ]]; then
-    return 1
-  fi
+  case ${1:-} in
+    wait-healthy)
+      [[ ${FIXTURE_FAIL_HAPROXY:-0} != 1 ]] || return 1
+      if [[ $(cat "$TEST_HAPROXY_STATE") == DRAIN && " $* " != *" --allow-drained "* ]]; then
+        return 1
+      fi
+      ;;
+    drain)
+      [[ ${FIXTURE_FAIL_DRAIN:-0} != 1 ]] || return 1
+      printf '%s\n' DRAIN > "$TEST_HAPROXY_STATE"
+      ;;
+    enable) printf '%s\n' UP > "$TEST_HAPROXY_STATE" ;;
+    *) return 95 ;;
+  esac
   return 0
 }
 """
@@ -326,6 +415,7 @@ demo_haproxy_control() {
                 "OPS_NAME": "rotate-turnstile-qa-bypass-token",
                 "TEST_CALLS": str(self.calls),
                 "TEST_CURRENT_CONTAINER": str(self.current_container),
+                "TEST_HAPROXY_STATE": str(self.haproxy_state),
                 "TEST_TOKEN_FILE": str(self.token_file),
                 "TEST_NEW_TOKEN": self.new_token,
                 "TEST_ROTATION_RAN": str(self.rotation_ran),
@@ -357,6 +447,7 @@ demo_haproxy_control() {
         calls = self.calls.read_text(encoding="utf-8")
         self.assertIn("compose-up", calls)
         self.assertIn("haproxy-enable teagramd-next", calls)
+        self.assertIn("--allow-drained", calls)
         self.assertNotIn("compose-stop", calls)
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "new-container\n")
         self.assertNotIn(self.old_token, result.stdout + result.stderr)
@@ -414,6 +505,28 @@ demo_haproxy_control() {
         self.assertIn("haproxy-drain teagramd-next", self.calls.read_text(encoding="utf-8"))
         self.assertIn("server drained from HAProxy", result.stderr)
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
+        self.assertEqual(self.haproxy_state.read_text(encoding="ascii"), "DRAIN\n")
+
+    def test_rerun_recovers_a_drained_healthy_slot_before_enabling_it(self) -> None:
+        first = self._run_operation(
+            FIXTURE_FAIL_UP="1",
+            FIXTURE_FAIL_COMPOSE_STOP="1",
+            FIXTURE_FAIL_DOCKER_STOP="1",
+            FIXTURE_FAIL_DOCKER_KILL="1",
+        )
+        self._assert_rotated_without_leaking(first)
+        self.assertEqual(self.haproxy_state.read_text(encoding="ascii"), "DRAIN\n")
+        self.calls.write_text("", encoding="utf-8")
+
+        retry = self._run_operation()
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(self.haproxy_state.read_text(encoding="ascii"), "UP\n")
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        health_check = next(i for i, call in enumerate(calls) if call.startswith("haproxy-wait-healthy"))
+        enable = next(i for i, call in enumerate(calls) if call == "haproxy-enable teagramd-next")
+        self.assertIn("--allow-drained", calls[health_check])
+        self.assertLess(health_check, enable)
 
     def test_failed_stop_and_drain_are_reported_as_unconfirmed(self) -> None:
         result = self._run_operation(

@@ -168,7 +168,7 @@ active_after_ids=$(demo_compose ps --status running -q "$ACTIVE_SERVER")
 new_container_id=$active_after_ids
 [[ -z "$ACTIVE_CONTAINER_ID" || "$new_container_id" != "$ACTIVE_CONTAINER_ID" ]] ||
   fail 'server container was not recreated after token rotation'
-demo_haproxy_control wait-healthy "$ACTIVE_SERVER" --timeout 60 ||
+demo_haproxy_control wait-healthy "$ACTIVE_SERVER" --timeout 60 --allow-drained ||
   fail 'rotated server did not pass the HAProxy readiness check'
 demo_haproxy_control enable "$ACTIVE_SERVER" ||
   fail 'rotated server could not be enabled in HAProxy'

@@ -381,8 +381,9 @@ it tries a forced stop and then drains the slot from HAProxy; if neither stop
 nor drain can be confirmed, it reports that failure and leaves the compromised
 token snapshot untouched. Rerun the reviewed operation to generate another
 fresh token; never restore the snapshot, because the old value is compromised.
-The operation prints only the snapshot path, token length, active slot and
-HAProxy readiness.
+On a rerun, it accepts healthy HAProxy checks in `UP` or `DRAIN` state and only
+enables the active slot after both checks pass. The operation prints only the
+snapshot path, token length, active slot and HAProxy readiness.
 Run it with ssh -T teagram-demo 'run <main-sha> rotate-turnstile-qa-bypass-token'.
 
 After rotation, an authorized workspace admin must copy the new value into
