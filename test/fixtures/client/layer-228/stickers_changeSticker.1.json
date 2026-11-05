@@ -1,0 +1,22 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_changeSticker.1.txt",
+  "method": "stickers.changeSticker",
+  "request": {
+    "type": "stickers.changeSticker",
+    "flags": 5,
+    "fields": {
+      "sticker": {
+        "type": "inputDocument",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>",
+          "file_reference": "REDACTED"
+        }
+      },
+      "emoji": "🌟",
+      "keywords": "star,glow"
+    }
+  }
+}

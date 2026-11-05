@@ -1,0 +1,20 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_setStickerSetThumb.1.txt",
+  "method": "stickers.setStickerSetThumb",
+  "request": {
+    "type": "stickers.setStickerSetThumb",
+    "flags": 2,
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetID",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "thumb_document_id": "<N>"
+    }
+  }
+}

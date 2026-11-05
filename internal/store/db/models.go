@@ -173,9 +173,10 @@ type ChannelParticipantCount struct {
 }
 
 type ChannelPollMessage struct {
-	ChannelID int64
-	LocalID   int64
-	PollID    int64
+	ChannelID              int64
+	LocalID                int64
+	PollID                 int64
+	CustomEmojiDocumentIds []string
 }
 
 type ChannelPostMarker struct {
@@ -726,9 +727,10 @@ type Poll struct {
 }
 
 type PollMessageCopy struct {
-	OwnerID int64
-	LocalID int64
-	PollID  int64
+	OwnerID                int64
+	LocalID                int64
+	PollID                 int64
+	CustomEmojiDocumentIds []string
 }
 
 type PollOption struct {
@@ -926,18 +928,26 @@ type UserContact struct {
 }
 
 type UserCreatedStickerSet struct {
-	ID         int64
-	AccessHash int64
-	CreatorID  int64
-	Title      string
-	ShortName  string
-	Software   string
-	Kind       string
-	TextColor  bool
-	ItemCount  int32
-	SetHash    int32
-	IsLive     bool
-	CreatedAt  pgtype.Timestamptz
+	ID              int64
+	AccessHash      int64
+	CreatorID       int64
+	Title           string
+	ShortName       string
+	Software        string
+	Kind            string
+	TextColor       bool
+	ItemCount       int32
+	SetHash         int32
+	IsLive          bool
+	CreatedAt       pgtype.Timestamptz
+	ThumbFileID     *int64
+	ThumbFormat     *string
+	ThumbSize       *int64
+	ThumbWidth      *int32
+	ThumbHeight     *int32
+	ThumbDurationNs int64
+	ThumbVersion    int32
+	ThumbDocumentID int64
 }
 
 type UserCreatedStickerSetItem struct {
@@ -952,6 +962,7 @@ type UserCreatedStickerSetItem struct {
 	DurationNs    int64
 	MaskCoords    []byte
 	ContentSha256 []byte
+	IsActive      bool
 }
 
 type UserDialogFilter struct {

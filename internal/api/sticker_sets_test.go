@@ -678,6 +678,55 @@ func TestSearchStickerSetsIncludesOnlyCallerVisibleUserSets(t *testing.T) {
 	}
 }
 
+func TestSearchStickerSetsReturnsActiveCoverAndCustomThumbnail(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	s := openStickerStore(t, blobs, pgtest.DSN(t))
+	owner, err := s.CreateUser(ctx, "+15551810025")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	removed := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	active := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	request := createStickerRequest("archived_search_cats", removed, false, false)
+	request.Stickers = append(request.Stickers, tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: active.ID, AccessHash: active.AccessHash}, Emoji: "⭐",
+	})
+	created := createStickerSet(t, h, owner.ID, request)
+	ref := &tg.InputStickerSetID{ID: created.Set.ID, AccessHash: created.Set.AccessHash}
+
+	thumb := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 100, 100))
+	setThumb := &tg.StickersSetStickerSetThumbRequest{Stickerset: ref}
+	setThumb.SetThumb(&tg.InputDocument{ID: thumb.ID, AccessHash: thumb.AccessHash})
+	stickerSetMutation(t, h, owner.ID, "stickers.setStickerSetThumb", setThumb)
+	stickerSetMutation(t, h, owner.ID, "stickers.removeStickerFromSet", &tg.StickersRemoveStickerFromSetRequest{
+		Sticker: &tg.InputDocument{ID: removed.ID, AccessHash: removed.AccessHash},
+	})
+
+	result := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "ARCHIVED_SEARCH", ExcludeFeatured: true})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || len(full.Sets) != 1 {
+		t.Fatalf("searchStickerSets = %T with %d sets; want the edited set", result, foundStickerSetsCount(result))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "archived_search_cats" || covered.Set.Count != 1 {
+		t.Fatalf("searchStickerSets result = %T (%v); want one active item in archived_search_cats", full.Sets[0], full.Sets[0])
+	}
+	cover, ok := covered.Cover.(*tg.Document)
+	if !ok || cover.ID != active.ID {
+		t.Fatalf("searchStickerSets cover = %T (%v); want active document %d", covered.Cover, covered.Cover, active.ID)
+	}
+	if len(covered.Set.Thumbs) != 1 || covered.Set.ThumbVersion == 0 {
+		t.Fatalf("searchStickerSets set thumbnail = %+v (version %d); want custom thumbnail", covered.Set.Thumbs, covered.Set.ThumbVersion)
+	}
+	photoSize, ok := covered.Set.Thumbs[0].(*tg.PhotoSize)
+	if !ok || photoSize.W != 100 || photoSize.H != 100 || photoSize.Size != int(thumb.Size) {
+		t.Fatalf("searchStickerSets thumbnail metadata = %T (%v); want 100x100 and size %d", covered.Set.Thumbs[0], covered.Set.Thumbs[0], thumb.Size)
+	}
+}
+
 func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

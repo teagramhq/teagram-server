@@ -1,0 +1,33 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_addStickerToSet.1.txt",
+  "method": "stickers.addStickerToSet",
+  "request": {
+    "type": "stickers.addStickerToSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetID",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "sticker": {
+        "type": "inputStickerSetItem",
+        "flags": 0,
+        "fields": {
+          "document": {
+            "type": "inputDocument",
+            "fields": {
+              "id": "<N>",
+              "access_hash": "<N>",
+              "file_reference": "REDACTED"
+            }
+          },
+          "emoji": "⭐"
+        }
+      }
+    }
+  }
+}

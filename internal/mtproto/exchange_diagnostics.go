@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 
 	"github.com/gotd/td/bin"
@@ -69,8 +70,11 @@ const (
 )
 
 type transportCloseDiagnostics struct {
-	transport string
-	step      transportCloseStep
+	transport    string
+	step         transportCloseStep
+	peerAddr     netip.Addr
+	authKeyID    [8]byte
+	hasAuthKeyID bool
 }
 
 type transportCloseReason string
@@ -124,6 +128,15 @@ func (d *transportCloseDiagnostics) markDHComplete() {
 
 func (d *transportCloseDiagnostics) markAuthorized() {
 	d.step = transportCloseStepAuthorized
+}
+
+func (d *transportCloseDiagnostics) setPeerAddr(addr netip.Addr) {
+	d.peerAddr = addr
+}
+
+func (d *transportCloseDiagnostics) observeAuthKeyID(id [8]byte) {
+	d.authKeyID = id
+	d.hasAuthKeyID = id != ([8]byte{})
 }
 
 func newExchangeDiagnostics() *exchangeDiagnostics {
