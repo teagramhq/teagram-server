@@ -42,9 +42,23 @@ type webSocketConnState struct {
 	deadline time.Time
 }
 
+var errWebSocketTransportReadEOF = errors.New("WebSocket transport read returned EOF")
+
+// markWebSocketTransportReadEOF distinguishes peer-read EOFs from server
+// errors in stores or RPC handlers that happen to wrap the same sentinel.
+func markWebSocketTransportReadEOF(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errors.Join(errWebSocketTransportReadEOF, err)
+	}
+	return err
+}
+
 func isWebSocketDisconnect(err error) bool {
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		return !errors.Is(err, errAuthKeyLookupFailure) && !errors.Is(err, errAuthKeyPersistenceFailure)
+	if errors.Is(err, errWebSocketTransportReadEOF) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
 	}
 	if isDisconnect(err) {
 		return true
@@ -62,6 +76,11 @@ type webSocketDrainReadDeadlineConn struct {
 
 	readDeadlineMu       sync.Mutex
 	preserveReadDeadline bool
+}
+
+func (c *webSocketDrainReadDeadlineConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	return n, markWebSocketTransportReadEOF(err)
 }
 
 func (c *webSocketDrainReadDeadlineConn) SetDeadline(deadline time.Time) error {

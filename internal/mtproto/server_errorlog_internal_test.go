@@ -50,6 +50,12 @@ type serverLoopFailureConn struct {
 	err   error
 }
 
+type serverLoopReadErrorConn struct {
+	net.Conn
+
+	err error
+}
+
 type unexpectedEOFAuthKeyStore struct{}
 
 func (unexpectedEOFAuthKeyStore) Save(context.Context, tdcrypto.AuthKey) error { return nil }
@@ -67,8 +73,20 @@ func (c *serverLoopFailureConn) Recv(_ context.Context, b *bin.Buffer) error {
 	return c.err
 }
 
+func (c serverLoopReadErrorConn) Read([]byte) (int, error) { return 0, c.err }
+
 func (*serverLoopFailureConn) Send(context.Context, *bin.Buffer) error { return nil }
 func (*serverLoopFailureConn) Close() error                            { return nil }
+
+type webSocketReadEOFConn struct{ transport.Conn }
+
+func (c webSocketReadEOFConn) Recv(ctx context.Context, b *bin.Buffer) error {
+	return markWebSocketTransportReadEOF(c.Conn.Recv(ctx, b))
+}
+
+func webSocketTestConn(server *Server, conn transport.Conn) transport.Conn {
+	return webSocketDrainConn{Conn: webSocketReadEOFConn{Conn: conn}, shutdown: server.shutdown}
+}
 
 func (*serverErrorLogSink) Enabled(context.Context, slog.Level) bool { return true }
 
@@ -910,7 +928,7 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	frame[0] = 1
 	diagnostics := newTransportCloseDiagnostics(websocketPath)
 	err := server.serveConnModeWithDiagnostics(
-		context.Background(), context.Background(), &serverLoopFailureConn{frame: frame}, peerAddr, nil, nil, false, nil, diagnostics,
+		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{frame: frame}), peerAddr, nil, nil, false, nil, diagnostics,
 	)
 	if err == nil {
 		t.Fatal("WebSocket serve loop succeeded after auth-key lookup returned unexpected EOF")
@@ -984,12 +1002,111 @@ func TestWebSocketAuthKeyPersistenceUnexpectedEOFRemainsServerFailure(t *testing
 	}
 }
 
+func TestWebSocketProcessingEOFRemainsServerFailure(t *testing.T) {
+	peerAddr := netip.MustParseAddr("203.0.113.37")
+	tests := []struct {
+		name      string
+		stage     string
+		wrap      func(error) error
+		wantCause func(error) string
+	}{
+		{
+			name:  "pending login lease store",
+			stage: "maintain_pending_login_lease",
+			wrap: func(err error) error {
+				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
+			},
+			wantCause: func(error) string { return string(requestFailurePendingLoginStore) },
+		},
+		{
+			name:  "RPC processing",
+			stage: "dispatch_rpc",
+			wrap: func(err error) error {
+				return errors.Join(errRequestHandlingFailure, requestFailureContext(&Request{rpcLogMethod: "messages.getDialogs"}, err))
+			},
+			wantCause: func(err error) string {
+				if errors.Is(err, io.EOF) {
+					return string(requestFailureTransport)
+				}
+				return "request_processing"
+			},
+		},
+	}
+	eofs := []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+	}
+	for _, eof := range eofs {
+		for _, test := range tests {
+			t.Run(test.name+"/"+eof.name, func(t *testing.T) {
+				sink := &serverErrorLogSink{}
+				server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+				diagnostics := newTransportCloseDiagnostics(websocketPath)
+				err := newWebSocketServeFailure(test.stage, test.wrap(eof.err), peerAddr, diagnostics)
+				if isWebSocketDisconnect(err) {
+					t.Fatalf("processing error = %v, want server failure", err)
+				}
+				server.logConnectionFailure(err)
+				server.logTransportClose(diagnostics, err)
+
+				var failure, closeRecord *serverErrorLogRecord
+				for i := range sink.records {
+					record := &sink.records[i]
+					switch record.message {
+					case "server operation failed":
+						failure = record
+					case "transport connection closed":
+						closeRecord = record
+					}
+				}
+				if failure == nil {
+					t.Fatalf("no server operation failure record in %+v", sink.records)
+				}
+				if failure.attrs["operation"] != "websocket_serve_loop" {
+					t.Errorf("failure operation = %v, want websocket_serve_loop", failure.attrs["operation"])
+				}
+				wantCause := test.wantCause(eof.err)
+				if failure.attrs["stage"] != test.stage || failure.attrs["cause"] != wantCause {
+					t.Errorf("failure stage/cause = %v/%v, want %s/%s", failure.attrs["stage"], failure.attrs["cause"], test.stage, wantCause)
+				}
+				if closeRecord == nil {
+					t.Fatalf("no transport close record in %+v", sink.records)
+				}
+				if got := closeRecord.attrs["reason"]; got != "server error" {
+					t.Errorf("transport close reason = %v, want server error", got)
+				}
+			})
+		}
+	}
+}
+
+func TestWebSocketTransportReadEOFIsMarkedAtOrigin(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conn := &webSocketDrainReadDeadlineConn{Conn: serverLoopReadErrorConn{err: test.err}}
+			_, err := conn.Read(nil)
+			if !errors.Is(err, errWebSocketTransportReadEOF) || !errors.Is(err, test.err) {
+				t.Fatalf("read error = %v, want EOF tagged with its transport origin", err)
+			}
+		})
+	}
+}
+
 func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	diagnostics := newTransportCloseDiagnostics(websocketPath)
 	err := server.serveConnModeWithDiagnostics(
-		context.Background(), context.Background(), &serverLoopFailureConn{err: io.ErrUnexpectedEOF},
+		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{err: io.ErrUnexpectedEOF}),
 		netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 	)
 	if err == nil {
@@ -1027,10 +1144,10 @@ func TestWebSocketKeyExchangeUnexpectedEOFRemainsClientDisconnect(t *testing.T) 
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	diagnostics := newTransportCloseDiagnostics(websocketPath)
 	err = server.serveConnModeWithDiagnostics(
-		context.Background(), context.Background(), &serverLoopFailureConn{
+		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{
 			frame: exchangeRequestFrame(t),
 			err:   io.ErrUnexpectedEOF,
-		}, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
+		}), netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 	)
 	if err == nil {
 		t.Fatal("WebSocket serve loop succeeded after key-exchange read returned unexpected EOF")

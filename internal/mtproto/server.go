@@ -1109,10 +1109,10 @@ func isWebSocketProtocolDecodeError(err error) bool {
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
 	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout {
-		if errors.Is(err, io.ErrUnexpectedEOF) && (errors.Is(err, errAuthKeyLookupFailure) || errors.Is(err, errAuthKeyPersistenceFailure)) {
-			reason = transportCloseReasonServerError
-		} else if isWebSocketDisconnect(err) {
+		if isWebSocketDisconnect(err) {
 			reason = transportCloseReasonClientClose
+		} else if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			reason = transportCloseReasonServerError
 		}
 	}
 	attrs := []any{
