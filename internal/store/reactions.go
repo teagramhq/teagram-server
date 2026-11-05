@@ -67,6 +67,9 @@ func reactionFromRow(r db.MessageReaction) Reaction {
 // Returns the set of (ownerID, localID) pairs whose copies were affected,
 // for the NOTIFY fan-out that pushes updateMessageReactions.
 func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reaction string) ([]ReactionTarget, error) {
+	if strings.HasPrefix(reaction, customEmojiReactionPrefix) {
+		return nil, ErrReactionInvalid
+	}
 	return s.sendReaction(ctx, ownerID, localID, reaction, 0)
 }
 
@@ -132,6 +135,8 @@ func (s *Store) sendReaction(ctx context.Context, ownerID, localID int64, reacti
 	if msg.Deleted {
 		return nil, ErrMessageInvalid
 	}
+	// The custom-emoji set row FOR SHARE lock follows the message-owner
+	// advisory locks and message reload; no owner-row lock is taken afterward.
 	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
 		return nil, err
 	}
@@ -337,6 +342,8 @@ func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID
 	if !members[reactorID] {
 		return nil, ErrNotMember
 	}
+	// The custom-emoji set row FOR SHARE lock follows the chat row, member-owner
+	// advisory locks, and message reload; no earlier lock class is taken after it.
 	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -205,6 +206,77 @@ func TestUpdateEmojiStatusReturnsAndClearsCustomEmojiStatus(t *testing.T) {
 	}
 }
 
+func TestSetUserEmojiStatusLocksOwnerBeforeCustomEmojiSet(t *testing.T) {
+	t.Parallel()
+	fixture := newCustomEmojiActionFixture(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, fixture.dsn)
+	if err != nil {
+		t.Fatalf("connect to custom emoji test database: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close custom emoji test database connection: %v", err)
+		}
+	}()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin sticker-set edit transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // deferred rollback cleans up this test-owned transaction
+	if _, err := tx.Exec(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, fixture.pair.a.ID); err != nil {
+		t.Fatalf("lock sticker-set owner: %v", err)
+	}
+
+	statusDone := make(chan error, 1)
+	go func() {
+		statusDone <- fixture.s.SetUserEmojiStatus(ctx, fixture.pair.a.ID, fixture.doc.ID)
+	}()
+	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWait()
+	for {
+		var waiters int
+		if err := conn.QueryRow(waitCtx, `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'
+		`).Scan(&waiters); err != nil {
+			t.Fatalf("check emoji status lock wait: %v", err)
+		}
+		if waiters > 0 {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("emoji status did not block on owner row: %v", waitCtx.Err())
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	lockCtx, cancelLock := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelLock()
+	if _, err := tx.Exec(lockCtx, `SELECT id FROM user_created_sticker_sets WHERE id = $1 FOR UPDATE`, fixture.set.Set.ID); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback sticker-set edit transaction: %v", rollbackErr)
+		}
+		select {
+		case statusErr := <-statusDone:
+			t.Fatalf("lock sticker set after owner row: %v; set emoji status: %v", err, statusErr)
+		case <-waitCtx.Done():
+			t.Fatalf("lock sticker set after owner row: %v; emoji status did not return", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit sticker-set edit transaction: %v", err)
+	}
+	select {
+	case err := <-statusDone:
+		if err != nil {
+			t.Fatalf("set emoji status while editing own set: %v", err)
+		}
+	case <-waitCtx.Done():
+		t.Fatal("set emoji status did not return after sticker-set edit committed")
+	}
+}
+
 func TestBasicChatCustomEmojiReactionRequiresAllowedCustomReactions(t *testing.T) {
 	t.Parallel()
 	fixture := newCustomEmojiActionFixture(t)
@@ -253,6 +325,10 @@ func TestBasicChatCustomEmojiReactionRequiresAllowedCustomReactions(t *testing.T
 	if _, rpc := sendReaction(t, fixture.s, pair.a.ID, peer, messageID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc != nil {
 		t.Fatalf("send custom emoji allowed by explicit chat setting: %s", rpc.ErrorMessage)
 	}
+	setCustomEmojiSetLive(t, fixture, false)
+	if _, rpc := sendReaction(t, fixture.s, pair.a.ID, peer, messageID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc == nil || rpc.ErrorMessage != "REACTION_INVALID" {
+		t.Fatalf("custom emoji reaction from a taken-down set = %v, want REACTION_INVALID", rpc)
+	}
 }
 
 func TestChannelCustomEmojiReactionRespectsAllowedReactions(t *testing.T) {
@@ -291,5 +367,9 @@ func TestChannelCustomEmojiReactionRespectsAllowedReactions(t *testing.T) {
 	requireReactionUpdates(t, updates, rpc, "allow custom reaction in channel subset")
 	if _, rpc := sendReaction(t, fixture.s, fixture.pair.b.ID, peer, post.LocalID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc != nil {
 		t.Fatalf("send custom channel reaction in allowed subset: %s", rpc.ErrorMessage)
+	}
+	setCustomEmojiSetLive(t, fixture, false)
+	if _, rpc := sendReaction(t, fixture.s, fixture.pair.b.ID, peer, post.LocalID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc == nil || rpc.ErrorMessage != "REACTION_INVALID" {
+		t.Fatalf("custom channel reaction from a taken-down set = %v, want REACTION_INVALID", rpc)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -145,6 +146,9 @@ func (s *Store) SetChannelMessageReaction(
 	channelID, reactorID, localID int64,
 	reaction string,
 ) ([]ChannelReactionCount, error) {
+	if strings.HasPrefix(reaction, customEmojiReactionPrefix) {
+		return nil, ErrReactionInvalid
+	}
 	return s.setChannelMessageReaction(ctx, channelID, reactorID, localID, reaction, 0)
 }
 
@@ -211,6 +215,8 @@ func (s *Store) setChannelMessageReaction(
 	if reaction != "" && !available.Allows(reaction) {
 		return nil, ErrReactionInvalid
 	}
+	// The custom-emoji set row FOR SHARE lock follows the channel, participant,
+	// and post row locks, matching the established channel reaction lock order.
 	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
 		return nil, err
 	}

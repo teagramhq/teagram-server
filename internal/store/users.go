@@ -358,8 +358,9 @@ func (s *Store) SetUserStatus(ctx context.Context, userID int64, online bool) er
 }
 
 // SetUserEmojiStatus stores the caller's custom emoji status. Positive IDs
-// refer to mutable user-created sets, so their set row is locked and checked
-// live in the same transaction as the status write. Zero clears the status.
+// refer to mutable user-created sets, so the user's row is locked before the
+// set row, matching sticker-set writes' owner-then-set order. Both locks and
+// the liveness check share the status transaction. Zero clears the status.
 func (s *Store) SetUserEmojiStatus(ctx context.Context, userID, documentID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -368,6 +369,11 @@ func (s *Store) SetUserEmojiStatus(ctx context.Context, userID, documentID int64
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 	if documentID > 0 {
+		if _, err := qtx.LockUserStickerSetOwner(ctx, userID); errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("set user emoji status: user %d not found", userID)
+		} else if err != nil {
+			return fmt.Errorf("lock emoji status owner: %w", err)
+		}
 		if err := lockLiveReactionCustomEmoji(ctx, qtx, documentID); err != nil {
 			return err
 		}
