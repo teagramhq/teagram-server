@@ -86,6 +86,31 @@ wait_for_no_pods() {
   return 1
 }
 
+wait_for_job() {
+  local namespace=$1 name=$2 timeout_seconds=$3 elapsed=0 condition
+  while (( elapsed < timeout_seconds )); do
+    if ! condition=$(kubectl get job "$name" --namespace "$namespace" \
+      --output 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}'); then
+      printf 'could not read Job status: %s/%s\n' "$namespace" "$name" >&2
+      return 1
+    fi
+    if [[ $condition == *Failed* ]]; then
+      printf 'Job failed: %s/%s\n' "$namespace" "$name" >&2
+      kubectl describe job "$name" --namespace "$namespace" >&2 || true
+      kubectl logs "job/$name" --namespace "$namespace" --all-containers --tail=200 >&2 || true
+      return 1
+    fi
+    [[ $condition == *Complete* ]] && return 0
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  printf 'timed out waiting for Job: %s/%s after %ss\n' \
+    "$namespace" "$name" "$timeout_seconds" >&2
+  kubectl describe job "$name" --namespace "$namespace" >&2 || true
+  kubectl logs "job/$name" --namespace "$namespace" --all-containers --tail=200 >&2 || true
+  return 1
+}
+
 start_port_forward() {
   local namespace=$1 attempt
   kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
@@ -118,7 +143,7 @@ start_linkselector_forward() {
 }
 
 smoke_restored_account() {
-  docker run --rm --network host \
+  timeout --signal=TERM --kill-after=5s 45s docker run --rm --network host \
     --user 0:0 \
     --volume "$tmp_dir/client.json:/client.json:ro" \
     --volume "$tmp_dir/username:/username:ro" \
@@ -144,6 +169,7 @@ kubectl attach "$seed_pod" --namespace "$SOURCE_NAMESPACE" \
   --stdin --container create-account < "$tmp_dir/password" >/dev/null
 kubectl wait --for=condition=complete job/cutover-account-seed \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
+printf 'source account seeded\n'
 
 kubectl create namespace "$TARGET_NAMESPACE" >/dev/null
 for secret in ghcr-pull postgres-credentials rustfs-credentials \
@@ -181,6 +207,7 @@ kubectl wait --for=condition=complete jobs --selector=app.kubernetes.io/name=rus
 kubectl wait --for=condition=Ready pod/cutover-volume-importer \
   --namespace "$TARGET_NAMESPACE" --timeout=300s >/dev/null
 [[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]]
+printf 'target cutover resources ready\n'
 
 # Spool every transfer through a file instead of piping one kubectl exec into
 # another: a receiver such as tar stops reading at the end-of-archive marker,
@@ -237,14 +264,14 @@ migration_job=$(kubectl get jobs --namespace "$TARGET_NAMESPACE" \
 [[ -n $migration_job && $(wc -l <<< "$migration_job") -eq 1 ]]
 kubectl patch "$migration_job" --namespace "$TARGET_NAMESPACE" --type=merge \
   --patch '{"spec":{"suspend":false}}' >/dev/null
-kubectl wait --for=condition=complete "$migration_job" --namespace "$TARGET_NAMESPACE" --timeout=900s >/dev/null
+wait_for_job "$TARGET_NAMESPACE" "${migration_job##*/}" 900
 kubectl patch job/local-blob-migration --namespace "$TARGET_NAMESPACE" --type=merge \
   --patch '{"spec":{"suspend":false}}' >/dev/null
-kubectl wait --for=condition=complete job/local-blob-migration \
-  --namespace "$TARGET_NAMESPACE" --timeout=21600s >/dev/null
+wait_for_job "$TARGET_NAMESPACE" local-blob-migration 900
 # Drain the log stream; grep -q can SIGPIPE kubectl under pipefail.
 kubectl logs --namespace "$TARGET_NAMESPACE" job/local-blob-migration -c migrate |
   grep --fixed-strings 'blob_copy=pass mode=encrypted objects=1 bytes=32' >/dev/null
+printf 'snapshot restored and encrypted blob migration passed\n'
 
 kubectl scale statefulset/teagramd --replicas=1 --namespace "$TARGET_NAMESPACE" >/dev/null
 kubectl rollout status statefulset/teagramd --namespace "$TARGET_NAMESPACE" --timeout=900s >/dev/null
@@ -271,7 +298,9 @@ legacy_discovery_status=$(curl --silent --show-error --output /dev/null --write-
 admin_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --location --max-redirs 3 --max-time 10 http://127.0.0.1:12445/admin)
 [[ $admin_status =~ ^(200|302|401|403)$ ]]
+printf 'restored target Service smoke passed; verifying restored-account sign-in\n'
 smoke_restored_account
+printf 'restored account sign-in passed on target\n'
 stop_port_forward
 
 # Model the confirmed edge switch and rollback with disposable connector pods.
@@ -299,6 +328,7 @@ kubectl scale deployment/cloudflared --replicas=1 --namespace "$SOURCE_NAMESPACE
 kubectl rollout status deployment/cloudflared --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
 start_port_forward "$SOURCE_NAMESPACE"
 smoke_restored_account
+printf 'restored account sign-in passed after source rollback\n'
 stop_port_forward
 
 printf 'cutover migration, restored-password sign-in, connector handoff, and source rollback smoke passed\n'
