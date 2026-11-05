@@ -33,10 +33,11 @@ scale_container() {
 docker_command() {
   local subcommand=$1 format container service path basename
   shift
+  local -a args=("$@")
   case "$subcommand" in
     inspect)
       format=$2
-      container=${@: -1}
+      container=${args[-1]}
       case "$format" in
         *'.State.Status'*)
           if [[ $container == teagram-web-cloudflared &&
@@ -82,7 +83,7 @@ docker_command() {
       done
       ;;
     stop|start)
-      container=${@: -1}
+      container=${args[-1]}
       scale_container "$subcommand" "$container"
       ;;
     exec)
@@ -167,7 +168,8 @@ PY
 systemctl_command() {
   local subcommand=$1 unit unit_path command_line pid_file pid
   shift
-  unit=${@: -1}
+  local -a args=("$@")
+  unit=${args[-1]}
   unit_path="$STATE_DIR/units/$unit"
   pid_file="$STATE_DIR/units/$unit.pid"
   case "$subcommand" in
@@ -225,6 +227,7 @@ case "${1:-}" in
     shift
     command_name=$1
     shift
+    args=("$@")
     if [[ $instance == teagram ]]; then
       case "$command_name" in
         command) exit 0 ;;
@@ -253,7 +256,7 @@ case "${1:-}" in
           fi
           ;;
         install)
-          destination=${@: -1}
+          destination=${args[-1]}
           cat > "$STATE_DIR/units/${destination##*/}"
           ;;
         curl) curl "$@" ;;

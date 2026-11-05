@@ -27,8 +27,8 @@ for required in \
   fi
 done
 
-if ! grep --fixed-strings --quiet -- '--tcp="$MTPROTO_PORT"' deploy/k8s/cutover-alpha.sh ||
-  ! grep --fixed-strings --quiet '"$MTPROTO_PORT:$MTPROTO_PORT' deploy/k8s/cutover-alpha.sh ||
+if ! grep --fixed-strings --quiet -- "--tcp=\"\$MTPROTO_PORT\"" deploy/k8s/cutover-alpha.sh ||
+  ! grep --fixed-strings --quiet "\"\$MTPROTO_PORT:\$MTPROTO_PORT" deploy/k8s/cutover-alpha.sh ||
   ! grep --fixed-strings --quiet '"TCP"' deploy/k8s/cutover-alpha.sh ||
   ! grep --fixed-strings --quiet 'https://127.0.0.1:6443' deploy/k8s/cutover-alpha.sh; then
   printf 'alpha cutover does not switch and verify the advertised MTProto TCP route\n' >&2

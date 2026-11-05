@@ -692,6 +692,9 @@ kubectl wait --for=condition=complete jobs \
   fail 'k8s cloudflared must remain at zero replicas until the edge switch'
 
 fence_source_writes
+if [[ $TEST_MODE == true && ${CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE:-} == true ]]; then
+  fail 'injected disposable-cluster failure after the source write fence'
+fi
 
 blob_sizes=$(incus exec "$SOURCE_INSTANCE" -- docker cp \
   teagram-teagramd-1:/var/lib/teagramd-blobs/. - |

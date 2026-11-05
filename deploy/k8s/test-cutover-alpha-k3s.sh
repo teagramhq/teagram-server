@@ -203,10 +203,6 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ ${CUTOVER_FAIL_PG_ISREADY:-} == true && " $* " == *' pg_isready '* ]]; then
-  printf 'injected disposable-cluster failure after the source write fence\n' >&2
-  exit 42
-fi
 if [[ ${CUTOVER_FAIL_RESOURCE_LOOKUP:-} == cloudflared &&
   " $* " == *' get deployment/cloudflared '* && " $* " == *' --ignore-not-found '* ]]; then
   printf 'injected disposable-cluster Cloudflare lookup failure\n' >&2
@@ -222,26 +218,32 @@ exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
 chmod 0600 "$KUBECONFIG"
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_PG_ISREADY=true \
+if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
   > "$tmp_dir/pre-switch-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly passed the injected post-fence failure\n' >&2
   exit 1
 fi
-grep --fixed-strings --quiet 'injected disposable-cluster failure after the source write fence' \
-  "$tmp_dir/pre-switch-failure.log"
+if ! grep --fixed-strings --quiet 'injected disposable-cluster failure after the source write fence' \
+  "$tmp_dir/pre-switch-failure.log"; then
+  cat "$tmp_dir/pre-switch-failure.log" >&2
+  exit 1
+fi
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
-! grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/pre-switch-failure.log"
+if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/pre-switch-failure.log"; then
+  printf 'the pre-switch failure incorrectly selected post-switch recovery\n' >&2
+  exit 1
+fi
 printf 'pre-switch failure recovery restarted the fenced source services\n'
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
 if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" \
-  CUTOVER_FAIL_PG_ISREADY=true CUTOVER_FAIL_RESOURCE_LOOKUP=cloudflared \
+  CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true CUTOVER_FAIL_RESOURCE_LOOKUP=cloudflared \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
   > "$tmp_dir/recovery-lookup-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly recovered after a Kubernetes resource lookup failure\n' >&2
