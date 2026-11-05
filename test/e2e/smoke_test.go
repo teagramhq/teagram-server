@@ -59,6 +59,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBotAPISendMessage(t)
 	})
+	t.Run("bot-api-get-updates-stock-client", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotAPIGetUpdatesStockClient(t)
+	})
 	t.Run("turnstile-signup", func(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignUp(t)
