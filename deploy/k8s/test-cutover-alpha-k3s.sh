@@ -207,16 +207,18 @@ done
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
   tar -cf - -C /var/lib/teagramd-blobs . > "$tmp_dir/source-blobs.tar"
 kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
-# The fixture goes first: extracting the source archive restores the source
-# directory mode (0700, uid 65532), which the importer cannot enter afterwards
-# because it holds no DAC_OVERRIDE.
+# New local-path claims can start with permissions that deny writes to the
+# importer. Keep the destination owned by its restricted root process while
+# extracting; the final chown below transfers it to the runtime owner.
+kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-volume-importer -c importer -- \
+  sh -ec 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' >/dev/null
 mkdir -p "$tmp_dir/blob-fixture/parts/aa"
 printf 'alpha cutover migration fixture\n' > "$tmp_dir/blob-fixture/parts/aa/0123456789abcdef0123456789abcd"
 tar -cf "$tmp_dir/blob-fixture.tar" -C "$tmp_dir/blob-fixture" parts
 kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-  tar -xpf - -C /target/legacy-blobs < "$tmp_dir/blob-fixture.tar"
+  tar -xopf - -C /target/legacy-blobs < "$tmp_dir/blob-fixture.tar"
 kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-  tar -xpf - -C /target/legacy-blobs < "$tmp_dir/source-blobs.tar"
+  tar -xopf - -C /target/legacy-blobs < "$tmp_dir/source-blobs.tar"
 kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-volume-importer -c importer -- \
   sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
 kubectl delete pod cutover-volume-importer --namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null

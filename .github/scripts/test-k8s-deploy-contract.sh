@@ -195,6 +195,16 @@ for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
     fail "the cutover overlay is missing PVC $pvc"
 done
 
+cutover_volume_importer=deploy/k8s/prod-cutover/volume-importer.yaml
+[[ "$(yq -r '.spec.containers[] | select(.name == "importer") | .securityContext.capabilities.add | join(",")' "$cutover_volume_importer")" == 'CHOWN,FOWNER' ]] ||
+  fail 'the cutover importer must retain only the capabilities needed to prepare target PVC ownership'
+for script in deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha-k3s.sh; do
+  grep --fixed-strings --quiet 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' "$script" ||
+    fail "$script must prepare the private target blob root before importing"
+  grep --fixed-strings --quiet 'tar -xopf - -C /target/legacy-blobs' "$script" ||
+    fail "$script must preserve blob modes without restoring source ownership"
+done
+
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do
   probe_port="$(yq -r ".spec.template.spec.containers[] | select(.name == \"teagramd\") | .${probe}.tcpSocket.port" "$statefulset")"

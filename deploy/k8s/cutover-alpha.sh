@@ -644,6 +644,12 @@ for claim in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; d
 done
 kubectl wait --for=condition=Ready pod/cutover-volume-importer --namespace "$NAMESPACE" --timeout=300s >/dev/null
 
+# New local-path claims can start with permissions that deny writes to the
+# importer. Make the private destination root traversable to its restricted
+# root process before extracting, and keep archive owners from replacing it.
+kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
+  sh -ec 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' >/dev/null
+
 # Run a pipeline consumer and then drain whatever it left unread. A consumer
 # such as tar stops at the end-of-archive marker; without the drain the
 # producer is killed by SIGPIPE (exit 141) while still writing archive padding.
@@ -672,7 +678,7 @@ copy_secret_file /var/lib/teagramd/server_key.pem server_key.pem
 copy_secret_file /var/lib/teagramd/enc_key.hex enc_key.hex
 incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:/var/lib/teagramd-blobs/. - |
   drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-    tar -xpf - -C /target/legacy-blobs
+    tar -xopf - -C /target/legacy-blobs
 kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
   sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
 kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --wait=true --timeout=300s >/dev/null
