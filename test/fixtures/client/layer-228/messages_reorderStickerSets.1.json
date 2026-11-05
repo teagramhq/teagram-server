@@ -1,0 +1,16 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop dev b70b98b",
+  "source": "source-derived/messages_reorderStickerSets.1.txt",
+  "method": "messages.reorderStickerSets",
+  "request": {
+    "type": "messages.reorderStickerSets",
+    "flags": 0,
+    "fields": {
+      "order": [
+        "<N>",
+        "<N>"
+      ]
+    }
+  }
+}

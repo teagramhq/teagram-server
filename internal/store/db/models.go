@@ -1063,9 +1063,10 @@ type UserPrivacyRuleUser struct {
 }
 
 type UserStickerSet struct {
-	UserID      int64
-	SetID       int64
-	InstalledAt pgtype.Timestamptz
+	UserID       int64
+	SetID        int64
+	InstalledAt  pgtype.Timestamptz
+	SortPosition *int32
 }
 
 type Username struct {

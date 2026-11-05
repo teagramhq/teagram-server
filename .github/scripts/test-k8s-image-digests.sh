@@ -37,7 +37,7 @@ jq --exit-status '
 migrations_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
 rustfs_init_digest="$(jq -r '.[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest | sub("^sha256:"; "")' <<<"$production_images")"
 production_migration_version="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").literals[] | sub("^migration-version="; "")' deploy/k8s/prod/kustomization.yaml)"
-[[ "$production_migration_version" =~ ^[0-9]+$ ]] ||
+[[ "$production_migration_version" =~ ^[0-9]{14}$ ]] ||
   fail 'production must pin a migration version alongside its image digests'
 production_migration_behavior="$(yq -r '.configMapGenerator[] | select(.name == "required-migration-version").behavior' deploy/k8s/prod/kustomization.yaml)"
 [[ "$production_migration_behavior" == replace ]] ||
@@ -113,7 +113,11 @@ case "$1" in
     [[ "$2" == inspect ]] || exit 2
     format="${@: -1}"
     [[ "$format" == *'org.opencontainers.image.revision'* ]] || exit 2
-    printf '%s\n' "$EXPECTED_MIGRATION_REVISION"
+    case "$3" in
+      ghcr.io/teagramhq/teagramd@*) printf '%s\n' "$EXPECTED_SERVER_REVISION" ;;
+      ghcr.io/teagramhq/teagram-migrations@*) printf '%s\n' "$EXPECTED_MIGRATION_REVISION" ;;
+      *) printf 'unexpected image revision request: %s\n' "$3" >&2; exit 2 ;;
+    esac
     ;;
   *)
     printf 'unexpected docker command: %s\n' "$*" >&2
@@ -130,7 +134,15 @@ set -euo pipefail
 case "$1" in
   cat-file) exit 1 ;;
   fetch) exit 0 ;;
-  show) printf '%s\n' "$EXPECTED_IMAGE_MIGRATION_VERSION" ;;
+  ls-tree)
+    revision="$3"
+    case "$revision" in
+      "$EXPECTED_SERVER_REVISION") tree="$EXPECTED_SERVER_TREE" ;;
+      "$EXPECTED_MIGRATION_REVISION") tree="$EXPECTED_MIGRATION_TREE" ;;
+      *) printf 'unexpected source revision: %s\n' "$revision" >&2; exit 2 ;;
+    esac
+    printf '%s\n' "$tree"
+    ;;
   *)
     printf 'unexpected git command: %s\n' "$*" >&2
     exit 2
@@ -146,6 +158,14 @@ rustfs_init_digest="$(printf '3%.0s' {1..64})"
 landing_digest="$(printf '4%.0s' {1..64})"
 selector_digest="$(printf '5%.0s' {1..64})"
 expected_migration_revision=abcdef0123456789abcdef0123456789abcdef01
+expected_server_revision=abcdef0123456789abcdef0123456789abcdef02
+export EXPECTED_MIGRATION_REVISION="$expected_migration_revision"
+export EXPECTED_SERVER_REVISION="$expected_server_revision"
+fixture_migration_path="migrations/${production_migration_version}_existing.sql"
+EXPECTED_SERVER_TREE="$(printf '100644 blob %s\t%s' \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path")"
+export EXPECTED_SERVER_TREE
+export EXPECTED_MIGRATION_TREE="$EXPECTED_SERVER_TREE"
 printf '%s\n' \
   'apiVersion: v1' \
   'kind: Pod' \
@@ -181,16 +201,30 @@ printf '%s\n' \
   "  migration-version: \"$production_migration_version\"" > "$valid_prod_manifest"
 PATH="$test_dir/bin:$PATH" \
   EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
-  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" >/dev/null ||
   fail 'the production image pin validator must accept valid images and matching Job suffixes'
+
+valid_later_migration_version="$(printf '%014d' "$((10#$production_migration_version + 1))")"
+[[ "$valid_later_migration_version" =~ ^[0-9]{14}$ ]] ||
+  fail 'the later migration fixture must remain a 14-digit version'
+valid_later_migration_path="migrations/${valid_later_migration_version}_later.sql"
+valid_later_server_tree="$(printf '100644 blob %s\t%s\n100644 blob %s\t%s' \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path" \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$valid_later_migration_path")"
+valid_later_prod_manifest="$test_dir/k8s-prod-later-migration.yaml"
+sed "s|migration-version: \"$production_migration_version\"|migration-version: \"$valid_later_migration_version\"|" \
+  "$valid_prod_manifest" > "$valid_later_prod_manifest"
+PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_TREE="$valid_later_server_tree" \
+  EXPECTED_MIGRATION_TREE="$valid_later_server_tree" \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_later_prod_manifest" >/dev/null ||
+  fail 'the production image pin validator must accept compatible images with a later migration version'
 
 drifted_migration_manifest="$test_dir/k8s-prod-drifted-migration.yaml"
 sed "s|migration-version: \"$production_migration_version\"|migration-version: \"99999999999999\"|" \
   "$valid_prod_manifest" > "$drifted_migration_manifest"
 if PATH="$test_dir/bin:$PATH" \
   EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
-  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$drifted_migration_manifest" \
   >"$test_dir/drifted-migration-output" 2>"$test_dir/drifted-migration-error"; then
   fail 'the production image pin validator must reject a migration version drift'
@@ -214,13 +248,38 @@ sed "s|db-migrations-${migrations_digest:0:16}|db-migrations-0000000000000000|" 
   "$valid_prod_manifest" > "$wrong_job_prod_manifest"
 if PATH="$test_dir/bin:$PATH" \
   EXPECTED_MIGRATION_REVISION="$expected_migration_revision" \
-  EXPECTED_IMAGE_MIGRATION_VERSION="$production_migration_version" \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$wrong_job_prod_manifest" \
   >"$test_dir/wrong-job-output" 2>"$test_dir/wrong-job-error"; then
   fail 'the production image pin validator must reject a migration Job suffix mismatch'
 fi
 grep --fixed-strings --quiet 'migration Job name' "$test_dir/wrong-job-error" ||
   fail 'a migration Job suffix rejection must identify the mismatch'
+
+divergent_migration_prod_manifest="$test_dir/k8s-prod-divergent-migrations.yaml"
+divergent_migration_version=20261105000001
+sed "s|migration-version: \"$production_migration_version\"|migration-version: \"$divergent_migration_version\"|" \
+  "$valid_prod_manifest" > "$divergent_migration_prod_manifest"
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql\n100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tmigrations/20261104000001_required.sql' \
+  EXPECTED_MIGRATION_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql\n100644 blob cccccccccccccccccccccccccccccccccccccccc\tmigrations/20261105000001_other.sql' \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$divergent_migration_prod_manifest" \
+  >"$test_dir/divergent-migration-output" 2>"$test_dir/divergent-migration-error"; then
+  fail 'the production migration image must contain the exact migrations required by the pinned teagramd image'
+fi
+grep --fixed-strings --quiet 'lacks the exact migration migrations/20261104000001_required.sql' \
+  "$test_dir/divergent-migration-error" ||
+  fail 'a divergent migration image rejection must identify the missing server migration'
+
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql' \
+  EXPECTED_MIGRATION_TREE=$'100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tmigrations/20261102000002_existing.sql' \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" \
+  >"$test_dir/different-migration-blob-output" 2>"$test_dir/different-migration-blob-error"; then
+  fail 'the production migration image must contain the exact migration contents required by the pinned teagramd image'
+fi
+grep --fixed-strings --quiet 'lacks the exact migration migrations/20261102000002_existing.sql' \
+  "$test_dir/different-migration-blob-error" ||
+  fail 'a differing migration blob rejection must identify the changed migration path'
 
 unpullable_digest="$(printf '9%.0s' {1..64})"
 unpullable_reference="ghcr.io/teagramhq/teagramd@sha256:$unpullable_digest"
