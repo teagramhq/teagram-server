@@ -389,6 +389,53 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	}
 }
 
+func TestBotAPIGetUpdatesCancelledPollAllowsServerShutdown(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	_, token, err := f.store.CreateBot(f.ctx, "smoke_shutdown_poll_bot", "Shutdown")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	observedStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
+	handler := botapi.NewHandler(observedStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	serverURL := startSmokeBotAPIServerWithHandler(t, f, handler)
+	pollCtx, cancelPoll := context.WithCancel(f.ctx)
+	client := &http.Client{Timeout: 45 * time.Second}
+	pollDone := make(chan error, 1)
+	pollFinished := false
+	go func() {
+		_, err := doBotAPIGetUpdates(pollCtx, client, serverURL, token, 0, 30)
+		pollDone <- err
+	}()
+	// This cleanup runs before the HTTP server cleanup registered above.
+	t.Cleanup(func() {
+		cancelPoll()
+		if pollFinished {
+			return
+		}
+		select {
+		case err := <-pollDone:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("getUpdates poll error after cancellation = %v, want context.Canceled", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("getUpdates poll did not stop after cancellation")
+		}
+	})
+
+	select {
+	case <-observedStore.emptyQuery:
+	case <-time.After(15 * time.Second):
+		t.Fatal("getUpdates poll did not reach the empty-log wait")
+	}
+	select {
+	case err := <-pollDone:
+		pollFinished = true
+		t.Fatalf("getUpdates poll finished before cleanup cancellation: %v", err)
+	default:
+	}
+}
+
 func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
@@ -780,10 +827,10 @@ func startSmokeBotAPIServerWithHandler(t *testing.T, f *smokeFixture, handler ht
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			t.Errorf("Bot API shutdown failed")
+			t.Errorf("Bot API shutdown failed for %s: %v", listener.Addr(), err)
 		}
 		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Bot API server stopped unexpectedly")
+			t.Errorf("Bot API server at %s stopped unexpectedly: %v", listener.Addr(), err)
 		}
 	})
 	return "http://" + listener.Addr().String()
