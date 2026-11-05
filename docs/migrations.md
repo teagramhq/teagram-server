@@ -109,27 +109,33 @@ If the process stops or a chunk fails, that chunk's postings and cursor update
 roll back together. Earlier chunks remain committed and the marker stays
 unready; a rerun resumes at its saved cursor.
 
-The initializer and message triggers serialize posting changes through one of
-1024 transaction advisory lock buckets derived from the affected dialog. A
-trigger invocation that touches old and new dialogs acquires their buckets in
-ascending bucket order. Hash collisions only serialize unrelated dialogs; the
-buckets are scoped by database. The initializer locks the unready marker,
-message rows by `local_id`, dialog buckets, then posting and count rows.
-Writers take their existing owner or chat locks first. Before a user-to-user
-send inserts its first copy, a trigger locks both reciprocal dialog buckets in
-ascending order; the second copy reuses those locks. Message updates and hard
-deletes lock any operation-specific poll rows, then the complete affected
-message-copy set in `(owner_id, local_id)` order, then all affected dialog
-buckets in ascending bucket order, and finally posting and count rows. This
-transaction-wide row-before-bucket order covers revokes and batches that touch
-several dialogs; their triggers reuse the already-held bucket set. The
-initializer does not take owner or chat locks, and each chunk holds message
-rows for only one dialog.
+While a dialog has an unready marker, the initializer and message triggers
+serialize posting changes through one of 1024 transaction advisory lock
+buckets derived from the affected dialog. A trigger invocation that touches
+old and new dialogs acquires the buckets for marked dialogs in ascending bucket
+order. Hash collisions only serialize unrelated dialogs; the buckets are
+scoped by database. The initializer locks the unready marker, message rows by
+`local_id`, dialog bucket, then posting and count rows.
+
+Every application writer locks each affected owner before its first message-copy
+write, including for ready dialogs. These owner advisory locks serialize
+posting and count changes for ready dialogs, which do not take posting-dialog
+buckets; a chat lock alone is not a substitute. Before a user-to-user send
+inserts its first copy, a trigger locks the buckets for any unready reciprocal
+dialogs in ascending order; the second copy reuses those locks. Message updates
+and hard deletes lock any operation-specific poll rows, then the complete
+affected message-copy set in `(owner_id, local_id)` order, then the buckets for
+affected unready dialogs in ascending bucket order, and finally posting and
+count rows. This transaction-wide row-before-bucket order covers revokes and
+batches that touch several dialogs; their triggers reuse the already-held bucket
+set. The initializer does not take owner or chat locks, and each chunk holds
+message rows for only one dialog.
 
 Before a basic-group send, chat forward, or album writes its first message
-copy, it locks every recipient's dialog bucket as one set in ascending bucket
-order. Its insert triggers reuse that set, so disjoint group fan-outs with
-colliding buckets cannot acquire them in opposite per-copy orders.
+copy, it locks the buckets for recipients whose dialogs have unready markers as
+one set in ascending bucket order. Its insert triggers reuse that set, so
+disjoint group fan-outs with colliding buckets cannot acquire them in opposite
+per-copy orders.
 
 Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
 A send into that dialog can wait on its advisory bucket while holding its owner
@@ -142,13 +148,13 @@ omits the configured Postgres statement timeout so it can finish a chunk;
 message writers still use their normal request timeout. Run it in a low-traffic
 window when large dialogs are expected.
 
-Existing send, edit, and delete transactions acquire their owner or chat locks
+Existing send, edit, and delete transactions acquire the affected owner locks
 before changing message rows, then their message triggers update postings and
 counts. A batch may touch rows in multiple dialogs: it locks the complete row
-set by `(owner_id, local_id)` before taking any posting bucket, so it cannot
-hold a bucket while waiting for a row in the initializer's current chunk. The
-initializer holds rows for only one dialog in one chunk and releases them
-before starting another chunk.
+set by `(owner_id, local_id)` before taking any required unready-dialog bucket,
+so it cannot hold a bucket while waiting for a row in the initializer's
+current chunk. The initializer holds rows for only one dialog in one chunk
+and releases them before starting another chunk.
 
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain
