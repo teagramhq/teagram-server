@@ -499,13 +499,10 @@ func TestServeWebSocketWithHandlerUsesListenerOriginPolicy(t *testing.T) {
 func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate server RSA key: %v", err)
-	}
 	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build public discovery document: %v", err)
@@ -527,7 +524,7 @@ func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 		{name: "IPv4-mapped IPv6", addr: "::ffff:198.51.100.31", want: netip.MustParseAddr("198.51.100.31")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			ws, status, err := dialWebSocketWithHeaders(requestCtx, listener.Addr().String(), http.Header{
 				"CF-Connecting-IP": []string{tt.addr},
@@ -557,13 +554,10 @@ func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate server RSA key: %v", err)
-	}
 	gotAddr := make(chan netip.Addr, 1)
 	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
 		gotAddr <- req.ClientAddr
@@ -594,13 +588,10 @@ func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
 func TestPublicWebSocketRejectsInvalidCFConnectingIP(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate server RSA key: %v", err)
-	}
 	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build public discovery document: %v", err)
@@ -636,13 +627,10 @@ func TestPublicWebSocketRejectsInvalidCFConnectingIP(t *testing.T) {
 func TestPublicWebSocketPreAuthCapUsesCFConnectingIP(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate server RSA key: %v", err)
-	}
 	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build public discovery document: %v", err)
@@ -1921,4 +1909,20 @@ func (c *webSocketBoundaryConn) Flush() error {
 	c.pending = nil
 	_, err := c.Conn.Write(pending)
 	return err
+}
+
+var cloudflareTestKey = sync.OnceValues(func() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
+})
+
+// cloudflareTestRSAKey returns one RSA key shared by the Cloudflare address
+// tests, so key generation neither repeats per test nor counts against the
+// per-test deadlines on a loaded runner.
+func cloudflareTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := cloudflareTestKey()
+	if err != nil {
+		t.Fatalf("generate server RSA key: %v", err)
+	}
+	return key
 }
