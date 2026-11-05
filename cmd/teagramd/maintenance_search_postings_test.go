@@ -388,13 +388,38 @@ func TestRunCommandMaintenanceInitializesPostingsDuringMessageMutations(t *testi
 		_, _, _, _, err := s.SendMessage(ctx, firstOwner.ID, firstPeer.ID, "brandnewterm", 30103, 0, 0)
 		newMessageDone <- err
 	}()
-	select {
-	case err := <-newMessageDone:
-		if err != nil {
-			t.Fatalf("insert message during initialization: %v", err)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND query ILIKE '%INSERT INTO messages%'
+			)
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("check concurrent message insert wait: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("new message insert did not complete during initialization")
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case err := <-newMessageDone:
+				t.Fatalf("message insert completed before the active chunk committed: %v", err)
+			default:
+				t.Fatal("message insert did not wait for the active backfill chunk")
+			}
+		}
+		select {
+		case err := <-newMessageDone:
+			t.Fatalf("message insert completed before the active chunk committed: %v", err)
+		case result := <-commandDone:
+			t.Fatalf("initializer ended before the message insert waited: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 
 	editDone := make(chan error, 1)
@@ -422,6 +447,9 @@ func TestRunCommandMaintenanceInitializesPostingsDuringMessageMutations(t *testi
 	}
 	if result.stderr != "Message search postings initialized: 2 dialogs\n" {
 		t.Fatalf("initializer stderr = %q, want both dialogs initialized", result.stderr)
+	}
+	if err := <-newMessageDone; err != nil {
+		t.Fatalf("insert message after active backfill chunk: %v", err)
 	}
 	if err := <-editDone; err != nil {
 		t.Fatalf("edit after initialization: %v", err)
@@ -568,10 +596,15 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		}
 	}
 
-	inserted, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "legacyterm", 30202, 0, 0) //nolint:dogsled // only the stored message is needed here
-	if err != nil {
-		t.Fatalf("insert message during clear: %v", err)
+	type insertResult struct {
+		localID int64
+		err     error
 	}
+	insertDone := make(chan insertResult, 1)
+	go func() {
+		inserted, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "legacyterm", 30202, 0, 0)
+		insertDone <- insertResult{localID: inserted.LocalID, err: err}
+	}()
 	startEdit := func(localID int64, text string) <-chan error {
 		done := make(chan error, 1)
 		go func() {
@@ -596,49 +629,42 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		return done
 	}
 	seedEditDone := startEdit(seed.LocalID, "newseedterm")
-	insertedEditDone := startEdit(inserted.LocalID, "insertedfreshterm")
-	select {
-	case err := <-insertedEditDone:
-		if err != nil {
-			t.Fatalf("edit message inserted after the backfill snapshot: %v", err)
-		}
-	case result := <-commandDone:
-		t.Fatalf("initializer ended before the post-snapshot edit completed: %v", result.err)
-	case <-time.After(time.Second):
-		t.Fatal("edit of a post-snapshot insert waited for the whole backfill")
-	}
 
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		var waitingEdits int
+		var waitingWriters int
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*)
 			FROM pg_stat_activity
 			WHERE pid <> pg_backend_pid()
 			  AND state = 'active'
 			  AND wait_event_type = 'Lock'
-			  AND query ILIKE '%UPDATE messages%'
-		`).Scan(&waitingEdits); err != nil {
-			t.Fatalf("check concurrent edit waits: %v", err)
+			  AND (query ILIKE '%INSERT INTO messages%' OR query ILIKE '%UPDATE messages%')
+		`).Scan(&waitingWriters); err != nil {
+			t.Fatalf("check concurrent message writer waits: %v", err)
 		}
-		if waitingEdits >= 1 {
+		if waitingWriters >= 2 {
 			break
 		}
 		if time.Now().After(deadline) {
 			select {
 			case result := <-commandDone:
-				t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
+				t.Fatalf("initializer returned before concurrent writers waited: %v", result.err)
 			case err := <-seedEditDone:
 				t.Fatalf("seed edit completed before initializer released its locks: %v", err)
+			case result := <-insertDone:
+				t.Fatalf("insert completed before initializer released its posting lock: %v", result.err)
 			default:
-				t.Fatalf("only %d concurrent edits waited for the initializer", waitingEdits)
+				t.Fatalf("only %d concurrent message writers waited for the initializer", waitingWriters)
 			}
 		}
 		select {
 		case result := <-commandDone:
-			t.Fatalf("initializer returned before concurrent edits waited: %v", result.err)
+			t.Fatalf("initializer returned before concurrent writers waited: %v", result.err)
 		case err := <-seedEditDone:
 			t.Fatalf("seed edit completed before initializer released its locks: %v", err)
+		case result := <-insertDone:
+			t.Fatalf("insert completed before initializer released its posting lock: %v", result.err)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -650,6 +676,13 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 	if err := <-seedEditDone; err != nil {
 		t.Fatalf("commit seed edit: %v", err)
 	}
+	inserted := <-insertDone
+	if inserted.err != nil {
+		t.Fatalf("insert message after backfill chunk: %v", inserted.err)
+	}
+	if _, _, err := s.EditMessage(ctx, owner.ID, inserted.localID, "insertedfreshterm"); err != nil {
+		t.Fatalf("edit inserted message after initialization: %v", err)
+	}
 
 	var oldPostingCount, freshPostingCount int64
 	if err := pool.QueryRow(ctx, `
@@ -657,7 +690,7 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 		       count(*) FILTER (WHERE lexeme = 'insertedfreshterm')
 		FROM message_search_postings
 		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3 AND local_id = $4
-	`, owner.ID, int16(store.PeerTypeUser), peer.ID, inserted.LocalID).Scan(&oldPostingCount, &freshPostingCount); err != nil {
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID, inserted.localID).Scan(&oldPostingCount, &freshPostingCount); err != nil {
 		t.Fatalf("count message postings: %v", err)
 	}
 	if oldPostingCount != 0 || freshPostingCount != 1 {
