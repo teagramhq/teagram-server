@@ -1120,6 +1120,7 @@ jobs:
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
           bash -n deploy/teagram/ops/bot-api-qa.sh
           bash -n deploy/teagram/test-bot-api-qa.sh
+          bash -n deploy/teagram/test-bot-api-qa-ops.sh
           bash -n deploy/teagram/ops/start-server.sh
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
@@ -1177,6 +1178,7 @@ jobs:
             deploy/teagram/test-apply-user-invite-quota.sh \
             deploy/teagram/ops/bot-api-qa.sh \
             deploy/teagram/test-bot-api-qa.sh \
+            deploy/teagram/test-bot-api-qa-ops.sh \
             deploy/teagram/ops/start-server.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
@@ -1231,6 +1233,12 @@ jobs:
 
       - name: Check Bot API QA operation
         run: deploy/teagram/test-bot-api-qa.sh
+
+      - name: Check Bot API QA operations with fixtures
+        run: deploy/teagram/test-bot-api-qa-ops.sh
+
+      - name: Check QA Bot API credential record encoding
+        run: python3 -B .github/scripts/test_qa_bot_record.py
 
       - name: Check invite signup URL operation fixtures
         run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh

@@ -869,6 +869,39 @@ check_bot_api_qa_contract() {
   grep -Eq "$apply_response_pattern" <<< \
     "configuration=already-applied source_sha=$source_sha bind=127.0.0.1:2447 publish=100.124.236.66:2447 forwarder=healthy" ||
     qa_fail 'the production apply response check must accept an already-applied configuration'
+  if ! grep -Fq 'ss -Hltn '\''sport = :2447'\''' deploy/teagram/ops/bot-api-qa.sh || \
+     [[ "$provision_run" != *'listeners=verified'* || "$provision_run" == *'lan_probe_ip'* || \
+        "$provision_run" != *'Bot API port answered on a public address'* ]]; then
+    qa_fail 'host-side listener verification must replace the unreachable hosted-runner LAN probe'
+  fi
+  if ! grep -Fq 'report_token_error()' <<< "$provision_run" || \
+     ! grep -Fq 'report_token_error' <<< "$provision_run"; then
+    qa_fail 'failed apply and verify operations must print their server diagnostics'
+  fi
+  if ! BOT_API_DEPLOY_RUN="$provision_run" python3 - <<'PY'
+import os
+import re
+
+run = os.environ["BOT_API_DEPLOY_RUN"]
+blocks = {}
+for operation in ("apply", "provision", "verify"):
+    matches = re.findall(
+        rf'if ! .*bot-api-qa {operation}.*?; then(.*?)\n\s*fi', run, re.DOTALL
+    )
+    if len(matches) != 1:
+        raise SystemExit(f"expected one failure block for {operation}")
+    blocks[operation] = matches[0]
+
+if "report_token_error" not in blocks["apply"] or "report_token_error" not in blocks["verify"]:
+    raise SystemExit("apply and verify failures must print the SSH diagnostic")
+if "report_token_error" in blocks["provision"]:
+    raise SystemExit("provision stderr must stay out of the workflow log")
+if run.count("report_token_error") != 3:
+    raise SystemExit("token-bearing curl diagnostics must stay out of the workflow log")
+PY
+  then
+    qa_fail 'Bot API SSH diagnostics must be visible for apply and verify while provisioning stderr stays private'
+  fi
 
   local storage_job_json
   storage_job_json="$(bot_api_qa_query '.jobs."ops-qa-bot-credential" | to_json')"
@@ -908,6 +941,8 @@ if download.get("with", {}).get("name") != "bot-api-token-${{ github.run_id }}":
 if cleanup.get("if") != "always()" or not all(path in cleanup.get("run", "") for path in ("ssh-qa-bot-api", "encrypted-token", "age-bin")):
     raise SystemExit("QA storage must always remove temporary credentials and tools")
 store_run = store.get("run", "")
+if "python3 .github/scripts/qa_bot_record.py" not in store_run or "base64.urlsafe_b64decode" in store_run:
+    raise SystemExit("QA token validation must use the tested Bot API record builder")
 remove_command = '"qa@$QA_ACCOUNTS_HOST" "remove $handle"'
 store_command = '"qa@$QA_ACCOUNTS_HOST" store'
 if remove_command not in store_run or store_command not in store_run or store_run.index(remove_command) >= store_run.index(store_command):

@@ -16,21 +16,25 @@ import (
 )
 
 const (
-	listenAddress   = "0.0.0.0:2448"
-	upstreamAddress = "127.0.0.1:2447"
+	listenAddress            = "0.0.0.0:2448"
+	healthcheckAddress       = "127.0.0.1:2448"
+	upstreamAddress          = "127.0.0.1:2447"
+	maxConcurrentConnections = 128
+	acceptErrorBackoff       = time.Second
+	connectionIdleTimeout    = 2 * time.Minute
 )
 
 var tailnetIPv4 = netip.MustParsePrefix("100.64.0.0/10")
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "-healthcheck" {
-		conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "tcp4", upstreamAddress)
-		if err != nil {
-			slog.Error("health check failed", "err", err)
+		configuredListener := os.Getenv("TG_BOT_API_LISTEN_ADDR")
+		if configuredListener != "" && configuredListener != upstreamAddress {
+			slog.Error("health check rejected an unsupported Bot API listener address")
 			os.Exit(1)
 		}
-		if err := conn.Close(); err != nil {
-			slog.Error("health check close failed", "err", err)
+		if err := checkHealth(healthcheckAddress, upstreamAddress, configuredListener != ""); err != nil {
+			slog.Error("health check failed", "err", err)
 			os.Exit(1)
 		}
 		return
@@ -53,7 +57,11 @@ func main() {
 	}
 	defer closeQuietly(listener)
 	slog.Info("Bot API forwarder ready", "listen", listenAddress, "upstream", upstreamAddress)
+	serve(listener, gateway, acceptErrorBackoff)
+}
 
+func serve(listener net.Listener, gateway netip.Addr, acceptBackoff time.Duration) {
+	activeConnections := make(chan struct{}, maxConcurrentConnections)
 	for {
 		client, err := listener.Accept()
 		if err != nil {
@@ -61,6 +69,7 @@ func main() {
 				return
 			}
 			slog.Error("accept failed", "err", err)
+			time.Sleep(acceptBackoff)
 			continue
 		}
 		remote, ok := client.RemoteAddr().(*net.TCPAddr)
@@ -76,7 +85,46 @@ func main() {
 			closeQuietly(client)
 			continue
 		}
-		go forward(client)
+		if !reserveConnection(activeConnections, client) {
+			slog.Warn("Bot API forwarder connection limit reached", "limit", maxConcurrentConnections)
+			continue
+		}
+		go func(client net.Conn) {
+			defer func() { <-activeConnections }()
+			forward(client)
+		}(client)
+	}
+}
+
+func checkHealth(listenerAddr, upstreamAddr string, checkUpstream bool) error {
+	if err := probeAddress(listenerAddr); err != nil {
+		return fmt.Errorf("forwarder listener unavailable: %w", err)
+	}
+	if !checkUpstream {
+		return nil
+	}
+	if err := probeAddress(upstreamAddr); err != nil {
+		return fmt.Errorf("bot API listener unavailable: %w", err)
+	}
+	return nil
+}
+
+func probeAddress(address string) error {
+	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "tcp4", address)
+	if err != nil {
+		return err
+	}
+	closeQuietly(conn)
+	return nil
+}
+
+func reserveConnection(active chan struct{}, client net.Conn) bool {
+	select {
+	case active <- struct{}{}:
+		return true
+	default:
+		closeQuietly(client)
+		return false
 	}
 }
 
@@ -116,17 +164,21 @@ func parseDefaultGateway(contents string) (netip.Addr, error) {
 }
 
 func forward(client net.Conn) {
+	forwardTo(client, upstreamAddress, connectionIdleTimeout)
+}
+
+func forwardTo(client net.Conn, upstreamAddress string, idleTimeout time.Duration) {
 	defer closeQuietly(client)
 	upstream, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp4", upstreamAddress)
 	if err != nil {
-		slog.Warn("Bot API upstream unavailable")
+		slog.Warn("Bot API upstream unavailable", "err", err)
 		return
 	}
 	defer closeQuietly(upstream)
 
 	copyDone := make(chan struct{})
 	go func() {
-		if _, err := io.Copy(upstream, client); err != nil && !errors.Is(err, net.ErrClosed) {
+		if _, err := io.Copy(upstream, idleReadConn{Conn: client, idleTimeout: idleTimeout}); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Debug("client to Bot API copy ended", "err", err)
 		}
 		if conn, ok := upstream.(*net.TCPConn); ok {
@@ -136,7 +188,7 @@ func forward(client net.Conn) {
 		}
 		close(copyDone)
 	}()
-	if _, err := io.Copy(client, upstream); err != nil && !errors.Is(err, net.ErrClosed) {
+	if _, err := io.Copy(client, idleReadConn{Conn: upstream, idleTimeout: idleTimeout}); err != nil && !errors.Is(err, net.ErrClosed) {
 		slog.Debug("Bot API to client copy ended", "err", err)
 	}
 	if conn, ok := client.(*net.TCPConn); ok {
@@ -147,6 +199,19 @@ func forward(client net.Conn) {
 	closeQuietly(client)
 	closeQuietly(upstream)
 	<-copyDone
+}
+
+type idleReadConn struct {
+	net.Conn
+
+	idleTimeout time.Duration
+}
+
+func (c idleReadConn) Read(p []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
 }
 
 func closeQuietly(closer io.Closer) {

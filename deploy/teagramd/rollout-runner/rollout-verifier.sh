@@ -304,7 +304,7 @@ verify_bot_api_configuration() {
         ([$ports[] | select(allowed_bot_port($host_ip))] | length) == 1 and
         ($bot_ports | length) == 1 and
         (($forwarder | keys | sort) == [
-          "depends_on", "entrypoint", "healthcheck", "image", "logging", "network_mode", "read_only", "restart"
+          "depends_on", "entrypoint", "environment", "healthcheck", "image", "logging", "network_mode", "read_only", "restart"
         ]) and
         $forwarder.image == $server.image and
         $forwarder.entrypoint == ["/usr/local/bin/bot-api-forwarder"] and
@@ -332,7 +332,7 @@ verify_bot_api_configuration() {
         (($forwarder.ports // []) == []) and
         (($forwarder.networks // {}) == {}) and
         (($forwarder.volumes // []) == []) and
-        (($forwarder.environment // {}) == {}) and
+        $forwarder.environment == {TG_BOT_API_LISTEN_ADDR:$listener_value} and
         (($runtime_listener_values | length) == 0 or
           (($runtime_listener_values | length) == 1 and $runtime_listener_values[0] == $listener_value)) and
         (if $snapshot_name == "target" then

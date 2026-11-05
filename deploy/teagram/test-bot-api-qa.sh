@@ -29,6 +29,7 @@ compose_json=$(jq -cn '
       "bot-api-forwarder": {
         image: "teagramd:local",
         entrypoint: ["/usr/local/bin/bot-api-forwarder"],
+        environment: {TG_BOT_API_LISTEN_ADDR:"127.0.0.1:2447"},
         network_mode: "service:teagramd",
         depends_on: {teagramd:{condition:"service_started",required:true}},
         restart: "unless-stopped",
@@ -100,6 +101,14 @@ if verify_configuration "$inspect_json" "$bad_sidecar" "$ENV_FILE" target >/dev/
   exit 1
 fi
 
+bad_sidecar_listener=$(jq -c '
+  .services["bot-api-forwarder"].environment.TG_BOT_API_LISTEN_ADDR=""
+' <<< "$compose_json")
+if verify_configuration "$inspect_json" "$bad_sidecar_listener" "$ENV_FILE" target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL disabled health-check configuration was accepted for the enabled Bot API listener' >&2
+  exit 1
+fi
+
 bad_namespace=$(jq -c '
   .services["bot-api-forwarder"].network_mode="host"
 ' <<< "$compose_json")
@@ -121,6 +130,7 @@ baseline_env=$(jq -cn '
       "bot-api-forwarder": {
         image:"teagramd:local",
         entrypoint:["/usr/local/bin/bot-api-forwarder"],
+        environment:{TG_BOT_API_LISTEN_ADDR:""},
         network_mode:"service:teagramd",
         depends_on:{teagramd:{condition:"service_started",required:true}},
         restart:"unless-stopped",

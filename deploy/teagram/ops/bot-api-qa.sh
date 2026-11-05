@@ -156,11 +156,12 @@ verify_live_configuration() {
   }
   sidecar_id=${sidecar_ids[0]}
   server_id=$(docker inspect --format '{{.Id}}' "$SERVICE") || { fail 'cannot inspect teagramd container identity'; return 1; }
-  docker inspect "$sidecar_id" | jq -e --arg server_id "$server_id" '
+  docker inspect "$sidecar_id" | jq -e --arg server_id "$server_id" --arg listener "$listen_value" '
     .[0] as $sidecar
     | $sidecar.State.Status == "running" and $sidecar.State.Health.Status == "healthy" and
       $sidecar.HostConfig.NetworkMode == ("container:" + $server_id) and
       $sidecar.Config.Labels["com.docker.compose.service"] == "bot-api-forwarder" and
+      (($sidecar.Config.Env // []) | map(select(startswith("TG_BOT_API_LISTEN_ADDR=")))) == ["TG_BOT_API_LISTEN_ADDR=" + $listener] and
       $sidecar.Config.Image == "teagramd:local" and
       $sidecar.Config.Entrypoint == ["/usr/local/bin/bot-api-forwarder"] and
       $sidecar.HostConfig.ReadonlyRootfs == true and
@@ -174,6 +175,30 @@ verify_live_configuration() {
     return 1
   }
   [[ "$compose_env" == "$APP_LISTEN_ADDR" ]] || { fail 'resolved Compose listener differs from the live bind address'; return 1; }
+}
+
+verify_host_port_listeners() {
+  local output line state local_address
+  local listener_count=0 has_tailnet_listener=0
+  output=$(ss -Hltn 'sport = :2447') || { fail 'cannot inspect host Bot API port listeners'; return 1; }
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    read -r state _ _ local_address _ <<< "$line"
+    [[ "$state" == LISTEN && -n "$local_address" ]] || {
+      fail 'host Bot API listener output is malformed'
+      return 1
+    }
+    case "$local_address" in
+      127.0.0.1:2447) ;;
+      100.124.236.66:2447) has_tailnet_listener=1 ;;
+      *) fail 'Bot API port has a public or LAN host listener'; return 1 ;;
+    esac
+    listener_count=$((listener_count + 1))
+  done <<< "$output"
+  [[ "$listener_count" -gt 0 && "$has_tailnet_listener" == 1 ]] || {
+    fail 'Bot API port is not listening on the tailnet host address'
+    return 1
+  }
 }
 
 TEMP_DIR=
@@ -301,19 +326,19 @@ if [[ "$MODE" == apply ]]; then
     failed_env_sha=$(file_sha256 "$ENV_FILE" 2>/dev/null || true)
     failed_record=$(cat -- "$ENV_RECORD" 2>/dev/null || true)
     if [[ "$failed_env_sha" == "$recorded_env_sha" && "$failed_record" == "$record" ]]; then
-      fail "rollout runner failed with exit $runner_status and restored the verified environment"
+      fail "rollout runner failed with exit $runner_status and restored the verified environment" || true
     elif [[ "$failed_env_sha" == "$expected_env_sha" && "$failed_record" == "$record" && \
             "$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE" 2>/dev/null || true)" == "$target_sha" ]]; then
       TEMP_ENV=$(mktemp "$REPO/.env.main-2825.XXXXXXXX") || { fail 'rollout failed and the previous environment cannot be staged'; exit "$runner_status"; }
       if cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" && chmod 600 -- "$TEMP_ENV" && sync && \
          mv -f -- "$TEMP_ENV" "$ENV_FILE" && sync; then
         TEMP_ENV=
-        fail "rollout runner failed with exit $runner_status; prior environment restored"
+        fail "rollout runner failed with exit $runner_status; prior environment restored" || true
       else
-        fail "rollout runner failed with exit $runner_status; environment restore is unverified"
+        fail "rollout runner failed with exit $runner_status; environment restore is unverified" || true
       fi
     else
-      fail "rollout runner failed with exit $runner_status; inspect the reviewed rollout evidence"
+      fail "rollout runner failed with exit $runner_status; inspect the reviewed rollout evidence" || true
     fi
     exit "$runner_status"
   fi
@@ -325,7 +350,8 @@ fi
 
 if [[ "$MODE" == verify ]]; then
   verify_live_configuration || exit 1
-  printf 'configuration=verified source_sha=%s bind=127.0.0.1:2447 publish=%s:2447 forwarder=healthy\n' "$OPS_SHA" "$TAILNET_HOST_IP"
+  verify_host_port_listeners || exit 1
+  printf 'configuration=verified source_sha=%s bind=127.0.0.1:2447 publish=%s:2447 forwarder=healthy listeners=verified\n' "$OPS_SHA" "$TAILNET_HOST_IP"
   public_probe_ip=$(curl -4 --fail --silent --show-error --max-time 8 https://api.ipify.org) || {
     fail 'cannot determine the host public IPv4 probe address'
     exit 1
@@ -342,19 +368,6 @@ if address.version != 4 or not address.is_global:
     raise SystemExit(1)
 PY
   printf 'public_probe_ip=%s\n' "$public_probe_ip"
-  mapfile -t lan_probe_ips < <(ip -o -4 addr show scope global | awk '
-    $2 !~ /^(tailscale0|docker0|br-|veth)/ {
-      split($4, address, "/")
-      if (address[1] !~ /^100\./) print address[1]
-    }
-  ' | sort -u)
-  lan_count=0
-  for lan_probe_ip in "${lan_probe_ips[@]}"; do
-    [[ "$lan_probe_ip" =~ ^[0-9.]+$ && "$lan_probe_ip" != "$TAILNET_HOST_IP" && "$lan_probe_ip" != "$public_probe_ip" ]] || continue
-    printf 'lan_probe_ip=%s\n' "$lan_probe_ip"
-    lan_count=$((lan_count + 1))
-  done
-  [[ "$lan_count" -gt 0 ]] || { fail 'no non-tailnet LAN IPv4 address is available for the refusal probe'; exit 1; }
   exit 0
 fi
 

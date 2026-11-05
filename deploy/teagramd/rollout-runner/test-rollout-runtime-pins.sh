@@ -19,9 +19,19 @@ docker() {
       [ "${MOCK_COMPOSE_JSON_ERROR:-0}" != 1 ] || return 43
       printf '%s\n' "$MOCK_COMPOSE_JSON"
       ;;
+    'compose up -d --no-build --no-deps --wait --wait-timeout 1 bot-api-forwarder')
+      printf '%s\n' "$*" >> "$MOCK_FORWARDER_UP_EVENTS"
+      [ "${MOCK_FORWARDER_UP_FAIL:-0}" != 1 ] || return 47
+      ;;
     *) return 99 ;;
   esac
 }
+
+rollback_after_target_failure() {
+  printf '%s\n' "$1" >> "$MOCK_ROLLBACK_EVENTS"
+  [ "${MOCK_ROLLBACK_FAIL:-0}" != 1 ]
+}
+READY_SECONDS=1
 
 MOCK_COMPOSE_SERVICES=$'teagramd\nbot-api-forwarder'
 MOCK_COMPOSE_JSON='{"services":{"teagramd":{"environment":{"TG_BOT_API_LISTEN_ADDR":""}},"bot-api-forwarder":{}}}'
@@ -45,6 +55,36 @@ else
   printf '%s\n' 'FAIL enabled Bot API listener skips the forwarder health check' >&2
   exit 1
 fi
+
+MOCK_FORWARDER_UP_EVENTS=$(mktemp)
+MOCK_ROLLBACK_EVENTS=$(mktemp)
+trap 'rm -f -- "$MOCK_FORWARDER_UP_EVENTS" "$MOCK_ROLLBACK_EVENTS"' EXIT
+MOCK_FORWARDER_UP_FAIL=1
+if wait_for_bot_api_forwarder; then
+  printf '%s\n' 'FAIL failed forwarder health was accepted' >&2
+  exit 1
+else
+  wait_status=$?
+fi
+if [ "$wait_status" = 1 ] && \
+   grep -Fxq 'compose up -d --no-build --no-deps --wait --wait-timeout 1 bot-api-forwarder' "$MOCK_FORWARDER_UP_EVENTS" && \
+   grep -Fxq 'bot_api_forwarder_health_exit_47' "$MOCK_ROLLBACK_EVENTS"; then
+  printf '%s\n' 'PASS enabled Bot API listener waits for forwarder health and rolls back on failure'
+else
+  printf 'FAIL enabled forwarder health wait status=%s up=%s rollback=%s\n' \
+    "$wait_status" "$(cat "$MOCK_FORWARDER_UP_EVENTS")" "$(cat "$MOCK_ROLLBACK_EVENTS")" >&2
+  exit 1
+fi
+
+: > "$MOCK_FORWARDER_UP_EVENTS"
+: > "$MOCK_ROLLBACK_EVENTS"
+MOCK_FORWARDER_UP_FAIL=0
+MOCK_COMPOSE_JSON='{"services":{"teagramd":{"environment":{"TG_BOT_API_LISTEN_ADDR":""}},"bot-api-forwarder":{}}}'
+if ! wait_for_bot_api_forwarder || [ -s "$MOCK_FORWARDER_UP_EVENTS" ] || [ -s "$MOCK_ROLLBACK_EVENTS" ]; then
+  printf '%s\n' 'FAIL disabled Bot API listener did not skip the forwarder health wait' >&2
+  exit 1
+fi
+rm -f -- "$MOCK_FORWARDER_UP_EVENTS" "$MOCK_ROLLBACK_EVENTS"
 
 MOCK_COMPOSE_SERVICES=teagramd
 if bot_api_forwarder_health_required; then

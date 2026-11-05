@@ -99,7 +99,10 @@ applying another rollout.
 `TEAGRAM_BOT_API_HOST_IP=100.124.236.66` through the rollout runner's named
 environment path. The app listener stays on loopback; the same-network-namespace
 forwarder accepts only tailnet peers and the Docker gateway used by the host
-port proxy, and forwards only to `127.0.0.1:2447`.
+port proxy, and forwards only to `127.0.0.1:2447`. It caps active connections
+at 128, closes connections idle for two minutes, and backs off one second after
+an accept error. Its healthcheck always probes its own `2448` listener and only
+probes the app listener when `TG_BOT_API_LISTEN_ADDR` is enabled.
 `bot-api-qa provision` creates `teagram_test_bot` once and rotates its token,
 returning the revoked and active tokens only on the SSH result channel for the
 QA workflow. It stores only the numeric bot ID on the server. Run both from the

@@ -418,6 +418,8 @@ services:
   bot-api-forwarder:
     image: teagramd:local
     entrypoint: ["/usr/local/bin/bot-api-forwarder"]
+    environment:
+      TG_BOT_API_LISTEN_ADDR: ${TG_BOT_API_LISTEN_ADDR:-}
     network_mode: service:teagramd
     depends_on:
       teagramd:

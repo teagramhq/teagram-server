@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=6f0328d03085da6e1dae310b0bc07459048fffdc80475f85416346fdf1f9f8e0
+readonly APPROVED_VERIFIER_SHA=d2d1698d4d698226c990b4f9b1292e7a6416920ab610775268ce638536b141d3
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -887,6 +887,26 @@ bot_api_forwarder_health_required() {
     | if ($listener | type) == "string" then ($listener != "") else error("Bot API listener is missing") end
   ' <<< "$compose_json") || return 2
   [ "$listener_enabled" = true ]
+}
+
+wait_for_bot_api_forwarder() {
+  local check_status rc
+  if bot_api_forwarder_health_required; then
+    if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then
+      return 0
+    else
+      rc=$?
+      rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
+      return 1
+    fi
+  else
+    check_status=$?
+    if [ "$check_status" -eq 1 ]; then
+      return 0
+    fi
+    rollback_after_target_failure bot_api_forwarder_configuration_check_failed || return 2
+    return 1
+  fi
 }
 
 remove_orphaned_public_profile_services() {
@@ -3163,18 +3183,10 @@ run_apply() {
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
-  if bot_api_forwarder_health_required; then
-    if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then :; else
-      rc=$?
-      rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
-      return 1
-    fi
-  else
+  if wait_for_bot_api_forwarder; then :; else
     rc=$?
-    if [ "$rc" -ne 1 ]; then
-      rollback_after_target_failure bot_api_forwarder_configuration_check_failed || return 2
-      return 1
-    fi
+    [ "$rc" -eq 2 ] && return 2
+    return 1
   fi
   target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
   if [ -n "$target_id" ]; then

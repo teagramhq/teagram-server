@@ -139,6 +139,11 @@ jobs:
             rm -f -- "$token_file" "$token_error" "$apply_result" "$verify_result" \
               "$active_config" "$revoked_config" "$active_body" "$revoked_body" "$public_ips"
           }
+          report_token_error() {
+            if [[ -s "$token_error" ]]; then
+              cat -- "$token_error" >&2
+            fi
+          }
           trap cleanup EXIT
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           ssh_cmd=(ssh -T -i "$RUNNER_TEMP/ssh-bot-api/id_deploy"
@@ -147,6 +152,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
           if ! "${ssh_cmd[@]}" "root@100.124.236.66" "run $SOURCE_SHA bot-api-qa apply" \
             </dev/null > "$apply_result" 2> "$token_error"; then
+            report_token_error
             echo "::error::The reviewed Bot API config operation failed"
             exit 1
           fi
@@ -172,16 +178,15 @@ jobs:
 
           if ! "${ssh_cmd[@]}" "root@100.124.236.66" "run $SOURCE_SHA bot-api-qa verify" \
             </dev/null > "$verify_result" 2> "$token_error"; then
+            report_token_error
             echo "::error::The live Bot API deployment failed its host-side verification"
             exit 1
           fi
-          grep -Fxq "configuration=verified source_sha=$SOURCE_SHA bind=127.0.0.1:2447 publish=100.124.236.66:2447 forwarder=healthy" "$verify_result"
-          grep -E '^public_probe_ip=[0-9.]+$|^lan_probe_ip=[0-9.]+$' "$verify_result" > "$public_ips"
+          grep -Fxq "configuration=verified source_sha=$SOURCE_SHA bind=127.0.0.1:2447 publish=100.124.236.66:2447 forwarder=healthy listeners=verified" "$verify_result"
+          grep -E '^public_probe_ip=[0-9.]+$' "$verify_result" > "$public_ips"
           grep -q '^public_probe_ip=' "$public_ips"
-          grep -q '^lan_probe_ip=' "$public_ips"
           public_ip=$(sed -n 's/^public_probe_ip=//p' "$public_ips" | head -n 1)
-          mapfile -t lan_ips < <(sed -n 's/^lan_probe_ip=//p' "$public_ips")
-          [[ "$public_ip" =~ ^[0-9.]+$ && "${#lan_ips[@]}" -gt 0 ]]
+          [[ "$public_ip" =~ ^[0-9.]+$ ]]
 
           printf 'url = "http://100.124.236.66:2447/bot%s/getMe"\n' "$active_token" > "$active_config"
           printf 'url = "http://100.124.236.66:2447/bot%s/getMe"\n' "$revoked_token" > "$revoked_config"
@@ -200,13 +205,11 @@ jobs:
           }
           [[ "$revoked_status" == 401 ]]
 
-          for address in "$public_ip" "${lan_ips[@]}"; do
-            if curl -q --silent --connect-timeout 4 --max-time 5 --output /dev/null \
-              "http://$address:2447/" 2> "$token_error"; then
-              echo "::error::Bot API port answered on a non-tailnet address"
-              exit 1
-            fi
-          done
+          if curl -q --silent --connect-timeout 4 --max-time 5 --output /dev/null \
+            "http://$public_ip:2447/" 2> "$token_error"; then
+            echo "::error::Bot API port answered on a public address"
+            exit 1
+          fi
 
           web_status=$(curl -q --silent --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
             https://teagram.tailaa4918.ts.net/ 2> "$token_error") || {
@@ -255,7 +258,7 @@ jobs:
           rm -f -- "$token_file" "$active_config" "$revoked_config"
           [[ ! -e "$token_file" && ! -e "$active_config" && ! -e "$revoked_config" ]]
           echo "bot_id=$bot_id" >> "$GITHUB_OUTPUT"
-          echo "checks=tailnet_getMe,revoked_401,public_refused,lan_refused,web,apiws,admin,serve" >> "$GITHUB_OUTPUT"
+          echo "checks=tailnet_getMe,revoked_401,public_refused,lan_bindings,web,apiws,admin,serve" >> "$GITHUB_OUTPUT"
 
       - name: Upload encrypted Bot API token
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -358,20 +361,7 @@ jobs:
           active_token=${BASH_REMATCH[1]}
           [[ "${token_lines[2]}" == "active_token=$bot_id:"* ]]
           printf '::add-mask::%s\n' "$active_token"
-          printf '%s' "$active_token" | python3 -c '
-          import base64
-          import re
-          import sys
-
-          token = sys.stdin.read()
-          match = re.fullmatch(r"([1-9][0-9]{0,18}):([A-Za-z0-9_-]{43})", token)
-          if not match:
-              raise SystemExit(1)
-          secret = base64.urlsafe_b64decode(match.group(2) + "=")
-          if len(secret) != 32 or base64.urlsafe_b64encode(secret).decode().rstrip("=") != match.group(2):
-              raise SystemExit(1)
-          sys.stdout.write(f"bot_{match.group(1)}\t{secret.hex()}\n")
-          ' > "$record_file"
+          printf '%s' "$active_token" | python3 .github/scripts/qa_bot_record.py > "$record_file"
           chmod 0600 "$record_file"
           handle="bot_$bot_id"
           ssh -T -p "$QA_ACCOUNTS_PORT" -i "$key_file" \
