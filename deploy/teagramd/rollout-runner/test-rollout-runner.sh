@@ -318,6 +318,7 @@ if [ "${1:-}" = ps ]; then
     done
     [ "$project" = fixture ] || { printf 'unexpected Compose project filter: %s\n' "$project" >&2; exit 95; }
     case "$service" in
+      bot-api-forwarder) exit 0 ;;
       public-haproxy|teagramd-public-1|teagramd-public-2) ;;
       *) printf 'unexpected public profile service filter: %s\n' "$service" >&2; exit 96 ;;
     esac
