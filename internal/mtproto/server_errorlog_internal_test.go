@@ -894,6 +894,68 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 	}
 }
 
+func TestClassifyWebSocketServeCauseCoversEveryStage(t *testing.T) {
+	tests := []struct {
+		stage string
+		want  string
+	}{
+		{stage: "read_frame", want: "transport"},
+		{stage: "write_auth_key_not_found", want: "transport"},
+		{stage: "connection_cleanup", want: "transport"},
+		{stage: "read_auth_key_id", want: "protocol_decode"},
+		{stage: "validate_auth_key_id", want: "protocol_decode"},
+		{stage: "key_exchange", want: "exchange"},
+		{stage: "auth_key_lookup", want: "auth_key_lookup"},
+		{stage: "refresh_auth_key", want: "auth_key_lookup"},
+		{stage: "maintain_pending_login_lease", want: "pending_login"},
+		{stage: "dispatch_rpc", want: "request_processing"},
+		{stage: "unrecognized_stage", want: "internal"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.stage, func(t *testing.T) {
+			if got := classifyWebSocketServeCause(tt.stage, errors.New("untyped failure")); got != tt.want {
+				t.Fatalf("cause = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWebSocketIdleReadTimeoutKeepsIdleTimeoutCategory(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	conn := &serverLoopFailureConn{err: errIdleReadTimeout}
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	err := server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
+	)
+	if err == nil {
+		t.Fatal("WebSocket serve loop succeeded after idle timeout")
+	}
+	server.logConnectionFailure(err)
+
+	var record *serverErrorLogRecord
+	for i := range sink.records {
+		if sink.records[i].message == "server operation failed" {
+			record = &sink.records[i]
+			break
+		}
+	}
+	if record == nil {
+		t.Fatalf("no server operation failure record in %+v", sink.records)
+	}
+	for key, want := range map[string]any{
+		"category": "idle_timeout",
+		"stage":    "read_frame",
+		"cause":    "timeout",
+		"error":    "idle read timeout",
+	} {
+		if got := record.attrs[key]; got != want {
+			t.Errorf("failure %s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestWebSocketAuthKeyLookupFailureLogsAllowlistedDatabaseDetails(t *testing.T) {
 	const (
 		privateKey     = "PRIVATE_AUTH_KEY_BYTES"

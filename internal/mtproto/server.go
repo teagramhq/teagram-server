@@ -812,7 +812,11 @@ func (s *Server) logWebSocketServeFailure(failure *webSocketServeFailureError) {
 			"peer_addr", failure.peerAddr.String(),
 		)
 	}
-	s.logServerFailure(serverFailureWebSocket, details...)
+	category := serverFailureWebSocket
+	if errors.Is(failure.err, errIdleReadTimeout) {
+		category = serverFailureIdleTimeout
+	}
+	s.logServerFailure(category, details...)
 }
 
 func (s *Server) logPendingLoginLeaseFailure(err error, transportName string) {
