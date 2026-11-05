@@ -680,7 +680,7 @@ incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:/var/lib/teagramd-
   drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
     tar -xopf - -C /target/legacy-blobs
 kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
-  sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
+  sh -ec 'chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex; chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode' >/dev/null
 kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --wait=true --timeout=300s >/dev/null
 
 migration_jobs=()
