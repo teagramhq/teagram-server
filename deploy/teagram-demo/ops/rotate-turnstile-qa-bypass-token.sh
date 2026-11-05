@@ -75,9 +75,12 @@ fail_closed_and_cleanup() {
       while IFS= read -r container_id; do
         [[ -n "$container_id" ]] || continue
         if ! docker stop "$container_id" >/dev/null 2>&1; then
-          printf 'demo QA bypass rotation: failed to stop server container %s\n' "$container_id" >&2
-          server_stopped=0
-          status=1
+          if ! docker kill "$container_id" >/dev/null 2>&1; then
+            printf 'demo QA bypass rotation: failed to stop or kill server container %s\n' \
+              "$container_id" >&2
+            server_stopped=0
+            status=1
+          fi
         fi
       done <<<"$running_ids"
     else
@@ -86,8 +89,11 @@ fail_closed_and_cleanup() {
     fi
     if (( server_stopped == 1 )); then
       printf '%s\n' 'demo QA bypass rotation: server stopped; rerun the reviewed operation to install a fresh token' >&2
+    elif demo_haproxy_control drain "$ACTIVE_SERVER" >/dev/null; then
+      printf '%s\n' 'demo QA bypass rotation: server drained from HAProxy; rerun the reviewed operation to install a fresh token' >&2
     else
-      printf '%s\n' 'demo QA bypass rotation: server stop could not be confirmed; do not restore the old token' >&2
+      printf '%s\n' 'demo QA bypass rotation: server stop and HAProxy drain could not be confirmed; do not restore the old token' >&2
+      status=1
     fi
   fi
   if [[ -n "$TMP_DIR" ]]; then
@@ -164,6 +170,8 @@ new_container_id=$active_after_ids
   fail 'server container was not recreated after token rotation'
 demo_haproxy_control wait-healthy "$ACTIVE_SERVER" --timeout 60 ||
   fail 'rotated server did not pass the HAProxy readiness check'
+demo_haproxy_control enable "$ACTIVE_SERVER" ||
+  fail 'rotated server could not be enabled in HAProxy'
 inactive_after_ids=$(demo_compose ps -q "$INACTIVE_SERVER")
 [[ -z "$inactive_after_ids" ]] || fail 'inactive server slot became active during rotation'
 

@@ -9,8 +9,11 @@ import io
 import os
 import pathlib
 import re
+import shlex
 import stat
+import subprocess
 import sys
+import textwrap
 import tempfile
 import unittest
 
@@ -142,6 +145,288 @@ class RotateQABypassTokenTests(unittest.TestCase):
             self._rotate()
 
         self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
+
+
+class RotateQABypassOperationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="teagram-qa-bypass-operation-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = pathlib.Path(self.temporary.name)
+        self.repo = self.root / "demo"
+        self.repo.mkdir()
+        (self.repo / ".git").mkdir()
+        (self.repo / ".state" / "teagram-demo").mkdir(parents=True)
+        demo_dir = self.repo / "deploy" / "teagram-demo"
+        (demo_dir / "nginx-config").mkdir(parents=True)
+        tracked_files = (
+            "deploy/teagram-demo/demo-common.sh",
+            "deploy/teagram-demo/compose.yaml",
+            "deploy/teagram-demo/haproxy.cfg",
+            "deploy/teagram-demo/render-haproxy-config.py",
+            "deploy/teagram-demo/nginx-config/nginx.conf",
+            "deploy/teagram-demo/validate-env.py",
+            "deploy/teagram-demo/haproxy-control.py",
+            "deploy/teagram-demo/rotate-qa-bypass-token.py",
+        )
+        for relative_path in tracked_files:
+            path = self.repo / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        (demo_dir / ".env").touch()
+
+        operation_path = pathlib.Path(__file__).with_name("ops") / "rotate-turnstile-qa-bypass-token.sh"
+        operation = operation_path.read_text(encoding="utf-8")
+        repo_assignment = "readonly REPO=/opt/teagram-demo"
+        self.assertEqual(operation.count(repo_assignment), 1)
+        operation = operation.replace(
+            repo_assignment, f"readonly REPO={shlex.quote(str(self.repo))}"
+        )
+        root_guard = '[[ "$EUID" -eq 0 ]] || fail \'operation must run as root\''
+        self.assertEqual(operation.count(root_guard), 1)
+        operation = operation.replace(root_guard, ": # bypassed only in this private fixture copy")
+        self.operation = self.root / "rotate-operation.sh"
+        self.operation.write_text(operation, encoding="utf-8")
+        self.operation.chmod(0o700)
+
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self.calls = self.root / "calls"
+        self.current_container = self.root / "current-container"
+        self.current_container.write_text("old-container\n", encoding="ascii")
+        self.token_file = self.root / "installed-token"
+        self.old_token = "compromised-demo-token-fixture"
+        self.new_token = "f" * 64
+        self.token_file.write_text(f"{self.old_token}\n", encoding="ascii")
+        self.rotation_ran = self.root / "rotation-ran"
+
+        self._write_executable(
+            "git",
+            r"""#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == --no-optional-locks ]]; then shift; fi
+if [[ ${1:-} == -C ]]; then shift 2; fi
+case ${1:-} in
+  merge-base|diff) exit 0 ;;
+  rev-parse|hash-object) printf '%040d\n' 1 ;;
+  show) printf 'fixture rotator\n' ;;
+  *) exit 90 ;;
+esac
+""",
+        )
+        self._write_executable(
+            "python3",
+            r"""#!/usr/bin/env bash
+set -euo pipefail
+case ${1##*/} in
+  validate-env.py) exit 0 ;;
+  rotate-qa-bypass-token.py)
+    : > "$2"
+    chmod 0600 "$2"
+    printf '%s\n' "$TEST_NEW_TOKEN" > "$TEST_TOKEN_FILE"
+    : > "$TEST_ROTATION_RAN"
+    printf '%s\n' 'rotation=pass token_length=64 snapshot=/var/backups/teagram-demo-turnstile-qa-bypass/turnstile-qa-bypass-token.fixture.abcdef01'
+    ;;
+  *) exit 91 ;;
+esac
+""",
+        )
+        self._write_executable(
+            "docker",
+            r"""#!/usr/bin/env bash
+set -euo pipefail
+log() { printf '%s\n' "$*" >> "$TEST_CALLS"; }
+case ${1:-} in
+  image) printf '%s\n' 'sha256:fixture-image' ;;
+  inspect)
+    case ${3:-} in
+      '{{.Image}}') printf '%s\n' 'sha256:fixture-image' ;;
+      '{{json .Config.Env}}') printf '%s\n' '["TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/teagram_demo_turnstile_qa_bypass"]' ;;
+      *) exit 92 ;;
+    esac
+    ;;
+  ps) cat "$TEST_CURRENT_CONTAINER" ;;
+  stop)
+    log docker-stop
+    [[ ${FIXTURE_FAIL_DOCKER_STOP:-0} != 1 ]] || exit 1
+    : > "$TEST_CURRENT_CONTAINER"
+    ;;
+  kill)
+    log docker-kill
+    [[ ${FIXTURE_FAIL_DOCKER_KILL:-0} != 1 ]] || exit 1
+    : > "$TEST_CURRENT_CONTAINER"
+    ;;
+  *) exit 93 ;;
+esac
+""",
+        )
+        self._write_executable(
+            "common.sh",
+            textwrap.dedent(
+                r"""#!/usr/bin/env bash
+DEMO_ENV_FILE="$REPO/deploy/teagram-demo/.env"
+fixture_log() { printf '%s\n' "$*" >> "$TEST_CALLS"; }
+demo_active_server() { printf '%s\n' teagramd-next; }
+demo_inactive_server() { printf '%s\n' teagramd; }
+demo_active_image_ref() { printf '%s\n' demo:fixture; }
+demo_render_config() {
+  cat > "$1" <<'JSON'
+{"services":{"teagramd":{"environment":{"TG_TURNSTILE_QA_BYPASS_TOKEN_FILE":"/run/secrets/teagram_demo_turnstile_qa_bypass"}},"teagramd-next":{"environment":{"TG_TURNSTILE_QA_BYPASS_TOKEN_FILE":"/run/secrets/teagram_demo_turnstile_qa_bypass"}}},"secrets":{"teagram_demo_turnstile_qa_bypass":{"file":"/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token"}}}
+JSON
+}
+demo_compose() {
+  case ${1:-} in
+    ps)
+      if [[ ${2:-} == -q && ${3:-} == teagramd-next ]]; then
+        cat "$TEST_CURRENT_CONTAINER"
+      elif [[ ${2:-} == --status ]]; then
+        cat "$TEST_CURRENT_CONTAINER"
+      fi
+      ;;
+    up)
+      fixture_log compose-up
+      [[ ${FIXTURE_FAIL_UP:-0} != 1 ]] || return 1
+      printf '%s\n' new-container > "$TEST_CURRENT_CONTAINER"
+      ;;
+    stop)
+      fixture_log compose-stop
+      [[ ${FIXTURE_FAIL_COMPOSE_STOP:-0} != 1 ]] || return 1
+      : > "$TEST_CURRENT_CONTAINER"
+      ;;
+    *) return 94 ;;
+  esac
+}
+demo_haproxy_control() {
+  fixture_log "haproxy-$*"
+  if [[ ${1:-} == wait-healthy && ${FIXTURE_FAIL_HAPROXY:-0} == 1 ]]; then
+    return 1
+  fi
+  if [[ ${1:-} == drain && ${FIXTURE_FAIL_DRAIN:-0} == 1 ]]; then
+    return 1
+  fi
+  return 0
+}
+"""
+            ),
+        )
+        (demo_dir / "demo-common.sh").write_text(
+            f"source {shlex.quote(str(self.fake_bin / 'common.sh'))}\n", encoding="utf-8"
+        )
+
+    def _write_executable(self, name: str, content: str) -> None:
+        path = self.fake_bin / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o700)
+
+    def _run_operation(self, **flags: str) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{self.fake_bin}{os.pathsep}{environment['PATH']}",
+                "OPS_SHA": "a" * 40,
+                "OPS_NAME": "rotate-turnstile-qa-bypass-token",
+                "TEST_CALLS": str(self.calls),
+                "TEST_CURRENT_CONTAINER": str(self.current_container),
+                "TEST_TOKEN_FILE": str(self.token_file),
+                "TEST_NEW_TOKEN": self.new_token,
+                "TEST_ROTATION_RAN": str(self.rotation_ran),
+            }
+        )
+        environment.update(flags)
+        return subprocess.run(
+            ["/bin/bash", str(self.operation)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=20,
+        )
+
+    def _assert_rotated_without_leaking(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.rotation_ran.is_file())
+        self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.new_token}\n")
+        self.assertNotIn(self.old_token, result.stdout + result.stderr)
+        self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def test_successful_recreation_reports_the_replaced_container(self) -> None:
+        result = self._run_operation()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.new_token}\n")
+        self.assertIn("old_container_replaced=true", result.stdout)
+        calls = self.calls.read_text(encoding="utf-8")
+        self.assertIn("compose-up", calls)
+        self.assertIn("haproxy-enable teagramd-next", calls)
+        self.assertNotIn("compose-stop", calls)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "new-container\n")
+        self.assertNotIn(self.old_token, result.stdout + result.stderr)
+        self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def test_compose_startup_readiness_failure_stops_old_container(self) -> None:
+        result = self._run_operation(FIXTURE_FAIL_UP="1")
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("compose-stop", self.calls.read_text(encoding="utf-8"))
+        self.assertIn("server stopped", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
+
+    def test_haproxy_readiness_failure_stops_server_after_token_install(self) -> None:
+        result = self._run_operation(FIXTURE_FAIL_HAPROXY="1")
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("compose-stop", self.calls.read_text(encoding="utf-8"))
+        self.assertIn("server stopped", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
+
+    def test_compose_stop_failure_falls_back_to_docker_stop(self) -> None:
+        result = self._run_operation(
+            FIXTURE_FAIL_HAPROXY="1", FIXTURE_FAIL_COMPOSE_STOP="1"
+        )
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("docker-stop", self.calls.read_text(encoding="utf-8"))
+        self.assertIn("server stopped", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
+
+    def test_docker_stop_failure_falls_back_to_kill(self) -> None:
+        result = self._run_operation(
+            FIXTURE_FAIL_HAPROXY="1",
+            FIXTURE_FAIL_COMPOSE_STOP="1",
+            FIXTURE_FAIL_DOCKER_STOP="1",
+        )
+
+        self._assert_rotated_without_leaking(result)
+        calls = self.calls.read_text(encoding="utf-8")
+        self.assertIn("docker-stop", calls)
+        self.assertIn("docker-kill", calls)
+        self.assertIn("server stopped", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
+
+    def test_stop_failures_drain_old_server_from_haproxy(self) -> None:
+        result = self._run_operation(
+            FIXTURE_FAIL_UP="1",
+            FIXTURE_FAIL_COMPOSE_STOP="1",
+            FIXTURE_FAIL_DOCKER_STOP="1",
+            FIXTURE_FAIL_DOCKER_KILL="1",
+        )
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("haproxy-drain teagramd-next", self.calls.read_text(encoding="utf-8"))
+        self.assertIn("server drained from HAProxy", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
+
+    def test_failed_stop_and_drain_are_reported_as_unconfirmed(self) -> None:
+        result = self._run_operation(
+            FIXTURE_FAIL_UP="1",
+            FIXTURE_FAIL_COMPOSE_STOP="1",
+            FIXTURE_FAIL_DOCKER_STOP="1",
+            FIXTURE_FAIL_DOCKER_KILL="1",
+            FIXTURE_FAIL_DRAIN="1",
+        )
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("server stop and HAProxy drain could not be confirmed", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
 
 
 if __name__ == "__main__":
