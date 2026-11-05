@@ -10,7 +10,7 @@ configMapGenerator:
   - name: required-migration-version
     behavior: replace
     literals:
-      - migration-version=20261103000004
+      - migration-version=20261104000001
   - name: teagramd-runtime
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/

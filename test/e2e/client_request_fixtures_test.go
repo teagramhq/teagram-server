@@ -540,6 +540,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_saveGif.1",
 		"messages_saveGif.2",
 		"messages_getSavedGifs.1",
+		"messages_reorderStickerSets.1",
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
@@ -613,8 +614,10 @@ const clientRequestFixturesTimeout = 3 * time.Minute
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
 	// This replay covers many RPCs; allow room for the parallel CI smoke load.
+	stickerSets, _ := loadSmokeStickerBundleCatalogue(t)
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.recoveryEmailMode = config.RecoveryEmailContact
+		f.stickerSets = stickerSets
 	}, clientRequestFixturesTimeout)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
@@ -775,6 +778,60 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay install-sticker-set-by-id fixture: %v", err)
+	}
+	const secondStickerSetShortName = "openmoji_animals"
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{
+			Stickerset: &tg.InputStickerSetShortName{ShortName: secondStickerSetShortName},
+		})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+			return fmt.Errorf("install second sticker set result = %T, want success", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("install second sticker set for reorder fixture: %v", err)
+	}
+	var reorderOrder []int64
+	if err := fixtureClientCall(t, creator, "messages_getAllStickers.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAllStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		all, ok := result.(*tg.MessagesAllStickers)
+		if !ok {
+			return fmt.Errorf("getAllStickers before reorder = %T, want *tg.MessagesAllStickers", result)
+		}
+		byShortName := make(map[string]int64, len(all.Sets))
+		for _, set := range all.Sets {
+			byShortName[set.ShortName] = set.ID
+		}
+		for _, shortName := range []string{secondStickerSetShortName, stickerSetShortName} {
+			id, exists := byShortName[shortName]
+			if !exists || id == 0 {
+				return fmt.Errorf("getAllStickers omitted installed set %q", shortName)
+			}
+			reorderOrder = append(reorderOrder, id)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read installed order for reorder fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_reorderStickerSets.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.MessagesReorderStickerSetsRequest{Order: reorderOrder}
+		request.SetFlags()
+		reordered, err := api.MessagesReorderStickerSets(ctx, request)
+		if err != nil {
+			return err
+		}
+		if !reordered {
+			return errors.New("reorderStickerSets returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay reorder-sticker-sets fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_getArchivedStickers.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetArchivedStickers(ctx, &tg.MessagesGetArchivedStickersRequest{
