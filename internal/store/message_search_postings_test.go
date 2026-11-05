@@ -97,6 +97,34 @@ func TestMessageSearchPostingsTrackMessageLifecycle(t *testing.T) {
 	assertMessageSearchLexemeCount(t, s, b.ID, store.PeerTypeUser, a.ID, "new", 0)
 }
 
+func TestMessageSearchPostingDialogLocksStayBoundedForBulkWrites(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	const dialogCount = 20_000
+	pool := store.StorePool(s)
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+posting-lock-' || n, 'Posting Lock' FROM generate_series(1, 20000) AS n`,
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		 SELECT n, 1, 1, n + 20000, n, 'alpha beta', true
+		 FROM generate_series(1, 20000) AS n`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed bounded posting-lock fixture: %v", err)
+		}
+	}
+
+	var postingCount int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM message_search_postings`).Scan(&postingCount); err != nil {
+		t.Fatalf("count bulk message postings: %v", err)
+	}
+	if want := int64(dialogCount * 2); postingCount != want {
+		t.Fatalf("bulk message postings = %d, want %d", postingCount, want)
+	}
+}
+
 type searchedMessage struct {
 	localID int64
 	text    string

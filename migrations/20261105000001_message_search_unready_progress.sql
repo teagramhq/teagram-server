@@ -3,35 +3,41 @@
 ALTER TABLE public.message_search_unready_dialogs
     ADD COLUMN last_local_id BIGINT NOT NULL DEFAULT 0;
 
--- Serialize count-row changes for a dialog's affected lexemes in one stable
--- order. Hash collisions only serialize unrelated lexemes; the lock key still
--- includes the complete dialog and lexeme identity before it is hashed.
-CREATE FUNCTION public.lock_message_search_posting_lexemes(
-    p_owner_id BIGINT,
-    p_peer_type SMALLINT,
-    p_peer_id BIGINT,
-    p_lexemes TEXT[]
+-- Serialize posting updates with a bounded set of dialog lock buckets. This
+-- avoids a lock-table entry for every distinct dialog/lexeme in bulk writes.
+CREATE FUNCTION public.lock_message_search_posting_dialogs(
+    p_owner_ids BIGINT[],
+    p_peer_types SMALLINT[],
+    p_peer_ids BIGINT[]
 )
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $function$
 DECLARE
-    posting_lexeme TEXT;
+    lock_class INTEGER;
+    lock_bucket INTEGER;
 BEGIN
-    FOR posting_lexeme IN
-        SELECT DISTINCT candidate.lexeme COLLATE "C"
-        FROM unnest(COALESCE(p_lexemes, ARRAY[]::TEXT[])) AS candidate(lexeme)
-        ORDER BY candidate.lexeme COLLATE "C"
+    lock_class := hashtext('message-search-posting-dialog/v1:' || current_database());
+
+    FOR lock_bucket IN
+        SELECT DISTINCT (
+            (hashtextextended(
+                'message-search-posting-dialog/v1:'
+                    || dialog.owner_id::TEXT || ':'
+                    || dialog.peer_type::TEXT || ':'
+                    || dialog.peer_id::TEXT,
+                73194627
+            ) % 1024 + 1024) % 1024
+        )::INTEGER AS bucket
+        FROM unnest(
+            COALESCE(p_owner_ids, ARRAY[]::BIGINT[]),
+            COALESCE(p_peer_types, ARRAY[]::SMALLINT[]),
+            COALESCE(p_peer_ids, ARRAY[]::BIGINT[])
+        ) AS dialog(owner_id, peer_type, peer_id)
+        ORDER BY bucket
     LOOP
-        PERFORM pg_advisory_xact_lock(hashtextextended(
-            'message-search-posting-count/v1:'
-                || p_owner_id::TEXT || ':'
-                || p_peer_type::TEXT || ':'
-                || p_peer_id::TEXT || ':'
-                || posting_lexeme,
-            73194627
-        ));
+        PERFORM pg_advisory_xact_lock(lock_class, lock_bucket);
     END LOOP;
     RETURN TRUE;
 END;
@@ -43,44 +49,22 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $function$
 DECLARE
-    old_lexemes TEXT[];
     new_lexemes TEXT[];
 BEGIN
     IF TG_OP = 'UPDATE' THEN
-        SELECT COALESCE(array_agg(lexeme ORDER BY lexeme COLLATE "C"), ARRAY[]::TEXT[])
-        INTO old_lexemes
-        FROM (
-            SELECT term.lexeme
-            FROM unnest(tsvector_to_array(OLD.message_tsv)) AS term(lexeme)
-            UNION
-            SELECT posting.lexeme
-            FROM public.message_search_postings AS posting
-            WHERE posting.owner_id = OLD.owner_id AND posting.local_id = OLD.local_id
-        ) AS old_terms;
         new_lexemes := tsvector_to_array(NEW.message_tsv);
-
-        IF (OLD.owner_id, OLD.peer_type, OLD.peer_id) = (NEW.owner_id, NEW.peer_type, NEW.peer_id) THEN
-            SELECT COALESCE(array_agg(lexeme ORDER BY lexeme COLLATE "C"), ARRAY[]::TEXT[])
-            INTO old_lexemes
-            FROM (
-                SELECT unnest(old_lexemes) AS lexeme
-                UNION
-                SELECT unnest(new_lexemes) AS lexeme
-            ) AS affected_terms;
-            PERFORM public.lock_message_search_posting_lexemes(NEW.owner_id, NEW.peer_type, NEW.peer_id, old_lexemes);
-        ELSIF (OLD.owner_id, OLD.peer_type, OLD.peer_id) < (NEW.owner_id, NEW.peer_type, NEW.peer_id) THEN
-            PERFORM public.lock_message_search_posting_lexemes(OLD.owner_id, OLD.peer_type, OLD.peer_id, old_lexemes);
-            PERFORM public.lock_message_search_posting_lexemes(NEW.owner_id, NEW.peer_type, NEW.peer_id, new_lexemes);
-        ELSE
-            PERFORM public.lock_message_search_posting_lexemes(NEW.owner_id, NEW.peer_type, NEW.peer_id, new_lexemes);
-            PERFORM public.lock_message_search_posting_lexemes(OLD.owner_id, OLD.peer_type, OLD.peer_id, old_lexemes);
-        END IF;
-
+        PERFORM public.lock_message_search_posting_dialogs(
+            ARRAY[OLD.owner_id, NEW.owner_id],
+            ARRAY[OLD.peer_type, NEW.peer_type],
+            ARRAY[OLD.peer_id, NEW.peer_id]
+        );
         DELETE FROM public.message_search_postings
         WHERE owner_id = OLD.owner_id AND local_id = OLD.local_id;
     ELSE
         new_lexemes := tsvector_to_array(NEW.message_tsv);
-        PERFORM public.lock_message_search_posting_lexemes(NEW.owner_id, NEW.peer_type, NEW.peer_id, new_lexemes);
+        PERFORM public.lock_message_search_posting_dialogs(
+            ARRAY[NEW.owner_id], ARRAY[NEW.peer_type], ARRAY[NEW.peer_id]
+        );
     END IF;
 
     IF NOT NEW.deleted THEN
@@ -98,21 +82,10 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $function$
-DECLARE
-    old_lexemes TEXT[];
 BEGIN
-    SELECT COALESCE(array_agg(lexeme ORDER BY lexeme COLLATE "C"), ARRAY[]::TEXT[])
-    INTO old_lexemes
-    FROM (
-        SELECT term.lexeme
-        FROM unnest(tsvector_to_array(OLD.message_tsv)) AS term(lexeme)
-        UNION
-        SELECT posting.lexeme
-        FROM public.message_search_postings AS posting
-        WHERE posting.owner_id = OLD.owner_id AND posting.local_id = OLD.local_id
-    ) AS old_terms;
-
-    PERFORM public.lock_message_search_posting_lexemes(OLD.owner_id, OLD.peer_type, OLD.peer_id, old_lexemes);
+    PERFORM public.lock_message_search_posting_dialogs(
+        ARRAY[OLD.owner_id], ARRAY[OLD.peer_type], ARRAY[OLD.peer_id]
+    );
     RETURN OLD;
 END;
 $function$;

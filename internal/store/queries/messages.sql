@@ -298,7 +298,8 @@ FOR UPDATE;
 -- Rebuild one bounded range of a marked dialog. The source CTE locks at most
 -- batch_size message rows in local_id order before clearing their postings.
 -- Deletes and inserts update posting counts in this transaction; the source
--- snapshot and row locks keep concurrent edits from restoring stale terms.
+-- snapshot, row locks, and dialog lock bucket keep writers from deadlocking
+-- with this chunk or restoring stale terms.
 -- name: BackfillMessageSearchDialogPostings :one
 WITH source_messages AS MATERIALIZED (
     SELECT message.local_id, message.message_tsv, message.deleted
@@ -311,26 +312,12 @@ WITH source_messages AS MATERIALIZED (
     LIMIT sqlc.arg(batch_size)::int
     FOR SHARE OF message
 ),
-posting_lexemes AS MATERIALIZED (
-    SELECT DISTINCT term.lexeme COLLATE "C" AS lexeme
-    FROM source_messages AS source
-    CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
-    UNION
-    SELECT posting.lexeme COLLATE "C"
-    FROM message_search_postings AS posting
-    JOIN source_messages AS source ON source.local_id = posting.local_id
-    WHERE posting.owner_id = sqlc.arg(owner_id)::bigint
-      AND posting.peer_type = sqlc.arg(peer_type)::smallint
-      AND posting.peer_id = sqlc.arg(peer_id)::bigint
-),
 posting_locks AS MATERIALIZED (
-    SELECT public.lock_message_search_posting_lexemes(
-               sqlc.arg(owner_id)::bigint,
-               sqlc.arg(peer_type)::smallint,
-               sqlc.arg(peer_id)::bigint,
-               COALESCE(array_agg(posting_lexemes.lexeme ORDER BY posting_lexemes.lexeme COLLATE "C"), ARRAY[]::text[])
+    SELECT public.lock_message_search_posting_dialogs(
+               ARRAY[sqlc.arg(owner_id)::bigint],
+               ARRAY[sqlc.arg(peer_type)::smallint],
+               ARRAY[sqlc.arg(peer_id)::bigint]
            ) AS locked
-    FROM posting_lexemes
 ),
 locked_source_messages AS MATERIALIZED (
     SELECT source.*
