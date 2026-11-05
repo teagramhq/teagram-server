@@ -499,7 +499,7 @@ func TestServeWebSocketWithHandlerUsesListenerOriginPolicy(t *testing.T) {
 func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -518,27 +518,39 @@ func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
 	serveCloudflarePublicWebSocket(t, ctx, server, listener, handler, doc)
 
-	cfAddr := netip.MustParseAddr("198.51.100.31")
-	ws, status, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{
-		"CF-Connecting-IP": []string{cfAddr.String()},
-		"X-Forwarded-For":  []string{"203.0.113.99"},
-	})
-	if err != nil {
-		if status != 0 {
-			t.Fatalf("public WebSocket handshake: %v (HTTP %d)", err, status)
-		}
-		t.Fatalf("public WebSocket handshake: %v", err)
-	}
-	defer closeWebSocket(t, ws)
+	for _, tt := range []struct {
+		name string
+		addr string
+		want netip.Addr
+	}{
+		{name: "IPv4", addr: "198.51.100.31", want: netip.MustParseAddr("198.51.100.31")},
+		{name: "IPv4-mapped IPv6", addr: "::ffff:198.51.100.31", want: netip.MustParseAddr("198.51.100.31")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			ws, status, err := dialWebSocketWithHeaders(requestCtx, listener.Addr().String(), http.Header{
+				"CF-Connecting-IP": []string{tt.addr},
+				"X-Forwarded-For":  []string{"203.0.113.99"},
+			})
+			if err != nil {
+				if status != 0 {
+					t.Fatalf("public WebSocket handshake: %v (HTTP %d)", err, status)
+				}
+				t.Fatalf("public WebSocket handshake: %v", err)
+			}
+			defer closeWebSocket(t, ws)
 
-	sendAddressProbe(t, ctx, ws, rsaKey)
-	select {
-	case got := <-gotAddr:
-		if got != cfAddr {
-			t.Errorf("public request address = %s, want CF-Connecting-IP %s", got, cfAddr)
-		}
-	case <-ctx.Done():
-		t.Fatal("public request did not reach the handler")
+			sendAddressProbe(t, requestCtx, ws, rsaKey)
+			select {
+			case got := <-gotAddr:
+				if got != tt.want {
+					t.Errorf("public request address = %s, want %s after parsing %q", got, tt.want, tt.addr)
+				}
+			case <-requestCtx.Done():
+				t.Fatal("public request did not reach the handler")
+			}
+		})
 	}
 }
 
@@ -603,6 +615,7 @@ func TestPublicWebSocketRejectsInvalidCFConnectingIP(t *testing.T) {
 		{name: "missing"},
 		{name: "spoofed forwarded-for only", headers: http.Header{"X-Forwarded-For": []string{"198.51.100.33"}}},
 		{name: "malformed", headers: http.Header{"CF-Connecting-IP": []string{"not-an-ip"}}},
+		{name: "zone-scoped IPv6", headers: http.Header{"CF-Connecting-IP": []string{"fe80::1%eth0"}}},
 		{name: "multiple addresses", headers: http.Header{"CF-Connecting-IP": []string{"198.51.100.33, 203.0.113.2"}}},
 		{name: "duplicate", headers: http.Header{"Cf-Connecting-Ip": []string{"198.51.100.33", "203.0.113.2"}}},
 	}
@@ -660,19 +673,28 @@ func TestPublicWebSocketPreAuthCapUsesCFConnectingIP(t *testing.T) {
 		t.Fatalf("different public client network was refused: %v", err)
 	}
 	defer closeWebSocket(t, other)
+
+	ipv6First, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"2001:db8:1::1"}})
+	if err != nil {
+		t.Fatalf("first public handshake from IPv6 /64: %v", err)
+	}
+	defer closeWebSocket(t, ipv6First)
+
+	ipv6Second, status, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"2001:db8:1::2"}})
+	if err == nil {
+		closeWebSocket(t, ipv6Second)
+		t.Fatal("second connection from the same IPv6 /64 passed the pre-auth cap")
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("same-/64 handshake error = %v, response status = %d; want HTTP 429", err, status)
+	}
 }
 
 func serveCloudflarePublicWebSocket(t *testing.T, ctx context.Context, server *mtproto.Server, listener net.Listener, handler mtproto.Handler, doc discovery.Document) {
 	t.Helper()
-	public, ok := any(server).(interface {
-		ServePublicWebSocketWithCFConnectingIP(context.Context, net.Listener, mtproto.Handler, []string, discovery.Document) error
-	})
-	if !ok {
-		t.Fatal("server does not support CF-Connecting-IP on the public WebSocket listener")
-	}
 	served := make(chan error, 1)
 	go func() {
-		served <- public.ServePublicWebSocketWithCFConnectingIP(ctx, listener, handler, nil, doc)
+		served <- server.ServePublicWebSocketWithCFConnectingIP(ctx, listener, handler, nil, doc)
 	}()
 	t.Cleanup(func() {
 		if err := <-served; err != nil {

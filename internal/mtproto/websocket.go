@@ -642,16 +642,28 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	if clientAddrHeader != "" {
 		values := r.Header.Values(clientAddrHeader)
 		if len(values) != 1 {
-			http.Error(w, "exactly one client address header is required", http.StatusBadRequest)
+			s.logInvalidClientAddrHeader(len(values))
+			http.Error(w, "CF-Connecting-IP must appear exactly once", http.StatusBadRequest)
 			return
 		}
 		addr, err := netip.ParseAddr(values[0])
 		if err != nil || !addr.IsValid() || addr.Zone() != "" {
-			http.Error(w, "client address header must contain one IP address", http.StatusBadRequest)
+			s.logInvalidClientAddrHeader(len(values))
+			http.Error(w, "CF-Connecting-IP must be exactly one IP address", http.StatusBadRequest)
 			return
 		}
 		addr = addr.Unmap()
-		if !state.slot.keyAddr(addr) {
+		state.socket.state.Lock()
+		if state.socket.closed {
+			state.socket.state.Unlock()
+			return
+		}
+		keyed := state.slot.keyAddr(addr)
+		if keyed {
+			state.addr = addr
+		}
+		state.socket.state.Unlock()
+		if !keyed {
 			if dropped, allow := s.netCapLog.allow(time.Now(), preAuthLogInterval); allow {
 				s.log.Info("WebSocket connection refused at the per-network pre-auth cap",
 					"client_addr", addr, "cap", s.preAuth.limits.MaxConnsPerNet, "suppressed", dropped)
@@ -659,7 +671,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 			return
 		}
-		state.addr = addr
 	}
 	requestPath := r.URL.EscapedPath()
 	if requestPath == clientDiscoveryPath {
@@ -745,6 +756,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}, websocketPath, handler, closeDiagnostics)
 	if closeErr != nil && !isDisconnect(closeErr) {
 		s.logConnectionFailure(closeErr)
+	}
+}
+
+func (s *Server) logInvalidClientAddrHeader(valueCount int) {
+	if dropped, ok := s.clientAddrHeaderLog.allow(time.Now(), preAuthLogInterval); ok {
+		s.log.Warn("invalid CF-Connecting-IP header",
+			"header", cfConnectingIPHeader, "value_count", valueCount, "suppressed", dropped)
 	}
 }
 

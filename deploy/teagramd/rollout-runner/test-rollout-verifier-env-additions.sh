@@ -800,6 +800,13 @@ public_ws_cf_snapshot=$(snapshot_from_json \
   "$public_ws_cf_inspect" "$public_ws_cf_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
 [ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
 [ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
+public_ws_unset_compose=$(jq -c 'del(.services.teagramd.environment.TG_CLIENT_ADDR_TRUST)' <<< "$public_ws_loopback_compose")
+public_ws_unset_inspect=$(printf '%s' "$public_ws_loopback_inspect" | jq -c \
+  '.Config.Env |= map(select(startswith("TG_CLIENT_ADDR_TRUST=") | not))')
+public_ws_unset_snapshot=$(snapshot_from_json \
+  "$public_ws_unset_inspect" "$public_ws_unset_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_unset_snapshot")" = unset ]
+[ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_unset_snapshot")" = unset ]
 printf '%s\n' "$public_ws_socket_snapshot" > "$TMP/public-ws-socket.snapshot.json"
 printf '%s\n' "$public_ws_cf_snapshot" > "$TMP/public-ws-cf.snapshot.json"
 if ! compare_snapshots "$TMP/public-ws-socket.snapshot.json" "$TMP/public-ws-cf.snapshot.json" \
@@ -1762,6 +1769,45 @@ printf '%s\n' "$turnstile_default_preflight" > "$TARGET_DIR/preflight.snapshot.j
 printf '%s\n' "$turnstile_default_target" > "$TARGET_DIR/target.snapshot.json"
 chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
 INITIALIZE_LOCAL=0
+turnstile_baseline_dir=$BASELINE_DIR
+turnstile_target_dir=$TARGET_DIR
+assert_resolved_preflight_trust_rejected() {
+  local name=$1 baseline_snapshot=$2 target_snapshot=$3 expected_before=$4 expected_after=$5
+  local baseline_dir="$TMP/$name.baseline" target_dir="$TMP/$name.target"
+  mkdir -m 700 "$baseline_dir" "$target_dir"
+  printf '%s\n' "$baseline_snapshot" > "$baseline_dir/baseline.snapshot.json"
+  printf '%s\n' "$target_snapshot" > "$target_dir/preflight.snapshot.json"
+  BASELINE_DIR=$baseline_dir
+  TARGET_DIR=$target_dir
+  PREFLIGHT_BASELINE_SNAPSHOT="$baseline_dir/baseline.snapshot.json"
+  PREFLIGHT_TARGET_SNAPSHOT="$target_dir/preflight.snapshot.json"
+  PREFLIGHT_RESULTS_FILE="$target_dir/preflight-comparisons.tsv"
+  if compare_resolved_preflight 2>"$TMP/$name.err"; then
+    printf 'FAIL resolved preflight accepted client-address trust transition %s to %s\n' \
+      "$expected_before" "$expected_after" >&2
+    exit 1
+  fi
+  if [ ! -f "$PREFLIGHT_RESULTS_FILE" ] || \
+    ! grep -Fq $'preflight\tcompose_client_addr_trust\t'"$expected_before"$'\t'"$expected_after"$'\tfail' \
+      "$PREFLIGHT_RESULTS_FILE"; then
+    printf 'FAIL resolved preflight did not reject client-address trust transition %s to %s\n' \
+      "$expected_before" "$expected_after" >&2
+    cat "$TMP/$name.err" >&2
+    if [ -f "$PREFLIGHT_RESULTS_FILE" ]; then cat "$PREFLIGHT_RESULTS_FILE" >&2; fi
+    exit 1
+  fi
+  unset PREFLIGHT_BASELINE_SNAPSHOT PREFLIGHT_TARGET_SNAPSHOT PREFLIGHT_RESULTS_FILE
+}
+
+assert_resolved_preflight_trust_rejected public-ws-cf-to-socket \
+  "$public_ws_cf_snapshot" "$public_ws_socket_snapshot" cf-connecting-ip socket
+printf '%s\n' 'PASS resolved Compose preflight rejects Cloudflare client-address downgrade to socket'
+assert_resolved_preflight_trust_rejected public-ws-unset-to-cf \
+  "$public_ws_unset_snapshot" "$public_ws_cf_snapshot" unset cf-connecting-ip
+printf '%s\n' 'PASS resolved Compose preflight rejects unset client-address trust changing to Cloudflare'
+BASELINE_DIR=$turnstile_baseline_dir
+TARGET_DIR=$turnstile_target_dir
+
 if ! compare_resolved_preflight; then
   printf '%s\n' 'FAIL safe Turnstile runtime defaults changed the resolved Compose preflight' >&2
   cat "$TARGET_DIR/preflight-comparisons.tsv" >&2

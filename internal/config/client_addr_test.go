@@ -226,6 +226,19 @@ func TestLoadClientAddrTrustAcceptsCloudflareOnPublicWebSocket(t *testing.T) {
 	}
 }
 
+func TestLoadClientAddrProxyCIDRsRejectedWithCFConnectingIP(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_PROXY_CIDRS", "192.0.2.1")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_CLIENT_ADDR_PROXY_CIDRS") {
+		t.Fatalf("Load with proxy CIDRs in CF-Connecting-IP mode = %v, want error naming TG_CLIENT_ADDR_PROXY_CIDRS", err)
+	}
+}
+
 func TestLoadClientAddrTrustCFConnectingIPRequiresPublicWebSocket(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
