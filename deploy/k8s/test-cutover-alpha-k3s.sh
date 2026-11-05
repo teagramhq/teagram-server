@@ -269,7 +269,7 @@ legacy_discovery_status=$(curl --silent --show-error --output /dev/null --write-
   --max-time 10 http://127.0.0.1:12444/.well-known/telegramd/client)
 [[ $legacy_discovery_status == 404 ]]
 admin_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  --max-time 10 http://127.0.0.1:12445/admin)
+  --location --max-redirs 3 --max-time 10 http://127.0.0.1:12445/admin)
 [[ $admin_status =~ ^(200|302|401|403)$ ]]
 smoke_restored_account
 stop_port_forward
