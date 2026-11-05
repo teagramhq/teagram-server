@@ -1093,10 +1093,15 @@ snapshot_from_json() {
         [$env[] | select(type == "string" and startswith("TG_CLIENT_ADDR_TRUST=")) | .[("TG_CLIENT_ADDR_TRUST=" | length):]] as $values
         | if ($values | length) == 0 then "unset"
           elif ($values | length) > 1 then "duplicate"
-          elif $values[0] == "socket" then "socket"
+          elif $values[0] == "" or $values[0] == "socket" then "socket"
+          elif $values[0] == "cf-connecting-ip" then "cf-connecting-ip"
           else "invalid" end
       end
   ')
+  if [ "$compose_source" != selected-compose-render ] && [ "$container_client_addr_trust" = cf-connecting-ip ]; then
+    printf '%s\n' 'cannot verify cf-connecting-ip trust without the selected loopback-only Compose render' >&2
+    return 1
+  fi
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
     verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
@@ -1375,9 +1380,30 @@ snapshot_from_json() {
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
       | if ($env | type) != "object" then error("teagramd environment must be an object")
         elif ($env | has("TG_CLIENT_ADDR_TRUST")) then
-          if ($env.TG_CLIENT_ADDR_TRUST | type) == "string" and $env.TG_CLIENT_ADDR_TRUST == "socket" then "socket" else "invalid" end
+          if ($env.TG_CLIENT_ADDR_TRUST | type) != "string" then "invalid"
+          elif $env.TG_CLIENT_ADDR_TRUST == "" or $env.TG_CLIENT_ADDR_TRUST == "socket" then "socket"
+          elif $env.TG_CLIENT_ADDR_TRUST == "cf-connecting-ip" then "cf-connecting-ip"
+          else "invalid" end
         else "unset" end
     ')
+    if [ "$compose_client_addr_trust" = cf-connecting-ip ] || [ "$container_client_addr_trust" = cf-connecting-ip ]; then
+      if [ "$compose_client_addr_trust" != cf-connecting-ip ] || \
+         [ "$container_client_addr_trust" != cf-connecting-ip ] || \
+         [ "$compose_public_ws_2446" != true ] || [ "$exposure_public_ws_2446" != true ] || \
+         ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se '
+           def item: if type == "array" then .[0] else . end;
+           (.[0] | item | .Config.Env // []) as $container_env
+           | .[1].services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $compose_env
+           | [$container_env[] | select(type == "string" and startswith("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="))
+              | .[("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=" | length):]] as $container_listeners
+           | ($compose_env.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR // null) as $compose_listener
+           | ($compose_listener | type == "string" and length > 0) and
+             $container_listeners == [$compose_listener]
+         ' >/dev/null; then
+        printf '%s\n' 'cf-connecting-ip requires a matching public WebSocket listener and loopback-only 2446 publish' >&2
+        return 1
+      fi
+    fi
     grace=$(printf '%s' "$resolved_config" | jq -er '.stop_grace_period')
     config_sha=$(sha256_text "$canonical_compose")
     canonical_without_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart)') || return 1
@@ -1623,6 +1649,23 @@ record_ordinary_setting() {
   return 0
 }
 
+record_client_addr_trust_transition() {
+  local output=$1 field=$2 before=$3 after=$4 after_file=$5 result=fail
+  if [ "$before" = socket ] && [ "$after" = socket ]; then
+    result=pass
+  elif { [ "$before" = socket ] || [ "$before" = cf-connecting-ip ]; } && \
+       [ "$after" = cf-connecting-ip ] && \
+       [ "$(jq -er '.compose_public_ws_2446' "$after_file")" = true ] && \
+       [ "$(jq -er '.exposure_public_ws_2446' "$after_file")" = true ]; then
+    result=pass
+  fi
+  if ! record_comparison "$output" "$field" "$before" "$after" "$result"; then
+    printf '%s\n' "failed to persist comparison result: $field" >&2
+    return 1
+  fi
+  return 0
+}
+
 approved_restart_policy_transition() {
   local before_file=$1 after_file=$2
   jq -en --slurpfile before "$before_file" --slurpfile after "$after_file" '
@@ -1682,7 +1725,7 @@ compare_snapshots() {
       (.stop_grace_period | test("^[0-9]+(m[0-9]+s|s)$")) and
       (.container_stop_timeout | type == "number" and . >= 0 and . == floor) and
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
-      (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
+      (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket","cf-connecting-ip")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
       (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.compose_log_login_codes | type == "string" and IN("true","false","unset","not-captured")) and
@@ -1691,7 +1734,7 @@ compare_snapshots() {
       (.media_key_current | type == "string" and (. == "unset" or test("^[1-9][0-9]*$"))) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
-      (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
+      (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket","cf-connecting-ip")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
@@ -1714,7 +1757,7 @@ compare_snapshots() {
       (.stop_grace_period | test("^[0-9]+(m[0-9]+s|s)$")) and
       (.container_stop_timeout | type == "number" and . >= 0 and . == floor) and
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
-      (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
+      (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket","cf-connecting-ip")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
       (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.compose_log_login_codes | type == "string" and IN("true","false","unset","not-captured")) and
@@ -1723,7 +1766,7 @@ compare_snapshots() {
       (.media_key_current | type == "string" and (. == "unset" or test("^[1-9][0-9]*$"))) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
-      (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
+      (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket","cf-connecting-ip")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
@@ -1822,13 +1865,13 @@ compare_snapshots() {
   if ! record_ordinary_setting "$result_file" resolved_TG_REPLICA_COUNT "$before_value" "$after_value" 1; then return 1; fi
   if ! before_value=$(jq -er '.compose_client_addr_trust' "$before_file"); then return 1; fi
   if ! after_value=$(jq -er '.compose_client_addr_trust' "$after_file"); then return 1; fi
-  if ! record_ordinary_setting "$result_file" resolved_TG_CLIENT_ADDR_TRUST "$before_value" "$after_value" socket; then return 1; fi
+  if ! record_client_addr_trust_transition "$result_file" resolved_TG_CLIENT_ADDR_TRUST "$before_value" "$after_value" "$after_file"; then return 1; fi
   if ! before_value=$(jq -er '.container_replica_count' "$before_file"); then return 1; fi
   if ! after_value=$(jq -er '.container_replica_count' "$after_file"); then return 1; fi
   if ! record_ordinary_setting "$result_file" running_TG_REPLICA_COUNT "$before_value" "$after_value" 1; then return 1; fi
   if ! before_value=$(jq -er '.container_client_addr_trust' "$before_file"); then return 1; fi
   if ! after_value=$(jq -er '.container_client_addr_trust' "$after_file"); then return 1; fi
-  if ! record_ordinary_setting "$result_file" running_TG_CLIENT_ADDR_TRUST "$before_value" "$after_value" socket; then return 1; fi
+  if ! record_client_addr_trust_transition "$result_file" running_TG_CLIENT_ADDR_TRUST "$before_value" "$after_value" "$after_file"; then return 1; fi
   if ! before_value=$(jq -er '.container_id' "$before_file"); then return 1; fi
   if ! after_value=$(jq -er '.container_id' "$after_file"); then return 1; fi
   if ! before_image=$(jq -er '.image_id' "$before_file"); then return 1; fi

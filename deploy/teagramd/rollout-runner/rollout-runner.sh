@@ -2544,8 +2544,25 @@ compare_resolved_preflight() {
   done
   for field in compose_replica_count compose_client_addr_trust; do
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
-    if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
-    if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    if [ "$field" = compose_replica_count ]; then
+      expected=1
+      if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    else
+      before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing its client address trust mode'; return 1; }
+      expected=$before
+      if [ "$after" = cf-connecting-ip ] && \
+         { [ "$before" = socket ] || [ "$before" = cf-connecting-ip ]; } && \
+         [ "$(jq -er '.compose_public_ws_2446' "$target_file")" = true ] && \
+         [ "$(jq -er '.exposure_public_ws_2446' "$target_file")" = true ]; then
+        result=pass
+      elif [ "$after" = socket ] && \
+           { [ "$before" = socket ] || [ "$before" = unset ]; }; then
+        result=pass
+      else
+        result=fail
+        failures=$((failures + 1))
+      fi
+    fi
     append_evidence_row "$results" preflight "$field" "$expected" "$after" "$result" || return 1
   done
   [ "$failures" -eq 0 ] || { fail 'resolved Compose preflight rejected unapproved drift'; return 1; }

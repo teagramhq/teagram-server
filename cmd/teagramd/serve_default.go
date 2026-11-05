@@ -31,6 +31,9 @@ func serveMTProto(ctx context.Context, server *mtproto.Server, tcp net.Listener,
 	}
 	if public != nil {
 		group.Go(func(ctx context.Context) error {
+			if public.trustCFConnectingIP {
+				return server.ServePublicWebSocketWithCFConnectingIP(ctx, public.listener, public.handler, public.originPatterns, public.discovery)
+			}
 			return server.ServeWebSocketWithHandlerAndDiscovery(ctx, public.listener, public.handler, public.originPatterns, public.discovery)
 		})
 	}
