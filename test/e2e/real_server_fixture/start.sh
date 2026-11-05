@@ -260,7 +260,7 @@ auth_progress_server_pid() {
 	' | tail -n 1
 }
 signal_auth_progress_boundary() {
-	local boundary=$1 index=$2 count server_pid report attempt
+	local boundary=$1 index=$2 count server_pid report
 	count="$(front_websocket_accepted)" || {
 		printf 'fixture could not read the front websocket counter\n' >&2
 		return 1
@@ -275,7 +275,7 @@ signal_auth_progress_boundary() {
 		printf 'fixture could not signal its auth-progress server process\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		if report="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" 2>/dev/null)" &&
 			jq -e --arg boundary "$boundary" --arg source "$AUTH_PROGRESS_FRONT_SOURCE" --argjson count "$count" --argjson index "$index" \
 				'.boundaries | length >= $index and .[$index - 1].server.boundary == $boundary and .[$index - 1].front.ws_accepted == $count and .[$index - 1].front.source == $source' <<<"$report" >/dev/null 2>&1; then
@@ -287,14 +287,14 @@ signal_auth_progress_boundary() {
 	return 1
 }
 bind_auth_progress_identity() {
-	local identity=$1 server_pid status attempt
+	local identity=$1 server_pid status
 	printf '%s\n' "$identity" | docker exec -i --user 65532:65532 "$BACKEND" /bin/sh -c "umask 077; cat > /run/log/$AUTH_PROGRESS_BINDING_PATH" || return 1
 	server_pid="$(auth_progress_server_pid)"
 	if [[ ! $server_pid =~ ^[0-9]+$ ]] || ! docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -USR2 $server_pid"; then
 		printf 'fixture could not request auth-progress identity binding\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		if status="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_BINDING_STATUS" 2>/dev/null)"; then
 			case "$status" in
 				bound) docker exec --user 65532:65532 "$BACKEND" rm -f "/run/log/$AUTH_PROGRESS_BINDING_PATH" "/run/log/$AUTH_PROGRESS_BINDING_STATUS" || return 1; return 0 ;;
@@ -307,7 +307,7 @@ bind_auth_progress_identity() {
 	return 1
 }
 stop_auth_progress_server() {
-	local server_pid attempt stopped=0
+	local server_pid stopped=0
 	server_pid="$(auth_progress_server_pid)"
 	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
 		printf 'fixture could not identify its auth-progress server process for shutdown\n' >&2
@@ -317,7 +317,7 @@ stop_auth_progress_server() {
 		printf 'fixture could not request bounded auth-progress shutdown\n' >&2
 		return 1
 	fi
-	for attempt in $(seq 1 150); do
+	for _ in $(seq 1 150); do
 		if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "test -d /proc/$server_pid"; then
 			stopped=1
 			break
@@ -511,8 +511,8 @@ docker run --detach --name "$DATABASE" --label "$OWNER_LABEL=$OWNER_TOKEN" --lab
 	mirror.gcr.io/library/postgres:18-alpine >/dev/null
 
 wait_healthy() {
-	local container=$1 attempt status
-	for attempt in $(seq 1 60); do
+	local container=$1 status
+	for _ in $(seq 1 60); do
 		status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")"
 		if [[ $status == healthy ]]; then return 0; fi
 		if [[ $status == unhealthy || $status == missing ]]; then
@@ -1018,7 +1018,7 @@ front_listening() {
 }
 docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
 front_stopped=0
-for attempt in $(seq 1 50); do
+for _ in $(seq 1 50); do
 	if ! front_listening; then front_stopped=1; break; fi
 	sleep 0.1
 done
@@ -1033,7 +1033,7 @@ if [[ $LEG_DIGEST_BEFORE != "$FROZEN_ARTIFACT_DIGEST" ]]; then
 fi
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
 front_serving=0
-for attempt in $(seq 1 100); do
+for _ in $(seq 1 100); do
 	if front_listening; then front_serving=1; break; fi
 	sleep 0.1
 done
@@ -1086,7 +1086,7 @@ BROWSER_EVIDENCE="$(jq -c \
 if [[ $GUEST_SIGNUP == 1 ]]; then
 	docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
 	guest_front_stopped=0
-	for attempt in $(seq 1 50); do
+	for _ in $(seq 1 50); do
 		if ! front_listening; then guest_front_stopped=1; break; fi
 		sleep 0.1
 	done
@@ -1101,7 +1101,7 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 	fi
 	docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact --guest-signup >/run/front.log 2>&1 & echo $! > /run/front.pid'
 	guest_front_serving=0
-	for attempt in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		if front_listening; then guest_front_serving=1; break; fi
 		sleep 0.1
 	done
