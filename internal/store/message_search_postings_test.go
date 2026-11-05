@@ -998,6 +998,12 @@ func TestBatchDeleteLocksAllRowsBeforePostingBuckets(t *testing.T) {
 	}
 	pool := store.StorePool(s)
 	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $2, $3)
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("mark batch-delete dialog unready: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		CREATE FUNCTION public.test_pause_outside_chunk_posting_delete() RETURNS trigger
 		LANGUAGE plpgsql AS $function$
 		BEGIN
@@ -1058,6 +1064,7 @@ func TestBatchDeleteLocksAllRowsBeforePostingBuckets(t *testing.T) {
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
+				  AND datname = current_database()
 				  AND state = 'active'
 				  AND wait_event_type = 'Lock'
 				  AND query ILIKE '%messages%'
