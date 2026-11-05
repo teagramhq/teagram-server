@@ -94,7 +94,13 @@ docker_command() {
           kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "$@"
           ;;
         teagram-teagramd-1)
-          kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
+          # The teagramd image is distroless and has no test binary; the
+          # key-reader pod mounts the same volumes at the same paths.
+          if [[ ${1:-} == test ]]; then
+            kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- "$@"
+          else
+            kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
+          fi
           ;;
         *) return 1 ;;
       esac
