@@ -265,7 +265,9 @@ func testSmokeUserCreatedStickerSets(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("complete user sticker-set report: %v", err)
 	}
-	reports, err := f.store.AdminOpenUserStickerSetReportsForSets(f.ctx, []int64{created.Set.ID})
+	reports, err := f.store.AdminOpenUserStickerSetReportsForSets(
+		f.ctx, []int64{created.Set.ID}, 0, 0, 1,
+	)
 	if err != nil || len(reports) != 1 || reports[0].ReporterID != member.id || reports[0].Comment != reportRequest.Message || !reports[0].SetIsLive {
 		t.Fatalf("stored admin report = %+v, err %v; want one report from recipient %d and a live set", reports, err, member.id)
 	}

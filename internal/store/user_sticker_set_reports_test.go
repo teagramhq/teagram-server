@@ -55,6 +55,69 @@ func TestUserStickerSetReportQuotaSerializesConcurrentReports(t *testing.T) {
 	}
 }
 
+func TestUserStickerSetReportsDeduplicateOnlyIdenticalOpenReports(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559421011")
+	reporter := mustUser(t, s, "+15559421012")
+	setID := seedReportSet(t, ctx, s, owner.ID, "distinct_reports", 1011)
+	create := func(messageID int64, reason, comment string) {
+		t.Helper()
+		if err := s.CreateUserStickerSetReportsForMessage(
+			ctx, reporter.ID, []int64{setID}, store.PeerTypeUser, owner.ID, messageID, reason, comment,
+		); err != nil {
+			t.Fatalf("create report for message %d (%s): %v", messageID, reason, err)
+		}
+	}
+	count := func() int {
+		t.Helper()
+		var reports int
+		if err := store.StorePool(s).QueryRow(ctx, `
+			SELECT count(*) FROM user_sticker_set_reports WHERE reporter_id = $1 AND set_id = $2
+		`, reporter.ID, setID).Scan(&reports); err != nil {
+			t.Fatalf("count reports: %v", err)
+		}
+		return reports
+	}
+
+	create(11, "copyright", "same report")
+	create(11, "copyright", "same report")
+	if got := count(); got != 1 {
+		t.Fatalf("identical open reports = %d, want one", got)
+	}
+	create(12, "copyright", "same report")
+	create(11, "abuse", "same report")
+	if got := count(); got != 3 {
+		t.Fatalf("distinct message or reason reports = %d, want three", got)
+	}
+
+	var dismissedID int64
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT id FROM user_sticker_set_reports
+		WHERE reporter_id = $1 AND set_id = $2 AND message_id = 11 AND reason = 'copyright'
+	`, reporter.ID, setID).Scan(&dismissedID); err != nil {
+		t.Fatalf("find report to dismiss: %v", err)
+	}
+	if err := s.DismissUserStickerSetReport(ctx, dismissedID); err != nil {
+		t.Fatalf("dismiss report: %v", err)
+	}
+	create(11, "copyright", "same report")
+	if got := count(); got != 4 {
+		t.Fatalf("reports after resubmission of dismissed report = %d, want four", got)
+	}
+	var openReports, dismissedReports int
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'dismissed')
+		FROM user_sticker_set_reports WHERE reporter_id = $1 AND set_id = $2
+	`, reporter.ID, setID).Scan(&openReports, &dismissedReports); err != nil {
+		t.Fatalf("count report states: %v", err)
+	}
+	if openReports != 3 || dismissedReports != 1 {
+		t.Fatalf("open/dismissed reports = %d/%d, want 3/1", openReports, dismissedReports)
+	}
+}
+
 func TestSweepExpiredUserStickerSetReportsUsesClosedAtAnd180DayRetention(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

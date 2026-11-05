@@ -89,7 +89,7 @@ func TestMessagesReportStartsOptionFlowForReadableMessage(t *testing.T) {
 	}
 }
 
-func TestMessagesReportStoresOneAdminReportPerReporterAndSet(t *testing.T) {
+func TestMessagesReportDeduplicatesIdenticalAdminReport(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := testBlobs(t)
@@ -116,9 +116,9 @@ func TestMessagesReportStoresOneAdminReportPerReporterAndSet(t *testing.T) {
 	if history[0].StickerDocumentID == nil || *history[0].StickerDocumentID != file.ID {
 		t.Fatalf("reporter sticker document id = %v, want %d", history[0].StickerDocumentID, file.ID)
 	}
-	setIDs, visible, err := s.UserStickerSetsInMessageForReport(ctx, reporter.ID, store.PeerTypeUser, owner.ID, history[0].LocalID)
-	if err != nil || !visible || len(setIDs) != 1 || setIDs[0] != set.Set.ID {
-		t.Fatalf("resolve reportable sticker sets = %v, visible %t, err %v; want set %d", setIDs, visible, err, set.Set.ID)
+	messages, visible, err := s.UserStickerSetsInMessagesForReport(ctx, reporter.ID, store.PeerTypeUser, owner.ID, []int64{history[0].LocalID})
+	if err != nil || !visible || len(messages) != 1 || len(messages[0].SetIDs) != 1 || messages[0].SetIDs[0] != set.Set.ID {
+		t.Fatalf("resolve reportable sticker sets = %v, visible %t, err %v; want set %d", messages, visible, err, set.Set.ID)
 	}
 
 	request := &tg.MessagesReportRequest{
@@ -151,6 +151,79 @@ func TestMessagesReportStoresOneAdminReportPerReporterAndSet(t *testing.T) {
 	}
 	if reportCount != 1 {
 		t.Fatalf("duplicate reports = %d, want one", reportCount)
+	}
+}
+
+func TestMessagesReportProcessesMultipleSelectedMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15559420071")
+	if err != nil {
+		t.Fatalf("create set owner: %v", err)
+	}
+	reporter, err := s.CreateUser(ctx, "+15559420072")
+	if err != nil {
+		t.Fatalf("create reporter: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	h := fullChannelDispatcher(s)
+	set := createStickerSet(t, h, owner.ID, createStickerRequest("report_selected_messages", file, false, false))
+	if _, _, _, duplicate, err := s.SendMessage(ctx, reporter.ID, owner.ID, "ordinary selected message", 9420071, 0, 0); err != nil || duplicate {
+		t.Fatalf("send ordinary selected message: duplicate %t, err %v", duplicate, err)
+	}
+	for i := range 2 {
+		if _, _, _, _, err := s.SendStickerMessageWithEntities(ctx, owner.ID, reporter.ID, "cat", int64(9420072+i), file.ID, 0, nil); err != nil {
+			t.Fatalf("send selected sticker message %d: %v", i, err)
+		}
+	}
+	history, err := s.History(ctx, reporter.ID, store.PeerTypeUser, owner.ID, 0, 10)
+	if err != nil || len(history) != 3 {
+		t.Fatalf("selected-message history = %d messages, err %v; want ordinary message plus two stickers", len(history), err)
+	}
+	messageIDs := make([]int, 0, len(history))
+	wantReportMessageIDs := make(map[int64]struct{}, 2)
+	for _, message := range history {
+		messageIDs = append(messageIDs, int(message.LocalID))
+		if message.StickerDocumentID != nil {
+			wantReportMessageIDs[message.LocalID] = struct{}{}
+		}
+	}
+	if len(wantReportMessageIDs) != 2 {
+		t.Fatalf("selected sticker messages = %d, want two", len(wantReportMessageIDs))
+	}
+
+	request := &tg.MessagesReportRequest{
+		Peer: api.InputPeerUser(reporter.ID, owner.ID),
+		ID:   messageIDs,
+	}
+	completeMessageReport(t, h, reporter.ID, request, "selected messages report")
+
+	rows, err := reportDatabase(t, ctx, dsn).Query(ctx, `SELECT message_id FROM user_sticker_set_reports WHERE set_id = $1`, set.Set.ID)
+	if err != nil {
+		t.Fatalf("query reports for selected messages: %v", err)
+	}
+	defer rows.Close()
+	got := make(map[int64]struct{}, len(wantReportMessageIDs))
+	for rows.Next() {
+		var messageID int64
+		if err := rows.Scan(&messageID); err != nil {
+			t.Fatalf("scan selected-message report: %v", err)
+		}
+		got[messageID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read selected-message reports: %v", err)
+	}
+	if len(got) != len(wantReportMessageIDs) {
+		t.Fatalf("reports for selected stickers = %v, want both selected sticker messages %v", got, wantReportMessageIDs)
+	}
+	for messageID := range wantReportMessageIDs {
+		if _, ok := got[messageID]; !ok {
+			t.Errorf("selected sticker message %d has no report", messageID)
+		}
 	}
 }
 
@@ -250,7 +323,7 @@ func TestMessagesReportResolvesUserCustomEmojiFromMessageEntities(t *testing.T) 
 	}
 }
 
-func TestMessagesReportAcceptsReadableChannelStickerPost(t *testing.T) {
+func TestMessagesReportAcceptsReadableChannelStickerWithCustomEmojiEntity(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	blobs := testBlobs(t)
@@ -264,9 +337,11 @@ func TestMessagesReportAcceptsReadableChannelStickerPost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create reporter: %v", err)
 	}
-	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGSSize(t, 100, 100))
 	h := fullChannelDispatcher(s)
-	set := createStickerSet(t, h, owner.ID, createStickerRequest("report_channel_sticker", file, false, false))
+	setRequest := createStickerRequest("report_channel_sticker", file, false, true)
+	setRequest.TextColor = true
+	set := createStickerSet(t, h, owner.ID, setRequest)
 	channel, err := s.CreateChannel(ctx, owner.ID, "Reportable stickers", "", true)
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
@@ -274,9 +349,12 @@ func TestMessagesReportAcceptsReadableChannelStickerPost(t *testing.T) {
 	if _, err := s.AddChannelMembers(ctx, channel.ID, owner.ID, []int64{reporter.ID}); err != nil {
 		t.Fatalf("add reporter to channel: %v", err)
 	}
-	post, _, _, err := s.PostChannelStickerAsWithEntities(ctx, channel.ID, owner.ID, "cat", 9420041, file.ID, 0, nil)
+	entities := []store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: file.ID,
+	}}
+	post, _, _, err := s.PostChannelStickerAsWithEntities(ctx, channel.ID, owner.ID, "cat", 9420041, file.ID, 0, entities)
 	if err != nil {
-		t.Fatalf("post user sticker in channel: %v", err)
+		t.Fatalf("post user sticker with custom emoji entity in channel: %v", err)
 	}
 	request := &tg.MessagesReportRequest{
 		Peer: api.InputPeerChannel(reporter.ID, channel.ID),

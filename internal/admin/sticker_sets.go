@@ -7,6 +7,8 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +84,11 @@ var adminStickerSetsPageTemplate = template.Must(template.New("admin-sticker-set
               </tbody>
             </table>
           </div>
+          <nav aria-label="Reports for {{.SetTitle}}" class="dashboard-controls">
+            {{if .HasPrevious}}<a href="/admin/sticker-sets?page={{$.Page}}&amp;report_set_id={{.SetID}}&amp;report_page={{.PreviousPage}}">Previous reports</a>{{end}}
+            <span>Report page {{.Page}}</span>
+            {{if .HasNext}}<a href="/admin/sticker-sets?page={{$.Page}}&amp;report_set_id={{.SetID}}&amp;report_page={{.NextPage}}">Next reports</a>{{end}}
+          </nav>
         </article>
       {{else}}
         <p>No open user sticker-set reports.</p>
@@ -208,6 +215,11 @@ type adminStickerSetReportGroup struct {
 	SetShortName string
 	SetIsLive    bool
 	Reports      []adminStickerSetReportRow
+	Page         int32
+	PreviousPage int32
+	NextPage     int32
+	HasPrevious  bool
+	HasNext      bool
 }
 
 type adminStickerSetsPageData struct {
@@ -234,6 +246,11 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 				return
 			}
 			page = parsed
+		}
+		reportSetID, reportPage, err := parseAdminStickerSetReportPage(r.URL.Query())
+		if err != nil {
+			http.Error(w, "invalid report page", http.StatusBadRequest)
+			return
 		}
 		sessionCookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
@@ -268,7 +285,17 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 		if hasMoreReportGroups {
 			reportSetIDs = reportSetIDs[:store.AdminUserStickerSetReportPageSize]
 		}
-		reports, err := cfg.Store.AdminOpenUserStickerSetReportsForSets(r.Context(), reportSetIDs)
+		if reportSetID != 0 && !slices.Contains(reportSetIDs, reportSetID) {
+			http.Error(w, "invalid report page", http.StatusBadRequest)
+			return
+		}
+		reportOffset := int32(0)
+		if reportSetID != 0 {
+			reportOffset = (reportPage - 1) * store.AdminUserStickerSetReportsPerGroupPageSize
+		}
+		reports, err := cfg.Store.AdminOpenUserStickerSetReportsForSets(
+			r.Context(), reportSetIDs, reportSetID, reportOffset, store.AdminUserStickerSetReportsPerGroupPageSize+1,
+		)
 		if err != nil {
 			adminStickerSetLog(cfg).Error("list admin open sticker-set reports", "err", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -307,13 +334,27 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 		for _, setID := range reportSetIDs {
 			setReports := reportsBySet[setID]
 			if len(setReports) == 0 {
+				if setID == reportSetID {
+					http.Error(w, "invalid report page", http.StatusBadRequest)
+					return
+				}
 				continue
+			}
+			hasMore := len(setReports) > int(store.AdminUserStickerSetReportsPerGroupPageSize)
+			if hasMore {
+				setReports = setReports[:store.AdminUserStickerSetReportsPerGroupPageSize]
+			}
+			groupPage := int32(1)
+			if setID == reportSetID {
+				groupPage = reportPage
 			}
 			first := setReports[0]
 			group := adminStickerSetReportGroup{
 				SetID: first.SetID, SetTitle: first.SetTitle,
 				SetShortName: first.SetShortName, SetIsLive: first.SetIsLive,
 				Reports: make([]adminStickerSetReportRow, 0, len(setReports)),
+				Page:    groupPage, PreviousPage: groupPage - 1, NextPage: groupPage + 1,
+				HasPrevious: groupPage > 1, HasNext: hasMore,
 			}
 			for _, report := range setReports {
 				group.Reports = append(group.Reports, adminStickerSetReportRow{
@@ -332,6 +373,30 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 			adminStickerSetLog(cfg).Error("render admin user sticker sets", "err", err)
 		}
 	}
+}
+
+func parseAdminStickerSetReportPage(query url.Values) (int64, int32, error) {
+	setIDValue := query.Get("report_set_id")
+	pageValue := query.Get("report_page")
+	if setIDValue == "" {
+		if pageValue != "" {
+			return 0, 0, errors.New("report page requires a set id")
+		}
+		return 0, 1, nil
+	}
+	setID, err := strconv.ParseInt(setIDValue, 10, 64)
+	if err != nil || setID <= 0 {
+		return 0, 0, errors.New("invalid report set id")
+	}
+	page := int64(1)
+	if pageValue != "" {
+		page, err = strconv.ParseInt(pageValue, 10, 32)
+		maxPage := int64(^uint32(0)>>1) / int64(store.AdminUserStickerSetReportsPerGroupPageSize)
+		if err != nil || page < 1 || page > maxPage {
+			return 0, 0, errors.New("invalid report page")
+		}
+	}
+	return setID, int32(page), nil
 }
 
 func adminStickerSetReportPeerType(peerType store.PeerType) string {

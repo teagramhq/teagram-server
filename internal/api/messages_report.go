@@ -36,8 +36,15 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if len(req.ID) != 1 || req.ID[0] <= 0 {
+	if len(req.ID) == 0 || len(req.ID) > maxHistoryLimit {
 		return nil, errMessageIDInvalid
+	}
+	messageIDs := make([]int64, len(req.ID))
+	for i, messageID := range req.ID {
+		if messageID <= 0 {
+			return nil, errMessageIDInvalid
+		}
+		messageIDs[i] = int64(messageID)
 	}
 	if len(req.Message) > messageReportCommentMaxBytes {
 		return nil, errMessageTooLong
@@ -49,9 +56,9 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 	if err != nil {
 		return nil, err
 	}
-	setIDs, visible, err := h.store.UserStickerSetsInMessageForReport(r.Ctx, r.UserID, peerType, peerID, int64(req.ID[0]))
+	messages, visible, err := h.store.UserStickerSetsInMessagesForReport(r.Ctx, r.UserID, peerType, peerID, messageIDs)
 	if err != nil {
-		h.log.Error("resolve message for report", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_id", req.ID[0], "err", err)
+		h.log.Error("resolve messages for report", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_ids", messageIDs, "err", err)
 		return nil, errInternal
 	}
 	if !visible {
@@ -87,8 +94,8 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 		if !ok {
 			return nil, errMessageReportOptionInvalid
 		}
-		if err := h.store.CreateUserStickerSetReportsForMessage(
-			r.Ctx, r.UserID, setIDs, peerType, peerID, int64(req.ID[0]), reason.reason, req.Message,
+		if err := h.store.CreateUserStickerSetReportsForMessages(
+			r.Ctx, r.UserID, messages, peerType, peerID, reason.reason, req.Message,
 		); err != nil {
 			if errors.Is(err, store.ErrUserStickerSetReportRateLimited) {
 				return nil, FloodWaitError(3600)
@@ -96,7 +103,7 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 			if errors.Is(err, store.ErrUserStickerSetReportInputInvalid) {
 				return nil, errInputRequestInvalid
 			}
-			h.log.Error("store user sticker-set report", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_id", req.ID[0], "err", err)
+			h.log.Error("store user sticker-set reports", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_ids", messageIDs, "err", err)
 			return nil, errInternal
 		}
 		return &tg.ReportResultReported{}, nil

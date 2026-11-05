@@ -1,14 +1,24 @@
 -- Resolve the report target in the reporter's own message space. Chat copies
 -- remain stored after a member leaves, so require current membership as well.
--- name: UserStickerSetsInOwnMessageForReport :many
+-- name: UserStickerSetsInOwnMessagesForReport :many
 SELECT DISTINCT m.local_id, s.id AS set_id
 FROM messages m
-LEFT JOIN user_created_sticker_set_items i
-  ON i.file_id = m.sticker_document_id
-  OR i.file_id::text = ANY(message_custom_emoji_document_ids(m.entities))
+LEFT JOIN LATERAL (
+    SELECT item.set_id
+    FROM user_created_sticker_set_items item
+    WHERE item.file_id = m.sticker_document_id
+    UNION
+    SELECT item.set_id
+    FROM unnest(message_custom_emoji_document_ids(m.entities)) AS custom_emoji(document_id)
+    JOIN user_created_sticker_set_items item
+      ON item.file_id = CASE
+          WHEN pg_input_is_valid(custom_emoji.document_id, 'bigint')
+          THEN custom_emoji.document_id::bigint
+      END
+) i ON true
 LEFT JOIN user_created_sticker_sets s ON s.id = i.set_id AND s.is_live = true
 WHERE m.owner_id = sqlc.arg(reporter_id)::bigint
-  AND m.local_id = sqlc.arg(message_id)::bigint
+  AND m.local_id = ANY(sqlc.arg(message_ids)::bigint[])
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
   AND m.deleted = false
@@ -25,19 +35,29 @@ ORDER BY s.id;
 -- Channel posts are visible only while the reporter is an unbanned member and
 -- the post is above their history floor. The visibility check and set lookup
 -- share one statement snapshot.
--- name: UserStickerSetsInReadableChannelMessageForReport :many
+-- name: UserStickerSetsInReadableChannelMessagesForReport :many
 SELECT DISTINCT post.local_id, s.id AS set_id
 FROM channel_messages post
 JOIN channel_participants participant
   ON participant.channel_id = post.channel_id
  AND participant.user_id = sqlc.arg(reporter_id)::bigint
 JOIN channels channel ON channel.id = post.channel_id AND channel.deleted_at IS NULL
-LEFT JOIN user_created_sticker_set_items i
-  ON i.file_id = post.sticker_document_id
-  OR i.file_id::text = ANY(message_custom_emoji_document_ids(post.entities))
+LEFT JOIN LATERAL (
+    SELECT item.set_id
+    FROM user_created_sticker_set_items item
+    WHERE item.file_id = post.sticker_document_id
+    UNION
+    SELECT item.set_id
+    FROM unnest(message_custom_emoji_document_ids(post.entities)) AS custom_emoji(document_id)
+    JOIN user_created_sticker_set_items item
+      ON item.file_id = CASE
+          WHEN pg_input_is_valid(custom_emoji.document_id, 'bigint')
+          THEN custom_emoji.document_id::bigint
+      END
+) i ON true
 LEFT JOIN user_created_sticker_sets s ON s.id = i.set_id AND s.is_live = true
 WHERE post.channel_id = sqlc.arg(peer_id)::bigint
-  AND post.local_id = sqlc.arg(message_id)::bigint
+  AND post.local_id = ANY(sqlc.arg(message_ids)::bigint[])
   AND post.deleted = false
   AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
   AND post.local_id > participant.available_min_id
@@ -57,10 +77,22 @@ WHERE id = ANY(sqlc.arg(set_ids)::bigint[]) AND is_live = true
 ORDER BY id
 FOR SHARE;
 
--- name: ExistingUserStickerSetReportSetIDs :many
-SELECT set_id FROM user_sticker_set_reports
-WHERE reporter_id = sqlc.arg(reporter_id)::bigint
-  AND set_id = ANY(sqlc.arg(set_ids)::bigint[]);
+-- name: ExistingOpenUserStickerSetReportTargets :many
+WITH requested AS (
+    SELECT set_id, message_id
+    FROM unnest(sqlc.arg(set_ids)::bigint[]) WITH ORDINALITY AS set_targets(set_id, position)
+    JOIN unnest(sqlc.arg(message_ids)::bigint[]) WITH ORDINALITY AS message_targets(message_id, position)
+      USING (position)
+)
+SELECT report.set_id, report.message_id
+FROM user_sticker_set_reports report
+JOIN requested ON requested.set_id = report.set_id AND requested.message_id = report.message_id
+WHERE report.reporter_id = sqlc.arg(reporter_id)::bigint
+  AND report.message_peer_type = sqlc.arg(message_peer_type)::smallint
+  AND report.message_peer_id = sqlc.arg(message_peer_id)::bigint
+  AND report.reason = sqlc.arg(reason)::text
+  AND report.comment = sqlc.arg(comment)::text
+  AND report.status = 'open';
 
 -- Closed reports still count during the rolling hour.
 -- name: CountRecentUserStickerSetReports :one
@@ -76,7 +108,9 @@ VALUES (
     sqlc.arg(reporter_id), sqlc.arg(set_id), sqlc.arg(message_peer_type), sqlc.arg(message_peer_id),
     sqlc.arg(message_id), sqlc.arg(reason), sqlc.arg(comment)
 )
-ON CONFLICT (reporter_id, set_id) DO NOTHING;
+ON CONFLICT (reporter_id, set_id, message_peer_type, message_peer_id, message_id, reason, comment)
+    WHERE status = 'open'
+DO NOTHING;
 
 -- Page report groups rather than individual rows so one set's open reports stay
 -- together in the admin surface.
@@ -93,9 +127,19 @@ OFFSET sqlc.arg(offset_count)::int;
 SELECT r.id AS report_id, r.set_id, s.title AS set_title, s.short_name AS set_short_name,
        s.is_live AS set_is_live, r.reporter_id, r.message_peer_type, r.message_peer_id,
        r.message_id, r.reason, r.comment, r.created_at
-FROM user_sticker_set_reports r
-JOIN user_created_sticker_sets s ON s.id = r.set_id
-WHERE r.status = 'open' AND r.set_id = ANY(sqlc.arg(set_ids)::bigint[])
+FROM unnest(sqlc.arg(set_ids)::bigint[]) AS requested(set_id)
+JOIN user_created_sticker_sets s ON s.id = requested.set_id
+CROSS JOIN LATERAL (
+    SELECT report.*
+    FROM user_sticker_set_reports report
+    WHERE report.status = 'open' AND report.set_id = requested.set_id
+    ORDER BY report.created_at, report.id
+    LIMIT sqlc.arg(limit_count)::int
+    OFFSET CASE
+        WHEN requested.set_id = sqlc.arg(page_set_id)::bigint THEN sqlc.arg(offset_count)::int
+        ELSE 0
+    END
+) r
 ORDER BY r.set_id, r.created_at, r.id;
 
 -- name: DismissUserStickerSetReport :execrows

@@ -16,7 +16,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 )
 
-func TestAdminStickerSetReportsCanBeReviewedAndDismissed(t *testing.T) {
+func TestAdminStickerSetReportsCanBeReviewedDismissedAndPaginated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
@@ -54,6 +54,28 @@ func TestAdminStickerSetReportsCanBeReviewedAndDismissed(t *testing.T) {
 		RETURNING id`, reporter.ID, setID, owner.ID, comment).Scan(&reportID); err != nil {
 		t.Fatalf("create report: %v", err)
 	}
+	const reportPageSize = 50
+	seeded, err := conn.Exec(ctx, `
+		WITH new_reporters AS (
+			INSERT INTO users (phone)
+			SELECT '+1555998' || lpad(n::text, 4, '0')
+			FROM generate_series(1, $3::int) AS n
+			RETURNING id
+		), numbered AS (
+			SELECT id, row_number() OVER (ORDER BY id) AS n FROM new_reporters
+		)
+		INSERT INTO user_sticker_set_reports (
+			reporter_id, set_id, message_peer_type, message_peer_id, message_id, reason, comment
+		)
+		SELECT id, $1, 1, $2, 1000 + n, 'copyright', 'large-group report ' || n
+		FROM numbered
+	`, setID, owner.ID, reportPageSize)
+	if err != nil {
+		t.Fatalf("seed large report group: %v", err)
+	}
+	if seeded.RowsAffected() != reportPageSize {
+		t.Fatalf("seeded reports = %d, want %d", seeded.RowsAffected(), reportPageSize)
+	}
 
 	tokenHash := authTestTokenHash()
 	const sessionID = "sticker-report-session"
@@ -87,6 +109,29 @@ func TestAdminStickerSetReportsCanBeReviewedAndDismissed(t *testing.T) {
 	}
 	if !strings.Contains(body, `name="id" value="`+strconv.FormatInt(setID, 10)+`"`) {
 		t.Fatal("report group omitted the direct takedown action for its set")
+	}
+	if got := strings.Count(body, "Dismiss report"); got != reportPageSize {
+		t.Fatalf("reports rendered on first group page = %d, want %d", got, reportPageSize)
+	}
+	if strings.Contains(body, "message 1050") || !strings.Contains(body, "report_page=2") {
+		t.Fatal("first group page rendered its final report or omitted the next-page link")
+	}
+	page2Query := url.Values{
+		"report_set_id": {strconv.FormatInt(setID, 10)},
+		"report_page":   {"2"},
+	}
+	page2 := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/sticker-sets?"+page2Query.Encode(), nil)
+	page2.AddCookie(admin.SessionCookie(sessionID))
+	page2Rec := httptest.NewRecorder()
+	h.ServeHTTP(page2Rec, page2)
+	if page2Rec.Code != http.StatusOK {
+		t.Fatalf("GET report page two returned %d, want 200", page2Rec.Code)
+	}
+	if got := strings.Count(page2Rec.Body.String(), "Dismiss report"); got != 1 {
+		t.Fatalf("reports rendered on second group page = %d, want one", got)
+	}
+	if !strings.Contains(page2Rec.Body.String(), "message 1050") || !strings.Contains(page2Rec.Body.String(), "report_page=1") {
+		t.Fatal("second group page omitted its report or previous-page link")
 	}
 	csrfToken, err := admin.SessionCSRFToken(tokenHash, sessionID)
 	if err != nil {
