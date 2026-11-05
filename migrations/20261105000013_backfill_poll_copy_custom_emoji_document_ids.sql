@@ -1,6 +1,8 @@
 -- Backfill retained poll copies in committed batches. Insert triggers populate
 -- new copies while the existing rows are reconciled.
 -- atlas:txmode none
+-- atlas:nolint blocking
+-- atlas:lock-waiver: The block commits only bounded 500-row updates; schema changes and indexes use separate migrations.
 
 DO $migration$
 DECLARE
