@@ -360,7 +360,7 @@ func TestRunCommandMaintenanceInitializesPostingsDuringMessageMutations(t *testi
 				WHERE pid <> pg_backend_pid()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
-				  AND query ILIKE '%INSERT INTO message_search_postings%'
+				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
 			)
 		`).Scan(&paused); err != nil {
 			t.Fatalf("check initializer pause: %v", err)
@@ -545,7 +545,7 @@ func TestRunCommandMaintenanceHandlesLongConcurrentBackfillWithoutStalePostings(
 				WHERE pid <> pg_backend_pid()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
-				  AND query ILIKE '%DELETE FROM message_search_postings%'
+				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
 			)
 		`).Scan(&paused); err != nil {
 			t.Fatalf("check initializer clear pause: %v", err)
@@ -833,7 +833,7 @@ func TestRunCommandMaintenanceBoundsWritersForLargeDialog(t *testing.T) {
 				WHERE pid <> pg_backend_pid()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
-				  AND query ILIKE '%INSERT INTO message_search_postings%'
+				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
 			)
 		`).Scan(&paused); err != nil {
 			t.Fatalf("check initializer pause: %v", err)
@@ -981,5 +981,208 @@ func TestRunCommandMaintenanceBoundsWritersForLargeDialog(t *testing.T) {
 	}
 	if results[0].LocalID != firstLocalID+historySize {
 		t.Fatalf("large dialog search first local ID = %d, want newest %d", results[0].LocalID, firstLocalID+historySize)
+	}
+}
+
+func TestRunCommandMaintenanceUsesConsistentPostingCountLockOrder(t *testing.T) {
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("2a", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_REGISTRATION", "closed")
+	t.Setenv("TG_RSA_KEY_PATH", filepath.Join(t.TempDir(), "must-not-be-created.pem"))
+	t.Setenv("TG_BLOB_DIR", filepath.Join(t.TempDir(), "must-not-be-created"))
+
+	ctx := context.Background()
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create fixture blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open fixture store: %v", err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close fixture store: %v", err)
+		}
+	}()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open fixture database pool: %v", err)
+	}
+	defer pool.Close()
+
+	owner, err := s.CreateUsernameUser(ctx, "searchorderowner", "Search", "Order Owner")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUsernameUser(ctx, "searchorderpeer", "Search", "Order Peer")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	first, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "z", 30401, 0, 0) //nolint:dogsled // only the stored message is needed here
+	if err != nil {
+		t.Fatalf("send first message: %v", err)
+	}
+	second, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "a", 30402, 0, 0) //nolint:dogsled // only the stored message is needed here
+	if err != nil {
+		t.Fatalf("send second message: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("remove simulated historical postings: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $2, $3)
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID); err != nil {
+		t.Fatalf("mark dialog unready: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION public.test_pause_ordered_message_search_posting_insert() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF NEW.owner_id = %d AND NEW.peer_id = %d AND NEW.local_id = %d AND NEW.lexeme = 'z' THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN NEW;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_ordered_message_search_posting_insert
+		AFTER INSERT ON message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_ordered_message_search_posting_insert();
+	`, owner.ID, peer.ID, first.LocalID)); err != nil {
+		t.Fatalf("install posting count lock-order pause fixture: %v", err)
+	}
+
+	type commandResult struct{ err error }
+	commandDone := make(chan commandResult, 1)
+	commandFinished := false
+	go func() {
+		var stdout, stderr bytes.Buffer
+		commandDone <- commandResult{err: runCommand([]string{"maintenance", "initialize-message-search-postings", "--batch-size", "2"}, slog.New(slog.DiscardHandler), &stdout, &stderr)}
+	}()
+	defer func() {
+		if !commandFinished {
+			select {
+			case <-commandDone:
+			case <-time.After(10 * time.Second):
+				t.Error("initializer did not stop during cleanup")
+			}
+		}
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_ordered_message_search_posting_insert ON message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_ordered_message_search_posting_insert();
+		`); err != nil {
+			t.Errorf("remove posting lock-order pause fixture: %v", err)
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check initializer pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-commandDone:
+				commandFinished = true
+				t.Fatalf("initializer returned before posting pause: %v", result.err)
+			default:
+				t.Fatal("initializer did not enter the posting pause")
+			}
+		}
+		select {
+		case result := <-commandDone:
+			commandFinished = true
+			t.Fatalf("initializer returned before posting pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	type sendResult struct{ err error }
+	sendDone := make(chan sendResult, 1)
+	go func() {
+		_, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "a z", 30403, 0, 0)
+		sendDone <- sendResult{err: err}
+	}()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND query ILIKE '%INSERT INTO messages%'
+			)
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("check concurrent send lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-sendDone:
+				t.Fatalf("send completed before initializer released posting locks: %v", result.err)
+			default:
+				t.Fatal("send did not wait for the initializer's posting locks")
+			}
+		}
+		select {
+		case result := <-sendDone:
+			t.Fatalf("send completed before initializer released posting locks: %v", result.err)
+		case result := <-commandDone:
+			commandFinished = true
+			t.Fatalf("initializer returned before send waited: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	select {
+	case result := <-commandDone:
+		commandFinished = true
+		if result.err != nil {
+			t.Fatalf("initialize dialog with concurrent send: %v", result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("initializer and concurrent send deadlocked")
+	}
+	select {
+	case result := <-sendDone:
+		if result.err != nil {
+			t.Fatalf("send with concurrent initializer: %v", result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("send did not finish after initializer committed")
+	}
+
+	var aCount, zCount int64
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE lexeme = 'a'), count(*) FILTER (WHERE lexeme = 'z')
+		FROM message_search_postings
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, owner.ID, int16(store.PeerTypeUser), peer.ID).Scan(&aCount, &zCount); err != nil {
+		t.Fatalf("count final postings: %v", err)
+	}
+	if aCount != 2 || zCount != 2 {
+		t.Fatalf("final posting counts = a %d, z %d; want 2 each (messages %d and %d)", aCount, zCount, second.LocalID, first.LocalID)
 	}
 }

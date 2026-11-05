@@ -109,9 +109,19 @@ If the process stops or a chunk fails, that chunk's postings and cursor update
 roll back together. Earlier chunks remain committed and the marker stays
 unready; a rerun resumes at its saved cursor.
 
+The initializer and message triggers acquire transaction advisory locks for
+every affected old and new lexeme in the dialog, ordered by the lexeme's `C`
+collation, before changing postings. This gives all posting-count row updates
+the same order even when a message has multiple terms. The lock order is the
+unready marker, message rows by `local_id`, posting-count advisory locks by
+lexeme, then posting and count rows. Writers first take their existing owner or
+chat locks, then message rows, then the same lexeme locks and posting/count
+rows. The initializer does not take owner or chat locks, and each chunk holds
+message rows for only one dialog.
+
 Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
-A send with an overlapping lexeme can wait on the chunk's posting-count row
-while holding its owner advisory locks, which queues that owner's other sends
+A send with an overlapping lexeme can wait on the chunk's posting-count
+advisory lock while holding its owner advisory locks, which queues other sends
 until the chunk commits. This stall is limited to one chunk, rather than the
 dialog's full history; choose `--batch-size` for the write delay the deployment
 can tolerate. The initializer omits the configured Postgres statement timeout
