@@ -86,7 +86,12 @@ previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
 The only approved Compose listener addition is `127.0.0.1:2446:2446` for the
-public WebSocket listener. Preflight and post-start comparisons normalize that
+public WebSocket listener. When `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` is active,
+the root Compose configuration selects `TG_CLIENT_ADDR_TRUST=cf-connecting-ip`
+for that listener's HTTP client address. The rollout verifier accepts this
+mode only with the active public listener and the exact loopback-only 2446
+publish; other listeners remain socket-keyed in the server. Preflight and
+post-start comparisons normalize that
 exact binding from the configuration and inspected-exposure digests, while
 recording its presence separately and requiring the replacement container to
 match the Compose mapping. A wildcard host IP, another host or container port,

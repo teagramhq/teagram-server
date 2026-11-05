@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=d2d1698d4d698226c990b4f9b1292e7a6416920ab610775268ce638536b141d3
+readonly APPROVED_VERIFIER_SHA=0c4bb2cfdd6cb6e9d1998296ce64a3d1514639a2a8bc5f1ef0c4ee3c18c2c993
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -2628,8 +2628,25 @@ compare_resolved_preflight() {
   done
   for field in compose_replica_count compose_client_addr_trust; do
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
-    if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
-    if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    if [ "$field" = compose_replica_count ]; then
+      expected=1
+      if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    else
+      before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing its client address trust mode'; return 1; }
+      expected=$before
+      if [ "$after" = cf-connecting-ip ] && \
+         { [ "$before" = socket ] || [ "$before" = cf-connecting-ip ]; } && \
+         [ "$(jq -er '.compose_public_ws_2446' "$target_file")" = true ] && \
+         [ "$(jq -er '.exposure_public_ws_2446' "$target_file")" = true ]; then
+        result=pass
+      elif [ "$after" = socket ] && \
+           { [ "$before" = socket ] || [ "$before" = unset ]; }; then
+        result=pass
+      else
+        result=fail
+        failures=$((failures + 1))
+      fi
+    fi
     append_evidence_row "$results" preflight "$field" "$expected" "$after" "$result" || return 1
   done
   [ "$failures" -eq 0 ] || { fail 'resolved Compose preflight rejected unapproved drift'; return 1; }

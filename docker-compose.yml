@@ -351,9 +351,10 @@ services:
       TG_TURNSTILE_SECRET_KEY_FILE: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:+/run/secrets/teagramd-turnstile}
       TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
       TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
-      # The ordinary listener trusts its direct socket peer. The opt-in proxy
-      # overlay changes only its replacement services to proxy-v2 trust.
-      TG_CLIENT_ADDR_TRUST: socket
+      # The public WebSocket listener is reached through the loopback-only
+      # Cloudflare Tunnel publish. Enable its HTTP client address only while
+      # that listener is configured; all other listeners remain socket-keyed.
+      TG_CLIENT_ADDR_TRUST: "${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:+cf-connecting-ip}"
       # Empty values preserve the binary defaults; operators can tune each
       # key-exchange budget through the deployment environment.
       TG_RATE_LIMIT_KEY_EXCHANGE_IP: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP:-}

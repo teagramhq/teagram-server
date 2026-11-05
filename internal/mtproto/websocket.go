@@ -25,6 +25,10 @@ import (
 const (
 	// websocketPath is the endpoint used by Telegram Web's MTProto transport.
 	websocketPath = "/apiws"
+	// cfConnectingIPHeader is trusted only on the separately bound public
+	// WebSocket listener, whose host port is published on loopback for the
+	// Cloudflare Tunnel connector.
+	cfConnectingIPHeader = "CF-Connecting-IP"
 	// clientDiscoveryPath publishes the public identity for browser clients.
 	clientDiscoveryPath = "/.well-known/teagramd/client"
 	// The MTProto codecs reject payloads larger than 16 MiB. The extra bytes
@@ -193,6 +197,7 @@ type webSocketListener struct {
 
 	server            *Server
 	rateLimitListener store.RateLimitListener
+	clientAddrHeader  string
 	ready             chan *webSocketAcceptedConn
 	acceptErr         chan error
 	done              chan struct{}
@@ -208,11 +213,12 @@ type webSocketListener struct {
 	handlers  sync.WaitGroup
 }
 
-func newWebSocketListener(listener net.Listener, server *Server, rateLimitListener store.RateLimitListener) *webSocketListener {
+func newWebSocketListener(listener net.Listener, server *Server, rateLimitListener store.RateLimitListener, clientAddrHeader string) *webSocketListener {
 	return &webSocketListener{
 		Listener:          listener,
 		server:            server,
 		rateLimitListener: rateLimitListener,
+		clientAddrHeader:  clientAddrHeader,
 		ready:             make(chan *webSocketAcceptedConn, 1),
 		acceptErr:         make(chan error, 1),
 		done:              make(chan struct{}),
@@ -328,12 +334,16 @@ func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 }
 
 func (l *webSocketListener) prepare(accepted *webSocketAcceptedConn) {
-	addr, err := l.server.clientAddrUntil(accepted, accepted.deadline)
-	if err != nil {
-		l.server.logNegotiation(err)
-		l.closeAccepted(accepted)
-		l.untrack(accepted)
-		return
+	var addr netip.Addr
+	if l.clientAddrHeader == "" {
+		var err error
+		addr, err = l.server.clientAddrUntil(accepted, accepted.deadline)
+		if err != nil {
+			l.server.logNegotiation(err)
+			l.closeAccepted(accepted)
+			l.untrack(accepted)
+			return
+		}
 	}
 	accepted.state.Lock()
 	if accepted.closed {
@@ -341,7 +351,7 @@ func (l *webSocketListener) prepare(accepted *webSocketAcceptedConn) {
 		l.untrack(accepted)
 		return
 	}
-	if !accepted.slot.keyAddr(addr) {
+	if l.clientAddrHeader == "" && !accepted.slot.keyAddr(addr) {
 		accepted.state.Unlock()
 		l.server.dropRefused(accepted)
 		accepted.slot.clear()
@@ -498,7 +508,7 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
-	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument, store.RateLimitListenerTailnet)
+	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
 }
 
 // ServeWebSocketWithHandler serves MTProto over WebSocket with a handler and
@@ -509,7 +519,7 @@ func (s *Server) ServeWebSocketWithHandler(ctx context.Context, l net.Listener, 
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument, store.RateLimitListenerTailnet)
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
 }
 
 // ServeWebSocketWithHandlerAndDiscovery serves a listener with its own public
@@ -523,10 +533,25 @@ func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l ne
 	if err != nil {
 		return fmt.Errorf("marshal listener client discovery document: %w", err)
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic)
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic, "")
 }
 
-func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte, rateLimitListener store.RateLimitListener) error {
+// ServePublicWebSocketWithCFConnectingIP serves a public WebSocket listener
+// with its own discovery document and trusts the one CF-Connecting-IP header
+// supplied by the loopback-only Cloudflare Tunnel path. Other listeners keep
+// their socket peer address.
+func (s *Server) ServePublicWebSocketWithCFConnectingIP(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document) error {
+	if handler == nil {
+		return errors.New("WebSocket handler is required")
+	}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		return fmt.Errorf("marshal listener client discovery document: %w", err)
+	}
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic, cfConnectingIPHeader)
+}
+
+func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte, rateLimitListener store.RateLimitListener, clientAddrHeader string) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
@@ -535,7 +560,7 @@ func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Han
 				state.socket.handlerStarted.Store(true)
 				defer state.socket.handlerDone()
 			}
-			s.handleWebSocket(w, r, handler, originPatterns, discoveryDocument)
+			s.handleWebSocket(w, r, handler, originPatterns, discoveryDocument, clientAddrHeader)
 		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
@@ -553,7 +578,7 @@ func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Han
 		},
 	}
 	server.SetKeepAlivesEnabled(false)
-	listener := newWebSocketListener(l, s, rateLimitListener)
+	listener := newWebSocketListener(l, s, rateLimitListener, clientAddrHeader)
 	listener.start()
 	stopOnContext := context.AfterFunc(ctx, s.shutdown.beginDrain)
 	defer stopOnContext()
@@ -635,7 +660,7 @@ func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
 	return nil
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string, discoveryDocument []byte) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string, discoveryDocument []byte, clientAddrHeader string) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -644,6 +669,39 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// Keep the slot tied to the request when the HTTP upgrade fails. The listener
 	// worker closes address-establishment failures before they reach net/http.
 	defer state.slot.clear()
+	if clientAddrHeader != "" {
+		values := r.Header.Values(clientAddrHeader)
+		if len(values) != 1 {
+			s.logInvalidClientAddrHeader(len(values))
+			http.Error(w, "CF-Connecting-IP must appear exactly once", http.StatusBadRequest)
+			return
+		}
+		addr, err := netip.ParseAddr(values[0])
+		if err != nil || !addr.IsValid() || addr.Zone() != "" {
+			s.logInvalidClientAddrHeader(len(values))
+			http.Error(w, "CF-Connecting-IP must be exactly one IP address", http.StatusBadRequest)
+			return
+		}
+		addr = addr.Unmap()
+		state.socket.state.Lock()
+		if state.socket.closed {
+			state.socket.state.Unlock()
+			return
+		}
+		keyed := state.slot.keyAddr(addr)
+		if keyed {
+			state.addr = addr
+		}
+		state.socket.state.Unlock()
+		if !keyed {
+			if dropped, allow := s.netCapLog.allow(time.Now(), preAuthLogInterval); allow {
+				s.log.Info("WebSocket connection refused at the per-network pre-auth cap",
+					"client_addr", addr, "cap", s.preAuth.limits.MaxConnsPerNet, "suppressed", dropped)
+			}
+			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			return
+		}
+	}
 	requestPath := r.URL.EscapedPath()
 	if requestPath == clientDiscoveryPath {
 		s.handleClientDiscovery(w, r, discoveryDocument)
@@ -728,6 +786,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}, websocketPath, handler, closeDiagnostics)
 	if closeErr != nil && !isWebSocketDisconnect(closeErr) {
 		s.logConnectionFailure(closeErr)
+	}
+}
+
+func (s *Server) logInvalidClientAddrHeader(valueCount int) {
+	if dropped, ok := s.clientAddrHeaderLog.allow(time.Now(), preAuthLogInterval); ok {
+		s.log.Warn("invalid CF-Connecting-IP header",
+			"header", cfConnectingIPHeader, "value_count", valueCount, "suppressed", dropped)
 	}
 }
 
