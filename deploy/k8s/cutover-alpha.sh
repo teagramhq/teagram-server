@@ -571,6 +571,8 @@ try:
             chunks = max(1, (member.size + chunk_size - 1) // chunk_size)
             encrypted_total += 102 + member.size + 16 * chunks
             objects += 1
+    while sys.stdin.buffer.read(1024 * 1024):
+        pass
 except (tarfile.TarError, OSError, ValueError):
     raise SystemExit("k3s cutover: legacy blob tree contains an unsupported entry")
 print(f"{total}\t{encrypted_total}\t{objects}")
@@ -642,14 +644,24 @@ for claim in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; d
 done
 kubectl wait --for=condition=Ready pod/cutover-volume-importer --namespace "$NAMESPACE" --timeout=300s >/dev/null
 
+# Run a pipeline consumer and then drain whatever it left unread. A consumer
+# such as tar stops at the end-of-archive marker; without the drain the
+# producer is killed by SIGPIPE (exit 141) while still writing archive padding.
+drain_after() {
+  local status=0
+  "$@" || status=$?
+  cat >/dev/null
+  return "$status"
+}
+
 copy_secret_file() {
   local source_path=$1 file_name=$2 source_hash destination_hash
   source_hash=$(incus exec "$SOURCE_INSTANCE" -- docker cp \
     "teagram-teagramd-1:$source_path" - |
-    tar -xOf - "$file_name" | sha256sum | awk '{print $1}')
+    drain_after tar -xOf - "$file_name" | sha256sum | awk '{print $1}')
   [[ $source_hash =~ ^[0-9a-f]{64}$ ]] || fail "source key file could not be verified: $file_name"
   incus exec "$SOURCE_INSTANCE" -- docker cp "teagram-teagramd-1:$source_path" - |
-    kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+    drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
       tar -xpf - -C /target/key-data
   destination_hash=$(kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
     sha256sum "/target/key-data/$file_name" | awk '{print $1}')
@@ -659,7 +671,7 @@ copy_secret_file() {
 copy_secret_file /var/lib/teagramd/server_key.pem server_key.pem
 copy_secret_file /var/lib/teagramd/enc_key.hex enc_key.hex
 incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:/var/lib/teagramd-blobs/. - |
-  kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+  drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
     tar -xpf - -C /target/legacy-blobs
 kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
   sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
