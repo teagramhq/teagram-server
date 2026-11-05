@@ -17,6 +17,12 @@ contains() {
   return 1
 }
 
+atlas_login_present() {
+  [[ -n "${ATLAS_TOKEN:-}" ]] && return 0
+  local atlas_data_dir="${DATA_DIR:-${HOME:-}}"
+  [[ -n "$atlas_data_dir" && -e "$atlas_data_dir/.atlas" ]]
+}
+
 local_shas=()
 remote_shas=()
 while read -r _local_ref local_sha _remote_ref remote_sha; do
@@ -164,10 +170,18 @@ if [[ "$migrations_changed" == true ]]; then
   elif ! command -v python3 >/dev/null 2>&1; then
     warn_missing_tool python3 'migration checks'
   else
+    atlas_skip_migration_lint=false
+    if ! atlas_login_present; then
+      atlas_skip_migration_lint=true
+      printf '%s\n' \
+        "warning: pre-push: Atlas login not found; skipping atlas migrate lint (run 'atlas login' to enable it)" \
+        >&2
+    fi
     MIGRATIONS_BASE_REF="$base_ref" \
       POSTGRES_IMAGE="${POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5}" \
       ATLAS_APPLY_IMAGE="${ATLAS_APPLY_IMAGE:-mirror.gcr.io/arigaio/atlas:1.3.0-alpine}" \
       ATLAS_LINT_BIN="${ATLAS_LINT_BIN:-$(command -v atlas)}" \
+      ATLAS_SKIP_MIGRATION_LINT="$atlas_skip_migration_lint" \
       bash .github/scripts/test-migrations.sh
   fi
 fi

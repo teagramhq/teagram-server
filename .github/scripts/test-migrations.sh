@@ -115,7 +115,9 @@ mapfile -t added_sql_migrations < <(
 mkdir -p "$baseline_dir"
 git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
 chmod -R a+rX "$baseline_dir"
-if [ "${#added_sql_migrations[@]}" -gt 0 ]; then
+if [[ "${ATLAS_SKIP_MIGRATION_LINT:-false}" == true ]]; then
+  :
+elif [ "${#added_sql_migrations[@]}" -gt 0 ]; then
   lint_git_worktree="$temp_dir/atlas-lint-worktree"
   git -C "$repo_root" worktree add --detach --no-checkout "$lint_git_worktree" HEAD >/dev/null
   lint_migration_dir="$lint_git_worktree/migrations"
@@ -210,14 +212,16 @@ EOF
   printf 'Atlas migration lint %s fixture: %s as expected.\n' "$fixture_name" "$expected_result"
 }
 
-docker exec "$postgres_container" createdb -U postgres migration_lint_additive
-docker exec "$postgres_container" createdb -U postgres migration_lint_destructive
-docker exec "$postgres_container" createdb -U postgres migration_lint_base_lock
-docker exec "$postgres_container" createdb -U postgres migration_lint_out_of_order
-run_atlas_lint_fixture additive pass migration_lint_additive
-run_atlas_lint_fixture destructive reject migration_lint_destructive
-run_atlas_lint_fixture base-lock pass migration_lint_base_lock
-run_atlas_lint_fixture out-of-order reject migration_lint_out_of_order git-base 20260102000000
+if [[ "${ATLAS_SKIP_MIGRATION_LINT:-false}" != true ]]; then
+  docker exec "$postgres_container" createdb -U postgres migration_lint_additive
+  docker exec "$postgres_container" createdb -U postgres migration_lint_destructive
+  docker exec "$postgres_container" createdb -U postgres migration_lint_base_lock
+  docker exec "$postgres_container" createdb -U postgres migration_lint_out_of_order
+  run_atlas_lint_fixture additive pass migration_lint_additive
+  run_atlas_lint_fixture destructive reject migration_lint_destructive
+  run_atlas_lint_fixture base-lock pass migration_lint_base_lock
+  run_atlas_lint_fixture out-of-order reject migration_lint_out_of_order git-base 20260102000000
+fi
 
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 

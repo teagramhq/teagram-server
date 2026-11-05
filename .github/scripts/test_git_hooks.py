@@ -25,6 +25,9 @@ class PrePushHookTests(unittest.TestCase):
         self.repo.mkdir()
         self.capture = self.root / "calls.log"
         self.postgres_capture = self.root / "postgres-image.log"
+        self.atlas_lint_capture = self.root / "atlas-lint-skip.log"
+        self.home = self.root / "home"
+        self.home.mkdir()
         self.tools = self.root / "tools"
         self.tools.mkdir()
 
@@ -106,6 +109,7 @@ class PrePushHookTests(unittest.TestCase):
             'printf \'%s\\t%s\\t%s\\n\' "$tool" "$PWD" "$*" >> "$HOOK_CAPTURE"\n'
             'if [ "$tool" = bash ] && [ "$*" = ".github/scripts/test-migrations.sh" ]; then\n'
             '  printf \'%s\\n\' "${POSTGRES_IMAGE:-}" >> "$HOOK_POSTGRES_CAPTURE"\n'
+            '  printf \'%s\\n\' "${ATLAS_SKIP_MIGRATION_LINT:-false}" >> "$HOOK_ATLAS_LINT_CAPTURE"\n'
             "fi\n"
             '[ "${HOOK_FAIL:-}" != "$tool" ] || exit 23\n',
             encoding="utf-8",
@@ -119,13 +123,20 @@ class PrePushHookTests(unittest.TestCase):
         remote_sha: str = ZERO_SHA,
         ref_name: str = "feature",
         fail_tool: str = "",
+        atlas_login: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        if atlas_login:
+            (self.home / ".atlas").mkdir(exist_ok=True)
         self.capture.unlink(missing_ok=True)
         environment = os.environ.copy()
         environment.pop("POSTGRES_IMAGE", None)
+        environment.pop("DATA_DIR", None)
+        environment.pop("ATLAS_TOKEN", None)
         environment["PATH"] = f"{self.tools}{os.pathsep}{environment['PATH']}"
         environment["HOOK_CAPTURE"] = str(self.capture)
         environment["HOOK_POSTGRES_CAPTURE"] = str(self.postgres_capture)
+        environment["HOOK_ATLAS_LINT_CAPTURE"] = str(self.atlas_lint_capture)
+        environment["HOME"] = str(self.home)
         environment["GIT_HOOK_BASE_REF"] = "main"
         if fail_tool:
             environment["HOOK_FAIL"] = fail_tool
@@ -155,7 +166,7 @@ class PrePushHookTests(unittest.TestCase):
         ]
 
     def test_changed_go_sql_and_migration_paths_run_their_checks(self) -> None:
-        result = self.run_hook()
+        result = self.run_hook(atlas_login=True)
 
         self.assertEqual(result.returncode, 0, result.stdout)
         calls = self.calls()
@@ -192,6 +203,10 @@ class PrePushHookTests(unittest.TestCase):
             self.postgres_capture.read_text(encoding="utf-8").splitlines(),
             [EXPECTED_POSTGRES_IMAGE],
         )
+        self.assertEqual(
+            self.atlas_lint_capture.read_text(encoding="utf-8").splitlines(), ["false"]
+        )
+        self.assertNotIn("Atlas login not found", result.stdout)
         self.assertTrue(
             any(
                 tool == "gitleaks" and f"--log-opts=main..{self.feature_sha}" in args
@@ -199,6 +214,31 @@ class PrePushHookTests(unittest.TestCase):
             ),
             calls,
         )
+
+    def test_migration_checks_skip_atlas_lint_without_login(self) -> None:
+        result = self.run_hook()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Atlas login not found; skipping atlas migrate lint", result.stdout)
+        self.assertEqual(
+            self.atlas_lint_capture.read_text(encoding="utf-8").splitlines(), ["true"]
+        )
+        calls = self.calls()
+        self.assertTrue(
+            any(
+                tool == "python" and ".github/scripts/sql_lint.py" in args
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+        self.assertTrue(
+            any(
+                tool == "bash" and args == ".github/scripts/test-migrations.sh"
+                for tool, _, args in calls
+            ),
+            calls,
+        )
+        self.assertTrue(any(tool == "gitleaks" for tool, _, _ in calls), calls)
 
     def test_docs_only_ref_skips_path_specific_checks(self) -> None:
         self.git("checkout", "--quiet", "main")
