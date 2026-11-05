@@ -154,6 +154,7 @@ jq -er '.mtproto.rsa_spki' "$DISCOVERY_FILE" | base64 -d | openssl pkey -pubin -
     MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$TMP_ROOT/server-public-key.pem" \
     corepack pnpm exec vite build --outDir "$WEB_CLIENT_DIR/web/current" --emptyOutDir --config vite.config.ts --logLevel error
 ) || fail 'could not build the pinned Web artifact for the QA invite endpoint'
+chmod -R a+rX "$WEB_CLIENT_DIR/web/current" || fail 'could not make the built Web artifact readable by the isolated TLS edge'
 
 compose exec -T --user 0:0 teagramd /usr/local/bin/teagramd admin create-user --username qa_browser_smoke < "$ACCOUNT_FILE" >/dev/null 2>&1 ||
   fail 'could not create the isolated QA browser account'
