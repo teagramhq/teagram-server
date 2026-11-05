@@ -2,7 +2,7 @@
 -- new copies while the existing rows are reconciled.
 -- atlas:txmode none
 -- atlas:nolint blocking
--- atlas:lock-waiver: The block commits only bounded 500-row updates; schema changes and indexes use separate migrations.
+-- atlas:lock-waiver: Backfill commits at most 500 rows; schema DDL is outside this block.
 
 DO $migration$
 DECLARE
