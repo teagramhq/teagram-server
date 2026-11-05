@@ -129,6 +129,31 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Run gate-off fresh-browser guest signup with the real challenge
+        id: guest-signup-gate-off-challenge-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
+        run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload gate-off challenge Playwright failure trace
+        if: ${{ always() && steps.guest-signup-gate-off-challenge-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-challenge-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-challenge-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload gate-off challenge run report
+        if: ${{ always() && steps.guest-signup-gate-off-challenge-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-challenge-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-challenge-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Run gate-off fresh-browser guest signup with the QA bypass
         id: guest-signup-gate-off-flow
         env:

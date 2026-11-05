@@ -32,3 +32,13 @@ test('the pinned guest browser runner exercises the signup QA bypass token', (t)
   assert.match(browser, /qaBypassUsed: Boolean\(runtime\.guestSignupQaBypassToken\)/);
   assert.throws(() => patchRealClientGuestSignup(webRoot), /already patched/);
 });
+
+test('CI keeps the gate-off Turnstile challenge flow beside the QA bypass flow', () => {
+  const workflow = readFileSync(join(process.cwd(), '.github/workflows/real-client-browser-flow.yml'), 'utf8');
+  const challengeStep = workflow.match(/- name: Run gate-off fresh-browser guest signup with the real challenge([\s\S]*?)(?=\n      - name: |$)/);
+  assert.ok(challengeStep, 'the gate-off real-challenge browser scenario must remain in CI');
+  assert.match(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'/);
+  assert.match(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'/);
+  assert.doesNotMatch(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS/);
+  assert.match(workflow, /Run gate-off fresh-browser guest signup with the QA bypass/);
+});
