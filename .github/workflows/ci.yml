@@ -1569,7 +1569,7 @@ jobs:
             deployment/teagram-deployer-rollback-check --namespace teagram \
             --timeout=60s >/dev/null
           kubectl set image deployment/teagram-deployer-rollback-check \
-            check=busybox:1.37 --namespace teagram >/dev/null
+            check=mirror.gcr.io/library/busybox:1.37 --namespace teagram >/dev/null
           kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
             deployment/teagram-deployer-rollback-check --namespace teagram \
             --timeout=60s >/dev/null
@@ -1583,7 +1583,7 @@ jobs:
             statefulset/teagram-deployer-rollback-check --namespace teagram \
             --timeout=60s >/dev/null
           kubectl set image statefulset/teagram-deployer-rollback-check \
-            check=busybox:1.37 --namespace teagram >/dev/null
+            check=mirror.gcr.io/library/busybox:1.37 --namespace teagram >/dev/null
           kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
             statefulset/teagram-deployer-rollback-check --namespace teagram \
             --timeout=60s >/dev/null
