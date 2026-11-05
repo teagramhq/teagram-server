@@ -36,6 +36,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  custom-emoji-actions
   bot-api-get-me
   bot-api-get-updates-stock-client
   bot-api-send-message

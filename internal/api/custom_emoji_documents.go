@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
@@ -9,6 +11,53 @@ import (
 )
 
 const maxCustomEmojiDocumentIDs = 200
+
+func (h *handlers) liveCustomEmojiDocument(ctx context.Context, userID, documentID int64) (bool, error) {
+	return h.liveCustomEmojiDocuments(ctx, userID, []int64{documentID})
+}
+
+// liveCustomEmojiDocuments reports whether every ID names a custom emoji in the
+// catalogue or in a live user emoji set. Catalogue IDs resolve in memory and all
+// user-set IDs resolve in one query, so cost does not grow with len(documentIDs).
+func (h *handlers) liveCustomEmojiDocuments(ctx context.Context, userID int64, documentIDs []int64) (bool, error) {
+	var userSetIDs []int64
+	var catalog *stickerSetCatalog
+	for _, documentID := range documentIDs {
+		switch {
+		case documentID == 0:
+			return false, nil
+		case documentID > 0:
+			userSetIDs = append(userSetIDs, documentID)
+		default:
+			if catalog == nil {
+				loaded, err := h.stickerSetCatalog()
+				if err != nil {
+					h.log.Error("load custom emoji catalogue", "user_id", userID, "err", err)
+					return false, errInternal
+				}
+				catalog = loaded
+			}
+			if document, ok := catalog.documentsByID[documentID]; !ok || !isCustomEmojiDocument(document) {
+				return false, nil
+			}
+		}
+	}
+	if len(userSetIDs) == 0 {
+		return true, nil
+	}
+	documents, err := h.store.UserStickerSetsByFileIDs(ctx, userSetIDs)
+	if err != nil {
+		h.log.Error("resolve custom emoji documents", "user_id", userID, "err", err)
+		return false, errInternal
+	}
+	for _, documentID := range userSetIDs {
+		document, ok := documents[documentID]
+		if !ok || document.Set.Kind != "emojis" || !document.Set.IsLive || !document.IsActive {
+			return false, nil
+		}
+	}
+	return true, nil
+}
 
 func (h *handlers) validateCustomEmojiDocumentReferences(userID int64, entities []store.PollDescriptionEntity) error {
 	// Catalogue IDs are immutable and can be validated here. Positive user-set

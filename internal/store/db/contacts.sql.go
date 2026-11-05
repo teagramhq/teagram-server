@@ -112,6 +112,7 @@ SELECT uc.contact_id,
        u.last_seen_at,
        un.handle AS username,
        u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id,
        visible_photos.current_file_id AS photo_file_id
 FROM owned_contacts uc
 JOIN users u ON u.id = uc.contact_id
@@ -121,16 +122,17 @@ LEFT JOIN visible_photos ON visible_photos.user_id = u.id
 `
 
 type ContactsWithUsersRow struct {
-	ContactID   int64
-	Mutual      bool
-	Total       int64
-	FirstName   string
-	LastName    string
-	IsOnline    bool
-	LastSeenAt  pgtype.Timestamptz
-	Username    *string
-	Kind        string
-	PhotoFileID *int64
+	ContactID             int64
+	Mutual                bool
+	Total                 int64
+	FirstName             string
+	LastName              string
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
+	PhotoFileID           *int64
 }
 
 // Load the full contact page, user records, and visible current photos
@@ -157,6 +159,7 @@ func (q *Queries) ContactsWithUsers(ctx context.Context, ownerID int64) ([]Conta
 			&i.LastSeenAt,
 			&i.Username,
 			&i.Kind,
+			&i.EmojiStatusDocumentID,
 			&i.PhotoFileID,
 		); err != nil {
 			return nil, err
