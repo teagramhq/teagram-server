@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -260,6 +261,96 @@ func TestCreateUserStickerSetReportsIgnoresMessagesOutsideReporterSpace(t *testi
 	}
 	if count != 0 {
 		t.Fatalf("reports for messages outside the reporter's space = %d, want none", count)
+	}
+}
+
+// Membership revocations hold the member's owner advisory lock while they
+// write. A report that starts while one is in flight must wait for it and then
+// see the revoked membership, so no report is filed after access ended.
+func TestCreateUserStickerSetReportsWaitsForConcurrentMembershipRevocation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559421041")
+	reporter := mustUser(t, s, "+15559421042")
+	_, file := seedReportableSet(t, ctx, s, owner, "revoked_member")
+	channel, err := s.CreateChannel(ctx, owner.ID, "Revocation race", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err := s.AddChannelMembers(ctx, channel.ID, owner.ID, []int64{reporter.ID}); err != nil {
+		t.Fatalf("add reporter to channel: %v", err)
+	}
+	post, _, _, err := s.PostChannelStickerAsWithEntities(ctx, channel.ID, owner.ID, "cat", 1041, file.ID, 0, nil)
+	if err != nil {
+		t.Fatalf("post sticker to channel: %v", err)
+	}
+	visible, err := s.UserStickerSetReportMessagesVisible(ctx, reporter.ID, store.PeerTypeChannel, channel.ID, []int64{post.LocalID})
+	if err != nil || !visible {
+		t.Fatalf("post visibility before revocation = %t, err %v; want visible", visible, err)
+	}
+
+	pool := store.StorePool(s)
+	revocation, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin revocation: %v", err)
+	}
+	defer func() { _ = revocation.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if _, err := revocation.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, reporter.ID); err != nil {
+		t.Fatalf("take reporter owner lock: %v", err)
+	}
+
+	type result struct {
+		visible bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		visible, err := s.CreateUserStickerSetReports(
+			ctx, reporter.ID, store.PeerTypeChannel, channel.ID, []int64{post.LocalID}, "copyright", "",
+		)
+		done <- result{visible, err}
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var waiting int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = $1::bigint
+		`, reporter.ID).Scan(&waiting); err != nil {
+			t.Fatalf("read advisory lock waiters: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		select {
+		case res := <-done:
+			t.Fatalf("report finished while the revocation held the owner lock: visible %t, err %v", res.visible, res.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("report never waited on the reporter's owner lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := revocation.Exec(ctx, `
+		UPDATE channel_participants SET banned_until = 'infinity' WHERE channel_id = $1 AND user_id = $2
+	`, channel.ID, reporter.ID); err != nil {
+		t.Fatalf("ban reporter: %v", err)
+	}
+	if err := revocation.Commit(ctx); err != nil {
+		t.Fatalf("commit revocation: %v", err)
+	}
+
+	res := <-done
+	if res.err != nil || res.visible {
+		t.Fatalf("report after concurrent ban = visible %t, err %v; want not visible", res.visible, res.err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_sticker_set_reports`).Scan(&count); err != nil {
+		t.Fatalf("count reports: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reports filed after the ban committed = %d, want none", count)
 	}
 }
 

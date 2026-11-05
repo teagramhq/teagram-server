@@ -321,18 +321,6 @@ func (q *Queries) LockLiveUserStickerSetReportTargets(ctx context.Context, setId
 	return items, nil
 }
 
-const lockUserStickerSetReportReporter = `-- name: LockUserStickerSetReportReporter :one
-SELECT id FROM users WHERE id = $1::bigint FOR UPDATE
-`
-
-// Serialize report quota checks for one account without a retained limiter row.
-func (q *Queries) LockUserStickerSetReportReporter(ctx context.Context, reporterID int64) (int64, error) {
-	row := q.db.QueryRow(ctx, lockUserStickerSetReportReporter, reporterID)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
 const userStickerSetsInOwnMessagesForReport = `-- name: UserStickerSetsInOwnMessagesForReport :many
 SELECT DISTINCT m.local_id, s.id AS set_id
 FROM messages m

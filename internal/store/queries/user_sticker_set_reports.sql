@@ -64,10 +64,6 @@ WHERE post.channel_id = sqlc.arg(peer_id)::bigint
   AND (participant.banned_until IS NULL OR participant.banned_until <= statement_timestamp())
 ORDER BY s.id;
 
--- Serialize report quota checks for one account without a retained limiter row.
--- name: LockUserStickerSetReportReporter :one
-SELECT id FROM users WHERE id = sqlc.arg(reporter_id)::bigint FOR UPDATE;
-
 -- Takedown locks the set row FOR UPDATE. Sharing the live rows here means a
 -- report either commits before the takedown and is actioned there, or observes
 -- the set as unavailable and is not inserted.

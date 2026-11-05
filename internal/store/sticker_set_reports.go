@@ -9,8 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -149,7 +147,8 @@ func resolveUserStickerSetReportMessages(
 // enforced in the same transaction. A set taken down before the insert is
 // skipped silently.
 //
-// Lock order: reporter user row, then live set rows (FOR SHARE, by id).
+// Lock order: reporter owner advisory lock, then live set rows (FOR SHARE, by
+// id), the same order message sends use.
 func (s *Store) CreateUserStickerSetReports(
 	ctx context.Context,
 	reporterID int64,
@@ -170,9 +169,13 @@ func (s *Store) CreateUserStickerSetReports(
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
-	if _, err = qtx.LockUserStickerSetReportReporter(ctx, reporterID); errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrUserStickerSetReportInputInvalid
-	} else if err != nil {
+	// The reporter's owner advisory lock serializes the quota check, and it is
+	// the lock LeaveChannel, SetChannelBan and RemoveChatUser hold while they
+	// revoke membership, so the visibility read below cannot interleave with a
+	// revocation: it either sees the revocation or finishes before it starts.
+	// Those paths take their channel or chat row lock first and never wait on
+	// this transaction for it, so taking only the owner lock adds no lock edge.
+	if err = lockOwners(ctx, tx, reporterID); err != nil {
 		return false, fmt.Errorf("lock report quota for reporter %d: %w", reporterID, err)
 	}
 
@@ -193,8 +196,8 @@ func (s *Store) CreateUserStickerSetReports(
 		return true, nil
 	}
 
-	// This row lock serializes report creation for a reporter, while ordered set
-	// locks make concurrent reports involving several sets deterministic.
+	// Ordered set locks make concurrent reports involving several sets
+	// deterministic.
 	liveSetIDs, err := qtx.LockLiveUserStickerSetReportTargets(ctx, setIDs)
 	if err != nil {
 		return false, fmt.Errorf("lock live sticker-set report targets: %w", err)
