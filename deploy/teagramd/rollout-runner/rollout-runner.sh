@@ -873,6 +873,12 @@ current_service_id() {
   printf '%s' "$id"
 }
 
+compose_has_service() {
+  local service=$1 services
+  services=$(docker compose config --services </dev/null) || return 2
+  printf '%s\n' "$services" | grep -Fxq -- "$service"
+}
+
 remove_orphaned_public_profile_services() {
   local baseline_container=$1 project target_services service container_ids container_id container_state stop_timeout found=0
   local -a observed_services=() remove_ids=()
@@ -3147,10 +3153,18 @@ run_apply() {
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
-  if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then :; else
+  if compose_has_service bot-api-forwarder; then
+    if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then :; else
+      rc=$?
+      rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
+      return 1
+    fi
+  else
     rc=$?
-    rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
-    return 1
+    if [ "$rc" -ne 1 ]; then
+      rollback_after_target_failure bot_api_forwarder_service_discovery_failed || return 2
+      return 1
+    fi
   fi
   target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
   if [ -n "$target_id" ]; then

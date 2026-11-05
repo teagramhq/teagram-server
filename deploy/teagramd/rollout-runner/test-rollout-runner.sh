@@ -2260,6 +2260,7 @@ make_fixture success built
 status=$(run_fixture success)
 root=$(cat "$TMP/success-root-path")
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep -q 'flock -x 9' "$TMP/success-events" && \
+   ! grep -Eq '^docker compose up .* bot-api-forwarder$' "$TMP/success-events" && \
    awk 'index($0,"docker image inspect teagramd:local") {image=NR} $0=="docker compose up -d" {up=NR} END{exit !(image>0 && up>image)}' "$TMP/success-events" && \
    grep -q 'restore network none tmpfs only' "$TMP/success-events" && \
    awk '
