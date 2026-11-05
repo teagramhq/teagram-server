@@ -344,6 +344,8 @@ posting_locks AS MATERIALIZED (
                ARRAY[sqlc.arg(peer_type)::smallint],
                ARRAY[sqlc.arg(peer_id)::bigint]
            ) AS locked
+    -- Consume and lock every source row before taking the dialog bucket.
+    FROM (SELECT count(*) AS locked_rows FROM source_messages) AS rows_locked
 ),
 locked_source_messages AS MATERIALIZED (
     SELECT source.*

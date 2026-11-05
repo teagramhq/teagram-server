@@ -92,6 +92,8 @@ posting_locks AS MATERIALIZED (
                ARRAY[$3::smallint],
                ARRAY[$4::bigint]
            ) AS locked
+    -- Consume and lock every source row before taking the dialog bucket.
+    FROM (SELECT count(*) AS locked_rows FROM source_messages) AS rows_locked
 ),
 locked_source_messages AS MATERIALIZED (
     SELECT source.local_id, source.message_tsv, source.deleted
