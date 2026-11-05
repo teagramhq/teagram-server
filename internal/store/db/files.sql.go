@@ -473,9 +473,39 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
                     AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
                     AND (cp.banned_until IS NULL OR cp.banned_until <= now())
               )
-              -- Custom emoji references live in message entities, not in
-              -- sticker_document_id. Only caller-visible history keeps those
-              -- bytes reachable after an owner removes the item or its set.
+              OR EXISTS (
+                  SELECT 1
+                  FROM poll_message_copies pmc
+                  JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
+                  JOIN polls p ON p.id = pmc.poll_id
+                  WHERE pmc.owner_id = $3 AND m.deleted = false
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+                    AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
+                    AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[f.id::text]
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM channel_poll_messages cpm
+                  JOIN channel_messages cm
+                    ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
+                  JOIN channel_participants cp ON cp.channel_id = cpm.channel_id AND cp.user_id = $3
+                  JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
+                  JOIN polls p ON p.id = cpm.poll_id
+                  WHERE cm.deleted = false AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+                    AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
+                    AND message_custom_emoji_document_ids(p.description_entities) && ARRAY[f.id::text]
+              )
+              -- Custom emoji references live in message entities or poll
+              -- descriptions, not in sticker_document_id. Only caller-visible
+              -- history keeps those bytes reachable after set edits.
               OR EXISTS (
                   SELECT 1 FROM messages m
                   WHERE m.owner_id = $3 AND m.deleted = false
@@ -567,7 +597,7 @@ type FileForDownloadParams struct {
 // The messages file index is partial on file_id <> 0. files.id's positive
 // check makes that predicate redundant for a matching file, but Postgres
 // cannot prove it from file_id = f.id while f is an outer row. Keep the
-// explicit predicate in each message entitlement check below.
+// explicit predicate in each message or poll entitlement check below.
 func (q *Queries) FileForDownload(ctx context.Context, arg FileForDownloadParams) (File, error) {
 	row := q.db.QueryRow(ctx, fileForDownload, arg.ID, arg.AccessHash, arg.OwnerID)
 	var i File

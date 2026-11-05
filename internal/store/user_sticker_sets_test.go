@@ -31,6 +31,181 @@ func createStickerSetWithTestFingerprints(
 	return s.CreateUserStickerSet(ctx, set, items, fingerprints)
 }
 
+func createPollCustomEmojiSet(
+	t *testing.T,
+	ctx context.Context,
+	s *store.Store,
+	owner store.User,
+	title, shortName string,
+	first, second store.File,
+) store.UserStickerSet {
+	t.Helper()
+	set, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
+		CreatorID: owner.ID, Title: title, ShortName: shortName, Kind: "emojis",
+	}, []store.UserStickerSetItem{
+		{FileID: first.ID, AccessHash: first.AccessHash, Size: first.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
+		{FileID: second.ID, AccessHash: second.AccessHash, Size: second.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
+	}, first, second)
+	if err != nil {
+		t.Fatalf("create poll custom emoji set: %v", err)
+	}
+	return set
+}
+
+func pollDraftWithCustomEmojiIDs(fileIDs ...int64) store.PollDraft {
+	draft := ordinaryPollDraft()
+	draft.DescriptionEntities = make([]store.PollDescriptionEntity, len(fileIDs))
+	for i, fileID := range fileIDs {
+		draft.DescriptionEntities[i] = store.PollDescriptionEntity{
+			Type: store.PollDescriptionEntityCustomEmoji, Offset: i, Length: 1, Argument: fileID,
+		}
+	}
+	return draft
+}
+
+func assertPollCustomEmojiReferences(t *testing.T, s *store.Store, ownerID int64, fileIDs []int64) {
+	t.Helper()
+	got, err := s.UserStickerSetMessageReferencedFileIDs(context.Background(), ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve poll custom emoji references for %d: %v", ownerID, err)
+	}
+	if len(got) != len(fileIDs) {
+		t.Errorf("poll custom emoji references for %d = %v, want %v", ownerID, got, fileIDs)
+	}
+	for _, fileID := range fileIDs {
+		if _, ok := got[fileID]; !ok {
+			t.Errorf("poll custom emoji document %d is not visible to %d", fileID, ownerID)
+		}
+	}
+}
+
+func assertPollCustomEmojiDownloads(t *testing.T, s *store.Store, ownerID int64, files []store.File, wantDownload bool) {
+	t.Helper()
+	for _, file := range files {
+		_, err := s.FileForDownload(context.Background(), file.ID, file.AccessHash, ownerID)
+		if wantDownload && err != nil {
+			t.Errorf("download poll custom emoji %d as %d: %v", file.ID, ownerID, err)
+		}
+		if !wantDownload && !errors.Is(err, store.ErrFileNotFound) {
+			t.Errorf("download poll custom emoji %d as %d = %v, want ErrFileNotFound", file.ID, ownerID, err)
+		}
+	}
+}
+
+func TestPollDescriptionCustomEmojiFollowsPrivateMessageVisibility(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559202001")
+	sender := mustUser(t, s, "+15559202002")
+	recipient := mustUser(t, s, "+15559202003")
+	stranger := mustUser(t, s, "+15559202008")
+
+	removedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	removedKeep := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedKeep := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	createPollCustomEmojiSet(t, ctx, s, owner, "Removed", "poll_private_removed", removedItem, removedKeep)
+	deletedSet := createPollCustomEmojiSet(t, ctx, s, owner, "Deleted", "poll_private_deleted", deletedItem, deletedKeep)
+
+	fileIDs := []int64{removedItem.ID, deletedItem.ID}
+	files := []store.File{removedItem, deletedItem}
+	senderMessage, _, _, duplicate, err := s.SendUserPollMessage(
+		ctx, sender.ID, recipient.ID, 92201, "poll", pollDraftWithCustomEmojiIDs(fileIDs...),
+	)
+	if err != nil || duplicate {
+		t.Fatalf("send private poll: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove poll emoji item: %v", err)
+	}
+	if err = s.DeleteUserStickerSet(ctx, owner.ID, deletedSet.ID); err != nil {
+		t.Fatalf("delete poll emoji set: %v", err)
+	}
+	for _, viewerID := range []int64{sender.ID, recipient.ID} {
+		assertPollCustomEmojiReferences(t, s, viewerID, fileIDs)
+		assertPollCustomEmojiDownloads(t, s, viewerID, files, true)
+	}
+	assertNoPollCustomEmojiReferences(t, s, stranger.ID, fileIDs)
+	assertPollCustomEmojiDownloads(t, s, stranger.ID, files, false)
+
+	if _, err = s.DeleteMessages(ctx, sender.ID, []int64{senderMessage.LocalID}, true); err != nil {
+		t.Fatalf("revoke private poll: %v", err)
+	}
+	for _, viewerID := range []int64{sender.ID, recipient.ID} {
+		assertNoPollCustomEmojiReferences(t, s, viewerID, fileIDs)
+		assertPollCustomEmojiDownloads(t, s, viewerID, files, false)
+	}
+}
+
+func TestPollDescriptionCustomEmojiFollowsChannelVisibility(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	owner := mustUser(t, s, "+15559202004")
+	sender := mustUser(t, s, "+15559202005")
+	member := mustUser(t, s, "+15559202006")
+	outsider := mustUser(t, s, "+15559202007")
+
+	removedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	removedKeep := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedItem := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	deletedKeep := stickerSetFileWithBytes(t, s, owner, []byte("hello world"))
+	createPollCustomEmojiSet(t, ctx, s, owner, "Removed", "poll_channel_removed", removedItem, removedKeep)
+	deletedSet := createPollCustomEmojiSet(t, ctx, s, owner, "Deleted", "poll_channel_deleted", deletedItem, deletedKeep)
+
+	fileIDs := []int64{removedItem.ID, deletedItem.ID}
+	files := []store.File{removedItem, deletedItem}
+	channel, _, err := store.SeedChannelWithMember(ctx, s, sender.ID, member.ID)
+	if err != nil {
+		t.Fatalf("seed poll channel: %v", err)
+	}
+	post, _, _, duplicate, err := s.PostChannelPollAs(
+		ctx, channel.ID, sender.ID, 92202, "poll", pollDraftWithCustomEmojiIDs(fileIDs...),
+	)
+	if err != nil || duplicate {
+		t.Fatalf("post channel poll: duplicate=%t err=%v", duplicate, err)
+	}
+	if _, err = s.RemoveUserStickerSetItem(ctx, owner.ID, removedItem.ID, removedItem.AccessHash); err != nil {
+		t.Fatalf("remove poll emoji item: %v", err)
+	}
+	if err = s.DeleteUserStickerSet(ctx, owner.ID, deletedSet.ID); err != nil {
+		t.Fatalf("delete poll emoji set: %v", err)
+	}
+	for _, viewerID := range []int64{sender.ID, member.ID} {
+		assertPollCustomEmojiReferences(t, s, viewerID, fileIDs)
+		assertPollCustomEmojiDownloads(t, s, viewerID, files, true)
+	}
+	assertNoPollCustomEmojiReferences(t, s, outsider.ID, fileIDs)
+	assertPollCustomEmojiDownloads(t, s, outsider.ID, files, false)
+
+	left, err := s.LeaveChannel(ctx, channel.ID, member.ID)
+	if err != nil || !left {
+		t.Fatalf("member leave channel: left=%t err=%v", left, err)
+	}
+	assertNoPollCustomEmojiReferences(t, s, member.ID, fileIDs)
+	assertPollCustomEmojiDownloads(t, s, member.ID, files, false)
+	assertPollCustomEmojiReferences(t, s, sender.ID, fileIDs)
+	assertPollCustomEmojiDownloads(t, s, sender.ID, files, true)
+
+	if _, _, err = s.DeleteChannelMessages(ctx, channel.ID, sender.ID, []int64{post.LocalID}); err != nil {
+		t.Fatalf("revoke channel poll: %v", err)
+	}
+	assertNoPollCustomEmojiReferences(t, s, sender.ID, fileIDs)
+	assertPollCustomEmojiDownloads(t, s, sender.ID, files, false)
+}
+
+func assertNoPollCustomEmojiReferences(t *testing.T, s *store.Store, ownerID int64, fileIDs []int64) {
+	t.Helper()
+	got, err := s.UserStickerSetMessageReferencedFileIDs(context.Background(), ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve revoked poll custom emoji references for %d: %v", ownerID, err)
+	}
+	if len(got) != 0 {
+		t.Errorf("revoked poll custom emoji references for %d = %v, want none", ownerID, got)
+	}
+}
+
 func TestRemoveStickerSetThumbnailItemClearsReferenceAndChangesHash(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

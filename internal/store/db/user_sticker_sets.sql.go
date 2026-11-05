@@ -2010,6 +2010,18 @@ visible_channels AS MATERIALIZED (
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
       AND message_custom_emoji_document_ids(cm.entities) && $2::text[]
+), channel_poll_candidates AS MATERIALIZED (
+    SELECT p.description_entities AS entities
+    FROM visible_channels vc
+    JOIN channel_poll_messages cpm ON cpm.channel_id = vc.channel_id
+    JOIN channel_messages cm
+      ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
+    JOIN polls p ON p.id = cpm.poll_id
+    WHERE cm.local_id > vc.available_min_id
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
+      AND message_custom_emoji_document_ids(p.description_entities) && $2::text[]
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
@@ -2022,6 +2034,19 @@ visible_channels AS MATERIALIZED (
     UNION ALL
     SELECT cm.entities
     FROM channel_candidates cm
+    UNION ALL
+    SELECT p.description_entities
+    FROM poll_message_copies pmc
+    JOIN messages m ON m.owner_id = pmc.owner_id AND m.local_id = pmc.local_id
+    JOIN polls p ON p.id = pmc.poll_id
+    WHERE pmc.owner_id = $3
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND cardinality(message_custom_emoji_document_ids(p.description_entities)) > 0
+      AND message_custom_emoji_document_ids(p.description_entities) && $2::text[]
+    UNION ALL
+    SELECT cpc.entities
+    FROM channel_poll_candidates cpc
 )
 SELECT DISTINCT requested.file_id::bigint
 FROM visible_entities
@@ -2044,8 +2069,8 @@ type UserStickerSetMessageReferencedFileIDsParams struct {
 	OwnerID    int64
 }
 
-// Only a caller-visible stored message keeps a removed or deleted custom emoji
-// document resolvable. Current set members are served directly from set state.
+// Only a caller-visible stored message or poll copy keeps a removed or deleted
+// custom emoji document resolvable. Current set members are served from set state.
 func (q *Queries) UserStickerSetMessageReferencedFileIDs(ctx context.Context, arg UserStickerSetMessageReferencedFileIDsParams) ([]int64, error) {
 	rows, err := q.db.Query(ctx, userStickerSetMessageReferencedFileIDs, arg.EntityType, arg.FileIds, arg.OwnerID)
 	if err != nil {

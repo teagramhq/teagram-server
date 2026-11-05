@@ -1426,7 +1426,7 @@ func (s *Store) UserStickerSetsByFileIDs(ctx context.Context, fileIDs []int64) (
 }
 
 // UserStickerSetMessageReferencedFileIDs returns historical custom emoji IDs
-// still referenced by messages visible to ownerID.
+// still referenced by message or poll copies visible to ownerID.
 func (s *Store) UserStickerSetMessageReferencedFileIDs(ctx context.Context, ownerID int64, fileIDs []int64) (map[int64]struct{}, error) {
 	result := make(map[int64]struct{}, len(fileIDs))
 	if ownerID <= 0 || len(fileIDs) == 0 {
@@ -1449,7 +1449,7 @@ func (s *Store) UserStickerSetMessageReferencedFileIDs(ctx context.Context, owne
 		OwnerID: ownerID, FileIds: fileIDTexts, EntityType: int32(PollDescriptionEntityCustomEmoji),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("find visible messages referencing historical custom emoji: %w", err)
+		return nil, fmt.Errorf("find visible messages or polls referencing historical custom emoji: %w", err)
 	}
 	for _, id := range rows {
 		result[id] = struct{}{}

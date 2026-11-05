@@ -65,7 +65,7 @@ func (h *handlers) handleGetCustomEmojiDocuments(r *mtproto.Request) (bin.Encode
 	}
 	messageReferencedIDs, err := h.store.UserStickerSetMessageReferencedFileIDs(r.Ctx, r.UserID, historicalIDs)
 	if err != nil {
-		h.log.Error("check historical custom emoji message references", "user_id", r.UserID, "err", err)
+		h.log.Error("check historical custom emoji message or poll references", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
 
