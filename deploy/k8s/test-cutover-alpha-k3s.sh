@@ -186,30 +186,17 @@ kubectl wait --for=condition=Ready pod/cutover-volume-importer \
 # another: a receiver such as tar stops reading at the end-of-archive marker,
 # and the sending kubectl then dies of SIGPIPE (exit 141) while still writing
 # the archive padding.
-# kubectl exec can cut a large stream short without reporting an error, so the
-# dump is hashed where it is written and every hop is verified and retried.
-source_dump_hash=$(kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- \
-  sh -ec 'umask 077; pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram --file=/tmp/cutover-source.dump; sha256sum /tmp/cutover-source.dump' |
-  awk '{print $1}')
-[[ $source_dump_hash =~ ^[0-9a-f]{64}$ ]]
-for attempt in 1 2 3 4 5 6; do
-  kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- \
-    cat /tmp/cutover-source.dump > "$tmp_dir/source.dump"
-  local_hash=$(sha256sum "$tmp_dir/source.dump" | awk '{print $1}')
-  [[ $local_hash == "$source_dump_hash" ]] && break
-  printf 'dump download attempt %s: %s bytes, hash mismatch\n' "$attempt" "$(wc -c < "$tmp_dir/source.dump")" >&2
-done
-[[ $local_hash == "$source_dump_hash" ]]
-for attempt in 1 2 3 4 5 6; do
-  kubectl exec --namespace "$TARGET_NAMESPACE" --stdin postgres-0 -c postgres -- \
-    sh -ec 'umask 077; install -d -m 0700 /var/lib/postgresql/cutover-backups; cat > /var/lib/postgresql/cutover-backups/source.dump' \
-    < "$tmp_dir/source.dump"
-  target_hash=$(kubectl exec --namespace "$TARGET_NAMESPACE" postgres-0 -c postgres -- \
-    sha256sum /var/lib/postgresql/cutover-backups/source.dump | awk '{print $1}')
-  [[ $target_hash == "$source_dump_hash" ]] && break
-  printf 'dump upload attempt %s: hash mismatch\n' "$attempt" >&2
-done
-[[ $target_hash == "$source_dump_hash" ]]
+# The disposable source and target namespaces share the cluster network. Have
+# the target PostgreSQL pod pull the snapshot from the source Service so the
+# database archive never traverses a runner-side kubectl exec stream.
+# shellcheck disable=SC2016 # The inner shell expands the target pod's secret.
+kubectl exec --namespace "$TARGET_NAMESPACE" postgres-0 -c postgres -- \
+  sh -ec 'umask 077
+    install -d -m 0700 /var/lib/postgresql/cutover-backups
+    PGPASSWORD="$POSTGRES_PASSWORD" pg_dump --host=postgres.teagram.svc.cluster.local --port=5432 \
+      --format=custom --no-owner --no-acl --username=postgres --dbname=teagram \
+      --file=/var/lib/postgresql/cutover-backups/source.dump
+    pg_restore --list /var/lib/postgresql/cutover-backups/source.dump >/dev/null'
 
 source_pod=$(kubectl get pods --namespace "$SOURCE_NAMESPACE" \
   --selector=app.kubernetes.io/name=teagramd --output 'jsonpath={.items[0].metadata.name}')

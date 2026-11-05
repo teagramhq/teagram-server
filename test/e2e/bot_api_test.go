@@ -306,6 +306,9 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	secondURL := startSmokeBotAPIServerWithHandler(t, f, secondHandler)
 	startSmokeBotAPINotifyListener(t, f, firstHandler)
 	startSmokeBotAPINotifyListener(t, f, secondHandler)
+	if err := store.WaitForNotificationListener(f.ctx, f.store, 3); err != nil {
+		t.Fatalf("wait for the server and Bot API notification listeners: %v", err)
+	}
 	client := &http.Client{Timeout: 45 * time.Second}
 
 	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
