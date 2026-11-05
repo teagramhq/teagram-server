@@ -521,6 +521,61 @@ func TestLegacyCustomEmojiEntityDoesNotGrantPlainFileDownload(t *testing.T) {
 	}
 }
 
+func TestLegacyChannelCustomEmojiEntityDoesNotGrantPlainFileDownload(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	alice := mustUser(t, s, "+15559100065")
+	sender := mustUser(t, s, "+15559100066")
+	member := mustUser(t, s, "+15559100067")
+
+	f := allocate(t, s, alice.ID, 11)
+	if err := s.MarkFileStored(ctx, f.ID); err != nil {
+		t.Fatalf("mark stored: %v", err)
+	}
+	original, _, _, _, err := s.SendMessage(ctx, alice.ID, sender.ID, "photo", 1, f.ID, 0) //nolint:dogsled // only message row needed
+	if err != nil {
+		t.Fatalf("send original file: %v", err)
+	}
+
+	channel, _, err := store.SeedChannelWithMember(ctx, s, sender.ID, member.ID)
+	if err != nil {
+		t.Fatalf("seed channel: %v", err)
+	}
+	post, _, _, err := s.PostChannelMessageAs(ctx, channel.ID, sender.ID, "x", 0, nil, 0)
+	if err != nil {
+		t.Fatalf("send channel post: %v", err)
+	}
+	encoded, err := store.EncodeMessageEntities([]store.PollDescriptionEntity{{
+		Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: f.ID,
+	}})
+	if err != nil {
+		t.Fatalf("encode legacy custom emoji entity: %v", err)
+	}
+	result, err := store.StorePool(s).Exec(ctx,
+		`UPDATE channel_messages SET entities = $1::jsonb WHERE channel_id = $2 AND local_id = $3`,
+		encoded, channel.ID, post.LocalID,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy channel entity row: %v", err)
+	}
+	if result.RowsAffected() != 1 {
+		t.Fatalf("legacy channel entity update affected %d rows, want 1", result.RowsAffected())
+	}
+
+	if _, err := s.DeleteMessages(ctx, alice.ID, []int64{original.LocalID}, true); err != nil {
+		t.Fatalf("revoke original file message: %v", err)
+	}
+	for _, viewer := range []struct {
+		name string
+		id   int64
+	}{{name: "sender", id: sender.ID}, {name: "second channel member", id: member.ID}} {
+		if _, err := s.FileForDownload(ctx, f.ID, f.AccessHash, viewer.id); !errors.Is(err, store.ErrFileNotFound) {
+			t.Errorf("legacy channel entity after revocation for %s: want ErrFileNotFound, got %v", viewer.name, err)
+		}
+	}
+}
+
 func TestFileForDownloadRejectsUnstoredFile(t *testing.T) {
 	t.Parallel()
 	s := open(t)
