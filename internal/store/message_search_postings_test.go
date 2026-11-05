@@ -1062,3 +1062,164 @@ func TestBatchDeleteLocksAllRowsBeforePostingBuckets(t *testing.T) {
 		t.Fatal("batch delete did not finish after initializer released its chunk row")
 	}
 }
+
+func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551510001")
+	member := mustUser(t, s, "+15551510002")
+	chat := chatWith(t, s, owner, member)
+
+	var first store.Message
+	for i, text := range []string{"deletechat one", "deletechat two", "deletechat three", "deletechat four"} {
+		message, _ := sendChat(t, s, store.FanOut{
+			ChatID: chat.ID, FromID: owner.ID, Text: text, RandomID: int64(730001 + i),
+		})
+		if i == 0 {
+			first = message
+		}
+	}
+	pool := store.StorePool(s)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id, last_local_id)
+		VALUES ($1, $2, $3, 2)
+	`, owner.ID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("mark chat dialog partially initialized: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION public.test_pause_delete_chat_first_copy() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF OLD.owner_id = %d AND OLD.peer_type = %d AND OLD.peer_id = %d AND OLD.local_id = %d THEN
+				PERFORM pg_sleep(3);
+			END IF;
+			RETURN NEW;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_delete_chat_first_copy
+		AFTER UPDATE OF deleted ON public.messages
+		FOR EACH ROW
+		WHEN (OLD.deleted = false AND NEW.deleted = true)
+		EXECUTE FUNCTION public.test_pause_delete_chat_first_copy();
+	`, owner.ID, int16(store.PeerTypeChat), chat.ID, first.LocalID)); err != nil {
+		t.Fatalf("install DeleteChat pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_delete_chat_first_copy ON public.messages;
+			DROP FUNCTION IF EXISTS public.test_pause_delete_chat_first_copy();
+		`); err != nil {
+			t.Errorf("remove DeleteChat pause fixture: %v", err)
+		}
+	}()
+
+	type deleteResult struct{ err error }
+	deleteCtx, cancelDelete := context.WithTimeout(ctx, 12*time.Second)
+	defer cancelDelete()
+	deleteDone := make(chan deleteResult, 1)
+	go func() {
+		_, err := s.DeleteChat(deleteCtx, chat.ID, owner.ID)
+		deleteDone <- deleteResult{err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%UPDATE messages SET deleted%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check DeleteChat first-copy pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-deleteDone:
+				t.Fatalf("DeleteChat returned before its first-copy pause: %v", result.err)
+			default:
+				t.Fatal("DeleteChat did not pause after deleting its first copy")
+			}
+		}
+		select {
+		case result := <-deleteDone:
+			t.Fatalf("DeleteChat returned before its first-copy pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	initCtx, cancelInit := context.WithTimeout(ctx, 12*time.Second)
+	defer cancelInit()
+	type initResult struct {
+		initialized int64
+		err         error
+	}
+	initDone := make(chan initResult, 1)
+	go func() {
+		initialized, err := s.InitializeMessageSearchPostings(initCtx, 2)
+		initDone <- initResult{initialized: initialized, err: err}
+	}()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var initializerWaiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
+			)
+		`).Scan(&initializerWaiting); err != nil {
+			t.Fatalf("check initializer wait during DeleteChat: %v", err)
+		}
+		if initializerWaiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case result := <-initDone:
+				t.Fatalf("initializer returned before overlapping DeleteChat: initialized=%d err=%v", result.initialized, result.err)
+			default:
+				t.Fatal("initializer did not wait on DeleteChat's lock set")
+			}
+		}
+		select {
+		case result := <-initDone:
+			t.Fatalf("initializer returned before overlapping DeleteChat: initialized=%d err=%v", result.initialized, result.err)
+		case result := <-deleteDone:
+			t.Fatalf("DeleteChat returned before initializer waited: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	select {
+	case result := <-deleteDone:
+		if result.err != nil {
+			t.Fatalf("DeleteChat while initializer waits on a chunk: %v", result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteChat did not finish after its pause")
+	}
+	select {
+	case result := <-initDone:
+		if result.err != nil {
+			t.Fatalf("initialize after DeleteChat released its locks: %v", result.err)
+		}
+		if result.initialized != 1 {
+			t.Fatalf("initialized dialogs = %d, want 1", result.initialized)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("initializer did not finish after DeleteChat released its locks")
+	}
+}
