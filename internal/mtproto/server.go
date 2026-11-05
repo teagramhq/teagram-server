@@ -1288,11 +1288,18 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
-	conn.ackFailed = func(err error) {
+	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
 		if !isDisconnect(err) {
 			failure := requestFailureContext(nil, err)
-			failure.errorCategory = RPCResultTransportFailure
+			if failure.cause == requestFailureTransport {
+				failure.errorCategory = RPCResultTransportFailure
+			}
 			details := append([]any{"operation", "msgs_ack"}, failure.logAttrs()...)
+			if len(rpcTypeIDs) == 1 {
+				details = append(details, "rpc_type_id", rpcTypeIDs[0])
+			} else if len(rpcTypeIDs) > 1 {
+				details = append(details, "rpc_type_ids", rpcTypeIDs)
+			}
 			s.logServerFailure(serverFailureRequest, details...)
 		}
 	}

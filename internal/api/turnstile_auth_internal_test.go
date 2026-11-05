@@ -17,25 +17,30 @@ import (
 
 type replayTurnstileVerifier struct {
 	seen      map[string]bool
+	verified  map[string]string
 	actions   []string
 	remoteIPs []string
 	failure   error
 }
 
-func (v *replayTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
+func (v *replayTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
+	action := "signin"
+	if verified, ok := v.verified[token]; ok {
+		action = verified
+	}
 	v.actions = append(v.actions, action)
 	v.remoteIPs = append(v.remoteIPs, remoteIP)
 	if v.failure != nil {
-		return v.failure
+		return "", v.failure
 	}
-	if action != "signin" {
-		return errors.New("wrong action")
+	if !turnstileActionAllowed(allowedActions, action) {
+		return "", errors.New("wrong action")
 	}
 	if v.seen[token] {
-		return errors.New("replayed token")
+		return "", errors.New("replayed token")
 	}
 	v.seen[token] = true
-	return nil
+	return action, nil
 }
 
 func TestAuthSendCodeRequiresAndConsumesTurnstileToken(t *testing.T) {
@@ -58,6 +63,21 @@ func TestAuthSendCodeRequiresAndConsumesTurnstileToken(t *testing.T) {
 	assertSigninTurnstileRequired(t, err)
 	if len(verifier.actions) != 2 || verifier.actions[0] != "signin" || verifier.actions[1] != "signin" {
 		t.Fatalf("verified actions = %v, want [signin signin]", verifier.actions)
+	}
+}
+
+func TestAuthSendCodeAcceptsSignupActionWhileSigninGateIsOn(t *testing.T) {
+	verifier := &replayTurnstileVerifier{
+		seen:     make(map[string]bool),
+		verified: map[string]string{"signup-token": "signup"},
+	}
+	h := &handlers{turnstileSiteKey: "site-key", turnstileVerifier: verifier, turnstileSignInEnabled: true}
+	_, err := h.handleSendCode(turnstileAuthRequest(t, &tg.AuthSendCodeRequest{PhoneNumber: "x"}, "signup-token"))
+	if got := rpcErrorMessage(err); got != "PHONE_NUMBER_INVALID" {
+		t.Fatalf("sendCode with signup action returned %q, want PHONE_NUMBER_INVALID after challenge verification", got)
+	}
+	if len(verifier.actions) != 1 || verifier.actions[0] != "signup" {
+		t.Fatalf("verified actions = %v, want one Siteverify result [signup]", verifier.actions)
 	}
 }
 
@@ -173,18 +193,18 @@ type consumingTurnstileVerifier struct {
 	calls    int
 }
 
-func (v *consumingTurnstileVerifier) Verify(_ context.Context, token, action, _ string) error {
+func (v *consumingTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, _ string) (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.calls++
-	if action != "signin" {
-		return errors.New("unexpected action")
+	if !turnstileActionAllowed(allowedActions, "signin") {
+		return "", errors.New("unexpected action")
 	}
 	if v.consumed[token] {
-		return errors.New("token already consumed")
+		return "", errors.New("token already consumed")
 	}
 	v.consumed[token] = true
-	return nil
+	return "signin", nil
 }
 
 func TestSigninTurnstileConcurrentReplayAdmitsAtMostOneAttempt(t *testing.T) {

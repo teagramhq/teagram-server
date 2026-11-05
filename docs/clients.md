@@ -207,13 +207,16 @@ opts local Compose into test mode explicitly and overrides the allowlist to
 `localhost,127.0.0.1`.
 
 The demo can set `TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` to a root-provisioned
-token file. A matching token bypasses Siteverify only for `auth.signUp`, is
-compared in constant time, and is never logged. The signup IP limit and all
-other registration checks still apply. Configuration rejects the token on any
-stack other than `demo.teagram.io`. Set `TG_TURNSTILE_SIGNIN_ENABLED=true` to
-also challenge username sign-in at `auth.sendCode`; this switch defaults to
-`false`, and other RPCs remain ungated. Behind `TG_CLIENT_ADDR_TRUST=proxy-v2`,
-the server also sends the client IP to Cloudflare for verification.
+token file. A matching token bypasses Siteverify only as the `signup` action,
+is compared in constant time, and is never logged. The isolated demo deploy
+probe may wrap `auth.sendCode` with this token to reach the signup path while
+the sign-in gate is on; that code is bound to signup and cannot authorize a
+sign-in. The signup IP limit and all other registration checks still apply.
+Configuration rejects the token on any stack other than `demo.teagram.io`.
+Set `TG_TURNSTILE_SIGNIN_ENABLED=true` to also challenge username sign-in at
+`auth.sendCode`; this switch defaults to `false`, and other RPCs remain
+ungated. Behind `TG_CLIENT_ADDR_TRUST=proxy-v2`, the server also sends the
+client IP to Cloudflare for verification.
 
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;

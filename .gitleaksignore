@@ -1,3 +1,6 @@
 # Synthetic QA bypass inputs in a unit test, not credentials.
 89c023c4a3d1228ef9865e96192c40aa8a960477:internal/api/turnstile_internal_test.go:generic-api-key:329
 89c023c4a3d1228ef9865e96192c40aa8a960477:internal/api/turnstile_internal_test.go:generic-api-key:356
+# Synthetic bootstrap test fixtures in 2f8236a5, fake values, removed at 2a422d86 but still in the PR range.
+2f8236a558324e605bfcfa9794ea3e5563877326:deploy/k8s/test-bootstrap-alpha.sh:generic-api-key:30
+2f8236a558324e605bfcfa9794ea3e5563877326:deploy/k8s/test-bootstrap-alpha.sh:generic-api-key:35

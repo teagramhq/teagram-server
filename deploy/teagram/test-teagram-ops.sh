@@ -209,11 +209,13 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media'* ]]
   [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
     "$help_output" == *'verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
+  [[ "$help_output" == *'encrypt-media backs up and encrypts referenced media'* ]]
+  [[ "$help_output" == *'cleanup-media --acceptance-passed removes plaintext media'* ]]
 done
 
 active_operation_count=0
@@ -260,6 +262,8 @@ expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
 expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
 expect_status 64 "run $OLD_MAIN_SHA replay-check"
 expect_status 66 "run $OLD_MAIN_SHA start-server"
+expect_status 66 "run $OLD_MAIN_SHA encrypt-media"
+expect_status 66 "run $OLD_MAIN_SHA cleanup-media"
 [[ ! -e "$MOCK_RETIRED_SCRIPT_MARKER" ]]
 for bad_name in 'nested/name' . .. 'Uppercase'; do
   expect_status 64 "run $OPS_SHA $bad_name $TARGET_SHA"

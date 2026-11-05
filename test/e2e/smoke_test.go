@@ -67,6 +67,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignUp(t)
 	})
+	t.Run("turnstile-signup-from-send-code", func(t *testing.T) {
+		t.Parallel()
+		testSmokeTurnstileSignUpFromSendCode(t)
+	})
 	t.Run("turnstile-signin", func(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignIn(t)
