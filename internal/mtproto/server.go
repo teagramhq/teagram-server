@@ -79,6 +79,21 @@ var (
 	errIdleReadTimeout           = errors.New("connection idle timeout")
 )
 
+type webSocketServeFailureError struct {
+	stage        string
+	cause        string
+	err          error
+	peerAddr     netip.Addr
+	authKeyID    [8]byte
+	hasAuthKeyID bool
+}
+
+func (e *webSocketServeFailureError) Error() string {
+	return "WebSocket serve loop " + e.stage + ": " + safeWebSocketErrorText(e.err, e.cause)
+}
+
+func (e *webSocketServeFailureError) Unwrap() error { return e.err }
+
 type authKeyNotFoundReason string
 
 const (
@@ -94,6 +109,7 @@ const (
 	serverFailureRequest        serverFailureCategory = "request_handling"
 	serverFailureAuthKeyLookup  serverFailureCategory = "auth_key_lookup"
 	serverFailureIdleTimeout    serverFailureCategory = "idle_timeout"
+	serverFailureWebSocket      serverFailureCategory = "websocket_serve"
 )
 
 // Server is an MTProto server: it accepts transport connections, performs key
@@ -190,6 +206,7 @@ type Server struct {
 	exchangeErrorLog        logSampler
 	requestHandlingErrorLog logSampler
 	idleTimeoutErrorLog     logSampler
+	webSocketServeErrorLog  logSampler
 	// Keep the two server-generated -404 paths independently sampled across all
 	// connections handled by this server.
 	lookupMissLog         logSampler
@@ -732,6 +749,10 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 }
 
 func (s *Server) logConnectionFailure(err error) {
+	if diagnostic, ok := errors.AsType[*webSocketServeFailureError](err); ok && diagnostic != nil {
+		s.logWebSocketServeFailure(diagnostic)
+		return
+	}
 	category := serverFailureRequest
 	var details []any
 	switch {
@@ -768,22 +789,196 @@ func (s *Server) logConnectionFailure(err error) {
 	s.logServerFailure(category, details...)
 }
 
-func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
-	reason := classifyTransportCloseReason(err)
-	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
-		s.log.Debug("transport connection closed",
-			"transport", diagnostics.transport,
-			"step", string(diagnostics.step),
-			"reason", string(reason),
+func (s *Server) logWebSocketServeFailure(failure *webSocketServeFailureError) {
+	details := []any{
+		"operation", "websocket_serve_loop",
+		"stage", failure.stage,
+		"cause", failure.cause,
+		"error", safeWebSocketErrorText(failure.err, failure.cause),
+	}
+	if diagnostic, ok := errors.AsType[*rpcRequestError](failure.err); ok && diagnostic != nil {
+		details = append(details,
+			"rpc_method", diagnostic.method,
+			"request_id", diagnostic.requestID,
+			"error_category", string(diagnostic.errorCategory),
 		)
+		details = withSafeRPCErrorCode(details, diagnostic.err)
+	}
+	if failure.hasAuthKeyID {
+		details = append(details,
+			"auth_key_id", hex.EncodeToString(failure.authKeyID[:]),
+			"peer_addr", failure.peerAddr.String(),
+		)
+	}
+	s.logServerFailure(serverFailureWebSocket, details...)
+}
+
+func (s *Server) logPendingLoginLeaseFailure(err error, transportName string) {
+	if transportName == websocketPath {
+		s.log.Error("maintain pending login limit lease", "error", safeWebSocketErrorText(err, "pending_login"))
 		return
 	}
-	attrs := make([]any, 0, 8)
-	attrs = append(attrs,
+	s.log.Error("maintain pending login limit lease", "err", err)
+}
+
+func newWebSocketServeFailure(stage string, err error, peerAddr netip.Addr, diagnostics *transportCloseDiagnostics) *webSocketServeFailureError {
+	if exchangeErr, ok := errors.AsType[*exchangeFailureError](err); ok && exchangeErr != nil {
+		stage = string(exchangeErr.stage)
+	}
+	failure := &webSocketServeFailureError{
+		stage:    stage,
+		cause:    classifyWebSocketServeCause(stage, err),
+		err:      err,
+		peerAddr: peerAddr,
+	}
+	if diagnostics != nil && diagnostics.hasAuthKeyID {
+		failure.authKeyID = diagnostics.authKeyID
+		failure.hasAuthKeyID = true
+		failure.peerAddr = diagnostics.peerAddr
+	}
+	return failure
+}
+
+func classifyWebSocketServeCause(stage string, err error) string {
+	switch {
+	case errors.Is(err, errIdleReadTimeout), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, errAuthKeyLookupFailure):
+		return "auth_key_lookup"
+	case errors.Is(err, errAuthKeyPersistenceFailure):
+		return "key_persistence"
+	case errors.Is(err, errAuthKeyExchangeFailure):
+		if diagnostic, ok := errors.AsType[*exchangeFailureError](err); ok && diagnostic != nil {
+			switch diagnostic.cause {
+			case exchangeCauseTimeout:
+				return "timeout"
+			case exchangeCausePeerClose:
+				return "peer_close"
+			case exchangeCauseUnexpected, exchangeCauseDecode:
+				return "protocol_decode"
+			case exchangeCauseWrite:
+				return "transport"
+			}
+		}
+		return "exchange"
+	}
+	if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok && diagnostic != nil {
+		if diagnostic.cause != requestFailureOther {
+			return string(diagnostic.cause)
+		}
+		return "request_processing"
+	}
+	if diagnostic, ok := errors.AsType[*requestFailureCauseError](err); ok && diagnostic != nil && diagnostic.cause != requestFailureOther {
+		return string(diagnostic.cause)
+	}
+	if errors.Is(err, errRequestHandlingFailure) {
+		return "request_processing"
+	}
+	if isWebSocketProtocolDecodeError(err) {
+		return "protocol_decode"
+	}
+	if networkErr, ok := errors.AsType[net.Error](err); ok {
+		if networkErr.Timeout() {
+			return "timeout"
+		}
+		return "transport"
+	}
+	switch stage {
+	case "read_frame", "write_auth_key_not_found", "connection_cleanup":
+		return "transport"
+	case "read_auth_key_id", "validate_auth_key_id":
+		return "protocol_decode"
+	case "key_exchange":
+		return "exchange"
+	case "auth_key_lookup", "refresh_auth_key":
+		return "auth_key_lookup"
+	case "maintain_pending_login_lease":
+		return "pending_login"
+	case "dispatch_rpc":
+		return "request_processing"
+	default:
+		return "internal"
+	}
+}
+
+// safeWebSocketErrorText exposes fixed summaries so arbitrary errors cannot
+// leak auth-key, payload, or token bytes embedded in their messages.
+func safeWebSocketErrorText(err error, cause string) string {
+	switch {
+	case errors.Is(err, errIdleReadTimeout):
+		return "idle read timeout"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	case errors.Is(err, context.Canceled):
+		return "operation canceled"
+	case errors.Is(err, errAuthKeyLookupFailure):
+		return "auth key lookup failed"
+	case errors.Is(err, errAuthKeyPersistenceFailure):
+		return "auth key persistence failed"
+	case errors.Is(err, errAuthKeyExchangeFailure):
+		return "auth key exchange failed"
+	case errors.Is(err, errRequestHandlingFailure):
+		return "request handling failed"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "peer closed the connection"
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		return "connection closed"
+	}
+	if unexpected, ok := errors.AsType[*bin.UnexpectedIDErr](err); ok && unexpected != nil {
+		return "unexpected protocol constructor"
+	}
+	if invalidLength, ok := errors.AsType[*bin.InvalidLengthError](err); ok && invalidLength != nil {
+		return "invalid protocol length"
+	}
+	switch cause {
+	case "timeout":
+		return "transport timeout"
+	case "peer_close":
+		return "peer closed the connection"
+	case "transport":
+		return "transport failure"
+	case "protocol_decode":
+		return "protocol decode failure"
+	case "auth_key_lookup":
+		return "auth key lookup failed"
+	case "key_persistence":
+		return "auth key persistence failed"
+	case "exchange":
+		return "key exchange failure"
+	case "request_processing":
+		return "request processing failure"
+	case "pending_login":
+		return "pending login state failure"
+	default:
+		return "internal error"
+	}
+}
+
+func isWebSocketProtocolDecodeError(err error) bool {
+	unexpected, hasUnexpected := errors.AsType[*bin.UnexpectedIDErr](err)
+	invalidLength, hasInvalidLength := errors.AsType[*bin.InvalidLengthError](err)
+	return hasUnexpected && unexpected != nil || hasInvalidLength && invalidLength != nil
+}
+
+func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
+	reason := classifyTransportCloseReason(err)
+	attrs := []any{
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
 		"reason", string(reason),
-	)
+	}
+	if diagnostics.transport == websocketPath && diagnostics.hasAuthKeyID {
+		attrs = append(attrs,
+			"auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]),
+			"peer_addr", diagnostics.peerAddr.String(),
+		)
+	}
+	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
+		s.log.Debug("transport connection closed", attrs...)
+		return
+	}
 	sampler := &s.preAuthCloseLog
 	if diagnostics.step == transportCloseStepAuthorized {
 		sampler = &s.authorizedCloseLog
@@ -805,6 +1000,8 @@ func (s *Server) logServerFailure(category serverFailureCategory, details ...any
 		sampler = &s.exchangeErrorLog
 	case serverFailureIdleTimeout:
 		sampler = &s.idleTimeoutErrorLog
+	case serverFailureWebSocket:
+		sampler = &s.webSocketServeErrorLog
 	case serverFailureRequest:
 		sampler = &s.requestHandlingErrorLog
 	default:
@@ -927,6 +1124,23 @@ func (s *Server) serveConnWithHandlerContextsAndTransportDiagnostics(readCtx, re
 }
 
 func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
+	if closeDiagnostics == nil {
+		closeDiagnostics = newTransportCloseDiagnostics(transportTCP)
+	}
+	if closeDiagnostics.transport == websocketPath {
+		closeDiagnostics.setPeerAddr(clientAddr)
+	}
+	failureStage := "connection_cleanup"
+	defer func() {
+		if closeDiagnostics.transport != websocketPath || rErr == nil || isDisconnect(rErr) {
+			return
+		}
+		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {
+			return
+		}
+		rErr = newWebSocketServeFailure(failureStage, rErr, clientAddr, closeDiagnostics)
+	}()
+
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
@@ -961,6 +1175,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	defer func() {
 		conn.stopAcks()
 		if err := conn.closeServer(); err != nil && rErr == nil && !isDisconnect(err) {
+			failureStage = "connection_cleanup"
 			rErr = err
 		}
 		if peerReader != nil {
@@ -1136,6 +1351,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		} else if readDeadline.IsZero() && pendingLoginDeadline.IsZero() {
 			idleDeadline = true
 		}
+		failureStage = "read_frame"
 		if err := readFrame(readDeadline, idleDeadline); err != nil {
 			if errors.Is(err, errServerDraining) || s.shutdown.draining() {
 				retire()
@@ -1158,8 +1374,12 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 
 		var authKeyID [8]byte
+		failureStage = "read_auth_key_id"
 		if err := b.PeekN(authKeyID[:], len(authKeyID)); err != nil {
 			return errors.Join(errors.New("peek id"), err)
+		}
+		if closeDiagnostics.transport == websocketPath {
+			closeDiagnostics.observeAuthKeyID(authKeyID)
 		}
 
 		if authKeyID == ([8]byte{}) {
@@ -1178,6 +1398,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if peerReader != nil {
 				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
 			}
+			failureStage = "key_exchange"
 			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics, &exchangeAttempts, slot.rateLimitListener()); err != nil {
 				if errors.Is(err, errKeyExchangeRateLimited) {
 					return nil
@@ -1188,11 +1409,15 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 				}
 				b.ResetTo(unexpected.Frame)
 				authKeyID = unexpected.AuthKeyID
+				if closeDiagnostics.transport == websocketPath {
+					closeDiagnostics.observeAuthKeyID(authKeyID)
+				}
 			} else {
 				continue
 			}
 		}
 
+		failureStage = "auth_key_lookup"
 		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 		if err != nil {
 			return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
@@ -1212,12 +1437,14 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 				// The deferred cleanup deregisters and disowns the conn.
 				return nil
 			}
+			failureStage = "write_auth_key_not_found"
 			if err := s.sendProtoError(requestCtx, tconn, codec.CodeAuthKeyNotFound); err != nil {
 				return err
 			}
 			s.logAuthKeyNotFound(authKeyLookupMiss, authKeyID, clientAddr)
 			continue
 		}
+		failureStage = "validate_auth_key_id"
 		if key.ID != authKeyID {
 			return errors.New("auth key ID mismatch")
 		}
@@ -1237,9 +1464,10 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// this socket against the shared pending-login cap and arm its
 		// database-started lease before dispatching the first request.
 		if pendingLogin.UserID != 0 {
+			failureStage = "maintain_pending_login_lease"
 			admitted, err := observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining)
 			if err != nil {
-				s.log.Error("maintain pending login limit lease", "err", err)
+				s.logPendingLoginLeaseFailure(err, closeDiagnostics.transport)
 				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
@@ -1258,6 +1486,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
 		conn.authorizationBindingRecorded = false
+		failureStage = "dispatch_rpc"
 		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, handler, func() error {
 			if userID != 0 {
 				closeDiagnostics.markAuthorized()
@@ -1289,9 +1518,10 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// shared slot through the connection and extend it when this timestamp
 		// moves forward.
 		if conn.PendingLogin() {
+			failureStage = "maintain_pending_login_lease"
 			admitted, err := observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining())
 			if err != nil {
-				s.log.Error("maintain pending login limit lease", "err", err)
+				s.logPendingLoginLeaseFailure(err, closeDiagnostics.transport)
 				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
@@ -1312,6 +1542,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		if userID == 0 && !hold.signedIn && conn.authorizationBindingRecorded {
 			var ok bool
 			var err error
+			failureStage = "refresh_auth_key"
 			_, chargeUser, _, _, ok, err = s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))

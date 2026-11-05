@@ -42,6 +42,23 @@ type serverErrorLogEncoder struct{ err error }
 
 func (e serverErrorLogEncoder) Encode(*bin.Buffer) error { return e.err }
 
+type serverLoopFailureConn struct {
+	frame []byte
+	err   error
+}
+
+func (c *serverLoopFailureConn) Recv(_ context.Context, b *bin.Buffer) error {
+	if c.frame != nil {
+		b.ResetTo(c.frame)
+		c.frame = nil
+		return nil
+	}
+	return c.err
+}
+
+func (*serverLoopFailureConn) Send(context.Context, *bin.Buffer) error { return nil }
+func (*serverLoopFailureConn) Close() error                            { return nil }
+
 func (*serverErrorLogSink) Enabled(context.Context, slog.Level) bool { return true }
 
 func (s *serverErrorLogSink) Handle(_ context.Context, record slog.Record) error {
@@ -789,6 +806,87 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	} {
 		if strings.Contains(logged, forbidden) {
 			t.Errorf("failure record exposed private request data %q: %s", forbidden, logged)
+		}
+	}
+}
+
+func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *testing.T) {
+	const (
+		payload = "PRIVATE_PAYLOAD_BYTES"
+		token   = "PRIVATE_TOKEN_BYTES"
+	)
+	var keyBytes tdcrypto.Key
+	for i := range keyBytes {
+		keyBytes[i] = byte(i + 1)
+	}
+	key := keyBytes.WithID()
+	rawError := fmt.Sprintf("auth_key=%x payload=%s token=%s", keyBytes, payload, token)
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	peerAddr := netip.MustParseAddr("203.0.113.37")
+	conn := &serverLoopFailureConn{
+		frame: shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 7}),
+		err:   errors.New(rawError),
+	}
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+
+	err := server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
+	)
+	if err == nil {
+		t.Fatal("WebSocket serve loop succeeded after forced read failure")
+	}
+	server.logConnectionFailure(err)
+	server.logTransportClose(diagnostics, err)
+
+	var failureRecord, closeRecord *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		switch record.message {
+		case "server operation failed":
+			failureRecord = record
+		case "transport connection closed":
+			closeRecord = record
+		}
+	}
+	if failureRecord == nil {
+		t.Fatalf("no server operation failure record in %+v", sink.records)
+	}
+	for key, want := range map[string]any{
+		"category":    "websocket_serve",
+		"operation":   "websocket_serve_loop",
+		"stage":       "read_frame",
+		"cause":       "transport",
+		"error":       "transport failure",
+		"auth_key_id": hex.EncodeToString(key.ID[:]),
+		"peer_addr":   peerAddr.String(),
+	} {
+		if got := failureRecord.attrs[key]; got != want {
+			t.Errorf("failure %s = %v, want %v", key, got, want)
+		}
+	}
+	if failureRecord.attrs["cause"] == "other" {
+		t.Fatalf("failure cause fell back to other: %+v", failureRecord.attrs)
+	}
+	if closeRecord == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	for key, want := range map[string]any{
+		"auth_key_id": hex.EncodeToString(key.ID[:]),
+		"peer_addr":   peerAddr.String(),
+	} {
+		if got := closeRecord.attrs[key]; got != want {
+			t.Errorf("transport close %s = %v, want %v", key, got, want)
+		}
+	}
+	logged := fmt.Sprint(sink.records)
+	for _, forbidden := range []string{rawError, fmt.Sprintf("%x", keyBytes), payload, token} {
+		if strings.Contains(logged, forbidden) {
+			t.Errorf("WebSocket failure logs exposed secret material %q: %s", forbidden, logged)
 		}
 	}
 }
