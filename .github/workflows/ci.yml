@@ -608,6 +608,11 @@ jobs:
           key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-mod-${{ runner.os }}-
 
+      # Another workflow can save this key without test-only modules, and the
+      # e2e step must not print download messages into its JSON stream.
+      - name: Download Go modules
+        run: go mod download
+
       # The run-specific key makes the restore miss exactly and load the newest
       # cache for this go.sum through the prefix. Only main saves the richer
       # snapshot produced by this run.
@@ -1091,6 +1096,10 @@ jobs:
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/check-k8s-migration-version.sh
+          shellcheck .github/scripts/check-k8s-migration-version.sh
+          bash -n .github/scripts/set-k8s-ci-migration-version.sh
+          shellcheck .github/scripts/set-k8s-ci-migration-version.sh
           bash -n .github/scripts/check-k8s-prod-image-pins.sh
           shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
@@ -1356,6 +1365,7 @@ jobs:
       KUBECTL_VERSION: v1.37.1
       KUBECONFORM_VERSION: v0.8.0
       KUBERNETES_VERSION: 1.37.1
+      K8S_MIGRATION_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1415,9 +1425,22 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
-          required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
-          test "$required_migration" = "$latest_migration"
+          previous_migration_version="$(tr -d '\r\n' < deploy/k8s/base/migration-version)"
+          if [[ "$K8S_MIGRATION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if ! git cat-file -e "${K8S_MIGRATION_BASE_SHA}^{commit}" 2>/dev/null; then
+              git fetch --quiet --no-tags --depth=1 origin "$K8S_MIGRATION_BASE_SHA"
+            fi
+            previous_migration_version="$(git show \
+              "${K8S_MIGRATION_BASE_SHA}:deploy/k8s/base/migration-version")"
+            previous_migration_version="$(tr -d '\r\n' <<< "$previous_migration_version")"
+          else
+            printf 'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA: %s\n' \
+              "$K8S_MIGRATION_BASE_SHA" >&2
+            exit 1
+          fi
+          bash .github/scripts/check-k8s-migration-version.sh \
+            migrations deploy/k8s/base/migration-version "$previous_migration_version"
+          bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           for overlay in prod prod-cutover ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
@@ -1624,6 +1647,7 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
@@ -3993,7 +4017,7 @@ jobs:
       contents: read
     env:
       MIGRATIONS_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
-      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
       ATLAS_APPLY_IMAGE: mirror.gcr.io/arigaio/atlas:1.3.0-alpine
 
     steps:
