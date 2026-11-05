@@ -848,9 +848,10 @@ copy_secret_file() {
     "teagram-teagramd-1:$source_path" - |
     drain_after tar -xOf - "$file_name" | sha256sum | awk '{print $1}')
   [[ $source_hash =~ ^[0-9a-f]{64}$ ]] || fail "source key file could not be verified: $file_name"
+  # The restricted importer must own the private file until it verifies it.
   incus exec "$SOURCE_INSTANCE" -- docker cp "teagram-teagramd-1:$source_path" - |
     drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-      tar -xpf - -C /target/key-data
+      tar -xopf - -C /target/key-data
   destination_hash=$(kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
     sha256sum "/target/key-data/$file_name" | awk '{print $1}')
   [[ $destination_hash == "$source_hash" ]] || fail "copied identity file did not match its source: $file_name"

@@ -38,6 +38,8 @@ cleanup() {
       kill "$mock_pid" 2>/dev/null || true
     done
   fi
+  kubectl delete pod cutover-key-reader --namespace "$TARGET_NAMESPACE" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
   if (( status == 0 )); then
     kubectl delete namespace "$TARGET_NAMESPACE" --wait=false >/dev/null 2>&1 || true
     rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
@@ -288,6 +290,31 @@ if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNE
 fi
 expect_log 'injected disposable-cluster failure after the Cloudflare connector started' "$tmp_dir/post-switch-failure.log"
 expect_log 'automatic recovery is disabled' "$tmp_dir/post-switch-failure.log"
+[[ $(kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+  stat -c '%a:%u' /var/lib/teagramd/server_key.pem) == 600:65532 ]] || {
+  printf 'source RSA fixture does not exercise a private non-root key\n' >&2
+  exit 1
+}
+sed 's/^  namespace: teagram$/  namespace: teagram-cutover/' deploy/k8s/test-cutover-key-reader.yaml |
+  kubectl apply --filename - >/dev/null
+kubectl wait --for=condition=Ready pod/cutover-key-reader \
+  --namespace "$TARGET_NAMESPACE" --timeout=180s >/dev/null
+for key_file in server_key.pem enc_key.hex; do
+  source_hash=$(kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+    sha256sum "/var/lib/teagramd/$key_file" | awk '{print $1}')
+  target_hash=$(kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-key-reader -c reader -- \
+    sha256sum "/var/lib/teagramd/$key_file" | awk '{print $1}')
+  [[ $source_hash =~ ^[0-9a-f]{64}$ && $source_hash == "$target_hash" ]] || {
+    printf 'cutover identity file does not match its source: %s\n' "$key_file" >&2
+    exit 1
+  }
+  [[ $(kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-key-reader -c reader -- \
+    stat -c '%a:%u' "/var/lib/teagramd/$key_file") == 600:65532 ]] || {
+    printf 'cutover identity file is not private and owned by teagramd: %s\n' "$key_file" >&2
+    exit 1
+  }
+done
+kubectl delete pod cutover-key-reader --namespace "$TARGET_NAMESPACE" --wait=true --timeout=180s >/dev/null
 [[ $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == route-switched ]]
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
