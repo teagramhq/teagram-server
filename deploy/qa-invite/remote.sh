@@ -124,74 +124,10 @@ compose() {
 # shellcheck source=deploy/qa-invite/rollback.sh
 source "$REPO_ROOT/deploy/qa-invite/rollback.sh"
 
-ensure_tls() {
-  local ca_key=$TLS_PRIVATE_DIR/ca.key ca_cert=$TLS_PUBLIC_DIR/ca.crt
-  local key=$TLS_PUBLIC_DIR/server.key leaf=$TLS_PUBLIC_DIR/server-leaf.crt
-  local cert=$TLS_PUBLIC_DIR/server.crt stage leaf_public key_public
-  [[ ! -L "$TLS_DIR" ]] || fail 'TLS directory must not be a symlink'
-  install -d -o root -g 101 -m 0750 "$TLS_DIR"
-  [[ "$(stat -c '%u:%g:%a' "$TLS_DIR")" == '0:101:750' ]] || fail 'TLS directory has unsafe ownership or mode'
-  if [[ -e "$TLS_IDENTITY_DIR" || -L "$TLS_IDENTITY_DIR" ]]; then
-    [[ -d "$TLS_IDENTITY_DIR" && ! -L "$TLS_IDENTITY_DIR" && "$(stat -c '%u:%g:%a' "$TLS_IDENTITY_DIR")" == '0:0:700' &&
-      -d "$TLS_PRIVATE_DIR" && ! -L "$TLS_PRIVATE_DIR" && "$(stat -c '%u:%g:%a' "$TLS_PRIVATE_DIR")" == '0:0:700' &&
-      -d "$TLS_PUBLIC_DIR" && ! -L "$TLS_PUBLIC_DIR" && "$(stat -c '%u:%g:%a' "$TLS_PUBLIC_DIR")" == '0:101:750' &&
-      -f "$ca_key" && ! -L "$ca_key" && "$(stat -c '%u:%g:%a' "$ca_key")" == '0:0:600' &&
-      -f "$ca_cert" && ! -L "$ca_cert" && "$(stat -c '%u:%a' "$ca_cert")" == '0:644' &&
-      -f "$key" && ! -L "$key" && "$(stat -c '%u:%g:%a' "$key")" == '0:101:640' &&
-      -f "$leaf" && ! -L "$leaf" && "$(stat -c '%u:%a' "$leaf")" == '0:644' &&
-      -f "$cert" && ! -L "$cert" && "$(stat -c '%u:%a' "$cert")" == '0:644' ]] ||
-      fail 'QA CA identity has unsafe or incomplete files'
-  else
-    stage=$(mktemp -d "$TLS_DIR/.identity.XXXXXXXX") || fail 'could not stage the private QA TLS identity'
-    TEMP_DIRS+=("$stage")
-    install -d -o root -g root -m 0700 "$stage/private"
-    install -d -o root -g 101 -m 0750 "$stage/public"
-    if ! openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$stage/private/ca.key" >/dev/null 2>&1 ||
-      ! openssl req -x509 -new -key "$stage/private/ca.key" -sha256 -days 3650 \
-        -subj '/CN=Teagram QA Invite Root CA' -out "$stage/public/ca.crt" \
-        -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
-        -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-        -addext 'subjectKeyIdentifier=hash' >/dev/null 2>&1 ||
-      ! openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$stage/public/server.key" >/dev/null 2>&1 ||
-      ! openssl req -new -key "$stage/public/server.key" -subj "/CN=$HOST_NAME" \
-        -out "$stage/server.csr" >/dev/null 2>&1; then
-      fail 'could not create the private QA TLS identity'
-    fi
-    cat > "$stage/server.ext" <<EXT
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectAltName=DNS:$HOST_NAME,IP:$HOST_ADDRESS
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EXT
-    if ! openssl x509 -req -in "$stage/server.csr" -CA "$stage/public/ca.crt" \
-      -CAkey "$stage/private/ca.key" -CAcreateserial -CAserial "$stage/private/ca.srl" \
-      -days 397 -sha256 -extfile "$stage/server.ext" -out "$stage/public/server-leaf.crt" >/dev/null 2>&1 ||
-      ! cat "$stage/public/server-leaf.crt" "$stage/public/ca.crt" > "$stage/public/server.crt"; then
-      fail 'could not issue the QA TLS server certificate'
-    fi
-    rm -f -- "$stage/private/ca.srl" "$stage/server.csr" "$stage/server.ext"
-    chown root:root "$stage/private/ca.key"
-    chmod 0600 "$stage/private/ca.key"
-    chown root:root "$stage/public/ca.crt" "$stage/public/server-leaf.crt" "$stage/public/server.crt"
-    chmod 0644 "$stage/public/ca.crt" "$stage/public/server-leaf.crt" "$stage/public/server.crt"
-    chown root:101 "$stage/public/server.key"
-    chmod 0640 "$stage/public/server.key"
-    [[ ! -e "$TLS_IDENTITY_DIR" && ! -L "$TLS_IDENTITY_DIR" ]] ||
-      fail 'QA TLS identity path appeared while it was being created'
-    mv -T -- "$stage" "$TLS_IDENTITY_DIR"
-  fi
-  openssl x509 -in "$ca_cert" -noout -checkend 2592000 >/dev/null || fail 'QA CA certificate expires within 30 days'
-  openssl x509 -in "$leaf" -noout -checkend 2592000 >/dev/null || fail 'QA server certificate expires within 30 days'
-  openssl verify -CAfile "$ca_cert" -purpose sslserver -verify_hostname "$HOST_NAME" "$leaf" >/dev/null ||
-    fail 'QA server certificate chain or DNS name does not verify'
-  openssl verify -CAfile "$ca_cert" -purpose sslserver -verify_ip "$HOST_ADDRESS" "$leaf" >/dev/null ||
-    fail 'QA server certificate IP address does not verify'
-  leaf_public=$(openssl x509 -in "$leaf" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)
-  key_public=$(openssl pkey -in "$key" -pubout -outform DER | sha256sum | cut -d' ' -f1)
-  [[ "$leaf_public" == "$key_public" ]] || fail 'QA server certificate and private key do not match'
-}
+[[ -f "$REPO_ROOT/deploy/qa-invite/tls.sh" && ! -L "$REPO_ROOT/deploy/qa-invite/tls.sh" ]] || fail 'reviewed QA TLS helper is unavailable or unsafe'
+# shellcheck disable=SC1091 # The reviewed archive supplies the referenced helper.
+# shellcheck source=deploy/qa-invite/tls.sh
+source "$REPO_ROOT/deploy/qa-invite/tls.sh"
 
 ensure_client_assets() {
   [[ -d "$WEB_CLIENT_DIR" && ! -L "$WEB_CLIENT_DIR" &&
@@ -276,6 +212,7 @@ backup_database() {
 
 probe_endpoint() {
   local document config web_status ca_fingerprint
+  wait_for_qa_tls "$HOST_ADDRESS:443" || return 1
   document=$(curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt" --max-time 10 \
     --resolve "$HOST_NAME:443:$HOST_ADDRESS" \
     "https://$HOST_NAME/.well-known/teagramd/client") || return 1
@@ -322,7 +259,7 @@ do_up() {
       fail 'could not create a validated rollback database dump'
     fi
   fi
-  if ! compose up -d --wait || ! probe_endpoint; then
+  if ! compose up -d --wait || ! reload_qa_tls || ! probe_endpoint; then
     rollback_failed_up "$previous_ref" "$dump"
     fail 'QA stack rollout or endpoint check failed; previous state restored where possible'
   fi
@@ -354,6 +291,11 @@ do_status() {
     return 0
   fi
   compose ps --format 'table {{.Name}}\t{{.Service}}\t{{.State}}\t{{.Health}}'
+  printf 'tls_leaf_%s\ntls_ca_%s\n' \
+    "$(openssl x509 -in "$TLS_PUBLIC_DIR/server.crt" -noout -enddate)" \
+    "$(openssl x509 -in "$TLS_PUBLIC_DIR/ca.crt" -noout -enddate)"
+  openssl x509 -in "$TLS_PUBLIC_DIR/ca.crt" -noout -checkend 2592000 >/dev/null || fail 'QA CA expires within 30 days; plan a trust migration'
+  openssl x509 -in "$TLS_PUBLIC_DIR/server.crt" -noout -checkend 2592000 >/dev/null || fail 'QA leaf expires within 30 days; run up to renew it'
   probe_endpoint || fail 'private endpoint discovery check failed'
   if [[ -f "$STATE_DIR/active-image" && ! -L "$STATE_DIR/active-image" ]]; then
     [[ "$(stat -c '%u:%a' "$STATE_DIR/active-image")" == '0:600' ]] || fail 'active image record has unsafe ownership or mode'

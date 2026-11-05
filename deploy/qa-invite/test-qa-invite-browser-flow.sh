@@ -10,6 +10,7 @@ PUBLIC_WEB_ROOT=${QA_WEB_SOURCE_DIR:-}
 WEB_PIN=$REPO_ROOT/deploy/teagram-demo/web-artifact-pin.json
 HOST_NAME=teagram-demo.incus
 HOST_ADDRESS=127.0.0.1
+CERT_ADDRESS=10.96.46.70
 RUN_ID=$(openssl rand -hex 8)
 PROJECT=qa-invite-smoke-$RUN_ID
 IMAGE_REF=localhost/teagram-server-qa-smoke:$RUN_ID
@@ -43,6 +44,9 @@ compose() {
     --file "$COMPOSE_FILE" \
     "$@"
 }
+
+# shellcheck source=deploy/qa-invite/tls.sh
+source "$SCRIPT_DIR/tls.sh"
 
 cleanup() {
   local result=$?
@@ -104,14 +108,16 @@ openssl req -x509 -new -key "$TLS_PRIVATE_DIR/ca.key" -sha256 -days 2 \
   -subj '/CN=Teagram QA Invite Browser Test Root CA' -out "$TLS_PUBLIC_DIR/ca.crt" \
   -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
   -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-  -addext 'subjectKeyIdentifier=hash' >/dev/null 2>&1 || fail 'could not issue the isolated QA root CA'
+  -addext 'extendedKeyUsage=critical,serverAuth' \
+  -addext 'subjectKeyIdentifier=hash' \
+  -addext "$(qa_tls_name_constraints "$HOST_NAME" "$CERT_ADDRESS")" >/dev/null 2>&1 || fail 'could not issue the isolated QA root CA'
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TLS_PUBLIC_DIR/server.key" >/dev/null 2>&1 || fail 'could not create the isolated QA server key'
 openssl req -new -key "$TLS_PUBLIC_DIR/server.key" -subj "/CN=$HOST_NAME" -out "$TMP_ROOT/server.csr" >/dev/null 2>&1 || fail 'could not create the QA server certificate request'
 cat > "$TMP_ROOT/server.ext" <<EXT
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=DNS:$HOST_NAME,IP:$HOST_ADDRESS
+subjectAltName=DNS:$HOST_NAME,IP:$CERT_ADDRESS
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
 EXT
@@ -127,6 +133,26 @@ sudo chown root:101 "$TLS_DIR" "$TLS_PUBLIC_DIR" "$TLS_PUBLIC_DIR/server.key"
 sudo chown root:root "$TLS_PUBLIC_DIR/ca.crt" "$TLS_PUBLIC_DIR/server-leaf.crt" "$TLS_PUBLIC_DIR/server.crt"
 openssl verify -CAfile "$TLS_PUBLIC_DIR/ca.crt" -purpose sslserver -verify_hostname "$HOST_NAME" "$TLS_PUBLIC_DIR/server-leaf.crt" >/dev/null ||
   fail 'isolated QA TLS chain does not verify for the configured hostname'
+openssl verify -CAfile "$TLS_PUBLIC_DIR/ca.crt" -purpose sslserver -verify_ip "$CERT_ADDRESS" "$TLS_PUBLIC_DIR/server-leaf.crt" >/dev/null ||
+  fail 'isolated QA TLS chain does not verify for the configured IP'
+
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP_ROOT/outside.key" >/dev/null 2>&1 || fail 'could not create the constraint probe key'
+openssl req -new -key "$TMP_ROOT/outside.key" -subj '/CN=outside-qa.invalid' -out "$TMP_ROOT/outside.csr" >/dev/null 2>&1 ||
+  fail 'could not create the constraint probe request'
+printf 'basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:outside-qa.invalid\n' > "$TMP_ROOT/outside.ext"
+openssl x509 -req -in "$TMP_ROOT/outside.csr" -CA "$TLS_PUBLIC_DIR/ca.crt" -CAkey "$TLS_PRIVATE_DIR/ca.key" \
+  -CAcreateserial -CAserial "$TLS_PRIVATE_DIR/outside.srl" -days 2 -sha256 -extfile "$TMP_ROOT/outside.ext" \
+  -out "$TMP_ROOT/outside.crt" >/dev/null 2>&1 || fail 'could not create the constraint probe certificate'
+openssl req -x509 -new -key "$TLS_PRIVATE_DIR/ca.key" -sha256 -days 2 \
+  -subj '/CN=Teagram QA Invite Browser Test Root CA' -out "$TMP_ROOT/unconstrained.crt" \
+  -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign,cRLSign' -addext 'extendedKeyUsage=critical,serverAuth' \
+  -addext 'subjectKeyIdentifier=hash' >/dev/null 2>&1 || fail 'could not create the constraint control root'
+openssl verify -CAfile "$TMP_ROOT/unconstrained.crt" -purpose sslserver -verify_hostname outside-qa.invalid "$TMP_ROOT/outside.crt" >/dev/null ||
+  fail 'the constraint probe certificate is otherwise invalid'
+if LC_ALL=C openssl verify -CAfile "$TLS_PUBLIC_DIR/ca.crt" -purpose sslserver -verify_hostname outside-qa.invalid "$TMP_ROOT/outside.crt" > "$TMP_ROOT/outside.verify" 2>&1; then
+  fail 'the QA root accepted an out-of-scope DNS name'
+fi
+grep -Fq 'permitted subtree violation' "$TMP_ROOT/outside.verify" || fail 'the constraint probe failed for an unexpected reason'
 
 certutil -d "sql:$TEST_HOME/.pki/nssdb" -N --empty-password >/dev/null 2>&1 || fail 'could not create the isolated Chromium trust database'
 certutil -d "sql:$TEST_HOME/.pki/nssdb" -A -t 'C,,' -n 'Teagram QA Invite Test Root' -i "$TLS_PUBLIC_DIR/ca.crt" ||
@@ -201,6 +227,8 @@ QA_INVITE_SITE="https://$HOST_NAME/" \
 QA_INVITE_USERNAME=qa_browser_smoke \
 QA_INVITE_PASSWORD="$(<"$ACCOUNT_FILE")" \
 QA_INVITE_PROFILE_ROOT="$TMP_ROOT/profiles" \
+QA_INVITE_PROBE_CERT="$TMP_ROOT/outside.crt" \
+QA_INVITE_PROBE_KEY="$TMP_ROOT/outside.key" \
 HOME="$TEST_HOME" \
   node "$SCRIPT_DIR/test-qa-invite-browser-flow.cjs" || fail 'trusted browser sign-in or repeated WebSocket flow failed'
 

@@ -1074,6 +1074,9 @@ jobs:
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
 
+      - name: Test QA invite TLS constraints and renewal
+        run: sudo -n bash deploy/qa-invite/test-qa-invite-tls.sh
+
       - name: Test immutable K8s image digest publication
         run: .github/scripts/test-k8s-image-digests.sh
 
@@ -1137,10 +1140,12 @@ jobs:
           bash -n deploy/teagram-demo/forced-command.sh
           bash -n deploy/qa-invite/remote.sh
           bash -n deploy/qa-invite/rollback.sh
+          bash -n deploy/qa-invite/tls.sh
           bash -n deploy/qa-invite/qa-account-writer.sh
           bash -n deploy/qa-invite/test-qa-invite-browser-flow.sh
           bash -n deploy/qa-invite/test-qa-invite-contract.sh
           bash -n deploy/qa-invite/test-qa-invite-rollback.sh
+          bash -n deploy/qa-invite/test-qa-invite-tls.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
           sh -n deploy/teagram-demo/ops/install-qa-invite-command.sh
@@ -1194,10 +1199,12 @@ jobs:
             deploy/teagram-demo/forced-command.sh \
             deploy/qa-invite/remote.sh \
             deploy/qa-invite/rollback.sh \
+            deploy/qa-invite/tls.sh \
             deploy/qa-invite/qa-account-writer.sh \
             deploy/qa-invite/test-qa-invite-browser-flow.sh \
             deploy/qa-invite/test-qa-invite-contract.sh \
             deploy/qa-invite/test-qa-invite-rollback.sh \
+            deploy/qa-invite/test-qa-invite-tls.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
             deploy/teagram-demo/ops/install-qa-invite-command.sh \

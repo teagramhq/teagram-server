@@ -13,6 +13,8 @@ REMOTE=$SCRIPT_DIR/remote.sh
 INSTALLER=$REPO_ROOT/deploy/teagram-demo/ops/install-qa-invite-command.sh
 ROLLBACK_TEST=$SCRIPT_DIR/test-qa-invite-rollback.sh
 ROLLBACK=$SCRIPT_DIR/rollback.sh
+TLS_HELPER=$SCRIPT_DIR/tls.sh
+TLS_TEST=$SCRIPT_DIR/test-qa-invite-tls.sh
 NGINX=$SCRIPT_DIR/nginx.conf
 QA_BROWSER_FLOW=$SCRIPT_DIR/test-qa-invite-browser-flow.sh
 QA_BROWSER_RUNNER=$SCRIPT_DIR/test-qa-invite-browser-flow.cjs
@@ -25,11 +27,11 @@ fail() {
   exit 1
 }
 
-for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
+for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular file: $path"
 done
 
-bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$QA_BROWSER_FLOW" || fail 'shell syntax failed'
+bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$QA_BROWSER_FLOW" || fail 'shell syntax failed'
 node --check "$QA_BROWSER_RUNNER" || fail 'QA browser runner syntax failed'
 grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
 grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
@@ -118,7 +120,9 @@ jq -e '
     ] | length > 0)
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'published QA service must join a non-internal network while backend stays internal'
 grep -Fq 'compose down --remove-orphans' "$REMOTE" || fail 'down must remove only QA project containers'
-grep -Fq 'openssl verify -CAfile "$ca_cert" -purpose sslserver -verify_hostname "$HOST_NAME" "$leaf"' "$REMOTE" || fail 'QA server certificate chain and DNS name are not checked'
+grep -Fq 'openssl verify -CAfile "$ca_cert" -purpose sslserver -verify_hostname "$HOST_NAME" "$cert"' "$TLS_HELPER" || fail 'QA server certificate chain and DNS name are not checked'
+grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/tls.sh"' "$REMOTE" || fail 'QA TLS identity helper is not loaded'
+grep -Fq '|| ! reload_qa_tls || ! probe_endpoint' "$REMOTE" || fail 'TLS certificates are not reloaded and checked'
 grep -Fq 'curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt"' "$REMOTE" || fail 'QA endpoint probes do not validate the private CA chain'
 ! grep -Fq -- '--insecure' "$REMOTE" || fail 'QA endpoint probes must not skip TLS verification'
 grep -Fq 'tls_ca_sha256=%s' "$REMOTE" || fail 'deployment summary does not report the QA root fingerprint'

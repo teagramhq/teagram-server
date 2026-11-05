@@ -73,6 +73,25 @@ certutil -d "sql:$nss_db" -A -t 'C,,' -n 'Teagram QA Invite Root' \
   -i "$HOME/.qa-invite-root.crt"
 ```
 
+The root has critical TLS server usage and name constraints for
+`teagram-demo.incus` and `10.96.46.70`; subdomains are excluded. Client
+enforcement of trust anchor constraints varies, so the root is still sensitive
+system trust. The
+`up` operation renews a leaf with 30 days or less remaining using the existing
+CA and server key, reloads the TLS edge, and verifies the served certificate.
+`status` reports both expiry dates and fails inside that window. Renewal occurs
+only on `up`; arrange regular status checks while the stack is in use.
+
+An existing root without the required constraints is rejected and retained.
+Do not replace it silently: plan a trust migration that removes the old root
+from both QA trust stores and installs the independently verified new root.
+The same migration is required before the CA expires. `server.crt` contains the
+active leaf followed by the root; a legacy `server-leaf.crt` is not used.
+There is no CRL or OCSP service. If the CA or leaf key is compromised, isolate
+the QA endpoint, remove this root from both trust stores, and coordinate a
+verified replacement before reconnecting; assess affected credentials and
+sessions.
+
 From the teagram-qa checkout root, verify `help.getAppConfig` with the
 repository smoke client. It uses normal system TLS verification:
 
