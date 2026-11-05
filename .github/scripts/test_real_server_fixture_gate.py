@@ -178,6 +178,36 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_real_client_resolves_live_web_without_checked_in_pin(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
+        step = re.search(
+            r"(?m)^        id: qa-web-pin\n        run: \|\n(?P<script>(?:          [^\n]*\n)+)",
+            workflow,
+        )
+        self.assertIsNotNone(step)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            resolver = root / "python3"
+            resolver.write_text(
+                '#!/bin/sh\n[ "$#" = 1 ] || exit 1\n'
+                '[ "$1" = deploy/teagram-demo/resolve_web_artifact_pin.py ] || exit 1\n'
+                'printf \'%s\\n\' "$PUBLICATION"\n', encoding="utf-8"
+            )
+            resolver.chmod(0o755)
+            output = root / "outputs"
+            publication = {"sourceCommit": "a" * 40, "artifactDigest": "sha256:" + "b" * 64, "deployable": True}
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(output), "PUBLICATION": json.dumps(publication)}
+            command = ["bash", "-e", "-c", textwrap.dedent(step.group("script"))]
+            result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), f"source_commit={publication['sourceCommit']}\nartifact_digest={publication['artifactDigest']}\n")
+            for invalid in ({**publication, "deployable": False}, {**publication, "sourceCommit": "bad"}):
+                with self.subTest(publication=invalid):
+                    env["PUBLICATION"] = json.dumps(invalid)
+                    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+
     def test_real_client_browser_checkout_uses_declared_revision(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (
