@@ -316,8 +316,8 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	const phone = "+15551049330"
 	seedSmokeUsers(t, f, phone)
 	human := newSmokeClient(t, f, "Bot API replica poll", phone)
-	firstStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
-	secondStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
+	firstStore := &observedBotUpdateStore{Store: f.store}
+	secondStore := &observedBotUpdateStore{Store: f.store}
 	firstHandler := botapi.NewHandler(firstStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	secondHandler := botapi.NewHandler(secondStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	firstURL := startSmokeBotAPIServerWithHandler(t, f, firstHandler)
@@ -340,6 +340,9 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 		t.Fatalf("initial updates = (%d, %+v), want first update", first.Code, firstUpdates)
 	}
 	confirmedOffset := firstUpdates[0].UpdateID + 1
+	// The initial response may scan a full page and make an empty follow-up read.
+	firstStore.emptyQuery = make(chan struct{})
+	secondStore.emptyQuery = make(chan struct{})
 
 	firstPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
