@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -45,6 +46,30 @@ type webSocketConnState struct {
 	deadline time.Time
 }
 
+var errWebSocketTransportReadEOF = errors.New("WebSocket transport read returned EOF")
+
+// markWebSocketTransportReadEOF distinguishes peer-read EOFs from server
+// errors in stores or RPC handlers that happen to wrap the same sentinel.
+func markWebSocketTransportReadEOF(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errors.Join(errWebSocketTransportReadEOF, err)
+	}
+	return err
+}
+
+func isWebSocketDisconnect(err error) bool {
+	if errors.Is(err, errWebSocketTransportReadEOF) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
+	if isDisconnect(err) {
+		return true
+	}
+	return websocket.CloseStatus(err) != -1
+}
+
 // webSocketDrainReadDeadlineConn lets the ordinary frame-read timeout expire
 // during service, then makes an outstanding read indefinite once shutdown has
 // committed to draining this connection. NetConn closes the whole WebSocket
@@ -55,6 +80,11 @@ type webSocketDrainReadDeadlineConn struct {
 
 	readDeadlineMu       sync.Mutex
 	preserveReadDeadline bool
+}
+
+func (c *webSocketDrainReadDeadlineConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	return n, markWebSocketTransportReadEOF(err)
 }
 
 func (c *webSocketDrainReadDeadlineConn) SetDeadline(deadline time.Time) error {
@@ -754,7 +784,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
 	}, websocketPath, handler, closeDiagnostics)
-	if closeErr != nil && !isDisconnect(closeErr) {
+	if closeErr != nil && !isWebSocketDisconnect(closeErr) {
 		s.logConnectionFailure(closeErr)
 	}
 }

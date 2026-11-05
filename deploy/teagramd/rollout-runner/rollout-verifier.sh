@@ -66,7 +66,11 @@ verify_added_container_environment() {
                 | select(type == "string" and startswith($runtime_name + "="))
                 | .[($runtime_name | length) + 1:]
               ] as $actual
-            | ($assignments | length) == 1 and
+            | if $name == "TEAGRAM_BOT_API_HOST_IP" then
+                ($assignments | length) == 1 and
+                dotenv_value($assignments[0]) == "100.124.236.66"
+              else
+              ($assignments | length) == 1 and
               ($compose_env | has($runtime_name)) and
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
@@ -81,6 +85,7 @@ verify_added_container_environment() {
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
               )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
+              end
           )
       end
   ' >/dev/null; then
@@ -232,6 +237,120 @@ verify_safe_public_environment() {
     else
       printf '%s\n' 'container has unsafe public environment settings' >&2
     fi
+    return 1
+  fi
+  return 0
+}
+
+verify_bot_api_configuration() {
+  local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4 snapshot_name=$5 compose_source=$6
+  [ "$compose_source" = selected-compose-render ] || return 0
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se \
+    --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" \
+    --rawfile env_content "$env_file" '
+    def item: if type == "array" then .[0] else . end;
+    def assignments($lines; $name):
+      [$lines[] as $line
+       | ($line | index("=")) as $separator
+       | select($separator != null and $line[:$separator] == $name)
+       | $line[($separator + 1):]];
+    def dotenv_value($value):
+      if ($value | length) >= 2 and
+         (((($value | startswith("\"")) and ($value | endswith("\""))) or
+           (($value | startswith("\u0027")) and ($value | endswith("\u0027"))))) then $value[1:-1]
+      else $value end;
+    def allowed_bot_port($host_ip):
+      type == "object" and
+      ((.target | tostring) == "2448") and
+      ((.published | tostring) == "2447") and
+      .host_ip == $host_ip and
+      ((.protocol // "tcp") == "tcp") and
+      ((.mode // "") == "" or (.mode // "") == "ingress") and
+      ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
+    .[0] as $inspect_raw
+    | .[1] as $compose
+    | ($inspect_raw | item) as $inspect
+    | ($compose.services.teagramd // {}) as $server
+    | ($compose.services["bot-api-forwarder"] // null) as $forwarder
+    | ($server.environment // {}) as $server_env
+    | ($server.ports // []) as $ports
+    | ($inspect.Config.Env // []) as $runtime_env
+    | ($inspect.HostConfig.PortBindings["2448/tcp"] // []) as $runtime_ports
+    | ($env_content | split("\n")) as $env_lines
+    | assignments($env_lines; "TG_BOT_API_LISTEN_ADDR") as $listener_assignments
+    | assignments($env_lines; "TEAGRAM_BOT_API_HOST_IP") as $host_assignments
+    | (if ($listener_assignments | length) == 0 then ""
+       elif ($listener_assignments | length) == 1 then dotenv_value($listener_assignments[0])
+       else "invalid" end) as $listener_value
+    | (if ($host_assignments | length) == 0 then "127.0.0.1"
+       elif ($host_assignments | length) == 1 then dotenv_value($host_assignments[0])
+       else "invalid" end) as $host_ip
+    | [$runtime_env[] | select(type == "string" and startswith("TG_BOT_API_LISTEN_ADDR="))
+       | .[("TG_BOT_API_LISTEN_ADDR=" | length):]] as $runtime_listener_values
+    | [$ports[] | select(((.target | tostring) == "2448") or ((.published | tostring) == "2447"))] as $bot_ports
+    | [$runtime_ports[] | select(.HostPort == "2447" or .HostIp == "100.124.236.66" or .HostIp == "127.0.0.1")] as $runtime_bot_ports
+    | if $forwarder == null then
+        (($server_env | has("TG_BOT_API_LISTEN_ADDR")) | not) and
+        ($bot_ports | length) == 0 and
+        ($runtime_listener_values | length) == 0 and
+        ($runtime_ports | length) == 0
+      else
+        (($compose.services | has("bot-api-forwarder"))) and
+        (($server.networks // {}) | keys | sort) == ["default", "rustfs_private"] and
+        ($listener_value == "" or $listener_value == "127.0.0.1:2447") and
+        ($host_ip == "127.0.0.1" or $host_ip == "100.124.236.66") and
+        (($listener_value == "127.0.0.1:2447") == ($host_ip == "100.124.236.66")) and
+        ($server_env.TG_BOT_API_LISTEN_ADDR == $listener_value) and
+        ([$ports[] | select(allowed_bot_port($host_ip))] | length) == 1 and
+        ($bot_ports | length) == 1 and
+        (($forwarder | keys | sort) == [
+          "depends_on", "entrypoint", "environment", "healthcheck", "image", "logging", "network_mode", "read_only", "restart"
+        ]) and
+        $forwarder.image == $server.image and
+        $forwarder.entrypoint == ["/usr/local/bin/bot-api-forwarder"] and
+        $forwarder.network_mode == "service:teagramd" and
+        $forwarder.read_only == true and
+        $forwarder.restart == "unless-stopped" and
+        $forwarder.depends_on.teagramd.condition == "service_started" and
+        (($forwarder.depends_on.teagramd | keys - ["condition", "required"]) | length) == 0 and
+        (($forwarder.depends_on.teagramd.required // true) == true) and
+        (($forwarder.depends_on | keys) == ["teagramd"]) and
+        (($forwarder.healthcheck.test // []) == ["CMD", "/usr/local/bin/bot-api-forwarder", "-healthcheck"]) and
+        $forwarder.healthcheck.interval == "5s" and
+        $forwarder.healthcheck.timeout == "2s" and
+        $forwarder.healthcheck.retries == 12 and
+        $forwarder.healthcheck.start_period == "2s" and
+        $forwarder.logging == {
+          "driver":"syslog",
+          "options":{
+            "syslog-address":"unixgram:///dev/log",
+            "syslog-facility":"daemon",
+            "syslog-format":"rfc5424",
+            "tag":"teagramd-bot-api-forwarder"
+          }
+        } and
+        (($forwarder.ports // []) == []) and
+        (($forwarder.networks // {}) == {}) and
+        (($forwarder.volumes // []) == []) and
+        $forwarder.environment == {TG_BOT_API_LISTEN_ADDR:$listener_value} and
+        (($runtime_listener_values | length) == 0 or
+          (($runtime_listener_values | length) == 1 and $runtime_listener_values[0] == $listener_value)) and
+        (if $snapshot_name == "target" then
+           ($runtime_ports | length) == 1 and
+           ($runtime_listener_values | length) == 1 and
+           ($runtime_bot_ports | length) == 1 and
+           $runtime_bot_ports[0].HostIp == $host_ip and $runtime_bot_ports[0].HostPort == "2447"
+         elif ($runtime_listener_values | length) == 0 and ($runtime_ports | length) == 0 then
+           $listener_value == "" and $host_ip == "127.0.0.1"
+         else
+           ($runtime_ports | length) == 1 and
+           ($runtime_listener_values | length) == 1 and
+           ($runtime_bot_ports | length) == 1 and
+           $runtime_bot_ports[0].HostIp == $host_ip and $runtime_bot_ports[0].HostPort == "2447"
+         end)
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'Bot API listener and same-network-namespace forwarder are not the reviewed configuration' >&2
     return 1
   fi
   return 0
@@ -906,6 +1025,8 @@ snapshot_from_json() {
   verify_safe_public_environment \
     "$inspect_json" "$compose_json" "$env_file" "$added_env_names" "$changed_env_names" \
     "$snapshot_name" "$compose_source" || return 1
+  verify_bot_api_configuration \
+    "$inspect_json" "$compose_json" "$env_file" "$added_env_names" "$snapshot_name" "$compose_source" || return 1
   compose_logging_policy=not-captured
   compose_log_login_codes=not-captured
   config_without_restart_sha=not-captured
@@ -1072,6 +1193,10 @@ snapshot_from_json() {
       if .container_port == "2446/tcp" then
         .bindings |= map(select(.host_ip != "127.0.0.1" or .host_port != "2446"))
         | select((.bindings | length) > 0)
+      elif .container_port == "2448/tcp" then
+        .bindings |= map(select(.host_port != "2447" or
+                                (.host_ip != "127.0.0.1" and .host_ip != "100.124.236.66")))
+        | select((.bindings | length) > 0)
       else . end
     )
   ') || return 1
@@ -1175,6 +1300,7 @@ snapshot_from_json() {
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))
         | map(select(. != "TG_USER_INVITE_QUOTA="))
+        | map(select(type != "string" or (startswith("TG_BOT_API_LISTEN_ADDR=") | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
@@ -1267,6 +1393,14 @@ snapshot_from_json() {
       return 1
     }
     resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" '
+      def approved_bot_api_port:
+        type == "object" and
+        ((.target | tostring) == "2448") and
+        ((.published | tostring) == "2447") and
+        (.host_ip == "127.0.0.1" or .host_ip == "100.124.236.66") and
+        ((.protocol // "tcp") == "tcp") and
+        ((.mode // "") == "" or (.mode // "") == "ingress") and
+        ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] as $s
       | {
           stop_grace_period:($s.stop_grace_period // ""),
@@ -1274,6 +1408,9 @@ snapshot_from_json() {
             | map({target:(.target // 0 | tostring), published:(.published // "" | tostring),
                    host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
             | map(select(.target != "2446" or .published != "2446" or .host_ip != "127.0.0.1" or
+                         .protocol != "tcp" or (.mode != "" and .mode != "ingress")))
+            | map(select(.target != "2448" or .published != "2447" or
+                         (.host_ip != "127.0.0.1" and .host_ip != "100.124.236.66") or
                          .protocol != "tcp" or (.mode != "" and .mode != "ingress")))
             | sort_by(.host_ip, .published, .target, .protocol, .mode)),
           volumes:(($s.volumes // [])
@@ -1294,6 +1431,14 @@ snapshot_from_json() {
         ((.target | tostring) == "2446") and
         ((.published | tostring) == "2446") and
         .host_ip == "127.0.0.1" and
+        ((.protocol // "tcp") == "tcp") and
+        ((.mode // "") == "" or (.mode // "") == "ingress") and
+        ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
+      def approved_bot_api_port:
+        type == "object" and
+        ((.target | tostring) == "2448") and
+        ((.published | tostring) == "2447") and
+        (.host_ip == "127.0.0.1" or .host_ip == "100.124.236.66") and
         ((.protocol // "tcp") == "tcp") and
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
@@ -1319,6 +1464,7 @@ snapshot_from_json() {
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
           .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,
+          .TG_BOT_API_LISTEN_ADDR,
           .TG_LOG_LOGIN_CODES,
           .TG_MEDIA_KEY_DIR, .TG_MEDIA_KEY_CURRENT,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
@@ -1342,7 +1488,7 @@ snapshot_from_json() {
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] |= del(.logging)
-      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports = ((.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports // []) | map(select(approved_public_ws_port | not)))
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports = ((.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports // []) | map(select((approved_public_ws_port or approved_bot_api_port) | not)))
       | if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports | length) == 0 then del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports) else . end
       | if $media_key_enabled then
           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].volumes |= map(select((.type == "bind" and .source == $media_key_source and
@@ -1368,6 +1514,8 @@ snapshot_from_json() {
           | .volumes |= del(.blob_key_rotate_reports)
           | if (.volumes | length) == 0 then del(.volumes) else . end
         else . end
+      # The Bot API sidecar is validated separately for a single fixed loopback upstream and no own networks or ports.
+      | if .services["bot-api-forwarder"] != null then .services |= del(."bot-api-forwarder") else . end
     ')
     compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
