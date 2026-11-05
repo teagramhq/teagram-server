@@ -43,6 +43,34 @@ BEGIN
 END;
 $function$;
 
+-- A direct send writes sender and recipient copies in separate statements.
+-- Lock both dialog buckets before inserting the first copy, in the helper's
+-- sorted order, so overlapping bucket collisions cannot form a cycle.
+CREATE FUNCTION public.lock_message_search_posting_pair_before_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF NEW.peer_type = 1 THEN -- PeerTypeUser
+        PERFORM public.lock_message_search_posting_dialogs(
+            ARRAY[NEW.owner_id, NEW.peer_id],
+            ARRAY[NEW.peer_type, NEW.peer_type],
+            ARRAY[NEW.peer_id, NEW.owner_id]
+        );
+    ELSE
+        PERFORM public.lock_message_search_posting_dialogs(
+            ARRAY[NEW.owner_id], ARRAY[NEW.peer_type], ARRAY[NEW.peer_id]
+        );
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER messages_search_posting_pair_before_insert
+BEFORE INSERT ON public.messages
+FOR EACH ROW EXECUTE FUNCTION public.lock_message_search_posting_pair_before_insert();
+
 CREATE OR REPLACE FUNCTION public.sync_message_search_postings()
 RETURNS trigger
 LANGUAGE plpgsql

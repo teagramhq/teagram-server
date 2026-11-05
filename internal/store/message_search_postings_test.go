@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -339,5 +340,192 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].LocalID != message.LocalID || got[0].Text != message.Text {
 		t.Fatalf("search not-ready dialog = %+v, want message %d %q", got, message.LocalID, message.Text)
+	}
+}
+
+func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	const userCount = 100
+	users := make([]store.User, userCount)
+	userIDs := make([]int64, userCount)
+	for i := range users {
+		users[i] = mustUser(t, s, fmt.Sprintf("+155513%05d", i))
+		userIDs[i] = users[i].ID
+	}
+
+	type sendPair struct {
+		fromID, toID         int64
+		fromBucket, toBucket int
+	}
+	// Find actual IDs whose bucket pairs reverse to reproduce the lock cycle.
+	rows, err := store.StorePool(s).Query(ctx, `
+		SELECT sender.id,
+		       recipient.id,
+		       ((hashtextextended(
+		           'message-search-posting-dialog/v1:' || sender.id::text || ':' || $2::smallint::text || ':' || recipient.id::text,
+		           73194627
+		       ) % 1024 + 1024) % 1024)::int AS sender_bucket,
+		       ((hashtextextended(
+		           'message-search-posting-dialog/v1:' || recipient.id::text || ':' || $2::smallint::text || ':' || sender.id::text,
+		           73194627
+		       ) % 1024 + 1024) % 1024)::int AS recipient_bucket
+		FROM unnest($1::bigint[]) AS sender(id)
+		CROSS JOIN unnest($1::bigint[]) AS recipient(id)
+		WHERE sender.id <> recipient.id
+	`, userIDs, int16(store.PeerTypeUser))
+	if err != nil {
+		t.Fatalf("find direct-message posting buckets: %v", err)
+	}
+	candidatesByBuckets := make(map[[2]int][]sendPair)
+	var candidates []sendPair
+	for rows.Next() {
+		var candidate sendPair
+		if err := rows.Scan(&candidate.fromID, &candidate.toID, &candidate.fromBucket, &candidate.toBucket); err != nil {
+			rows.Close()
+			t.Fatalf("scan direct-message posting buckets: %v", err)
+		}
+		candidates = append(candidates, candidate)
+		key := [2]int{candidate.fromBucket, candidate.toBucket}
+		candidatesByBuckets[key] = append(candidatesByBuckets[key], candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("read direct-message posting buckets: %v", err)
+	}
+	rows.Close()
+
+	var first, second sendPair
+	found := false
+	for _, candidate := range candidates {
+		if candidate.fromBucket == candidate.toBucket {
+			continue
+		}
+		for _, reversed := range candidatesByBuckets[[2]int{candidate.toBucket, candidate.fromBucket}] {
+			if candidate.fromID == reversed.fromID || candidate.fromID == reversed.toID ||
+				candidate.toID == reversed.fromID || candidate.toID == reversed.toID {
+				continue
+			}
+			first, second, found = candidate, reversed, true
+			break
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no disjoint send pairs with reversed bucket collisions among %d users", len(users))
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+		CREATE FUNCTION public.test_pause_search_posting_sender_copy() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF NEW.lexeme IN ('deadlockalpha', 'deadlockbravo') AND EXISTS (
+				SELECT 1 FROM public.messages
+				WHERE owner_id = NEW.owner_id AND local_id = NEW.local_id AND out
+			) THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN NEW;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_search_posting_sender_copy
+		AFTER INSERT ON public.message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_search_posting_sender_copy();
+	`); err != nil {
+		t.Fatalf("install sender-copy pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := store.StorePool(s).Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_search_posting_sender_copy ON public.message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_search_posting_sender_copy();
+		`); err != nil {
+			t.Errorf("remove sender-copy pause fixture: %v", err)
+		}
+	}()
+
+	type sendResult struct {
+		name string
+		err  error
+	}
+	results := make(chan sendResult, 2)
+	sendCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	send := func(name string, pair sendPair, text string, randomID int64) {
+		_, _, _, _, err := s.SendMessage(sendCtx, pair.fromID, pair.toID, text, randomID, 0, 0)
+		results <- sendResult{name: name, err: err}
+	}
+	go send("first", first, "deadlockalpha", 700001)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var paused bool
+		if err := store.StorePool(s).QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND wait_event = 'PgSleep'
+				  AND query ILIKE '%INSERT INTO messages%'
+			)
+		`).Scan(&paused); err != nil {
+			t.Fatalf("check first send pause: %v", err)
+		}
+		if paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first send did not pause after taking its posting bucket")
+		}
+		select {
+		case result := <-results:
+			t.Fatalf("first send returned before its posting pause: %v", result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	go send("second", second, "deadlockbravo", 700002)
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var activeSends int
+		if err := store.StorePool(s).QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND state = 'active'
+			  AND query ILIKE '%INSERT INTO messages%'
+			  AND (wait_event = 'PgSleep' OR wait_event_type = 'Lock')
+		`).Scan(&activeSends); err != nil {
+			t.Fatalf("check overlapping send transactions: %v", err)
+		}
+		if activeSends >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second send did not overlap the first send's posting lock")
+		}
+		select {
+		case result := <-results:
+			t.Fatalf("send %s returned before both sends overlapped: %v", result.name, result.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	var sendErrors []error
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				sendErrors = append(sendErrors, fmt.Errorf("%s send: %w", result.name, result.err))
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("disjoint sends did not complete")
+		}
+	}
+	if len(sendErrors) != 0 {
+		t.Fatalf("disjoint sends with reversed posting bucket collisions failed: %v", sendErrors)
 	}
 }

@@ -113,11 +113,14 @@ The initializer and message triggers serialize posting changes through one of
 1024 transaction advisory lock buckets derived from the affected dialog. A
 trigger invocation that touches old and new dialogs acquires their buckets in
 ascending bucket order. Hash collisions only serialize unrelated dialogs; the
-buckets are scoped by database. The lock order is the unready marker, message
-rows by `local_id`, dialog advisory buckets, then posting and count rows.
-Writers first take their existing owner or chat locks, then message rows, then
-the same dialog buckets and posting/count rows. The initializer does not take
-owner or chat locks, and each chunk holds message rows for only one dialog.
+buckets are scoped by database. The initializer locks the unready marker,
+message rows by `local_id`, dialog buckets, then posting and count rows.
+Writers take their existing owner or chat locks first. Before a user-to-user
+send inserts its first copy, a trigger locks both reciprocal dialog buckets in
+ascending order; the second copy reuses those locks. Message updates and hard
+deletes lock their affected message row before dialog buckets, then posting and
+count rows. The initializer does not take owner or chat locks, and each chunk
+holds message rows for only one dialog.
 
 Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
 A send into that dialog can wait on its advisory bucket while holding its owner
