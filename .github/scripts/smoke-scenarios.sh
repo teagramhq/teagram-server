@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 SMOKE_SCENARIOS=(
   launch-getters
   sticker-set-catalogue
