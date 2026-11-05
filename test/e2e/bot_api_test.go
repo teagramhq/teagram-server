@@ -291,24 +291,24 @@ func runBotAPIStockGetUpdatesSequence(t *testing.T, f *smokeFixture, serverURL, 
 func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
-	// Cancel any in-flight long polls before the HTTP server cleanups run.
-	pollCtx, cancelPolls := context.WithCancel(f.ctx)
-	var pendingPollDone chan error
+	var pendingPollDone chan asyncBotAPIResponse
 	pendingPollFinished := false
-	defer func() {
-		cancelPolls()
+	// Run after server cleanups to verify teardown ended the pending request.
+	t.Cleanup(func() {
 		if pendingPollDone == nil || pendingPollFinished {
 			return
 		}
 		select {
-		case err := <-pendingPollDone:
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("pending getUpdates poll error after cancellation = %v, want context.Canceled", err)
+		case result := <-pendingPollDone:
+			if result.err != nil {
+				t.Errorf("pending getUpdates poll failed during server shutdown: %v", result.err)
+			} else if result.response.Code != http.StatusOK || len(result.response.Body) != 0 {
+				t.Errorf("pending getUpdates response = (%d, %q), want the empty response from a canceled handler", result.response.Code, result.response.Body)
 			}
 		case <-time.After(15 * time.Second):
-			t.Error("pending getUpdates poll did not stop after cancellation")
+			t.Error("pending getUpdates poll did not stop during server shutdown")
 		}
-	}()
+	})
 	bot, token, err := f.store.CreateBot(f.ctx, "smoke_replica_poll_bot", "Replica")
 	if err != nil {
 		t.Fatalf("create bot: %v", err)
@@ -334,7 +334,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("human sends first message: %v", err)
 	}
-	first := getBotAPIUpdates(t, pollCtx, client, firstURL, token, 0, 0)
+	first := getBotAPIUpdates(t, f.ctx, client, firstURL, token, 0, 0)
 	firstUpdates := decodeBotAPIUpdates(t, first)
 	if first.Code != http.StatusOK || len(firstUpdates) != 1 || firstUpdates[0].Message.Text != "first update" {
 		t.Fatalf("initial updates = (%d, %+v), want first update", first.Code, firstUpdates)
@@ -343,7 +343,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 
 	firstPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(pollCtx, client, firstURL, token, confirmedOffset+1, 30)
+		response, err := doBotAPIGetUpdates(f.ctx, client, firstURL, token, confirmedOffset+1, 30)
 		firstPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
@@ -354,7 +354,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 
 	secondPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(pollCtx, client, secondURL, token, confirmedOffset, 30)
+		response, err := doBotAPIGetUpdates(f.ctx, client, secondURL, token, confirmedOffset, 30)
 		secondPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
@@ -406,10 +406,10 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	pendingStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
 	pendingHandler := botapi.NewHandler(pendingStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	pendingURL := startSmokeBotAPIServerWithHandler(t, f, pendingHandler)
-	pendingPollDone = make(chan error, 1)
+	pendingPollDone = make(chan asyncBotAPIResponse, 1)
 	go func() {
-		_, err := doBotAPIGetUpdates(pollCtx, client, pendingURL, token, updates[0].UpdateID+1, 30)
-		pendingPollDone <- err
+		response, err := doBotAPIGetUpdates(f.ctx, client, pendingURL, token, updates[0].UpdateID+1, 30)
+		pendingPollDone <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
 	case <-pendingStore.emptyQuery:
@@ -417,9 +417,9 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 		t.Fatal("cleanup poll did not reach the empty-log wait")
 	}
 	select {
-	case err := <-pendingPollDone:
+	case result := <-pendingPollDone:
 		pendingPollFinished = true
-		t.Fatalf("cleanup poll finished before cancellation: %v", err)
+		t.Fatalf("cleanup poll finished before server cleanup: %+v", result)
 	default:
 	}
 }
@@ -809,9 +809,12 @@ func startSmokeBotAPIServerWithHandler(t *testing.T, f *smokeFixture, handler ht
 		t.Fatalf("listen Bot API: %v", err)
 	}
 	server := botapi.NewServerWithHandler(listener.Addr().String(), handler, slog.New(slog.DiscardHandler))
+	serverCtx, cancelServer := context.WithCancel(context.Background())
+	server.BaseContext = func(net.Listener) context.Context { return serverCtx }
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
 	t.Cleanup(func() {
+		cancelServer()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
