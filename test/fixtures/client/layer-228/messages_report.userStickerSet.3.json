@@ -1,0 +1,21 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_report.userStickerSet.3.txt",
+  "method": "messages.report",
+  "request": {
+    "type": "messages.report",
+    "fields": {
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "id": ["<N>"],
+      "option": "REDACTED",
+      "message": "smoke user sticker-set report"
+    }
+  }
+}
