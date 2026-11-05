@@ -6,6 +6,8 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 WEB_ROOT=${REAL_CLIENT_WEB_ROOT:-}
 WEB_REVISION=${REAL_CLIENT_WEB_REVISION:-}
+PUBLIC_WEB_ROOT=${QA_WEB_SOURCE_DIR:-}
+WEB_PIN=$REPO_ROOT/deploy/teagram-demo/web-artifact-pin.json
 HOST_NAME=teagram-demo.incus
 HOST_ADDRESS=127.0.0.1
 RUN_ID=$(openssl rand -hex 8)
@@ -65,13 +67,37 @@ trap cleanup EXIT
 [[ -n "$WEB_ROOT" && -d "$WEB_ROOT" && ! -L "$WEB_ROOT" ]] || fail 'pinned teagram-web checkout is unavailable'
 [[ "$WEB_REVISION" =~ ^[0-9a-f]{40}$ ]] || fail 'pinned teagram-web revision is invalid'
 [[ "$(git -C "$WEB_ROOT" rev-parse HEAD)" == "$WEB_REVISION" ]] || fail 'teagram-web checkout does not match its pinned revision'
+[[ -n "$PUBLIC_WEB_ROOT" && -d "$PUBLIC_WEB_ROOT" && ! -L "$PUBLIC_WEB_ROOT" ]] || fail 'pinned demo Web checkout is unavailable'
+PUBLIC_WEB_ROOT=$(cd -P "$PUBLIC_WEB_ROOT" && pwd)
+PIN_SOURCE_SHA=$(jq -er '.sourceCommit' "$WEB_PIN") || fail 'demo Web source pin is invalid'
+PIN_ARTIFACT_DIGEST=$(jq -er '.artifactDigest' "$WEB_PIN") || fail 'demo Web artifact pin is invalid'
+python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST" >/dev/null ||
+  fail 'demo Web release identity does not match the published pin'
+[[ "$(git -C "$PUBLIC_WEB_ROOT" rev-parse HEAD)" == "$PIN_SOURCE_SHA" ]] || fail 'demo Web checkout does not match the deployed pin'
+[[ -d "$PUBLIC_WEB_ROOT/dist-private" && ! -L "$PUBLIC_WEB_ROOT/dist-private" ]] || fail 'pinned demo Web artifact is unavailable'
+PUBLIC_TARGET=$PUBLIC_WEB_ROOT/ci/private-mtproto-target.json
+PUBLIC_KEY_REL=$(jq -er '.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE | select(type == "string" and length > 0)' "$PUBLIC_TARGET") || fail 'demo Web target key path is invalid'
+PUBLIC_KEY_PATH=$(realpath -e -- "$PUBLIC_WEB_ROOT/$PUBLIC_KEY_REL") || fail 'demo Web target key is unavailable'
+[[ "$PUBLIC_KEY_PATH" == "$PUBLIC_WEB_ROOT/"* && -f "$PUBLIC_KEY_PATH" ]] || fail 'demo Web target key is outside the pinned checkout'
+PUBLIC_KEY_SHA=$(openssl pkey -pubin -in "$PUBLIC_KEY_PATH" -outform DER | sha256sum | cut -d' ' -f1) || fail 'demo Web target key is invalid'
 command -v certutil >/dev/null || fail 'NSS certutil is required for trusted browser TLS'
 command -v sudo >/dev/null || fail 'sudo is required to prepare the read-only nginx TLS mount'
 
 chmod 0755 "$TMP_ROOT"
-mkdir -p "$TLS_PRIVATE_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR/web" "$TEST_HOME/.pki/nssdb"
-chmod 0755 "$STATE_DIR" "$STATE_DIR/tls" "$TLS_IDENTITY_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR" "$WEB_CLIENT_DIR/web"
+mkdir -p "$TLS_PRIVATE_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR/web/releases" "$TEST_HOME/.pki/nssdb"
+chmod 0755 "$STATE_DIR" "$STATE_DIR/tls" "$TLS_IDENTITY_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR" "$WEB_CLIENT_DIR/web" "$WEB_CLIENT_DIR/web/releases"
 chmod 0700 "$TLS_PRIVATE_DIR" "$TEST_HOME"
+
+tar -czf "$TMP_ROOT/demo-web.tar.gz" -C "$PUBLIC_WEB_ROOT/dist-private" . || fail 'could not archive the pinned demo Web artifact'
+WEB_ARCHIVE_SHA=$(sha256sum "$TMP_ROOT/demo-web.tar.gz" | cut -d' ' -f1)
+WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA" python3 "$REPO_ROOT/deploy/teagram-demo/install-web-release.py" stage \
+  "$TMP_ROOT/demo-web.tar.gz" "$WEB_CLIENT_DIR/web/releases" "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
+  fail 'pinned demo Web artifact did not pass deployment verification'
+[[ "$WEB_RELEASE" == "$PIN_SOURCE_SHA-${PIN_ARTIFACT_DIGEST#sha256:}" ]] || fail 'staged demo Web release identity changed'
+ln -s -- "releases/$WEB_RELEASE" "$WEB_CLIENT_DIR/web/current"
+jq -e --arg host "$HOST_NAME" --slurpfile target "$PUBLIC_TARGET" \
+  '.mode == "private" and .endpoint == $target[0].MTPROTO_PRIVATE_ENDPOINT and .fingerprint == $target[0].fingerprint and .endpoint != ("wss://" + $host + "/apiws")' \
+  "$WEB_CLIENT_DIR/web/current/mtproto-target.json" >/dev/null || fail 'demo Web artifact does not retain its different embedded target'
 
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TLS_PRIVATE_DIR/ca.key" >/dev/null 2>&1 || fail 'could not create the isolated QA root CA'
 openssl req -x509 -new -key "$TLS_PRIVATE_DIR/ca.key" -sha256 -days 2 \
@@ -144,17 +170,12 @@ DISCOVERY_FILE=$WEB_CLIENT_DIR/client
 compose exec -T teagramd /usr/local/bin/teagramd client-config > "$DISCOVERY_FILE" || fail 'QA discovery configuration could not be read from the invite stack'
 jq -e --arg host "$HOST_NAME" '.mtproto.endpoint == ($host + ":443") and .websocket.endpoint == ("wss://" + $host + "/apiws")' \
   "$DISCOVERY_FILE" >/dev/null || fail 'QA invite stack advertised unexpected MTProto or WebSocket endpoints'
-jq -er '.mtproto.rsa_spki' "$DISCOVERY_FILE" | base64 -d | openssl pkey -pubin -inform DER -out "$TMP_ROOT/server-public-key.pem" >/dev/null 2>&1 ||
+jq -er '.mtproto.rsa_spki' "$DISCOVERY_FILE" | base64 -d > "$TMP_ROOT/server-public-key.der" ||
   fail 'QA discovery did not provide a usable server public key'
-
-(
-  cd "$WEB_ROOT"
-  MTPROTO_TARGET_MODE=private \
-    MTPROTO_PRIVATE_ENDPOINT="wss://$HOST_NAME/apiws" \
-    MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$TMP_ROOT/server-public-key.pem" \
-    corepack pnpm exec vite build --outDir "$WEB_CLIENT_DIR/web/current" --emptyOutDir --config vite.config.ts --logLevel error
-) || fail 'could not build the pinned Web artifact for the QA invite endpoint'
-chmod -R a+rX "$WEB_CLIENT_DIR/web/current" || fail 'could not make the built Web artifact readable by the isolated TLS edge'
+openssl pkey -pubin -inform DER -in "$TMP_ROOT/server-public-key.der" -noout >/dev/null 2>&1 ||
+  fail 'QA discovery did not provide a usable server public key'
+QA_KEY_SHA=$(sha256sum "$TMP_ROOT/server-public-key.der" | cut -d' ' -f1)
+[[ "$QA_KEY_SHA" != "$PUBLIC_KEY_SHA" ]] || fail 'QA server key unexpectedly matches the demo Web embedded key'
 
 compose exec -T --user 0:0 teagramd /usr/local/bin/teagramd admin create-user --username qa_browser_smoke < "$ACCOUNT_FILE" >/dev/null 2>&1 ||
   fail 'could not create the isolated QA browser account'
@@ -170,6 +191,10 @@ jq -e --arg host "$HOST_NAME" '.server == $host and .autoGuest == false' "$TMP_R
 curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt" --resolve "$HOST_NAME:443:$HOST_ADDRESS" \
   "https://$HOST_NAME/" > "$TMP_ROOT/served-index.html" || fail 'trusted TLS request for the built Web artifact failed'
 grep -q '<html' "$TMP_ROOT/served-index.html" || fail 'TLS edge did not serve the built Web artifact'
+cmp -s "$TMP_ROOT/served-index.html" "$WEB_CLIENT_DIR/web/current/index.html" || fail 'TLS edge served a different Web artifact'
+curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt" --resolve "$HOST_NAME:443:$HOST_ADDRESS" \
+  "https://$HOST_NAME/mtproto-target.json" > "$TMP_ROOT/served-target.json" || fail 'TLS edge did not serve the demo Web target manifest'
+cmp -s "$TMP_ROOT/served-target.json" "$WEB_CLIENT_DIR/web/current/mtproto-target.json" || fail 'TLS edge served a different Web target manifest'
 
 REAL_CLIENT_WEB_ROOT="$WEB_ROOT" \
 QA_INVITE_SITE="https://$HOST_NAME/" \

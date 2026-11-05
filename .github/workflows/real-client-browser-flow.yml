@@ -38,6 +38,22 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Read the deployed Web artifact pin
+        id: qa-web-pin
+        run: |
+          source_commit=$(jq -er '.sourceCommit' deploy/teagram-demo/web-artifact-pin.json)
+          artifact_digest=$(jq -er '.artifactDigest' deploy/teagram-demo/web-artifact-pin.json)
+          python3 deploy/teagram-demo/resolve_web_artifact_pin.py --verify-release-identity "$source_commit" "$artifact_digest"
+          printf 'source_commit=%s\nartifact_digest=%s\n' "$source_commit" "$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the deployed Web source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: teagramhq/teagram-web
+          ref: ${{ steps.qa-web-pin.outputs.source_commit }}
+          path: qa-demo-web-source
+          persist-credentials: false
+
       - name: Check out pinned web companion
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -77,6 +93,14 @@ jobs:
         working-directory: web-source
         run: pnpm install --frozen-lockfile
 
+      # The QA stack serves this exact artifact, including its embedded target.
+      - name: Rebuild the pinned demo Web artifact
+        working-directory: qa-demo-web-source
+        env:
+          WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}
+        run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
+
       # Pre-pull the Dockerfile base and runtime images; the fixture starts
       # Postgres directly, so it must be available under this mirror-qualified name.
       - name: Pull fixture base images
@@ -101,6 +125,7 @@ jobs:
         timeout-minutes: 15
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          QA_WEB_SOURCE_DIR: ${{ github.workspace }}/qa-demo-web-source
         run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh
 
       - name: Upload Playwright failure trace
