@@ -873,10 +873,20 @@ current_service_id() {
   printf '%s' "$id"
 }
 
-compose_has_service() {
-  local service=$1 services
+bot_api_forwarder_health_required() {
+  local services compose_json listener_enabled service_status
   services=$(docker compose config --services </dev/null) || return 2
-  printf '%s\n' "$services" | grep -Fxq -- "$service"
+  if grep -Fxq -- bot-api-forwarder <<< "$services"; then :; else
+    service_status=$?
+    [ "$service_status" -eq 1 ] && return 1
+    return 2
+  fi
+  compose_json=$(docker compose config --format json </dev/null) || return 2
+  listener_enabled=$(jq -r --arg service "$(rollout_compose_service)" '
+    .services[$service].environment.TG_BOT_API_LISTEN_ADDR as $listener
+    | if ($listener | type) == "string" then ($listener != "") else error("Bot API listener is missing") end
+  ' <<< "$compose_json") || return 2
+  [ "$listener_enabled" = true ]
 }
 
 remove_orphaned_public_profile_services() {
@@ -3153,7 +3163,7 @@ run_apply() {
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
-  if compose_has_service bot-api-forwarder; then
+  if bot_api_forwarder_health_required; then
     if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then :; else
       rc=$?
       rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
@@ -3162,7 +3172,7 @@ run_apply() {
   else
     rc=$?
     if [ "$rc" -ne 1 ]; then
-      rollback_after_target_failure bot_api_forwarder_service_discovery_failed || return 2
+      rollback_after_target_failure bot_api_forwarder_configuration_check_failed || return 2
       return 1
     fi
   fi

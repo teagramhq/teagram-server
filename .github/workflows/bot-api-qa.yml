@@ -150,7 +150,7 @@ jobs:
             echo "::error::The reviewed Bot API config operation failed"
             exit 1
           fi
-          grep -Eq '^configuration=(applied|already-applied) source_sha=[0-9a-f]{40} bind=127\.0\.0\.1:2447 publish=100\.124\.236\.66:2447 forwarder=healthy$' "$apply_result"
+          grep -Eq '^configuration=(applied source_sha=[0-9a-f]{40} env_sha256=[0-9a-f]{64}|already-applied source_sha=[0-9a-f]{40}) bind=127\.0\.0\.1:2447 publish=100\.124\.236\.66:2447 forwarder=healthy$' "$apply_result"
           if ! "${ssh_cmd[@]}" "root@100.124.236.66" "run $SOURCE_SHA bot-api-qa provision" \
             </dev/null > "$token_file" 2> "$token_error"; then
             echo "::error::The test bot could not be provisioned"
@@ -319,6 +319,12 @@ jobs:
         with:
           name: bot-api-token-${{ github.run_id }}
           path: ${{ runner.temp }}/encrypted-token
+
+      - name: Check out the selected main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Install age
         uses: actions/setup-go@v7.0.0
