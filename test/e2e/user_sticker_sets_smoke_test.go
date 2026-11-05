@@ -164,8 +164,9 @@ func testSmokeUserCreatedStickerSets(t *testing.T) {
 	}
 
 	const customEmojiText = "hi ⭐"
-	sendCustomEmoji := func(fixture string, peer tg.InputPeerClass, randomID int64) {
+	sendCustomEmoji := func(fixture string, peer tg.InputPeerClass, randomID int64) int {
 		t.Helper()
+		messageID := 0
 		if err := fixtureClientCall(t, owner, fixture, func(ctx context.Context, client *tg.Client) error {
 			result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 				Peer: peer, Message: customEmojiText, RandomID: randomID,
@@ -183,14 +184,91 @@ func testSmokeUserCreatedStickerSets(t *testing.T) {
 			if err := smokeNoPremiumUsers(updates.Users, "messages.sendMessage"); err != nil {
 				return err
 			}
+			for _, update := range updates.Updates {
+				switch created := update.(type) {
+				case *tg.UpdateNewMessage:
+					message, ok := created.Message.(*tg.Message)
+					if !ok {
+						continue
+					}
+					messageID = message.ID
+				case *tg.UpdateNewChannelMessage:
+					message, ok := created.Message.(*tg.Message)
+					if !ok {
+						continue
+					}
+					messageID = message.ID
+				}
+				if messageID > 0 {
+					break
+				}
+			}
+			if messageID <= 0 {
+				return errors.New("send custom emoji response omitted UpdateNewMessage")
+			}
 			return nil
 		}); err != nil {
 			t.Fatalf("send custom emoji using %s: %v", fixture, err)
 		}
+		return messageID
 	}
 
-	sendCustomEmoji("messages_sendMessage.customEmoji.private.1", peerUser(owner.id, member.id), 1049912)
+	stickerMessageID := sendCustomEmoji("messages_sendMessage.customEmoji.private.1", peerUser(owner.id, member.id), 1049912)
 	assertSmokeCustomEmojiReceived(t, f.ctx, member, peerUser(member.id, owner.id), customEmojiText, customEmojiDocumentID)
+	reportRequest := &tg.MessagesReportRequest{
+		Peer: peerUser(member.id, owner.id),
+		ID:   []int{stickerMessageID},
+	}
+	if err := fixtureClientCall(t, member, "messages_report.userStickerSet.1", func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesReport(ctx, reportRequest)
+		if err != nil {
+			return err
+		}
+		menu, ok := result.(*tg.ReportResultChooseOption)
+		if !ok {
+			return fmt.Errorf("messages.report result = %T, want option menu", result)
+		}
+		for _, option := range menu.Options {
+			if option.Text == "Copyright" {
+				reportRequest.Option = option.Option
+				return nil
+			}
+		}
+		return errors.New("messages.report menu omitted Copyright option")
+	}); err != nil {
+		t.Fatalf("start user sticker-set report: %v", err)
+	}
+	if err := fixtureClientCall(t, member, "messages_report.userStickerSet.2", func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesReport(ctx, reportRequest)
+		if err != nil {
+			return err
+		}
+		commentStep, ok := result.(*tg.ReportResultAddComment)
+		if !ok || !commentStep.Optional {
+			return fmt.Errorf("messages.report option result = %T, want optional comment", result)
+		}
+		reportRequest.Option = commentStep.Option
+		return nil
+	}); err != nil {
+		t.Fatalf("choose user sticker-set report reason: %v", err)
+	}
+	reportRequest.Message = "smoke user sticker-set report"
+	if err := fixtureClientCall(t, member, "messages_report.userStickerSet.3", func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesReport(ctx, reportRequest)
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.ReportResultReported); !ok {
+			return fmt.Errorf("messages.report final result = %T, want reported", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("complete user sticker-set report: %v", err)
+	}
+	reports, err := f.store.AdminOpenUserStickerSetReportsForSets(f.ctx, []int64{created.Set.ID})
+	if err != nil || len(reports) != 1 || reports[0].ReporterID != member.id || reports[0].Comment != reportRequest.Message || !reports[0].SetIsLive {
+		t.Fatalf("stored admin report = %+v, err %v; want one report from recipient %d and a live set", reports, err, member.id)
+	}
 
 	var groupID int64
 	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {

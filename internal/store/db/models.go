@@ -1078,6 +1078,20 @@ type UserStickerSet struct {
 	SortPosition *int32
 }
 
+type UserStickerSetReport struct {
+	ID              int64
+	ReporterID      int64
+	SetID           int64
+	MessagePeerType int16
+	MessagePeerID   int64
+	MessageID       int64
+	Reason          string
+	Comment         string
+	Status          string
+	CreatedAt       pgtype.Timestamptz
+	ClosedAt        pgtype.Timestamptz
+}
+
 type Username struct {
 	Handle        string
 	OwnerType     string

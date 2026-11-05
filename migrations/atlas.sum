@@ -1,4 +1,4 @@
-h1:KnefIE9efwPKsx9/kkB7sS9qB3EhakcqeubT6DqSFus=
+h1:v7/0X9zxmSOqydYsSlxw6bkrS9t6pT06uRWYI3AvGHs=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -179,3 +179,4 @@ h1:KnefIE9efwPKsx9/kkB7sS9qB3EhakcqeubT6DqSFus=
 20261105000013_backfill_poll_copy_custom_emoji_document_ids.sql h1:5v+Ibt+qtZqUf1hQvp6GNpd3jZTKeuq7E7/qvrMT9IA=
 20261105000014_poll_message_copies_owner_custom_emoji_document_ids_gin_idx.sql h1:PNFTjmGDpBx2LTujzIu4X2+w75IXHKA8Xz9HVTv4s8I=
 20261105000015_channel_poll_messages_channel_custom_emoji_document_ids_gin_idx.sql h1:Utrz4u+NbzEEHzyBqeHhPOajg9fe+PGn+XJKGv9jyNQ=
+20261105000016_user_sticker_set_reports.sql h1:6ByY3fQqtuN/3zZGB677svWbBjrysB1AiQsRzVgukBQ=
