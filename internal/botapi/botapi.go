@@ -716,9 +716,10 @@ func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 }
 
 type acceptResult struct {
-	conn    net.Conn
-	err     error
-	proxied bool
+	conn     net.Conn
+	err      error
+	proxied  bool
+	reserved bool
 }
 
 // Bound connections waiting for a preface separately from per-client limits.
@@ -736,11 +737,18 @@ func (l *connectionLimitListener) acceptConnections() {
 				return
 			}
 		}
+		ip := remoteIP(conn.RemoteAddr().String())
+		// A direct connection's transport address is its final client address.
+		// Reserve it before reading so idle sockets count against the same cap.
+		reserved := !ip.IsLoopback()
+		if reserved && !l.reserveIP(ip) {
+			closeBotConn(conn)
+			continue
+		}
 		select {
 		case pending <- struct{}{}:
-			go func() {
+			go func(conn net.Conn, ip netip.Addr, reserved bool) {
 				defer func() { <-pending }()
-				ip := remoteIP(conn.RemoteAddr().String())
 				parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
 				if err != nil {
 					if errors.Is(err, io.EOF) {
@@ -748,19 +756,47 @@ func (l *connectionLimitListener) acceptConnections() {
 					} else {
 						slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
 					}
+					if reserved {
+						l.releaseIP(ip)
+					}
 					closeBotConn(conn)
 					return
 				}
 				select {
-				case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0}:
+				case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0, reserved: reserved}:
 				case <-l.done:
+					if reserved {
+						l.releaseIP(ip)
+					}
 					closeBotConn(parsed)
 				}
-			}()
+			}(conn, ip, reserved)
 		default:
-			slog.Warn("Bot API pending preface limit reached", "remote_ip", remoteIP(conn.RemoteAddr().String()).String(), "limit", maxPendingPrefaces)
+			slog.Warn("Bot API pending preface limit reached", "remote_ip", ip.String(), "limit", maxPendingPrefaces)
+			if reserved {
+				l.releaseIP(ip)
+			}
 			closeBotConn(conn)
 		}
+	}
+}
+
+func (l *connectionLimitListener) reserveIP(ip netip.Addr) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[ip] >= l.limit {
+		return false
+	}
+	l.active[ip]++
+	return true
+}
+
+func (l *connectionLimitListener) releaseIP(ip netip.Addr) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.active[ip]--
+	if l.active[ip] == 0 {
+		delete(l.active, ip)
 	}
 }
 
@@ -790,27 +826,19 @@ func (l *connectionLimitListener) Accept() (net.Conn, error) {
 			return nil, result.err
 		}
 		conn := result.conn
+		ip := remoteIP(conn.RemoteAddr().String())
 		if l.closed.Load() {
+			if result.reserved {
+				l.releaseIP(ip)
+			}
 			closeBotConn(conn)
 			return nil, net.ErrClosed
 		}
-		ip := remoteIP(conn.RemoteAddr().String())
-		l.mu.Lock()
-		if l.active[ip] >= l.limit {
-			l.mu.Unlock()
+		if !result.reserved && !l.reserveIP(ip) {
 			closeBotConn(conn)
 			continue
 		}
-		l.active[ip]++
-		l.mu.Unlock()
-		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() {
-			l.mu.Lock()
-			defer l.mu.Unlock()
-			l.active[ip]--
-			if l.active[ip] == 0 {
-				delete(l.active, ip)
-			}
-		}}, nil
+		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() { l.releaseIP(ip) }}, nil
 	}
 }
 
