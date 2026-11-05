@@ -259,6 +259,14 @@ require_no_unaccounted_objects() {
     ops_fail "media migration result contains $unaccounted_count unaccounted objects in $result_path; resolve them before reporting migration complete"
 }
 
+verify_migration_image() {
+  local image_id
+  image_id=$(docker image inspect --format '{{.Id}}' teagramd:local) || \
+    ops_fail 'cannot inspect the teagramd migration image tag'
+  [[ "$image_id" == "$SERVER_IMAGE_ID" ]] || \
+    ops_fail 'teagramd:local no longer identifies the inspected running server image'
+}
+
 run_migration_job() {
   local operation=$1 result_path=$2 stderr_path=$3 job_args=(--writes stopped --progress "$PROGRESS_PATH")
   if [[ "$operation" == cleanup ]]; then
@@ -268,6 +276,7 @@ run_migration_job() {
   fi
   [[ ! -e "$result_path" && ! -L "$result_path" && ! -e "$stderr_path" && ! -L "$stderr_path" ]] || \
     ops_fail 'media migration evidence path already exists'
+  verify_migration_image
   if "${COMPOSE[@]}" --profile migration run --rm --no-deps blob-encrypt-migrate "${job_args[@]}" \
     > "$OPS_TEMP_DIR/job.json" 2> "$stderr_path"; then
     chmod 600 -- "$stderr_path" || ops_fail 'cannot protect migration diagnostics'

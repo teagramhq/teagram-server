@@ -21,6 +21,10 @@ report_failure() {
   local status=$? line=$1 command=$2
   printf 'FAIL media ops fixture line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
   [[ -z "${output:-}" ]] || printf 'last operation output: %s\n' "$output" >&2
+  if [[ -n "${FIXTURE_EVENTS:-}" && -f "$FIXTURE_EVENTS" ]]; then
+    printf 'fixture events:\n' >&2
+    cat "$FIXTURE_EVENTS" >&2 || true
+  fi
   exit "$status"
 }
 trap 'report_failure "$LINENO" "$BASH_COMMAND"' ERR
@@ -29,7 +33,8 @@ mkdir -p "$TMP/bin"
 FIXTURE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FIXTURE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 FIXTURE_IMAGE=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-export FIXTURE_SHA FIXTURE_REVISION FIXTURE_IMAGE
+FIXTURE_RETAGGED_IMAGE=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+export FIXTURE_SHA FIXTURE_REVISION FIXTURE_IMAGE FIXTURE_RETAGGED_IMAGE
 
 cat > "$TMP/bin/id" <<'ID'
 #!/usr/bin/env bash
@@ -115,7 +120,7 @@ case "${1##*/}" in
     ;;
   blob-mode-state.py)
     [[ "$2" == authority ]] || exit 99
-    jq -cn --arg outcome "$FIXTURE_AUTHORITY" '{outcome:$outcome}'
+    jq -cn --arg outcome "$(cat "$FIXTURE_AUTHORITY_FILE")" '{outcome:$outcome}'
     ;;
   *) echo "unexpected fixture Python helper: $1" >&2; exit 99 ;;
 esac
@@ -124,7 +129,41 @@ PYTHON
 cat > "$TMP/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
+publish_encrypted_authority() {
+  local transition_id=11111111-1111-4111-8111-111111111111
+  local inventory="$FIXTURE_EVIDENCE/teagramd-blob-encryption-inventory-$transition_id.json"
+  jq -cn '{schema:"teagram.blob-encryption-inventory/v1",
+    encrypted:{classes:{valid_envelope:{count:1},no_valid_envelope:{count:0},missing:{count:0},unaccounted:{count:0,ids:[]}}},
+    plaintext:{classes:{no_valid_envelope:{count:1},missing:{count:0},unaccounted:{count:0,ids:[]}}}}' > "$inventory"
+  chmod 600 "$inventory"
+  local inventory_sha
+  inventory_sha=$(sha256sum "$inventory")
+  inventory_sha=${inventory_sha%% *}
+  jq -cn --arg sha "$inventory_sha" \
+    --arg id "$transition_id" \
+    '{transition_id:$id,evidence:{encrypted_inventory_sha256:$sha,object_count:1}}' \
+    > "$FIXTURE_REPO/.state/blob-mode/mode.json"
+  chmod 600 "$FIXTURE_REPO/.state/blob-mode/mode.json"
+  printf 'encrypted\n' > "$FIXTURE_AUTHORITY_FILE"
+  if [[ ! -e "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl" ]]; then
+    printf '{"type":"header","schema":"teagram.blob-encryption-progress/v1","writes":"stopped"}\n' \
+      > "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"
+    chmod 600 "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"
+  fi
+}
 case "$1" in
+  image)
+    [[ "$2" == inspect && "$3" == --format && "$4" == '{{.Id}}' && "$5" == teagramd:local ]] || {
+      echo "unexpected fixture image command: $*" >&2
+      exit 99
+    }
+    printf 'image-check\n' >> "$FIXTURE_EVENTS"
+    if [[ "$FIXTURE_SCENARIO" == retagged-image ]]; then
+      printf '%s\n' "$FIXTURE_RETAGGED_IMAGE"
+    else
+      printf '%s\n' "$FIXTURE_IMAGE"
+    fi
+    ;;
   ps)
     if [[ "$*" == *"{{.Names}}|{{.Label"* ]]; then
       printf 'teagram-teagramd-1|teagramd\n'
@@ -136,6 +175,11 @@ case "$1" in
     if [[ "$*" == *'--type container'* ]]; then exit 1; fi
     format=$3
     container=$4
+    if [[ "$format" == *'com.teagram.ops.operation'* ]]; then
+      [[ "$container" == teagram-media-restore-* ]] || exit 99
+      printf 'media-backup\n'
+      exit
+    fi
     case "$container" in
       teagram-postgres-1) service=postgres; state_file=$FIXTURE_POSTGRES_STATE ;;
       teagram-teagramd-1) service=teagramd; state_file=$FIXTURE_SERVER_STATE ;;
@@ -153,10 +197,32 @@ case "$1" in
       *) echo "unexpected fixture inspect format: $format" >&2; exit 99 ;;
     esac
     ;;
+  run)
+    if [[ "$*" == *'--label com.teagram.ops.operation=media-backup'* ]]; then
+      restore_container=$5
+      printf '%s\n' "$restore_container" > "$FIXTURE_RESTORE_CONTAINER"
+      printf 'restore:start\n' >> "$FIXTURE_EVENTS"
+      printf 'fixture-restore-container\n'
+    elif [[ "$*" == *'/usr/local/bin/mtproto-smoke'* ]]; then
+      printf 'smoke\n' >> "$FIXTURE_EVENTS"
+      printf 'fixture smoke passed\n'
+    else
+      echo "unexpected fixture Docker run: $*" >&2
+      exit 99
+    fi
+    ;;
   stop)
-    [[ "$2" == --time && "$4" == teagram-teagramd-1 ]] || { echo "unexpected stop: $*" >&2; exit 99; }
-    printf 'stop:server\n' >> "$FIXTURE_EVENTS"
-    printf 'exited\n' > "$FIXTURE_SERVER_STATE"
+    [[ "$2" == --time ]] || { echo "unexpected stop: $*" >&2; exit 99; }
+    case "$4" in
+      teagram-teagramd-1)
+        printf 'stop:server\n' >> "$FIXTURE_EVENTS"
+        printf 'exited\n' > "$FIXTURE_SERVER_STATE"
+        ;;
+      teagram-media-restore-*)
+        printf 'restore:stop\n' >> "$FIXTURE_EVENTS"
+        ;;
+      *) echo "unexpected fixture Docker stop: $*" >&2; exit 99 ;;
+    esac
     ;;
   start)
     case "$2" in
@@ -173,13 +239,26 @@ case "$1" in
     printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
     ;;
   exec)
-    [[ "$2" == -i && "$3" == teagram-postgres-1 && "$4" == pg_dump ]] || {
+    if [[ "$2" == -i && "$3" == teagram-postgres-1 && "$4" == pg_dump ]]; then
+      printf 'pg_dump\n' >> "$FIXTURE_EVENTS"
+      [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
+      printf 'fixture archive\n'
+    elif [[ "$2" == -i && "$3" == teagram-media-restore-* && "$4" == pg_restore ]]; then
+      if [[ "$*" == *' --list '* ]]; then
+        printf 'restore:pg_restore-list\n' >> "$FIXTURE_EVENTS"
+        printf 'TABLE public fixture\n'
+      else
+        printf 'restore:pg_restore\n' >> "$FIXTURE_EVENTS"
+      fi
+    elif [[ "$2" == teagram-media-restore-* && "$3" == pg_isready ]]; then
+      exit 0
+    elif [[ "$2" == teagram-media-restore-* && "$3" == psql ]]; then
+      printf 'restore:psql\n' >> "$FIXTURE_EVENTS"
+      printf '1\n'
+    else
       echo "unexpected fixture exec: $*" >&2
       exit 99
-    }
-    printf 'pg_dump\n' >> "$FIXTURE_EVENTS"
-    [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
-    printf 'fixture archive\n'
+    fi
     ;;
   compose)
     if [[ "$*" == *' config --format json' ]]; then
@@ -201,15 +280,33 @@ case "$1" in
       exit
     fi
     if [[ "$*" == *' blob-encrypt-migrate '* ]]; then
-      printf 'migration\n' >> "$FIXTURE_EVENTS"
+      if [[ " $* " == *' --cleanup '* ]]; then
+        printf 'cleanup\n' >> "$FIXTURE_EVENTS"
+      else
+        printf 'migration\n' >> "$FIXTURE_EVENTS"
+      fi
       if [[ "$FIXTURE_SCENARIO" == interrupted-migration ]]; then
         echo 'fixture interrupted migration' >&2
         exit 42
       fi
       if [[ "$FIXTURE_SCENARIO" == cleanup-gating ]]; then
         printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":1,"unaccounted":[{"kind":"file","id":"999","key":"files/999"}]}\n'
+      elif [[ "$FIXTURE_SCENARIO" == encrypt-success ]]; then
+        publish_encrypted_authority
+        printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
+      elif [[ "$FIXTURE_SCENARIO" == cleanup-success && " $* " == *' --cleanup '* ]]; then
+        cleanup_calls=0
+        [[ ! -f "$FIXTURE_CLEANUP_CALLS" ]] || cleanup_calls=$(cat "$FIXTURE_CLEANUP_CALLS")
+        cleanup_calls=$((cleanup_calls + 1))
+        printf '%s\n' "$cleanup_calls" > "$FIXTURE_CLEANUP_CALLS"
+        removed=0
+        if [[ "$cleanup_calls" == 1 ]]; then
+          rm -- "$FIXTURE_PLAINTEXT_OBJECT"
+          removed=1
+        fi
+        printf '{"mode":"cleanup","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"plaintext_objects_removed":%s,"unaccounted":[]}\n' "$removed"
       else
-        printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":1}\n'
+        printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
       fi
       exit
     fi
@@ -239,12 +336,17 @@ setup_case() {
   FIXTURE_POSTGRES_STATE=$case_dir/postgres-state
   FIXTURE_SERVER_STATE=$case_dir/server-state
   FIXTURE_RUSTFS_STATE=$case_dir/rustfs-state
+  FIXTURE_AUTHORITY_FILE=$case_dir/authority
+  FIXTURE_RESTORE_CONTAINER=$case_dir/restore-container
+  FIXTURE_CLEANUP_CALLS=$case_dir/cleanup-calls
+  FIXTURE_PLAINTEXT_OBJECT=$case_dir/plaintext-source
   FIXTURE_EVENTS=$case_dir/events
   FIXTURE_SCENARIO=$scenario
   FIXTURE_AUTHORITY=$authority
   FIXTURE_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_POSTGRES_STATE \
-    FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_EVENTS FIXTURE_SCENARIO \
+    FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
+    FIXTURE_CLEANUP_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
     FIXTURE_AUTHORITY FIXTURE_COMPOSE_FILES
 
   mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE" "$FIXTURE_KEY_DIR"
@@ -261,6 +363,10 @@ setup_case() {
   printf 'running\n' > "$FIXTURE_POSTGRES_STATE"
   printf 'running\n' > "$FIXTURE_SERVER_STATE"
   printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
+  printf '%s\n' "$authority" > "$FIXTURE_AUTHORITY_FILE"
+  if [[ "$scenario" == cleanup-success ]]; then
+    printf 'fixture plaintext source\n' > "$FIXTURE_PLAINTEXT_OBJECT"
+  fi
   : > "$FIXTURE_EVENTS"
 
   sed -e "s|/opt/teagram|$FIXTURE_REPO|g" \
@@ -309,6 +415,7 @@ setup_encrypted_authority() {
     "$FIXTURE_REPO/.state/blob-mode/mode.json" > "$TMP/mode.json"
   mv "$TMP/mode.json" "$FIXTURE_REPO/.state/blob-mode/mode.json"
   chmod 600 "$FIXTURE_REPO/.state/blob-mode/mode.json"
+  printf 'encrypted\n' > "$FIXTURE_AUTHORITY_FILE"
 }
 
 run_encrypt() {
@@ -340,7 +447,7 @@ output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'blob-encrypt-migrate encrypt failed'* ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nmigration\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nstart:server' ]]
 printf '%s\n' 'PASS interrupted encrypted migration restores the server under encrypted authority'
 
 setup_case cleanup-gating encrypted
@@ -352,7 +459,7 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'unaccounted objects'* ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nmigration\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nstart:server' ]]
 printf '%s\n' 'PASS cleanup requires acceptance and refuses unaccounted objects before deleting plaintext'
 
 setup_case restart-recovery encrypted
@@ -361,5 +468,42 @@ output=$(run_encrypt)
 [[ "$output" == *'RustFS restart failed'* ]]
 [[ "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nmigration\nrestart:rustfs\nstart:rustfs\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nrestart:rustfs\nstart:rustfs\nstart:server' ]]
 printf '%s\n' 'PASS restart failure recovers RustFS and teagramd before returning'
+
+setup_case encrypt-success s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'migration=pass authority=encrypted'* && "$output" == *'dump_restore=pass'* ]]
+[[ "$(cat "$FIXTURE_AUTHORITY_FILE")" == encrypted ]]
+[[ -s "$FIXTURE_REPO/.state/blob-mode/mode.json" ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
+manifest_count=0
+for manifest in "$FIXTURE_OPERATION_EVIDENCE"/pgdump-pre-migration-*.manifest; do
+  [[ -f "$manifest" ]] || continue
+  manifest_count=$((manifest_count + 1))
+  [[ "$(jq -er '.result' "$manifest")" == isolated-restore-pass ]]
+  dump_path=$(jq -er '.dump_path' "$manifest")
+  [[ -s "$dump_path" ]]
+done
+[[ "$manifest_count" == 1 ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nrestore:psql\nrestore:stop\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+printf '%s\n' 'PASS encryption publishes verified backup and encrypted authority before restarting services'
+
+setup_case cleanup-success encrypted
+output=$(run_cleanup --acceptance-passed)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'cleanup=pass authority=encrypted'* ]]
+[[ "$output" == *'plaintext_objects_removed=1'* && "$output" == *'cleanup_recheck_removed=0'* ]]
+[[ ! -e "$FIXTURE_PLAINTEXT_OBJECT" ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+printf '%s\n' 'PASS cleanup removes plaintext only after acceptance and verifies encrypted readback'
+
+setup_case retagged-image s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'teagramd:local no longer identifies the inspected running server image'* ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nrestore:psql\nrestore:stop\nimage-check\nstart:server' ]]
+printf '%s\n' 'PASS migration refuses a retagged image and restores teagramd'
