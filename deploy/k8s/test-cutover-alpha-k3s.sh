@@ -192,7 +192,7 @@ source_dump_hash=$(kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c po
   sh -ec 'umask 077; pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram --file=/tmp/cutover-source.dump; sha256sum /tmp/cutover-source.dump' |
   awk '{print $1}')
 [[ $source_dump_hash =~ ^[0-9a-f]{64}$ ]]
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5 6; do
   kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- \
     cat /tmp/cutover-source.dump > "$tmp_dir/source.dump"
   local_hash=$(sha256sum "$tmp_dir/source.dump" | awk '{print $1}')
@@ -200,7 +200,7 @@ for attempt in 1 2 3; do
   printf 'dump download attempt %s: %s bytes, hash mismatch\n' "$attempt" "$(wc -c < "$tmp_dir/source.dump")" >&2
 done
 [[ $local_hash == "$source_dump_hash" ]]
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5 6; do
   kubectl exec --namespace "$TARGET_NAMESPACE" --stdin postgres-0 -c postgres -- \
     sh -ec 'umask 077; install -d -m 0700 /var/lib/postgresql/cutover-backups; cat > /var/lib/postgresql/cutover-backups/source.dump' \
     < "$tmp_dir/source.dump"
@@ -277,8 +277,10 @@ websocket_status=$(curl --silent --show-error --output /dev/null --write-out '%{
 [[ $websocket_status != 000 ]]
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12444/.well-known/teagramd/client |
   jq --exit-status '.mtproto.rsa_spki | type == "string" and length > 0' >/dev/null
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12444/.well-known/telegramd/client |
-  jq --exit-status '.mtproto.rsa_spki | type == "string" and length > 0' >/dev/null
+# The retired telegramd discovery name must stay absent, as deploy-main.sh expects.
+legacy_discovery_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --max-time 10 http://127.0.0.1:12444/.well-known/telegramd/client)
+[[ $legacy_discovery_status == 404 ]]
 admin_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --max-time 10 http://127.0.0.1:12445/admin)
 [[ $admin_status =~ ^(200|302|401|403)$ ]]
