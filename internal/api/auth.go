@@ -46,11 +46,22 @@ func (h *handlers) verifyTurnstile(r *mtproto.Request, action string) error {
 }
 
 func (h *handlers) verifyTurnstileActions(r *mtproto.Request, errorAction string, allowedActions []string) (string, error) {
-	if h.turnstileVerifier == nil {
+	verifiedAction, err := h.verifyTurnstileActionsRaw(r, allowedActions)
+	if errors.Is(err, ErrTurnstileBusy) {
+		return "", ErrTurnstileBusy
+	}
+	if err != nil {
 		return "", turnstileCheckRequiredError(errorAction, h.turnstileSiteKey)
 	}
+	return verifiedAction, nil
+}
+
+func (h *handlers) verifyTurnstileActionsRaw(r *mtproto.Request, allowedActions []string) (string, error) {
+	if h.turnstileVerifier == nil {
+		return "", errTurnstileUnavailable
+	}
 	if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
-		return "", turnstileCheckRequiredError(errorAction, h.turnstileSiteKey)
+		return "", errTurnstileRejected
 	}
 	remoteIP := ""
 	if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
@@ -58,13 +69,10 @@ func (h *handlers) verifyTurnstileActions(r *mtproto.Request, errorAction string
 	}
 	verifiedAction, err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, allowedActions, remoteIP)
 	if err != nil {
-		if errors.Is(err, ErrTurnstileBusy) {
-			return "", ErrTurnstileBusy
-		}
-		return "", turnstileCheckRequiredError(errorAction, h.turnstileSiteKey)
+		return "", err
 	}
 	if !turnstileActionAllowed(allowedActions, verifiedAction) {
-		return "", turnstileCheckRequiredError(errorAction, h.turnstileSiteKey)
+		return "", errTurnstileRejected
 	}
 	return verifiedAction, nil
 }
@@ -357,18 +365,23 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMethodNotImpl
 	}
 	verifiedAction := store.TurnstileAction("")
-	if h.turnstileSignInEnabled || r.ReCaptchaToken != "" {
+	if h.turnstileSignInEnabled {
 		verifiedActionString, err := h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
 		if err != nil {
-			if h.turnstileSignInEnabled {
-				if errors.Is(err, ErrTurnstileBusy) {
-					return nil, FloodWaitError(1)
-				}
-				return nil, err
+			if errors.Is(err, ErrTurnstileBusy) {
+				return nil, FloodWaitError(1)
 			}
-			// With the sign-in gate off, an optional token cannot turn sendCode
-			// into a sign-in challenge. Leave the code unbound so signUp still
-			// requires its own valid challenge.
+			return nil, err
+		}
+		verifiedAction = store.TurnstileAction(verifiedActionString)
+	} else if r.ReCaptchaToken != "" {
+		verifiedActionString, err := h.verifyTurnstileActionsRaw(r, []string{"signin", "signup"})
+		if err != nil {
+			if errors.Is(err, ErrTurnstileBusy) || errors.Is(err, errTurnstileUnavailable) {
+				h.log.Warn("send code: optional Turnstile token not bound", "err", err)
+			} else {
+				h.log.Info("send code: optional Turnstile token not bound", "err", err)
+			}
 		} else {
 			verifiedAction = store.TurnstileAction(verifiedActionString)
 		}

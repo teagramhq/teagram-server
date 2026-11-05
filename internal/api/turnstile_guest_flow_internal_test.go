@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"testing"
@@ -232,6 +234,8 @@ func TestSigninGateOffInvalidTokenIssuesUnboundCode(t *testing.T) {
 	h.turnstileSiteKey = "site-key"
 	h.turnstileVerifier = verifier
 	h.turnstileSignInEnabled = false
+	var logs bytes.Buffer
+	h.log = slog.New(slog.NewTextHandler(&logs, nil))
 
 	var sendCodeRequest bin.Buffer
 	if err := (&tg.AuthSendCodeRequest{PhoneNumber: username}).Encode(&sendCodeRequest); err != nil {
@@ -249,6 +253,12 @@ func TestSigninGateOffInvalidTokenIssuesUnboundCode(t *testing.T) {
 	}
 	if verifier.calls != 1 {
 		t.Fatalf("Turnstile verifier calls = %d, want invalid token checked once", verifier.calls)
+	}
+	if !strings.Contains(logs.String(), "send code: optional Turnstile token not bound") {
+		t.Fatalf("optional token failure was not logged: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), invalidToken) {
+		t.Fatalf("optional token failure log exposed the token: %s", logs.String())
 	}
 
 	challengeViaCode, err := s.CheckSignUpTurnstileCode(
