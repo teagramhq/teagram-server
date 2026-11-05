@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -21,7 +22,7 @@ func TestAllowedRemote(t *testing.T) {
 		want   bool
 	}{
 		{name: "loopback", remote: "127.0.0.1"},
-		{name: "tailnet peer", remote: "100.124.236.10", want: true},
+		{name: "tailnet peer", remote: "100.124.236.10"},
 		{name: "docker host proxy", remote: "172.22.0.1", want: true},
 		{name: "other default network container", remote: "172.22.0.8"},
 		{name: "private LAN", remote: "192.168.1.10"},
@@ -127,7 +128,13 @@ func TestForwardRelaysAndPropagatesHalfClose(t *testing.T) {
 			return
 		}
 		defer closeQuietly(conn)
-		request, err := io.ReadAll(conn)
+		reader := bufio.NewReader(conn)
+		header, err := reader.ReadString('\n')
+		if err != nil || !strings.HasPrefix(header, "PROXY TCP4 ") {
+			serverDone <- errors.New("missing PROXY header")
+			return
+		}
+		request, err := io.ReadAll(reader)
 		if err != nil {
 			serverDone <- err
 			return
@@ -152,7 +159,7 @@ func TestForwardRelaysAndPropagatesHalfClose(t *testing.T) {
 		close(forwardDone)
 	}()
 	defer closeTest(t, client)
-	if _, err := client.Write([]byte("long-poll")); err != nil {
+	if _, err := client.Write([]byte("PROXY TCP4 100.64.1.2 100.64.0.1 1234 2447\r\nlong-poll")); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CloseWrite(); err != nil {
@@ -196,7 +203,7 @@ func TestForwardClosesAnIdleConnection(t *testing.T) {
 		forwardTo(forwarder, upstream.Addr().String(), 40*time.Millisecond)
 		close(done)
 	}()
-	if _, err := client.Write([]byte("request")); err != nil {
+	if _, err := client.Write([]byte("PROXY TCP4 100.64.1.2 100.64.0.1 1234 2447\r\nrequest")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -225,6 +232,9 @@ func TestForwardLogsUpstreamDialError(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	defer slog.SetDefault(previousLogger)
 
+	if _, err := io.WriteString(client, "PROXY TCP4 100.64.1.2 100.64.0.1 1234 2447\r\n"); err != nil {
+		t.Fatal(err)
+	}
 	forwardTo(forwarder, upstreamAddress, time.Second)
 	if got := logs.String(); !strings.Contains(got, "Bot API upstream unavailable") || !strings.Contains(got, "err=") {
 		t.Fatalf("upstream dial failure log = %q, want contextual error", got)

@@ -19,9 +19,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/teagramhq/teagram-server/internal/proxyv1"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -673,20 +675,24 @@ func remoteIP(remoteAddr string) netip.Addr {
 type connectionLimitListener struct {
 	net.Listener
 
-	mu     sync.Mutex
-	limit  int
-	active map[netip.Addr]int
+	mu      sync.Mutex
+	limit   int
+	active  map[netip.Addr]int
+	results chan acceptResult
+	done    chan struct{}
+	closed  atomic.Bool
 }
 
 func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	if limit < 1 {
 		limit = DefaultMaxConnectionsPerIP
 	}
-	return &connectionLimitListener{
-		Listener: listener,
-		limit:    limit,
-		active:   make(map[netip.Addr]int),
+	l := &connectionLimitListener{
+		Listener: listener, limit: limit, active: make(map[netip.Addr]int),
+		results: make(chan acceptResult), done: make(chan struct{}),
 	}
+	go l.acceptConnections()
+	return l
 }
 
 // LimitConnectionsPerIP bounds the number of open HTTP connections from one
@@ -695,19 +701,83 @@ func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	return limitConnectionsPerIP(listener, limit)
 }
 
-func (l *connectionLimitListener) Accept() (net.Conn, error) {
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+// Bound connections waiting for a preface separately from per-client limits.
+const maxPendingPrefaces = 128
+
+func (l *connectionLimitListener) acceptConnections() {
+	pending := make(chan struct{}, maxPendingPrefaces)
 	for {
 		conn, err := l.Listener.Accept()
 		if err != nil {
-			return nil, err
+			select {
+			case l.results <- acceptResult{err: err}:
+				continue
+			case <-l.done:
+				return
+			}
+		}
+		select {
+		case pending <- struct{}{}:
+			go func() {
+				defer func() { <-pending }()
+				ip := remoteIP(conn.RemoteAddr().String())
+				parsed, _, err := proxyv1.Read(conn, false, ip.IsLoopback())
+				if err != nil {
+					closeBotConn(conn)
+					return
+				}
+				select {
+				case l.results <- acceptResult{conn: parsed}:
+				case <-l.done:
+					closeBotConn(parsed)
+				}
+			}()
+		default:
+			closeBotConn(conn)
+		}
+	}
+}
+
+func closeBotConn(conn net.Conn) {
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		slog.Debug("close Bot API connection", "err", err)
+	}
+}
+
+func (l *connectionLimitListener) Close() error {
+	if l.closed.CompareAndSwap(false, true) {
+		close(l.done)
+		return l.Listener.Close()
+	}
+	return net.ErrClosed
+}
+
+func (l *connectionLimitListener) Accept() (net.Conn, error) {
+	for {
+		var result acceptResult
+		select {
+		case <-l.done:
+			return nil, net.ErrClosed
+		case result = <-l.results:
+		}
+		if result.err != nil {
+			return nil, result.err
+		}
+		conn := result.conn
+		if l.closed.Load() {
+			closeBotConn(conn)
+			return nil, net.ErrClosed
 		}
 		ip := remoteIP(conn.RemoteAddr().String())
 		l.mu.Lock()
 		if l.active[ip] >= l.limit {
 			l.mu.Unlock()
-			if err := conn.Close(); err != nil {
-				return nil, err
-			}
+			closeBotConn(conn)
 			continue
 		}
 		l.active[ip]++

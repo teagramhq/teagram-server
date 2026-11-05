@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/teagramhq/teagram-server/internal/proxyv1"
 )
 
 const (
@@ -23,8 +25,6 @@ const (
 	acceptErrorBackoff       = time.Second
 	connectionIdleTimeout    = 2 * time.Minute
 )
-
-var tailnetIPv4 = netip.MustParsePrefix("100.64.0.0/10")
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "-healthcheck" {
@@ -130,7 +130,7 @@ func reserveConnection(active chan struct{}, client net.Conn) bool {
 
 func allowedRemote(remote, gateway netip.Addr) bool {
 	remote = remote.Unmap()
-	return tailnetIPv4.Contains(remote) || remote == gateway.Unmap()
+	return remote == gateway.Unmap()
 }
 
 func defaultGateway() (netip.Addr, error) {
@@ -169,12 +169,22 @@ func forward(client net.Conn) {
 
 func forwardTo(client net.Conn, upstreamAddress string, idleTimeout time.Duration) {
 	defer closeQuietly(client)
+	rawClient := client
+	client, header, err := proxyv1.Read(client, true, true)
+	if err != nil {
+		slog.Debug("invalid client preface", "err", err)
+		return
+	}
 	upstream, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp4", upstreamAddress)
 	if err != nil {
 		slog.Warn("Bot API upstream unavailable", "err", err)
 		return
 	}
 	defer closeQuietly(upstream)
+	if _, err := upstream.Write(header); err != nil {
+		slog.Debug("write Bot API preface failed", "err", err)
+		return
+	}
 
 	copyDone := make(chan struct{})
 	go func() {
@@ -191,7 +201,7 @@ func forwardTo(client net.Conn, upstreamAddress string, idleTimeout time.Duratio
 	if _, err := io.Copy(client, idleReadConn{Conn: upstream, idleTimeout: idleTimeout}); err != nil && !errors.Is(err, net.ErrClosed) {
 		slog.Debug("Bot API to client copy ended", "err", err)
 	}
-	if conn, ok := client.(*net.TCPConn); ok {
+	if conn, ok := rawClient.(*net.TCPConn); ok {
 		if err := conn.CloseWrite(); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Debug("client write half-close failed", "err", err)
 		}

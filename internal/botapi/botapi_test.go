@@ -965,6 +965,9 @@ func TestConnectionCapRejectsConcurrentConnectionFromSameIP(t *testing.T) {
 			t.Errorf("close first client: %v", err)
 		}
 	})
+	if _, err := io.WriteString(firstClient, "GET / HTTP/1.1\r\n"); err != nil {
+		t.Fatal(err)
+	}
 	firstServer, err := limited.Accept()
 	if err != nil {
 		t.Fatalf("accept first: %v", err)
@@ -987,6 +990,9 @@ func TestConnectionCapRejectsConcurrentConnectionFromSameIP(t *testing.T) {
 			t.Errorf("close second client: %v", err)
 		}
 	})
+	if _, err := io.WriteString(secondClient, "GET / HTTP/1.1\r\n"); err != nil {
+		t.Fatal(err)
+	}
 	accepted := make(chan net.Conn, 1)
 	acceptErr := make(chan error, 1)
 	go func() {
@@ -1019,6 +1025,9 @@ func TestConnectionCapRejectsConcurrentConnectionFromSameIP(t *testing.T) {
 			t.Errorf("close third client: %v", err)
 		}
 	})
+	if _, err := io.WriteString(thirdClient, "GET / HTTP/1.1\r\n"); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case conn := <-accepted:
 		if err := conn.Close(); err != nil {
