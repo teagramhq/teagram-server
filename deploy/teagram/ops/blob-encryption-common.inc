@@ -43,6 +43,11 @@ private_file() {
   [[ -f "$path" && ! -L "$path" && "$(stat -c '%u:%a' -- "$path")" == "$EXPECTED_ROOT_UID:600" ]]
 }
 
+authority_record_file() {
+  local path=$1
+  [[ -f "$path" && ! -L "$path" && "$(stat -c '%u:%a' -- "$path")" == "$EXPECTED_ROOT_UID:644" ]]
+}
+
 ensure_evidence_root() {
   if [[ ! -e "$EVIDENCE_ROOT" && ! -L "$EVIDENCE_ROOT" ]]; then
     mkdir -m 700 -- "$EVIDENCE_ROOT" || ops_fail 'cannot create private evidence directory'
@@ -207,7 +212,7 @@ verify_authority() {
 verify_encrypted_inventory() {
   local authority_json transition_id expected_sha actual_sha inventory_path inventory_unaccounted_ids
   local record_path="$AUTHORITY_DIR/mode.json"
-  private_file "$record_path" || ops_fail 'encrypted authority head is missing or unsafe'
+  authority_record_file "$record_path" || ops_fail 'encrypted authority head is missing or unsafe'
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-mode-state.py" authority \
     --state-dir "$AUTHORITY_DIR" --report-root "$REPORT_ROOT") || ops_fail 'blob authority verification failed'
   [[ "$(jq -er '.outcome' <<< "$authority_json")" == encrypted ]] || ops_fail 'blob authority is not encrypted'

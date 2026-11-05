@@ -160,7 +160,7 @@ publish_encrypted_authority() {
     --arg id "$transition_id" \
     '{transition_id:$id,evidence:{encrypted_inventory_sha256:$sha,object_count:1}}' \
     > "$FIXTURE_REPO/.state/blob-mode/mode.json"
-  chmod 600 "$FIXTURE_REPO/.state/blob-mode/mode.json"
+  chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.json"
   printf 'encrypted\n' > "$FIXTURE_AUTHORITY_FILE"
   if [[ ! -e "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl" ]]; then
     printf '{"type":"header","schema":"teagram.blob-encryption-progress/v1","writes":"stopped"}\n' \
@@ -456,7 +456,7 @@ setup_encrypted_authority() {
   jq --arg sha "$inventory_sha" '.evidence.encrypted_inventory_sha256=$sha' \
     "$FIXTURE_REPO/.state/blob-mode/mode.json" > "$TMP/mode.json"
   mv "$TMP/mode.json" "$FIXTURE_REPO/.state/blob-mode/mode.json"
-  chmod 600 "$FIXTURE_REPO/.state/blob-mode/mode.json"
+  chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.json"
   printf 'encrypted\n' > "$FIXTURE_AUTHORITY_FILE"
 }
 
