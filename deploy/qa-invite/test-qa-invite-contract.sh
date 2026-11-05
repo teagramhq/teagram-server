@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 COMPOSE=$SCRIPT_DIR/compose.yaml
 WORKFLOW=$REPO_ROOT/.github/workflows/deploy-qa-invite.yml
+BROWSER_WORKFLOW=$REPO_ROOT/.github/workflows/real-client-browser-flow.yml
 FORCED_COMMAND=$REPO_ROOT/deploy/teagram-demo/forced-command.sh
 WRITER=$SCRIPT_DIR/qa-account-writer.sh
 REMOTE=$SCRIPT_DIR/remote.sh
@@ -13,6 +14,8 @@ INSTALLER=$REPO_ROOT/deploy/teagram-demo/ops/install-qa-invite-command.sh
 ROLLBACK_TEST=$SCRIPT_DIR/test-qa-invite-rollback.sh
 ROLLBACK=$SCRIPT_DIR/rollback.sh
 NGINX=$SCRIPT_DIR/nginx.conf
+QA_BROWSER_FLOW=$SCRIPT_DIR/test-qa-invite-browser-flow.sh
+QA_BROWSER_RUNNER=$SCRIPT_DIR/test-qa-invite-browser-flow.cjs
 LIVE_SNAPSHOT=$SCRIPT_DIR/testdata/live-state.json
 CONTRACT_TMP=$(mktemp -d)
 trap 'rm -rf -- "$CONTRACT_TMP"' EXIT
@@ -22,11 +25,18 @@ fail() {
   exit 1
 }
 
-for path in "$COMPOSE" "$WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$NGINX" "$LIVE_SNAPSHOT"; do
+for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular file: $path"
 done
 
-bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" || fail 'shell syntax failed'
+bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$QA_BROWSER_FLOW" || fail 'shell syntax failed'
+node --check "$QA_BROWSER_RUNNER" || fail 'QA browser runner syntax failed'
+grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
+grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
+grep -Fq "certutil -d \"sql:\$TEST_HOME/.pki/nssdb\" -A -t 'C,,'" "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not trust the test CA in Chromium'
+! grep -Eq 'ignoreHTTPSErrors|ignore-certificate-errors|--insecure' "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" || fail 'QA browser smoke bypasses TLS verification'
+grep -Fq 'attempt <= 3' "$QA_BROWSER_RUNNER" || fail 'QA Web browser smoke does not repeat sign-in three times'
+grep -Fq 'HTTP/[0-9.]+' "$QA_BROWSER_FLOW" && grep -Fq ' 101(' "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not assert accepted WebSocket upgrades'
 
 [[ $(grep -c '^[[:space:]]*ports:' "$COMPOSE") -eq 1 ]] || fail 'Compose must publish exactly one service port'
 grep -Fq 'TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70' "$SCRIPT_DIR/.env.example" || fail 'Compose bind is not private to the demo LXC address'

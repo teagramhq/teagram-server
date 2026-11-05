@@ -1138,6 +1138,7 @@ jobs:
           bash -n deploy/qa-invite/remote.sh
           bash -n deploy/qa-invite/rollback.sh
           bash -n deploy/qa-invite/qa-account-writer.sh
+          bash -n deploy/qa-invite/test-qa-invite-browser-flow.sh
           bash -n deploy/qa-invite/test-qa-invite-contract.sh
           bash -n deploy/qa-invite/test-qa-invite-rollback.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
@@ -1194,6 +1195,7 @@ jobs:
             deploy/qa-invite/remote.sh \
             deploy/qa-invite/rollback.sh \
             deploy/qa-invite/qa-account-writer.sh \
+            deploy/qa-invite/test-qa-invite-browser-flow.sh \
             deploy/qa-invite/test-qa-invite-contract.sh \
             deploy/qa-invite/test-qa-invite-rollback.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \

@@ -16,7 +16,7 @@ jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -85,6 +85,22 @@ jobs:
         id: browser-flow
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
+      - name: Install Chromium and NSS trust utility
+        timeout-minutes: 10
+        working-directory: web-source
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3-tools
+          corepack pnpm exec playwright install --with-deps chromium
+
+      - name: Exercise the QA invite TLS edge and Web artifact
+        timeout-minutes: 15
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh
+
       - name: Upload Playwright failure trace
         if: ${{ always() && steps.browser-flow.outputs.trace_ready == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -110,7 +126,7 @@ jobs:
           finished="$(date +%s)"
           elapsed=$((finished - started))
           printf 'Complete job duration: %dm %02ds\n' "$((elapsed / 60))" "$((elapsed % 60))" | tee -a "$GITHUB_STEP_SUMMARY"
-          if ((elapsed >= 900)); then
-            echo "::error::real-client browser-flow job exceeded 15 minutes"
+          if ((elapsed >= 1800)); then
+            echo "::error::real-client browser-flow job exceeded 30 minutes"
             exit 1
           fi
