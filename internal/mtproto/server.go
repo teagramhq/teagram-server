@@ -1108,6 +1108,9 @@ func isWebSocketProtocolDecodeError(err error) bool {
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
+	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout && isWebSocketDisconnect(err) {
+		reason = transportCloseReasonClientClose
+	}
 	attrs := []any{
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
@@ -1276,7 +1279,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	}
 	failureStage := "connection_cleanup"
 	defer func() {
-		if closeDiagnostics.transport != websocketPath || rErr == nil || isDisconnect(rErr) {
+		if closeDiagnostics.transport != websocketPath || rErr == nil || isWebSocketDisconnect(rErr) {
 			return
 		}
 		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {

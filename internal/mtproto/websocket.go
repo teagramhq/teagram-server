@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -39,6 +40,13 @@ type webSocketConnState struct {
 	slot     *preAuthSlot
 	addr     netip.Addr
 	deadline time.Time
+}
+
+func isWebSocketDisconnect(err error) bool {
+	if isDisconnect(err) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return websocket.CloseStatus(err) != -1
 }
 
 // webSocketDrainReadDeadlineConn lets the ordinary frame-read timeout expire
@@ -696,7 +704,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
 	}, websocketPath, handler, closeDiagnostics)
-	if closeErr != nil && !isDisconnect(closeErr) {
+	if closeErr != nil && !isWebSocketDisconnect(closeErr) {
 		s.logConnectionFailure(closeErr)
 	}
 }
