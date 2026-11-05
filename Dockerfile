@@ -48,7 +48,8 @@ RUN if [ -n "$DEMO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$DEMO_BUILD_GOMA
     && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb \
     && CGO_ENABLED=0 go build -o /demo-seed ./cmd/demo-seed \
     && CGO_ENABLED=0 go build -o /mtproto-smoke ./cmd/mtproto-smoke \
-    && CGO_ENABLED=0 go build -o /stickerbundle-check ./cmd/stickerbundle-check
+    && CGO_ENABLED=0 go build -o /stickerbundle-check ./cmd/stickerbundle-check \
+    && CGO_ENABLED=0 go build -o /bot-api-forwarder ./cmd/bot-api-forwarder
 
 # The server writes exactly one file, its RSA identity key, and the final image
 # has no shell to mkdir with — so the directory is created here and copied in.
@@ -106,6 +107,7 @@ COPY --from=build /blob-encrypt-migrate /usr/local/bin/blob-encrypt-migrate
 COPY --from=build /photothumb /usr/local/bin/photothumb
 COPY --from=build /demo-seed /usr/local/bin/demo-seed
 COPY --from=build /mtproto-smoke /usr/local/bin/mtproto-smoke
+COPY --from=build /bot-api-forwarder /usr/local/bin/bot-api-forwarder
 COPY --from=server-image-build /sticker-bundle/ /usr/share/teagram/sticker-bundle/
 
 # No --chown: a stage-to-stage copy preserves the ownership set above, and
