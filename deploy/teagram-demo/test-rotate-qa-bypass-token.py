@@ -153,8 +153,87 @@ class RotateQABypassTokenTests(unittest.TestCase):
 
         self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
 
+    def test_accepts_short_turnstile_keys_but_keeps_qa_token_length(self) -> None:
+        self.site_key = "short-site-key"
+        self.siteverify_secret = "short-secret"
+        self._write_runtime_secret(self.siteverify_file, self.siteverify_secret)
+        self.env_file.write_text(
+            f"TEAGRAM_DEMO_TURNSTILE_SITE_KEY={self.site_key}\n", encoding="utf-8"
+        )
+
+        _, length = self._rotate()
+
+        self.assertEqual(length, 64)
+        self.assertRegex(
+            self.token_file.read_text(encoding="ascii").strip(),
+            re.compile(r"[0-9a-f]{64}\Z"),
+        )
+
+    def test_rejects_qa_token_below_minimum_length(self) -> None:
+        short_token = "short-token"
+        self._write_runtime_secret(self.token_file, short_token)
+
+        with self.assertRaisesRegex(ROTATION.RotationError, "qa-bypass-token-format"):
+            self._rotate()
+
+        self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{short_token}\n")
+        self.assertFalse(self.backup_dir.exists())
+
+    def test_rejects_existing_qa_token_reused_as_site_key(self) -> None:
+        self.site_key = self.old_token
+        self.env_file.write_text(
+            f"TEAGRAM_DEMO_TURNSTILE_SITE_KEY={self.site_key}\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ROTATION.RotationError, "existing-token-reuse"):
+            self._rotate()
+
+        self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
+        self.assertFalse(self.backup_dir.exists())
+
 
 class HaproxyControlTests(unittest.TestCase):
+    def test_shutdown_sessions_covers_http_and_mtproto_backends(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="teagram-haproxy-shutdown-") as temporary:
+            socket_path = pathlib.Path(temporary) / "admin.sock"
+            admin_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            admin_socket.bind(str(socket_path))
+            admin_socket.listen(2)
+            admin_socket.settimeout(3)
+            commands: list[str] = []
+            errors: list[OSError] = []
+
+            def serve_commands() -> None:
+                try:
+                    for _ in range(2):
+                        client, _ = admin_socket.accept()
+                        with client:
+                            commands.append(client.recv(1024).decode("ascii").strip())
+                            client.sendall(b"Shutdown started\n")
+                except OSError as error:
+                    errors.append(error)
+                finally:
+                    admin_socket.close()
+
+            thread = threading.Thread(target=serve_commands)
+            thread.start()
+            try:
+                HAPROXY_CONTROL.slot_command(
+                    socket_path, "shutdown-sessions", "teagramd-next"
+                )
+            finally:
+                thread.join(timeout=4)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                commands,
+                [
+                    "shutdown sessions server teagramd/teagramd-next",
+                    "shutdown sessions server teagramd_mtproto/teagramd-next-mtproto",
+                ],
+            )
+
     def test_wait_healthy_rejects_drained_status_without_opt_in(self) -> None:
         original_server_row = HAPROXY_CONTROL.server_row
         original_monotonic = HAPROXY_CONTROL.time.monotonic
@@ -287,8 +366,23 @@ set -euo pipefail
 if [[ ${1:-} == --no-optional-locks ]]; then shift; fi
 if [[ ${1:-} == -C ]]; then shift 2; fi
 case ${1:-} in
-  merge-base|diff) exit 0 ;;
-  rev-parse|hash-object) printf '%040d\n' 1 ;;
+  merge-base)
+    [[ ${FIXTURE_FAIL_MERGE_BASE:-0} != 1 ]] || exit 1
+    exit 0
+    ;;
+  diff) exit 0 ;;
+  rev-parse) printf '%040d\n' 1 ;;
+  hash-object)
+    case ${2:-} in
+      */demo-common.sh)
+        [[ ${FIXTURE_SOURCE_DRIFT:-0} != 1 ]] || { printf '%040d\n' 2; exit 0; }
+        ;;
+      */rotate-qa-bypass-token.py)
+        [[ ${FIXTURE_ROTATOR_IDENTITY_MISMATCH:-0} != 1 ]] || { printf '%040d\n' 2; exit 0; }
+        ;;
+    esac
+    printf '%040d\n' 1
+    ;;
   show) printf 'fixture rotator\n' ;;
   *) exit 90 ;;
 esac
@@ -389,6 +483,9 @@ demo_haproxy_control() {
       [[ ${FIXTURE_FAIL_DRAIN:-0} != 1 ]] || return 1
       printf '%s\n' DRAIN > "$TEST_HAPROXY_STATE"
       ;;
+    shutdown-sessions)
+      [[ ${FIXTURE_FAIL_SHUTDOWN_SESSIONS:-0} != 1 ]] || return 1
+      ;;
     enable) printf '%s\n' UP > "$TEST_HAPROXY_STATE" ;;
     *) return 95 ;;
   esac
@@ -437,6 +534,28 @@ demo_haproxy_control() {
         self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.new_token}\n")
         self.assertNotIn(self.old_token, result.stdout + result.stderr)
         self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def _assert_rejected_before_rotation(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.rotation_ran.exists())
+        self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
+        calls = self.calls.read_text(encoding="utf-8") if self.calls.exists() else ""
+        self.assertNotIn("compose-up", calls)
+
+    def test_source_drift_rejects_before_rotation_or_compose_up(self) -> None:
+        result = self._run_operation(FIXTURE_SOURCE_DRIFT="1")
+
+        self._assert_rejected_before_rotation(result)
+
+    def test_origin_main_guard_rejects_before_rotation_or_compose_up(self) -> None:
+        result = self._run_operation(FIXTURE_FAIL_MERGE_BASE="1")
+
+        self._assert_rejected_before_rotation(result)
+
+    def test_rotator_identity_guard_rejects_before_rotation_or_compose_up(self) -> None:
+        result = self._run_operation(FIXTURE_ROTATOR_IDENTITY_MISMATCH="1")
+
+        self._assert_rejected_before_rotation(result)
 
     def test_successful_recreation_reports_the_replaced_container(self) -> None:
         result = self._run_operation()
@@ -493,7 +612,7 @@ demo_haproxy_control() {
         self.assertIn("server stopped", result.stderr)
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
 
-    def test_stop_failures_drain_old_server_from_haproxy(self) -> None:
+    def test_stop_failures_drain_old_server_and_shutdown_sessions(self) -> None:
         result = self._run_operation(
             FIXTURE_FAIL_UP="1",
             FIXTURE_FAIL_COMPOSE_STOP="1",
@@ -502,10 +621,32 @@ demo_haproxy_control() {
         )
 
         self._assert_rotated_without_leaking(result)
-        self.assertIn("haproxy-drain teagramd-next", self.calls.read_text(encoding="utf-8"))
-        self.assertIn("server drained from HAProxy", result.stderr)
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        self.assertIn("haproxy-drain teagramd-next", calls)
+        self.assertIn("haproxy-shutdown-sessions teagramd-next", calls)
+        self.assertLess(
+            calls.index("haproxy-drain teagramd-next"),
+            calls.index("haproxy-shutdown-sessions teagramd-next"),
+        )
+        self.assertIn("server drained and existing sessions shut down", result.stderr)
+        self.assertIn("old token may still be live", result.stderr)
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
         self.assertEqual(self.haproxy_state.read_text(encoding="ascii"), "DRAIN\n")
+
+    def test_drain_with_failed_session_shutdown_warns_old_token_may_be_live(self) -> None:
+        result = self._run_operation(
+            FIXTURE_FAIL_UP="1",
+            FIXTURE_FAIL_COMPOSE_STOP="1",
+            FIXTURE_FAIL_DOCKER_STOP="1",
+            FIXTURE_FAIL_DOCKER_KILL="1",
+            FIXTURE_FAIL_SHUTDOWN_SESSIONS="1",
+        )
+
+        self._assert_rotated_without_leaking(result)
+        self.assertIn("haproxy-shutdown-sessions teagramd-next", self.calls.read_text(encoding="utf-8"))
+        self.assertIn("existing sessions could not be shut down", result.stderr)
+        self.assertIn("old token may still be live", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
 
     def test_rerun_recovers_a_drained_healthy_slot_before_enabling_it(self) -> None:
         first = self._run_operation(
@@ -539,6 +680,7 @@ demo_haproxy_control() {
 
         self._assert_rotated_without_leaking(result)
         self.assertIn("server stop and HAProxy drain could not be confirmed", result.stderr)
+        self.assertIn("old token may still be live", result.stderr)
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "old-container\n")
 
 

@@ -81,6 +81,14 @@ def wait_healthy(
 def slot_command(socket_path: pathlib.Path, action: str, slot: str) -> None:
     if slot not in SLOTS:
         fail("invalid service slot")
+    if action == "shutdown-sessions":
+        servers = (
+            ("teagramd", slot),
+            ("teagramd_mtproto", f"{slot}-mtproto"),
+        )
+        for backend, server in servers:
+            exchange(socket_path, f"shutdown sessions server {backend}/{server}")
+        return
     state = "ready" if action == "enable" else "drain"
     exchange(socket_path, f"set server teagramd/{slot} state {state}")
     exchange(socket_path, f"set server teagramd_mtproto/{slot}-mtproto state {state}")
@@ -90,7 +98,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=pathlib.Path, default=SOCKET_PATH)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    for action in ("enable", "drain"):
+    for action in ("enable", "drain", "shutdown-sessions"):
         subparser = subparsers.add_parser(action)
         subparser.add_argument("slot", choices=sorted(SLOTS))
     wait = subparsers.add_parser("wait-healthy")

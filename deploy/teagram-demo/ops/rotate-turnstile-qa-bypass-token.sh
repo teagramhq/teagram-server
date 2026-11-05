@@ -90,9 +90,14 @@ fail_closed_and_cleanup() {
     if (( server_stopped == 1 )); then
       printf '%s\n' 'demo QA bypass rotation: server stopped; rerun the reviewed operation to install a fresh token' >&2
     elif demo_haproxy_control drain "$ACTIVE_SERVER" >/dev/null; then
-      printf '%s\n' 'demo QA bypass rotation: server drained from HAProxy; rerun the reviewed operation to install a fresh token' >&2
+      if demo_haproxy_control shutdown-sessions "$ACTIVE_SERVER" >/dev/null; then
+        printf '%s\n' 'demo QA bypass rotation: server drained and existing sessions shut down; old token may still be live; rerun the reviewed operation to install a fresh token' >&2
+      else
+        printf '%s\n' 'demo QA bypass rotation: server drained but existing sessions could not be shut down; old token may still be live; do not restore the old token' >&2
+        status=1
+      fi
     else
-      printf '%s\n' 'demo QA bypass rotation: server stop and HAProxy drain could not be confirmed; do not restore the old token' >&2
+      printf '%s\n' 'demo QA bypass rotation: server stop and HAProxy drain could not be confirmed; old token may still be live; do not restore the old token' >&2
       status=1
     fi
   fi

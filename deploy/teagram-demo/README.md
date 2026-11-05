@@ -377,10 +377,13 @@ directory, atomically installs a new random token with the existing runtime
 ownership and mode, then recreates the active server slot with the current
 pinned image. This briefly interrupts the public demo. If the new server does
 not become healthy, the operation stops it. If container stop commands fail,
-it tries a forced stop and then drains the slot from HAProxy; if neither stop
-nor drain can be confirmed, it reports that failure and leaves the compromised
-token snapshot untouched. Rerun the reviewed operation to generate another
-fresh token; never restore the snapshot, because the old value is compromised.
+it tries a forced stop, then drains the slot from HAProxy and shuts down
+existing sessions in both public backends. The old container can retain the old
+token because its bind mount may pin the prior file inode. If stop, drain or
+session shutdown cannot be confirmed, the operation reports that the old token
+may still be live and leaves the compromised token snapshot untouched. Rerun
+the reviewed operation to generate another fresh token; never restore the
+snapshot, because the old value is compromised.
 On a rerun, it accepts healthy HAProxy checks in `UP` or `DRAIN` state and only
 enables the active slot after both checks pass. The operation prints only the
 snapshot path, token length, active slot and HAProxy readiness.

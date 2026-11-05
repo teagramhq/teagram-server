@@ -14,6 +14,7 @@ import tempfile
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+CONFIG_SECRET_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
 GENERATED_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SECRET_DIR = pathlib.Path("/var/lib/teagram-demo/secrets")
 TOKEN_FILE = SECRET_DIR / "turnstile-qa-bypass-token"
@@ -67,13 +68,15 @@ def _require_directory(path: pathlib.Path, owner: int, group: int, mode: int, na
         raise RotationError(f"{name}-owner-or-mode")
 
 
-def _runtime_secret(path: pathlib.Path, name: str) -> tuple[bytes, str, os.stat_result]:
+def _runtime_secret(
+    path: pathlib.Path, name: str, pattern: re.Pattern[str]
+) -> tuple[bytes, str, os.stat_result]:
     raw, metadata = _read_checked_file(path, name, 0, 65532, 0o440)
     try:
         value = raw.decode("ascii").strip()
     except UnicodeDecodeError as exc:
         raise RotationError(f"{name}-format") from exc
-    if not TOKEN_PATTERN.fullmatch(value):
+    if not pattern.fullmatch(value):
         raise RotationError(f"{name}-format")
     return raw, value, metadata
 
@@ -90,7 +93,7 @@ def _site_key(path: pathlib.Path) -> str:
         if line.partition("=")[0] == "TEAGRAM_DEMO_TURNSTILE_SITE_KEY"
         and "=" in line
     ]
-    if len(values) != 1 or not TOKEN_PATTERN.fullmatch(values[0]):
+    if len(values) != 1 or not CONFIG_SECRET_PATTERN.fullmatch(values[0]):
         raise RotationError("demo-site-key-format")
     return values[0]
 
@@ -182,8 +185,12 @@ def rotate_token(
     rotation_marker: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, int]:
     _require_directory(secret_dir, 0, 0, 0o700, "demo-secret-directory")
-    old_raw, old_token, original_metadata = _runtime_secret(token_file, "qa-bypass-token")
-    _, siteverify_secret, _ = _runtime_secret(siteverify_file, "siteverify-secret")
+    old_raw, old_token, original_metadata = _runtime_secret(
+        token_file, "qa-bypass-token", TOKEN_PATTERN
+    )
+    _, siteverify_secret, _ = _runtime_secret(
+        siteverify_file, "siteverify-secret", CONFIG_SECRET_PATTERN
+    )
     site_key = _site_key(env_file)
     if old_token in {site_key, siteverify_secret}:
         raise RotationError("existing-token-reuse")
@@ -245,7 +252,9 @@ def rotate_token(
     ):
         raise RotationError("generated-token-invalid")
     _install_token(token_file, secret_dir, token, rotation_marker)
-    installed_raw, installed_token, _ = _runtime_secret(token_file, "qa-bypass-token")
+    installed_raw, installed_token, _ = _runtime_secret(
+        token_file, "qa-bypass-token", TOKEN_PATTERN
+    )
     if installed_token != token or installed_raw != f"{token}\n".encode("ascii"):
         raise RotationError("installed-token-verify-failed")
     return snapshot_path, len(token)
