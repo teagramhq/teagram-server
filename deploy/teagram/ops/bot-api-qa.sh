@@ -267,7 +267,10 @@ if [[ "$MODE" == apply ]]; then
     cmp -s -- "$ENV_FILE" "$PREVIOUS_ENV_FILE" || { fail 'pre-change .env backup differs from the verified live file'; exit 1; }
   else
     cp -- "$ENV_FILE" "$PREVIOUS_ENV_FILE" || { fail 'cannot save the pre-change .env'; exit 1; }
-    chmod 600 -- "$PREVIOUS_ENV_FILE" && sync || { fail 'cannot protect the pre-change .env backup'; exit 1; }
+    if ! chmod 600 -- "$PREVIOUS_ENV_FILE" || ! sync; then
+      fail 'cannot protect the pre-change .env backup'
+      exit 1
+    fi
   fi
   private_file "$PREVIOUS_ENV_FILE" || { fail 'pre-change .env backup is unsafe'; exit 1; }
   [[ "$(file_sha256 "$PREVIOUS_ENV_FILE")" == "$recorded_env_sha" ]] || { fail 'pre-change .env backup is not the last verified file'; exit 1; }
@@ -401,7 +404,10 @@ else
     bot_id=${BASH_REMATCH[1]}
     revoked_token=${token_lines[0]}
     ID_TEMP=$(mktemp "$STATE_DIR/.bot-api-qa-id.XXXXXXXX") || { fail 'cannot stage test bot identity'; exit 1; }
-    printf '%s\n' "$bot_id" > "$ID_TEMP" && chmod 600 -- "$ID_TEMP" && sync || { fail 'cannot persist test bot identity'; exit 1; }
+    if ! printf '%s\n' "$bot_id" > "$ID_TEMP" || ! chmod 600 -- "$ID_TEMP" || ! sync; then
+      fail 'cannot persist test bot identity'
+      exit 1
+    fi
     mv -n -- "$ID_TEMP" "$BOT_ID_FILE" || { fail 'cannot publish test bot identity'; exit 1; }
     ID_TEMP=
     private_file "$BOT_ID_FILE" || { fail 'persisted test bot identity is unsafe'; exit 1; }

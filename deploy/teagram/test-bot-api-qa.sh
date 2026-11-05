@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROLLOUT_VERIFIER_SOURCE_ONLY=1
+export ROLLOUT_VERIFIER_SOURCE_ONLY=1
+# shellcheck source=deploy/teagramd/rollout-runner/rollout-verifier.sh
 source "$SCRIPT_DIR/../teagramd/rollout-runner/rollout-verifier.sh"
 
 TMP=$(mktemp -d)
