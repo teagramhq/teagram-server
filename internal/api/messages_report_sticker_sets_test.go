@@ -517,7 +517,7 @@ func TestMessagesReportRejectsChannelPostBelowHistoryFloor(t *testing.T) {
 	}
 	h := fullChannelDispatcher(s)
 	file, _ := seedReportableEmojiSet(t, ctx, s, blobs, h, owner.ID, "report_history_floor")
-	channel, err := s.CreateChannel(ctx, owner.ID, "Report floor", "", false)
+	channel, err := s.CreateChannel(ctx, owner.ID, "Report floor", "", true)
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
