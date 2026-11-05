@@ -1107,7 +1107,7 @@ jobs:
         run: |
           ./deploy/k8s/cutover-alpha.sh --dry-run
           bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
-            deploy/k8s/test-cutover-alpha-k3s.sh
+            deploy/k8s/test-cutover-alpha-k3s.sh deploy/k8s/test-cutover-alpha-incus.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1162,6 +1162,7 @@ jobs:
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha-k3s.sh \
+            deploy/k8s/test-cutover-alpha-incus.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \

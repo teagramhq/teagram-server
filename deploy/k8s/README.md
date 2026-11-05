@@ -148,20 +148,26 @@ database, identity and blobs. It then starts the WebSocket and admin listeners
 on the k3s teagramd Service and installs restartable `systemd` port-forwards in
 `teagram-k3s`. Tailscale Serve keeps all five existing paths and sends `/` to
 linkselector, `/apiws`, both client discovery paths, and `/admin` to the
-matching teagramd Service ports. Funnel remains off. The Cloudflare connector
+matching teagramd Service ports. It also forwards the existing raw MTProto TCP
+listener on port `2443` to the k3s teagramd Service and verifies the listener is
+reachable before changing Serve. Funnel remains off. The Cloudflare connector
 stays at zero until the dashboard route changes from `http://selector:8081` to
 `http://linkselector:8081`; confirm that change before the k8s connector starts.
 No Cloudflare API credential is provisioned.
 
-The script prints the exact rollback command after the cutover. Rollback scales
-the k8s app and connector to zero and verifies that no k8s connector pod
-remains before restoring the Cloudflare route and all five Serve paths. It then
-restarts the stopped Compose services and stops both port-forwards. PostgreSQL
-and PVC data remain intact. Writes made on k3s after the switch are not carried
-back to Compose.
+The first live Serve route is the switch boundary. A failure after that point
+leaves k3s serving and requires the printed explicit rollback command; it will
+not automatically restart Compose and discard writes accepted by k3s. Rollback
+requires confirmation of that data loss, scales the k8s app and connector to
+zero, and verifies their pods have stopped before restoring the Cloudflare
+route, all five Serve paths, and the MTProto TCP route. It then restarts the
+stopped Compose services and stops both port-forwards. PostgreSQL and PVC data
+remain intact. Writes made on k3s after the switch are not carried back to
+Compose.
 
-CI runs the migration Job from the same pinned teagramd image used by
-`prod-cutover` in a disposable k3s namespace, restores a seeded account and
-signs in with its original password, then shuts off the cutover Services and
-verifies sign-in against the untouched source. No production manifests reach a
-live cluster.
+CI runs the actual cutover runner with a disposable source namespace and a
+separate target namespace in k3s. The source database, identity files, and a
+blob fixture pass through the runner's fence, snapshot, transfer, and pinned
+migration Job; CI signs into the restored account on the target, invokes the
+runner's explicit rollback, then signs into the untouched source. No production
+namespace or live cluster is used.

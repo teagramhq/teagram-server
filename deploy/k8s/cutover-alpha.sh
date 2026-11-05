@@ -5,15 +5,26 @@ umask 077
 
 readonly SOURCE_INSTANCE=teagram
 readonly TARGET_INSTANCE=teagram-k3s
-readonly NAMESPACE=teagram
-readonly KUBECONFIG_PATH=/root/teagram-k3s-deploy.kubeconfig
-readonly EVIDENCE_DIR=/var/lib/teagram-k3s-cutover
+TEST_MODE=false
+if [[ ${2:-} == --test-mode ]]; then
+  TEST_MODE=true
+  readonly NAMESPACE=teagram-cutover
+  readonly KUBECONFIG_PATH=${KUBECONFIG:?--test-mode requires a disposable KUBECONFIG}
+  readonly EVIDENCE_DIR=${RUNNER_TEMP:?--test-mode requires RUNNER_TEMP}/teagram-cutover-runner
+  readonly LOCK_PATH=$EVIDENCE_DIR/cutover.lock
+else
+  readonly NAMESPACE=teagram
+  readonly KUBECONFIG_PATH=/root/teagram-k3s-deploy.kubeconfig
+  readonly EVIDENCE_DIR=/var/lib/teagram-k3s-cutover
+  readonly LOCK_PATH=/run/lock/teagram-k3s-cutover.lock
+fi
 readonly PHASE_FILE=$EVIDENCE_DIR/phase
 readonly LINKSELECTOR_PORT_FORWARD_UNIT=teagram-linkselector-port-forward.service
 readonly TEAGRAMD_PORT_FORWARD_UNIT=teagramd-port-forward.service
 readonly LINKSELECTOR_PORT=18081
 readonly WEBSOCKET_PORT=18444
 readonly ADMIN_PORT=18445
+readonly MTPROTO_PORT=2443
 readonly POSTGRES_DUMP_DIR=/var/lib/postgresql/cutover-backups
 readonly CLOUDFLARE_BEFORE=http://selector:8081
 readonly CLOUDFLARE_AFTER=http://linkselector:8081
@@ -35,6 +46,7 @@ fail() {
 usage() {
   cat <<'EOF'
 Usage: cutover-alpha.sh --dry-run | --apply | --rollback
+       cutover-alpha.sh --apply|--rollback --test-mode (disposable CI namespace only)
 
   --dry-run  Print the complete plan without contacting alpha or the cluster.
   --apply    Run once as root on alpha after bootstrap and before production data is in k3s.
@@ -52,16 +64,17 @@ Would save a mode-0600 pg_dump on the PostgreSQL PVC, restore it into k3s, then 
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
 Would stream server_key.pem, enc_key.hex, and local blobs from the old container into the new PVCs without a host-side plaintext copy; key hashes are compared silently.
 Would verify the old blob tree and its encrypted envelopes fit their PVCs and the target disk can hold both copies, encrypt and checksum-copy its objects to RustFS with the migrated media key, and keep a read-only source copy for recovery.
-Would start teagramd, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, teagramd WebSocket, and admin Services, then verify them from both LXCs.
-Would save all five tailnet-only Serve handlers, route / to linkselector and /apiws, /admin, and both discovery paths to the corresponding k3s Services, and verify Funnel remains off.
+Would start teagramd, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, MTProto TCP, teagramd WebSocket, and admin Services, then verify them from both LXCs.
+Would save all five tailnet-only Serve handlers and the advertised MTProto TCP route on port 2443, route / to linkselector and /apiws, /admin, and both discovery paths to the corresponding k3s Services, and verify Funnel remains off.
 Would keep k8s cloudflared at zero until the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081; then start and verify the k3s connector.
 Would keep all old Compose services stopped after cutover without modifying their volumes; retain the database dump and recovery evidence for at least seven days.
 Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five Serve handlers and Cloudflare to the old targets, restart the stopped Compose services, then stop both port-forwards. k3s writes since the switch are not carried back.
+After the first live Serve route, a failure requires explicit rollback after the first live Serve route; automatic recovery will not switch clients back to Compose and discard k3s writes.
 EOF
   printf 'Rollback command after review: sudo bash %q --rollback\n' "$SCRIPT_PATH"
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && ${2:-} != --test-mode ) ]]; then
   usage >&2
   exit 64
 fi
@@ -72,9 +85,11 @@ case "$1" in
   *) usage >&2; exit 64 ;;
 esac
 
-[[ $(id -u) -eq 0 ]] || fail "run $ACTION as root on alpha"
-[[ $(hostname -s) == alpha ]] || fail "run $ACTION on alpha"
-[[ -t 0 ]] || fail "$ACTION requires an interactive terminal for the manual Cloudflare route change"
+if [[ $TEST_MODE == false ]]; then
+  [[ $(id -u) -eq 0 ]] || fail "run $ACTION as root on alpha"
+  [[ $(hostname -s) == alpha ]] || fail "run $ACTION on alpha"
+  [[ -t 0 ]] || fail "$ACTION requires an interactive terminal for the manual Cloudflare route change"
+fi
 
 for command_name in incus kubectl readlink stat install sha256sum python3 awk grep sed tar flock date sleep; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
@@ -82,7 +97,11 @@ done
 
 export KUBECONFIG=$KUBECONFIG_PATH
 [[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] || fail 'bootstrap deploy kubeconfig is missing or not a regular file'
-[[ $(stat -c '%a:%u' "$KUBECONFIG_PATH") == 600:0 ]] || fail 'bootstrap deploy kubeconfig must be root-owned mode 0600'
+if [[ $TEST_MODE == false ]]; then
+  [[ $(stat -c '%a:%u' "$KUBECONFIG_PATH") == 600:0 ]] || fail 'bootstrap deploy kubeconfig must be root-owned mode 0600'
+else
+  [[ $(stat -c '%a' "$KUBECONFIG_PATH") == 600 ]] || fail 'disposable test kubeconfig must have mode 0600'
+fi
 incus info "$SOURCE_INSTANCE" >/dev/null 2>&1 || fail 'the old teagram LXC is unavailable'
 incus info "$TARGET_INSTANCE" >/dev/null 2>&1 || fail 'the teagram-k3s LXC is unavailable'
 [[ $(incus list "$TARGET_INSTANCE" --format csv -c s) == RUNNING ]] || fail 'teagram-k3s is not running'
@@ -95,16 +114,55 @@ incus exec "$TARGET_INSTANCE" -- command -v ip >/dev/null || fail 'ip is unavail
 incus exec "$TARGET_INSTANCE" -- command -v awk >/dev/null || fail 'awk is unavailable in teagram-k3s'
 incus exec "$TARGET_INSTANCE" -- command -v curl >/dev/null || fail 'curl is unavailable in teagram-k3s'
 
-exec 9>/run/lock/teagram-k3s-cutover.lock
+if [[ $TEST_MODE == true ]]; then
+  [[ $(kubectl config view --minify --output 'jsonpath={.clusters[0].cluster.server}') == https://127.0.0.1:6443 ]] ||
+    fail 'test mode is restricted to the loopback disposable k3s API'
+  [[ $(kubectl get namespace "$SOURCE_INSTANCE" --output 'jsonpath={.metadata.labels.cutover-test}') == true ]] ||
+    fail 'test mode requires the source namespace to carry cutover-test=true'
+  [[ $(kubectl get namespace "$NAMESPACE" --output 'jsonpath={.metadata.labels.cutover-test}') == true ]] ||
+    fail 'test mode requires the target namespace to carry cutover-test=true'
+fi
+
+if [[ $TEST_MODE == true ]]; then
+  install -d -m 0700 "$EVIDENCE_DIR"
+fi
+exec 9>"$LOCK_PATH"
 flock -n 9 || fail 'another k3s cutover or rollback is running'
 
 record_phase() {
   local next=$1 temporary
-  install -d -o root -g root -m 0700 "$EVIDENCE_DIR"
+  ensure_private_dir "$EVIDENCE_DIR"
   temporary=$(mktemp "$EVIDENCE_DIR/.phase.XXXXXX")
   printf '%s\n' "$next" > "$temporary"
   chmod 0600 "$temporary"
   mv -f -- "$temporary" "$PHASE_FILE"
+}
+
+ensure_private_dir() {
+  if [[ $TEST_MODE == true ]]; then
+    install -d -m 0700 "$1"
+  else
+    install -d -o root -g root -m 0700 "$1"
+  fi
+}
+
+install_private_file() {
+  local mode=$1 source=$2 destination=$3
+  if [[ $TEST_MODE == true ]]; then
+    install -m "$mode" "$source" "$destination"
+  else
+    install -o root -g root -m "$mode" "$source" "$destination"
+  fi
+}
+
+verify_private_file() {
+  local path=$1 mode=$2 owner
+  if [[ $TEST_MODE == true ]]; then
+    [[ $(stat -c '%a' "$path") == "$mode" ]]
+  else
+    owner=$(stat -c '%a:%u' "$path")
+    [[ $owner == "$mode:0" ]]
+  fi
 }
 
 container_status() {
@@ -128,7 +186,7 @@ restart_stopped_compose_services() {
   local -a containers=()
   [[ -f $COMPOSE_STOPPED_FILE && ! -L $COMPOSE_STOPPED_FILE ]] ||
     fail 'stopped Compose service evidence is missing; refusing an incomplete rollback'
-  [[ $(stat -c '%a:%u' "$COMPOSE_STOPPED_FILE") == 600:0 ]] ||
+  verify_private_file "$COMPOSE_STOPPED_FILE" 600 ||
     fail 'stopped Compose service evidence is not root-owned mode 0600'
 
   mapfile -t containers < "$COMPOSE_STOPPED_FILE"
@@ -160,7 +218,7 @@ verify_no_source_postgres_clients() {
   for ((attempt = 1; attempt <= 30; attempt++)); do
     connections=$(incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
       psql --username=postgres --dbname=postgres --tuples-only --no-align \
-        --command="SELECT count(*) FROM pg_stat_activity WHERE datname = 'teagram' AND backend_type = 'client backend' AND pid <> pg_backend_pid()") ||
+        --command="SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()") ||
       fail 'could not verify source PostgreSQL client connections'
     [[ $connections =~ ^[0-9]+$ ]] || fail 'source PostgreSQL client connection count is invalid'
     [[ $connections == 0 ]] && return 0
@@ -171,7 +229,7 @@ verify_no_source_postgres_clients() {
 
 fence_source_writes() {
   local running_ids container_id service container_name
-  install -d -o root -g root -m 0700 "$EVIDENCE_DIR"
+  ensure_private_dir "$EVIDENCE_DIR"
   : > "$COMPOSE_STOPPED_FILE"
   chmod 0600 "$COMPOSE_STOPPED_FILE"
 
@@ -243,7 +301,8 @@ serve_status_file() {
 }
 
 check_serve_status() {
-  local status_file=$1 expected_root=$2 websocket_base=$3 admin_base=$4
+  local status_file=$1 expected_root=$2 websocket_base=$3 admin_base=$4 expected_tcp=$5
+  local allow_old_routes=${6:-false}
   python3 -c '
 import json
 import pathlib
@@ -253,12 +312,21 @@ status = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 expected_root = sys.argv[2]
 websocket_base = sys.argv[3]
 admin_base = sys.argv[4]
+expected_tcp = sys.argv[5]
+allow_old_routes = sys.argv[6] == "true"
 expected = {
     "/": expected_root,
     "/apiws": websocket_base + "/apiws",
     "/admin": admin_base + "/admin",
     "/.well-known/teagramd/client": websocket_base + "/.well-known/teagramd/client",
     "/.well-known/telegramd/client": websocket_base + "/.well-known/telegramd/client",
+}
+old = {
+    "/": "http://127.0.0.1:8081",
+    "/apiws": "http://127.0.0.1:2444/apiws",
+    "/admin": "http://127.0.0.1:2445/admin",
+    "/.well-known/teagramd/client": "http://127.0.0.1:2444/.well-known/teagramd/client",
+    "/.well-known/telegramd/client": "http://127.0.0.1:2444/.well-known/telegramd/client",
 }
 web = status.get("Web")
 if not isinstance(web, dict):
@@ -271,18 +339,26 @@ if set(handlers) != set(expected):
     raise SystemExit("k3s cutover: Tailscale Serve handler paths changed")
 for path, target in expected.items():
     handler = handlers[path]
-    if not isinstance(handler, dict) or handler.get("Proxy") != target:
+    allowed = {target, old[path]} if allow_old_routes else {target}
+    if not isinstance(handler, dict) or handler.get("Proxy") not in allowed:
         raise SystemExit("k3s cutover: Tailscale Serve handler target changed: " + path)
+tcp = status.get("TCP")
+if not isinstance(tcp, dict) or set(tcp) != {"2443"}:
+    raise SystemExit("k3s cutover: the advertised MTProto TCP listener is missing or changed")
+tcp_handler = tcp["2443"]
+allowed_tcp = {expected_tcp, "127.0.0.1:2443"} if allow_old_routes else {expected_tcp}
+if not isinstance(tcp_handler, dict) or tcp_handler.get("TCPForward") not in allowed_tcp:
+    raise SystemExit("k3s cutover: the advertised MTProto TCP target changed")
 if "AllowFunnel" not in status or not isinstance(status["AllowFunnel"], dict):
     raise SystemExit("k3s cutover: Tailscale Funnel state is missing or invalid")
 funnel = status["AllowFunnel"]
 if any(value is not False for value in funnel.values()):
     raise SystemExit("k3s cutover: Tailscale Funnel is enabled or its state is unknown")
-' "$status_file" "$expected_root" "$websocket_base" "$admin_base"
+' "$status_file" "$expected_root" "$websocket_base" "$admin_base" "$expected_tcp" "$allow_old_routes"
 }
 
 set_serve_routes() {
-  local root=$1 websocket_base=$2 admin_base=$3
+  local root=$1 websocket_base=$2 admin_base=$3 tcp_target=$4
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ "$root" >/dev/null
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/apiws \
     "$websocket_base/apiws" >/dev/null
@@ -292,6 +368,8 @@ set_serve_routes() {
     --set-path=/.well-known/teagramd/client "$websocket_base/.well-known/teagramd/client" >/dev/null
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 \
     --set-path=/.well-known/telegramd/client "$websocket_base/.well-known/telegramd/client" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --tcp="$MTPROTO_PORT" \
+    "tcp://$tcp_target" >/dev/null
 }
 
 wait_for_no_pods() {
@@ -306,20 +384,56 @@ wait_for_no_pods() {
   return 1
 }
 
-stop_k8s_connector() {
-  if kubectl get deployment cloudflared --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null
-    wait_for_no_pods app.kubernetes.io/name=cloudflared 180 ||
-      fail 'k8s cloudflared pods did not stop; refusing to change the route or start the old connector'
+wait_for_job() {
+  local job=$1 timeout_seconds=$2 elapsed=0 condition
+  while (( elapsed < timeout_seconds )); do
+    if ! condition=$(kubectl get "$job" --namespace "$NAMESPACE" \
+      --output 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}'); then
+      printf 'k3s cutover: could not read Job status: %s\n' "$job" >&2
+      return 1
+    fi
+    if [[ $condition == *Failed* ]]; then
+      printf 'k3s cutover: Job failed: %s\n' "$job" >&2
+      kubectl describe "$job" --namespace "$NAMESPACE" >&2 || true
+      kubectl logs "$job" --namespace "$NAMESPACE" --all-containers --tail=200 >&2 || true
+      return 1
+    fi
+    [[ $condition == *Complete* ]] && return 0
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  printf 'k3s cutover: timed out waiting for Job %s after %ss\n' "$job" "$timeout_seconds" >&2
+  kubectl describe "$job" --namespace "$NAMESPACE" >&2 || true
+  kubectl logs "$job" --namespace "$NAMESPACE" --all-containers --tail=200 >&2 || true
+  return 1
+}
+
+kubectl_resource_exists() {
+  local resource=$1 result
+  result=$(kubectl get "$resource" --namespace "$NAMESPACE" --ignore-not-found --output name) || return 2
+  [[ -n $result ]]
+}
+
+stop_k8s_resource() {
+  local resource=$1 selector=$2 failure_message=$3 lookup_status
+  if kubectl_resource_exists "$resource"; then
+    kubectl scale "$resource" --replicas=0 --namespace "$NAMESPACE" >/dev/null ||
+      fail "could not scale down $resource"
+  else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] || fail "could not determine whether $resource exists"
   fi
+  wait_for_no_pods "$selector" 180 || fail "$failure_message"
+}
+
+stop_k8s_connector() {
+  stop_k8s_resource deployment/cloudflared app.kubernetes.io/name=cloudflared \
+    'k8s cloudflared pods did not stop; refusing to change the route or start the old connector'
 }
 
 stop_k8s_application() {
-  if kubectl get statefulset teagramd --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null
-    wait_for_no_pods app.kubernetes.io/name=teagramd 180 ||
-      fail 'k8s teagramd pods did not stop; refusing to restart the old Compose writers'
-  fi
+  stop_k8s_resource statefulset/teagramd app.kubernetes.io/name=teagramd \
+    'k8s teagramd pods did not stop; refusing to restart the old Compose writers'
 }
 
 confirm() {
@@ -334,21 +448,6 @@ print_rollback_command() {
   printf 'Rollback command: sudo bash %q --rollback\n' "$SCRIPT_PATH"
 }
 
-unit_file=''
-admin_hash_file=''
-admin_origin_file=''
-restore_old_serve() {
-  local serve_after
-  set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 || return 1
-  serve_after=$(mktemp) || return 1
-  if ! serve_status_file "$serve_after" ||
-    ! check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445; then
-    rm -f -- "$serve_after"
-    return 1
-  fi
-  rm -f -- "$serve_after"
-}
-
 stop_port_forward_units() {
   local unit
   for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT"; do
@@ -359,40 +458,46 @@ stop_port_forward_units() {
 }
 
 recover_before_edge_switch() {
-  local phase=${1:-} recovery_failed=false route_may_have_changed=false
-  if kubectl get deployment cloudflared --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    if ! kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null ||
-      ! wait_for_no_pods app.kubernetes.io/name=cloudflared 180; then
-      printf 'k3s cutover: failed to stop and verify the k8s Cloudflare connector during recovery\n' >&2
-      recovery_failed=true
-    fi
-  fi
-  if kubectl get statefulset teagramd --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    if ! kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null ||
-      ! wait_for_no_pods app.kubernetes.io/name=teagramd 180; then
-      printf 'k3s cutover: failed to stop k8s teagramd during recovery\n' >&2
-      recovery_failed=true
-    fi
-  fi
-
+  local phase=${1:-} recovery_failed=false lookup_status
   case "$phase" in
-    route-change-requested|route-switched|k8s-connector-started)
-      route_may_have_changed=true
+    serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started|complete)
+      recover_after_serve_switch
+      return 0
       ;;
   esac
-  if [[ $phase == serve-switch-started || $phase == serve-switched || $route_may_have_changed == true ]]; then
-    if ! restore_old_serve; then
-      printf 'k3s cutover: failed to restore the five old Tailscale Serve handlers\n' >&2
+  if kubectl_resource_exists deployment/cloudflared; then
+    if ! kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null; then
+      printf 'k3s cutover: failed to scale down the k8s Cloudflare connector during recovery\n' >&2
+      recovery_failed=true
+    fi
+  else
+    lookup_status=$?
+    if [[ $lookup_status != 1 ]]; then
+      printf 'k3s cutover: could not determine whether the k8s Cloudflare connector exists during recovery\n' >&2
       recovery_failed=true
     fi
   fi
-  if [[ $route_may_have_changed == true ]]; then
-    printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
-    if ! confirm ROUTE-RESTORED 'Restore the Cloudflare route to the before value before Compose services restart.'; then
-      printf 'k3s cutover: Cloudflare route restoration was not confirmed\n' >&2
+  if kubectl_resource_exists statefulset/teagramd; then
+    if ! kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null; then
+      printf 'k3s cutover: failed to scale down k8s teagramd during recovery\n' >&2
+      recovery_failed=true
+    fi
+  else
+    lookup_status=$?
+    if [[ $lookup_status != 1 ]]; then
+      printf 'k3s cutover: could not determine whether k8s teagramd exists during recovery\n' >&2
       recovery_failed=true
     fi
   fi
+  if ! wait_for_no_pods app.kubernetes.io/name=cloudflared 180; then
+    printf 'k3s cutover: failed to verify no k8s Cloudflare connector pods remain during recovery\n' >&2
+    recovery_failed=true
+  fi
+  if ! wait_for_no_pods app.kubernetes.io/name=teagramd 180; then
+    printf 'k3s cutover: failed to verify no k8s teagramd pods remain during recovery\n' >&2
+    recovery_failed=true
+  fi
+
   if ! stop_port_forward_units; then
     printf 'k3s cutover: failed to stop target port-forward units during recovery\n' >&2
     recovery_failed=true
@@ -408,52 +513,80 @@ recover_before_edge_switch() {
   fi
 }
 
+unit_file=''
+admin_hash_file=''
+admin_origin_file=''
+cutover_manifest=''
 handle_exit() {
   local status=$? phase=''
   trap - EXIT
   [[ -z ${unit_file:-} ]] || rm -f -- "$unit_file"
   [[ -z ${admin_hash_file:-} ]] || rm -f -- "$admin_hash_file"
   [[ -z ${admin_origin_file:-} ]] || rm -f -- "$admin_origin_file"
+  [[ -z ${cutover_manifest:-} ]] || rm -f -- "$cutover_manifest"
   if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
     phase=$(<"$PHASE_FILE")
     if [[ $phase != complete && $phase != rolled-back ]]; then
-      recover_before_edge_switch "$phase"
+      case "$phase" in
+        serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started)
+          recover_after_serve_switch
+          ;;
+        *)
+          recover_before_edge_switch "$phase"
+          ;;
+      esac
       print_rollback_command >&2
     fi
   fi
   exit "$status"
 }
+
+recover_after_serve_switch() {
+  printf 'k3s cutover: a live Serve route may have accepted k3s writes; automatic recovery is disabled to avoid losing those writes. Explicit rollback is required and does not carry k3s writes back.\n' >&2
+}
 trap handle_exit EXIT
 
 rollback() {
-  local current_serve target_root target_websocket target_admin target_ip serve_after
+  local current_serve target_root target_websocket target_admin target_tcp target_ip serve_after
+  local current_phase
+  current_phase=$(<"$PHASE_FILE")
+  case "$current_phase" in
+    serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started|complete)
+      confirm K3S-WRITES-LOST 'WARNING: this rollback does not copy k3s writes back to Compose. All writes accepted since the first live Serve route will be lost from the restored source. Continue only after accepting this data loss.'
+      ;;
+  esac
   current_serve=$(mktemp)
   serve_status_file "$current_serve"
   if ! check_serve_status "$current_serve" http://127.0.0.1:8081 \
-    http://127.0.0.1:2444 http://127.0.0.1:2445 2>/dev/null; then
+    http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" 2>/dev/null; then
     [[ -f $EVIDENCE_DIR/serve-target && ! -L $EVIDENCE_DIR/serve-target ]] ||
       fail 'Tailscale Serve is not on the old routes, and no verified cutover routes were recorded'
     mapfile -t target_routes < "$EVIDENCE_DIR/serve-target"
-    [[ ${#target_routes[@]} -eq 3 ]] || fail 'recorded Tailscale Serve cutover routes are incomplete'
+    [[ ${#target_routes[@]} -eq 4 ]] || fail 'recorded Tailscale Serve cutover routes are incomplete'
     target_root=${target_routes[0]}
     target_websocket=${target_routes[1]}
     target_admin=${target_routes[2]}
+    target_tcp=${target_routes[3]}
     [[ $target_root =~ ^http://(([0-9]{1,3}\.){3}[0-9]{1,3}):$LINKSELECTOR_PORT$ ]] ||
       fail 'recorded Tailscale Serve cutover root is invalid'
     target_ip=${BASH_REMATCH[1]}
     [[ $target_websocket == "http://$target_ip:$WEBSOCKET_PORT" &&
-      $target_admin == "http://$target_ip:$ADMIN_PORT" ]] ||
+      $target_admin == "http://$target_ip:$ADMIN_PORT" &&
+      $target_tcp == "$target_ip:$MTPROTO_PORT" ]] ||
       fail 'recorded Tailscale Serve cutover service addresses are invalid'
-    check_serve_status "$current_serve" "$target_root" "$target_websocket" "$target_admin"
+    check_serve_status "$current_serve" "$target_root" "$target_websocket" "$target_admin" \
+      "$target_tcp" true || fail 'Tailscale Serve contains an unrecognized route; refusing to overwrite it during rollback'
   fi
   rm -f -- "$current_serve"
 
   stop_k8s_connector
   stop_k8s_application
-  set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+  set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
+    "127.0.0.1:$MTPROTO_PORT"
   serve_after=$(mktemp)
   serve_status_file "$serve_after"
-  check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+  check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 \
+    http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"
   rm -f -- "$serve_after"
 
   printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
@@ -466,7 +599,7 @@ rollback() {
   check_source_container teagram-postgres-1
   check_source_container teagram-web-cloudflared
   record_phase rolled-back
-  printf 'Rollback complete: all five Serve handlers, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
+  printf 'Rollback complete: all five Serve handlers, the old MTProto TCP route, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
 }
 
 if [[ $ACTION == --rollback ]]; then
@@ -516,11 +649,12 @@ incus exec "$SOURCE_INSTANCE" -- docker exec teagram-teagramd-1 test -d /var/lib
 
 SERVE_BEFORE=$(mktemp)
 serve_status_file "$SERVE_BEFORE"
-check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445
+check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081 http://127.0.0.1:2444 \
+  http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"
 
 record_phase prepared
-install -d -o root -g root -m 0700 "$EVIDENCE_DIR"
-install -o root -g root -m 0600 "$SERVE_BEFORE" "$EVIDENCE_DIR/serve-before.json"
+ensure_private_dir "$EVIDENCE_DIR"
+install_private_file 0600 "$SERVE_BEFORE" "$EVIDENCE_DIR/serve-before.json"
 rm -f -- "$SERVE_BEFORE"
 if kubectl get secret teagramd-admin --namespace "$NAMESPACE" >/dev/null 2>&1; then
   fail 'target teagramd-admin Secret already exists; refusing to overwrite the cutover identity'
@@ -531,9 +665,22 @@ install_admin_secret "$admin_hash_file" "$admin_origin_file"
 rm -f -- "$admin_hash_file" "$admin_origin_file"
 admin_hash_file=''
 admin_origin_file=''
-kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
-record_phase applying
-kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+if [[ $TEST_MODE == true ]]; then
+  cutover_manifest=$(mktemp "$RUNNER_TEMP/cutover-alpha.XXXXXX.yaml")
+  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
+    sed "s/^namespace: teagram$/namespace: $NAMESPACE/" > "$cutover_manifest"
+  kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
+  record_phase applying
+  kubectl apply --filename "$cutover_manifest" >/dev/null
+  kubectl patch deployment/cloudflared --namespace "$NAMESPACE" --type=strategic \
+    --patch-file "$SCRIPT_DIR/test-cutover-cloudflared-patch.yaml" >/dev/null
+  rm -f -- "$cutover_manifest"
+  cutover_manifest=''
+else
+  kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+  record_phase applying
+  kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+fi
 
 kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=600s >/dev/null
 kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
@@ -691,13 +838,13 @@ done < <(kubectl get jobs --namespace "$NAMESPACE" \
 [[ ${#migration_jobs[@]} -eq 1 ]] || fail 'expected exactly one pinned Atlas migration Job'
 kubectl patch "${migration_jobs[0]}" --namespace "$NAMESPACE" --type=merge \
   --patch '{"spec":{"suspend":false}}' >/dev/null
-kubectl wait --for=condition=complete "${migration_jobs[0]}" \
-  --namespace "$NAMESPACE" --timeout=900s >/dev/null
+wait_for_job "${migration_jobs[0]}" 900
 
 kubectl patch job/local-blob-migration --namespace "$NAMESPACE" --type=merge \
   --patch '{"spec":{"suspend":false}}' >/dev/null
-kubectl wait --for=condition=complete job/local-blob-migration \
-  --namespace "$NAMESPACE" --timeout=21600s >/dev/null
+blob_migration_timeout=21600
+[[ $TEST_MODE == false ]] || blob_migration_timeout=900
+wait_for_job job/local-blob-migration "$blob_migration_timeout"
 migration_summary=$(kubectl logs --namespace "$NAMESPACE" job/local-blob-migration -c migrate |
   sed -n '/^blob_copy=pass mode=encrypted /p')
 [[ $migration_summary == blob_copy=pass\ mode=encrypted\ objects=* ]] ||
@@ -724,7 +871,7 @@ Requires=k3s.service
 [Service]
 Type=simple
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-ExecStart=/usr/local/bin/k3s kubectl port-forward --namespace teagram --address $linkselector_ip $target $ports
+ExecStart=/usr/local/bin/k3s kubectl port-forward --namespace $NAMESPACE --address $linkselector_ip $target $ports
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true
@@ -749,8 +896,8 @@ EOF
 install_port_forward_unit "$LINKSELECTOR_PORT_FORWARD_UNIT" \
   'Loopback-to-k3s linkselector port-forward' service/linkselector "$LINKSELECTOR_PORT:8081"
 install_port_forward_unit "$TEAGRAMD_PORT_FORWARD_UNIT" \
-  'Tailnet-only teagramd WebSocket and admin port-forward' service/teagramd \
-  "$WEBSOCKET_PORT:2444 $ADMIN_PORT:2445"
+  'Tailnet-only teagramd MTProto, WebSocket, and admin port-forward' service/teagramd \
+  "$MTPROTO_PORT:$MTPROTO_PORT $WEBSOCKET_PORT:2444 $ADMIN_PORT:2445"
 incus exec "$TARGET_INSTANCE" -- curl --fail --silent --show-error --max-time 10 \
   "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --output /dev/null
 incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
@@ -767,20 +914,31 @@ admin_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --out
   --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$ADMIN_PORT/admin") ||
   fail 'the new admin Service is not reachable from teagram-k3s'
 [[ $admin_status =~ ^(200|302|401|403)$ ]] || fail 'the new admin Service returned an unexpected HTTP status'
+python3 - "$linkselector_ip" "$MTPROTO_PORT" <<'PY'
+import socket
+import sys
+
+address, port = sys.argv[1], int(sys.argv[2])
+with socket.create_connection((address, port), timeout=10):
+    pass
+PY
 
 record_phase ready-for-edge
-printf '%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
-  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" > "$EVIDENCE_DIR/serve-target"
+printf '%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
+  "$linkselector_ip:$MTPROTO_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
 record_phase serve-switch-started
 set_serve_routes "http://$linkselector_ip:$LINKSELECTOR_PORT" \
-  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT"
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
+  "$linkselector_ip:$MTPROTO_PORT"
 SERVE_AFTER=$(mktemp)
 serve_status_file "$SERVE_AFTER"
 check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$LINKSELECTOR_PORT" \
-  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT"
-install -o root -g root -m 0600 "$SERVE_AFTER" "$EVIDENCE_DIR/serve-after.json"
+  "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
+  "$linkselector_ip:$MTPROTO_PORT"
+install_private_file 0600 "$SERVE_AFTER" "$EVIDENCE_DIR/serve-after.json"
 rm -f -- "$SERVE_AFTER"
 
 record_phase serve-switched

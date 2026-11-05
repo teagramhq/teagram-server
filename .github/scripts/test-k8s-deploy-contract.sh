@@ -187,8 +187,20 @@ cutover_key_reader=deploy/k8s/test-cutover-key-reader.yaml
    "$(yq -r '.spec.volumes[] | select(.name == "legacy-blobs") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'legacy-blobs-teagramd-0' &&
    "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "legacy-blobs") | .readOnly' "$cutover_key_reader")" == true ]] ||
   fail 'the cutover helper must mount source identity and blob PVCs read-only as their owner'
-grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/test-cutover-alpha-k3s.sh ||
-  fail 'the cutover test must read the source identity from the BusyBox helper pod'
+grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the actual cutover runner test adapter must read source identity from the BusyBox helper pod'
+grep --fixed-strings --quiet 'cutover-alpha.sh --apply --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must execute the actual apply runner in its disposable namespace'
+grep --fixed-strings --quiet 'cutover-alpha.sh --rollback --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise the actual rollback runner'
+grep --fixed-strings --quiet 'CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise failure handling after the first live route'
+grep --fixed-strings --quiet 'test-cutover-blob-seed.yaml' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must seed source blobs for the actual transfer and migration'
+cutover_blob_seed=deploy/k8s/test-cutover-blob-seed.yaml
+[[ "$(yq -r '.spec.containers[] | select(.name == "seed") | .image' "$cutover_blob_seed")" == \
+  'ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' ]] ||
+  fail 'the cutover blob seed must use the pinned BusyBox image'
 for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
   yq -e "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$pvc\")" \
     deploy/k8s/prod-cutover/persistentvolumeclaims.yaml >/dev/null 2>&1 ||
@@ -198,7 +210,7 @@ done
 cutover_volume_importer=deploy/k8s/prod-cutover/volume-importer.yaml
 [[ "$(yq -r '.spec.containers[] | select(.name == "importer") | .securityContext.capabilities.add | join(",")' "$cutover_volume_importer")" == 'CHOWN,FOWNER' ]] ||
   fail 'the cutover importer must retain only the capabilities needed to prepare target PVC ownership'
-for script in deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha-k3s.sh; do
+for script in deploy/k8s/cutover-alpha.sh; do
   grep --fixed-strings --quiet 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' "$script" ||
     fail "$script must prepare the private target blob root before importing"
   grep --fixed-strings --quiet 'tar -xopf - -C /target/legacy-blobs' "$script" ||

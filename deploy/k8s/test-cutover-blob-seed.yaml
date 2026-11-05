@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cutover-blob-seed
+  namespace: teagram
+  labels:
+    app.kubernetes.io/name: cutover-blob-seed
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  imagePullSecrets:
+    - name: ghcr-pull
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: seed
+      image: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-ec"]
+      args:
+        - mkdir -p /blobs/parts/aa; printf 'alpha cutover migration fixture\n' > /blobs/parts/aa/0123456789abcdef0123456789abcd; exec sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      volumeMounts:
+        - name: legacy-blobs
+          mountPath: /blobs
+  volumes:
+    - name: legacy-blobs
+      persistentVolumeClaim:
+        claimName: legacy-blobs-teagramd-0
