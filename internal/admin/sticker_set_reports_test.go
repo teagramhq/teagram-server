@@ -154,4 +154,32 @@ func TestAdminStickerSetReportsCanBeReviewedDismissedAndPaginated(t *testing.T) 
 	if status != "dismissed" || closedAt == nil {
 		t.Fatalf("dismissed report status/closed_at = %q/%v, want dismissed/non-null", status, closedAt)
 	}
+
+	var drainedSetID int64
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		VALUES (9308102, $1, 'Drained cats', 'drained_cats', 'regular', 1)
+		RETURNING id`, owner.ID).Scan(&drainedSetID); err != nil {
+		t.Fatalf("create set without reports: %v", err)
+	}
+	for _, query := range []url.Values{
+		{"report_set_id": {strconv.FormatInt(drainedSetID, 10)}, "report_page": {"1"}},
+		{"report_set_id": {strconv.FormatInt(drainedSetID+1000, 10)}, "report_page": {"2"}},
+	} {
+		stale := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/sticker-sets?"+query.Encode(), nil)
+		stale.AddCookie(admin.SessionCookie(sessionID))
+		staleRec := httptest.NewRecorder()
+		h.ServeHTTP(staleRec, stale)
+		if staleRec.Code != http.StatusSeeOther || staleRec.Header().Get("Location") != "/admin/sticker-sets?notice=no-reports" {
+			t.Fatalf("stale report link %v = %d, Location %q; want 303 to the no-reports notice",
+				query, staleRec.Code, staleRec.Header().Get("Location"))
+		}
+	}
+	notice := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/sticker-sets?notice=no-reports", nil)
+	notice.AddCookie(admin.SessionCookie(sessionID))
+	noticeRec := httptest.NewRecorder()
+	h.ServeHTTP(noticeRec, notice)
+	if noticeRec.Code != http.StatusOK || !strings.Contains(noticeRec.Body.String(), "no open reports") {
+		t.Fatalf("no-reports notice page = %d, want 200 with the notice", noticeRec.Code)
+	}
 }

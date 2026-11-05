@@ -286,7 +286,7 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 			reportSetIDs = reportSetIDs[:store.AdminUserStickerSetReportPageSize]
 		}
 		if reportSetID != 0 && !slices.Contains(reportSetIDs, reportSetID) {
-			http.Error(w, "invalid report page", http.StatusBadRequest)
+			http.Redirect(w, r, "/admin/sticker-sets?notice=no-reports", http.StatusSeeOther)
 			return
 		}
 		reportOffset := int32(0)
@@ -335,7 +335,7 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 			setReports := reportsBySet[setID]
 			if len(setReports) == 0 {
 				if setID == reportSetID {
-					http.Error(w, "invalid report page", http.StatusBadRequest)
+					http.Redirect(w, r, "/admin/sticker-sets?notice=no-reports", http.StatusSeeOther)
 					return
 				}
 				continue
@@ -571,6 +571,8 @@ func adminStickerSetNotice(value string) string {
 		return "Sticker set restored."
 	case "dismiss":
 		return "Report dismissed."
+	case "no-reports":
+		return "That sticker set has no open reports."
 	default:
 		return ""
 	}

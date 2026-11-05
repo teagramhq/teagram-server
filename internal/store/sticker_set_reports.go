@@ -44,28 +44,43 @@ type AdminUserStickerSetReport struct {
 	CreatedAt       time.Time
 }
 
-// UserStickerSetReportMessage carries server-resolved sets for one visible
-// message selected in a report request.
-type UserStickerSetReportMessage struct {
-	MessageID int64
-	SetIDs    []int64
-}
-
 type userStickerSetReportTarget struct {
 	SetID     int64
 	MessageID int64
 }
 
-// UserStickerSetsInMessagesForReport resolves only message rows visible in the
-// caller's own message space or channel history. Set ids come from stored
-// document references on those rows.
-func (s *Store) UserStickerSetsInMessagesForReport(
+// userStickerSetReportMessage carries the server-resolved sets of one visible
+// message selected in a report request.
+type userStickerSetReportMessage struct {
+	MessageID int64
+	SetIDs    []int64
+}
+
+// UserStickerSetReportMessagesVisible reports whether every selected message is
+// visible to the reporter. It is the read-only check for the early steps of
+// the report flow; nothing is stored.
+func (s *Store) UserStickerSetReportMessagesVisible(
 	ctx context.Context,
 	reporterID int64,
 	peerType PeerType,
 	peerID int64,
 	messageIDs []int64,
-) ([]UserStickerSetReportMessage, bool, error) {
+) (bool, error) {
+	_, visible, err := resolveUserStickerSetReportMessages(ctx, s.q, reporterID, peerType, peerID, messageIDs)
+	return visible, err
+}
+
+// resolveUserStickerSetReportMessages resolves only message rows visible in the
+// reporter's own message space or channel history. Set ids come from stored
+// document references on those rows, never from the caller.
+func resolveUserStickerSetReportMessages(
+	ctx context.Context,
+	q *db.Queries,
+	reporterID int64,
+	peerType PeerType,
+	peerID int64,
+	messageIDs []int64,
+) ([]userStickerSetReportMessage, bool, error) {
 	if reporterID <= 0 || peerID <= 0 || len(messageIDs) == 0 {
 		return nil, false, ErrUserStickerSetReportInputInvalid
 	}
@@ -75,61 +90,49 @@ func (s *Store) UserStickerSetsInMessagesForReport(
 		}
 	}
 	messageIDs = sortedUniquePositiveIDs(messageIDs)
-	var rows []db.UserStickerSetsInOwnMessagesForReportRow
-	var err error
-	if peerType == PeerTypeChannel {
-		channelRows, queryErr := s.q.UserStickerSetsInReadableChannelMessagesForReport(ctx, db.UserStickerSetsInReadableChannelMessagesForReportParams{
+	setIDsByMessage := make(map[int64][]int64, len(messageIDs))
+	visible := make(map[int64]struct{}, len(messageIDs))
+	switch peerType {
+	case PeerTypeChannel:
+		rows, err := q.UserStickerSetsInReadableChannelMessagesForReport(ctx, db.UserStickerSetsInReadableChannelMessagesForReportParams{
 			ReporterID: reporterID,
 			PeerID:     peerID,
 			MessageIds: messageIDs,
 		})
-		if queryErr != nil {
-			return nil, false, fmt.Errorf("resolve channel messages for sticker-set report: %w", queryErr)
+		if err != nil {
+			return nil, false, fmt.Errorf("resolve channel messages for sticker-set report: %w", err)
 		}
-		setIDsByMessage := make(map[int64][]int64, len(messageIDs))
-		visible := make(map[int64]struct{}, len(messageIDs))
-		for _, row := range channelRows {
+		for _, row := range rows {
 			visible[row.LocalID] = struct{}{}
 			if row.SetID != nil {
 				setIDsByMessage[row.LocalID] = append(setIDsByMessage[row.LocalID], *row.SetID)
 			}
 		}
-		return reportMessagesFromResolvedRows(messageIDs, visible, setIDsByMessage)
-	}
-	if peerType != PeerTypeUser && peerType != PeerTypeChat {
+	case PeerTypeUser, PeerTypeChat:
+		rows, err := q.UserStickerSetsInOwnMessagesForReport(ctx, db.UserStickerSetsInOwnMessagesForReportParams{
+			ReporterID: reporterID,
+			MessageIds: messageIDs,
+			PeerType:   int16(peerType),
+			PeerID:     peerID,
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("resolve owned messages for sticker-set report: %w", err)
+		}
+		for _, row := range rows {
+			visible[row.LocalID] = struct{}{}
+			if row.SetID != nil {
+				setIDsByMessage[row.LocalID] = append(setIDsByMessage[row.LocalID], *row.SetID)
+			}
+		}
+	default:
 		return nil, false, ErrUserStickerSetReportInputInvalid
 	}
-	rows, err = s.q.UserStickerSetsInOwnMessagesForReport(ctx, db.UserStickerSetsInOwnMessagesForReportParams{
-		ReporterID: reporterID,
-		MessageIds: messageIDs,
-		PeerType:   int16(peerType),
-		PeerID:     peerID,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("resolve owned messages for sticker-set report: %w", err)
-	}
-	setIDsByMessage := make(map[int64][]int64, len(messageIDs))
-	visible := make(map[int64]struct{}, len(messageIDs))
-	for _, row := range rows {
-		visible[row.LocalID] = struct{}{}
-		if row.SetID != nil {
-			setIDsByMessage[row.LocalID] = append(setIDsByMessage[row.LocalID], *row.SetID)
-		}
-	}
-	return reportMessagesFromResolvedRows(messageIDs, visible, setIDsByMessage)
-}
-
-func reportMessagesFromResolvedRows(
-	messageIDs []int64,
-	visible map[int64]struct{},
-	setIDsByMessage map[int64][]int64,
-) ([]UserStickerSetReportMessage, bool, error) {
 	if len(visible) != len(messageIDs) {
 		return nil, false, nil
 	}
-	messages := make([]UserStickerSetReportMessage, 0, len(messageIDs))
+	messages := make([]userStickerSetReportMessage, 0, len(messageIDs))
 	for _, messageID := range messageIDs {
-		messages = append(messages, UserStickerSetReportMessage{
+		messages = append(messages, userStickerSetReportMessage{
 			MessageID: messageID,
 			SetIDs:    sortedUniquePositiveIDs(setIDsByMessage[messageID]),
 		})
@@ -137,70 +140,64 @@ func reportMessagesFromResolvedRows(
 	return messages, true, nil
 }
 
-// CreateUserStickerSetReportsForMessages stores distinct selected message
-// reports, deduplicates identical open reports, and enforces the rolling-hour
-// quota in one transaction.
-func (s *Store) CreateUserStickerSetReportsForMessages(
+// CreateUserStickerSetReports files one report per live user set found in the
+// selected messages. Visibility and set resolution run inside the same
+// transaction as the insert, under the reporter lock, so the stored report
+// reflects what the reporter could see when it was written. It returns false
+// without storing anything when a selected message is not visible to the
+// reporter. Identical open reports count once and the rolling-hour quota is
+// enforced in the same transaction. A set taken down before the insert is
+// skipped silently.
+//
+// Lock order: reporter user row, then live set rows (FOR SHARE, by id).
+func (s *Store) CreateUserStickerSetReports(
 	ctx context.Context,
 	reporterID int64,
-	messages []UserStickerSetReportMessage,
 	peerType PeerType,
 	peerID int64,
+	messageIDs []int64,
 	reason, comment string,
-) error {
-	if reporterID <= 0 || peerID <= 0 || len(messages) == 0 || !validReportPeerType(peerType) ||
+) (bool, error) {
+	if reporterID <= 0 || peerID <= 0 || len(messageIDs) == 0 || !validReportPeerType(peerType) ||
 		!validUserStickerSetReportReason(reason) || len(comment) > 512 || !utf8.ValidString(comment) ||
 		strings.ContainsRune(comment, '\x00') {
-		return ErrUserStickerSetReportInputInvalid
+		return false, ErrUserStickerSetReportInputInvalid
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin user sticker-set report: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = qtx.LockUserStickerSetReportReporter(ctx, reporterID); errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrUserStickerSetReportInputInvalid
+	} else if err != nil {
+		return false, fmt.Errorf("lock report quota for reporter %d: %w", reporterID, err)
+	}
+
+	messages, visible, err := resolveUserStickerSetReportMessages(ctx, qtx, reporterID, peerType, peerID, messageIDs)
+	if err != nil || !visible {
+		return false, err
 	}
 	targets := make([]userStickerSetReportTarget, 0)
-	seenTargets := make(map[userStickerSetReportTarget]struct{})
 	setIDs := make([]int64, 0)
 	for _, message := range messages {
-		if message.MessageID <= 0 {
-			return ErrUserStickerSetReportInputInvalid
-		}
 		for _, setID := range message.SetIDs {
-			if setID <= 0 {
-				return ErrUserStickerSetReportInputInvalid
-			}
-			target := userStickerSetReportTarget{SetID: setID, MessageID: message.MessageID}
-			if _, ok := seenTargets[target]; ok {
-				continue
-			}
-			seenTargets[target] = struct{}{}
-			targets = append(targets, target)
+			targets = append(targets, userStickerSetReportTarget{SetID: setID, MessageID: message.MessageID})
 			setIDs = append(setIDs, setID)
 		}
 	}
 	setIDs = sortedUniquePositiveIDs(setIDs)
 	if len(setIDs) == 0 {
-		return nil
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin user sticker-set report: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
-	qtx := s.q.WithTx(tx)
-	if _, err = qtx.LockUserStickerSetReportReporter(ctx, reporterID); errors.Is(err, pgx.ErrNoRows) {
-		return ErrUserStickerSetReportInputInvalid
-	} else if err != nil {
-		return fmt.Errorf("lock report quota for reporter %d: %w", reporterID, err)
+		return true, nil
 	}
 
 	// This row lock serializes report creation for a reporter, while ordered set
 	// locks make concurrent reports involving several sets deterministic.
 	liveSetIDs, err := qtx.LockLiveUserStickerSetReportTargets(ctx, setIDs)
 	if err != nil {
-		return fmt.Errorf("lock live sticker-set report targets: %w", err)
-	}
-	if len(liveSetIDs) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit empty sticker-set report: %w", err)
-		}
-		return nil
+		return false, fmt.Errorf("lock live sticker-set report targets: %w", err)
 	}
 	liveSetIDSet := make(map[int64]struct{}, len(liveSetIDs))
 	for _, id := range liveSetIDs {
@@ -213,10 +210,7 @@ func (s *Store) CreateUserStickerSetReportsForMessages(
 		}
 	}
 	if len(liveTargets) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit empty sticker-set report: %w", err)
-		}
-		return nil
+		return true, nil
 	}
 	targetSetIDs := make([]int64, len(liveTargets))
 	targetMessageIDs := make([]int64, len(liveTargets))
@@ -234,7 +228,7 @@ func (s *Store) CreateUserStickerSetReportsForMessages(
 		MessageIds:      targetMessageIDs,
 	})
 	if err != nil {
-		return fmt.Errorf("read identical open sticker-set reports for reporter %d: %w", reporterID, err)
+		return false, fmt.Errorf("read identical open sticker-set reports for reporter %d: %w", reporterID, err)
 	}
 	existing := make(map[userStickerSetReportTarget]struct{}, len(existingTargets))
 	for _, target := range existingTargets {
@@ -247,17 +241,14 @@ func (s *Store) CreateUserStickerSetReportsForMessages(
 		}
 	}
 	if len(newTargets) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit duplicate sticker-set report: %w", err)
-		}
-		return nil
+		return true, nil
 	}
 	count, err := qtx.CountRecentUserStickerSetReports(ctx, reporterID)
 	if err != nil {
-		return fmt.Errorf("count recent sticker-set reports for reporter %d: %w", reporterID, err)
+		return false, fmt.Errorf("count recent sticker-set reports for reporter %d: %w", reporterID, err)
 	}
 	if count+int64(len(newTargets)) > UserStickerSetReportsPerHour {
-		return ErrUserStickerSetReportRateLimited
+		return false, ErrUserStickerSetReportRateLimited
 	}
 	for _, target := range newTargets {
 		if err := qtx.InsertUserStickerSetReport(ctx, db.InsertUserStickerSetReportParams{
@@ -269,29 +260,13 @@ func (s *Store) CreateUserStickerSetReportsForMessages(
 			Reason:          reason,
 			Comment:         comment,
 		}); err != nil {
-			return fmt.Errorf("insert report for sticker set %d message %d: %w", target.SetID, target.MessageID, err)
+			return false, fmt.Errorf("insert report for sticker set %d message %d: %w", target.SetID, target.MessageID, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit user sticker-set report: %w", err)
+		return false, fmt.Errorf("commit user sticker-set report: %w", err)
 	}
-	return nil
-}
-
-// CreateUserStickerSetReportsForMessage preserves the single-message call for
-// store consumers while sharing the multi-message transaction path.
-func (s *Store) CreateUserStickerSetReportsForMessage(
-	ctx context.Context,
-	reporterID int64,
-	setIDs []int64,
-	peerType PeerType,
-	peerID, messageID int64,
-	reason, comment string,
-) error {
-	return s.CreateUserStickerSetReportsForMessages(ctx, reporterID, []UserStickerSetReportMessage{{
-		MessageID: messageID,
-		SetIDs:    setIDs,
-	}}, peerType, peerID, reason, comment)
+	return true, nil
 }
 
 func (s *Store) AdminOpenUserStickerSetReportSetIDsPage(ctx context.Context, offset, limit int32) ([]int64, error) {

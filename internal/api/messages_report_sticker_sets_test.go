@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -116,11 +117,6 @@ func TestMessagesReportDeduplicatesIdenticalAdminReport(t *testing.T) {
 	if history[0].StickerDocumentID == nil || *history[0].StickerDocumentID != file.ID {
 		t.Fatalf("reporter sticker document id = %v, want %d", history[0].StickerDocumentID, file.ID)
 	}
-	messages, visible, err := s.UserStickerSetsInMessagesForReport(ctx, reporter.ID, store.PeerTypeUser, owner.ID, []int64{history[0].LocalID})
-	if err != nil || !visible || len(messages) != 1 || len(messages[0].SetIDs) != 1 || messages[0].SetIDs[0] != set.Set.ID {
-		t.Fatalf("resolve reportable sticker sets = %v, visible %t, err %v; want set %d", messages, visible, err, set.Set.ID)
-	}
-
 	request := &tg.MessagesReportRequest{
 		Peer: api.InputPeerUser(reporter.ID, owner.ID),
 		ID:   []int{int(history[0].LocalID)},
@@ -411,6 +407,198 @@ func TestMessagesReportRejectsUnreadableChannelPost(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("reports after unreadable channel post = %d, want none", count)
+	}
+}
+
+func TestMessagesReportRejectsChatCopyAfterReporterLeaves(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15559420061")
+	if err != nil {
+		t.Fatalf("create set owner: %v", err)
+	}
+	reporter, err := s.CreateUser(ctx, "+15559420062")
+	if err != nil {
+		t.Fatalf("create reporter: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	file, _ := seedReportableEmojiSet(t, ctx, s, blobs, h, owner.ID, "report_chat_leave")
+	other, err := s.CreateUser(ctx, "+15559420063")
+	if err != nil {
+		t.Fatalf("create other member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "Report leave", []int64{reporter.ID, other.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: owner.ID, Text: "x", RandomID: 9420061,
+		Entities: []store.PollDescriptionEntity{{
+			Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: file.ID,
+		}},
+	}); err != nil {
+		t.Fatalf("send custom emoji message to chat: %v", err)
+	}
+	history, err := s.History(ctx, reporter.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read reporter chat history: %v", err)
+	}
+	var copyID int64
+	for _, message := range history {
+		if message.Text == "x" {
+			copyID = message.LocalID
+		}
+	}
+	if copyID == 0 {
+		t.Fatalf("reporter chat history = %+v, want the custom emoji copy", history)
+	}
+	request := &tg.MessagesReportRequest{
+		Peer: api.InputPeerChat(reporter.ID, chat.ID),
+		ID:   []int{int(copyID)},
+	}
+	requireReportMenu(t, h, reporter.ID, request)
+	if removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, reporter.ID, reporter.ID); err != nil || !removed {
+		t.Fatalf("reporter leaves chat: removed %t, err %v", removed, err)
+	}
+	requireReportRejected(t, ctx, dsn, h, reporter.ID, request)
+}
+
+func TestMessagesReportRejectsBannedChannelMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15559420071")
+	if err != nil {
+		t.Fatalf("create set owner: %v", err)
+	}
+	reporter, err := s.CreateUser(ctx, "+15559420072")
+	if err != nil {
+		t.Fatalf("create reporter: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	file, _ := seedReportableEmojiSet(t, ctx, s, blobs, h, owner.ID, "report_banned_member")
+	channel, err := s.CreateChannel(ctx, owner.ID, "Report ban", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err := s.AddChannelMembers(ctx, channel.ID, owner.ID, []int64{reporter.ID}); err != nil {
+		t.Fatalf("add reporter to channel: %v", err)
+	}
+	post := postReportableEmoji(t, ctx, s, channel.ID, owner.ID, file.ID, 9420071)
+	request := &tg.MessagesReportRequest{
+		Peer: api.InputPeerChannel(reporter.ID, channel.ID),
+		ID:   []int{int(post.LocalID)},
+	}
+	requireReportMenu(t, h, reporter.ID, request)
+	if err := s.SetChannelBan(ctx, channel.ID, owner.ID, reporter.ID, nil, true); err != nil {
+		t.Fatalf("ban reporter: %v", err)
+	}
+	requireReportRejected(t, ctx, dsn, h, reporter.ID, request)
+}
+
+func TestMessagesReportRejectsChannelPostBelowHistoryFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15559420081")
+	if err != nil {
+		t.Fatalf("create set owner: %v", err)
+	}
+	reporter, err := s.CreateUser(ctx, "+15559420082")
+	if err != nil {
+		t.Fatalf("create reporter: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	file, _ := seedReportableEmojiSet(t, ctx, s, blobs, h, owner.ID, "report_history_floor")
+	channel, err := s.CreateChannel(ctx, owner.ID, "Report floor", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	before := postReportableEmoji(t, ctx, s, channel.ID, owner.ID, file.ID, 9420081)
+	if _, _, changed, err := s.SetChannelPreHistoryHidden(ctx, channel.ID, owner.ID, true); err != nil || !changed {
+		t.Fatalf("hide channel history: changed %t, err %v", changed, err)
+	}
+	if _, err := s.AddChannelMembers(ctx, channel.ID, owner.ID, []int64{reporter.ID}); err != nil {
+		t.Fatalf("add reporter to channel: %v", err)
+	}
+	after := postReportableEmoji(t, ctx, s, channel.ID, owner.ID, file.ID, 9420082)
+
+	requireReportMenu(t, h, reporter.ID, &tg.MessagesReportRequest{
+		Peer: api.InputPeerChannel(reporter.ID, channel.ID),
+		ID:   []int{int(after.LocalID)},
+	})
+	requireReportRejected(t, ctx, dsn, h, reporter.ID, &tg.MessagesReportRequest{
+		Peer: api.InputPeerChannel(reporter.ID, channel.ID),
+		ID:   []int{int(before.LocalID)},
+	})
+}
+
+func seedReportableEmojiSet(
+	t *testing.T, ctx context.Context, s *store.Store, blobs blob.Store, h mtproto.Handler, ownerID int64, shortName string,
+) (store.File, int64) {
+	t.Helper()
+	file := storedStickerDocument(t, s, blobs, ownerID, validStickerTGSSize(t, 100, 100))
+	request := createStickerRequest(shortName, file, false, true)
+	request.TextColor = true
+	set := createStickerSet(t, h, ownerID, request)
+	return file, set.Set.ID
+}
+
+func postReportableEmoji(t *testing.T, ctx context.Context, s *store.Store, channelID, ownerID, fileID, randomID int64) store.ChannelMessage {
+	t.Helper()
+	post, _, _, err := s.PostChannelStickerAsWithEntities(ctx, channelID, ownerID, "cat", randomID, fileID, 0,
+		[]store.PollDescriptionEntity{{
+			Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: fileID,
+		}})
+	if err != nil {
+		t.Fatalf("post custom emoji to channel: %v", err)
+	}
+	return post
+}
+
+func requireReportMenu(t *testing.T, h mtproto.Handler, reporterID int64, request *tg.MessagesReportRequest) {
+	t.Helper()
+	request.Option = nil
+	request.Message = ""
+	result, rpc := messagesReportCall(t, h, reporterID, request)
+	if rpc != nil {
+		t.Fatalf("report on a visible message = %q, want the option menu", rpc.ErrorMessage)
+	}
+	if _, ok := result.(*tg.ReportResultChooseOption); !ok {
+		t.Fatalf("report on a visible message = %T, want the option menu", result)
+	}
+}
+
+// requireReportRejected walks the whole report flow and asserts every step is
+// refused with MESSAGE_ID_INVALID and no report row exists afterwards.
+func requireReportRejected(
+	t *testing.T, ctx context.Context, dsn string, h mtproto.Handler, reporterID int64, request *tg.MessagesReportRequest,
+) {
+	t.Helper()
+	for _, step := range []struct {
+		option  string
+		message string
+	}{{"", ""}, {"reason:copyright", ""}, {"comment:copyright", "details"}} {
+		request.Option = []byte(step.option)
+		request.Message = step.message
+		_, rpc := messagesReportCall(t, h, reporterID, request)
+		if rpc == nil || rpc.ErrorMessage != "MESSAGE_ID_INVALID" {
+			t.Fatalf("report step %q on a hidden message = %v, want MESSAGE_ID_INVALID", step.option, rpc)
+		}
+	}
+	var count int
+	if err := reportDatabase(t, ctx, dsn).QueryRow(ctx, `SELECT count(*) FROM user_sticker_set_reports`).Scan(&count); err != nil {
+		t.Fatalf("count reports after rejected flow: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reports after rejected flow = %d, want none", count)
 	}
 }
 

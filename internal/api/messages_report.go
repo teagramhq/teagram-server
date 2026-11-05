@@ -56,13 +56,17 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 	if err != nil {
 		return nil, err
 	}
-	messages, visible, err := h.store.UserStickerSetsInMessagesForReport(r.Ctx, r.UserID, peerType, peerID, messageIDs)
-	if err != nil {
-		h.log.Error("resolve messages for report", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_ids", messageIDs, "err", err)
-		return nil, errInternal
-	}
-	if !visible {
-		return nil, errMessageIDInvalid
+	option := string(req.Option)
+	reasonName, isComment := strings.CutPrefix(option, "comment:")
+	if !isComment {
+		visible, err := h.store.UserStickerSetReportMessagesVisible(r.Ctx, r.UserID, peerType, peerID, messageIDs)
+		if err != nil {
+			h.log.Error("resolve messages for report", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_ids", messageIDs, "err", err)
+			return nil, errInternal
+		}
+		if !visible {
+			return nil, errMessageIDInvalid
+		}
 	}
 
 	if len(req.Option) == 0 {
@@ -78,7 +82,6 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 		}, nil
 	}
 
-	option := string(req.Option)
 	if reasonName, ok := strings.CutPrefix(option, "reason:"); ok {
 		reason, ok := messageReportReasonByName(reasonName)
 		if !ok {
@@ -89,14 +92,15 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 			Option:   []byte("comment:" + reason.reason),
 		}, nil
 	}
-	if reasonName, ok := strings.CutPrefix(option, "comment:"); ok {
+	if isComment {
 		reason, ok := messageReportReasonByName(reasonName)
 		if !ok {
 			return nil, errMessageReportOptionInvalid
 		}
-		if err := h.store.CreateUserStickerSetReportsForMessages(
-			r.Ctx, r.UserID, messages, peerType, peerID, reason.reason, req.Message,
-		); err != nil {
+		visible, err := h.store.CreateUserStickerSetReports(
+			r.Ctx, r.UserID, peerType, peerID, messageIDs, reason.reason, req.Message,
+		)
+		if err != nil {
 			if errors.Is(err, store.ErrUserStickerSetReportRateLimited) {
 				return nil, FloodWaitError(3600)
 			}
@@ -105,6 +109,9 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 			}
 			h.log.Error("store user sticker-set reports", "reporter_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "message_ids", messageIDs, "err", err)
 			return nil, errInternal
+		}
+		if !visible {
+			return nil, errMessageIDInvalid
 		}
 		return &tg.ReportResultReported{}, nil
 	}
