@@ -134,8 +134,17 @@ func NewServerWithHandler(addr string, h http.Handler, logger *slog.Logger) *htt
 		WriteTimeout:      getUpdatesWriteTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          log.New(errorLogWriter{logger: logger}, "", 0),
+		// Only the trusted listener can mark a connection as carrying a peer.
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			if c, ok := conn.(*limitedConn); ok && c.proxied {
+				return context.WithValue(ctx, proxyPeerContextKey{}, true)
+			}
+			return ctx
+		},
 	}
 }
+
+type proxyPeerContextKey struct{}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var botID int64
@@ -147,14 +156,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if !h.limiter.reserve(r.RemoteAddr, time.Now()) {
+	// Preserve network buckets for direct clients; Serve authenticates the
+	// individual tailnet peer named by a trusted PROXY header.
+	key := sourceNetwork(r.RemoteAddr)
+	if r.Context().Value(proxyPeerContextKey{}) != nil {
+		key = remoteIP(r.RemoteAddr).String()
+	}
+	if !h.limiter.reserve(key, time.Now()) {
 		h.rateLimited(w, botID, method)
 		return
 	}
 	authAttemptReserved := true
 	defer func() {
 		if authAttemptReserved {
-			h.limiter.refund(r.RemoteAddr, time.Now())
+			h.limiter.refund(key, time.Now())
 		}
 	}()
 	unauthorized := func(id int64, requestMethod string) {
@@ -582,16 +597,15 @@ func newAuthLimiter() *authLimiter {
 	return &authLimiter{buckets: make(map[string]authBucket)}
 }
 
-func (l *authLimiter) reserve(remoteAddr string, now time.Time) bool {
-	return l.update(remoteAddr, now, true)
+func (l *authLimiter) reserve(key string, now time.Time) bool {
+	return l.update(key, now, true)
 }
 
-func (l *authLimiter) refund(remoteAddr string, now time.Time) {
-	l.update(remoteAddr, now, false)
+func (l *authLimiter) refund(key string, now time.Time) {
+	l.update(key, now, false)
 }
 
-func (l *authLimiter) update(remoteAddr string, now time.Time, reserve bool) bool {
-	key := sourceNetwork(remoteAddr)
+func (l *authLimiter) update(key string, now time.Time, reserve bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -702,8 +716,9 @@ func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 }
 
 type acceptResult struct {
-	conn net.Conn
-	err  error
+	conn    net.Conn
+	err     error
+	proxied bool
 }
 
 // Bound connections waiting for a preface separately from per-client limits.
@@ -726,13 +741,13 @@ func (l *connectionLimitListener) acceptConnections() {
 			go func() {
 				defer func() { <-pending }()
 				ip := remoteIP(conn.RemoteAddr().String())
-				parsed, _, err := proxyv1.Read(conn, false, ip.IsLoopback())
+				parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
 				if err != nil {
 					closeBotConn(conn)
 					return
 				}
 				select {
-				case l.results <- acceptResult{conn: parsed}:
+				case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0}:
 				case <-l.done:
 					closeBotConn(parsed)
 				}
@@ -782,7 +797,7 @@ func (l *connectionLimitListener) Accept() (net.Conn, error) {
 		}
 		l.active[ip]++
 		l.mu.Unlock()
-		return &limitedConn{Conn: conn, release: func() {
+		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() {
 			l.mu.Lock()
 			defer l.mu.Unlock()
 			l.active[ip]--
@@ -797,6 +812,7 @@ type limitedConn struct {
 	net.Conn
 
 	once    sync.Once
+	proxied bool
 	release func()
 	err     error
 }

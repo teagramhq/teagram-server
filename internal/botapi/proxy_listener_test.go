@@ -100,19 +100,40 @@ func proxyRequest(t *testing.T, conn net.Conn, reader *bufio.Reader) int {
 func proxyHeader(ip string) string { return fmt.Sprintf("PROXY TCP4 %s 100.64.0.1 1234 2447\r\n", ip) }
 
 func TestProxyPeersHaveIndependentAuthBuckets(t *testing.T) {
+	for _, tc := range []struct{ name, first, second string }{
+		{"ipv4 same subnet", proxyHeader("100.64.1.2"), proxyHeader("100.64.1.3")},
+		{"ipv6 same subnet", "PROXY TCP6 fd7a:115c:a1e0::1 fd7a:115c:a1e0::10 1234 2447\r\n", "PROXY TCP6 fd7a:115c:a1e0::2 fd7a:115c:a1e0::10 1234 2447\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := proxyServer(t, 10, "")
+			a, ar := proxyDial(t, addr, tc.first)
+			for i := range 20 {
+				if status := proxyRequest(t, a, ar); status != http.StatusUnauthorized {
+					t.Fatalf("request %d status = %d, want 401", i, status)
+				}
+			}
+			if status := proxyRequest(t, a, ar); status != http.StatusTooManyRequests {
+				t.Fatalf("exhausted peer status = %d, want 429", status)
+			}
+			b, br := proxyDial(t, addr, tc.second)
+			if status := proxyRequest(t, b, br); status != http.StatusUnauthorized {
+				t.Fatalf("other peer status = %d, want 401", status)
+			}
+		})
+	}
+}
+
+func TestProxyMappedAndIPv4AddressesShareAuthBucket(t *testing.T) {
 	addr := proxyServer(t, 10, "")
-	a, ar := proxyDial(t, addr, proxyHeader("100.64.1.2"))
+	conn, reader := proxyDial(t, addr, proxyHeader("100.64.1.2"))
 	for i := range 20 {
-		if status := proxyRequest(t, a, ar); status != http.StatusUnauthorized {
+		if status := proxyRequest(t, conn, reader); status != http.StatusUnauthorized {
 			t.Fatalf("request %d status = %d, want 401", i, status)
 		}
 	}
-	if status := proxyRequest(t, a, ar); status != http.StatusTooManyRequests {
-		t.Fatalf("exhausted peer status = %d, want 429", status)
-	}
-	b, br := proxyDial(t, addr, proxyHeader("100.64.2.2"))
-	if status := proxyRequest(t, b, br); status != http.StatusUnauthorized {
-		t.Fatalf("other peer status = %d, want 401", status)
+	mapped, mappedReader := proxyDial(t, addr, "PROXY TCP6 ::ffff:100.64.1.2 ::ffff:100.64.0.1 5555 2447\r\n")
+	if status := proxyRequest(t, mapped, mappedReader); status != http.StatusTooManyRequests {
+		t.Fatalf("mapped peer status = %d, want 429", status)
 	}
 }
 
@@ -122,7 +143,7 @@ func TestProxyPeersHaveIndependentConnectionCaps(t *testing.T) {
 	if status := proxyRequest(t, a, ar); status != http.StatusUnauthorized {
 		t.Fatalf("first status = %d", status)
 	}
-	b, br := proxyDial(t, addr, proxyHeader("100.64.2.2"))
+	b, br := proxyDial(t, addr, proxyHeader("100.64.1.3"))
 	if status := proxyRequest(t, b, br); status != http.StatusUnauthorized {
 		t.Fatalf("other peer status = %d, want 401", status)
 	}
