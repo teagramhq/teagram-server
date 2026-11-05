@@ -206,6 +206,75 @@ func TestSignupChallengeAtSendCodePassesWhenSigninGateIsOff(t *testing.T) {
 	}
 }
 
+func TestSigninGateOffInvalidTokenIssuesUnboundCode(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	const username = "freshguestbadtoken"
+	const invalidToken = "invalid-token-off"
+	authKeyID := [8]byte{2, 4, 6, 8, 1, 3, 5, 7}
+	if err := s.SaveAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID), make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+
+	verifier := &actionTurnstileVerifier{verified: map[string]string{}}
+	h := testHandlers(s)
+	h.registrationMode = config.RegistrationOpen
+	h.turnstileSiteKey = "site-key"
+	h.turnstileVerifier = verifier
+	h.turnstileSignInEnabled = false
+
+	var sendCodeRequest bin.Buffer
+	if err := (&tg.AuthSendCodeRequest{PhoneNumber: username}).Encode(&sendCodeRequest); err != nil {
+		t.Fatalf("encode auth.sendCode: %v", err)
+	}
+	sent, err := h.handleSendCode(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ReCaptchaToken: invalidToken, Buf: &sendCodeRequest,
+	})
+	if err != nil {
+		t.Fatalf("auth.sendCode with invalid optional token while signin gate is off: %v", err)
+	}
+	sentCode, ok := sent.(*tg.AuthSentCode)
+	if !ok {
+		t.Fatalf("auth.sendCode result = %T, want *tg.AuthSentCode", sent)
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("Turnstile verifier calls = %d, want invalid token checked once", verifier.calls)
+	}
+
+	challengeViaCode, err := s.CheckSignUpTurnstileCode(
+		ctx, username, sentCode.PhoneCodeHash, mtproto.AuthKeyIDInt64(authKeyID),
+	)
+	if err != nil {
+		t.Fatalf("check code-bound signup challenge: %v", err)
+	}
+	if challengeViaCode {
+		t.Fatal("rejected token was stored as a code-bound signup challenge")
+	}
+
+	var signUpRequest bin.Buffer
+	if err := (&tg.AuthSignUpRequest{
+		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, FirstName: "Fresh",
+	}).Encode(&signUpRequest); err != nil {
+		t.Fatalf("encode auth.signUp: %v", err)
+	}
+	_, err = h.handleSignUp(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, Buf: &signUpRequest,
+	})
+	if got := rpcErrorMessage(err); got != "RECAPTCHA_CHECK_signup__site-key" {
+		t.Fatalf("auth.signUp without a fresh challenge error = %q, want signup challenge required", got)
+	}
+}
+
 func TestQASignupBypassCodeCannotStageExistingAccountLogin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

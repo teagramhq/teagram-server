@@ -360,12 +360,18 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 	if h.turnstileSignInEnabled || r.ReCaptchaToken != "" {
 		verifiedActionString, err := h.verifyTurnstileActions(r, "signin", []string{"signin", "signup"})
 		if err != nil {
-			if errors.Is(err, ErrTurnstileBusy) {
-				return nil, FloodWaitError(1)
+			if h.turnstileSignInEnabled {
+				if errors.Is(err, ErrTurnstileBusy) {
+					return nil, FloodWaitError(1)
+				}
+				return nil, err
 			}
-			return nil, err
+			// With the sign-in gate off, an optional token cannot turn sendCode
+			// into a sign-in challenge. Leave the code unbound so signUp still
+			// requires its own valid challenge.
+		} else {
+			verifiedAction = store.TurnstileAction(verifiedActionString)
 		}
-		verifiedAction = store.TurnstileAction(verifiedActionString)
 	}
 
 	// Phone-shaped identifiers are unsupported. Refuse them before applying
