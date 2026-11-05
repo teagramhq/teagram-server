@@ -1201,6 +1201,39 @@ func TestUnregisteredMethodFailureLogsUnknownMethodCause(t *testing.T) {
 	}
 }
 
+func TestUnknownRPCFailureLogIncludesConstructorTypeID(t *testing.T) {
+	const typeID uint32 = 0x8badf00d
+	const privateBody = "identifier-token-code-sentinel"
+	sink := &serverErrorLogSink{}
+	dispatcher := NewDispatcher().HandleFunc(typeID, func(*Conn, *Request) error {
+		return errors.New("private handler failure")
+	})
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), dispatcher, slog.New(sink))
+	server.checkMsgIDTime = false
+	var body bin.Buffer
+	body.PutID(typeID)
+	body.Buf = append(body.Buf, []byte(privateBody)...)
+	err := server.handleWithHandler(nil, &Request{Buf: &body, Ctx: context.Background()}, dispatcher)
+	if err == nil {
+		t.Fatal("handle succeeded after the unknown RPC failed")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	record := sink.records[0]
+	if got := record.attrs["rpc_method"]; got != UnknownRPCMethod {
+		t.Errorf("rpc_method = %v, want %q", got, UnknownRPCMethod)
+	}
+	if got := record.attrs["rpc_type_id"]; got != uint64(typeID) {
+		t.Errorf("rpc_type_id = %v, want %#x", got, typeID)
+	}
+	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, privateBody) || strings.Contains(logged, "private handler failure") {
+		t.Fatalf("failure record exposed request or error details: %s", logged)
+	}
+}
+
 func TestUnregisteredKnownMethodFailureLogsDecodedName(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), NewDispatcher(), slog.New(sink))

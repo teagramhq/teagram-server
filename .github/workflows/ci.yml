@@ -1103,8 +1103,15 @@ jobs:
           bash -n .github/scripts/check-k8s-prod-image-pins.sh
           shellcheck .github/scripts/check-k8s-prod-image-pins.sh
 
+      - name: Test the alpha bootstrap apply path with mocks
+        run: sudo deploy/k8s/test-bootstrap-alpha.sh
+
       - name: Check deploy script syntax
         run: |
+          ./deploy/k8s/bootstrap-alpha.sh --dry-run
+          bash -n deploy/k8s/bootstrap-alpha.sh
+          bash -n deploy/k8s/test-bootstrap-alpha.sh
+          sh -n deploy/k8s/teagram-k3s-ops.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1160,6 +1167,9 @@ jobs:
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
+            deploy/k8s/bootstrap-alpha.sh \
+            deploy/k8s/test-bootstrap-alpha.sh \
+            deploy/k8s/teagram-k3s-ops.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1451,6 +1461,196 @@ jobs:
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
+
+      - name: Verify deployer RBAC and Pod Security boundaries
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl apply --filename deploy/k8s/base/namespace.yaml
+          kubectl apply --filename deploy/k8s/deployer-access.yaml
+          kubectl wait --for=create secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl wait --for="jsonpath={.data.token}" secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl wait --for='jsonpath={.data.ca\.crt}' secret/teagram-deployer-token \
+            --namespace teagram --timeout=60s >/dev/null
+          kubectl get secret teagram-deployer-token --namespace teagram --output json |
+            python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", {}); sys.exit(0 if data.get("token") and data.get("ca.crt") else 1)'
+          expect_deployer_can_i() {
+            local expected=$1 verb=$2 resource=$3 answer status
+            shift 3
+            if answer=$(kubectl auth can-i "$verb" "$resource" \
+              --as=system:serviceaccount:teagram:teagram-deployer "$@"); then
+              status=0
+            else
+              status=$?
+            fi
+            case "$expected:$status:$answer" in
+              yes:0:yes|no:1:no) ;;
+              *) echo "unexpected deployer authorization: $verb $resource => $status:$answer" >&2; exit 1 ;;
+            esac
+          }
+          expect_deployer_can_i yes create deployments.apps --namespace teagram
+          expect_deployer_can_i yes patch deployments.apps --namespace teagram
+          expect_deployer_can_i yes patch statefulsets.apps --namespace teagram
+          expect_deployer_can_i yes get replicasets.apps --namespace teagram
+          expect_deployer_can_i yes list replicasets.apps --namespace teagram
+          expect_deployer_can_i yes get controllerrevisions.apps --namespace teagram
+          expect_deployer_can_i yes list controllerrevisions.apps --namespace teagram
+          for history_resource in replicasets.apps controllerrevisions.apps; do
+            for history_verb in create update patch delete; do
+              expect_deployer_can_i no "$history_verb" "$history_resource" --namespace teagram
+            done
+          done
+          expect_deployer_can_i yes create jobs.batch --namespace teagram
+          expect_deployer_can_i yes patch services --namespace teagram
+          expect_deployer_can_i yes create configmaps --namespace teagram
+          expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
+          expect_deployer_can_i yes list pods --namespace teagram
+          expect_deployer_can_i yes get pods --subresource=log --namespace teagram
+          expect_deployer_can_i yes list events --namespace teagram
+          expect_deployer_can_i no create pods --namespace teagram
+          for secret_verb in get list watch create update patch delete; do
+            expect_deployer_can_i no "$secret_verb" secrets --namespace teagram
+          done
+          expect_deployer_can_i no create roles.rbac.authorization.k8s.io --namespace teagram
+          expect_deployer_can_i no create rolebindings.rbac.authorization.k8s.io --namespace teagram
+          expect_deployer_can_i no create serviceaccounts --namespace teagram
+          expect_deployer_can_i no create serviceaccounts --subresource=token --namespace teagram
+          expect_deployer_can_i no '*' '*' --namespace teagram
+          expect_deployer_can_i no '*' '*' --namespace default
+          rollback_as=system:serviceaccount:teagram:teagram-deployer
+          rollback_manifest="$RUNNER_TEMP/teagram-deployer-rollout-undo.yaml"
+          cat > "$rollback_manifest" <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            replicas: 0
+            selector:
+              matchLabels:
+                app: teagram-deployer-rollback-check
+            template:
+              metadata:
+                labels:
+                  app: teagram-deployer-rollback-check
+              spec:
+                containers:
+                  - name: check
+                    image: busybox:1.36
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            clusterIP: None
+            selector:
+              app: teagram-deployer-rollback-check
+            ports:
+              - name: web
+                port: 80
+                targetPort: 80
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: teagram-deployer-rollback-check
+            namespace: teagram
+          spec:
+            serviceName: teagram-deployer-rollback-check
+            replicas: 0
+            selector:
+              matchLabels:
+                app: teagram-deployer-rollback-check
+            template:
+              metadata:
+                labels:
+                  app: teagram-deployer-rollback-check
+              spec:
+                containers:
+                  - name: check
+                    image: busybox:1.36
+          EOF
+          kubectl apply --filename "$rollback_manifest" >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=1 \
+            deployment/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl set image deployment/teagram-deployer-rollback-check \
+            check=mirror.gcr.io/library/busybox:1.37 --namespace teagram >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
+            deployment/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl --as="$rollback_as" rollout undo \
+            deployment/teagram-deployer-rollback-check --to-revision=1 \
+            --namespace teagram
+          deployment_image=$(kubectl get deployment teagram-deployer-rollback-check \
+            --namespace teagram --output jsonpath='{.spec.template.spec.containers[0].image}')
+          test "$deployment_image" = busybox:1.36
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=1 \
+            statefulset/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl set image statefulset/teagram-deployer-rollback-check \
+            check=mirror.gcr.io/library/busybox:1.37 --namespace teagram >/dev/null
+          kubectl wait --for=jsonpath='{.status.observedGeneration}'=2 \
+            statefulset/teagram-deployer-rollback-check --namespace teagram \
+            --timeout=60s >/dev/null
+          kubectl --as="$rollback_as" rollout undo \
+            statefulset/teagram-deployer-rollback-check --to-revision=1 \
+            --namespace teagram
+          statefulset_image=$(kubectl get statefulset teagram-deployer-rollback-check \
+            --namespace teagram --output jsonpath='{.spec.template.spec.containers[0].image}')
+          test "$statefulset_image" = busybox:1.36
+          kubectl delete deployment,statefulset,service teagram-deployer-rollback-check \
+            --namespace teagram --ignore-not-found=true >/dev/null
+          namespace_scope_stderr="$RUNNER_TEMP/teagram-deployer-namespaces.stderr"
+          if namespace_scope_answer=$(kubectl auth can-i '*' namespaces \
+            --as=system:serviceaccount:teagram:teagram-deployer \
+            2>"$namespace_scope_stderr"); then
+            namespace_scope_status=0
+          else
+            namespace_scope_status=$?
+          fi
+          if [[ "$namespace_scope_status:$namespace_scope_answer" != 1:no ]]; then
+            cat "$namespace_scope_stderr" >&2
+            echo "the deployer cluster-scoped authorization check did not return the expected denial" >&2
+            exit 1
+          fi
+          grep -Fq 'not namespace scoped' "$namespace_scope_stderr"
+          pod="$RUNNER_TEMP/teagram-deployer-escape-check.yaml"
+          cat > "$pod" <<'EOF'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: teagram-deployer-escape-check
+            namespace: teagram
+          spec:
+            hostPID: true
+            containers:
+              - name: escape
+                image: busybox:1.36
+                command: ["sleep", "3600"]
+                securityContext:
+                  privileged: true
+                volumeMounts:
+                  - name: host-root
+                    mountPath: /host
+            volumes:
+              - name: host-root
+                hostPath:
+                  path: /
+                  type: Directory
+          EOF
+          if output=$(kubectl create --dry-run=server --filename "$pod" 2>&1); then
+            echo "Pod Security Admission accepted the privileged hostPath pod" >&2
+            exit 1
+          fi
+          grep -F 'violates PodSecurity' <<<"$output"
+          grep -F 'privileged' <<<"$output"
+          grep -F 'hostPath' <<<"$output"
 
       - name: Remove k3s manifest-check server
         if: always()

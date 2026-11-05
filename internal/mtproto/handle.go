@@ -103,6 +103,8 @@ func msgIDTimeError(msgID int64, now time.Time) int {
 
 type rpcRequestError struct {
 	method        string
+	typeID        uint32
+	typeIDKnown   bool
 	requestID     int64
 	errorCategory RPCResultClass
 	cause         requestFailureCause
@@ -115,9 +117,13 @@ func (e *rpcRequestError) Unwrap() error { return e.err }
 
 func requestFailureContext(req *Request, err error) *rpcRequestError {
 	method := UnknownRPCMethod
+	var typeID uint32
+	typeIDKnown := false
 	var requestID int64
 	if req != nil {
 		method = sanitizeRPCMethod(requestRPCMethod(req))
+		typeID = req.rpcTypeID
+		typeIDKnown = req.rpcTypeIDSet
 		if method == UnknownRPCMethod && req.rpcLogMethod != "" {
 			method = sanitizeRPCMethod(req.rpcLogMethod)
 		}
@@ -125,6 +131,8 @@ func requestFailureContext(req *Request, err error) *rpcRequestError {
 	}
 	return &rpcRequestError{
 		method:        method,
+		typeID:        typeID,
+		typeIDKnown:   typeIDKnown,
 		requestID:     requestID,
 		errorCategory: requestRPCResult(req, err),
 		cause:         classifyRequestFailure(req, err),
@@ -166,6 +174,9 @@ func (e *rpcRequestError) logAttrs() []any {
 		"cause", string(e.cause),
 		"error", safeRPCErrorName(e.err),
 	}
+	if e.method == UnknownRPCMethod && e.typeIDKnown {
+		attrs = append(attrs, "rpc_type_id", e.typeID)
+	}
 	return withSafeRPCErrorCode(attrs, e.err)
 }
 
@@ -176,6 +187,9 @@ func safeRPCErrorName(err error) string {
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
+		return "transport"
+	}
+	if cause, ok := errors.AsType[*requestFailureCauseError](err); ok && cause != nil && cause.cause == requestFailureTransport {
 		return "transport"
 	}
 	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
@@ -334,9 +348,11 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
 	}
+	req.rpcTypeID = id
+	req.rpcTypeIDSet = true
 	setRPCMethodForHandler(req, id, handler)
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
-		c.queueAcks(req.MsgID)
+		c.queueInitialRPCAck(req.MsgID, id)
 	}
 
 	// Containers and acknowledgements are not executed; a container's entries
@@ -441,7 +457,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 			defer admission.finish()
 		}
 		if c != nil {
-			c.queueAcks(containerAcks(&container)...)
+			c.queueAckRecords(containerAcks(&container)...)
 		}
 		for i := range container.Messages {
 			m := container.Messages[i]

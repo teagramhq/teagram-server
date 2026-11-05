@@ -1,4 +1,4 @@
-h1:Vt3ifk24UkK+BpAIHR1AmuORW4HuKyJFyb7BmRSw944=
+h1:jwQpfNBWAzDG3e5EN6QO++PYNjApovgu1EclHcLx+hA=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -179,4 +179,5 @@ h1:Vt3ifk24UkK+BpAIHR1AmuORW4HuKyJFyb7BmRSw944=
 20261105000013_backfill_poll_copy_custom_emoji_document_ids.sql h1:5v+Ibt+qtZqUf1hQvp6GNpd3jZTKeuq7E7/qvrMT9IA=
 20261105000014_poll_message_copies_owner_custom_emoji_document_ids_gin_idx.sql h1:PNFTjmGDpBx2LTujzIu4X2+w75IXHKA8Xz9HVTv4s8I=
 20261105000015_channel_poll_messages_channel_custom_emoji_document_ids_gin_idx.sql h1:Utrz4u+NbzEEHzyBqeHhPOajg9fe+PGn+XJKGv9jyNQ=
-20261105000016_message_search_unready_progress.sql h1:k+YB6cro2z2a+C0ruxhALgwaGEHHI+1GU+mryGVHG1w=
+20261105000016_phone_code_turnstile_binding.sql h1:wea4ISjNcB8a7HqSr718gBr7jxGjwn2c8GqOx/52xh8=
+20261105000017_message_search_unready_progress.sql h1:m+uk0fpYbtIBmihsWGkAEchf09mxk0AtboNSpw07FVk=
