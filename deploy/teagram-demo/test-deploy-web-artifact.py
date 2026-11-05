@@ -20,6 +20,10 @@ def main() -> None:
         ["yq", "-r", '.jobs."deploy-demo".steps[] | select(.id == "web-gate") | .run', str(WORKFLOW)],
         text=True,
     )
+    publish = subprocess.check_output(
+        ["yq", "-r", '.jobs."deploy-demo".steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .run', str(WORKFLOW)],
+        text=True,
+    )
     with tempfile.TemporaryDirectory() as directory:
         temp = pathlib.Path(directory)
         bin_dir = temp / "bin"
@@ -78,6 +82,28 @@ fi
             subprocess.run(["bash", "-eo", "pipefail", "-c", gate], env=env, check=True, capture_output=True)
             if gate_output.read_text(encoding="utf-8").strip() != f"enabled={enabled}":
                 raise SystemExit("the web gate accepted an unsuccessful build")
+        ssh = bin_dir / "ssh"
+        ssh.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$TEST_SSH_ARGS"\ncat > /dev/null\n', encoding="utf-8")
+        ssh.chmod(0o755)
+        archive = temp / "demo-web-artifact" / f"demo-web-{'b' * 40}.tar.gz"
+        ssh_args = temp / "ssh-args"
+        env.update(DEPLOY_SHA="a" * 40, WEB_ARTIFACT_DIGEST="sha256:" + "c" * 64,
+                   WEB_ARCHIVE_SHA256="d" * 64, WEB_ARCHIVE=str(archive),
+                   DEMO_DEPLOY_HOST="demo.example", DEMO_DEPLOY_PORT="2223",
+                   WEB_PUBLICATION_RUN_ID="300", TEST_SSH_ARGS=str(ssh_args))
+        for event, requested, suffix in (("workflow_run", "", "0"),
+                                         ("workflow_dispatch", "300", "200")):
+            env.update(GITHUB_EVENT_NAME=event, WEB_ROLLBACK_REQUESTED=requested)
+            subprocess.run(["bash", "-eo", "pipefail", "-c", publish], env=env, check=True)
+            if not ssh_args.read_text().splitlines()[-1].endswith(" " + suffix):
+                raise SystemExit("rollback was not bound to the explicit dispatch run")
+        ssh_args.unlink()
+        env.update(GITHUB_EVENT_NAME="workflow_run", WEB_ROLLBACK_REQUESTED="300")
+        if subprocess.run(["bash", "-eo", "pipefail", "-c", publish], env=env).returncode == 0 or ssh_args.exists():
+            raise SystemExit("an automatic deploy was allowed to request rollback")
+        env.update(GITHUB_EVENT_NAME="workflow_dispatch", WEB_ROLLBACK_REQUESTED="301")
+        if subprocess.run(["bash", "-eo", "pipefail", "-c", publish], env=env).returncode == 0 or ssh_args.exists():
+            raise SystemExit("a dispatch was allowed to roll back a different publication")
     print("deploy-time web artifact selection passed")
 
 

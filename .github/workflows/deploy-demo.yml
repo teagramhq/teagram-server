@@ -1,6 +1,6 @@
 name: Deploy demo.
 
-run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
+run-name: ${{ inputs.issue && format('{0} [{1}]{2}', github.workflow, inputs.issue, inputs.web_rollback_run_id && format(' [web-rollback={0}]', inputs.web_rollback_run_id) || '') || '' }}
 
 # Keep the public demo deployment result separate from the server Deploy.
 # This workflow consumes the exact tested SHA and CI run selected by Deploy.
@@ -15,6 +15,11 @@ on:
         description: Multica issue key for this direct demo deploy
         required: true
         type: string
+      web_rollback_run_id:
+        description: Exact older live web publication run ID to allow; leave empty for no rollback
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -57,9 +62,11 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           ISSUE_KEY: ${{ inputs.issue }}
+          WEB_ROLLBACK_RUN_ID: ${{ inputs.web_rollback_run_id }}
         run: |
           [[ "$GITHUB_REF" == refs/heads/main ]]
           [[ "$ISSUE_KEY" =~ ^MAIN-[0-9]+$ ]]
+          [[ -z "$WEB_ROLLBACK_RUN_ID" || "$WEB_ROLLBACK_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]
           echo "succeeded=true" >> "$GITHUB_OUTPUT"
 
   build-demo-web:
@@ -77,6 +84,7 @@ jobs:
     outputs:
       source_commit: ${{ steps.publication.outputs.source_commit }}
       artifact_digest: ${{ steps.publication.outputs.artifact_digest }}
+      publication_run_id: ${{ steps.publication.outputs.run_id }}
       artifact_name: ${{ steps.package.outputs.name }}
       result: ${{ steps.build_result.outputs.result }}
     steps:
@@ -93,10 +101,12 @@ jobs:
           deployable=$(jq -er '.deployable | tostring' <<<"$publication")
           source_commit=$(jq -er '.sourceCommit' <<<"$publication")
           artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
+          run_id=$(jq -er '.runId | numbers | select(. > 0) | tostring' <<<"$publication")
           [[ "$deployable" == true ]]
           [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
           [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf 'source_commit=%s\nartifact_digest=%s\n' "$source_commit" "$artifact_digest" >> "$GITHUB_OUTPUT"
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          printf 'source_commit=%s\nartifact_digest=%s\nrun_id=%s\n' "$source_commit" "$artifact_digest" "$run_id" >> "$GITHUB_OUTPUT"
 
       - name: Check out the resolved web source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -351,6 +361,8 @@ jobs:
           WEB_ARTIFACT_DIGEST: ${{ needs.build-demo-web.outputs.artifact_digest }}
           WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
           WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
+          WEB_ROLLBACK_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.web_rollback_run_id || '' }}
+          WEB_PUBLICATION_RUN_ID: ${{ needs.build-demo-web.outputs.publication_run_id }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |
@@ -359,12 +371,18 @@ jobs:
           [[ "$WEB_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$WEB_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ -s "$WEB_ARCHIVE" ]]
+          rollback_dispatch_run_id=0
+          if [[ -n "$WEB_ROLLBACK_REQUESTED" ]]; then
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$WEB_ROLLBACK_REQUESTED" =~ ^[1-9][0-9]{0,18}$ && "$WEB_ROLLBACK_REQUESTED" == "$WEB_PUBLICATION_RUN_ID" ]]
+            rollback_dispatch_run_id="$GITHUB_RUN_ID"
+          fi
           ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
             -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "root@$DEMO_DEPLOY_HOST" \
-            "web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256" < "$WEB_ARCHIVE"
+            "web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256 $rollback_dispatch_run_id" < "$WEB_ARCHIVE"
 
       - name: Remove the demo deploy key
         if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' }}

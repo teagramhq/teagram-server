@@ -281,6 +281,8 @@ digest, then requires a successful `master` publication run and an available
 matching artifact from `.github/workflows/private-artifact.yml`. It reads the
 manifest again after those checks and fails if the live identity changed during
 resolution. There is no checked-in web pin or cross-repository write credential.
+All resolver requests, including redirects, require HTTPS to `api.github.com`
+or `web.teagram.io`; JSON responses are limited to 1 MiB.
 At deployment time a separate secret-free job resolves the live publication,
 checks out its source, and rebuilds it with `build-web-artifact.sh`, which
 requires the result to reproduce the published digest. It uploads the archive
@@ -289,16 +291,18 @@ server CI run can still be deployed. The credentialed deploy job downloads
 that archive, verifies its checksum and streams it to the LXC. If the live
 identity changes during the rollout, the web deployment fails closed. The
 forced command checks the release identity against the current live publication,
-and the LXC recomputes the artifact content digest before activation. The LXC
-never installs Node or builds the web app. The web source commit and artifact
-digest are stored in `.state/teagram-demo/active-release.json`. A PR workflow
+fetches the reviewed target and public key at its source commit, verifies the
+key hash and Telegram fingerprint, and requires the staged manifest's endpoint
+and fingerprint to match. The LXC recomputes the artifact content digest before
+activation. It never installs Node or builds the web app. The web source commit
+and artifact digest are stored in `.state/teagram-demo/active-release.json`. A PR workflow
 cannot influence the server image digest by overwriting the package's SHA tag.
 `deploy-main.sh` pulls only the supplied server digest and checks both its
 repository digest and revision label before touching the database. It revalidates
 the blob authority and running containers, then takes and validates a root-only
-PostgreSQL dump while the existing server and public edge keep running. It applies migrations while
-the old server remains live, starts the candidate in the inactive slot,
-verifies seeded API reads and both HAProxy listener checks, then sends new
+PostgreSQL dump while the existing server and public edge keep running. It
+applies migrations while the old server remains live, starts the candidate in the
+inactive slot, verifies seeded API reads and both HAProxy listener checks, then sends new
 sessions to the candidate and drains the old server before stopping it.
 The active slot and image digest are persisted atomically so a host or proxy
 restart recreates the same release. WebSocket sessions already connected to
@@ -313,6 +317,22 @@ file inode. A config-only change is syntax-checked and applied with Nginx's
 graceful reload; the edge container is not recreated, and old workers drain
 existing requests and WebSockets. `nginx.conf` remains an identical compatibility
 copy for already-installed demo ops wrappers that fingerprint that path.
+
+The root-owned `.state/teagram-demo/web-publication.json` records the installed
+publication run and a high-water mark. On first use, the existing release is
+resolved against its successful upstream publication before a baseline is saved;
+if that evidence is unavailable, deployment fails closed. A verified newer run
+reserves its watermark before activation, including when activation later fails.
+The adjacent `web-publication.json.guard` prevents a missing state file from
+silently resetting the watermark; preserve both files together in backups.
+The same installed run is a no-op, while an older run is rejected. To roll back,
+first make the desired older publication live upstream, then dispatch `Deploy demo.`
+on `main` with an issue key and `web_rollback_run_id` set to that publication's
+exact upstream run ID. The host independently
+verifies that this is an in-progress, explicitly marked manual dispatch whose
+main-ref and issue validation succeeded; ordinary automatic deploys cannot request
+rollback. A failed activation restores the previous web link and keeps the
+watermark, so an interrupted newer publication can be retried safely.
 
 The first deploy that changes the existing single-file mount to this directory
 layout recreates the only edge container once. That migration briefly interrupts

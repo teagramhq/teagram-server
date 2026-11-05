@@ -1297,6 +1297,11 @@ jobs:
       - name: Check demo web live publication resolution
         run: python3 deploy/teagram-demo/test-web-artifact-pin.py
 
+      - name: Check demo web publication ordering
+        run: |
+          python3 deploy/teagram-demo/test-web-publication-state.py
+          python3 deploy/teagram-demo/test-web-publication-rollout.py
+
       - name: Check demo Turnstile secret access
         run: |
           sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh

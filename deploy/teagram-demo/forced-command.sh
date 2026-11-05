@@ -29,12 +29,13 @@ elif [[ "$COMMAND" =~ ^qa-invite\ ([0-9a-f]{40})\ (create-account)\ ([A-Za-z][A-
   readonly SHA=${BASH_REMATCH[1]}
   readonly QA_ACTION=${BASH_REMATCH[2]}
   readonly QA_ACCOUNT_NAME=${BASH_REMATCH[3]}
-elif [[ "$COMMAND" =~ ^web\ ([0-9a-f]{40})\ ([0-9a-f]{40})\ (sha256:[0-9a-f]{64})\ ([0-9a-f]{64})$ ]]; then
+elif [[ "$COMMAND" =~ ^web\ ([0-9a-f]{40})\ ([0-9a-f]{40})\ (sha256:[0-9a-f]{64})\ ([0-9a-f]{64})\ (0|[1-9][0-9]*)$ ]]; then
   ACTION=web
   readonly DEMO_SHA=${BASH_REMATCH[1]}
   readonly WEB_SOURCE_SHA=${BASH_REMATCH[2]}
   readonly WEB_ARTIFACT_DIGEST=${BASH_REMATCH[3]}
   readonly WEB_ARCHIVE_SHA256=${BASH_REMATCH[4]}
+  readonly WEB_ROLLBACK_DISPATCH_RUN_ID=${BASH_REMATCH[5]}
 else
   echo 'demo deploy key accepts server/web releases or a reviewed qa-invite operation' >&2
   exit 1
@@ -164,8 +165,17 @@ git -C "$REPO" merge-base --is-ancestor "$DEMO_SHA" origin/main || {
   echo "$DEMO_SHA is not on origin/main; refusing web release" >&2
   exit 1
 }
-python3 "$REPO/deploy/teagram-demo/resolve_web_artifact_pin.py" \
-  --verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
+WEB_IDENTITY=$(python3 "$REPO/deploy/teagram-demo/resolve_web_artifact_pin.py" \
+  --verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST")
+WEB_PUBLICATION_RUN_ID=$(jq -er '.runId | numbers | select(. > 0) | tostring' <<< "$WEB_IDENTITY")
+WEB_EXPECTED_ENDPOINT=$(jq -er '.endpoint | strings' <<< "$WEB_IDENTITY")
+WEB_EXPECTED_FINGERPRINT=$(jq -er '.fingerprint | strings' <<< "$WEB_IDENTITY")
+WEB_ROLLBACK_ALLOWED=false
+if [[ "$WEB_ROLLBACK_DISPATCH_RUN_ID" != 0 ]]; then
+  python3 "$REPO/deploy/teagram-demo/resolve_web_artifact_pin.py" \
+    --verify-rollback-request "$WEB_ROLLBACK_DISPATCH_RUN_ID" "$DEMO_SHA" "$WEB_PUBLICATION_RUN_ID"
+  WEB_ROLLBACK_ALLOWED=true
+fi
 
 incoming_dir="$REPO/.state/teagram-demo/incoming"
 if [[ -e "$incoming_dir" || -L "$incoming_dir" ]]; then
@@ -184,6 +194,10 @@ DEMO_DEPLOY_LOCK_HELD=1 \
   DEPLOY_WEB_SOURCE_SHA="$WEB_SOURCE_SHA" \
   DEPLOY_WEB_ARTIFACT_DIGEST="$WEB_ARTIFACT_DIGEST" \
   DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA256" \
+  DEPLOY_WEB_PUBLICATION_RUN_ID="$WEB_PUBLICATION_RUN_ID" \
+  DEPLOY_WEB_EXPECTED_ENDPOINT="$WEB_EXPECTED_ENDPOINT" \
+  DEPLOY_WEB_EXPECTED_FINGERPRINT="$WEB_EXPECTED_FINGERPRINT" \
+  DEPLOY_WEB_ROLLBACK_ALLOWED="$WEB_ROLLBACK_ALLOWED" \
   DEPLOY_WEB_ARCHIVE="$archive" \
   bash "$REPO/deploy/teagram-demo/publish-web-release.sh" || deploy_rc=$?
 exit "$deploy_rc"

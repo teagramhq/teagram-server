@@ -148,7 +148,10 @@ def extract_archive(archive_path: pathlib.Path, destination: pathlib.Path) -> No
                 reject("release-file-write")
 
 
-def verify_manifest(directory: pathlib.Path, source_commit: str, artifact_digest: str) -> None:
+def verify_manifest(
+    directory: pathlib.Path, source_commit: str, artifact_digest: str,
+    expected_endpoint: str, expected_fingerprint: str,
+) -> None:
     manifest_path = directory / "mtproto-target.json"
     try:
         metadata = manifest_path.lstat()
@@ -168,6 +171,8 @@ def verify_manifest(directory: pathlib.Path, source_commit: str, artifact_digest
         or not isinstance(manifest.get("endpoint"), str)
         or not re.fullmatch(r"wss://[^/\s]+(?:/[^\s]*)?", manifest["endpoint"])
         or not re.fullmatch(r"[0-9a-f]{16}", str(manifest.get("fingerprint", "")))
+        or manifest.get("endpoint") != expected_endpoint
+        or manifest.get("fingerprint") != expected_fingerprint
     ):
         reject("artifact-manifest-identity")
     index_path = directory / "index.html"
@@ -219,11 +224,16 @@ def stage(
     source_commit: str,
     artifact_digest: str,
     archive_sha256: str,
+    expected_endpoint: str,
+    expected_fingerprint: str,
 ) -> pathlib.Path:
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         reject("source-commit-format")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
         reject("artifact-digest-format")
+    if (not re.fullmatch(r"wss://[^/\s]+(?:/[^\s]*)?", expected_endpoint)
+        or not re.fullmatch(r"[0-9a-f]{16}", expected_fingerprint)):
+        reject("expected-target-format")
     verify_directory(releases_dir, mode=0o755)
     verify_archive(archive_path, archive_sha256)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=".web-stage-", dir=releases_dir))
@@ -233,13 +243,13 @@ def stage(
         for directory, _, _ in os.walk(temporary):
             pathlib.Path(directory).chmod(0o755)
         verify_tree(temporary)
-        verify_manifest(temporary, source_commit, artifact_digest)
+        verify_manifest(temporary, source_commit, artifact_digest, expected_endpoint, expected_fingerprint)
         release_name = f"{source_commit}-{artifact_digest.removeprefix('sha256:')}"
         destination = releases_dir / release_name
         if destination.exists() or destination.is_symlink():
             verify_directory(destination, mode=0o755)
             verify_tree(destination)
-            verify_manifest(destination, source_commit, artifact_digest)
+            verify_manifest(destination, source_commit, artifact_digest, expected_endpoint, expected_fingerprint)
             shutil.rmtree(temporary)
             return destination
         os.replace(temporary, destination)
@@ -264,6 +274,8 @@ def main() -> None:
         sys.argv[4],
         sys.argv[5],
         os.environ.get("DEPLOY_WEB_ARCHIVE_SHA256", ""),
+        os.environ.get("DEPLOY_WEB_EXPECTED_ENDPOINT", ""),
+        os.environ.get("DEPLOY_WEB_EXPECTED_FINGERPRINT", ""),
     )
     print(destination.name)
 

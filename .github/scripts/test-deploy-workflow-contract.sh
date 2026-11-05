@@ -23,6 +23,7 @@ expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && 
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
+expected_demo_run_name="\${{ inputs.issue && format('{0} [{1}]{2}', github.workflow, inputs.issue, inputs.web_rollback_run_id && format(' [web-rollback={0}]', inputs.web_rollback_run_id) || '') || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
 fail() {
@@ -449,13 +450,20 @@ check_demo_manual_request() (
   # shellcheck disable=SC2030,SC2031
   export GITHUB_OUTPUT="$tmp/output"
   : > "$GITHUB_OUTPUT"
-  GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 bash -euo pipefail "$tmp/manual.sh"
+  GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 WEB_ROLLBACK_RUN_ID='' bash -euo pipefail "$tmp/manual.sh"
   [[ "$(cat "$GITHUB_OUTPUT")" == 'succeeded=true' ]] || fail 'a valid direct demo request must pass its issue gate'
-  if GITHUB_REF=refs/heads/fix ISSUE_KEY=MAIN-3121 bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+  GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 WEB_ROLLBACK_RUN_ID=123 bash -euo pipefail "$tmp/manual.sh"
+  if GITHUB_REF=refs/heads/fix ISSUE_KEY=MAIN-3121 WEB_ROLLBACK_RUN_ID='' bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
     fail 'a direct demo deployment must reject non-main refs'
   fi
-  if GITHUB_REF=refs/heads/main ISSUE_KEY=OTHER-1 bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+  if GITHUB_REF=refs/heads/main ISSUE_KEY=OTHER-1 WEB_ROLLBACK_RUN_ID='' bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
     fail 'a direct demo deployment must reject non-MAIN issue keys'
+  fi
+  if GITHUB_REF=refs/heads/main ISSUE_KEY='MAIN-1] [web-rollback=123' WEB_ROLLBACK_RUN_ID='' bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+    fail 'an issue key must not forge a rollback marker in the run name'
+  fi
+  if GITHUB_REF=refs/heads/main ISSUE_KEY=MAIN-3121 WEB_ROLLBACK_RUN_ID='123] [other' bash -euo pipefail "$tmp/manual.sh" >/dev/null 2>&1; then
+    fail 'a direct demo deployment must reject a malformed rollback run ID'
   fi
 )
 
@@ -602,16 +610,18 @@ check_contract() {
 
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
-  [[ "$(demo_query '.run-name')" == "$expected_run_name" ]] ||
+  [[ "$(demo_query '.run-name')" == "$expected_demo_run_name" ]] ||
     fail 'direct demo deploy runs must include the issue key in the name for failure routing'
   [[ "$(demo_query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'the demo workflow must support automatic and direct deployments'
-  [[ "$(demo_query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
-    fail 'a direct demo deployment must require one issue key'
+  [[ "$(demo_query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == 'issue,web_rollback_run_id' ]] ||
+    fail 'a direct demo deployment must accept only the issue key and explicit web rollback flag'
   [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
     fail 'a direct demo deployment must require an issue key for CI routing'
   [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
     fail 'the direct demo deployment issue key must be a string'
+  [[ "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.type')" == 'string' && "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.default')" == '' && "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.required')" == 'false' ]] ||
+    fail 'web rollback must require an explicit publication run ID and default to no rollback'
   [[ "$(demo_query '.on.workflow_run.workflows | join(",")')" == 'Deploy.' ]] ||
     fail 'the demo workflow must start from the server Deploy. workflow'
   [[ "$(demo_query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
@@ -636,6 +646,8 @@ check_contract() {
     fail 'the server deploy check must run only for workflow_run events'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual").if')" == '${{ github.event_name == '"'"'workflow_dispatch'"'"' }}' ]] ||
     fail 'direct demo deploys must validate the selected main ref and issue key'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual") | .env.WEB_ROLLBACK_RUN_ID')" == '${{ inputs.web_rollback_run_id }}' ]] ||
+    fail 'direct demo deploys must validate the requested rollback run ID'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
     fail 'the verifier must inspect the workflow run that triggered the demo'
   local deploy_verify_run
@@ -659,6 +671,8 @@ check_contract() {
   fi
   [[ "$(demo_query '.jobs."build-demo-web".outputs.source_commit')" == '${{ steps.publication.outputs.source_commit }}' && "$(demo_query '.jobs."build-demo-web".outputs.artifact_digest')" == '${{ steps.publication.outputs.artifact_digest }}' ]] ||
     fail 'the web build must expose the resolved publication identity'
+  [[ "$(demo_query '.jobs."build-demo-web".outputs.publication_run_id')" == '${{ steps.publication.outputs.run_id }}' ]] ||
+    fail 'the web build must expose the verified publication run ID'
   [[ "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" && "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Check out the workflow source commit") | .with."persist-credentials"')" == 'false' ]] ||
     fail 'the web build must use the trusted workflow source without persisting credentials'
   [[ "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Check out the resolved web source") | .with.ref')" == '${{ steps.publication.outputs.source_commit }}' && "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Check out the resolved web source") | .with."persist-credentials"')" == 'false' ]] ||
@@ -830,16 +844,38 @@ check_contract() {
   grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
     fail 'the downloaded image digest must be validated before SSH'
   if ! grep -Fq 'resolve_web_artifact_pin.py' "$demo_forced_command" ||
-    ! grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command"; then
+    ! grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command" ||
+    ! grep -Fq -- '--verify-rollback-request "$WEB_ROLLBACK_DISPATCH_RUN_ID" "$DEMO_SHA" "$WEB_PUBLICATION_RUN_ID"' "$demo_forced_command"; then
     fail 'the forced demo command must verify the release identity against the live publication'
   fi
+  local forced_identity_binding
+  for forced_identity_binding in \
+    'WEB_IDENTITY=$(python3' \
+    'DEPLOY_WEB_PUBLICATION_RUN_ID="$WEB_PUBLICATION_RUN_ID"' \
+    'DEPLOY_WEB_EXPECTED_ENDPOINT="$WEB_EXPECTED_ENDPOINT"' \
+    'DEPLOY_WEB_EXPECTED_FINGERPRINT="$WEB_EXPECTED_FINGERPRINT"' \
+    'DEPLOY_WEB_ROLLBACK_ALLOWED="$WEB_ROLLBACK_ALLOWED"'; do
+    grep -Fq "$forced_identity_binding" "$demo_forced_command" ||
+      fail 'the forced command must pass its independently verified publication identity and rollback authorization'
+  done
+  local rollback_section
+  rollback_section="$(sed -n '/^WEB_ROLLBACK_ALLOWED=false$/,/^fi$/p' "$demo_forced_command")"
+  [[ "$rollback_section" == *'if [[ "$WEB_ROLLBACK_DISPATCH_RUN_ID" != 0 ]]; then'*'--verify-rollback-request "$WEB_ROLLBACK_DISPATCH_RUN_ID" "$DEMO_SHA" "$WEB_PUBLICATION_RUN_ID"'*'WEB_ROLLBACK_ALLOWED=true'* ]] ||
+    fail 'rollback must default to denied and be enabled only after dispatch verification'
   local pin_resolver_run
   pin_resolver_run="$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Resolve the current live web publication") | .run')"
   grep -Fq 'resolve_web_artifact_pin.py' <<< "$pin_resolver_run" ||
     fail 'the deploy preflight must resolve the current live manifest and publication run'
   query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .run' |
-    grep -Fq '"web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256" < "$WEB_ARCHIVE"' ||
+    grep -Fq '"web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256 $rollback_dispatch_run_id" < "$WEB_ARCHIVE"' ||
     fail 'the verified web archive must be streamed to the forced demo command'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ROLLBACK_REQUESTED')" == '${{ github.event_name == '"'"'workflow_dispatch'"'"' && inputs.web_rollback_run_id || '"'"''"'"' }}' ]] ||
+    fail 'the rollback flag must come only from explicit workflow dispatch'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_PUBLICATION_RUN_ID')" == '${{ needs.build-demo-web.outputs.publication_run_id }}' ]] ||
+    fail 'rollback must be bound to the live publication selected by the build'
+  query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .run' |
+    grep -Fq '[[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]' ||
+    fail 'the workflow must bind rollback to its own manual dispatch run'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_SOURCE_SHA')" == '${{ needs.build-demo-web.outputs.source_commit }}' && "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ARTIFACT_DIGEST')" == '${{ needs.build-demo-web.outputs.artifact_digest }}' ]] ||
     fail 'the published web identity must come from the deploy-time build'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
@@ -1054,6 +1090,8 @@ self_test() {
     '.jobs."deploy-demo".needs = []'
     '.jobs."deploy-demo".if = "${{ always() }}"'
     '.jobs."deploy-demo".continue-on-error = true'
+    '.on.workflow_dispatch.inputs.web_rollback_run_id.default = "123"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ROLLBACK_REQUESTED) = "true"'
     'del(.jobs."check-server-deploy-result")'
     '(.jobs."check-server-deploy-result".steps[] | select(.id == "verify") | .run) |= sub("deploy: server"; "wrong deploy job")'
     '.jobs."deploy-demo".steps |= map(select(.name != "Fail after server deploy when web build failed"))'

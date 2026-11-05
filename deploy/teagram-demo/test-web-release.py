@@ -107,6 +107,8 @@ def main() -> None:
         releases.mkdir(mode=0o755)
         install_env = os.environ.copy()
         install_env["DEPLOY_WEB_ARCHIVE_SHA256"] = archive_sha256
+        install_env["DEPLOY_WEB_EXPECTED_ENDPOINT"] = "wss://web.example/apiws"
+        install_env["DEPLOY_WEB_EXPECTED_FINGERPRINT"] = "c" * 16
         install_args = (
             str(SCRIPT_DIR / "install-web-release.py"),
             "stage",
@@ -125,6 +127,23 @@ def main() -> None:
         repeated = run(*install_args, env=install_env)
         if repeated.returncode != 0 or repeated.stdout.decode().strip() != expected_release:
             raise SystemExit("web release staging is not idempotent")
+
+        for field, value in (("endpoint", "wss://untrusted.example/apiws"), ("fingerprint", "d" * 16)):
+            changed = entries.copy()
+            manifest = json.loads(changed["./mtproto-target.json"])
+            manifest[field] = value
+            changed["./mtproto-target.json"] = json.dumps(manifest).encode()
+            changed_archive = root / f"bad-{field}.tar.gz"
+            write_archive(changed_archive, changed)
+            changed_archive.chmod(0o600)
+            changed_env = install_env.copy()
+            changed_env["DEPLOY_WEB_ARCHIVE_SHA256"] = hashlib.sha256(changed_archive.read_bytes()).hexdigest()
+            result = run(
+                str(SCRIPT_DIR / "install-web-release.py"), "stage", str(changed_archive),
+                str(releases), SOURCE_SHA, artifact_digest_value, env=changed_env,
+            )
+            if result.returncode == 0:
+                raise SystemExit(f"web installer accepted a changed {field} with an unchanged digest")
 
         altered_entries = entries.copy()
         altered_entries["./assets/app.js"] = b"console.log('unverified payload');"
