@@ -35,6 +35,7 @@ SMOKE_SCENARIOS=(
   basic-group
   basic-group-reactions
   bot-api-get-me
+  bot-api-get-updates-stock-client
   bot-api-send-message
   channel-reactions
   available-reactions
@@ -68,4 +69,5 @@ SMOKE_SCENARIOS=(
   secret-chat-blocked-message
   provisioned-account-login
   admin-proxy-login
+  admin-sticker-takedown
 )

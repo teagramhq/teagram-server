@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import pathlib
 import sys
 from typing import Any
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 
 SCRIPT = pathlib.Path(__file__).with_name("resolve_web_artifact_pin.py")
@@ -109,7 +112,125 @@ def fake_fetch(responses: dict[str, Any]):
     return fetch
 
 
+def check_fetch_retries_transient_errors() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    rate_limit_headers = {"Retry-After": "0"}
+    with (
+        patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            side_effect=[
+                URLError("temporary connection reset"),
+                HTTPError(url, 429, "Too Many Requests", rate_limit_headers, io.BytesIO()),
+                io.BytesIO(b'{"ok":true}'),
+            ],
+        ) as open_url,
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        if MODULE.fetch_json(url) != {"ok": True}:
+            raise SystemExit("transient upstream rate limit did not recover")
+        if open_url.call_count != 3:
+            raise SystemExit("transient upstream errors were not retried")
+        if [call.args[0] for call in sleep.call_args_list] != [1.0, 0.0]:
+            raise SystemExit("transient upstream retry delays were not respected")
+
+
+def check_fetch_retries_secondary_rate_limit_reset() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1005"}
+    with (
+        patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            side_effect=[
+                HTTPError(url, 403, "Forbidden", headers, io.BytesIO()),
+                io.BytesIO(b'{"ok":true}'),
+            ],
+        ) as open_url,
+        patch.object(MODULE.time, "time", return_value=1000.0),
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        if MODULE.fetch_json(url) != {"ok": True}:
+            raise SystemExit("GitHub secondary rate limit did not recover")
+        if open_url.call_count != 2:
+            raise SystemExit("GitHub secondary rate limit was not retried")
+        if [call.args[0] for call in sleep.call_args_list] != [5.0]:
+            raise SystemExit("X-RateLimit-Reset delay was not respected")
+
+
+def check_fetch_aborts_excessive_secondary_rate_limit_delay() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1031"}
+    with (
+        patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            side_effect=HTTPError(url, 403, "Forbidden", headers, io.BytesIO()),
+        ) as open_url,
+        patch.object(MODULE.time, "time", return_value=1000.0),
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        try:
+            MODULE.fetch_json(url)
+        except ValueError as error:
+            if "retry requested after 31s" not in str(error):
+                raise SystemExit("excessive rate-limit delays must explain why retry stopped")
+        else:
+            raise SystemExit("rate-limit delay above MAX_RETRY_DELAY_SECONDS was retried")
+        if open_url.call_count != 1 or sleep.called:
+            raise SystemExit("excessive rate-limit delays must stop before another request")
+
+
+def check_fetch_exhausts_secondary_rate_limit_attempts() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1000"}
+    errors = [
+        HTTPError(url, 403, "Forbidden", headers, io.BytesIO())
+        for _ in range(MODULE.MAX_FETCH_ATTEMPTS)
+    ]
+    with (
+        patch.object(MODULE.urllib.request, "urlopen", side_effect=errors) as open_url,
+        patch.object(MODULE.time, "time", return_value=1000.0),
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        try:
+            MODULE.fetch_json(url)
+        except ValueError as error:
+            if f"after {MODULE.MAX_FETCH_ATTEMPTS} attempts" not in str(error):
+                raise SystemExit("exhausted rate-limit retries must report the attempt count")
+        else:
+            raise SystemExit("secondary rate-limit retry exhaustion unexpectedly passed")
+        if open_url.call_count != MODULE.MAX_FETCH_ATTEMPTS:
+            raise SystemExit("secondary rate-limit retry exhaustion used the wrong attempt count")
+        if [call.args[0] for call in sleep.call_args_list] != [0.0, 0.0]:
+            raise SystemExit("secondary rate-limit retries did not stop after the final attempt")
+
+
+def check_fetch_errors_are_actionable() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    with patch.object(
+        MODULE.urllib.request,
+        "urlopen",
+        side_effect=HTTPError(url, 404, "Not Found", {}, io.BytesIO()),
+    ) as open_url:
+        try:
+            MODULE.fetch_json(url)
+        except ValueError as error:
+            if url not in str(error) or "HTTP 404 Not Found" not in str(error):
+                raise SystemExit("upstream HTTP failures must identify the URL and status")
+        else:
+            raise SystemExit("upstream 404 unexpectedly passed")
+        if open_url.call_count != 1:
+            raise SystemExit("permanent upstream HTTP failures must not be retried")
+
+
 def main() -> None:
+    check_fetch_retries_transient_errors()
+    check_fetch_retries_secondary_rate_limit_reset()
+    check_fetch_aborts_excessive_secondary_rate_limit_delay()
+    check_fetch_exhausts_secondary_rate_limit_attempts()
+    check_fetch_errors_are_actionable()
+
     actual_pin = MODULE.validate_pin_document(
         json.loads(MODULE.PIN_PATH.read_text(encoding="utf-8"))
     )

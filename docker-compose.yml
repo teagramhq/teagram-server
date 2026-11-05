@@ -49,6 +49,7 @@ services:
       interval: 2s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
     # No ports: on purpose. The server reaches Postgres by service name on the
     # compose network, and psql is `docker compose exec postgres psql -U postgres
     # teagram` — so publishing 5432 would buy nothing and put the database on
@@ -63,7 +64,7 @@ services:
   migrate:
     # Pinned to the version the ariga/setup-atlas steps in ci.yml use, so the
     # stack and CI cannot apply migrations with different atlas versions.
-    image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
+    image: mirror.gcr.io/arigaio/atlas:1.3.0-alpine
     # The image entrypoint is already atlas, so the command starts at `migrate`.
     # Not `--env local`: that env's dev database is docker://postgres/18, which
     # would need a Docker daemon inside this container. Three slashes in
@@ -296,6 +297,7 @@ services:
     # container alive long enough for that drain to complete before Docker's
     # final kill.
     stop_grace_period: 120s
+    restart: unless-stopped
     networks:
       - default
       - rustfs_private

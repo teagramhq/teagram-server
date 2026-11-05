@@ -317,6 +317,7 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 	}
 
 	items := make([]store.UserStickerSetItem, 0, len(req.Stickers))
+	fingerprints := make([]store.StickerFileFingerprint, 0, len(req.Stickers))
 	target := stickervalidation.TargetSticker
 	switch kind {
 	case "mask":
@@ -326,7 +327,7 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 	}
 	for position, input := range req.Stickers {
 		file := files[position]
-		data, readErr := h.store.ReadStickerFileForSet(r.Ctx, file)
+		data, fingerprint, readErr := h.store.ReadStickerFileForSetWithFingerprint(r.Ctx, file)
 		if errors.Is(readErr, store.ErrStickerFileTooLarge) {
 			return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
 		}
@@ -349,18 +350,19 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 			Emoji: input.Emoji, Keywords: keywordsByPosition[position], Format: string(metadata.Format),
 			Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskCoordsByPosition[position],
 		})
+		fingerprints = append(fingerprints, fingerprint)
 	}
 	set, err := h.store.CreateUserStickerSet(r.Ctx, store.UserStickerSet{
 		CreatorID: creatorID, Title: req.Title, ShortName: req.ShortName,
 		Software: software, Kind: kind, TextColor: req.TextColor,
-	}, items)
+	}, items, fingerprints)
 	if errors.Is(err, store.ErrStickerSetNameOccupied) {
 		return nil, nil, errShortNameOccupied
 	}
 	if errors.Is(err, store.ErrStickerSetLimit) {
 		return nil, nil, errStickersTooMuch
 	}
-	if errors.Is(err, store.ErrStickerDocumentInvalid) || errors.Is(err, store.ErrStickerFileAlreadyUsed) {
+	if errors.Is(err, store.ErrStickerDocumentInvalid) || errors.Is(err, store.ErrStickerFileAlreadyUsed) || errors.Is(err, store.ErrStickerFileBlocked) {
 		return nil, nil, errStickerDocumentInvalid
 	}
 	if err != nil {

@@ -1,0 +1,59 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: teagram
+
+resources:
+  - ../base
+
+configMapGenerator:
+  - name: required-migration-version
+    behavior: replace
+    literals:
+      - migration-version=20261102000002
+  - name: db-migrations-job-revision
+    behavior: merge
+    literals:
+      - job-name=db-migrations-c4d3c2f5019f87c0
+  - name: rustfs-init-job-revision
+    behavior: merge
+    literals:
+      - job-name=rustfs-init-e811a35bbe001c12
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: db-migrations-job-revision
+      fieldPath: data.job-name
+    targets:
+      - select:
+          group: batch
+          version: v1
+          kind: Job
+          name: db-migrations
+        fieldPaths:
+          - metadata.name
+  - source:
+      kind: ConfigMap
+      name: rustfs-init-job-revision
+      fieldPath: data.job-name
+    targets:
+      - select:
+          group: batch
+          version: v1
+          kind: Job
+          name: rustfs-init
+        fieldPaths:
+          - metadata.name
+
+images:
+  - name: ghcr.io/teagramhq/teagramd
+    digest: sha256:e20ef26b80cf3ce1a3ff1cc501111c3403befa7b2a0e94506ab14fa24ed474eb
+  - name: ghcr.io/teagramhq/teagram-migrations
+    digest: sha256:c4d3c2f5019f87c0971427cb9a3842ae372f542b2020a26024461c4ee7dc130d
+  - name: ghcr.io/teagramhq/teagramd-mc-init
+    digest: sha256:e811a35bbe001c12264a88f86538d1ded695970328a960f364644c50ac529fbd
+  - name: ghcr.io/teagramhq/link-edge-landing
+    digest: sha256:9d23a84630fff7e4052e3e3bf1fb3a549bc65ca2404f3786835bf6584373414d
+  - name: ghcr.io/teagramhq/link-edge-selector
+    digest: sha256:5ad00ea0dfca4d80428a1c81ecec06a08d35fcec8caaf04d5bfa85a55016698b

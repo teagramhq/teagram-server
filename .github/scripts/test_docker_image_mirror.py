@@ -41,7 +41,7 @@ DIRECT_HUB_IMAGE = re.compile(
     r"(?<![A-Za-z0-9._/-])(?:"
     r"golang:1\.27|golang:1\.26|golang:1\.24\.8-alpine|alpine:3\.22|"
     r"node:24-alpine3\.22@sha256:[0-9a-f]{64}|node@sha256:[0-9a-f]{64}|"
-    r"postgres:1[68]-alpine|arigaio/atlas:1\.2\.0-alpine|"
+    r"postgres:1[68]-alpine|arigaio/atlas:1\.3\.0-alpine|"
     r"rustfs/rustfs:1\.0\.1@sha256:[0-9a-f]{64}|"
     r"haproxy:3\.2-alpine|busybox:1\.37(?:\.0)?)"
 )
@@ -116,11 +116,8 @@ class DockerImageMirrorTests(unittest.TestCase):
         job = photo_job.group(1)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
+            r"(?m)^    needs:\n      - check-sticker-license$",
         )
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
-        self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("actions: read", job)
         self.assertIn("path: build/sticker-bundle", job)
@@ -190,11 +187,8 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
+            r"(?m)^    needs:\n      - check-sticker-license$",
         )
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
-        self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)

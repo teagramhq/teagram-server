@@ -59,6 +59,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBotAPISendMessage(t)
 	})
+	t.Run("bot-api-get-updates-stock-client", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotAPIGetUpdatesStockClient(t)
+	})
 	t.Run("turnstile-signup", func(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignUp(t)
@@ -323,6 +327,9 @@ func TestSmoke(t *testing.T) {
 	})
 	t.Run("admin-proxy-login", func(t *testing.T) {
 		testSmokeAdminProxyLogin(t)
+	})
+	t.Run("admin-sticker-takedown", func(t *testing.T) {
+		testSmokeAdminStickerTakedown(t)
 	})
 }
 

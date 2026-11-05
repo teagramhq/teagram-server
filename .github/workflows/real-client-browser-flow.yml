@@ -13,19 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ops-gate-pr-during-main:
-    name: 'ops: gate-pr-during-main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 1
-    permissions:
-      contents: read
-    steps:
-      - name: Defer privileged priority operations to trusted workflow
-        run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'
-
   real-client-browser-flow:
     name: real-client-browser-flow
-    needs: ops-gate-pr-during-main
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -90,7 +79,7 @@ jobs:
       # Postgres directly, so it must be available under this mirror-qualified name.
       - name: Pull fixture base images
         timeout-minutes: 5
-        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine test/e2e/real_server_fixture/Dockerfile
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine --image mirror.gcr.io/arigaio/atlas:1.3.0-alpine test/e2e/real_server_fixture/Dockerfile
 
       - name: Run fixture, private build, and all six browser scenarios
         id: browser-flow

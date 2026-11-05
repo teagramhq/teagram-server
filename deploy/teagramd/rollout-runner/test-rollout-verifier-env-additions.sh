@@ -43,7 +43,7 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}},"migrate":{"image":"mirror.gcr.io/arigaio/atlas:1.3.0-alpine"}}}'
 
 inspect_json() {
   local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
@@ -52,11 +52,25 @@ inspect_json() {
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
+        Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120,Labels:{"com.docker.compose.service":"teagramd"}},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
+        HostConfig:{RestartPolicy:{Name:"no"},LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
+}
+
+restart_policy_pair_inspect() {
+  local server_policy=$1 postgres_policy=$2 server postgres
+  server=$(jq -c --arg policy "$server_policy" '
+    .HostConfig.RestartPolicy.Name=$policy
+  ' <<< "$(inspect_json '')")
+  postgres=$(jq -nc --arg policy "$postgres_policy" '
+    {Id:"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     Image:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     Config:{Labels:{"com.docker.compose.service":"postgres"}},
+     HostConfig:{RestartPolicy:{Name:$policy}}}
+  ')
+  printf '%s\n%s\n' "$server" "$postgres" | jq -cs .
 }
 
 rotation_inspect_json() {
@@ -188,6 +202,121 @@ COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"sysl
 INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+restart_policy_baseline_compose=$(jq -c '
+  .services.postgres={image:"postgres"}
+  | .services.rustfs={image:"rustfs",restart:"unless-stopped"}
+' <<< "$COMPOSE_JSON")
+restart_policy_target_compose=$(jq -c '
+  .services.postgres.restart="unless-stopped"
+  | .services.teagramd.restart="unless-stopped"
+' <<< "$restart_policy_baseline_compose")
+restart_policy_baseline=$(snapshot_from_json \
+  "$(inspect_json '')" "$restart_policy_baseline_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+restart_policy_target=$(snapshot_from_json \
+  "$(inspect_json '')" "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$restart_policy_baseline" > "$TMP/restart-policy-baseline.snapshot.json"
+printf '%s\n' "$restart_policy_target" > "$TMP/restart-policy-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL exact postgres and teagramd restart-policy transition was rejected' >&2
+  cat "$TMP/restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'config_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" || \
+   ! grep -q $'compose_restart_policies\t.*\tpass' "$TMP/restart-policy-comparisons.tsv" || \
+   ! grep -q $'config_without_restart_sha256\t.*\tpass' "$TMP/restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL restart-policy exception was not recorded in comparison evidence' >&2
+  cat "$TMP/restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact postgres and teagramd restart-policy transition is approved and recorded'
+
+restart_policy_runtime_match=$(snapshot_from_json \
+  "$(restart_policy_pair_inspect unless-stopped unless-stopped)" \
+  "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' '[]' true)
+if [ "$(jq -c '.container_restart_policies' <<< "$restart_policy_runtime_match")" != \
+     '{"postgres":"unless-stopped","teagramd":"unless-stopped"}' ]; then
+  printf '%s\n' 'FAIL target snapshot did not capture both live restart policies' >&2
+  exit 1
+fi
+for mismatch in 'no unless-stopped' 'unless-stopped no'; do
+  read -r server_policy postgres_policy <<< "$mismatch"
+  if snapshot_from_json \
+    "$(restart_policy_pair_inspect "$server_policy" "$postgres_policy")" \
+    "$restart_policy_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' '[]' true \
+    >/dev/null 2>&1; then
+    printf 'FAIL target snapshot accepted mismatched runtime restart policies: teagramd=%s postgres=%s\n' \
+      "$server_policy" "$postgres_policy" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS target snapshot requires postgres and teagramd runtime restart policies to match Compose'
+
+cp "$TMP/restart-policy-target.snapshot.json" "$TMP/restart-policy-rollback-baseline.snapshot.json"
+cp "$TMP/restart-policy-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/restart-policy-rollback-baseline.snapshot.json" "$TMP/restart-policy-rollback-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/restart-policy-rollback-comparisons.tsv"; then
+  printf '%s\n' 'FAIL rollback of the exact restart-policy transition was rejected' >&2
+  cat "$TMP/restart-policy-rollback-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS rollback of the exact restart-policy transition remains available'
+partial_restart_policy_compose=$(jq -c '.services.postgres.restart="unless-stopped"' <<< "$restart_policy_baseline_compose")
+partial_restart_policy_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$partial_restart_policy_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$partial_restart_policy_snapshot" > "$TMP/partial-restart-policy.snapshot.json"
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/partial-restart-policy.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/partial-restart-policy-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL partial restart-policy transition was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_restart_policies\t.*\tfail' "$TMP/partial-restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL partial restart-policy transition was not recorded as rejected' >&2
+  cat "$TMP/partial-restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS partial restart-policy transition remains rejected'
+extra_restart_policy_compose=$(jq -c '.services.rustfs.restart="always"' <<< "$restart_policy_target_compose")
+extra_restart_policy_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$extra_restart_policy_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$extra_restart_policy_snapshot" > "$TMP/extra-restart-policy.snapshot.json"
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/extra-restart-policy.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/extra-restart-policy-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unrelated rustfs restart-policy drift was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_restart_policies\t.*\tfail' "$TMP/extra-restart-policy-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated restart-policy drift was not recorded as rejected' >&2
+  cat "$TMP/extra-restart-policy-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated restart-policy drift remains rejected'
+unrelated_compose_drift=$(jq -c '.services.teagramd.image="teagramd:unreviewed"' <<< "$restart_policy_target_compose")
+unrelated_compose_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$unrelated_compose_drift" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$unrelated_compose_snapshot" > "$TMP/unrelated-compose-drift.snapshot.json"
+
+if compare_snapshots \
+  "$TMP/restart-policy-baseline.snapshot.json" "$TMP/unrelated-compose-drift.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/unrelated-compose-drift-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unrelated Compose config drift was accepted with the restart-policy exception' >&2
+  exit 1
+fi
+if ! grep -q $'config_without_restart_sha256\t.*\tfail' "$TMP/unrelated-compose-drift-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated Compose config drift was not recorded as rejected' >&2
+  cat "$TMP/unrelated-compose-drift-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated Compose config drift remains rejected'
 rotation_base_compose=$(jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
   .services.teagramd.image="teagramd:local"
   | .services.teagramd.environment += {
@@ -973,6 +1102,71 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+turnstile_controls_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_TEST_MODE:"false",
+    TG_TURNSTILE_HOSTNAMES:"web.teagram.io",
+    TG_TURNSTILE_QA_BYPASS_TOKEN_FILE:""
+  }
+  | .services.teagramd.logging={driver:"syslog",options:{
+      "syslog-address":"unixgram:///dev/log",
+      "syslog-facility":"daemon",
+      "syslog-format":"rfc5424",
+      tag:"teagramd"
+    }}
+' <<< "$turnstile_disabled_compose")
+turnstile_controls_inspect=$(printf '%s' "$turnstile_disabled_inspect" | jq -c '
+  .Config.Env += [
+    "TG_TURNSTILE_TEST_MODE=false",
+    "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+    "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="
+  ]
+  | .HostConfig.LogConfig={Type:"syslog",Config:{
+      "syslog-address":"unixgram:///dev/log",
+      "syslog-facility":"daemon",
+      "syslog-format":"rfc5424",
+      tag:"teagramd"
+    }}
+')
+turnstile_controls_snapshot=$(snapshot_from_json \
+  "$turnstile_controls_inspect" "$turnstile_controls_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.config_sha256' <<< "$turnstile_controls_snapshot")" ] || \
+   [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" != "$(jq -r '.container_env_sha256' <<< "$turnstile_controls_snapshot")" ]; then
+  printf '%s\n' 'FAIL safe Turnstile rollout controls changed normalized deployment digests' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS safe Turnstile rollout controls preserve normalized deployment digests'
+
+for turnstile_control in test-mode hostname bypass-file; do
+  case "$turnstile_control" in
+    test-mode)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_TEST_MODE="true"' <<< "$turnstile_controls_compose")
+      ;;
+    hostname)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_HOSTNAMES="attacker.example"' <<< "$turnstile_controls_compose")
+      ;;
+    bypass-file)
+      unsafe_turnstile_controls=$(jq -c '.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE="/run/secrets/qa-bypass"' <<< "$turnstile_controls_compose")
+      ;;
+  esac
+  if verify_turnstile_compose_configuration "$unsafe_turnstile_controls" >/dev/null 2>&1; then
+    printf 'FAIL unsafe Turnstile %s control was accepted\n' "$turnstile_control" >&2
+    exit 1
+  fi
+done
+printf '%s\n' 'PASS unsafe Turnstile test, hostname, and QA bypass controls remain rejected'
+
+turnstile_unsafe_container=$(printf '%s' "$turnstile_controls_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_TURNSTILE_HOSTNAMES=") then
+    "TG_TURNSTILE_HOSTNAMES=attacker.example" else . end)
+')
+if snapshot_from_json "$turnstile_unsafe_container" "$turnstile_controls_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unsafe Turnstile container controls matched the approved Compose defaults' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Turnstile container controls must match the approved Compose defaults'
+
 turnstile_local_compose=$(jq -c '
   .services.teagramd.environment += {
     TG_TURNSTILE_SITE_KEY:"",
@@ -1556,6 +1750,186 @@ for setting_value in \
   fi
   printf 'PASS target container must match the production Turnstile setting: %s\n' "$setting"
 done
+unset INSPECT_LOG_CONFIG
+INITIALIZE_LOCAL=0
+BASELINE_DIR="$TMP/restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$restart_policy_target" > "$TARGET_DIR/preflight.snapshot.json"
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL exact postgres and teagramd restart-policy preflight transition was rejected' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL exact restart-policy preflight did not record the config digest as approved' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact postgres and teagramd restart-policy preflight transition is approved'
+
+BASELINE_DIR="$TMP/partial-restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/partial-restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$partial_restart_policy_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL partial restart-policy preflight transition was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL partial restart-policy preflight transition was not rejected by its config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS partial restart-policy preflight transition remains rejected'
+
+BASELINE_DIR="$TMP/unrelated-restart-policy-preflight.baseline"
+TARGET_DIR="$TMP/unrelated-restart-policy-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$restart_policy_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$unrelated_compose_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL unrelated Compose drift with restart-policy preflight was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated Compose drift was not rejected by restart-policy preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unrelated Compose drift remains rejected by restart-policy preflight'
+
+BASELINE_DIR="$TMP/turnstile-controls-preflight.baseline"
+TARGET_DIR="$TMP/turnstile-controls-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$turnstile_legacy_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$turnstile_controls_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL exact safe Turnstile control additions were rejected by resolved Compose preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL safe Turnstile control additions did not preserve the approved config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS exact safe Turnstile control additions pass resolved Compose preflight'
+
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+atlas_baseline_compose=$(jq -c \
+  '.services.migrate={image:"mirror.gcr.io/arigaio/atlas:1.2.0-alpine"} |
+   .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  <<< "$COMPOSE_JSON")
+atlas_target_compose=$(jq -c \
+  '.services.migrate.image="mirror.gcr.io/arigaio/atlas:1.3.0-alpine"' \
+  <<< "$atlas_baseline_compose")
+atlas_baseline_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_baseline_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render baseline)
+atlas_target_preflight=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+atlas_target_inspect=$(jq -c '
+  .Id="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  | .Image="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+' <<< "$(inspect_json '')")
+atlas_target_snapshot=$(snapshot_from_json \
+  "$atlas_target_inspect" "$atlas_target_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target)
+BASELINE_DIR="$TMP/atlas-image.baseline"
+TARGET_DIR="$TMP/atlas-image.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_target_preflight" > "$TARGET_DIR/preflight.snapshot.json"
+printf '%s\n' "$atlas_target_snapshot" > "$TARGET_DIR/target.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL reviewed Atlas 1.2.0 to 1.3.0 image update was rejected by resolved Compose preflight' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tpass' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL reviewed Atlas image update did not record its config digest as approved' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TARGET_DIR/target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL reviewed Atlas image update was rejected by target verification' >&2
+  cat "$TARGET_DIR/target-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS reviewed Atlas 1.2.0 to 1.3.0 image update passes preflight and target verification'
+
+atlas_unapproved_version='1.4.0'
+atlas_unapproved_compose=$(jq -c --arg version "$atlas_unapproved_version" \
+  '.services.migrate.image=("mirror.gcr.io/arigaio/atlas:" + $version + "-alpine")' \
+  <<< "$atlas_baseline_compose")
+atlas_unapproved_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_unapproved_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+BASELINE_DIR="$TMP/atlas-unapproved.baseline"
+TARGET_DIR="$TMP/atlas-unapproved.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_unapproved_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was accepted by resolved Compose preflight' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was not rejected by its config digest' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unreviewed Atlas image updates remain rejected by resolved Compose preflight'
+
+atlas_unapproved_target=$(snapshot_from_json \
+  "$atlas_target_inspect" "$atlas_unapproved_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target)
+printf '%s\n' "$atlas_unapproved_target" > "$TARGET_DIR/unapproved-target.snapshot.json"
+chmod 600 "$TARGET_DIR/unapproved-target.snapshot.json"
+if compare_snapshots "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/unapproved-target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TARGET_DIR/unapproved-target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was accepted by target verification' >&2
+  exit 1
+fi
+if ! grep -q $'config_sha256\t.*\tfail' "$TARGET_DIR/unapproved-target-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unreviewed Atlas image update was not rejected by target config comparison' >&2
+  cat "$TARGET_DIR/unapproved-target-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target verification rejects unreviewed Atlas image updates'
+
+atlas_config_drift_compose=$(jq -c \
+  '.services.migrate.image="mirror.gcr.io/arigaio/atlas:1.3.0-alpine" |
+   .services.teagramd.environment.TG_SYNTHETIC_FLAG="unapproved"' \
+  <<< "$atlas_baseline_compose")
+atlas_config_drift_snapshot=$(snapshot_from_json \
+  "$(inspect_json '')" "$atlas_config_drift_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight)
+BASELINE_DIR="$TMP/atlas-config-drift.baseline"
+TARGET_DIR="$TMP/atlas-config-drift.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+printf '%s\n' "$atlas_baseline_snapshot" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$atlas_config_drift_snapshot" > "$TARGET_DIR/preflight.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
+if compare_resolved_preflight; then
+  printf '%s\n' 'FAIL Atlas image update combined with unrelated config drift was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'preflight\tconfig_sha256\t.*\tfail' "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unrelated config drift combined with Atlas image update was not rejected' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Atlas image update does not admit unrelated Compose drift'
 unset INSPECT_LOG_CONFIG
 
 media_key_initial_local_baseline=$(jq -c '

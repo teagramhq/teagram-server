@@ -262,6 +262,15 @@ verify_turnstile_compose_configuration() {
         ($env.TG_TURNSTILE_SITE_KEY | type == "string") and
         ($env.TG_TURNSTILE_SECRET_KEY_FILE | type == "string") and
         ($env.TG_TURNSTILE_SIGNIN_ENABLED | IN("false", "true")) and
+        (
+          if ($env | has("TG_TURNSTILE_TEST_MODE")) or
+             ($env | has("TG_TURNSTILE_HOSTNAMES")) or
+             ($env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) then
+            $env.TG_TURNSTILE_TEST_MODE == "false" and
+            $env.TG_TURNSTILE_HOSTNAMES == "web.teagram.io" and
+            $env.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+          else true end
+        ) and
         ($env | has("TG_TURNSTILE_SECRET_KEY") | not) and
         (
           if $env.TG_TURNSTILE_SITE_KEY == "" then
@@ -361,7 +370,8 @@ verify_turnstile_container_configuration() {
             startswith("TG_TURNSTILE_SECRET_KEY=")
           )
         ] as $turnstile_entries
-        | if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
+        | (
+          if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
             ($turnstile_entries | length) == 0
           else
             ([$turnstile_entries[] | select(startswith("TG_TURNSTILE_SECRET_KEY="))] | length) == 0 and
@@ -388,6 +398,34 @@ verify_turnstile_container_configuration() {
               end
             )
           end
+        ) and (
+          [
+            $container_env[] | select(type == "string") |
+            select(
+              startswith("TG_TURNSTILE_TEST_MODE=") or
+              startswith("TG_TURNSTILE_HOSTNAMES=") or
+              startswith("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=")
+            )
+          ] as $control_entries
+          | [
+              "TG_TURNSTILE_HOSTNAMES=web.teagram.io",
+              "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=",
+              "TG_TURNSTILE_TEST_MODE=false"
+            ] as $expected_control_entries
+          | if ($compose_env | has("TG_TURNSTILE_TEST_MODE")) or
+               ($compose_env | has("TG_TURNSTILE_HOSTNAMES")) or
+               ($compose_env | has("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")) then
+              if $snapshot_name == "target" then
+                ($control_entries | sort) == $expected_control_entries
+              else
+                ($control_entries | length) == 0 or
+                ($control_entries | sort) == $expected_control_entries
+              end
+            else
+              ($control_entries | length) == 0 or
+              ($control_entries | sort) == $expected_control_entries
+            end
+        )
       end
   ' >/dev/null; then
     printf '%s\n' 'container Turnstile environment does not match the resolved Compose mapping' >&2
@@ -841,8 +879,9 @@ snapshot_from_json() {
   local snapshot_name=${6:-}
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
-  local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
+  local require_restart_policies=${9:-false}
+  local mounts exposure exposure_for_hash resolved_config canonical_compose canonical_without_restart canonical_without_migrate_image_and_restart container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
+  local mounts_sha exposure_sha config_sha config_without_restart_sha config_without_migrate_image_and_restart_sha migrate_image compose_restart_policies container_restart_policies env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
   local media_key_source media_key_current
@@ -869,6 +908,11 @@ snapshot_from_json() {
     "$snapshot_name" "$compose_source" || return 1
   compose_logging_policy=not-captured
   compose_log_login_codes=not-captured
+  config_without_restart_sha=not-captured
+  config_without_migrate_image_and_restart_sha=not-captured
+  migrate_image=not-captured
+  compose_restart_policies='{}'
+  container_restart_policies='{}'
   if [ "$compose_source" = selected-compose-render ]; then
     compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].logging as $logging
@@ -1141,7 +1185,10 @@ snapshot_from_json() {
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
-             . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
+             . == "TG_TURNSTILE_SIGNIN_ENABLED=false" or
+             . == "TG_TURNSTILE_TEST_MODE=false" or
+             . == "TG_TURNSTILE_HOSTNAMES=web.teagram.io" or
+             . == "TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=") | not
           )))
         | map(select(type != "string" or (
             ((split("="))[0]) as $key
@@ -1205,6 +1252,8 @@ snapshot_from_json() {
     compose_replica_count=not-captured
     compose_client_addr_trust=not-captured
     config_sha=not-captured
+    config_without_restart_sha=not-captured
+    compose_restart_policies='{}'
     env_sha=not-captured
     override_sha=not-captured
   else
@@ -1331,8 +1380,48 @@ snapshot_from_json() {
     ')
     grace=$(printf '%s' "$resolved_config" | jq -er '.stop_grace_period')
     config_sha=$(sha256_text "$canonical_compose")
+    canonical_without_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart)') || return 1
+    config_without_restart_sha=$(sha256_text "$canonical_without_restart")
+    migrate_image=$(printf '%s' "$compose_json" | jq -er '
+      .services.migrate.image | select(type == "string" and length > 0)
+    ') || {
+      printf '%s\n' 'resolved Compose migration image is missing or invalid' >&2
+      return 1
+    }
+    canonical_without_migrate_image_and_restart=$(printf '%s' "$canonical_compose" | jq -ceS 'del(.services[].restart) | del(.services.migrate.image)') || return 1
+    config_without_migrate_image_and_restart_sha=$(sha256_text "$canonical_without_migrate_image_and_restart")
+    compose_restart_policies=$(printf '%s' "$canonical_compose" | jq -ceS '
+      .services | with_entries(.value = (.value.restart // "no"))
+    ') || return 1
     env_sha=$(sha256sum "$env_file" | awk '{print $1}')
     override_sha=$(sha256sum "$override_file" | awk '{print $1}')
+  fi
+  container_restart_policies=$(printf '%s' "$inspect_json" | jq -ceS --arg server_service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
+    def containers: if type == "array" then . else [.] end;
+    [containers[] as $container
+     | ($container.Config.Labels["com.docker.compose.service"] // "") as $service
+     | select($service == "postgres" or $service == $server_service)
+     | {key:$service,
+        value:((($container.HostConfig.RestartPolicy.Name // "no")
+          | if . == "" then "no" else . end))}]
+    | (map(.key) | unique | length) as $unique_count
+    | if $unique_count == length then from_entries else error("duplicate service inspection") end
+  ') || {
+    printf '%s\n' 'container restart policy inspection is invalid' >&2
+    return 1
+  }
+  if [ "$require_restart_policies" = true ] && [ "$compose_source" = selected-compose-render ] && \
+     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; }; then
+    if ! jq -en --argjson actual "$container_restart_policies" --argjson expected "$compose_restart_policies" \
+      --arg server_service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
+      ($actual.postgres != null) and ($actual[$server_service] != null) and
+      ($expected.postgres != null) and ($expected[$server_service] != null) and
+      ($actual.postgres == $expected.postgres) and
+      ($actual[$server_service] == $expected[$server_service])
+    ' >/dev/null; then
+      printf '%s\n' 'inspected postgres and teagramd restart policies do not match resolved Compose' >&2
+      return 1
+    fi
   fi
   mount_count=$(printf '%s' "$mounts" | jq -er 'length')
   mounts_sha=$(sha256_text "$mounts")
@@ -1363,6 +1452,11 @@ snapshot_from_json() {
     --arg mounts_sha "$mounts_sha" \
     --arg exposure_sha "$exposure_sha" \
     --arg config_sha "$config_sha" \
+    --arg config_without_restart_sha "$config_without_restart_sha" \
+    --arg config_without_migrate_image_and_restart_sha "$config_without_migrate_image_and_restart_sha" \
+    --arg migrate_image "$migrate_image" \
+    --argjson compose_restart_policies "$compose_restart_policies" \
+    --argjson container_restart_policies "$container_restart_policies" \
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
     --arg container_env_sha "$container_env_sha" \
@@ -1386,6 +1480,11 @@ snapshot_from_json() {
       container_client_addr_trust:$container_client_addr_trust,
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
+      config_without_restart_sha256:$config_without_restart_sha,
+      config_without_migrate_image_and_restart_sha256:$config_without_migrate_image_and_restart_sha,
+      migrate_image:$migrate_image,
+      compose_restart_policies:$compose_restart_policies,
+      container_restart_policies:$container_restart_policies,
       env_sha256:$env_sha,override_sha256:$override_sha,
       container_env_sha256:$container_env_sha,
       container_logging_sha256:$container_logging_sha,
@@ -1524,13 +1623,48 @@ record_ordinary_setting() {
   return 0
 }
 
+approved_restart_policy_transition() {
+  local before_file=$1 after_file=$2
+  jq -en --slurpfile before "$before_file" --slurpfile after "$after_file" '
+    ($before[0].compose_restart_policies) as $before_policies
+    | ($after[0].compose_restart_policies) as $after_policies
+    | ($before_policies | type == "object") and
+      ($after_policies | type == "object") and
+      (($before_policies | keys) == ($after_policies | keys)) and
+      (($before_policies | del(.postgres, .teagramd)) ==
+       ($after_policies | del(.postgres, .teagramd))) and
+      (
+        ($before_policies.postgres == "no" and
+         $before_policies.teagramd == "no" and
+         $after_policies.postgres == "unless-stopped" and
+         $after_policies.teagramd == "unless-stopped") or
+        ($after_policies.postgres == "no" and
+         $after_policies.teagramd == "no" and
+         $before_policies.postgres == "unless-stopped" and
+         $before_policies.teagramd == "unless-stopped")
+      )
+  ' >/dev/null
+}
+
+approved_migration_image_transition() {
+  local before_file=$1 after_file=$2
+  jq -en --slurpfile before "$before_file" --slurpfile after "$after_file" '
+    ($before[0].migrate_image == "mirror.gcr.io/arigaio/atlas:1.2.0-alpine") and
+    ($after[0].migrate_image == "mirror.gcr.io/arigaio/atlas:1.3.0-alpine") and
+    ($before[0].compose_restart_policies == $after[0].compose_restart_policies) and
+    ($before[0].config_without_migrate_image_and_restart_sha256 | test("^[0-9a-f]{64}$")) and
+    ($after[0].config_without_migrate_image_and_restart_sha256 | test("^[0-9a-f]{64}$")) and
+    ($before[0].config_without_migrate_image_and_restart_sha256 == $after[0].config_without_migrate_image_and_restart_sha256)
+  ' >/dev/null
+}
+
 compare_snapshots() {
   local before_file=$1
   local after_file=$2
   local expected_image=$3
   local result_file=$4
-  local field before_value after_value before_image after_image result before_logging_policy after_logging_policy
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
+  local field before_value after_value before_image after_image result before_logging_policy after_logging_policy before_config_without_restart after_config_without_restart
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 config_without_restart_sha256 config_without_migrate_image_and_restart_sha256 migrate_image compose_restart_policies container_restart_policies env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -1560,7 +1694,12 @@ compare_snapshots() {
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
-      (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.config_without_migrate_image_and_restart_sha256 | sha) and
+      (.migrate_image | type == "string" and length > 0) and
+      (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$before_file" >/dev/null \
     || ! jq -e '
@@ -1587,7 +1726,12 @@ compare_snapshots() {
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
-      (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.config_sha256 | sha) and (.config_without_restart_sha256 | sha) and
+      (.config_without_migrate_image_and_restart_sha256 | sha) and
+      (.migrate_image | type == "string" and length > 0) and
+      (.compose_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.container_restart_policies | type == "object" and all(.[]; type == "string")) and
+      (.env_sha256 | sha) and (.override_sha256 | sha) and
       (.container_env_sha256 | sha) and (.container_logging_sha256 | sha)
     ' "$after_file" >/dev/null \
     || ! [[ "$expected_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -1605,10 +1749,46 @@ compare_snapshots() {
   before_logging_policy=$(jq -er '.compose_logging_policy' "$before_file") || return 1
   after_logging_policy=$(jq -er '.compose_logging_policy' "$after_file") || return 1
   for field in "${fields[@]}"; do
-    if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
-    if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
+    if ! before_value=$(jq -cer --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
+    if ! after_value=$(jq -cer --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
     if [ "$field" = compose_logging_policy ]; then
       if approved_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
+    elif [ "$field" = config_sha256 ]; then
+      if [ "$before_value" = "$after_value" ]; then
+        result=pass
+      else
+        before_config_without_restart=$(jq -er '.config_without_restart_sha256' "$before_file") || return 1
+        after_config_without_restart=$(jq -er '.config_without_restart_sha256' "$after_file") || return 1
+        if { [ "$before_config_without_restart" = "$after_config_without_restart" ] && \
+             approved_restart_policy_transition "$before_file" "$after_file"; } || \
+           approved_migration_image_transition "$before_file" "$after_file"; then
+          result=pass
+        else
+          result=fail
+        fi
+      fi
+    elif [ "$field" = compose_restart_policies ]; then
+      if [ "$before_value" = "$after_value" ] || \
+         approved_restart_policy_transition "$before_file" "$after_file"; then
+        result=pass
+      else
+        result=fail
+      fi
+    elif [ "$field" = container_restart_policies ]; then
+      if [ "$before_value" = "$after_value" ] || \
+         approved_restart_policy_transition "$before_file" "$after_file"; then
+        result=pass
+      else
+        result=fail
+      fi
+    elif [ "$field" = config_without_restart_sha256 ] || [ "$field" = migrate_image ]; then
+      if approved_migration_image_transition "$before_file" "$after_file"; then
+        result=pass
+      elif [ "$before_value" = "$after_value" ]; then
+        result=pass
+      else
+        result=fail
+      fi
     elif [ "$field" = compose_log_login_codes ] || [ "$field" = container_log_login_codes ]; then
       if approved_login_code_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
     elif [ "$field" = media_key_source ] && [ "$before_value" = unset ] && [[ "$after_value" = /* ]]; then
@@ -1857,7 +2037,7 @@ live_ready_command() {
 snapshot_command() {
   local container_id=$1 evidence_dir=$2 name=$3 env_file=$4 override_file=$5
   local compose_source=${6:-selected-compose-render}
-  local inspect_json compose_json image_env_json image_id snapshot output
+  local inspect_json compose_json image_env_json image_id postgres_container_id snapshot output require_restart_policies=false
   secure_evidence_dir "$evidence_dir"
   validate_container_id "$container_id"
   if [ "$PWD" != "$ROLLOUT_CHECKOUT_PATH" ] || [ "$env_file" != "$ROLLOUT_CHECKOUT_PATH/.env" ] || [ "$override_file" != "$ROLLOUT_CHECKOUT_PATH/docker-compose.override.yml" ]; then
@@ -1870,10 +2050,27 @@ snapshot_command() {
     *) printf '%s\n' 'invalid snapshot source' >&2; return 64 ;;
   esac
   output="$evidence_dir/$name.snapshot.json"
-  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
   if [ "$compose_source" = selected-compose-render ]; then
     compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
+    postgres_container_id=$(docker compose ps -aq postgres </dev/null 2>/dev/null) || {
+      printf '%s\n' 'postgres container ID is unavailable for restart policy inspection' >&2
+      return 1
+    }
+    validate_container_id "$postgres_container_id" || {
+      printf '%s\n' 'postgres container ID is invalid for restart policy inspection' >&2
+      return 1
+    }
+    [ "$container_id" != "$postgres_container_id" ] || {
+      printf '%s\n' 'teagramd and postgres container IDs are not distinct' >&2
+      return 1
+    }
+    inspect_json=$(docker inspect "$container_id" "$postgres_container_id" 2>/dev/null) || {
+      printf '%s\n' 'serving and postgres container snapshot unavailable' >&2
+      return 1
+    }
+    require_restart_policies=true
   else
+    inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
     compose_json='{}'
   fi
   image_id=$(printf '%s' "$inspect_json" | jq -er 'def item: if type == "array" then .[0] else . end; item.Image | select(type == "string" and length > 0)') || {
@@ -1888,7 +2085,7 @@ snapshot_command() {
     printf '%s\n' 'container image environment is invalid' >&2
     return 1
   }
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}" "$image_env_json") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}" "$image_env_json" "$require_restart_policies") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \
@@ -1910,6 +2107,24 @@ compare_command() {
     printf 'comparison_result=fail checks=%s evidence=%s\n' "$(wc -l < "$results" | tr -d ' ')" "$results"
     return "$rc"
   fi
+}
+
+restart_policy_transition_command() {
+  local before=$1 after=$2
+  [ -f "$before" ] && [ ! -L "$before" ] && [ -f "$after" ] && [ ! -L "$after" ] || {
+    printf '%s\n' 'restart-policy snapshots are unavailable' >&2
+    return 1
+  }
+  approved_restart_policy_transition "$before" "$after"
+}
+
+migration_image_transition_command() {
+  local before=$1 after=$2
+  [ -f "$before" ] && [ ! -L "$before" ] && [ -f "$after" ] && [ ! -L "$after" ] || {
+    printf '%s\n' 'migration-image snapshots are unavailable' >&2
+    return 1
+  }
+  approved_migration_image_transition "$before" "$after"
 }
 
 secure_replay_evidence_dir() {
@@ -1939,7 +2154,7 @@ secure_replay_evidence_dir() {
 
 preflight_snapshot_command() {
   local container_id=$1 project_dir=$2 evidence_dir=$3 name=$4 project_name=$5 selection=$6
-  local env_file override_file compose_files_value='' compose_json inspect_json snapshot output entry file canonical owner=0
+  local env_file override_file compose_files_value='' compose_json inspect_json postgres_container_id snapshot output entry file canonical owner=0
   local -a compose_entries=() compose_args=()
   secure_replay_evidence_dir "$evidence_dir" || return 1
   if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then owner=$(id -u) || return 1; fi
@@ -2013,17 +2228,30 @@ preflight_snapshot_command() {
   export COMPOSE_EXPERIMENTAL_OCI_REMOTE XDG_CACHE_HOME
   export ROLLOUT_CHECKOUT_PATH ROLLOUT_COMPOSE_SERVICE
   export ROLLOUT_ADDED_ENV ROLLOUT_CHANGED_ENV
-  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || {
-    printf '%s\n' 'cannot inspect the live teagramd container' >&2
-    return 1
-  }
   compose_json=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
     "${compose_args[@]}" config --format json </dev/null 2>/dev/null) || {
     printf '%s\n' 'cannot render the selected Compose files' >&2
     return 1
   }
+  postgres_container_id=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
+    "${compose_args[@]}" ps -aq postgres </dev/null 2>/dev/null) || {
+    printf '%s\n' 'cannot find the live postgres container for restart policy inspection' >&2
+    return 1
+  }
+  validate_container_id "$postgres_container_id" || {
+    printf '%s\n' 'live postgres container ID is invalid for restart policy inspection' >&2
+    return 1
+  }
+  [ "$container_id" != "$postgres_container_id" ] || {
+    printf '%s\n' 'live teagramd and postgres container IDs are not distinct' >&2
+    return 1
+  }
+  inspect_json=$(docker inspect "$container_id" "$postgres_container_id" 2>/dev/null) || {
+    printf '%s\n' 'cannot inspect the live teagramd and postgres containers' >&2
+    return 1
+  }
   snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" \
-    selected-compose-render "$name" "$compose_files_value") || {
+    selected-compose-render "$name" "$compose_files_value" '[]' true) || {
     printf '%s\n' 'preflight replay snapshot validation failed' >&2
     return 1
   }
@@ -2035,7 +2263,7 @@ preflight_snapshot_command() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2; return 64; }
+  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, migration-image-transition, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
   case "$command" in
@@ -2048,6 +2276,12 @@ main() {
     compare)
       [ "$#" -eq 5 ] || { printf '%s\n' 'usage: rollout-verifier.sh compare BEFORE AFTER EXPECTED_IMAGE_ID EVIDENCE_DIR NAME' >&2; return 64; }
       compare_command "$@" ;;
+    restart-policy-transition)
+      [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-verifier.sh restart-policy-transition BEFORE AFTER' >&2; return 64; }
+      restart_policy_transition_command "$@" ;;
+    migration-image-transition)
+      [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-verifier.sh migration-image-transition BEFORE AFTER' >&2; return 64; }
+      migration_image_transition_command "$@" ;;
     ready)
       [ "$#" -eq 3 ] || { printf '%s\n' 'usage: rollout-verifier.sh ready target|rollback CONTAINER_ID EVIDENCE_DIR' >&2; return 64; }
       live_ready_command "$@" ;;
@@ -2063,7 +2297,7 @@ main() {
       secure_evidence_dir "$(dirname "$3")"
       wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
-      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2
+      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, restart-policy-transition, migration-image-transition, ready, ready-pair' >&2
       return 64 ;;
   esac
 }

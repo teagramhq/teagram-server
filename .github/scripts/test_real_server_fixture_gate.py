@@ -185,26 +185,6 @@ class RealServerFixtureGateTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
-            r"(?m)^concurrency:\n  group: real-client-browser-flow-pr-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true$",
-        )
-        ops_gate = re.search(
-            r"(?ms)^  ops-gate-pr-during-main:\n(?P<body>.*?)(?=^  real-client-browser-flow:\n)",
-            workflow,
-        )
-        self.assertIsNotNone(ops_gate, "browser workflow has no priority gate job")
-        ops_gate_body = ops_gate.group("body")
-        self.assertIn("permissions:\n      contents: read", ops_gate_body)
-        self.assertNotIn("GH_TOKEN", ops_gate_body)
-        self.assertIn(
-            "run: echo 'Pull request cancellation and recovery are handled by PR CI priority.'",
-            ops_gate_body,
-        )
-        self.assertRegex(
-            workflow,
-            r"(?m)^    needs: ops-gate-pr-during-main$",
-        )
-        self.assertRegex(
-            workflow,
             r"(?ms)^      REAL_CLIENT_WEB_REVISION: [0-9a-f]{40}$.*?"
             r"^      - name: Check out pinned web companion\n"
             r"        uses: [^\n]+\n"
@@ -216,21 +196,49 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        ci_job = re.search(r"(?ms)^  test-go:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
-        fixture_job = re.search(
-            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+        checkout = r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$"
+        for job_name in (
+            "check-sticker-license",
+            "test-go",
+            "test-e2e-admin",
+            "test-real-server-fixtures",
+            "build-server-image",
+            "test-compose",
+        ):
+            with self.subTest(job=job_name):
+                job = re.search(
+                    rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                    workflow,
+                )
+                self.assertIsNotNone(job, f"CI workflow has no {job_name} job")
+                self.assertRegex(job.group("body"), checkout)
+
+    def test_admin_e2e_job_is_read_only_and_keeps_cache_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  test-e2e-admin:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
         )
-        self.assertIsNotNone(ci_job, "CI workflow has no test-go job")
-        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
-        self.assertRegex(
-            ci_job.group("body"),
-            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        self.assertIsNotNone(job, "CI workflow has no test-e2e-admin job")
+        permissions = re.search(
+            r"(?ms)^    permissions:\n(?P<body>.*?)(?=^    (?:env|steps):)",
+            job.group("body"),
         )
-        self.assertRegex(
-            fixture_job.group("body"),
-            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        self.assertIsNotNone(permissions, "test-e2e-admin permissions are missing")
+        self.assertEqual(
+            [line.strip() for line in permissions.group("body").splitlines() if line.strip()],
+            ["contents: read"],
         )
+        cached_install = re.search(
+            r"(?ms)^      - name: Install the system dependencies from cache\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            job.group("body"),
+        )
+        self.assertIsNotNone(cached_install, "cached dependency install step is missing")
+        self.assertIn("falling back to the network install", cached_install.group("body"))
+        self.assertNotIn("gh cache delete", cached_install.group("body"))
+        self.assertNotIn("GH_TOKEN", cached_install.group("body"))
 
     def test_required_ci_check_gates_all_required_lanes(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -241,24 +249,15 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
         body = ci_job.group("body")
         self.assertRegex(body, r"(?m)^    name: ci$")
-        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) &&")
-        self.assertIn("needs.ops-prioritize-main.result == 'success'", body)
-        self.assertIn("needs.ops-prioritize-main.result == 'failure'", body)
-        self.assertIn("needs.ops-prioritize-main.result == 'cancelled'", body)
-        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", body)
-        self.assertIn("github.event_name == 'pull_request'", body)
-        self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
+        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
+        self.assertNotIn("ops-prioritize-main", body)
 
-        # The publisher and recovery dispatcher are main-push-only. The demo
-        # pin is advisory and must not gate the production CI aggregate. The
-        # main-priority job is skipped on PRs and checked separately. MAIN-2918
-        # is deleting the other three lanes.
+        # The demo publisher and demo pin are advisory. K8s image publication
+        # gates production because the prod overlay pins those images.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
             "check-demo-web-pin",
-            "ops-dispatch-pr-ci-recovery",
-            "ops-prioritize-main",
             "mirror-rustfs-qualification-images",
             "restore-readiness",
             "rustfs-transition-qualification",
@@ -296,11 +295,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(needs, "CI aggregate has no explicit needs list")
         needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
-        expected_dependencies = expected_lanes | {"ops-prioritize-main"}
+        expected_dependencies = expected_lanes
         self.assertEqual(
-            needed_lanes[:6],
+            needed_lanes[:5],
             [
-                "ops-prioritize-main",
                 "check-security",
                 "test-go",
                 "check-sticker-license",
@@ -337,35 +335,40 @@ class RealServerFixtureGateTests(unittest.TestCase):
 
         result_guard = re.search(
             r'(?ms)^          if \[\[ (?P<condition>'
-            r'"\$MAIN_PRIORITY_RESULT" != "success" \|\|.*?) \]\]; then$',
+            r'"\$CHECK_SECURITY_RESULT".*?)\]\]; then$',
             body,
         )
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
-        expected_guard = '"$MAIN_PRIORITY_RESULT" != "success" || '
-        expected_guard += " || ".join(
-            f'"${result_envs[lane]}" != "success"'
+        expected_guard = " || ".join(
+            (
+                f'"${result_envs[lane]}" != "$expected_publish_result"'
+                if lane == "publish-k8s-images"
+                else f'"${result_envs[lane]}" != "success"'
+            )
             for lane in needed_lanes
-            if lane != "ops-prioritize-main"
         )
         self.assertEqual(
             " ".join(result_guard.group("condition").split()),
             expected_guard,
-            "CI aggregate must fail unless every retained PR lane and main-priority check pass",
+            "CI aggregate must fail unless every retained PR lane passes",
         )
 
         run_script = re.search(r"(?ms)^        run: \|\n(?P<script>.*)\Z", body)
         self.assertIsNotNone(run_script, "CI aggregate has no executable result gate")
         shell_script = textwrap.dedent(run_script.group("script"))
         environment = os.environ.copy()
-        environment["GITHUB_EVENT_NAME"] = "pull_request"
         environment.update(
             {
-                env_name: "success"
-                for lane, env_name in result_envs.items()
-                if lane != "ops-prioritize-main"
+                env_name: "success" for env_name in result_envs.values()
             }
         )
-        environment[result_envs["ops-prioritize-main"]] = "success"
+        environment.update(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REPOSITORY": "teagramhq/teagram-server",
+                "PULL_REQUEST_HEAD_REPO": "teagramhq/teagram-server",
+            }
+        )
         success = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
@@ -375,7 +378,90 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
 
-        failed_lane = next(lane for lane in needed_lanes if lane != "ops-prioritize-main")
+        workflow_triggers = re.search(r"(?ms)^on:\n(?P<body>.*?)^permissions:", workflow)
+        self.assertIsNotNone(workflow_triggers, "CI workflow has no event triggers")
+        self.assertRegex(
+            workflow_triggers.group("body"),
+            r"(?m)^  merge_group:\n    types: \[checks_requested\]$",
+        )
+        merge_group_environment = environment.copy()
+        merge_group_environment.update(
+            {
+                "GITHUB_EVENT_NAME": "merge_group",
+                "PULL_REQUEST_HEAD_REPO": "",
+                result_envs["publish-k8s-images"]: "skipped",
+            }
+        )
+        merge_group_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertEqual(
+            merge_group_success.returncode,
+            0,
+            merge_group_success.stdout + merge_group_success.stderr,
+        )
+        merge_group_publisher_ran = merge_group_environment.copy()
+        merge_group_publisher_ran[result_envs["publish-k8s-images"]] = "success"
+        merge_group_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_publisher_ran,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_publisher.returncode,
+            0,
+            "merge-group aggregate returned success when image publication ran",
+        )
+        merge_group_environment[result_envs["test-go"]] = "skipped"
+        merge_group_failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=merge_group_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            merge_group_failure.returncode,
+            0,
+            "merge-group aggregate returned success when a required lane was skipped",
+        )
+
+        failed_publisher_environment = environment.copy()
+        failed_publisher_environment[result_envs["publish-k8s-images"]] = "failure"
+        failed_publisher = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=failed_publisher_environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failed_publisher.returncode,
+            0,
+            "CI aggregate returned success when the image publisher failed: "
+            + failed_publisher.stdout
+            + failed_publisher.stderr,
+        )
+
+        fork_environment = environment.copy()
+        fork_environment["PULL_REQUEST_HEAD_REPO"] = "fork/teagram-server"
+        fork_environment[result_envs["publish-k8s-images"]] = "skipped"
+        fork_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=fork_environment,
+            text=True,
+        )
+        self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
+
+        failed_lane = needed_lanes[0]
         environment[result_envs[failed_lane]] = "failure"
         failure = subprocess.run(
             ["bash", "-e", "-c", shell_script],
@@ -390,23 +476,6 @@ class RealServerFixtureGateTests(unittest.TestCase):
             "CI aggregate returned success when a required lane failed: "
             + failure.stdout
             + failure.stderr,
-        )
-
-        environment.update({env_name: "success" for env_name in result_envs.values()})
-        environment[result_envs["ops-prioritize-main"]] = "failure"
-        priority_failure = subprocess.run(
-            ["bash", "-e", "-c", shell_script],
-            capture_output=True,
-            check=False,
-            env=environment,
-            text=True,
-        )
-        self.assertNotEqual(
-            priority_failure.returncode,
-            0,
-            "CI aggregate returned success when main prioritization failed: "
-            + priority_failure.stdout
-            + priority_failure.stderr,
         )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
