@@ -64,7 +64,7 @@ Would verify alpha, the bootstrap kubeconfig, source Compose containers, the fiv
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
 Would wait for PostgreSQL and RustFS, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
 Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before that switch restarts every stopped Compose service.
-Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
+Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file, sent over a temporary loopback port-forward, and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
 Would stream server_key.pem, enc_key.hex, and local blobs from the old container into the new PVCs without a host-side plaintext copy; key hashes are compared silently.
 Would verify the old blob tree and its encrypted envelopes fit their PVCs and the target disk can hold both copies, encrypt and checksum-copy its objects to RustFS with the migrated media key, and keep a read-only source copy for recovery.
@@ -759,9 +759,9 @@ dump_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 dump_path="$POSTGRES_DUMP_DIR/source-$dump_stamp.dump"
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
   sh -ec 'install -d -m 0700 /var/lib/postgresql/cutover-backups' >/dev/null
-# kubectl exec --stdin can end a large upload early without reporting an error,
-# so the dump is spooled to a private file on this host, fed to the pod from
-# that file (no pipe to break) and compared by SHA-256 before it is restored.
+# kubectl exec --stdin can end a large upload early without reporting an error.
+# Send the private spool through a loopback port-forward and compare SHA-256
+# before restoring it.
 # The spool is removed once the restore has finished.
 dump_spool="$EVIDENCE_DIR/source-$dump_stamp.dump.partial"
 : > "$dump_spool"
@@ -772,11 +772,15 @@ spool_hash=$(sha256sum "$dump_spool" | awk '{print $1}')
 [[ $spool_hash =~ ^[0-9a-f]{64}$ ]] || fail 'could not hash the PostgreSQL cutover dump'
 dump_uploaded=false
 for upload_attempt in 1 2 3 4 5; do
-  # shellcheck disable=SC2016 # The inner sh expands $1 from its argument list.
-  kubectl exec --namespace "$NAMESPACE" --stdin postgres-0 -c postgres -- \
-    sh -ec 'umask 077; cat > "$1"' -- "$dump_path" < "$dump_spool" || true
-  uploaded_hash=$(kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
-    sha256sum "$dump_path" 2>/dev/null | awk '{print $1}') || uploaded_hash=''
+  if ! bash "$SCRIPT_DIR/cutover-dump-upload.sh" "$NAMESPACE" postgres-0 "$dump_spool" "$dump_path"; then
+    printf 'k3s cutover: PostgreSQL dump upload attempt %s failed; retrying\n' "$upload_attempt" >&2
+    continue
+  fi
+  if ! uploaded_hash=$(kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
+    sha256sum "$dump_path" | awk '{print $1}'); then
+    printf 'k3s cutover: could not hash PostgreSQL dump upload attempt %s; retrying\n' "$upload_attempt" >&2
+    continue
+  fi
   if [[ $uploaded_hash == "$spool_hash" ]]; then
     dump_uploaded=true
     break

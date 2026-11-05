@@ -11,6 +11,7 @@ for required in \
   'stop all running Compose services except PostgreSQL' \
   'verify no PostgreSQL client connections remain' \
   'save a mode-0600 pg_dump' \
+  'sent over a temporary loopback port-forward' \
   '8 GiB PostgreSQL PVC can hold both the protected dump and restored database' \
   'server_key.pem, enc_key.hex, and local blobs' \
   'encrypt and checksum-copy its objects to RustFS' \

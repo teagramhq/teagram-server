@@ -173,6 +173,7 @@ kubectl attach "$seed_pod" --namespace "$SOURCE_NAMESPACE" \
 kubectl wait --for=condition=complete job/cutover-account-seed \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
 printf 'source account seeded\n'
+bash deploy/k8s/test-cutover-dump-upload.sh "$SOURCE_NAMESPACE" postgres-0
 
 kubectl label namespace "$SOURCE_NAMESPACE" cutover-test=true --overwrite >/dev/null
 create_target_namespace
