@@ -243,8 +243,9 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff}) {
-  const scenarios = guestSignupOnly ? (guestSignupGateOff ? 'guest-signup-gate-off' : GUEST_SIGNUP_SCENARIOS) : SCENARIOS;
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass}) {
+  const scenarios = guestSignupOnly ? (guestSignupGateOff ?
+    (guestSignupQaBypass ? 'guest-signup-gate-off-qa-bypass' : 'guest-signup-gate-off') : GUEST_SIGNUP_SCENARIOS) : SCENARIOS;
   const result = {
     status,
     runId,
@@ -300,8 +301,16 @@ async function main() {
   }
   const guestSignupOnly = guestSignupOnlyValue === '1';
   const guestSignupGateOff = guestSignupGateOffValue === '1';
+  const guestSignupQaBypassValue = process.env.REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS || '0';
+  if(guestSignupQaBypassValue !== '0' && guestSignupQaBypassValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS must be 0 or 1');
+  }
+  const guestSignupQaBypass = guestSignupQaBypassValue === '1';
   if(guestSignupGateOff && !guestSignupOnly) {
     throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF requires REAL_CLIENT_GUEST_SIGNUP_ONLY=1');
+  }
+  if(guestSignupQaBypass && (!guestSignupOnly || !guestSignupGateOff)) {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS requires gate-off guest signup mode');
   }
   const serverRevision = requiredRevision('REAL_CLIENT_SERVER_REVISION');
   const webRevision = requiredRevision('REAL_CLIENT_WEB_REVISION');
@@ -310,6 +319,7 @@ async function main() {
   const serverRoot = resolve(process.env.REAL_CLIENT_SERVER_ROOT || process.cwd());
   const webRoot = resolve(process.env.REAL_CLIENT_WEB_ROOT || process.cwd());
   const runId = randomBytes(16).toString('hex');
+  const guestSignupQaBypassToken = guestSignupQaBypass ? randomBytes(32).toString('hex') : undefined;
   const runTemp = createDirectory('/dev/shm', 'real-client-run-');
   const artifactParent = createDirectory(process.env.RUNNER_TEMP || tmpdir(), 'real-client-artifact-');
   const traceDirectory = join(process.env.RUNNER_TEMP || tmpdir(), `real-client-traces-${runId}`);
@@ -337,7 +347,9 @@ async function main() {
       '--web-revision', webRevision,
       '--run-id', runId,
       ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : [])
-    ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe']});
+    ], {cwd: serverRoot, env: cleanEnvironment(guestSignupQaBypassToken ? {
+      REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken
+    } : {}), stdio: ['pipe', 'pipe', 'pipe']});
     fixtureStarted = true;
     const output = createInterface({input: fixtureProcess.stdout});
     output.on('line', receiveFixtureEvent);
@@ -401,7 +413,10 @@ async function main() {
     artifactAttached = true;
 
     runStage = 'browser-scenarios';
-    const runnerEnvironment = cleanEnvironment({REAL_CLIENT_TRACE_DIR: traceDirectory});
+    const runnerEnvironment = cleanEnvironment({
+      REAL_CLIENT_TRACE_DIR: traceDirectory,
+      ...(guestSignupQaBypassToken ? {REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken} : {})
+    });
     let runnerError;
     try {
       await runCommand('corepack', ['pnpm', 'run', 'test:real-client', '--',
@@ -455,7 +470,7 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff});
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
       status = 'failed';

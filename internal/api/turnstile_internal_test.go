@@ -374,7 +374,7 @@ func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing
 	}
 }
 
-func TestTurnstileVerifierRefusesQABypassAtSendCode(t *testing.T) {
+func TestTurnstileVerifierAcceptsQABypassAtSendCodeOnlyWhenSignupIsAllowed(t *testing.T) {
 	const bypassToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -385,10 +385,30 @@ func TestTurnstileVerifierRefusesQABypassAtSendCode(t *testing.T) {
 
 	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, bypassToken, nil)
 	verifier.endpoint = server.URL
-	if action, err := verifier.Verify(context.Background(), bypassToken, []string{"signin", "signup"}, ""); !errors.Is(err, errTurnstileRejected) || action != "" {
-		t.Fatalf("Verify sendCode with QA token = (%q, %v), want a refusal", action, err)
+	for _, tc := range []struct {
+		name           string
+		allowedActions []string
+		wantAction     string
+		wantErr        bool
+	}{
+		{name: "sendCode allows sign-in and sign-up", allowedActions: []string{"signin", "signup"}, wantAction: "signup"},
+		{name: "sign-up allows only sign-up", allowedActions: []string{"signup"}, wantAction: "signup"},
+		{name: "sign-in does not allow sign-up", allowedActions: []string{"signin"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, err := verifier.Verify(context.Background(), bypassToken, tc.allowedActions, "")
+			if tc.wantErr {
+				if !errors.Is(err, errTurnstileRejected) || action != "" {
+					t.Fatalf("Verify with QA token = (%q, %v), want a refusal", action, err)
+				}
+				return
+			}
+			if err != nil || action != tc.wantAction {
+				t.Fatalf("Verify with QA token = (%q, %v), want signup", action, err)
+			}
+		})
 	}
 	if got := requests.Load(); got != 0 {
-		t.Fatalf("sendCode made %d Siteverify requests with the reserved QA token, want 0", got)
+		t.Fatalf("QA bypass made %d Siteverify requests, want 0", got)
 	}
 }

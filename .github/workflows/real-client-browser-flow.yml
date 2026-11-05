@@ -65,11 +65,13 @@ jobs:
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
       - name: Test real-client worker source observation
-        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/patch_real_client_guest_signup.test.mjs
 
       # Keep the web app revision fixed; overlay runner-side evidence checks.
       - name: Patch pinned real-client runner evidence
-        run: node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+        run: |
+          node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+          node test/e2e/real_server_fixture/patch_real_client_guest_signup.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
 
       - name: Install pinned web dependencies
         working-directory: web-source
@@ -127,18 +129,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Run fresh-browser guest signup with the sign-in gate disabled
+      - name: Run gate-off fresh-browser guest signup with the QA bypass
         id: guest-signup-gate-off-flow
         env:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
           REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
+          REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS: '1'
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Upload gate-off guest-signup Playwright failure trace
         if: ${{ always() && steps.guest-signup-gate-off-flow.outputs.trace_ready == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: real-client-guest-signup-gate-off-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          name: real-client-guest-signup-gate-off-qa-bypass-trace-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.guest-signup-gate-off-flow.outputs.trace_dir }}
           if-no-files-found: error
           retention-days: 7
@@ -147,7 +150,7 @@ jobs:
         if: ${{ always() && steps.guest-signup-gate-off-flow.outputs.summary_path != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: real-client-guest-signup-gate-off-report-${{ github.run_id }}-${{ github.run_attempt }}
+          name: real-client-guest-signup-gate-off-qa-bypass-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.guest-signup-gate-off-flow.outputs.summary_path }}
           if-no-files-found: error
           retention-days: 7

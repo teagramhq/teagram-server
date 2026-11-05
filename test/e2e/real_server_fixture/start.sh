@@ -47,6 +47,14 @@ if [[ $GUEST_SIGNUP_GATE_OFF != 0 && $GUEST_SIGNUP_GATE_OFF != 1 ||
 	printf 'fixture guest signup gate-off mode is invalid or missing guest signup mode\n' >&2
 	exit 2
 fi
+GUEST_SIGNUP_QA_BYPASS=0
+if [[ -n ${REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN:-} ]]; then
+	if [[ $GUEST_SIGNUP != 1 || $GUEST_SIGNUP_GATE_OFF != 1 || ! $REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN =~ ^[0-9a-f]{64}$ ]]; then
+		printf 'fixture guest signup QA bypass requires gate-off guest signup mode and a 64-character test token\n' >&2
+		exit 2
+	fi
+	GUEST_SIGNUP_QA_BYPASS=1
+fi
 if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
 	printf 'prebaseline auth-progress controls require auth controls\n' >&2
 	exit 2
@@ -573,6 +581,9 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 		--env "TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
 		--env TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 	)
+	if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+		SERVER_AUTH_ENV+=(--env TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass-token)
+	fi
 	SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/)
 fi
 
@@ -603,6 +614,11 @@ if [[ -n $PHOTO_THUMB_BINARY ]]; then
 fi
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/server-key.pem' < "$SECRET_DIR/server-key.pem"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/authkey.hex' < "$SECRET_DIR/authkey.hex"
+if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+	printf '%s' "$REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN" | docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/qa-bypass-token'
+	docker exec "$BACKEND" chown 65532:65532 /run/secrets/qa-bypass-token
+	docker exec "$BACKEND" chmod 0440 /run/secrets/qa-bypass-token
+fi
 docker exec "$BACKEND" chown 65532:65532 /run/app/teagramd /run/secrets/server-key.pem /run/secrets/authkey.hex
 docker exec "$BACKEND" chmod 0755 /run/app/teagramd
 docker exec "$BACKEND" chmod 0440 /run/secrets/server-key.pem /run/secrets/authkey.hex
@@ -774,6 +790,9 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 		TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 		TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 	)
+	if [[ $GUEST_SIGNUP_QA_BYPASS == 1 ]]; then
+		EXPECTED_SERVER_ENV+=(TG_TURNSTILE_QA_BYPASS_TOKEN_FILE=/run/secrets/qa-bypass-token)
+	fi
 fi
 for expected in "${EXPECTED_SERVER_ENV[@]}"; do
 	if ! printf '%s\n' "$SERVER_ENV" | grep -Fxq "$expected"; then

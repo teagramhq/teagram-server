@@ -98,7 +98,7 @@ func (v *turnstileVerifier) Verify(ctx context.Context, token string, allowedAct
 	}
 	if v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
 		subtle.ConstantTimeCompare([]byte(token), []byte(v.qaBypassToken)) == 1 {
-		if len(allowedActions) != 1 || allowedActions[0] != "signup" {
+		if !slices.Contains(allowedActions, "signup") {
 			return "", errTurnstileRejected
 		}
 		v.logger.Info("turnstile QA bypass used", "action", "signup")

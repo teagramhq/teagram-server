@@ -13,7 +13,7 @@ import (
 
 // The isolated real-client guest fixture uses an in-process Siteverify peer.
 // This file is absent from production builds and accepts exactly one synthetic
-// signup token, so browser CI needs no external network access or QA bypass.
+// signup token, so browser CI needs no external network access.
 func init() {
 	if os.Getenv("TG_FIXTURE_TURNSTILE_SITEVERIFY") != "1" {
 		return

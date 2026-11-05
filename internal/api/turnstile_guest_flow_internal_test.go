@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -205,7 +206,7 @@ func TestSignupChallengeAtSendCodePassesWhenSigninGateIsOff(t *testing.T) {
 	}
 }
 
-func TestSignupVerifiedCodeCannotStageExistingAccountLogin(t *testing.T) {
+func TestQASignupBypassCodeCannotStageExistingAccountLogin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
@@ -219,7 +220,7 @@ func TestSignupVerifiedCodeCannotStageExistingAccountLogin(t *testing.T) {
 	})
 
 	const username = "existingguest"
-	const signupToken = "signup-token"
+	signupToken := strings.Repeat("a", 64)
 	authKeyID := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
 	if _, err := s.CreateUsernameAccountWithPassword(ctx, username, []byte{1}, []byte{2}, []byte{3}); err != nil {
 		t.Fatalf("create existing username account: %v", err)
@@ -228,7 +229,7 @@ func TestSignupVerifiedCodeCannotStageExistingAccountLogin(t *testing.T) {
 		t.Fatalf("save auth key: %v", err)
 	}
 
-	verifier := &actionTurnstileVerifier{verified: map[string]string{signupToken: "signup"}}
+	verifier := newTurnstileVerifierWithConfig("private-secret", []string{"web.teagram.io"}, signupToken, nil)
 	h := testHandlers(s)
 	h.turnstileSiteKey = "site-key"
 	h.turnstileVerifier = verifier
