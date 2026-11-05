@@ -13,13 +13,10 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
-	"regexp"
 	"slices"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/clock"
@@ -82,8 +79,6 @@ var (
 	errAuthKeyExchangeFailure    = errors.New("auth key exchange failed")
 	errRequestHandlingFailure    = errors.New("request handling failed")
 	errIdleReadTimeout           = errors.New("connection idle timeout")
-	webSocketSensitiveErrorValue = regexp.MustCompile(`(?i)\b(auth[_ -]?key(?:[_ -]?(?:id|bytes))?|payload|token|password|secret|authorization)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
-	webSocketLongHexValue        = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
 )
 
 type webSocketServeFailureError struct {
@@ -910,8 +905,8 @@ func classifyWebSocketServeCause(stage string, err error) string {
 	}
 }
 
-// safeWebSocketErrorText exposes fixed summaries for arbitrary errors and only
-// selected, redacted database diagnostics.
+// safeWebSocketErrorText maps failures to fixed diagnostics so arbitrary error
+// text cannot leak auth keys, payloads, tokens, or other request data.
 func safeWebSocketErrorText(err error, cause string) string {
 	switch {
 	case errors.Is(err, errIdleReadTimeout):
@@ -941,6 +936,9 @@ func safeWebSocketErrorText(err error, cause string) string {
 	}
 	if invalidLength, ok := errors.AsType[*bin.InvalidLengthError](err); ok && invalidLength != nil {
 		return "invalid protocol length"
+	}
+	if detail := safeTransportErrorText(err); detail != "" {
+		return detail
 	}
 	switch cause {
 	case "timeout":
@@ -981,14 +979,42 @@ func safeAuthKeyLookupErrorText(err error) string {
 			}
 		}
 
-		message := redactWebSocketDiagnosticText(pgErr.Message)
-		if message == "" {
-			return "PostgreSQL SQLSTATE " + code
+		if category := safePostgreSQLStateCategory(code); category != "" {
+			return "PostgreSQL " + category + " (SQLSTATE " + code + ")"
 		}
-		return "PostgreSQL SQLSTATE " + code + ": " + message
+		return "PostgreSQL error (SQLSTATE " + code + ")"
 	}
 
 	return safePostgreSQLConnectErrorText(err)
+}
+
+func safePostgreSQLStateCategory(code string) string {
+	switch code {
+	case "08001", "08006":
+		return "connection failure"
+	case "40001":
+		return "serialization failure"
+	case "40P01":
+		return "deadlock detected"
+	case "57014":
+		return "query canceled"
+	case "22P02":
+		return "invalid text representation"
+	case "23503":
+		return "foreign key violation"
+	case "23505":
+		return "unique constraint violation"
+	case "28P01":
+		return "authentication failure"
+	case "42P01":
+		return "undefined table"
+	case "42703":
+		return "undefined column"
+	case "53300":
+		return "connection limit reached"
+	default:
+		return ""
+	}
 }
 
 func safePostgreSQLConnectErrorText(err error) string {
@@ -1001,34 +1027,35 @@ func safePostgreSQLConnectErrorText(err error) string {
 	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok && dnsErr != nil {
 		return "PostgreSQL DNS lookup failed"
 	}
+	if detail := safeTransportErrorText(err); detail != "" {
+		return "PostgreSQL " + detail
+	}
 	if networkErr, ok := errors.AsType[net.Error](err); ok && networkErr.Timeout() {
 		return "PostgreSQL connection timed out"
-	}
-	if isOpErr && opErr.Err != nil {
-		if syscallErr, ok := errors.AsType[*os.SyscallError](opErr.Err); ok && syscallErr.Err != nil {
-			message := redactWebSocketDiagnosticText(syscallErr.Err.Error())
-			if message != "" {
-				return "PostgreSQL connection failure: " + message
-			}
-		}
 	}
 	return "PostgreSQL connection failure"
 }
 
-func redactWebSocketDiagnosticText(message string) string {
-	message = webSocketSensitiveErrorValue.ReplaceAllString(message, "$1=[redacted]")
-	message = webSocketLongHexValue.ReplaceAllString(message, "[redacted]")
-	message = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, message)
-	message = strings.Join(strings.Fields(message), " ")
-	if runes := []rune(message); len(runes) > 256 {
-		message = string(runes[:256])
+func safeTransportErrorText(err error) string {
+	switch {
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset by peer"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNABORTED):
+		return "connection aborted"
+	case errors.Is(err, syscall.ETIMEDOUT):
+		return "connection timed out"
+	case errors.Is(err, syscall.EPIPE):
+		return "broken pipe"
+	case errors.Is(err, syscall.ENOTCONN):
+		return "not connected"
+	case errors.Is(err, syscall.ENETUNREACH):
+		return "network unreachable"
+	case errors.Is(err, syscall.EHOSTUNREACH):
+		return "host unreachable"
 	}
-	return strings.TrimSpace(message)
+	return ""
 }
 
 func isWebSocketProtocolDecodeError(err error) bool {

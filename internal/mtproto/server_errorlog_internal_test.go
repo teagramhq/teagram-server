@@ -894,7 +894,7 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 	}
 }
 
-func TestWebSocketAuthKeyLookupFailureLogsRedactedDatabaseDetails(t *testing.T) {
+func TestWebSocketAuthKeyLookupFailureLogsAllowlistedDatabaseDetails(t *testing.T) {
 	const (
 		privateKey     = "PRIVATE_AUTH_KEY_BYTES"
 		privatePayload = "PRIVATE_PAYLOAD_BYTES"
@@ -911,21 +911,31 @@ func TestWebSocketAuthKeyLookupFailureLogsRedactedDatabaseDetails(t *testing.T) 
 			name: "database unavailable",
 			err: &pgconn.PgError{
 				Code:    "08006",
-				Message: "connection refused auth_key=" + privateKey + " payload=" + privatePayload + " token=" + privateToken + " raw=" + privateKeyHex,
+				Message: "connection refused " + privateKey + " " + privatePayload + " " + privateToken + " " + privateKeyHex,
 				Detail:  "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken,
 			},
-			want:      "PostgreSQL SQLSTATE 08006: connection refused auth_key=[redacted] payload=[redacted] token=[redacted] raw=[redacted]",
+			want:      "PostgreSQL connection failure (SQLSTATE 08006)",
 			forbidden: []string{privateKey, privateKeyHex, privatePayload, privateToken, "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken},
 		},
 		{
 			name: "serialization conflict",
 			err: &pgconn.PgError{
 				Code:    "40001",
-				Message: "serialization failure",
+				Message: "serialization failure: token " + privateToken,
 				Detail:  "driver detail contains " + privateKey + " " + privatePayload + " " + privateToken,
 			},
-			want:      "PostgreSQL SQLSTATE 40001: serialization failure",
+			want:      "PostgreSQL serialization failure (SQLSTATE 40001)",
 			forbidden: []string{privateKey, privatePayload, privateToken},
+		},
+		{
+			name: "unlabelled token in database message",
+			err: &pgconn.PgError{
+				Code:    "22P02",
+				Message: `invalid input syntax for type text: "` + privateToken + `"`,
+				Detail:  "database detail: " + privatePayload,
+			},
+			want:      "PostgreSQL invalid text representation (SQLSTATE 22P02)",
+			forbidden: []string{privateToken, `invalid input syntax for type text: "` + privateToken + `"`, privatePayload},
 		},
 		{
 			name: "connection refused",
@@ -938,7 +948,7 @@ func TestWebSocketAuthKeyLookupFailureLogsRedactedDatabaseDetails(t *testing.T) 
 				},
 				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
 			},
-			want:      "PostgreSQL connection failure: connection refused",
+			want:      "PostgreSQL connection refused",
 			forbidden: []string{"203.0.113.37:5432"},
 		},
 	}
@@ -964,6 +974,58 @@ func TestWebSocketAuthKeyLookupFailureLogsRedactedDatabaseDetails(t *testing.T) 
 			for _, secret := range tt.forbidden {
 				if strings.Contains(logged, secret) {
 					t.Errorf("failure log exposed secret material %q: %s", secret, logged)
+				}
+			}
+		})
+	}
+}
+
+func TestWebSocketReadFrameFailuresLogAllowlistedCause(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantCause string
+		wantError string
+	}{
+		{
+			name:      "connection reset",
+			err:       syscall.ECONNRESET,
+			wantCause: "transport",
+			wantError: "connection reset by peer",
+		},
+		{
+			name:      "connection aborted",
+			err:       syscall.ECONNABORTED,
+			wantCause: "transport",
+			wantError: "connection aborted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &serverErrorLogSink{}
+			server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+			conn := &serverLoopFailureConn{err: tt.err}
+			diagnostics := newTransportCloseDiagnostics(websocketPath)
+			err := server.serveConnModeWithDiagnostics(
+				context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
+			)
+			if err == nil {
+				t.Fatal("WebSocket serve loop succeeded after forced read failure")
+			}
+			server.logConnectionFailure(err)
+
+			if len(sink.records) != 1 {
+				t.Fatalf("failure records = %d, want 1", len(sink.records))
+			}
+			record := sink.records[0]
+			for key, want := range map[string]any{
+				"stage": "read_frame",
+				"cause": tt.wantCause,
+				"error": tt.wantError,
+			} {
+				if got := record.attrs[key]; got != want {
+					t.Errorf("failure %s = %v, want %v", key, got, want)
 				}
 			}
 		})
