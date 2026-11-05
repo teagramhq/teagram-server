@@ -234,12 +234,9 @@ def rotate_token(
     if snapshot_path is None:
         raise RotationError("snapshot-create-failed")
 
-    try:
-        current_raw, current_metadata = _read_checked_file(
-            token_file, "qa-bypass-token", 0, 65532, 0o440
-        )
-    except RotationError as exc:
-        raise RotationError("qa-bypass-token-changed") from exc
+    current_raw, current_metadata = _read_checked_file(
+        token_file, "qa-bypass-token", 0, 65532, 0o440
+    )
     if (
         current_metadata.st_dev != original_metadata.st_dev
         or current_metadata.st_ino != original_metadata.st_ino

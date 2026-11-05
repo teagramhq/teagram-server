@@ -144,6 +144,23 @@ class RotateQABypassTokenTests(unittest.TestCase):
         self.assertEqual(self.token_file.read_text(encoding="ascii"), f"{self.old_token}\n")
         self.assertFalse(self.backup_dir.exists())
 
+    def test_second_token_read_reports_symlink_error_without_secret(self) -> None:
+        original_snapshot = ROTATION._snapshot
+
+        def swap_after_snapshot(path: pathlib.Path, content: bytes) -> None:
+            original_snapshot(path, content)
+            self.token_file.unlink()
+            self.token_file.symlink_to(self.siteverify_file)
+
+        with mock.patch.object(ROTATION, "_snapshot", side_effect=swap_after_snapshot):
+            with self.assertRaises(ROTATION.RotationError) as caught:
+                self._rotate()
+
+        self.assertIn(os.strerror(errno.ELOOP), str(caught.exception))
+        self.assertNotIn(self.old_token, str(caught.exception))
+        self.assertNotIn(self.siteverify_secret, str(caught.exception))
+        self.assertTrue(self.token_file.is_symlink())
+
     def test_command_output_contains_only_snapshot_path_and_length(self) -> None:
         names = ("SECRET_DIR", "TOKEN_FILE", "SITEVERIFY_FILE", "ENV_FILE", "BACKUP_DIR")
         original_paths = {name: getattr(ROTATION, name) for name in names}
