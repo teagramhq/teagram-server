@@ -162,8 +162,9 @@ expected_server_revision=abcdef0123456789abcdef0123456789abcdef02
 export EXPECTED_MIGRATION_REVISION="$expected_migration_revision"
 export EXPECTED_SERVER_REVISION="$expected_server_revision"
 fixture_migration_path="migrations/${production_migration_version}_existing.sql"
-export EXPECTED_SERVER_TREE="$(printf '100644 blob %s\t%s' \
+EXPECTED_SERVER_TREE="$(printf '100644 blob %s\t%s' \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path")"
+export EXPECTED_SERVER_TREE
 export EXPECTED_MIGRATION_TREE="$EXPECTED_SERVER_TREE"
 printf '%s\n' \
   'apiVersion: v1' \
