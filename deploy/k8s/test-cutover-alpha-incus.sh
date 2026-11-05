@@ -42,6 +42,7 @@ docker_command() {
         *'.State.Status'*)
           if [[ $container == teagram-web-cloudflared &&
             ${CUTOVER_FAIL_OLD_CONNECTOR_CHECK:-} == true &&
+            -f $RUNNER_TEMP/teagram-cutover-runner/phase &&
             $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == route-switched &&
             ! -e $STATE_DIR/old-connector-check-failure-injected ]]; then
             : > "$STATE_DIR/old-connector-check-failure-injected"

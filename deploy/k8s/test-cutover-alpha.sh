@@ -83,4 +83,42 @@ if [[ $plan == *'TUNNEL_TOKEN'* || $plan == *'POSTGRES_PASSWORD'* || $plan == *'
   exit 1
 fi
 
+fixture_dir=$(mktemp -d)
+trap 'rm -rf -- "$fixture_dir"' EXIT
+mkdir -p "$fixture_dir/bin" "$fixture_dir/state" "$fixture_dir/teagram-cutover-runner"
+cat > "$fixture_dir/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $* == 'get deployment/cloudflared --namespace teagram -o jsonpath={.spec.replicas}' ]]
+printf '1\n'
+SH
+chmod 0700 "$fixture_dir/bin/kubectl"
+fixture=(env "PATH=$fixture_dir/bin:$PATH" "RUNNER_TEMP=$fixture_dir" \
+  "INCUS_STATE_DIR=$fixture_dir/state" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
+  bash deploy/k8s/test-cutover-alpha-incus.sh exec teagram -- \
+  docker inspect --format '{{.State.Status}}' teagram-web-cloudflared)
+
+assert_connector_running() {
+  local output
+  if ! output=$("${fixture[@]}" 2>"$fixture_dir/error") ||
+    [[ $output != running || -s $fixture_dir/error ]]; then
+    cat "$fixture_dir/error" >&2
+    printf 'cutover fixture did not report the running source connector\n' >&2
+    exit 1
+  fi
+}
+
+assert_connector_running
+printf 'fenced\n' > "$fixture_dir/teagram-cutover-runner/phase"
+assert_connector_running
+printf 'route-switched\n' > "$fixture_dir/teagram-cutover-runner/phase"
+status=0
+"${fixture[@]}" > "$fixture_dir/output" 2> "$fixture_dir/error" || status=$?
+if [[ $status -ne 42 ]] || ! grep --fixed-strings --quiet \
+  'injected disposable-cluster failure after the Cloudflare connector started' "$fixture_dir/error"; then
+  printf 'cutover fixture did not inject the post-switch connector failure\n' >&2
+  exit 1
+fi
+assert_connector_running
+
 printf 'alpha cutover dry-run contract passed\n'
