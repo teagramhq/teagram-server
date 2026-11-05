@@ -224,6 +224,11 @@ func TestBasicChatCustomEmojiReactionRequiresAllowedCustomReactions(t *testing.T
 	if _, rpc := setChatReactions(t, fixture.s, pair.a.ID, chatID, &tg.ChatReactionsAll{AllowCustom: true}); rpc != nil {
 		t.Fatalf("allow custom chat reactions: %s", rpc.ErrorMessage)
 	}
+	full := getFullChat(t, fullChannelDispatcher(fixture.s), pair.b.ID, chatID)
+	all, ok := chatReactionsFromFull(t, full).(*tg.ChatReactionsAll)
+	if !ok || !all.GetAllowCustom() {
+		t.Fatalf("getFullChat all reactions = %#v, want allow_custom=true", chatReactionsFromFull(t, full))
+	}
 	if _, rpc := sendReaction(t, fixture.s, pair.a.ID, peer, messageID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc != nil {
 		t.Fatalf("send custom emoji after allowing it: %s", rpc.ErrorMessage)
 	}
@@ -235,6 +240,15 @@ func TestBasicChatCustomEmojiReactionRequiresAllowedCustomReactions(t *testing.T
 	}
 	if _, rpc := setChatReactions(t, fixture.s, pair.a.ID, chatID, &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{&tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}}}); rpc != nil {
 		t.Fatalf("allow one custom chat reaction: %s", rpc.ErrorMessage)
+	}
+	full = getFullChat(t, fullChannelDispatcher(fixture.s), pair.b.ID, chatID)
+	some, ok := chatReactionsFromFull(t, full).(*tg.ChatReactionsSome)
+	if !ok || len(some.Reactions) != 1 {
+		t.Fatalf("getFullChat custom subset = %#v, want one custom reaction", chatReactionsFromFull(t, full))
+	}
+	allowed, ok := some.Reactions[0].(*tg.ReactionCustomEmoji)
+	if !ok || allowed.DocumentID != fixture.doc.ID {
+		t.Fatalf("getFullChat custom reaction = %#v, want document %d", some.Reactions[0], fixture.doc.ID)
 	}
 	if _, rpc := sendReaction(t, fixture.s, pair.a.ID, peer, messageID, &tg.ReactionCustomEmoji{DocumentID: fixture.doc.ID}); rpc != nil {
 		t.Fatalf("send custom emoji allowed by explicit chat setting: %s", rpc.ErrorMessage)
