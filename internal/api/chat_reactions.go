@@ -115,14 +115,12 @@ func (h *handlers) handleSetChatAvailableReactions(r *mtproto.Request) (bin.Enco
 	if err != nil {
 		return nil, err
 	}
-	for _, documentID := range available.CustomEmojiIDs {
-		live, liveErr := h.liveCustomEmojiDocument(r.Ctx, r.UserID, documentID)
-		if liveErr != nil {
-			return nil, liveErr
-		}
-		if !live {
-			return nil, errReactionInvalid
-		}
+	live, err := h.liveCustomEmojiDocuments(r.Ctx, r.UserID, available.CustomEmojiIDs)
+	if err != nil {
+		return nil, err
+	}
+	if !live {
+		return nil, errReactionInvalid
 	}
 	if peerType == store.PeerTypeChat {
 		err = h.store.SetChatAvailableReactions(r.Ctx, peerID, r.UserID, available)

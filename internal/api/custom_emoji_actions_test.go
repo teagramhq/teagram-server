@@ -373,3 +373,49 @@ func TestChannelCustomEmojiReactionRespectsAllowedReactions(t *testing.T) {
 		t.Fatalf("custom channel reaction from a taken-down set = %v, want REACTION_INVALID", rpc)
 	}
 }
+
+func TestSetChatAvailableReactionsStatementCountDoesNotDependOnAllowlistSize(t *testing.T) {
+	t.Parallel()
+	const allowlistSize = 100
+	blobs := testBlobs(t)
+	tracer := &historyQueryCounter{}
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(blobs), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	pair := seedReactionPair(t, s, "+15551348111", "+15551348112", "")
+	request := createStickerRequest("allowlist_cost", storedStickerDocument(t, s, blobs, pair.a.ID, validStickerTGSSize(t, 100, 100)), false, true)
+	for i := 1; i < allowlistSize; i++ {
+		file := storedStickerDocument(t, s, blobs, pair.a.ID, validStickerTGSSize(t, 100, 100))
+		request.Stickers = append(request.Stickers, tg.InputStickerSetItem{Document: &tg.InputDocument{ID: file.ID, AccessHash: file.AccessHash}, Emoji: "⭐"})
+	}
+	set := createStickerSet(t, fullChannelDispatcher(s), pair.a.ID, request)
+	if len(set.Documents) != allowlistSize {
+		t.Fatalf("created %d custom emoji, want %d", len(set.Documents), allowlistSize)
+	}
+	reactions := make([]tg.ReactionClass, 0, allowlistSize)
+	for _, document := range set.Documents {
+		reactions = append(reactions, &tg.ReactionCustomEmoji{DocumentID: document.GetID()})
+	}
+	chatID := createChatForTest(t, s, pair.a.ID, "Allowlist cost", pair.b.ID)
+
+	tracer.reset()
+	if _, rpc := setChatReactions(t, s, pair.a.ID, chatID, &tg.ChatReactionsSome{Reactions: reactions[:1]}); rpc != nil {
+		t.Fatalf("set one custom reaction: %s", rpc.ErrorMessage)
+	}
+	one := tracer.total()
+	tracer.reset()
+	if _, rpc := setChatReactions(t, s, pair.a.ID, chatID, &tg.ChatReactionsSome{Reactions: reactions}); rpc != nil {
+		t.Fatalf("set %d custom reactions: %s", allowlistSize, rpc.ErrorMessage)
+	}
+	many := tracer.total()
+	if many != one {
+		t.Fatalf("statements for %d allowlisted custom emoji = %d, want %d (same as one)", allowlistSize, many, one)
+	}
+}
