@@ -296,6 +296,10 @@ func TestListenerLogsPendingPrefaceCapacity(t *testing.T) {
 }
 
 func TestListenerClosesStalledPreface(t *testing.T) {
+	var logs lockedLog
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
 	addr := proxyServer(t, 10, "")
 	conn, reader := proxyDial(t, addr, "PROXY TCP4 100.64.")
 	if err := conn.SetReadDeadline(time.Now().Add(6 * time.Second)); err != nil {
@@ -305,5 +309,48 @@ func TestListenerClosesStalledPreface(t *testing.T) {
 		t.Fatal("stalled preface remained open")
 	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		t.Fatalf("stalled preface was not closed: %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remote_ip=127.0.0.1") {
+		t.Fatalf("stalled preface log = %q", got)
+	}
+}
+
+func TestListenerLogsEmptyProbeAtDebugAndPartialPrefacesAtWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preface string
+		level   string
+	}{
+		{"empty probe", "", "DEBUG"},
+		{"short partial preface", "PRO", "WARN"},
+		{"partial proxy header", "PROXY TCP4 100.64.", "WARN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs lockedLog
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(previous)
+			addr := proxyServer(t, 10, "")
+			conn, reader := proxyDial(t, addr, tc.preface)
+			tcp, ok := conn.(*net.TCPConn)
+			if !ok {
+				t.Fatal("connection is not TCP")
+			}
+			if err := tcp.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reader.ReadByte(); err == nil {
+				t.Fatal("connection remained open")
+			} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+				t.Fatal(err)
+			}
+			got := logs.String()
+			if !strings.Contains(got, "level="+tc.level) || !strings.Contains(got, "remote_ip=127.0.0.1") {
+				t.Fatalf("preface log = %q, want %s with remote IP", got, tc.level)
+			}
+			if tc.level == "DEBUG" && strings.Contains(got, "level=WARN") {
+				t.Fatalf("empty probe logged warning: %q", got)
+			}
+		})
 	}
 }

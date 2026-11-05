@@ -743,7 +743,11 @@ func (l *connectionLimitListener) acceptConnections() {
 				ip := remoteIP(conn.RemoteAddr().String())
 				parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
 				if err != nil {
-					slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
+					if errors.Is(err, io.EOF) {
+						slog.Debug("empty Bot API connection", "remote_ip", ip.String(), "err", err)
+					} else {
+						slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
+					}
 					closeBotConn(conn)
 					return
 				}

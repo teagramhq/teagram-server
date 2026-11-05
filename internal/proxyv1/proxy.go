@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -28,6 +29,9 @@ func Read(conn net.Conn, required, trusted bool) (net.Conn, []byte, error) {
 	reader := bufio.NewReaderSize(conn, maxHeader+1)
 	prefix, err := reader.Peek(6)
 	if err != nil {
+		if errors.Is(err, io.EOF) && len(prefix) > 0 {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, nil, fmt.Errorf("read preface: %w", err)
 	}
 	var header []byte
@@ -38,6 +42,9 @@ func Read(conn net.Conn, required, trusted bool) (net.Conn, []byte, error) {
 		}
 		header, err = reader.ReadSlice('\n')
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
 			return nil, nil, fmt.Errorf("read PROXY preface: %w", err)
 		}
 		if len(header) > maxHeader || !bytes.HasSuffix(header, []byte("\r\n")) {
