@@ -530,6 +530,211 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 	}
 }
 
+func TestConcurrentDisjointChatFanoutsWithReversedPostingBucketCollisions(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	pool := store.StorePool(s)
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE server_administration SET election_closed = true WHERE singleton_id = 1;
+		INSERT INTO users (id, phone, first_name)
+		SELECT n, '+group-posting-' || n, 'Group Posting'
+		FROM generate_series(1, 2002) AS n;
+	`); err != nil {
+		t.Fatalf("seed group posting fixture: %v", err)
+	}
+	chatA, err := s.CreateChat(ctx, 2001, "posting buckets A", nil)
+	if err != nil {
+		t.Fatalf("create first posting chat: %v", err)
+	}
+	chatB, err := s.CreateChat(ctx, 2002, "posting buckets B", nil)
+	if err != nil {
+		t.Fatalf("create second posting chat: %v", err)
+	}
+
+	// Find two disjoint two-member prefixes whose message-copy bucket order is
+	// reversed. Each chat creator has a larger id and is inserted after these
+	// copies, so both chat sends and forwards exercise the same collision.
+	var ownerAFirst, ownerALater, ownerBFirst, ownerBLater int64
+	if err := pool.QueryRow(ctx, `
+		WITH a_first AS (
+			SELECT n AS owner_id,
+			       ((hashtextextended('message-search-posting-dialog/v1:' || n::text || ':2:' || $1::bigint::text, 73194627) % 1024 + 1024) % 1024)::int AS bucket
+			FROM generate_series(1, 500) AS n
+		), a_later AS (
+			SELECT n AS owner_id,
+			       ((hashtextextended('message-search-posting-dialog/v1:' || n::text || ':2:' || $1::bigint::text, 73194627) % 1024 + 1024) % 1024)::int AS bucket
+			FROM generate_series(501, 1000) AS n
+		), b_first AS (
+			SELECT n AS owner_id,
+			       ((hashtextextended('message-search-posting-dialog/v1:' || n::text || ':2:' || $2::bigint::text, 73194627) % 1024 + 1024) % 1024)::int AS bucket
+			FROM generate_series(1001, 1500) AS n
+		), b_later AS (
+			SELECT n AS owner_id,
+			       ((hashtextextended('message-search-posting-dialog/v1:' || n::text || ':2:' || $2::bigint::text, 73194627) % 1024 + 1024) % 1024)::int AS bucket
+			FROM generate_series(1501, 2000) AS n
+		)
+		SELECT a_first.owner_id, a_later.owner_id, b_first.owner_id, b_later.owner_id
+		FROM a_first
+		JOIN b_later ON b_later.bucket = a_first.bucket
+		JOIN a_later ON a_later.bucket <> a_first.bucket
+		JOIN b_first ON b_first.bucket = a_later.bucket
+		LIMIT 1
+	`, chatA.ID, chatB.ID).Scan(&ownerAFirst, &ownerALater, &ownerBFirst, &ownerBLater); err != nil {
+		t.Fatalf("find reversed group posting buckets: %v", err)
+	}
+	for _, participant := range []struct {
+		chatID, ownerID, inviterID int64
+	}{
+		{chatA.ID, ownerAFirst, 2001},
+		{chatA.ID, ownerALater, 2001},
+		{chatB.ID, ownerBFirst, 2002},
+		{chatB.ID, ownerBLater, 2002},
+	} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO chat_participants (chat_id, user_id, inviter_id)
+			VALUES ($1, $2, $3)
+		`, participant.chatID, participant.ownerID, participant.inviterID); err != nil {
+			t.Fatalf("add group posting participant %d: %v", participant.ownerID, err)
+		}
+	}
+
+	sourceA, _, _, _, err := s.SendMessage(ctx, ownerAFirst, ownerALater, "groupforwardalpha", 720001, 0, 0) //nolint:dogsled // only the stored source is needed for forwarding.
+	if err != nil {
+		t.Fatalf("send first forward source: %v", err)
+	}
+	sourceB, _, _, _, err := s.SendMessage(ctx, ownerBFirst, ownerBLater, "groupforwardbravo", 720002, 0, 0) //nolint:dogsled // only the stored source is needed for forwarding.
+	if err != nil {
+		t.Fatalf("send second forward source: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION public.test_pause_group_search_posting_sender_copy() RETURNS trigger
+		LANGUAGE plpgsql AS $function$
+		BEGIN
+			IF NEW.lexeme IN ('groupfanoutalpha', 'groupfanoutbravo', 'groupforwardalpha', 'groupforwardbravo') AND EXISTS (
+				SELECT 1 FROM public.messages
+				WHERE owner_id = NEW.owner_id AND local_id = NEW.local_id AND out
+			) THEN
+				PERFORM pg_sleep(2);
+			END IF;
+			RETURN NEW;
+		END;
+		$function$;
+		CREATE TRIGGER zzz_test_pause_group_search_posting_sender_copy
+		AFTER INSERT ON public.message_search_postings
+		FOR EACH ROW EXECUTE FUNCTION public.test_pause_group_search_posting_sender_copy();
+	`); err != nil {
+		t.Fatalf("install group sender-copy pause fixture: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS zzz_test_pause_group_search_posting_sender_copy ON public.message_search_postings;
+			DROP FUNCTION IF EXISTS public.test_pause_group_search_posting_sender_copy();
+		`); err != nil {
+			t.Errorf("remove group sender-copy pause fixture: %v", err)
+		}
+	}()
+
+	type fanoutResult struct {
+		name string
+		err  error
+	}
+	runConcurrentFanouts := func(name string, first, second func(context.Context) error) {
+		t.Helper()
+		results := make(chan fanoutResult, 2)
+		fanoutCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		defer cancel()
+		go func() { results <- fanoutResult{name: "first", err: first(fanoutCtx)} }()
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var paused bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity
+					WHERE pid <> pg_backend_pid()
+					  AND state = 'active'
+					  AND wait_event = 'PgSleep'
+					  AND query ILIKE '%INSERT INTO messages%'
+				)
+			`).Scan(&paused); err != nil {
+				t.Fatalf("check %s first fanout pause: %v", name, err)
+			}
+			if paused {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s first fanout did not pause after taking its posting bucket", name)
+			}
+			select {
+			case result := <-results:
+				t.Fatalf("%s first fanout returned before its posting pause: %v", name, result.err)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		go func() { results <- fanoutResult{name: "second", err: second(fanoutCtx)} }()
+
+		deadline = time.Now().Add(5 * time.Second)
+		for {
+			var activeFanouts int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*)
+				FROM pg_stat_activity
+				WHERE pid <> pg_backend_pid()
+				  AND state = 'active'
+				  AND (wait_event = 'PgSleep' OR wait_event_type = 'Lock')
+				  AND (query ILIKE '%INSERT INTO messages%' OR query ILIKE '%lock_message_search_posting_dialogs%')
+			`).Scan(&activeFanouts); err != nil {
+				t.Fatalf("check %s overlapping fanouts: %v", name, err)
+			}
+			if activeFanouts >= 2 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s second fanout did not overlap the first fanout's posting lock", name)
+			}
+			select {
+			case result := <-results:
+				t.Fatalf("%s fanout %s returned before both fanouts overlapped: %v", name, result.name, result.err)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+
+		var failures []error
+		for range 2 {
+			select {
+			case result := <-results:
+				if result.err != nil {
+					failures = append(failures, fmt.Errorf("%s: %w", result.name, result.err))
+				}
+			case <-time.After(12 * time.Second):
+				t.Fatalf("%s disjoint fanouts did not complete", name)
+			}
+		}
+		if len(failures) != 0 {
+			t.Fatalf("%s disjoint fanouts with reversed posting bucket collisions failed: %v", name, failures)
+		}
+	}
+
+	runConcurrentFanouts("chat sends", func(ctx context.Context) error {
+		_, _, _, err := s.SendChatMessage(ctx, store.FanOut{ChatID: chatA.ID, FromID: ownerAFirst, Text: "groupfanoutalpha", RandomID: 720011})
+		return err
+	}, func(ctx context.Context) error {
+		_, _, _, err := s.SendChatMessage(ctx, store.FanOut{ChatID: chatB.ID, FromID: ownerBFirst, Text: "groupfanoutbravo", RandomID: 720012})
+		return err
+	})
+
+	runConcurrentFanouts("chat forwards", func(ctx context.Context) error {
+		_, _, err := s.ForwardMessages(ctx, ownerAFirst, store.PeerTypeChat, chatA.ID, []store.ForwardSource{{FromID: sourceA.FromID, Date: sourceA.Date, Text: sourceA.Text}}, []int64{720013})
+		return err
+	}, func(ctx context.Context) error {
+		_, _, err := s.ForwardMessages(ctx, ownerBFirst, store.PeerTypeChat, chatB.ID, []store.ForwardSource{{FromID: sourceB.FromID, Date: sourceB.Date, Text: sourceB.Text}}, []int64{720014})
+		return err
+	})
+}
+
 func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -126,6 +126,11 @@ several dialogs; their triggers reuse the already-held bucket set. The
 initializer does not take owner or chat locks, and each chunk holds message
 rows for only one dialog.
 
+Before a basic-group send, chat forward, or album writes its first message
+copy, it locks every recipient's dialog bucket as one set in ascending bucket
+order. Its insert triggers reuse that set, so disjoint group fan-outs with
+colliding buckets cannot acquire them in opposite per-copy orders.
+
 Sends, edits, and deletes in the dialog can wait for the active chunk to commit.
 A send into that dialog can wait on its advisory bucket while holding its owner
 locks, which queues other sends from that owner until the chunk commits. An

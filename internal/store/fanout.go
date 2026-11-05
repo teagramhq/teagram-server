@@ -347,6 +347,9 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			return Message{}, nil, false, err
 		}
 	}
+	if err = lockMessageSearchPostingBucketsForOwners(ctx, qtx, owners, PeerTypeChat, f.ChatID); err != nil {
+		return Message{}, nil, false, err
+	}
 
 	fanoutID, err := qtx.NextFanoutID(ctx)
 	if err != nil {

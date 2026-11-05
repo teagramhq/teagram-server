@@ -1161,6 +1161,29 @@ func lockMessageCopiesForSearchPostings(ctx context.Context, qtx *db.Queries, re
 	return nil
 }
 
+// lockMessageSearchPostingBucketsForOwners takes the whole fan-out's buckets
+// before its first insert so per-row triggers cannot form opposing lock orders.
+func lockMessageSearchPostingBucketsForOwners(ctx context.Context, qtx *db.Queries, owners []int64, peerType PeerType, peerID int64) error {
+	owners = ascendingUnique(owners)
+	if len(owners) == 0 {
+		return nil
+	}
+	peerTypes := make([]int16, len(owners))
+	peerIDs := make([]int64, len(owners))
+	for i := range owners {
+		peerTypes[i] = int16(peerType)
+		peerIDs[i] = peerID
+	}
+	if _, err := qtx.LockMessageSearchPostingDialogBuckets(ctx, db.LockMessageSearchPostingDialogBucketsParams{
+		OwnerIds:  owners,
+		PeerTypes: peerTypes,
+		PeerIds:   peerIDs,
+	}); err != nil {
+		return fmt.Errorf("lock message search posting buckets: %w", err)
+	}
+	return nil
+}
+
 // lockPollsForDeletedMessageCopies locks every canonical poll referenced by
 // the message rows a delete batch will update. The IDs are sorted before taking
 // row locks so concurrent batches with different message orders share one lock
@@ -2002,7 +2025,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 	}
 
 	// For chat destinations, we need the member set.
-	var chatMembers map[int64]bool
+	var chatOwnerIDs []int64
 	var chatDefaultBannedRights []string
 	var chatCreatorID int64
 	if destPeerType == PeerTypeChat {
@@ -2027,9 +2050,9 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		if e != nil {
 			return nil, nil, fmt.Errorf("chat participants: %w", e)
 		}
-		chatMembers = make(map[int64]bool, len(parts))
+		chatOwnerIDs = make([]int64, 0, len(parts))
 		for _, p := range parts {
-			chatMembers[p.UserID] = true
+			chatOwnerIDs = append(chatOwnerIDs, p.UserID)
 			lockIDs = append(lockIDs, p.UserID)
 		}
 	}
@@ -2085,7 +2108,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			return nil, nil, fmt.Errorf("ensure dest state: %w", err)
 		}
 	} else {
-		for uid := range chatMembers {
+		for _, uid := range chatOwnerIDs {
 			if err = qtx.EnsureUpdateState(ctx, uid); err != nil {
 				return nil, nil, fmt.Errorf("ensure state %d: %w", uid, err)
 			}
@@ -2095,6 +2118,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 	perOwner := make(map[int64]int)
 	var sentMsgs []ForwardedMessage
 	blockChecked, withhold := false, false
+	postingBucketsLocked := false
 
 	for i, src := range sources {
 		randomID := randomIDs[i]
@@ -2138,6 +2162,12 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			}
 			if err = checkDefaultMessageRestriction(chatDefaultBannedRights, fromID == chatCreatorID, src.FileID != 0 || stickerDocumentID != nil, mediaRights); err != nil {
 				return nil, nil, err
+			}
+			if !postingBucketsLocked {
+				if err = lockMessageSearchPostingBucketsForOwners(ctx, qtx, chatOwnerIDs, PeerTypeChat, destPeerID); err != nil {
+					return nil, nil, err
+				}
+				postingBucketsLocked = true
 			}
 		}
 
@@ -2223,7 +2253,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			}
 			var senderLocalID int64
 			var senderPts int64
-			for uid := range chatMembers {
+			for _, uid := range chatOwnerIDs {
 				b, err := bumpState(ctx, qtx, uid)
 				if err != nil {
 					return nil, nil, fmt.Errorf("bump %d: %w", uid, err)
