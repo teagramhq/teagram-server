@@ -343,7 +343,7 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 	}
 }
 
-func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T) {
+func TestUnreadyDisjointSendsWithReversedPostingBucketCollisions(t *testing.T) {
 	t.Parallel()
 	s := open(t)
 	ctx := context.Background()
@@ -418,6 +418,12 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 	if !found {
 		t.Fatalf("no disjoint send pairs with reversed bucket collisions among %d users", len(users))
 	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $5, $2), ($2, $5, $1), ($3, $5, $4), ($4, $5, $3)
+	`, first.fromID, first.toID, second.fromID, second.toID, int16(store.PeerTypeUser)); err != nil {
+		t.Fatalf("mark direct-send dialogs unready: %v", err)
+	}
 
 	if _, err := store.StorePool(s).Exec(ctx, `
 		CREATE FUNCTION public.test_pause_search_posting_sender_copy() RETURNS trigger
@@ -467,6 +473,7 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
+				  AND datname = current_database()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
 				  AND query ILIKE '%INSERT INTO messages%'
@@ -495,6 +502,7 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 			SELECT count(*)
 			FROM pg_stat_activity
 			WHERE pid <> pg_backend_pid()
+			  AND datname = current_database()
 			  AND state = 'active'
 			  AND query ILIKE '%INSERT INTO messages%'
 			  AND (wait_event = 'PgSleep' OR wait_event_type = 'Lock')
@@ -531,6 +539,15 @@ func TestConcurrentDisjointSendsWithReversedPostingBucketCollisions(t *testing.T
 }
 
 func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *testing.T) {
+	testDisjointChatFanoutsWithReversedPostingBucketCollisions(t, false)
+}
+
+func TestUnreadyDisjointChatFanoutsWithReversedPostingBucketCollisions(t *testing.T) {
+	testDisjointChatFanoutsWithReversedPostingBucketCollisions(t, true)
+}
+
+func testDisjointChatFanoutsWithReversedPostingBucketCollisions(t *testing.T, unready bool) {
+	t.Helper()
 	t.Parallel()
 	s := open(t)
 	ctx := context.Background()
@@ -599,6 +616,14 @@ func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *t
 			t.Fatalf("add group posting participant %d: %v", participant.ownerID, err)
 		}
 	}
+	if unready {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+			VALUES ($1, $5, $3), ($2, $5, $3), ($4, $5, $6), ($7, $5, $6)
+		`, ownerAFirst, ownerALater, chatA.ID, ownerBFirst, int16(store.PeerTypeChat), chatB.ID, ownerBLater); err != nil {
+			t.Fatalf("mark chat dialogs unready: %v", err)
+		}
+	}
 	var unreadyDialogs int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*)
@@ -607,8 +632,12 @@ func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *t
 	`, int16(store.PeerTypeChat), []int64{chatA.ID, chatB.ID}).Scan(&unreadyDialogs); err != nil {
 		t.Fatalf("check chat search readiness: %v", err)
 	}
-	if unreadyDialogs != 0 {
-		t.Fatalf("test chats have %d unready dialogs, want both chats ready", unreadyDialogs)
+	wantUnready := 0
+	if unready {
+		wantUnready = 4
+	}
+	if unreadyDialogs != wantUnready {
+		t.Fatalf("test chats have %d unready dialogs, want %d", unreadyDialogs, wantUnready)
 	}
 
 	sourceA, _, _, _, err := s.SendMessage(ctx, ownerAFirst, ownerALater, "groupforwardalpha", 720001, 0, 0) //nolint:dogsled // only the stored source is needed for forwarding.
@@ -666,6 +695,7 @@ func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *t
 				SELECT EXISTS (
 					SELECT 1 FROM pg_stat_activity
 					WHERE pid <> pg_backend_pid()
+					  AND datname = current_database()
 					  AND state = 'active'
 					  AND wait_event = 'PgSleep'
 					  AND query ILIKE '%INSERT INTO messages%'
@@ -689,22 +719,23 @@ func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *t
 
 		deadline = time.Now().Add(5 * time.Second)
 		for {
-			var sleepingFanouts int
+			var sleepingFanouts, waitingFanouts int
 			if err := pool.QueryRow(ctx, `
-				SELECT count(*)
+				SELECT count(*) FILTER (WHERE wait_event = 'PgSleep'),
+				       count(*) FILTER (WHERE wait_event_type = 'Lock')
 				FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
+				  AND datname = current_database()
 				  AND state = 'active'
-				  AND wait_event = 'PgSleep'
-				  AND query ILIKE '%INSERT INTO messages%'
-			`).Scan(&sleepingFanouts); err != nil {
+				  AND (query ILIKE '%INSERT INTO messages%' OR query ILIKE '%lock_message_search_posting_dialogs%')
+			`).Scan(&sleepingFanouts, &waitingFanouts); err != nil {
 				t.Fatalf("check %s overlapping fanouts: %v", name, err)
 			}
-			if sleepingFanouts >= 2 {
+			if (!unready && sleepingFanouts >= 2) || (unready && sleepingFanouts >= 1 && waitingFanouts >= 1) {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("%s second fanout waited instead of reaching its message insert alongside the first", name)
+				t.Fatalf("%s fanouts did not overlap as expected: unready=%t sleeping=%d waiting=%d", name, unready, sleepingFanouts, waitingFanouts)
 			}
 			select {
 			case result := <-results:
@@ -746,7 +777,7 @@ func TestReadyDisjointChatFanoutsOverlapWithReversedPostingBucketCollisions(t *t
 	})
 }
 
-func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing.T) {
+func TestUnreadyDisjointRevokesWithReversedPostingBucketCollisions(t *testing.T) {
 	t.Parallel()
 	s := open(t)
 	ctx := context.Background()
@@ -830,6 +861,12 @@ func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing
 		t.Fatalf("send second revoke fixture: %v", err)
 	}
 	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id)
+		VALUES ($1, $5, $2), ($2, $5, $1), ($3, $5, $4), ($4, $5, $3)
+	`, first.fromID, first.toID, second.fromID, second.toID, int16(store.PeerTypeUser)); err != nil {
+		t.Fatalf("mark revoke dialogs unready: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
 		CREATE FUNCTION public.test_pause_revoke_search_posting_delete() RETURNS trigger
 		LANGUAGE plpgsql AS $function$
 		BEGIN
@@ -877,6 +914,7 @@ func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
+				  AND datname = current_database()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
 				  AND query ILIKE '%UPDATE messages SET deleted%'
@@ -910,6 +948,7 @@ func TestConcurrentDisjointRevokesWithReversedPostingBucketCollisions(t *testing
 			SELECT count(*)
 			FROM pg_stat_activity
 			WHERE pid <> pg_backend_pid()
+			  AND datname = current_database()
 			  AND state = 'active'
 			  AND (query ILIKE '%UPDATE messages SET deleted%'
 			       OR query ILIKE '%lock_message_search_posting_dialogs%')
