@@ -1,0 +1,18 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_deleteStickerSet.1.txt",
+  "method": "stickers.deleteStickerSet",
+  "request": {
+    "type": "stickers.deleteStickerSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetID",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>"
+        }
+      }
+    }
+  }
+}

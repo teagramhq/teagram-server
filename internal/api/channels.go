@@ -950,6 +950,9 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 			}, nil
 		}
 	}
+	if err := h.validateCustomEmojiDocumentReferences(r.UserID, entities); err != nil {
+		return nil, err
+	}
 
 	// Rate limit: new message, consume a token.
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
@@ -967,6 +970,9 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	}
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrMediaInvalid) {
+		return nil, errInputRequestInvalid
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, errMessageIDInvalid

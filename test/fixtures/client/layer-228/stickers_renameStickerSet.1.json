@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/stickers_renameStickerSet.1.txt",
+  "method": "stickers.renameStickerSet",
+  "request": {
+    "type": "stickers.renameStickerSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetID",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "title": "Edited smoke set"
+    }
+  }
+}

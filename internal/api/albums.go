@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -56,7 +57,7 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	items, err := albumItems(h, r.UserID, req.MultiMedia)
+	items, err := albumItems(r.Ctx, h, r.UserID, req.MultiMedia)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -114,6 +115,11 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 				h.logDirectAlbumReplay(r, toID, replay)
 			}
 			return h.userAlbumReplay(c, r, peerType, toID, replay)
+		}
+	}
+	for _, item := range items {
+		if err = h.validateCustomEmojiDocumentReferences(r.UserID, item.Entities); err != nil {
+			return nil, nil, nil, err
 		}
 	}
 
@@ -226,12 +232,12 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 // uploadMedia first, and spoilers, timers, covers and live photos are not
 // served. Every item needs its own non-zero random_id, and no file may appear
 // twice.
-func albumItems(h *handlers, viewerID int64, multi []tg.InputSingleMedia) ([]store.AlbumItem, error) {
+func albumItems(ctx context.Context, h *handlers, viewerID int64, multi []tg.InputSingleMedia) ([]store.AlbumItem, error) {
 	items := make([]store.AlbumItem, 0, len(multi))
 	seenFiles := make(map[int64]bool, len(multi))
 	seenRandom := make(map[int64]bool, len(multi))
 	for _, single := range multi {
-		entities, err := h.encodeMessageEntitiesWithURLs(viewerID, single.Message, single.Entities)
+		entities, err := h.encodeMessageEntitiesWithURLsUnchecked(viewerID, single.Message, single.Entities)
 		if err != nil {
 			return nil, err
 		}

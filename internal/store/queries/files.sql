@@ -36,8 +36,10 @@ VALUES ($1, $2, $3, $4, $5, $6);
 
 -- FileForDownload is the one-query download authorization gate. Matching (id,
 -- access_hash) is wire compatibility and defence in depth. A live user sticker
--- set is a public entitlement; once a file has any set-item reference, the
--- ordinary message entitlement cannot bypass that set's live-state check.
+-- set is a public entitlement; once a file has any set-item reference, ordinary
+-- file-message entitlement cannot bypass its live-state check. A caller's own
+-- visible message retains removed-item bytes after an owner edit; the latest
+-- admin takedown event suppresses that historical entitlement.
 -- messages is per-owner — one row per entitled account, and one per member on a
 -- chat fan-out — so the set of accounts allowed to read a file is already
 -- enumerated on disk and needs no separate membership model. Channels are the
@@ -63,17 +65,122 @@ VALUES ($1, $2, $3, $4, $5, $6);
 -- cannot prove it from file_id = f.id while f is an outer row. Keep the
 -- explicit predicate in each message entitlement check below.
 -- name: FileForDownload :one
+WITH visible_poll_channels AS MATERIALIZED (
+    SELECT cp.channel_id, cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c ON c.id = cp.channel_id AND c.deleted_at IS NULL
+    WHERE cp.user_id = $3
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+)
 SELECT f.* FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
           SELECT 1 FROM user_created_sticker_set_items i
           JOIN live_user_created_sticker_sets s ON s.id = i.set_id
-          WHERE i.file_id = f.id
+          WHERE i.file_id = f.id AND i.is_active = true
+      )
+      OR EXISTS (
+          SELECT 1 FROM user_created_sticker_sets s
+          WHERE s.thumb_file_id = f.id AND s.is_live = true
+      )
+      OR (
+          NOT EXISTS (
+              SELECT 1
+              FROM user_created_sticker_set_items i
+              JOIN user_created_sticker_sets s ON s.id = i.set_id
+              WHERE i.file_id = f.id AND s.is_live = false
+                AND (
+                    SELECT e.action
+                    FROM admin_sticker_set_events e
+                    WHERE e.set_id = s.id
+                    ORDER BY e.id DESC
+                    LIMIT 1
+                ) = 'takedown'
+          )
+          AND (
+          EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.owner_id = $3 AND m.sticker_document_id = f.id
+                    AND m.deleted = false
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+              )
+              OR EXISTS (
+                  SELECT 1 FROM channel_messages cm
+                  JOIN channel_participants cp
+                    ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+                  WHERE cm.sticker_document_id = f.id
+                    AND cm.deleted = false
+                    AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM poll_message_copies copy
+                  JOIN messages m ON m.owner_id = copy.owner_id AND m.local_id = copy.local_id
+                  WHERE copy.owner_id = $3
+                    AND cardinality(copy.custom_emoji_document_ids) > 0
+                    AND copy.custom_emoji_document_ids && ARRAY[($1::bigint)::text]
+                    AND m.deleted = false
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM visible_poll_channels cp
+                  JOIN channel_poll_messages copy
+                    ON copy.channel_id = cp.channel_id
+                   AND cardinality(copy.custom_emoji_document_ids) > 0
+                   AND copy.custom_emoji_document_ids && ARRAY[($1::bigint)::text]
+                  JOIN channel_messages cm
+                    ON cm.channel_id = copy.channel_id AND cm.local_id = copy.local_id
+                  WHERE cm.local_id > cp.available_min_id
+                    AND cm.deleted = false
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+              )
+              -- Custom emoji references live in message entities or poll
+              -- descriptions, not in sticker_document_id. Only caller-visible
+              -- history keeps those bytes reachable after set edits.
+              OR EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.owner_id = $3 AND m.deleted = false
+                    AND m.entities IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+                    AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
+                    AND message_custom_emoji_document_ids(m.entities) && ARRAY[f.id::text]
+                    AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+              )
+              OR EXISTS (
+                  SELECT 1 FROM channel_messages cm
+                  JOIN channel_participants cp
+                    ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+                  WHERE cm.deleted = false
+                    AND cm.entities IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+                    )
+                    AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+                    AND message_custom_emoji_document_ids(cm.entities) && ARRAY[f.id::text]
+                    AND cm.local_id > cp.available_min_id
+                    AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                    AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+          )
+          )
       )
       OR (
           NOT EXISTS (
               SELECT 1 FROM user_created_sticker_set_items i WHERE i.file_id = f.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
           )
           AND (
               EXISTS (
@@ -455,10 +562,14 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
-       EXISTS (
-           SELECT 1 FROM user_created_sticker_set_items i
-           WHERE i.file_id = f.id
-       ) AS sticker_set_ref,
+       COALESCE(
+           EXISTS (
+               SELECT 1 FROM user_created_sticker_set_items i
+               WHERE i.file_id = f.id
+           ) OR EXISTS (
+               SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
+           ), false
+       )::bool AS sticker_set_ref,
        coalesce(gallery.found, false) AS gallery_ref,
        coalesce(chat_photo.found, false) AS chat_ref,
        coalesce(channel_photo.found, false) AS channel_photo_ref
@@ -586,6 +697,9 @@ WHERE f.id = sqlc.arg(id)
       WHERE i.file_id = f.id
   )
   AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
   AND NOT EXISTS (
@@ -625,6 +739,9 @@ WHERE f.id = sqlc.arg(id)
   AND NOT EXISTS (
       SELECT 1 FROM user_created_sticker_set_items i
       WHERE i.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_sets s WHERE s.thumb_file_id = f.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id

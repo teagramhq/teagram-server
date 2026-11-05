@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -37,11 +38,13 @@ func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEnd
 type scalePlan struct {
 	Node                  string      `json:"Node Type"`
 	Relation              string      `json:"Relation Name"`
+	IndexName             string      `json:"Index Name"`
 	SortKey               []string    `json:"Sort Key"`
 	Cost                  float64     `json:"Total Cost"`
 	Rows                  float64     `json:"Actual Rows"`
 	Loops                 float64     `json:"Actual Loops"`
 	RemovedByFilter       float64     `json:"Rows Removed by Filter"`
+	RemovedByJoinFilter   float64     `json:"Rows Removed by Join Filter"`
 	RemovedByIndexRecheck float64     `json:"Rows Removed by Index Recheck"`
 	Hits                  int64       `json:"Shared Hit Blocks"`
 	Reads                 int64       `json:"Shared Read Blocks"`
@@ -71,6 +74,18 @@ func (p scalePlan) containsNode(node string) bool {
 	return false
 }
 
+func (p scalePlan) usesIndex(index string) bool {
+	if p.IndexName == index {
+		return true
+	}
+	for _, child := range p.Plans {
+		if child.usesIndex(index) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p scalePlan) sortsOn(key string) bool {
 	if slices.Contains(p.SortKey, key) {
 		return true
@@ -86,12 +101,557 @@ func (p scalePlan) sortsOn(key string) bool {
 func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
-		rows += (p.Rows + p.RemovedByFilter + p.RemovedByIndexRecheck) * p.Loops
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
 	}
 	for _, child := range p.Plans {
 		rows += child.rowsReadFrom(table)
 	}
 	return rows
+}
+
+func (p scalePlan) accessSummary() []string {
+	var accesses []string
+	if p.Relation != "" || p.IndexName != "" {
+		accesses = append(accesses, fmt.Sprintf("%s %s index=%s rows=%.0f loops=%.0f",
+			p.Node, p.Relation, p.IndexName, p.Rows, p.Loops))
+	}
+	for _, child := range p.Plans {
+		accesses = append(accesses, child.accessSummary()...)
+	}
+	return accesses
+}
+
+func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "UPDATE server_administration SET election_closed = true WHERE singleton_id = 1"); err != nil {
+		t.Fatalf("close scale election: %v", err)
+	}
+
+	var ownerID, peerID int64
+	for _, user := range []struct {
+		phone  string
+		target *int64
+	}{
+		{phone: "+emoji-history-scale-owner", target: &ownerID},
+		{phone: "+emoji-history-scale-peer", target: &peerID},
+	} {
+		if err := pool.QueryRow(ctx,
+			"INSERT INTO users (phone, first_name) VALUES ($1, 'Emoji scale') RETURNING id", user.phone,
+		).Scan(user.target); err != nil {
+			t.Fatalf("create scale user: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO update_state (user_id) VALUES ($1), ($2) ON CONFLICT DO NOTHING", ownerID, peerID,
+	); err != nil {
+		t.Fatalf("create scale update state: %v", err)
+	}
+	visibleChannelID := int64(9_000_000_000_000_000_001)
+	hiddenChannelID := int64(9_000_000_000_000_000_002)
+	for _, channel := range []struct {
+		id        int64
+		creatorID int64
+	}{
+		{id: visibleChannelID, creatorID: ownerID},
+		{id: hiddenChannelID, creatorID: peerID},
+	} {
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO channels (id, title, creator_id) VALUES ($1, 'Emoji scale', $2)", channel.id, channel.creatorID,
+		); err != nil {
+			t.Fatalf("create scale channel: %v", err)
+		}
+		if _, err := pool.Exec(ctx, "INSERT INTO channel_state (channel_id) VALUES ($1)", channel.id); err != nil {
+			t.Fatalf("seed scale channel state: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)", visibleChannelID, ownerID,
+	); err != nil {
+		t.Fatalf("seed visible scale channel membership: %v", err)
+	}
+	seeds := []struct {
+		query string
+		args  []any
+	}{
+		{query: "ALTER TABLE messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
+		 SELECT $1, n, 1, $2, $1, 'scale emoji', true,
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1,
+		            'argument', CASE WHEN n <= 100 THEN 1000000 + n ELSE 30000000 + n END
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{ownerID, peerID}},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, entities)
+		 SELECT $1, n, 1, $2, $1, 'other-owner popular emoji', true,
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000201
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{peerID, ownerID}},
+		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
+		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
+		 SELECT $1, n, $2, 'visible scale emoji',
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1,
+		            'argument', CASE WHEN n <= 99 THEN 1000100 + n ELSE 50000000 + n END
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID}},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
+		 SELECT $1, n, $2, 'popular hidden scale emoji',
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000200
+		        )))
+		 FROM generate_series(1, 20000) AS n`, args: []any{hiddenChannelID, peerID}},
+		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: "ANALYZE messages"},
+		{query: "ANALYZE channel_messages"},
+		{query: "ANALYZE channel_participants"},
+	}
+	for _, seed := range seeds {
+		if _, err := pool.Exec(ctx, seed.query, seed.args...); err != nil {
+			t.Fatalf("seed scaled emoji history: %v", err)
+		}
+	}
+
+	fileIDs := make([]int64, 201)
+	for i := range fileIDs {
+		fileIDs[i] = 1_000_001 + int64(i)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	referenced, err := store.UserStickerSetMessageReferencedFileIDs(ctx, ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve scale historical emoji references: %v", err)
+	}
+	if len(referenced) != len(fileIDs)-2 {
+		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-2)
+	}
+	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
+		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
+	}
+	if _, found := referenced[fileIDs[len(fileIDs)-2]]; found {
+		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("historical emoji query count = %d, want 1", len(queries))
+	}
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("historical emoji query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain historical emoji references: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode historical emoji plan: %v", err)
+	}
+	for _, index := range []string{
+		"messages_owner_custom_emoji_document_ids_gin_idx",
+		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+	} {
+		if !plans[0].Plan.usesIndex(index) {
+			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+		var predicate string
+		if err := pool.QueryRow(ctx, `
+			SELECT pg_get_expr(index_info.indpred, index_info.indrelid)
+			FROM pg_index AS index_info
+			JOIN pg_class AS index_name ON index_name.oid = index_info.indexrelid
+			WHERE index_name.relname = $1
+		`, index).Scan(&predicate); err != nil {
+			t.Fatalf("read %s predicate: %v", index, err)
+		}
+		if !strings.Contains(predicate, "cardinality") || !strings.Contains(predicate, "message_custom_emoji_document_ids") {
+			t.Errorf("%s indexes rows without custom emoji references: %s", index, predicate)
+		}
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "messages" || table == "channel_messages" {
+			t.Errorf("historical emoji plan sequentially scans %s: %s", table, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	for _, table := range []string{"messages", "channel_messages"} {
+		if rows := plans[0].Plan.rowsReadFrom(table); rows > 800 {
+			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(fileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+}
+
+func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "UPDATE server_administration SET election_closed = true WHERE singleton_id = 1"); err != nil {
+		t.Fatalf("close scale election: %v", err)
+	}
+
+	var ownerID, peerID, unrelatedOwnerID int64
+	for _, user := range []struct {
+		phone  string
+		target *int64
+	}{
+		{phone: "+poll-emoji-scale-owner", target: &ownerID},
+		{phone: "+poll-emoji-scale-peer", target: &peerID},
+		{phone: "+poll-emoji-scale-unrelated", target: &unrelatedOwnerID},
+	} {
+		if err := pool.QueryRow(ctx,
+			"INSERT INTO users (phone, first_name) VALUES ($1, 'Poll emoji scale') RETURNING id", user.phone,
+		).Scan(user.target); err != nil {
+			t.Fatalf("create scale user: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO update_state (user_id) VALUES ($1), ($2) ON CONFLICT DO NOTHING", ownerID, peerID,
+	); err != nil {
+		t.Fatalf("create scale update state: %v", err)
+	}
+	const channelID int64 = 9_000_000_000_000_000_011
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO channels (id, title, creator_id) VALUES ($1, 'Poll emoji scale', $2)", channelID, ownerID,
+	); err != nil {
+		t.Fatalf("create scale channel: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "INSERT INTO channel_state (channel_id) VALUES ($1)", channelID); err != nil {
+		t.Fatalf("seed scale channel state: %v", err)
+	}
+	const unrelatedScopeCount = 200
+	const unrelatedOwnerBase int64 = 8_000_000_000_000_000_000
+	const unrelatedChannelBase int64 = 9_000_000_000_001_000_000
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, phone, first_name)
+		SELECT $1::bigint + n, '+poll-emoji-scale-unrelated-' || n, 'Unrelated poll scale'
+		FROM generate_series(1, $2::int) AS n`, unrelatedOwnerBase, unrelatedScopeCount,
+	); err != nil {
+		t.Fatalf("create unrelated scale users: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO channels (id, title, creator_id)
+		SELECT $1::bigint + n, 'Unrelated poll emoji scale ' || n, $2
+		FROM generate_series(1, $3::int) AS n`, unrelatedChannelBase, unrelatedOwnerID, unrelatedScopeCount,
+	); err != nil {
+		t.Fatalf("create unrelated scale channels: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2), ($1, $3)", channelID, ownerID, peerID,
+	); err != nil {
+		t.Fatalf("seed visible scale channel membership: %v", err)
+	}
+
+	const fileID int64 = 1_000_001
+	const fileAccessHash int64 = 8_000_001
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO files (id, uploader_id, access_hash, size, mime_type, file_name, stored)
+		VALUES ($1, $2, $3, 1, 'application/x-tgsticker', 'poll-scale.tgs', true)
+	`, fileID, ownerID, fileAccessHash); err != nil {
+		t.Fatalf("seed historical custom emoji file: %v", err)
+	}
+	var setID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count, is_live)
+		VALUES (8_000_002, $1, 'Poll scale', 'poll_scale', 'emojis', 1, false)
+		RETURNING id
+	`, ownerID).Scan(&setID); err != nil {
+		t.Fatalf("seed deleted custom emoji set: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_created_sticker_set_items
+		    (set_id, position, file_id, emoji, format, width, height, is_active)
+		VALUES ($1, 0, $2, '⭐', 'TGS', 100, 100, false)
+	`, setID, fileID); err != nil {
+		t.Fatalf("seed removed custom emoji item: %v", err)
+	}
+
+	const pollCount = 30_001
+	const pollIDBase int64 = 7_000_000_000_000_000_000
+	seeds := []struct {
+		query string
+		args  []any
+	}{
+		{query: "ALTER TABLE messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		 SELECT $1, n, 1, $2, $1, 'poll scale copy', true
+		 FROM generate_series(1, 10000) AS n`, args: []any{ownerID, peerID}},
+		{query: `INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		 SELECT $1::bigint + ((n - 1) / 50) + 1, ((n - 1) % 50) + 1, 1, $2,
+		        $1::bigint + ((n - 1) / 50) + 1, 'unrelated poll scale copy', true
+		 FROM generate_series(1, 10000) AS n`, args: []any{unrelatedOwnerBase, peerID}},
+		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
+		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message)
+		 SELECT $1, n, $2, 'poll scale channel copy'
+		 FROM generate_series(10001, 20000) AS n`, args: []any{channelID, ownerID}},
+		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message)
+		 SELECT $1::bigint + ((n - 1) / 50) + 1, ((n - 1) % 50) + 1,
+		        $2, 'unrelated poll scale channel copy'
+		 FROM generate_series(1, 10000) AS n`, args: []any{unrelatedChannelBase, unrelatedOwnerID}},
+		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: `INSERT INTO polls (id, creator_id, source_local_id, question, description_entities)
+		 SELECT $1::bigint + n, $2, n, convert_to('scale poll', 'UTF8'),
+		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
+		            'type', 18, 'offset', 0, 'length', 1,
+		            'argument', CASE WHEN n = 10000 OR n = 10001 OR n > 10001 THEN $3::bigint ELSE 70000000 + n END
+		        )))
+		 FROM generate_series(1, $4::bigint) AS n`, args: []any{pollIDBase, ownerID, fileID, int64(pollCount)}},
+		{query: `INSERT INTO poll_message_copies (owner_id, local_id, poll_id)
+		 VALUES ($1, 10000, $2)`, args: []any{ownerID, pollIDBase + 10000}},
+		{query: `INSERT INTO poll_message_copies (owner_id, local_id, poll_id)
+		 SELECT $1::bigint + ((n - 10002) / 50) + 1, ((n - 10002) % 50) + 1, $2::bigint + n
+		 FROM generate_series(10002, 20001) AS n`, args: []any{unrelatedOwnerBase, pollIDBase}},
+		{query: `INSERT INTO channel_poll_messages (channel_id, local_id, poll_id)
+		 SELECT $1::bigint + ((n - 20002) / 50) + 1, ((n - 20002) % 50) + 1, $2::bigint + n
+		 FROM generate_series(20002, 30001) AS n`, args: []any{unrelatedChannelBase, pollIDBase}},
+		{query: `INSERT INTO channel_poll_messages (channel_id, local_id, poll_id)
+		 VALUES ($1, 10001, $2)`, args: []any{channelID, pollIDBase + 10001}},
+		{query: "ANALYZE messages"},
+		{query: "ANALYZE channel_messages"},
+		{query: "ANALYZE channel_participants"},
+		{query: "ANALYZE poll_message_copies"},
+		{query: "ANALYZE channel_poll_messages"},
+		{query: "ANALYZE polls"},
+	}
+	for _, seed := range seeds {
+		if _, err := pool.Exec(ctx, seed.query, seed.args...); err != nil {
+			t.Fatalf("seed scaled poll emoji history: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	referenced, err := store.UserStickerSetMessageReferencedFileIDs(ctx, ownerID, []int64{fileID})
+	if err != nil || len(referenced) != 1 {
+		t.Fatalf("resolve scale poll custom emoji references = %v, err %v", referenced, err)
+	}
+	if _, err := store.FileForDownload(ctx, fileID, fileAccessHash, ownerID); err != nil {
+		t.Fatalf("download custom emoji from scale poll history: %v", err)
+	}
+	if _, err := store.FileForDownload(ctx, fileID, fileAccessHash, peerID); err != nil {
+		t.Fatalf("download custom emoji from scale channel poll history: %v", err)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 3 {
+		t.Fatalf("poll emoji lookup query count = %d, want resolver and two download queries", len(queries))
+	}
+	for _, index := range []string{
+		"poll_message_copies_owner_custom_emoji_document_ids_gin_idx",
+		"channel_poll_messages_channel_custom_emoji_document_ids_gin_idx",
+	} {
+		var exists bool
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", index).Scan(&exists); err != nil {
+			t.Fatalf("check scoped poll emoji index %s: %v", index, err)
+		}
+		if !exists {
+			t.Errorf("scoped poll emoji index %s is missing", index)
+		}
+	}
+	for _, query := range queries {
+		_, sql, ok := strings.Cut(query.SQL, "\n")
+		if !ok {
+			t.Fatalf("poll emoji query is missing its sqlc header: %s", query.SQL)
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+sql, query.Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain poll emoji query: %v", err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode poll emoji plan: %v", err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("poll emoji explain returned %d plans, want 1", len(plans))
+		}
+		plan := plans[0].Plan
+		for _, table := range []string{
+			"polls", "poll_message_copies", "channel_poll_messages", "messages", "channel_messages",
+		} {
+			if rows := plan.rowsReadFrom(table); rows > 800 {
+				t.Errorf("poll emoji query read %.0f %s rows for one requested ID: %s",
+					rows, table, strings.Join(plan.accessSummary(), "; "))
+			}
+		}
+	}
+}
+
+func TestUserCreatedStickerSetActiveItemsStayBoundedWithArchivedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "UPDATE server_administration SET election_closed = true WHERE singleton_id = 1"); err != nil {
+		t.Fatalf("close scale election: %v", err)
+	}
+
+	var ownerID int64
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO users (phone, first_name) VALUES ($1, 'Active item scale') RETURNING id", "+active-item-scale-owner",
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("create active item scale user: %v", err)
+	}
+	const setAccessHash int64 = 7_000_000_000_000_001
+	var setID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind, item_count)
+		VALUES ($1, $2, 'Active item scale', 'active_items_scale', 'regular', 3)
+		RETURNING id`, setAccessHash, ownerID,
+	).Scan(&setID); err != nil {
+		t.Fatalf("create active item scale set: %v", err)
+	}
+
+	const fileIDBase int64 = 6_000_000_000_000_000_000
+	const itemCount = 20_003
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO files (id, uploader_id, access_hash, size, mime_type, file_name, stored)
+		SELECT $1::bigint + n, $2, 8_000_000::bigint + n, 1, 'image/webp', 'active-item-scale-' || n, true
+		FROM generate_series(1, $3::int) AS n`, fileIDBase, ownerID, itemCount,
+	); err != nil {
+		t.Fatalf("seed active item scale files: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_created_sticker_set_items
+		    (set_id, position, file_id, emoji, keywords, format, width, height, is_active)
+		SELECT $1,
+		       CASE WHEN n <= 3 THEN n - 1 ELSE 200_000 + n END,
+		       $2::bigint + n, '⭐', '', 'WEBP', 100, 100, n <= 3
+		FROM generate_series(1, $3::int) AS n`, setID, fileIDBase, itemCount,
+	); err != nil {
+		t.Fatalf("seed active and archived sticker items: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "ANALYZE user_created_sticker_set_items"); err != nil {
+		t.Fatalf("analyze active item scale data: %v", err)
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	store := &Store{pool: traced, q: db.New(traced)}
+	set, err := store.UserStickerSetByID(ctx, setID, setAccessHash)
+	if err != nil {
+		t.Fatalf("get scale sticker set: %v", err)
+	}
+	if len(set.Items) != 3 {
+		t.Fatalf("get scale sticker set returned %d active items, want 3", len(set.Items))
+	}
+	mutationRows, err := store.q.UserCreatedStickerSetItemsForMutation(ctx, setID)
+	if err != nil {
+		t.Fatalf("read scale sticker set items for mutation: %v", err)
+	}
+	if len(mutationRows) != 3 {
+		t.Fatalf("mutation read returned %d active items, want 3", len(mutationRows))
+	}
+	searchCandidates, err := store.UserStickerSetSearchCandidates(ctx, "Active item scale")
+	if err != nil {
+		t.Fatalf("search scale sticker-set candidates: %v", err)
+	}
+	searchSets, err := store.UserStickerSetsBySearchCandidates(ctx, searchCandidates)
+	if err != nil {
+		t.Fatalf("resolve scale sticker-set search candidates: %v", err)
+	}
+	if len(searchSets) != 1 {
+		t.Fatalf("search resolution returned %d sets, want one", len(searchSets))
+	}
+	if len(searchSets[0].Items) != 3 {
+		t.Fatalf("search resolution returned %d active items, want 3", len(searchSets[0].Items))
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	for _, queryName := range []string{
+		"UserCreatedStickerSetItems :many",
+		"UserCreatedStickerSetItemsForMutation :many",
+		"UserCreatedStickerSetsBySearchCandidates :many",
+	} {
+		var query *pgx.TraceQueryStartData
+		for i := range queries {
+			if strings.Contains(queries[i].SQL, "-- name: "+queryName) {
+				query = &queries[i]
+				break
+			}
+		}
+		if query == nil {
+			t.Fatalf("active item query %q was not traced", queryName)
+		}
+		_, sql, ok := strings.Cut(query.SQL, "\n")
+		if !ok {
+			t.Fatalf("active item query %q is missing its sqlc header: %s", queryName, query.SQL)
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+sql, query.Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain active item query %q: %v", queryName, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode active item plan %q: %v", queryName, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("active item query %q explain returned %d plans, want 1", queryName, len(plans))
+		}
+		plan := plans[0].Plan
+		if !plan.usesIndex("user_created_sticker_set_items_active_position_idx") {
+			t.Errorf("active item query %q does not use the active-position index: %s", queryName, strings.Join(plan.accessSummary(), "; "))
+		}
+		if rows := plan.rowsReadFrom("user_created_sticker_set_items"); rows > 10 {
+			t.Errorf("active item query %q read %.0f item rows with only 3 active among %d historical rows: %s",
+				queryName, rows, itemCount, strings.Join(plan.accessSummary(), "; "))
+		}
+	}
 }
 
 func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {

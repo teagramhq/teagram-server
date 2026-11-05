@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func TestPollDescriptionEntitiesCanonicalizeMentionNames(t *testing.T) {
 	h := testHandlers(nil)
 	const viewerID int64 = 100
 	const mentionedUserID int64 = 200
-	entities, err := h.encodeMessageEntities(viewerID, "A @Bob", []tg.MessageEntityClass{
+	entities, err := h.encodeMessageEntities(context.Background(), viewerID, "A @Bob", []tg.MessageEntityClass{
 		&tg.MessageEntityBold{Offset: 0, Length: 1},
 		&tg.InputMessageEntityMentionName{
 			Offset: 2,
@@ -73,7 +74,7 @@ func TestPollDescriptionEntitiesRejectUntrustedConstructorsAndMentions(t *testin
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := h.encodeMessageEntities(viewerID, "Bob", []tg.MessageEntityClass{test.entity})
+			_, err := h.encodeMessageEntities(context.Background(), viewerID, "Bob", []tg.MessageEntityClass{test.entity})
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("encode error = %v, want %v", err, test.wantErr)
 			}
@@ -174,7 +175,7 @@ func TestAddDetectedMessageURLsStopsAtEntityLimit(t *testing.T) {
 	for i := range store.MaxPollDescriptionEntities {
 		clientEntities = append(clientEntities, &tg.MessageEntityBold{Offset: i * 2, Length: 1})
 	}
-	entities, err = testHandlers(nil).encodeMessageEntitiesWithURLs(100, text, clientEntities)
+	entities, err = testHandlers(nil).encodeMessageEntitiesWithURLs(context.Background(), 100, text, clientEntities)
 	if err != nil {
 		t.Fatalf("encode 100 client entities with a URL: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestMessageEntitiesSupportTextPastPollLengthLimit(t *testing.T) {
 	const url = "https://example.com"
 	text := strings.Repeat("x", 4097) + " " + url
 	clientEntityOffset := 4096
-	entities, err := testHandlers(nil).encodeMessageEntitiesWithURLs(101, text, []tg.MessageEntityClass{
+	entities, err := testHandlers(nil).encodeMessageEntitiesWithURLs(context.Background(), 101, text, []tg.MessageEntityClass{
 		&tg.MessageEntityBold{Offset: clientEntityOffset, Length: 1},
 	})
 	if err != nil {
