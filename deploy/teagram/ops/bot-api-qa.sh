@@ -147,7 +147,7 @@ verify_live_configuration() {
   ') || { fail 'published Bot API port is not restricted to the tailnet IP'; return 1; }
   [[ "$host_binding" == verified ]] || return 1
 
-  mapfile -t sidecar_ids < <(docker ps --quiet \
+  mapfile -t sidecar_ids < <(docker ps --quiet --no-trunc \
     --filter label=com.docker.compose.project=teagram \
     --filter label=com.docker.compose.service=bot-api-forwarder)
   [[ "${#sidecar_ids[@]}" == 1 && "${sidecar_ids[0]}" =~ ^[0-9a-f]{64}$ ]] || {

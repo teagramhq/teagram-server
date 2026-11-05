@@ -121,7 +121,11 @@ if [[ "$1" == inspect && "$2" == "$MOCK_SIDECAR_ID" ]]; then
   exit 0
 fi
 if [[ "$1" == ps && "$2" == --quiet ]]; then
-  printf '%s\n' "$MOCK_SIDECAR_ID"
+  if [[ " $* " == *' --no-trunc '* ]]; then
+    printf '%s\n' "$MOCK_SIDECAR_ID"
+  else
+    printf 'bbbbbbbbbbbb\n'
+  fi
   exit 0
 fi
 if [[ "$1" == compose && "$2" == config && "$3" == --format && "$4" == json ]]; then
