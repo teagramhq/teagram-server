@@ -54,7 +54,8 @@ type User struct {
 	LastSeenAt *time.Time
 	// Username is the normalized handle claimed in the usernames table.
 	// Nil when the account has no username.
-	Username *string
+	Username              *string
+	EmojiStatusDocumentID int64
 }
 
 // NormalizePhone strips an optional leading '+' so that '+1555...' and
@@ -310,15 +311,20 @@ func UserFromDB(u db.UserByIDRow) User {
 	if u.Phone != nil {
 		phone = *u.Phone
 	}
+	var emojiStatusDocumentID int64
+	if u.EmojiStatusDocumentID != nil {
+		emojiStatusDocumentID = *u.EmojiStatusDocumentID
+	}
 	return User{
-		ID:         u.ID,
-		Kind:       u.Kind,
-		Phone:      phone,
-		FirstName:  u.FirstName,
-		LastName:   u.LastName,
-		IsOnline:   u.IsOnline,
-		LastSeenAt: lastSeen,
-		Username:   u.Username,
+		ID:                    u.ID,
+		Kind:                  u.Kind,
+		Phone:                 phone,
+		FirstName:             u.FirstName,
+		LastName:              u.LastName,
+		IsOnline:              u.IsOnline,
+		LastSeenAt:            lastSeen,
+		Username:              u.Username,
+		EmojiStatusDocumentID: emojiStatusDocumentID,
 	}
 }
 
@@ -347,6 +353,34 @@ func (s *Store) SetUserStatus(ctx context.Context, userID int64, online bool) er
 	}
 	if n == 0 {
 		return fmt.Errorf("set user status: user %d not found", userID)
+	}
+	return nil
+}
+
+// SetUserEmojiStatus stores the caller's custom emoji status. Positive IDs
+// refer to mutable user-created sets, so their set row is locked and checked
+// live in the same transaction as the status write. Zero clears the status.
+func (s *Store) SetUserEmojiStatus(ctx context.Context, userID, documentID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin user emoji status: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if documentID > 0 {
+		if err := lockLiveReactionCustomEmoji(ctx, qtx, documentID); err != nil {
+			return err
+		}
+	}
+	n, err := qtx.SetUserEmojiStatus(ctx, db.SetUserEmojiStatusParams{ID: userID, DocumentID: documentID})
+	if err != nil {
+		return fmt.Errorf("set user emoji status: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("set user emoji status: user %d not found", userID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit user emoji status: %w", err)
 	}
 	return nil
 }

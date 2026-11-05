@@ -182,16 +182,6 @@ func TestSetChatAvailableReactionsRejectsUnsupportedValues(t *testing.T) {
 			},
 		},
 		{
-			name: "allow custom",
-			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
-				all := &tg.ChatReactionsAll{}
-				all.SetAllowCustom(true)
-				return &tg.MessagesSetChatAvailableReactionsRequest{
-					Peer: &tg.InputPeerChat{ChatID: 1}, AvailableReactions: all,
-				}
-			},
-		},
-		{
 			name: "paid enabled",
 			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
 				request := &tg.MessagesSetChatAvailableReactionsRequest{

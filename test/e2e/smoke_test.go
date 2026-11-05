@@ -215,6 +215,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupReactions(t)
 	})
+	t.Run("custom-emoji-actions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeCustomEmojiActions(t)
+	})
 	t.Run("channel-reactions", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannelReactions(t)

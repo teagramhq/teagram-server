@@ -268,7 +268,7 @@ func TestGetMessageReactionsListRejectsMalformedOffsetAndOversizedLimit(t *testi
 		}
 	}
 	invalidFilter := messageReactionsListRequest(peer, int(f.message.LocalID), 1)
-	invalidFilter.SetReaction(&tg.ReactionCustomEmoji{DocumentID: 1})
+	invalidFilter.SetReaction(&tg.ReactionPaid{})
 	requireReactionListError(t, f.s, f.creator.ID, invalidFilter, "REACTION_INVALID")
 	if _, rpc := callMessageReactionsList(t, f.s, 0, messageReactionsListRequest(peer, int(f.message.LocalID), 1)); rpc == nil || rpc.ErrorMessage != "AUTH_KEY_UNREGISTERED" {
 		t.Fatalf("unauthenticated call error = %v, want AUTH_KEY_UNREGISTERED", rpc)

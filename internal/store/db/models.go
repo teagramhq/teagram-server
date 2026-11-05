@@ -100,9 +100,11 @@ type Channel struct {
 }
 
 type ChannelAvailableReaction struct {
-	ChannelID int64
-	Mode      string
-	Reactions []string
+	ChannelID      int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 type ChannelDeletionJob struct {
@@ -259,9 +261,11 @@ type ChatAdminStateMarker struct {
 }
 
 type ChatAvailableReaction struct {
-	ChatID    int64
-	Mode      string
-	Reactions []string
+	ChatID         int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 type ChatParticipant struct {
@@ -905,19 +909,20 @@ type UploadPart struct {
 }
 
 type User struct {
-	ID                   int64
-	Phone                *string
-	FirstName            string
-	LastName             string
-	CreatedAt            pgtype.Timestamptz
-	IsOnline             bool
-	LastSeenAt           pgtype.Timestamptz
-	Username             *string
-	NameTsv              interface{}
-	LoginMode            string
-	AuthorizationTtlDays int32
-	About                string
-	Kind                 string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	NameTsv               interface{}
+	LoginMode             string
+	AuthorizationTtlDays  int32
+	About                 string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 type UserContact struct {

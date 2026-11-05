@@ -468,6 +468,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.AccountGetWebAuthorizationsRequestTypeID, h.handleGetWebAuthorizations)
 	register(d, tg.AccountGetPasswordRequestTypeID, h.handleGetPassword)
 	register(d, tg.AccountUpdateStatusRequestTypeID, h.handleUpdateStatus)
+	register(d, tg.AccountUpdateEmojiStatusRequestTypeID, h.handleUpdateEmojiStatus)
 	register(d, tg.AccountUpdateNotifySettingsRequestTypeID, h.handleUpdateNotifySettings)
 	register(d, tg.AccountCheckUsernameRequestTypeID, h.handleCheckUsername)
 	register(d, tg.AccountUpdateUsernameRequestTypeID, h.handleUpdateUsername)

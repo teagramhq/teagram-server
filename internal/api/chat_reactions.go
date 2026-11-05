@@ -23,28 +23,43 @@ func isStandardReactionEmoji(emoticon string) bool {
 func chatAvailableReactionsFromTL(value tg.ChatReactionsClass) (store.ChatAvailableReactions, error) {
 	switch reactions := value.(type) {
 	case *tg.ChatReactionsAll:
-		if reactions == nil || reactions.GetAllowCustom() {
+		if reactions == nil {
 			return store.ChatAvailableReactions{}, errReactionInvalid
 		}
-		return store.ChatAvailableReactions{Mode: store.ChatAvailableReactionsAll}, nil
+		return store.ChatAvailableReactions{Mode: store.ChatAvailableReactionsAll, AllowCustom: reactions.GetAllowCustom()}, nil
 	case *tg.ChatReactionsSome:
-		if reactions == nil || len(reactions.Reactions) > len(chatReactionsAll) {
+		if reactions == nil || len(reactions.Reactions) > len(chatReactionsAll)+maxCustomEmojiDocumentIDs {
 			return store.ChatAvailableReactions{}, errReactionInvalid
 		}
 		allowed := make([]string, 0, len(reactions.Reactions))
+		customAllowed := make([]int64, 0, len(reactions.Reactions))
 		seen := make(map[string]struct{}, len(reactions.Reactions))
+		seenCustom := make(map[int64]struct{}, len(reactions.Reactions))
 		for _, reaction := range reactions.Reactions {
-			emoji, ok := reaction.(*tg.ReactionEmoji)
-			if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+			switch value := reaction.(type) {
+			case *tg.ReactionEmoji:
+				if value == nil || !isStandardReactionEmoji(value.Emoticon) {
+					return store.ChatAvailableReactions{}, errReactionInvalid
+				}
+				if _, ok := seen[value.Emoticon]; ok {
+					continue
+				}
+				seen[value.Emoticon] = struct{}{}
+				allowed = append(allowed, value.Emoticon)
+			case *tg.ReactionCustomEmoji:
+				if value == nil || value.DocumentID == 0 {
+					return store.ChatAvailableReactions{}, errReactionInvalid
+				}
+				if _, ok := seenCustom[value.DocumentID]; ok {
+					continue
+				}
+				seenCustom[value.DocumentID] = struct{}{}
+				customAllowed = append(customAllowed, value.DocumentID)
+			default:
 				return store.ChatAvailableReactions{}, errReactionInvalid
 			}
-			if _, ok := seen[emoji.Emoticon]; ok {
-				continue
-			}
-			seen[emoji.Emoticon] = struct{}{}
-			allowed = append(allowed, emoji.Emoticon)
 		}
-		return store.ChatAvailableReactions{Mode: store.ChatAvailableReactionsSome, Emoticons: allowed}, nil
+		return store.ChatAvailableReactions{Mode: store.ChatAvailableReactionsSome, Emoticons: allowed, CustomEmojiIDs: customAllowed}, nil
 	case *tg.ChatReactionsNone:
 		if reactions == nil {
 			return store.ChatAvailableReactions{}, errReactionInvalid
@@ -58,11 +73,14 @@ func chatAvailableReactionsFromTL(value tg.ChatReactionsClass) (store.ChatAvaila
 func chatAvailableReactionsToTL(available store.ChatAvailableReactions) (tg.ChatReactionsClass, error) {
 	switch available.Mode {
 	case store.ChatAvailableReactionsAll:
-		return &tg.ChatReactionsAll{}, nil
+		return &tg.ChatReactionsAll{AllowCustom: available.AllowCustom}, nil
 	case store.ChatAvailableReactionsSome:
-		reactions := make([]tg.ReactionClass, len(available.Emoticons))
-		for i, emoticon := range available.Emoticons {
-			reactions[i] = &tg.ReactionEmoji{Emoticon: emoticon}
+		reactions := make([]tg.ReactionClass, 0, len(available.Emoticons)+len(available.CustomEmojiIDs))
+		for _, emoticon := range available.Emoticons {
+			reactions = append(reactions, &tg.ReactionEmoji{Emoticon: emoticon})
+		}
+		for _, documentID := range available.CustomEmojiIDs {
+			reactions = append(reactions, &tg.ReactionCustomEmoji{DocumentID: documentID})
 		}
 		return &tg.ChatReactionsSome{Reactions: reactions}, nil
 	case store.ChatAvailableReactionsNone:
@@ -96,6 +114,15 @@ func (h *handlers) handleSetChatAvailableReactions(r *mtproto.Request) (bin.Enco
 	available, err := chatAvailableReactionsFromTL(req.AvailableReactions)
 	if err != nil {
 		return nil, err
+	}
+	for _, documentID := range available.CustomEmojiIDs {
+		live, liveErr := h.liveCustomEmojiDocument(r.Ctx, r.UserID, documentID)
+		if liveErr != nil {
+			return nil, liveErr
+		}
+		if !live {
+			return nil, errReactionInvalid
+		}
 	}
 	if peerType == store.PeerTypeChat {
 		err = h.store.SetChatAvailableReactions(r.Ctx, peerID, r.UserID, available)

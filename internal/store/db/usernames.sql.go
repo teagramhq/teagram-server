@@ -117,22 +117,24 @@ func (q *Queries) GetChannelByUsername(ctx context.Context, handle string) (Chan
 
 const getUserByUsername = `-- name: GetUserByUsername :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE un.handle = lower($1)
 `
 
 type GetUserByUsernameRow struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   string
-	Kind       string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 // The handle reported back is the joined usernames row — the one that admitted
@@ -150,6 +152,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, handle string) (GetUser
 		&i.LastSeenAt,
 		&i.Username,
 		&i.Kind,
+		&i.EmojiStatusDocumentID,
 	)
 	return i, err
 }

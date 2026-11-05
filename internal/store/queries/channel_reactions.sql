@@ -32,16 +32,18 @@ FOR SHARE OF cm;
 -- ChannelAvailableReactionsByIDs reads only explicit channel settings. A
 -- missing row inherits all standard reactions.
 -- name: ChannelAvailableReactionsByIDs :many
-SELECT channel_id, mode, reactions
+SELECT channel_id, mode, reactions, allow_custom, custom_emoji_ids
 FROM channel_available_reactions
 WHERE channel_id = ANY(sqlc.arg(channel_ids)::bigint[])
 ORDER BY channel_id;
 
 -- name: SetChannelAvailableReactions :exec
-INSERT INTO channel_available_reactions (channel_id, mode, reactions)
-VALUES (sqlc.arg(channel_id)::bigint, sqlc.arg(mode)::text, sqlc.arg(reactions)::text[])
+INSERT INTO channel_available_reactions (channel_id, mode, reactions, allow_custom, custom_emoji_ids)
+VALUES (sqlc.arg(channel_id)::bigint, sqlc.arg(mode)::text, sqlc.arg(reactions)::text[],
+        sqlc.arg(allow_custom)::boolean, sqlc.arg(custom_emoji_ids)::bigint[])
 ON CONFLICT (channel_id)
-DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions;
+DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions,
+              allow_custom = EXCLUDED.allow_custom, custom_emoji_ids = EXCLUDED.custom_emoji_ids;
 
 -- name: UpsertChannelMessageReaction :exec
 INSERT INTO channel_message_reactions (channel_id, local_id, reactor_id, reaction)

@@ -15,9 +15,10 @@ import (
 // ChannelReactionCount is an aggregate count for one channel post. Chosen is
 // derived only from the requesting member's own reaction row.
 type ChannelReactionCount struct {
-	Reaction string
-	Count    int
-	Chosen   bool
+	Reaction              string
+	CustomEmojiDocumentID int64
+	Count                 int
+	Chosen                bool
 }
 
 // SetChannelAvailableReactions changes the channel reaction setting under the
@@ -33,9 +34,13 @@ func (s *Store) SetChannelAvailableReactions(
 	if channelID <= 0 || callerID <= 0 {
 		return ErrNotMember
 	}
-	reactions := available.Emoticons
-	if reactions == nil {
-		reactions = []string{}
+	emoticons := available.Emoticons
+	if emoticons == nil {
+		emoticons = []string{}
+	}
+	customEmojiIDs := available.CustomEmojiIDs
+	if customEmojiIDs == nil {
+		customEmojiIDs = []int64{}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -74,9 +79,8 @@ func (s *Store) SetChannelAvailableReactions(
 	}
 
 	if err := qtx.SetChannelAvailableReactions(ctx, db.SetChannelAvailableReactionsParams{
-		ChannelID: channelID,
-		Mode:      available.Mode,
-		Reactions: reactions,
+		ChannelID: channelID, Mode: available.Mode, Reactions: emoticons,
+		AllowCustom: available.AllowCustom, CustomEmojiIds: customEmojiIDs,
 	}); err != nil {
 		return fmt.Errorf("set channel available reactions: %w", err)
 	}
@@ -96,8 +100,20 @@ func (s *Store) SetChannelAvailableReactions(
 func validateAvailableReactions(available ChatAvailableReactions) error {
 	if (available.Mode != ChatAvailableReactionsAll && available.Mode != ChatAvailableReactionsSome && available.Mode != ChatAvailableReactionsNone) ||
 		(available.Mode != ChatAvailableReactionsSome && len(available.Emoticons) != 0) ||
+		(available.Mode != ChatAvailableReactionsSome && len(available.CustomEmojiIDs) != 0) ||
+		(available.Mode != ChatAvailableReactionsAll && available.AllowCustom) ||
 		slices.Contains(available.Emoticons, "") {
 		return ErrReactionInvalid
+	}
+	seenCustomEmojiIDs := make(map[int64]struct{}, len(available.CustomEmojiIDs))
+	for _, documentID := range available.CustomEmojiIDs {
+		if documentID == 0 {
+			return ErrReactionInvalid
+		}
+		if _, exists := seenCustomEmojiIDs[documentID]; exists {
+			return ErrReactionInvalid
+		}
+		seenCustomEmojiIDs[documentID] = struct{}{}
 	}
 	return nil
 }
@@ -113,7 +129,10 @@ func channelAvailableReactions(ctx context.Context, qtx *db.Queries, channelID i
 	if len(rows) != 1 {
 		return ChatAvailableReactions{}, fmt.Errorf("load channel available reactions: got %d rows for channel %d", len(rows), channelID)
 	}
-	return ChatAvailableReactions{Mode: rows[0].Mode, Emoticons: rows[0].Reactions}, nil
+	return ChatAvailableReactions{
+		Mode: rows[0].Mode, Emoticons: rows[0].Reactions,
+		CustomEmojiIDs: rows[0].CustomEmojiIds, AllowCustom: rows[0].AllowCustom,
+	}, nil
 }
 
 // SetChannelMessageReaction records or clears the caller's single reaction.
@@ -125,6 +144,29 @@ func (s *Store) SetChannelMessageReaction(
 	ctx context.Context,
 	channelID, reactorID, localID int64,
 	reaction string,
+) ([]ChannelReactionCount, error) {
+	return s.setChannelMessageReaction(ctx, channelID, reactorID, localID, reaction, 0)
+}
+
+// SetChannelCustomEmojiReaction records the caller's custom emoji reaction on
+// a visible channel post. User-created documents are locked and checked live
+// in the same transaction as the reaction write.
+func (s *Store) SetChannelCustomEmojiReaction(
+	ctx context.Context,
+	channelID, reactorID, localID, documentID int64,
+) ([]ChannelReactionCount, error) {
+	reaction, ok := CustomEmojiReactionValue(documentID)
+	if !ok {
+		return nil, ErrReactionInvalid
+	}
+	return s.setChannelMessageReaction(ctx, channelID, reactorID, localID, reaction, documentID)
+}
+
+func (s *Store) setChannelMessageReaction(
+	ctx context.Context,
+	channelID, reactorID, localID int64,
+	reaction string,
+	customDocumentID int64,
 ) ([]ChannelReactionCount, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -168,6 +210,9 @@ func (s *Store) SetChannelMessageReaction(
 	}
 	if reaction != "" && !available.Allows(reaction) {
 		return nil, ErrReactionInvalid
+	}
+	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
+		return nil, err
 	}
 	if reaction == "" {
 		err = qtx.DeleteChannelMessageReaction(ctx, db.DeleteChannelMessageReactionParams{
@@ -224,9 +269,10 @@ func channelMessageReactionsByMessageIDs(
 		return nil, fmt.Errorf("load channel reaction counts: %w", err)
 	}
 	for _, row := range counts {
+		documentID, _ := CustomEmojiDocumentID(row.Reaction)
 		byMessage[row.LocalID] = append(byMessage[row.LocalID], ChannelReactionCount{
-			Reaction: row.Reaction,
-			Count:    int(row.ReactionCount),
+			Reaction: row.Reaction, CustomEmojiDocumentID: documentID,
+			Count: int(row.ReactionCount),
 		})
 	}
 	own, err := qtx.ChannelOwnReactionsByMessageIDs(ctx, db.ChannelOwnReactionsByMessageIDsParams{

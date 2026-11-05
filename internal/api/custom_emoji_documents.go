@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
@@ -9,6 +11,28 @@ import (
 )
 
 const maxCustomEmojiDocumentIDs = 200
+
+func (h *handlers) liveCustomEmojiDocument(ctx context.Context, userID, documentID int64) (bool, error) {
+	if documentID == 0 {
+		return false, nil
+	}
+	if documentID < 0 {
+		catalog, err := h.stickerSetCatalog()
+		if err != nil {
+			h.log.Error("load custom emoji catalogue", "user_id", userID, "err", err)
+			return false, errInternal
+		}
+		document, ok := catalog.documentsByID[documentID]
+		return ok && isCustomEmojiDocument(document), nil
+	}
+	documents, err := h.store.UserStickerSetsByFileIDs(ctx, []int64{documentID})
+	if err != nil {
+		h.log.Error("resolve custom emoji document", "user_id", userID, "document_id", documentID, "err", err)
+		return false, errInternal
+	}
+	document, ok := documents[documentID]
+	return ok && document.Set.Kind == "emojis" && document.Set.IsLive && document.IsActive, nil
+}
 
 func (h *handlers) validateCustomEmojiDocumentReferences(userID int64, entities []store.PollDescriptionEntity) error {
 	// Catalogue IDs are immutable and can be validated here. Positive user-set
