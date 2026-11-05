@@ -237,7 +237,12 @@ def kubectl(args, state):
     if args[:2] == ["auth", "can-i"]:
         verb, resource = args[2:4]
         namespace = args[args.index("--namespace") + 1] if "--namespace" in args else ""
-        group = args[args.index("--api-group") + 1] if "--api-group" in args else ""
+        group = ""
+        if "." in resource:
+            resource, group = resource.split(".", 1)
+        subresource = (
+            args[args.index("--subresource") + 1] if "--subresource" in args else ""
+        )
         if resource == "namespaces":
             print(
                 "Warning: resource 'namespaces' is not namespace scoped",
@@ -253,7 +258,7 @@ def kubectl(args, state):
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
             elif group == "" and resource in ("persistentvolumeclaims", "pods", "events"):
                 allowed = verb in {"get", "list", "watch"}
-            elif group == "" and resource == "pods/log":
+            elif group == "" and resource == "pods" and subresource == "log":
                 allowed = verb == "get"
         answer = "yes" if allowed else "no"
         print(answer)

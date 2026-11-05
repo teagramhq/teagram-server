@@ -1456,23 +1456,23 @@ jobs:
               *) echo "unexpected deployer authorization: $verb $resource => $status:$answer" >&2; exit 1 ;;
             esac
           }
-          expect_deployer_can_i yes create deployments --namespace teagram --api-group apps
-          expect_deployer_can_i yes patch statefulsets --namespace teagram --api-group apps
-          expect_deployer_can_i yes create jobs --namespace teagram --api-group batch
+          expect_deployer_can_i yes create deployments.apps --namespace teagram
+          expect_deployer_can_i yes patch statefulsets.apps --namespace teagram
+          expect_deployer_can_i yes create jobs.batch --namespace teagram
           expect_deployer_can_i yes patch services --namespace teagram
           expect_deployer_can_i yes create configmaps --namespace teagram
           expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
           expect_deployer_can_i yes list pods --namespace teagram
-          expect_deployer_can_i yes get pods/log --namespace teagram
+          expect_deployer_can_i yes get pods --subresource=log --namespace teagram
           expect_deployer_can_i yes list events --namespace teagram
           expect_deployer_can_i no create pods --namespace teagram
           for secret_verb in get list watch create update patch delete; do
             expect_deployer_can_i no "$secret_verb" secrets --namespace teagram
           done
-          expect_deployer_can_i no create roles --namespace teagram --api-group rbac.authorization.k8s.io
-          expect_deployer_can_i no create rolebindings --namespace teagram --api-group rbac.authorization.k8s.io
+          expect_deployer_can_i no create roles.rbac.authorization.k8s.io --namespace teagram
+          expect_deployer_can_i no create rolebindings.rbac.authorization.k8s.io --namespace teagram
           expect_deployer_can_i no create serviceaccounts --namespace teagram
-          expect_deployer_can_i no create serviceaccounts/token --namespace teagram
+          expect_deployer_can_i no create serviceaccounts --subresource=token --namespace teagram
           expect_deployer_can_i no '*' '*' --namespace teagram
           expect_deployer_can_i no '*' '*' --namespace default
           namespace_scope_stderr="$RUNNER_TEMP/teagram-deployer-namespaces.stderr"
