@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -42,6 +43,9 @@ type webSocketConnState struct {
 }
 
 func isWebSocketDisconnect(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return !errors.Is(err, errAuthKeyLookupFailure) && !errors.Is(err, errAuthKeyPersistenceFailure)
+	}
 	if isDisconnect(err) {
 		return true
 	}

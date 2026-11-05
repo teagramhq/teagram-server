@@ -915,6 +915,9 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("WebSocket serve loop succeeded after auth-key lookup returned unexpected EOF")
 	}
+	if isWebSocketDisconnect(err) {
+		t.Fatalf("auth-key lookup EOF = %v, want server failure", err)
+	}
 	server.logConnectionFailure(err)
 	server.logTransportClose(diagnostics, err)
 
@@ -949,6 +952,38 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	}
 }
 
+func TestWebSocketAuthKeyPersistenceUnexpectedEOFRemainsServerFailure(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	err := errors.Join(errAuthKeyPersistenceFailure, io.ErrUnexpectedEOF)
+	if isWebSocketDisconnect(err) {
+		t.Fatalf("auth-key persistence EOF = %v, want server failure", err)
+	}
+	server.logConnectionFailure(err)
+	server.logTransportClose(diagnostics, err)
+
+	var failure, closeRecord *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		switch record.message {
+		case "server operation failed":
+			failure = record
+		case "transport connection closed":
+			closeRecord = record
+		}
+	}
+	if failure == nil {
+		t.Fatalf("no server operation failure record in %+v", sink.records)
+	}
+	if closeRecord == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	if got := closeRecord.attrs["reason"]; got != "server error" {
+		t.Errorf("transport close reason = %v, want server error", got)
+	}
+}
+
 func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
@@ -965,13 +1000,69 @@ func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
 	}
 	server.logTransportClose(diagnostics, err)
 
-	for _, record := range sink.records {
+	var closeRecord *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
 		if record.message == "server operation failed" {
-			t.Fatalf("frame-read EOF logged a server failure: %+v", record)
+			t.Fatalf("frame-read EOF logged a server failure: %+v", *record)
 		}
-		if record.message == "transport connection closed" && record.attrs["reason"] != "client close" {
-			t.Fatalf("transport close = %+v, want client close", record)
+		if record.message == "transport connection closed" {
+			closeRecord = record
 		}
+	}
+	if closeRecord == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	if got := closeRecord.attrs["reason"]; got != "client close" {
+		t.Fatalf("transport close = %+v, want client close", *closeRecord)
+	}
+}
+
+func TestWebSocketKeyExchangeUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	err = server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), &serverLoopFailureConn{
+			frame: exchangeRequestFrame(t),
+			err:   io.ErrUnexpectedEOF,
+		}, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
+	)
+	if err == nil {
+		t.Fatal("WebSocket serve loop succeeded after key-exchange read returned unexpected EOF")
+	}
+	failure, ok := errors.AsType[*exchangeFailureError](err)
+	if !ok || failure == nil {
+		t.Fatalf("key-exchange error = %v, want exchange diagnostics", err)
+	}
+	if failure.stage != exchangeStageReadReqDH || failure.cause != exchangeCausePeerClose {
+		t.Fatalf("key-exchange diagnostics = (%q, %q), want (%q, %q)", failure.stage, failure.cause, exchangeStageReadReqDH, exchangeCausePeerClose)
+	}
+	if !isWebSocketDisconnect(err) {
+		server.logConnectionFailure(err)
+		t.Errorf("key-exchange unexpected EOF = %v, want WebSocket disconnect", err)
+	}
+	server.logTransportClose(diagnostics, err)
+
+	var closeRecord *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		if record.message == "server operation failed" {
+			t.Fatalf("key-exchange EOF logged a server failure: %+v", *record)
+		}
+		if record.message == "transport connection closed" {
+			closeRecord = record
+		}
+	}
+	if closeRecord == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	if got := closeRecord.attrs["reason"]; got != "client close" {
+		t.Fatalf("transport close = %+v, want client close", *closeRecord)
 	}
 }
 
