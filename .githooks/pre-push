@@ -19,8 +19,12 @@ contains() {
 
 atlas_login_present() {
   [[ -n "${ATLAS_TOKEN:-}" ]] && return 0
-  local atlas_data_dir="${DATA_DIR:-${HOME:-}}"
-  [[ -n "$atlas_data_dir" && -e "$atlas_data_dir/.atlas" ]]
+  # The default .atlas directory also holds caches, so ask Atlas for login state.
+  local atlas_whoami_output
+  if atlas_whoami_output="$(atlas whoami 2>&1)"; then
+    return 0
+  fi
+  [[ "$atlas_whoami_output" != *"command requires 'atlas login'"* ]]
 }
 
 local_shas=()
