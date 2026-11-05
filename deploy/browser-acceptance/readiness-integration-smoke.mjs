@@ -19,6 +19,7 @@ const CONTENT_DIGEST = `sha256:${"f".repeat(64)}`;
 const URL_CANARY = "wss-diagnostic-canary";
 const HEADER_CANARY = "wss-response-header-canary";
 const COOKIE_CANARY = "wss-set-cookie-canary";
+const PRIVATE_CLIENT_WORKER_SOCKET_COUNT = 4;
 // The page's timer starts while navigation is still in flight, so the delayed
 // scenario is timed from the app request the timer follows, not from when
 // Playwright's navigation resolves.
@@ -179,7 +180,7 @@ async function createFixture(directory, scenario, certificate) {
       // workers itself, so only dedicated workers are held from their first statement.
       let body = socket;
       if (scenario === "private-client-worker") {
-        body = `self.addEventListener("connect",(event)=>{const port=event.ports?.[0]||event.source;port.onmessage=()=>{for(const url of ${JSON.stringify(Array(4).fill(endpoint))}){const socket=new WebSocket(url);socket.onerror=()=>{};}};});`;
+        body = `self.addEventListener("connect",(event)=>{const port=event.ports?.[0]||event.source;port.onmessage=()=>{for(const url of ${JSON.stringify(Array(PRIVATE_CLIENT_WORKER_SOCKET_COUNT).fill(endpoint))}){const socket=new WebSocket(url);socket.onerror=()=>{};}};});`;
       } else if (scenario.startsWith("shared-worker")) {
         body = pathname === "/client/worker.js"
           ? `import ${JSON.stringify(`https://${ALLOWED_HOST}/client/worker-chunk.js`)};`
@@ -328,6 +329,16 @@ export async function captureQaWssProof(proveWss, ...args) {
   }
 }
 
+export async function captureQaScenarioWssProof(qa, scenario, contextInfo, release, manifest, progress, tracker) {
+  const options = scenario === "private-client-worker"
+    ? {expectedConnectionCount: PRIVATE_CLIENT_WORKER_SOCKET_COUNT}
+    : undefined;
+  return captureQaWssProof(
+    (...args) => qa.proveWss(...args, options),
+    contextInfo, release, manifest, progress, tracker,
+  );
+}
+
 export function assertQaWssProof(proof, expected, label) {
   if (proof.error) {
     const message = typeof proof.error.message === "string"
@@ -359,8 +370,8 @@ async function runQaScenario(directory, scenario, certificate, qa) {
     const tracker = await qa.installNetworkGuards(contextInfo, fixture.release, null);
     const progress = createAcceptanceProgress({ sourceCommit: SOURCE_COMMIT });
     const manifest = { endpoint: fixture.manifest.endpoint, fingerprint: fixture.manifest.fingerprint };
-    const proof = await captureQaWssProof(
-      (...args) => qa.proveWss(...args), contextInfo, fixture.release, manifest, progress, tracker,
+    const proof = await captureQaScenarioWssProof(
+      qa, scenario, contextInfo, fixture.release, manifest, progress, tracker,
     );
     return { ...proof, upgrades: fixture.upgrades() };
   } catch (error) {
@@ -597,8 +608,11 @@ async function main() {
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
     assertQaWssProof(qaSharedWorker, { connectionCount: 1, status101: true }, "qaSharedWorker");
     const qaPrivateClientWorker = await runQaScenario(directory, "private-client-worker", certificate, qa);
-    assertQaWssProof(qaPrivateClientWorker, { connectionCount: 4, status101: true }, "qaPrivateClientWorker");
-    assert.equal(qaPrivateClientWorker.upgrades, 4, "qaPrivateClientWorker.upgrades");
+    assertQaWssProof(qaPrivateClientWorker, {
+      connectionCount: PRIVATE_CLIENT_WORKER_SOCKET_COUNT,
+      status101: true,
+    }, "qaPrivateClientWorker");
+    assert.equal(qaPrivateClientWorker.upgrades, PRIVATE_CLIENT_WORKER_SOCKET_COUNT, "qaPrivateClientWorker.upgrades");
     const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
     assertQaWssProof(qaDedicatedWorker, { connectionCount: 1, status101: true }, "qaDedicatedWorker");
     const qaNestedWorker = await runQaScenario(directory, "nested-worker", certificate, qa);
