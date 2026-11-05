@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: teagram-deployer
+  namespace: teagram
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: teagram-deployer
+  namespace: teagram
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["create", "get", "list", "patch", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "patch", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["create", "get", "list", "patch", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: teagram-deployer
+  namespace: teagram
+subjects:
+  - kind: ServiceAccount
+    name: teagram-deployer
+    namespace: teagram
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: teagram-deployer
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: teagram-deployer-token
+  namespace: teagram
+  annotations:
+    kubernetes.io/service-account.name: teagram-deployer
+type: kubernetes.io/service-account-token

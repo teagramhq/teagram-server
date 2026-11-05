@@ -1428,52 +1428,12 @@ jobs:
           done
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
-      - name: Verify Pod Security blocks deployer host escape
+      - name: Verify deployer RBAC and Pod Security boundaries
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl apply --filename deploy/k8s/base/namespace.yaml
-          kubectl apply --filename - <<'EOF'
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: teagram-deployer
-            namespace: teagram
-          automountServiceAccountToken: false
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: Role
-          metadata:
-            name: teagram-deployer
-            namespace: teagram
-          rules:
-            - apiGroups: ["*"]
-              resources: ["*"]
-              verbs: ["*"]
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: RoleBinding
-          metadata:
-            name: teagram-deployer
-            namespace: teagram
-          subjects:
-            - kind: ServiceAccount
-              name: teagram-deployer
-              namespace: teagram
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: Role
-            name: teagram-deployer
-          ---
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: teagram-deployer-token
-            namespace: teagram
-            annotations:
-              kubernetes.io/service-account.name: teagram-deployer
-          type: kubernetes.io/service-account-token
-          EOF
+          kubectl apply --filename deploy/k8s/deployer-access.yaml
           kubectl wait --for=create secret/teagram-deployer-token \
             --namespace teagram --timeout=60s >/dev/null
           kubectl wait --for="jsonpath={.data.token}" secret/teagram-deployer-token \
@@ -1482,9 +1442,39 @@ jobs:
             --namespace teagram --timeout=60s >/dev/null
           kubectl get secret teagram-deployer-token --namespace teagram --output json |
             python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", {}); sys.exit(0 if data.get("token") and data.get("ca.crt") else 1)'
-          kubectl auth can-i create pods \
-            --as=system:serviceaccount:teagram:teagram-deployer \
-            --namespace teagram | grep -Fx yes
+          expect_deployer_can_i() {
+            local expected=$1 verb=$2 resource=$3 answer status
+            shift 3
+            if answer=$(kubectl auth can-i "$verb" "$resource" \
+              --as=system:serviceaccount:teagram:teagram-deployer "$@"); then
+              status=0
+            else
+              status=$?
+            fi
+            case "$expected:$status:$answer" in
+              yes:0:yes|no:1:no) ;;
+              *) echo "unexpected deployer authorization: $verb $resource => $status:$answer" >&2; exit 1 ;;
+            esac
+          }
+          expect_deployer_can_i yes create deployments --namespace teagram --api-group apps
+          expect_deployer_can_i yes patch statefulsets --namespace teagram --api-group apps
+          expect_deployer_can_i yes create jobs --namespace teagram --api-group batch
+          expect_deployer_can_i yes patch services --namespace teagram
+          expect_deployer_can_i yes create configmaps --namespace teagram
+          expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
+          expect_deployer_can_i yes list pods --namespace teagram
+          expect_deployer_can_i yes get pods/log --namespace teagram
+          expect_deployer_can_i yes list events --namespace teagram
+          expect_deployer_can_i no create pods --namespace teagram
+          for secret_verb in get list watch create update patch delete; do
+            expect_deployer_can_i no "$secret_verb" secrets --namespace teagram
+          done
+          expect_deployer_can_i no create roles --namespace teagram --api-group rbac.authorization.k8s.io
+          expect_deployer_can_i no create rolebindings --namespace teagram --api-group rbac.authorization.k8s.io
+          expect_deployer_can_i no create serviceaccounts --namespace teagram
+          expect_deployer_can_i no create serviceaccounts/token --namespace teagram
+          expect_deployer_can_i no '*' '*' --namespace teagram
+          expect_deployer_can_i no '*' '*' --namespace default
           namespace_scope_stderr="$RUNNER_TEMP/teagram-deployer-namespaces.stderr"
           if namespace_scope_answer=$(kubectl auth can-i '*' namespaces \
             --as=system:serviceaccount:teagram:teagram-deployer \
@@ -1523,8 +1513,7 @@ jobs:
                   path: /
                   type: Directory
           EOF
-          if output=$(kubectl --as=system:serviceaccount:teagram:teagram-deployer \
-            create --dry-run=server --filename "$pod" 2>&1); then
+          if output=$(kubectl create --dry-run=server --filename "$pod" 2>&1); then
             echo "Pod Security Admission accepted the privileged hostPath pod" >&2
             exit 1
           fi

@@ -314,6 +314,7 @@ assert_hex_length() {
 }
 
 [[ -f $REPO_ROOT/deploy/k8s/teagram-k3s-ops.sh ]] || fail 'forced-command menu is missing from this checkout'
+[[ -f $REPO_ROOT/deploy/k8s/deployer-access.yaml ]] || fail 'deployer access manifest is missing from this checkout'
 incus info "$SOURCE_INSTANCE" >/dev/null 2>&1 || fail 'the live teagram LXC is unavailable'
 incus exec "$SOURCE_INSTANCE" -- docker inspect teagram-teagramd-1 teagram-postgres-1 \
   teagram-rustfs-1 teagram-link-edge-selector-1 teagram-web-cloudflared >/dev/null ||
@@ -610,47 +611,7 @@ if (not isinstance(labels, dict) or
 '; then
   fail 'the teagram namespace does not enforce the Pod Security baseline'
 fi
-apply_manifest 'deployer RBAC and token manifest' <<'EOF'
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: teagram-deployer
-  namespace: teagram
-automountServiceAccountToken: false
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: teagram-deployer
-  namespace: teagram
-rules:
-  - apiGroups: ["*"]
-    resources: ["*"]
-    verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: teagram-deployer
-  namespace: teagram
-subjects:
-  - kind: ServiceAccount
-    name: teagram-deployer
-    namespace: teagram
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: teagram-deployer
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: teagram-deployer-token
-  namespace: teagram
-  annotations:
-    kubernetes.io/service-account.name: teagram-deployer
-type: kubernetes.io/service-account-token
-EOF
+apply_manifest 'deployer RBAC and token manifest' < "$REPO_ROOT/deploy/k8s/deployer-access.yaml"
 
 apply_env_resource configmap teagramd-runtime \
   "TG_PUBLIC_LINK_PREFIX=$TG_PUBLIC_LINK_PREFIX" \
@@ -700,7 +661,6 @@ json.dump(secret, sys.stdout, separators=(",", ":"))
 ' | apply_manifest secret/teagramd-media-keys
 
 admission_result=$(incus exec "$INSTANCE" -- k3s kubectl \
-  --as=system:serviceaccount:teagram:teagram-deployer \
   create --dry-run=server -f - 2>&1 <<'EOF'
 apiVersion: v1
 kind: Pod
@@ -823,7 +783,24 @@ expect_deployer_can_i() {
   esac
 }
 
-expect_deployer_can_i yes '*' '*' --namespace teagram
+expect_deployer_can_i yes create deployments --namespace teagram --api-group apps
+expect_deployer_can_i yes patch statefulsets --namespace teagram --api-group apps
+expect_deployer_can_i yes create jobs --namespace teagram --api-group batch
+expect_deployer_can_i yes patch services --namespace teagram
+expect_deployer_can_i yes create configmaps --namespace teagram
+expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
+expect_deployer_can_i yes list pods --namespace teagram
+expect_deployer_can_i yes get pods/log --namespace teagram
+expect_deployer_can_i yes list events --namespace teagram
+expect_deployer_can_i no create pods --namespace teagram
+for secret_verb in get list watch create update patch delete; do
+  expect_deployer_can_i no "$secret_verb" secrets --namespace teagram
+done
+expect_deployer_can_i no create roles --namespace teagram --api-group rbac.authorization.k8s.io
+expect_deployer_can_i no create rolebindings --namespace teagram --api-group rbac.authorization.k8s.io
+expect_deployer_can_i no create serviceaccounts --namespace teagram
+expect_deployer_can_i no create serviceaccounts/token --namespace teagram
+expect_deployer_can_i no '*' '*' --namespace teagram
 expect_deployer_can_i no '*' '*' --namespace default
 expect_deployer_can_i no '*' namespaces
 

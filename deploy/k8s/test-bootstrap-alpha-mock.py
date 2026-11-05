@@ -235,16 +235,27 @@ def kubectl(args, state):
         print(json.dumps(create_from_env(args, sys.stdin.read())))
         sys.exit(0)
     if args[:2] == ["auth", "can-i"]:
-        if "namespaces" in args:
+        verb, resource = args[2:4]
+        namespace = args[args.index("--namespace") + 1] if "--namespace" in args else ""
+        group = args[args.index("--api-group") + 1] if "--api-group" in args else ""
+        if resource == "namespaces":
             print(
                 "Warning: resource 'namespaces' is not namespace scoped",
                 file=sys.stderr,
             )
-            answer = "no"
-        elif "--namespace" in args and args[args.index("--namespace") + 1] == NAMESPACE:
-            answer = "yes"
-        else:
-            answer = "no"
+        allowed = False
+        if namespace == NAMESPACE:
+            if group == "apps" and resource in ("deployments", "statefulsets"):
+                allowed = verb in {"create", "get", "list", "patch", "watch"}
+            elif group == "batch" and resource == "jobs":
+                allowed = verb in {"create", "get", "list", "patch", "watch"}
+            elif group == "" and resource in ("configmaps", "services"):
+                allowed = verb in {"create", "get", "list", "patch", "watch"}
+            elif group == "" and resource in ("persistentvolumeclaims", "pods", "events"):
+                allowed = verb in {"get", "list", "watch"}
+            elif group == "" and resource == "pods/log":
+                allowed = verb == "get"
+        answer = "yes" if allowed else "no"
         print(answer)
         sys.exit(0 if answer == "yes" else 1)
     if args[0] == "get" and args[1] == "namespace":

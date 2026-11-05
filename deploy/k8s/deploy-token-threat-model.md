@@ -10,10 +10,11 @@ holds a copy of that kubeconfig. It does not cover the RSA server identity
 (see `identity-threat-model.md`) or the forced-command operations menu.
 
 The token is the only credential a deploy job presents to the k3s API. Its
-Role grants every verb on every resource in `teagram`, so whoever holds it
-can read every Secret in that namespace: the PostgreSQL, RustFS and blob
-credentials, the media keys, the Cloudflare tunnel token and the GHCR pull
-credential listed in `README.md`.
+Role can create, get, list, patch and watch Deployments and StatefulSets,
+Jobs, Services and ConfigMaps in `teagram`. It can read PVCs, Pods, events and
+Pod logs. It cannot read or write Secrets, create Pods, ServiceAccounts,
+TokenRequests, Roles or RoleBindings. The production overlay's generated
+ConfigMaps and workload resources fit this allowlist.
 
 ## Actors and trust
 
@@ -26,23 +27,26 @@ port (it still needs the token, but the port is reachable).
 
 ## Scope of the token
 
-The Role is `*` on `*` inside `teagram` only. The bootstrap's `can-i` checks
-confirm that the token cannot manage cluster-scoped resources or the `default`
-namespace. Because a workload could otherwise use `hostPath` and privileged
-mode to reach the node, the namespace enforces Pod Security Admission's
-`baseline` profile at Kubernetes `v1.37`. That profile blocks privileged
-containers, host namespaces, and `hostPath` volumes while allowing the current
-workload manifests. The bootstrap verifies the namespace label and submits a
-server-side dry-run of a privileged `hostPath` pod as the deploy ServiceAccount;
-it fails unless admission rejects that pod for both violations.
+The Role is limited to the named workload resources and verbs in
+`deployer-access.yaml`; it grants no access to RBAC, ServiceAccounts, token
+requests or Secrets. The bootstrap's `can-i` checks confirm that the token has
+the permissions needed to apply and inspect workloads while denying
+cluster-scoped resources, other namespaces, Pod creation and credential or
+RBAC escalation. Because a workload could otherwise use `hostPath` and
+privileged mode to reach the node, the namespace enforces Pod Security
+Admission's `baseline` profile at Kubernetes `v1.37`. That profile blocks
+privileged containers, host namespaces, and `hostPath` volumes while allowing
+the current workload manifests. The bootstrap verifies the namespace label
+and submits a server-side dry-run of a privileged `hostPath` pod; it fails
+unless admission rejects that pod for both violations.
 See Kubernetes' [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
 and [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
 references for the namespace enforcement and baseline rules.
 
-The credential can still read every Secret in `teagram` and change any
-namespace workload. The profile prevents the direct node-root escape described
-above; it does not reduce the namespace-wide data and availability impact of a
-compromised deploy job.
+The credential cannot read Secret objects directly, but it can change
+workloads whose controllers may mount those Secrets into Pods. This leaves the
+accepted namespace data and availability impact of a compromised deploy job.
+Pod Security blocks the direct node-root escape described above.
 
 ## GitHub secret storage
 
@@ -76,17 +80,36 @@ on a fixed interval (quarterly is the recommendation).
 
 Rotation changes a production credential, so it requires Tech Lead approval on
 the issue. Take a backup of the namespace Secrets before starting, and record
-the restore path on the issue. The Steward runs it on `alpha`:
+the restore path on the issue. The Steward runs it on `alpha`. Before
+rotating, inspect these name-only inventories and compare them with the
+expected `default` and `teagram-deployer` ServiceAccounts, the
+`teagram-deployer` RoleBinding, and the `teagram-deployer-token` service-account
+token Secret. Do not print Secret data:
+
+```sh
+sudo incus exec teagram-k3s -- k3s kubectl get serviceaccounts --namespace teagram -o name
+sudo incus exec teagram-k3s -- k3s kubectl get rolebindings --namespace teagram -o name
+sudo incus exec teagram-k3s -- k3s kubectl get secrets --namespace teagram \
+  -o custom-columns=NAME:.metadata.name,TYPE:.type --no-headers
+```
+
+During suspected exposure, remove unexpected RoleBindings first, then
+unexpected ServiceAccounts and their `kubernetes.io/service-account-token`
+Secrets. Re-list and verify only the expected entries remain.
 
 1. Confirm no deploy job is running.
-2. Delete the Secret `teagram-deployer-token`. The old token stops working at
-   once.
+2. Delete the Secret `teagram-deployer-token`, then delete the
+   `teagram-deployer` ServiceAccount. Deleting the ServiceAccount invalidates
+   TokenRequest tokens bound to it; deleting the Secret invalidates its static
+   token.
 3. Remove `/root/teagram-k3s-deploy.kubeconfig`. The bootstrap refuses to
    overwrite a kubeconfig that does not match the cluster.
 4. Run `sudo deploy/k8s/bootstrap-alpha.sh --apply`. It recreates the Secret,
-   waits for the token and CA, and writes the new kubeconfig.
+   ServiceAccount, Role and RoleBinding, waits for the token and CA, and writes
+   the new kubeconfig.
 5. Replace the GitHub environment secret with the new kubeconfig, then check
-   the token with `kubectl auth can-i '*' '*' --namespace teagram` and a
+   the workload permissions and denied RBAC, Secret and ServiceAccount
+   operations with the bootstrap's `kubectl auth can-i` checks, plus a
    server-side dry run of the deploy manifests.
 6. Delete any local copy of the old kubeconfig.
 
@@ -99,8 +122,9 @@ rotation.
 
 ## Residual risk
 
-- A holder of the token can read namespace Secrets and change or disrupt
-  production workloads.
+- A holder of the token can change or disrupt production workloads and may
+  expose namespace Secrets by mounting them into workloads. The token has no
+  direct Secret read or write permission.
 - The token does not expire and is valid until its Secret is deleted.
 - Secrets sit in plaintext in the k3s datastore until encryption at rest is
   enabled.
