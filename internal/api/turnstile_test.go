@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,18 +25,22 @@ type fakeTurnstileVerifier struct {
 	allowReplay bool
 }
 
-func (f *fakeTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
+func (f *fakeTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, remoteIP string) (string, error) {
+	action := "signup"
 	f.verifyCalls++
 	f.actions = append(f.actions, action)
 	f.remoteIPs = append(f.remoteIPs, remoteIP)
 	if f.failure != nil {
-		return f.failure
+		return "", f.failure
+	}
+	if !slices.Contains(allowedActions, action) {
+		return "", errors.New("rejected")
 	}
 	if f.seen[token] && !f.allowReplay {
-		return errors.New("rejected")
+		return "", errors.New("rejected")
 	}
 	f.seen[token] = true
-	return nil
+	return action, nil
 }
 
 func TestSignUpTurnstileRequiresFreshTokenBeforeChargingIPLimit(t *testing.T) {

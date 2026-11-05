@@ -1,3 +1,34 @@
+## Alpha cluster bootstrap
+
+On `alpha`, review the host changes and then apply the bootstrap:
+
+```sh
+sudo deploy/k8s/bootstrap-alpha.sh --dry-run
+sudo deploy/k8s/bootstrap-alpha.sh --apply
+```
+
+The script
+creates the `teagram` namespace, transfers only the production credentials and
+runtime values described below from the live `teagram` LXC, installs the
+namespace-scoped deploy account and agent operations menu, and writes the
+kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode `0600`. Store that
+file in the designated GitHub environment secret. The API and operations SSH
+menu are exposed through Tailscale Serve only; the Incus proxy listeners bind
+to host loopback.
+
+Before workloads have written production data, rollback on `alpha` with:
+
+```sh
+sudo tailscale serve --yes --tcp=6443 off
+sudo tailscale serve --yes --tcp=2222 off
+sudo incus delete --force teagram-k3s
+sudo rm -f /root/teagram-k3s-deploy.kubeconfig
+```
+
+The old `teagram` LXC remains untouched. After production data is written,
+first restore the matching PostgreSQL and PVC snapshot using the recovery
+procedure below before removing the cluster.
+
 ## Kustomize layouts
 
 `base/` contains the single-replica teagramd, PostgreSQL, and RustFS workloads,
@@ -11,6 +42,10 @@ the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
+Read the [deploy credential threat model](deploy-token-threat-model.md) before
+storing, using, or rotating the production kubeconfig. The bootstrap enforces
+the Pod Security `baseline` profile on `teagram` and verifies it rejects a
+privileged `hostPath` pod.
 
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
@@ -46,8 +81,11 @@ by the cluster's secret and configuration management before it is applied:
 | `ghcr-pull` Secret | Docker config for the private GHCR packages |
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
-`POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The
-server's RSA identity and auth-key encryption key live on the `key-data` PVC;
+`POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha
+bootstrap creates the `teagram` namespace; the overlays intentionally do not
+include a Namespace object so the namespace-scoped deploy account can apply
+them. The server's RSA identity and auth-key encryption key live on the
+`key-data` PVC;
 back up and restore that volume together with Postgres when moving an existing
 installation. `legacy-blobs` is mounted read-only and retained for recovery.
 RustFS data lives on its own PVC.
