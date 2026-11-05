@@ -840,15 +840,25 @@ check_bot_api_qa_contract() {
     qa_fail 'the Bot API QA workflow must be manually dispatched only'
   [[ "$(bot_api_qa_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
     qa_fail 'the Bot API QA workflow must require an issue key for CI routing'
-  [[ "$(bot_api_qa_query '.jobs."store-qa-token".needs | sort | join(",")')" == 'apply-and-probe,prepare-qa-recipient' ]] ||
+  [[ "$(bot_api_qa_query '.jobs | keys | sort | join(",")')" == 'check-qa-token-recipient,deploy-bot-api,ops-qa-bot-credential' ]] ||
+    qa_fail 'the Bot API QA jobs must use stage-prefixed kebab-case IDs'
+  [[ "$(bot_api_qa_query '.jobs."check-qa-token-recipient".name')" == 'check: qa-token-recipient' ]] ||
+    qa_fail 'the recipient job must follow the check-stage naming convention'
+  [[ "$(bot_api_qa_query '.jobs."deploy-bot-api".name')" == 'deploy: bot-api (prod)' ]] ||
+    qa_fail 'the production Bot API job must follow the deploy-stage naming convention'
+  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".name')" == 'ops: qa-bot-credential' ]] ||
+    qa_fail 'the QA credential job must follow the ops-stage naming convention'
+  [[ "$(bot_api_qa_query '.jobs."deploy-bot-api".needs')" == 'check-qa-token-recipient' ]] ||
+    qa_fail 'the production Bot API job must wait for recipient preparation'
+  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".needs | sort | join(",")')" == 'check-qa-token-recipient,deploy-bot-api' ]] ||
     qa_fail 'QA credential storage must wait for the recipient and successful Bot API probes'
-  [[ "$(bot_api_qa_query '.jobs."store-qa-token".environment')" == 'demo' ]] ||
+  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".environment')" == 'demo' ]] ||
     qa_fail 'QA credential storage must use the demo environment'
-  [[ "$(bot_api_qa_query '.jobs."store-qa-token".permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
+  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
     qa_fail 'QA credential storage must use read-only GitHub permissions'
 
   local provision_run apply_response_pattern source_sha env_sha
-  provision_run="$(bot_api_qa_query '.jobs."apply-and-probe".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run')"
+  provision_run="$(bot_api_qa_query '.jobs."deploy-bot-api".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run')"
   apply_response_pattern="$(awk -F "'" '/grep -Eq .*apply_result/ {print $2}' <<< "$provision_run")"
   [[ -n "$apply_response_pattern" ]] || qa_fail 'the production apply response must have an explicit output check'
   printf -v source_sha '%040d' 1
@@ -861,7 +871,7 @@ check_bot_api_qa_contract() {
     qa_fail 'the production apply response check must accept an already-applied configuration'
 
   local storage_job_json
-  storage_job_json="$(bot_api_qa_query '.jobs."store-qa-token" | to_json')"
+  storage_job_json="$(bot_api_qa_query '.jobs."ops-qa-bot-credential" | to_json')"
   if ! BOT_API_STORAGE_JOB_JSON="$storage_job_json" python3 - <<'PY'
 import json
 import os
@@ -1019,9 +1029,10 @@ self_test() {
   done
 
   local bot_api_qa_mutations=(
-    'del(.jobs."store-qa-token".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"))'
-    '(.jobs."store-qa-token".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683") | .with.ref) = "${{ github.ref }}"'
-    '(.jobs."apply-and-probe".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run) |= sub("env_sha256"; "unexpected_env_sha256")'
+    '(.jobs."deploy-bot-api".name) = "verify: bot API (prod)"'
+    'del(.jobs."ops-qa-bot-credential".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"))'
+    '(.jobs."ops-qa-bot-credential".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683") | .with.ref) = "${{ github.ref }}"'
+    '(.jobs."deploy-bot-api".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run) |= sub("env_sha256"; "unexpected_env_sha256")'
   )
   for mutation in "${bot_api_qa_mutations[@]}"; do
     yq "$mutation" "$bot_api_qa_workflow" > "$tmp/bot-api-qa.yml"

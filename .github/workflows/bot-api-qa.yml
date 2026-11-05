@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare-qa-recipient:
-    name: 'prepare: qa token recipient'
+  check-qa-token-recipient:
+    name: 'check: qa-token-recipient'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment: demo
@@ -55,9 +55,9 @@ jobs:
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/qa-recipient"
 
-  apply-and-probe:
-    name: 'verify: bot API (prod)'
-    needs: prepare-qa-recipient
+  deploy-bot-api:
+    name: 'deploy: bot-api (prod)'
+    needs: check-qa-token-recipient
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     environment: production
@@ -269,9 +269,9 @@ jobs:
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/ssh-bot-api" "$RUNNER_TEMP/age-bin"
 
-  store-qa-token:
-    name: 'store: qa bot credential'
-    needs: [prepare-qa-recipient, apply-and-probe]
+  ops-qa-bot-credential:
+    name: 'ops: qa-bot-credential'
+    needs: [check-qa-token-recipient, deploy-bot-api]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     environment: demo
