@@ -171,7 +171,7 @@ func reactionsToTL(reactions []store.Reaction, viewerID int64, canSeeList bool) 
 			}
 			continue
 		}
-		result := tg.ReactionCount{Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction}, Count: 1}
+		result := tg.ReactionCount{Reaction: reactionToTL(r.Reaction), Count: 1}
 		if r.ReactorID == viewerID {
 			result.SetChosenOrder(1)
 		}
@@ -188,7 +188,7 @@ func channelReactionsToTL(reactions []store.ChannelReactionCount, canSeeList boo
 	}
 	for i, reaction := range reactions {
 		result := tg.ReactionCount{
-			Reaction: &tg.ReactionEmoji{Emoticon: reaction.Reaction},
+			Reaction: reactionToTL(reaction.Reaction),
 			Count:    reaction.Count,
 		}
 		if reaction.Chosen {
@@ -637,6 +637,9 @@ func (h *handlers) userToTLWithAccessHash(u store.User, self bool, contact store
 	}
 	if u.Username != nil {
 		tlUser.Username = *u.Username
+	}
+	if u.EmojiStatusDocumentID != 0 {
+		tlUser.SetEmojiStatus(&tg.EmojiStatus{DocumentID: u.EmojiStatusDocumentID})
 	}
 	return tlUser
 }

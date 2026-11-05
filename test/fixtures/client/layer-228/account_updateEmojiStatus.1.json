@@ -1,0 +1,18 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/account_updateEmojiStatus.1.txt",
+  "method": "account.updateEmojiStatus",
+  "request": {
+    "type": "account.updateEmojiStatus",
+    "fields": {
+      "emoji_status": {
+        "type": "emojiStatus",
+        "flags": 0,
+        "fields": {
+          "document_id": "<N>"
+        }
+      }
+    }
+  }
+}

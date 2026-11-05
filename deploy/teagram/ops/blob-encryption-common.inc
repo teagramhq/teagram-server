@@ -215,7 +215,7 @@ configure_compose() {
   compose_stderr="$EVIDENCE_ROOT/compose-render-$RUN_ID.stderr"
   [[ ! -e "$compose_stderr" && ! -L "$compose_stderr" ]] || \
     ops_fail 'Compose render diagnostic path already exists'
-  if ! "${COMPOSE[@]}" config --format json </dev/null \
+  if ! "${COMPOSE[@]}" --profile migration config --format json </dev/null \
     > "$OPS_TEMP_DIR/compose.json" 2> "$compose_stderr"; then
     chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
     ops_fail "live Compose render failed; private diagnostic retained at $compose_stderr"

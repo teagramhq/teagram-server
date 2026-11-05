@@ -12,6 +12,36 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestReactionEntrypointsRejectCustomEmojiValuesWithoutLivenessLock(t *testing.T) {
+	t.Parallel()
+	var s *store.Store
+	for _, call := range []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "message reaction",
+			run: func() error {
+				_, err := s.SendReaction(context.Background(), 1, 1, "c:42")
+				return err
+			},
+		},
+		{
+			name: "channel reaction",
+			run: func() error {
+				_, err := s.SetChannelMessageReaction(context.Background(), 1, 1, 1, "c:42")
+				return err
+			},
+		},
+	} {
+		t.Run(call.name, func(t *testing.T) {
+			if err := call.run(); !errors.Is(err, store.ErrReactionInvalid) {
+				t.Fatalf("custom emoji value without liveness validation = %v, want ErrReactionInvalid", err)
+			}
+		})
+	}
+}
+
 // TestSendReactionBlockedByDeleteLock holds the per-owner advisory locks from
 // a raw transaction, soft-deletes the message, then starts SendReaction in a
 // goroutine. SendReaction blocks at lockOwners until the holding tx commits,

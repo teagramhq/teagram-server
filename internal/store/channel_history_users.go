@@ -44,15 +44,16 @@ func (s *Store) ChannelHistoryUsersForViewer(ctx context.Context, viewerID int64
 	users := make([]ChannelHistoryUser, 0, len(rows))
 	for _, row := range rows {
 		user := UserFromDB(db.UserByIDRow{
-			ID:         row.ID,
-			Phone:      row.Phone,
-			FirstName:  row.FirstName,
-			LastName:   row.LastName,
-			CreatedAt:  row.CreatedAt,
-			IsOnline:   row.IsOnline,
-			LastSeenAt: row.LastSeenAt,
-			Username:   row.Username,
-			Kind:       row.Kind,
+			ID:                    row.ID,
+			Phone:                 row.Phone,
+			FirstName:             row.FirstName,
+			LastName:              row.LastName,
+			CreatedAt:             row.CreatedAt,
+			IsOnline:              row.IsOnline,
+			LastSeenAt:            row.LastSeenAt,
+			Username:              row.Username,
+			Kind:                  row.Kind,
+			EmojiStatusDocumentID: row.EmojiStatusDocumentID,
 		})
 		visibility := LastSeenVisibility{Level: LastSeenAccessCoarse, Bucket: LastSeenBucketRecently}
 		if row.ID != viewerID {
