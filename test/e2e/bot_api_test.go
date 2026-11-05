@@ -291,6 +291,9 @@ func runBotAPIStockGetUpdatesSequence(t *testing.T, f *smokeFixture, serverURL, 
 func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
+	// Cancel any in-flight long polls before the HTTP server cleanups run.
+	pollCtx, cancelPolls := context.WithCancel(f.ctx)
+	defer cancelPolls()
 	bot, token, err := f.store.CreateBot(f.ctx, "smoke_replica_poll_bot", "Replica")
 	if err != nil {
 		t.Fatalf("create bot: %v", err)
@@ -316,7 +319,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("human sends first message: %v", err)
 	}
-	first := getBotAPIUpdates(t, f.ctx, client, firstURL, token, 0, 0)
+	first := getBotAPIUpdates(t, pollCtx, client, firstURL, token, 0, 0)
 	firstUpdates := decodeBotAPIUpdates(t, first)
 	if first.Code != http.StatusOK || len(firstUpdates) != 1 || firstUpdates[0].Message.Text != "first update" {
 		t.Fatalf("initial updates = (%d, %+v), want first update", first.Code, firstUpdates)
@@ -325,7 +328,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 
 	firstPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, firstURL, token, confirmedOffset+1, 30)
+		response, err := doBotAPIGetUpdates(pollCtx, client, firstURL, token, confirmedOffset+1, 30)
 		firstPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
@@ -336,7 +339,7 @@ func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
 
 	secondPoll := make(chan asyncBotAPIResponse, 1)
 	go func() {
-		response, err := doBotAPIGetUpdates(f.ctx, client, secondURL, token, confirmedOffset, 30)
+		response, err := doBotAPIGetUpdates(pollCtx, client, secondURL, token, confirmedOffset, 30)
 		secondPoll <- asyncBotAPIResponse{response: response, err: err}
 	}()
 	select {
@@ -519,10 +522,10 @@ func testSmokeBotAPIGetMe(t *testing.T) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			t.Errorf("Bot API shutdown failed")
+			t.Errorf("Bot API shutdown failed for %s: %v", listener.Addr(), err)
 		}
 		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Bot API server stopped unexpectedly")
+			t.Errorf("Bot API server at %s stopped unexpectedly: %v", listener.Addr(), err)
 		}
 	})
 
