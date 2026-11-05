@@ -23,7 +23,8 @@ make_fixture() {
   local case_dir="$TMP/$name" repo="$TMP/$name/opt/teagram" bin="$TMP/$name/bin"
   local test_op="$TMP/$name/bot-api-qa.sh" runner="$TMP/$name/fixture-runner.sh"
   local helper="$TMP/$name/blob-transition-runner.py" lock="$TMP/$name/teagram-deploy.lock"
-  mkdir -p -m 700 "$repo/.state/blob-mode" "$bin"
+  mkdir -p "$repo/.state/blob-mode" "$bin"
+  chmod 700 "$repo/.state/blob-mode" "$bin"
   if [[ "$configured" == true ]]; then
     printf 'TEAGRAM_TEST_SETTING=fixture\nTG_BOT_API_LISTEN_ADDR=127.0.0.1:2447\nTEAGRAM_BOT_API_HOST_IP=100.124.236.66\n' > "$repo/.env"
   else
