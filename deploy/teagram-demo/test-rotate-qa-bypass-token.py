@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -18,6 +19,7 @@ import tempfile
 import textwrap
 import threading
 import unittest
+from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).with_name("rotate-qa-bypass-token.py")
@@ -30,6 +32,37 @@ CONTROL_SPEC = importlib.util.spec_from_file_location("demo_haproxy_control", CO
 assert CONTROL_SPEC is not None and CONTROL_SPEC.loader is not None
 HAPROXY_CONTROL = importlib.util.module_from_spec(CONTROL_SPEC)
 CONTROL_SPEC.loader.exec_module(HAPROXY_CONTROL)
+
+
+class RotationErrorTests(unittest.TestCase):
+    def test_checked_file_os_errors_identify_cause_without_exposing_path(self) -> None:
+        for code in (errno.EACCES, errno.ENOENT, errno.ELOOP):
+            with self.subTest(code=code):
+                error = OSError(code, os.strerror(code), "secret-value")
+                with mock.patch.object(ROTATION.os, "open", side_effect=error):
+                    with self.assertRaises(ROTATION.RotationError) as caught:
+                        ROTATION._read_checked_file(pathlib.Path("unused"), "token", 0, 0, 0o600)
+                self.assertIn(os.strerror(code), str(caught.exception))
+                self.assertNotIn("secret-value", str(caught.exception))
+
+    def test_snapshot_verification_failures_remove_partial_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "snapshot"
+            results = (
+                ROTATION.RotationError("snapshot-unavailable"),
+                (b"wrong", mock.Mock(st_mode=0o100600)),
+            )
+            for read_result in results:
+                with self.subTest(read_result=read_result):
+                    read_mock = {"side_effect": read_result} if isinstance(
+                        read_result, Exception
+                    ) else {"return_value": read_result}
+                    with mock.patch.object(ROTATION.os, "fchown"), mock.patch.object(
+                        ROTATION, "_read_checked_file", **read_mock
+                    ):
+                        with self.assertRaises(ROTATION.RotationError):
+                            ROTATION._snapshot(path, b"secret-value")
+                    self.assertFalse(path.exists())
 
 
 @unittest.skipUnless(os.geteuid() == 0, "fixture ownership checks require root")
@@ -209,7 +242,7 @@ class HaproxyControlTests(unittest.TestCase):
                         client, _ = admin_socket.accept()
                         with client:
                             commands.append(client.recv(1024).decode("ascii").strip())
-                            client.sendall(b"Shutdown started\n")
+                            client.sendall(b"\n")
                 except OSError as error:
                     errors.append(error)
                 finally:
@@ -234,24 +267,46 @@ class HaproxyControlTests(unittest.TestCase):
                 ],
             )
 
+    def test_shutdown_sessions_rejects_unknown_server_reply(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="teagram-haproxy-error-") as temporary:
+            socket_path = pathlib.Path(temporary) / "admin.sock"
+            admin_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            admin_socket.bind(str(socket_path))
+            admin_socket.listen(1)
+            admin_socket.settimeout(3)
+
+            def serve_error() -> None:
+                try:
+                    client, _ = admin_socket.accept()
+                    with client:
+                        client.recv(1024)
+                        client.sendall(b"No such server.\n\n")
+                finally:
+                    admin_socket.close()
+
+            thread = threading.Thread(target=serve_error)
+            thread.start()
+            error_output = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(error_output):
+                    with self.assertRaises(SystemExit):
+                        HAPROXY_CONTROL.slot_command(socket_path, "shutdown-sessions", "teagramd-next")
+            finally:
+                thread.join(timeout=4)
+            self.assertFalse(thread.is_alive())
+            self.assertIn("HAProxy rejected runtime command", error_output.getvalue())
+
     def test_wait_healthy_rejects_drained_status_without_opt_in(self) -> None:
-        original_server_row = HAPROXY_CONTROL.server_row
-        original_monotonic = HAPROXY_CONTROL.time.monotonic
-        original_sleep = HAPROXY_CONTROL.time.sleep
         clock = iter((0.0, 0.0, 2.0))
-        HAPROXY_CONTROL.server_row = lambda *_args: {
+        with mock.patch.object(HAPROXY_CONTROL, "server_row", return_value={
             "status": "DRAIN",
             "check_status": "L7OK",
-        }
-        HAPROXY_CONTROL.time.monotonic = lambda: next(clock)
-        HAPROXY_CONTROL.time.sleep = lambda _seconds: None
-        self.addCleanup(setattr, HAPROXY_CONTROL, "server_row", original_server_row)
-        self.addCleanup(setattr, HAPROXY_CONTROL.time, "monotonic", original_monotonic)
-        self.addCleanup(setattr, HAPROXY_CONTROL.time, "sleep", original_sleep)
-
-        with contextlib.redirect_stderr(io.StringIO()):
+        }), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                HAPROXY_CONTROL.wait_healthy(pathlib.Path("unused.sock"), "teagramd-next", 1)
+                HAPROXY_CONTROL.wait_healthy(
+                    pathlib.Path("unused.sock"), "teagramd-next", 1,
+                    monotonic=lambda: next(clock), sleep=lambda _seconds: None,
+                )
 
     def test_wait_healthy_accepts_healthy_drained_server_rows(self) -> None:
         with tempfile.TemporaryDirectory(prefix="teagram-haproxy-drain-") as temporary:
@@ -399,6 +454,7 @@ case ${1##*/} in
     chmod 0600 "$2"
     printf '%s\n' "$TEST_NEW_TOKEN" > "$TEST_TOKEN_FILE"
     : > "$TEST_ROTATION_RAN"
+    [[ ${FIXTURE_FAIL_ROTATOR:-0} != 1 ]] || exit 1
     printf '%s\n' 'rotation=pass token_length=64 snapshot=/var/backups/teagram-demo-turnstile-qa-bypass/turnstile-qa-bypass-token.fixture.abcdef01'
     ;;
   *) exit 91 ;;
@@ -571,6 +627,16 @@ demo_haproxy_control() {
         self.assertEqual(self.current_container.read_text(encoding="ascii"), "new-container\n")
         self.assertNotIn(self.old_token, result.stdout + result.stderr)
         self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def test_rotator_failure_after_install_stops_without_starting_server(self) -> None:
+        result = self._run_operation(FIXTURE_FAIL_ROTATOR="1")
+
+        self._assert_rotated_without_leaking(result)
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        self.assertIn("compose-stop", calls)
+        self.assertNotIn("compose-up", calls)
+        self.assertIn("server stopped", result.stderr)
+        self.assertEqual(self.current_container.read_text(encoding="ascii"), "")
 
     def test_compose_startup_readiness_failure_stops_old_container(self) -> None:
         result = self._run_operation(FIXTURE_FAIL_UP="1")

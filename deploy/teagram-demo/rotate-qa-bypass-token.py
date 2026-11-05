@@ -47,7 +47,7 @@ def _read_checked_file(
     except RotationError:
         raise
     except OSError as exc:
-        raise RotationError(f"{name}-unavailable") from exc
+        raise RotationError(f"{name}-unavailable: {exc.strerror}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -125,9 +125,13 @@ def _snapshot(path: pathlib.Path, content: bytes) -> None:
     else:
         os.close(descriptor)
 
-    copied, metadata = _read_checked_file(path, "snapshot", 0, 0, 0o600)
-    if copied != content or stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise RotationError("snapshot-verify-failed")
+    try:
+        copied, metadata = _read_checked_file(path, "snapshot", 0, 0, 0o600)
+        if copied != content or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise RotationError("snapshot-verify-failed")
+    except RotationError:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _install_token(
