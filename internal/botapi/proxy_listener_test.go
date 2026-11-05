@@ -2,6 +2,7 @@ package botapi_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +101,23 @@ func proxyRequest(t *testing.T, conn net.Conn, reader *bufio.Reader) int {
 }
 func proxyHeader(ip string) string { return fmt.Sprintf("PROXY TCP4 %s 100.64.0.1 1234 2447\r\n", ip) }
 
+func exhaustAuthBucket(t *testing.T, conn net.Conn, reader *bufio.Reader) {
+	t.Helper()
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 200 {
+		switch status := proxyRequest(t, conn, reader); status {
+		case http.StatusTooManyRequests:
+			return
+		case http.StatusUnauthorized:
+		default:
+			t.Fatalf("request %d status = %d, want 401 or 429", i, status)
+		}
+	}
+	t.Fatal("auth bucket did not exhaust within 200 requests")
+}
+
 func TestProxyPeersHaveIndependentAuthBuckets(t *testing.T) {
 	for _, tc := range []struct{ name, first, second string }{
 		{"ipv4 same subnet", proxyHeader("100.64.1.2"), proxyHeader("100.64.1.3")},
@@ -107,14 +126,7 @@ func TestProxyPeersHaveIndependentAuthBuckets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr := proxyServer(t, 10, "")
 			a, ar := proxyDial(t, addr, tc.first)
-			for i := range 20 {
-				if status := proxyRequest(t, a, ar); status != http.StatusUnauthorized {
-					t.Fatalf("request %d status = %d, want 401", i, status)
-				}
-			}
-			if status := proxyRequest(t, a, ar); status != http.StatusTooManyRequests {
-				t.Fatalf("exhausted peer status = %d, want 429", status)
-			}
+			exhaustAuthBucket(t, a, ar)
 			b, br := proxyDial(t, addr, tc.second)
 			if status := proxyRequest(t, b, br); status != http.StatusUnauthorized {
 				t.Fatalf("other peer status = %d, want 401", status)
@@ -126,15 +138,22 @@ func TestProxyPeersHaveIndependentAuthBuckets(t *testing.T) {
 func TestProxyMappedAndIPv4AddressesShareAuthBucket(t *testing.T) {
 	addr := proxyServer(t, 10, "")
 	conn, reader := proxyDial(t, addr, proxyHeader("100.64.1.2"))
-	for i := range 20 {
-		if status := proxyRequest(t, conn, reader); status != http.StatusUnauthorized {
-			t.Fatalf("request %d status = %d, want 401", i, status)
+	mapped, mappedReader := proxyDial(t, addr, "PROXY TCP6 ::ffff:100.64.1.2 ::ffff:100.64.0.1 5555 2447\r\n")
+	if err := mapped.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// Fewer than the burst size of probes cannot exhaust a separate mapped bucket.
+	for range 10 {
+		exhaustAuthBucket(t, conn, reader)
+		switch status := proxyRequest(t, mapped, mappedReader); status {
+		case http.StatusTooManyRequests:
+			return
+		case http.StatusUnauthorized:
+		default:
+			t.Fatalf("mapped peer status = %d, want 401 or 429", status)
 		}
 	}
-	mapped, mappedReader := proxyDial(t, addr, "PROXY TCP6 ::ffff:100.64.1.2 ::ffff:100.64.0.1 5555 2447\r\n")
-	if status := proxyRequest(t, mapped, mappedReader); status != http.StatusTooManyRequests {
-		t.Fatalf("mapped peer status = %d, want 429", status)
-	}
+	t.Fatal("mapped peer did not share the exhausted IPv4 bucket")
 }
 
 func TestProxyPeersHaveIndependentConnectionCaps(t *testing.T) {
@@ -216,5 +235,75 @@ func TestNonLoopbackWithoutProxyHeaderStillWorks(t *testing.T) {
 	conn, reader := proxyDial(t, addr, "")
 	if status := proxyRequest(t, conn, reader); status != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", status)
+	}
+}
+
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+func (l *lockedLog) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.buf.String() }
+
+func TestListenerLogsRejectedPreface(t *testing.T) {
+	var logs lockedLog
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	addr := proxyServer(t, 10, "192.0.2.5")
+	conn, reader := proxyDial(t, addr, proxyHeader("100.64.1.2"))
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadByte(); err == nil {
+		t.Fatal("untrusted preface accepted")
+	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		t.Fatal(err)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remote_ip=192.0.2.5") || !strings.Contains(got, "err=") {
+		t.Fatalf("preface rejection log = %q", got)
+	}
+}
+
+func TestListenerLogsPendingPrefaceCapacity(t *testing.T) {
+	var logs lockedLog
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	addr := proxyServer(t, 10, "")
+	for range 128 {
+		proxyDial(t, addr, "PROXY ")
+	}
+	conn, reader := proxyDial(t, addr, "PROXY ")
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadByte(); err == nil {
+		t.Fatal("connection above pending limit was accepted")
+	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		t.Fatalf("pending connection was not shed: %v", err)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remote_ip=127.0.0.1") || !strings.Contains(got, "pending") {
+		t.Fatalf("pending limit log = %q", got)
+	}
+}
+
+func TestListenerClosesStalledPreface(t *testing.T) {
+	addr := proxyServer(t, 10, "")
+	conn, reader := proxyDial(t, addr, "PROXY TCP4 100.64.")
+	if err := conn.SetReadDeadline(time.Now().Add(6 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadByte(); err == nil {
+		t.Fatal("stalled preface remained open")
+	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		t.Fatalf("stalled preface was not closed: %v", err)
 	}
 }

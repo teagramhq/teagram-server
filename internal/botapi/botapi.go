@@ -743,6 +743,7 @@ func (l *connectionLimitListener) acceptConnections() {
 				ip := remoteIP(conn.RemoteAddr().String())
 				parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
 				if err != nil {
+					slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
 					closeBotConn(conn)
 					return
 				}
@@ -753,6 +754,7 @@ func (l *connectionLimitListener) acceptConnections() {
 				}
 			}()
 		default:
+			slog.Warn("Bot API pending preface limit reached", "remote_ip", remoteIP(conn.RemoteAddr().String()).String(), "limit", maxPendingPrefaces)
 			closeBotConn(conn)
 		}
 	}

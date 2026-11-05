@@ -50,7 +50,7 @@ func main() {
 		os.Exit(1)
 	}
 	var listenConfig net.ListenConfig
-	listener, err := listenConfig.Listen(context.Background(), "tcp4", listenAddress) // #nosec G102 -- host publish is limited to the tailnet IP and this listener rejects other sources.
+	listener, err := listenConfig.Listen(context.Background(), "tcp4", listenAddress) // #nosec G102 -- only the Docker gateway is accepted; the host publish must be loopback-only.
 	if err != nil {
 		slog.Error("cannot listen", "err", err)
 		os.Exit(1)
@@ -172,7 +172,11 @@ func forwardTo(client net.Conn, upstreamAddress string, idleTimeout time.Duratio
 	rawClient := client
 	client, header, err := proxyv1.Read(client, true, true)
 	if err != nil {
-		slog.Debug("invalid client preface", "err", err)
+		remoteIP := "unknown"
+		if addr, ok := rawClient.RemoteAddr().(*net.TCPAddr); ok {
+			remoteIP = addr.IP.String()
+		}
+		slog.Warn("invalid client preface", "remote_ip", remoteIP, "err", err)
 		return
 	}
 	upstream, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp4", upstreamAddress)

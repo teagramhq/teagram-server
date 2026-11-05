@@ -19,7 +19,8 @@ const (
 )
 
 // Read consumes an optional or required PROXY preface, preserving any bytes
-// read past it. Only a trusted peer may supply a preface.
+// read past it. Only a trusted peer may supply a preface. The returned header
+// aliases the read buffer and is valid only until the returned connection is read.
 func Read(conn net.Conn, required, trusted bool) (net.Conn, []byte, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(HeaderTimeout)); err != nil {
 		return nil, nil, fmt.Errorf("set preface deadline: %w", err)

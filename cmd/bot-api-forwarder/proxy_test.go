@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -178,4 +180,25 @@ func proxyTestTCPListener(t *testing.T) *net.TCPListener {
 		t.Fatal("listener is not TCP")
 	}
 	return tcp
+}
+
+func TestForwardLogsInvalidPrefaceAtWarning(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	client, fwd := tcpPair(t)
+	defer closeTest(t, client)
+	peer, _, err := net.SplitHostPort(client.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(client, "BAD REQUEST\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	forwardTo(fwd, "127.0.0.1:1", time.Second)
+	got := logs.String()
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remote_ip="+peer) || !strings.Contains(got, "err=") {
+		t.Fatalf("invalid preface log = %q", got)
+	}
 }
