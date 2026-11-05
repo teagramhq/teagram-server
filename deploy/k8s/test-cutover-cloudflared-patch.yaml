@@ -1,6 +1,10 @@
 spec:
   template:
     spec:
+      # The BusyBox stand-in is a private ghcr image preloaded into k3s; kubelet
+      # only reuses it for pods that present the pull secret it was pulled with.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: cloudflared
           image: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
