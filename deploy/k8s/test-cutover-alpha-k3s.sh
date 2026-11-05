@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
@@ -39,6 +39,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'printf "cutover test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 copy_secret() {
   local name=$1
@@ -179,29 +180,34 @@ kubectl wait --for=condition=Ready pod/cutover-volume-importer \
   --namespace "$TARGET_NAMESPACE" --timeout=300s >/dev/null
 [[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]]
 
+# Spool every transfer through a file instead of piping one kubectl exec into
+# another: a receiver such as tar stops reading at the end-of-archive marker,
+# and the sending kubectl then dies of SIGPIPE (exit 141) while still writing
+# the archive padding.
 kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- \
-  pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram |
-  kubectl exec --namespace "$TARGET_NAMESPACE" --stdin postgres-0 -c postgres -- \
-    sh -ec 'umask 077; install -d -m 0700 /var/lib/postgresql/cutover-backups; cat > /var/lib/postgresql/cutover-backups/source.dump'
+  pg_dump --format=custom --no-owner --no-acl --username=postgres --dbname=teagram > "$tmp_dir/source.dump"
+kubectl exec --namespace "$TARGET_NAMESPACE" --stdin postgres-0 -c postgres -- \
+  sh -ec 'umask 077; install -d -m 0700 /var/lib/postgresql/cutover-backups; cat > /var/lib/postgresql/cutover-backups/source.dump' \
+  < "$tmp_dir/source.dump"
 
 source_pod=$(kubectl get pods --namespace "$SOURCE_NAMESPACE" \
   --selector=app.kubernetes.io/name=teagramd --output 'jsonpath={.items[0].metadata.name}')
 [[ -n $source_pod ]]
 for file in server_key.pem enc_key.hex; do
   kubectl exec --namespace "$SOURCE_NAMESPACE" "$source_pod" -- \
-    cat "/var/lib/teagramd/$file" |
-    kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-      sh -ec "cat > /target/key-data/$file"
+    cat "/var/lib/teagramd/$file" > "$tmp_dir/$file"
+  kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+    sh -ec "cat > /target/key-data/$file" < "$tmp_dir/$file"
 done
 kubectl exec --namespace "$SOURCE_NAMESPACE" "$source_pod" -- \
-  tar -cf - -C /var/lib/teagramd-blobs . |
-  kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-    tar -xpf - -C /target/legacy-blobs
+  tar -cf - -C /var/lib/teagramd-blobs . > "$tmp_dir/source-blobs.tar"
+kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+  tar -xpf - -C /target/legacy-blobs < "$tmp_dir/source-blobs.tar"
 mkdir -p "$tmp_dir/blob-fixture/parts/aa"
 printf 'alpha cutover migration fixture\n' > "$tmp_dir/blob-fixture/parts/aa/0123456789abcdef0123456789abcd"
-tar -cf - -C "$tmp_dir/blob-fixture" parts |
-  kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
-    tar -xpf - -C /target/legacy-blobs
+tar -cf "$tmp_dir/blob-fixture.tar" -C "$tmp_dir/blob-fixture" parts
+kubectl exec --namespace "$TARGET_NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+  tar -xpf - -C /target/legacy-blobs < "$tmp_dir/blob-fixture.tar"
 kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-volume-importer -c importer -- \
   sh -ec 'chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode; chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex' >/dev/null
 kubectl delete pod cutover-volume-importer --namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
