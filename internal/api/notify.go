@@ -140,22 +140,35 @@ func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
 	u.pushTransientFanout(ctx, pushes)
 }
 
-// DeliverStickerSets fans out the account's transient sticker-set invalidation
-// to live sessions on this replica, omitting the session that made the RPC.
-// The snapshotted binding is checked again under the conn's write lock.
-func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64) {
+// DeliverStickerSets fans out account sticker-set changes to live sessions on
+// this replica. A nil order sends updateStickerSets, omitting the session that
+// made the RPC; otherwise it sends the kind's new order as
+// updateStickerSetsOrder to all sessions, including the origin so it can
+// reconcile after any older order push already in flight. The snapshotted
+// binding is checked again under the conn's write lock.
+func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64, order *store.StickerSetOrder) {
 	if ownerID <= 0 || authKeyID == 0 || u.registry == nil {
 		return
 	}
+	var change tg.UpdateClass = &tg.UpdateStickerSets{}
+	if order != nil {
+		orderUpdate := &tg.UpdateStickerSetsOrder{
+			Masks:  order.Kind == "mask",
+			Emojis: order.Kind == "emojis",
+			Order:  order.IDs,
+		}
+		orderUpdate.SetFlags()
+		change = orderUpdate
+	}
 	update := &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateStickerSets{}},
+		Updates: []tg.UpdateClass{change},
 		Date:    int(time.Now().Unix()),
 		Seq:     0,
 	}
 	pushes := make([]transientPush, 0)
 	for _, conn := range u.registry.Conns(ownerID) {
 		connAuthKeyID, connSessionID := conn.SessionIdentity()
-		if connAuthKeyID == authKeyID && connSessionID == sessionID {
+		if order == nil && connAuthKeyID == authKeyID && connSessionID == sessionID {
 			continue
 		}
 		pushes = append(pushes, transientPush{
