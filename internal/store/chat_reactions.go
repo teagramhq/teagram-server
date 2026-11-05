@@ -20,16 +20,28 @@ const (
 // ChatAvailableReactions is the durable reaction setting for one basic group.
 // A missing row means Mode is ChatAvailableReactionsAll.
 type ChatAvailableReactions struct {
-	Mode      string
-	Emoticons []string
+	Mode           string
+	Emoticons      []string
+	CustomEmojiIDs []int64
+	AllowCustom    bool
 }
 
-func (available ChatAvailableReactions) Allows(emoticon string) bool {
+func (available ChatAvailableReactions) Allows(reaction string) bool {
+	if documentID, ok := CustomEmojiDocumentID(reaction); ok {
+		switch available.Mode {
+		case ChatAvailableReactionsAll:
+			return available.AllowCustom
+		case ChatAvailableReactionsSome:
+			return slices.Contains(available.CustomEmojiIDs, documentID)
+		default:
+			return false
+		}
+	}
 	switch available.Mode {
 	case ChatAvailableReactionsAll:
 		return true
 	case ChatAvailableReactionsSome:
-		return slices.Contains(available.Emoticons, emoticon)
+		return slices.Contains(available.Emoticons, reaction)
 	}
 	return false
 }
@@ -41,9 +53,13 @@ func (s *Store) SetChatAvailableReactions(ctx context.Context, chatID, callerID 
 	if err := validateAvailableReactions(available); err != nil {
 		return err
 	}
-	reactions := available.Emoticons
-	if reactions == nil {
-		reactions = []string{}
+	emoticons := available.Emoticons
+	if emoticons == nil {
+		emoticons = []string{}
+	}
+	customEmojiIDs := available.CustomEmojiIDs
+	if customEmojiIDs == nil {
+		customEmojiIDs = []int64{}
 	}
 
 	m, err := s.beginChatMutation(ctx, chatID, callerID)
@@ -56,7 +72,8 @@ func (s *Store) SetChatAvailableReactions(ctx context.Context, chatID, callerID 
 		return ErrChatAdminRequired
 	}
 	if err := m.qtx.SetChatAvailableReactions(ctx, db.SetChatAvailableReactionsParams{
-		ChatID: chatID, Mode: available.Mode, Reactions: reactions,
+		ChatID: chatID, Mode: available.Mode, Reactions: emoticons,
+		AllowCustom: available.AllowCustom, CustomEmojiIds: customEmojiIDs,
 	}); err != nil {
 		return fmt.Errorf("set chat available reactions: %w", err)
 	}
@@ -80,7 +97,10 @@ func chatAvailableReactions(ctx context.Context, qtx *db.Queries, chatID int64) 
 	if len(rows) != 1 {
 		return ChatAvailableReactions{}, fmt.Errorf("load chat available reactions: got %d rows for chat %d", len(rows), chatID)
 	}
-	return ChatAvailableReactions{Mode: rows[0].Mode, Emoticons: rows[0].Reactions}, nil
+	return ChatAvailableReactions{
+		Mode: rows[0].Mode, Emoticons: rows[0].Reactions,
+		CustomEmojiIDs: rows[0].CustomEmojiIds, AllowCustom: rows[0].AllowCustom,
+	}, nil
 }
 
 func chatHasMember(ctx context.Context, qtx *db.Queries, chatID, userID int64) (bool, error) {

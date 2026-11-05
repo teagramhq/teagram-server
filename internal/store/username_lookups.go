@@ -156,15 +156,16 @@ func (s *Store) UsernameByHandle(ctx context.Context, handle string) (UsernameRe
 		// authoritative, and a writer that released the handle without clearing
 		// the copy must not make two RPCs name the same account differently.
 		return UsernameResolution{Kind: UsernameKindUser, User: UserFromDB(db.UserByIDRow{
-			ID:         u.ID,
-			Kind:       u.Kind,
-			Phone:      u.Phone,
-			FirstName:  u.FirstName,
-			LastName:   u.LastName,
-			CreatedAt:  u.CreatedAt,
-			IsOnline:   u.IsOnline,
-			LastSeenAt: u.LastSeenAt,
-			Username:   &u.Username,
+			ID:                    u.ID,
+			Kind:                  u.Kind,
+			Phone:                 u.Phone,
+			FirstName:             u.FirstName,
+			LastName:              u.LastName,
+			CreatedAt:             u.CreatedAt,
+			IsOnline:              u.IsOnline,
+			LastSeenAt:            u.LastSeenAt,
+			Username:              &u.Username,
+			EmojiStatusDocumentID: u.EmojiStatusDocumentID,
 		})}, true, nil
 	case "channel":
 		c, err := s.q.GetChannelByUsername(ctx, handle)

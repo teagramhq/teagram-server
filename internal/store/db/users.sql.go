@@ -54,6 +54,7 @@ SELECT u.id,
        u.last_seen_at,
        un.handle AS username,
        u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id,
        (entitled.id IS NOT NULL)::boolean AS entitled,
        (viewer_contact.contact_id IS NOT NULL)::boolean AS has_contact,
        COALESCE(reverse_contact.owner_id IS NOT NULL, false)::boolean AS mutual_contact,
@@ -147,24 +148,25 @@ type ChannelHistoryUsersForViewerParams struct {
 }
 
 type ChannelHistoryUsersForViewerRow struct {
-	ID                   int64
-	Phone                *string
-	FirstName            string
-	LastName             string
-	CreatedAt            pgtype.Timestamptz
-	IsOnline             bool
-	LastSeenAt           pgtype.Timestamptz
-	Username             *string
-	Kind                 string
-	Entitled             bool
-	HasContact           bool
-	MutualContact        bool
-	OwnerBaseRule        string
-	OwnerBlocked         bool
-	OwnerDisallowed      bool
-	OwnerAllowed         bool
-	OwnerContact         bool
-	ViewerHidesFromOwner bool
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
+	Entitled              bool
+	HasContact            bool
+	MutualContact         bool
+	OwnerBaseRule         string
+	OwnerBlocked          bool
+	OwnerDisallowed       bool
+	OwnerAllowed          bool
+	OwnerContact          bool
+	ViewerHidesFromOwner  bool
 }
 
 // Channel history always returns the same profile query shape regardless of
@@ -190,6 +192,7 @@ func (q *Queries) ChannelHistoryUsersForViewer(ctx context.Context, arg ChannelH
 			&i.LastSeenAt,
 			&i.Username,
 			&i.Kind,
+			&i.EmojiStatusDocumentID,
 			&i.Entitled,
 			&i.HasContact,
 			&i.MutualContact,
@@ -365,7 +368,8 @@ WITH matched AS MATERIALIZED (
       )
 )
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id IN (SELECT id FROM matched)
@@ -380,15 +384,16 @@ type SearchContactsByNameParams struct {
 }
 
 type SearchContactsByNameRow struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	Kind       string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 // Search users by name within the caller's existing dialogs.
@@ -456,6 +461,7 @@ func (q *Queries) SearchContactsByName(ctx context.Context, arg SearchContactsBy
 			&i.LastSeenAt,
 			&i.Username,
 			&i.Kind,
+			&i.EmojiStatusDocumentID,
 		); err != nil {
 			return nil, err
 		}
@@ -465,6 +471,25 @@ func (q *Queries) SearchContactsByName(ctx context.Context, arg SearchContactsBy
 		return nil, err
 	}
 	return items, nil
+}
+
+const setUserEmojiStatus = `-- name: SetUserEmojiStatus :execrows
+UPDATE users
+SET emoji_status_document_id = NULLIF($1::bigint, 0)
+WHERE id = $2
+`
+
+type SetUserEmojiStatusParams struct {
+	DocumentID int64
+	ID         int64
+}
+
+func (q *Queries) SetUserEmojiStatus(ctx context.Context, arg SetUserEmojiStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserEmojiStatus, arg.DocumentID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setUserStatus = `-- name: SetUserStatus :execrows
@@ -555,22 +580,24 @@ func (q *Queries) UserAboutByID(ctx context.Context, id int64) (string, error) {
 
 const userByID = `-- name: UserByID :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = $1
 `
 
 type UserByIDRow struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	Kind       string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
@@ -586,6 +613,7 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
 		&i.LastSeenAt,
 		&i.Username,
 		&i.Kind,
+		&i.EmojiStatusDocumentID,
 	)
 	return i, err
 }
@@ -593,22 +621,24 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
 const userByPhone = `-- name: UserByPhone :one
 
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.phone = $1
 `
 
 type UserByPhoneRow struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	Kind       string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 // Every query that loads a user reads the handle from the usernames row, never
@@ -632,28 +662,31 @@ func (q *Queries) UserByPhone(ctx context.Context, phone *string) (UserByPhoneRo
 		&i.LastSeenAt,
 		&i.Username,
 		&i.Kind,
+		&i.EmojiStatusDocumentID,
 	)
 	return i, err
 }
 
 const usersByID = `-- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = ANY($1::bigint[])
 `
 
 type UsersByIDRow struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	Kind       string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 func (q *Queries) UsersByID(ctx context.Context, ids []int64) ([]UsersByIDRow, error) {
@@ -675,6 +708,7 @@ func (q *Queries) UsersByID(ctx context.Context, ids []int64) ([]UsersByIDRow, e
 			&i.LastSeenAt,
 			&i.Username,
 			&i.Kind,
+			&i.EmojiStatusDocumentID,
 		); err != nil {
 			return nil, err
 		}
