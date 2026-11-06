@@ -74,7 +74,7 @@ if ! grep --extended-regexp --quiet 'backend_type.*client backend.*pg_backend_pi
 fi
 
 if ! grep --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/cutover-alpha.sh ||
-  ! grep --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/prod-cutover/teagramd-cutover-listeners.yaml; then
+  ! grep --fixed-strings --quiet 'TG_ADMIN_ORIGIN' deploy/k8s/prod/teagramd-listeners.yaml; then
   printf 'alpha cutover does not preserve the existing admin origin configuration\n' >&2
   exit 1
 fi

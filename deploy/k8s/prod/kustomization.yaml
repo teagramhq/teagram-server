@@ -6,6 +6,9 @@ namespace: teagram
 resources:
   - ../base
 
+patches:
+  - path: teagramd-listeners.yaml
+
 configMapGenerator:
   - name: required-migration-version
     behavior: replace

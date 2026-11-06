@@ -77,12 +77,13 @@ by the cluster's secret and configuration management before it is applied:
 | `rustfs-credentials` Secret | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` |
 | `teagramd-blob-credentials` Secret | `TG_BLOB_S3_ACCESS_KEY_ID`, `TG_BLOB_S3_SECRET_ACCESS_KEY` |
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
+| `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
 | `cloudflared-token` Secret | `token` |
 | `ghcr-pull` Secret | Docker config for the private GHCR packages |
 
 The alpha cutover runner creates the `teagramd-admin` Secret from the existing
 Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
-either value. The Secret is specific to the cutover overlay.
+either value. Subsequent production deployments use the same Secret.
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha

@@ -112,8 +112,7 @@ create_target_namespace() {
 start_port_forward() {
   local namespace=$1 attempt
   local -a ports=(12443:2443)
-  # Only the cutover overlay adds the web and admin listeners; the source
-  # deployment serves MTProto on 2443 alone.
+  # The source smoke needs only MTProto; the target also checks web and admin.
   [[ $namespace == "$TARGET_NAMESPACE" ]] && ports+=(12444:2444 12445:2445)
   kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
     service/teagramd "${ports[@]}" > "$tmp_dir/port-forward-$namespace.log" 2>&1 &
@@ -369,6 +368,61 @@ curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12881/+k3s-smok
 printf 'restored-account sign-in on target\n'
 smoke_restored_account
 printf 'target listener and restored-account smoke passed\n'
+stop_port_forward
+
+# Apply the normal production resources after cutover. Keep the already-tested
+# workload image and substitute the disposable Cloudflare connector fixture.
+prod_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
+[[ $prod_digest =~ ^sha256:[0-9a-f]{64}$ ]]
+kubectl kustomize deploy/k8s/prod |
+  sed -e "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" \
+    -e "s|ghcr.io/teagramhq/teagramd@$prod_digest|$CUTOVER_IMAGE|g" |
+  yq 'select(.kind != "Deployment" or .metadata.name != "cloudflared")' - > "$tmp_dir/normal-prod.yaml"
+printf '\n---\n' >> "$tmp_dir/normal-prod.yaml"
+kubectl kustomize deploy/k8s/ci |
+  sed "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" |
+  yq 'select(.kind == "Deployment" and .metadata.name == "cloudflared")' - >> "$tmp_dir/normal-prod.yaml"
+kubectl apply --dry-run=server --filename "$tmp_dir/normal-prod.yaml" >/dev/null
+kubectl apply --filename "$tmp_dir/normal-prod.yaml" >/dev/null
+kubectl rollout status statefulset/teagramd --namespace "$TARGET_NAMESPACE" --timeout=600s >/dev/null
+kubectl rollout restart statefulset/teagramd --namespace "$TARGET_NAMESPACE" >/dev/null
+kubectl rollout status statefulset/teagramd --namespace "$TARGET_NAMESPACE" --timeout=600s >/dev/null
+kubectl rollout status deployment/cloudflared --namespace "$TARGET_NAMESPACE" --timeout=300s >/dev/null
+start_port_forward "$TARGET_NAMESPACE"
+start_linkselector_forward "$TARGET_NAMESPACE"
+curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12881/+k3s-smoke |
+  grep --fixed-strings 'Open this in Teagram' >/dev/null
+discovery_key=$(curl --fail --silent --show-error --max-time 10 \
+  http://127.0.0.1:12444/.well-known/teagramd/client | jq -er '.mtproto.rsa_spki | strings | select(length > 0)')
+[[ $discovery_key == "$(jq -er '.mtproto.rsa_spki' "$tmp_dir/client.json")" ]]
+python3 - <<'PY'
+import base64
+import socket
+
+request = (
+    b"GET /apiws HTTP/1.1\r\nHost: 127.0.0.1:12444\r\n"
+    b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
+    b"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "
+    + base64.b64encode(bytes(16)) + b"\r\n"
+    b"Sec-WebSocket-Protocol: binary\r\n\r\n"
+)
+with socket.create_connection(("127.0.0.1", 12444), timeout=10) as connection:
+    connection.sendall(request)
+    response = b""
+    while b"\r\n\r\n" not in response and len(response) < 16384:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        response += chunk
+    if not response.startswith(b"HTTP/1.1 101 "):
+        raise SystemExit("WebSocket upgrade failed after the normal production apply")
+PY
+admin_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --max-time 10 http://127.0.0.1:12445/admin/metrics)
+[[ $admin_status == 401 ]] || { printf 'admin auth returned HTTP %s after the normal production apply\n' "$admin_status" >&2; exit 1; }
+smoke_restored_account
+printf 'normal production apply preserved discovery, WebSocket, admin authentication, and restored-account sign-in\n'
 stop_port_forward
 kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
 

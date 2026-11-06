@@ -159,6 +159,20 @@ cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq
   fail 'the cutover workload must use a pinned teagramd image digest'
 [[ "$cutover_teagramd_digest" != "sha256:$(printf '%064d' 0)" ]] ||
   fail 'the cutover workload must not use a placeholder teagramd image digest'
+for overlay in prod prod-cutover; do
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
+      select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
+             .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
+    jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+      .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
+      .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
+      .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
+      .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
+    fail "$overlay must preserve the WebSocket and admin listeners and Secret references"
+  fi
+done
 [[ "$(yq -r '.spec.suspend' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == true ]] ||
   fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||

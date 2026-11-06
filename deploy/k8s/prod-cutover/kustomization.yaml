@@ -19,7 +19,6 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 0
-  - path: teagramd-cutover-listeners.yaml
   - target:
       group: apps
       version: v1

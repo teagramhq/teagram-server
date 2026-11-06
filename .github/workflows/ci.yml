@@ -1874,6 +1874,12 @@ jobs:
           kubectl create secret generic teagramd-media-keys --namespace teagram \
             --from-file=1.key="$RUNNER_TEMP/media-key"
           rm -f "$RUNNER_TEMP/media-key"
+          printf '%064d' 0 > "$RUNNER_TEMP/admin-token-hash"
+          printf '%s' https://links.example.test > "$RUNNER_TEMP/admin-origin"
+          kubectl create secret generic teagramd-admin --namespace teagram \
+            --from-file=TG_ADMIN_TOKEN_HASH="$RUNNER_TEMP/admin-token-hash" \
+            --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
+          rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
             --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443
