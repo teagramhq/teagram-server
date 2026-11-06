@@ -265,9 +265,12 @@ check_media_key() {
     "$(media_path_metadata "$KEY_DIR" directory '%u:%a:%g')" || invalid_metadata=1
   check_hash_value media_key_file_metadata 'file:65532:600:65532' \
     "$(media_path_metadata "$KEY_FILE" file '%u:%a:%g')" || invalid_metadata=1
-  local backup_parent=${KEY_BACKUP%/*}
+  local backup_parent_mode backup_parent=${KEY_BACKUP%/*}
   backup_parent=${backup_parent%/*}
   [[ -d "$backup_parent" && ! -L "$backup_parent" && "$(stat -c '%u' -- "$backup_parent")" == "$EXPECTED_ROOT_UID" ]] || \
+    ops_fail 'media key backup parent is unsafe'
+  backup_parent_mode=$(stat -c '%a' -- "$backup_parent") || ops_fail 'cannot inspect media key backup parent'
+  [[ "$backup_parent_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$backup_parent_mode & 0022) == 0 )) || \
     ops_fail 'media key backup parent is unsafe'
   private_dir "${KEY_BACKUP%/*}" || ops_fail 'media key backup directory is unsafe'
   check_hash_value media_key_backup_metadata 'file:0:600' \

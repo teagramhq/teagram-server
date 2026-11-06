@@ -550,6 +550,13 @@ output=$(run_encrypt)
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
 printf '%s\n' 'PASS unsafe media-key backup directory stops preflight before teagramd'
 
+setup_case key-backup-parent-writable s3-accepted
+chmod 777 "$FIXTURE_EVIDENCE"
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key backup parent is unsafe'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS writable media-key backup parent stops preflight before teagramd'
+
 setup_case backup-failure s3-accepted
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
