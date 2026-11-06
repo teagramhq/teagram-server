@@ -20,7 +20,7 @@ REPORT_ROOT=$(mktemp -d /var/lib/teagram-report-fixtures.XXXXXXXX)
 chmod 700 "$REPORT_ROOT"
 export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 cleanup_fixtures() {
-  local root_file root phase checkout transition record_file report phase_dir
+  local root_file root phase checkout transition record_file report legacy_report phase_dir
   for root_file in "$TMP"/*-root-path; do
     [ -f "$root_file" ] || continue
     root=$(cat "$root_file")
@@ -33,10 +33,24 @@ cleanup_fixtures() {
         if [ -f "$report" ]; then
           while IFS= read -r phase_dir; do
             case "$phase_dir" in
-              transition-proof-fixtures-*) rm -rf -- "$REPORT_ROOT/$phase_dir" ;;
+              transition-proof-fixtures-*|stack-move-*)
+                rm -rf -- "$REPORT_ROOT/$phase_dir" "/root/$phase_dir"
+                ;;
             esac
           done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
           rm -f -- "$report"
+        fi
+        if [[ "$transition" =~ ^[0-9a-f-]{36}$ ]]; then
+          legacy_report="/root/teagramd-blob-mode-report-$transition.json"
+          if [ -f "$legacy_report" ]; then
+            while IFS= read -r phase_dir; do
+              case "$phase_dir" in
+                transition-proof-fixtures-*|stack-move-*) rm -rf -- "/root/$phase_dir" ;;
+              esac
+            done < <(jq -r '.phase_files[]? | split("/")[0]' "$legacy_report" | sort -u)
+            rm -f -- "$legacy_report"
+          fi
+          rm -rf -- "/root/stack-move-$transition"
         fi
         if [ "$(jq -r '.outcome' "$record_file")" = stack-moved-local ]; then
           rm -rf -- "$REPORT_ROOT/stack-move-$transition"
@@ -1908,6 +1922,29 @@ remove_authority_reports() {
   done
 }
 
+move_authority_reports_to_legacy_root() {
+  local state_dir=$1 report_root=$2 record transition report legacy_report phase_dir
+  for record in "$state_dir"/journal/*.json; do
+    [ -f "$record" ] || continue
+    transition=$(jq -er '.transition_id' "$record") || return 1
+    [[ "$transition" =~ ^[0-9a-f-]{36}$ ]] || return 1
+    report="$report_root/teagramd-blob-mode-report-$transition.json"
+    legacy_report="/root/teagramd-blob-mode-report-$transition.json"
+    [ -f "$report" ] && [ ! -e "$legacy_report" ] || return 1
+    while IFS= read -r phase_dir; do
+      case "$phase_dir" in
+        transition-proof-fixtures-*|stack-move-*) ;;
+        *) return 1 ;;
+      esac
+      [ -d "$report_root/$phase_dir" ] && [ ! -e "/root/$phase_dir" ] || return 1
+      cp -a -- "$report_root/$phase_dir" /root/ || return 1
+      rm -rf -- "$report_root/$phase_dir" || return 1
+    done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
+    cp -p -- "$report" "$legacy_report" || return 1
+    rm -f -- "$report" || return 1
+  done
+}
+
 configure_s3_compose_fixture() {
   local state=$1 rustfs_volume=$2 private_network=$3
   local config next
@@ -2699,11 +2736,30 @@ if prepare_moved_stack_apply_fixture "$recovered_apply_name" recovered-local-app
   state=$(cat "$TMP/$recovered_apply_name-state-path")
   checkout=$(cat "$TMP/$recovered_apply_name-checkout-path")
   root=$(cat "$TMP/$recovered_apply_name-root-path")
+  legacy_reports_migrated=0
   if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
     "$TMP/$recovered_apply_name-authority" "$checkout/.state/blob-mode" "$REPORT_ROOT" recovered-local 1; then
-    status=$(run_fixture "$recovered_apply_name" built 0 '' 2 '' '' apply da0107dfeadbeafbc1abfc4dd1594796ae661ed1)
+    if move_authority_reports_to_legacy_root "$checkout/.state/blob-mode" "$REPORT_ROOT"; then
+      status=$(run_fixture "$recovered_apply_name" built 0 '' 2 '' '' apply da0107dfeadbeafbc1abfc4dd1594796ae661ed1)
+      legacy_reports_migrated=1
+      for record in "$checkout"/.state/blob-mode/journal/*.json; do
+        transition=$(jq -er '.transition_id' "$record")
+        if ! cmp -s "/root/teagramd-blob-mode-report-$transition.json" \
+          "$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"; then
+          legacy_reports_migrated=0
+        fi
+      done
+    else
+      status=1
+    fi
     compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$recovered_apply_name-compose-selections" | sort -u)
     if [ "$status" = 0 ] && \
+       [ "$legacy_reports_migrated" = 1 ] && \
+       awk '
+         $1 == "python3" && $2 ~ /^blob-mode-state(\.pinned)?$/ && $3 == "migrate-reports" && !migration {migration=NR}
+         $1 == "python3" && $2 ~ /^blob-mode-state(\.pinned)?$/ && $3 == "authority" && !authority {authority=NR}
+         END {exit !(migration > 0 && authority > migration)}
+       ' "$TMP/$recovered_apply_name-events" && \
        grep -q 'rollout=verified sha=da0107dfeadbeafbc1abfc4dd1594796ae661ed1' \
          "$TMP/$recovered_apply_name.stdout" && \
        [ "$(cat "$state/head")" = da0107dfeadbeafbc1abfc4dd1594796ae661ed1 ] && \
@@ -2718,10 +2774,10 @@ if prepare_moved_stack_apply_fixture "$recovered_apply_name" recovered-local-app
        ' "$root.target/pre-backup-blob-compose.json" >/dev/null && \
        grep -q 'compose_contract=tracked-local-authority blob_dir=/var/lib/telegramd-blobs' \
          "$root.target/pre-backup-blob-authority.txt" && assert_evidence_mode "$root"; then
-      pass 'ordinary deploy after recovery renders the tracked local Compose pair from recovered-local authority'
+      pass 'tracked local apply migrates reports from the legacy root before reading recovered-local authority'
     else
       show_fixture_failure "$recovered_apply_name" "$status"
-      fail 'ordinary deploy after recovery must render the authority directory before backup and pass rollout gates'
+      fail 'tracked local apply must migrate legacy-root reports before strict authority validation'
     fi
   else
     fail 'recovered-local apply fixture requires a valid moved-stack S3 and recovery authority chain'

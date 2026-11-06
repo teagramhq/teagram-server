@@ -597,7 +597,7 @@ verify_target_local_compose() {
   }
 }
 
-require_runtime() {
+require_runtime_preflight() {
   local uid expected_checkout expected_source_dir
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
   [ "$uid" = 0 ] || { fail 'production rollout requires uid 0'; return 1; }
@@ -628,9 +628,6 @@ require_runtime() {
     fail 'secret and override paths must be fixed within the checkout'
     return 1
   }
-  require_compose_override || return 1
-  verify_initial_local_compose || return 1
-  verify_target_local_compose || return 1
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
@@ -654,6 +651,13 @@ require_runtime() {
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
   fi
+}
+
+require_runtime() {
+  require_runtime_preflight || return 1
+  require_compose_override || return 1
+  verify_initial_local_compose || return 1
+  verify_target_local_compose || return 1
 }
 
 acquire_shared_lock() {
@@ -2906,9 +2910,6 @@ run_apply() {
     }
   fi
   verify_runtime_sources || return 1
-  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
-    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
-
   local layout_report layout_changed layout_diagnostics layout_differences difference
   layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
     --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" \
@@ -3283,8 +3284,6 @@ run_stack_move() {
     return 1
   }
   verify_runtime_sources || return 1
-  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
-    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
   require_clean_build_checkout || return 1
   [ "$TARGET_CHECKOUT" != "$CHECKOUT" ] || {
     fail 'target checkout path must differ from the source checkout'
@@ -3369,7 +3368,7 @@ main() {
     configure_action_paths apply
     TARGET_SHA=$2
     [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { fail 'reconcile target SHA must be a full commit ID'; return 64; }
-    require_runtime || return 1
+    require_runtime_preflight || return 1
     local reconcile_branch reconcile_head
     reconcile_branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
     reconcile_head=$(git -C "$CHECKOUT" rev-parse HEAD) || { fail 'cannot read current checkout SHA'; return 1; }
@@ -3382,6 +3381,7 @@ main() {
     verify_runtime_sources || return 1
     python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
       --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
+    require_runtime || return 1
     cd "$CHECKOUT"
     python3 "$MODE_HELPER" reconcile --state-dir "$CHECKOUT/.state/blob-mode" \
       --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH"
@@ -3398,7 +3398,7 @@ main() {
     fail 'readiness bound must be 1 through 120 seconds'
     return 64
   }
-  require_runtime || return 1
+  require_runtime_preflight || return 1
   if [ "$RUNNER_ACTION" = move-stack ]; then
     LOCK_PATH=$TARGET_LOCK_PATH
     if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
@@ -3422,6 +3422,10 @@ main() {
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
   fi
   verify_approved_gates || return 1
+  verify_runtime_sources || return 1
+  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
+  require_runtime || return 1
   cd "$CHECKOUT"
   if [ "$RUNNER_ACTION" = move-stack ]; then
     run_stack_move
