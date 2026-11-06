@@ -1315,3 +1315,150 @@ WHERE c.id = sqlc.arg(channel_id)::bigint
   AND (sqlc.arg(offset_id)::bigint = 0 OR post.local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY post.local_id DESC
 LIMIT sqlc.arg(lim)::int;
+
+-- One bit per MediaSearchFilter, in enum order. Keep each predicate aligned
+-- with CountFilteredChannelPosts so batched counters match individual searches.
+-- Each requested filter runs its original count predicate in one statement,
+-- preserving its index plan while sharing the transaction and round trip.
+-- name: CountAllFilteredChannelPosts :many
+SELECT 1::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 1) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.media_kind = 'document')
+UNION ALL
+SELECT 2::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 2) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.media_kind = 'photo')
+UNION ALL
+SELECT 3::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 4) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  -- Every URL match contains a dot or "://"; the substring test is far cheaper
+  -- than the regex, and CASE keeps the planner from running the regex first.
+  AND CASE WHEN strpos(post.message, '.') > 0 OR strpos(post.message, '://') > 0
+    THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
+    ELSE false END
+UNION ALL
+SELECT 4::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 8) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_videos']::text[] )
+UNION ALL
+SELECT 5::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 16) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_gifs']::text[] )
+UNION ALL
+SELECT 6::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 32) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND false
+UNION ALL
+SELECT 7::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 64) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[] )
+UNION ALL
+SELECT 8::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 128) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_audios']::text[] )
+UNION ALL
+SELECT 9::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE (sqlc.arg(filter_mask)::int & 256) <> 0
+  AND post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = sqlc.arg(owner_id)::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[]));

@@ -1853,6 +1853,18 @@ func SearchCountersForTest(s *store.Store, userID int64, req *tg.MessagesGetSear
 	return testHandlers(s).handleGetSearchCounters(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SearchCountersForTestWithLogger invokes messages.getSearchCounters with a
+// caller-supplied logger for failure-path assertions.
+func SearchCountersForTestWithLogger(s *store.Store, userID int64, req *tg.MessagesGetSearchCountersRequest, logger *slog.Logger) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.log = logger
+	return h.handleGetSearchCounters(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // SearchCountersForTestWithLimits invokes messages.getSearchCounters with a
 // custom messages search rate limit.
 func SearchCountersForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.MessagesGetSearchCountersRequest) (bin.Encoder, error) {
