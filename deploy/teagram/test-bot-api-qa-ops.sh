@@ -74,7 +74,7 @@ SH
 cat > "$tmp/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -eu
-image='alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e'
+image='mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e'
 case "$*" in
   'inspect --format '*org.opencontainers*) printf '%s\n' "$OPS_SHA" ;;
   'inspect --format '*com.docker.compose.project.config_files*) printf '%s/docker-compose.yml,%s/docker-compose.override.yml\n' "$MOCK_REPO" "$MOCK_REPO" ;;

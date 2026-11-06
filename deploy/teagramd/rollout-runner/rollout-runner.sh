@@ -2829,7 +2829,7 @@ reconcile_bot_api_relays() {
     and $s["bot-api-ingress"].ports == [{"mode":"ingress","host_ip":"127.0.0.1","target":2448,"published":"2447","protocol":"tcp"}]
     and ($s["bot-api-ingress"].networks | keys) == ["bot_api_ingress"]
     and all(["bot-api-inner","bot-api-ingress"][];
-      $s[.].image == "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
+      $s[.].image == "mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
       and $s[.].entrypoint == null and $s[.].read_only == true and $s[.].cap_drop == ["ALL"])
   ' <<< "$config" >/dev/null || { fail 'Bot API relay configuration is unsafe'; return 1; }
   docker compose --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout "$READY_SECONDS" bot-api-inner bot-api-ingress </dev/null

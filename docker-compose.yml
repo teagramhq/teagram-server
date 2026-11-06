@@ -412,7 +412,7 @@ services:
         condition: service_completed_successfully
 
   bot-api-inner:
-    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
     profiles: ["bot-api-qa"]
     network_mode: service:teagramd
     depends_on:
@@ -438,7 +438,7 @@ services:
         max-file: "3"
 
   bot-api-ingress:
-    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
     profiles: ["bot-api-qa"]
     depends_on:
       bot-api-inner:

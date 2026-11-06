@@ -91,7 +91,7 @@ validate_relay_config() {
     and $s["bot-api-ingress"].ports == [{"mode":"ingress","host_ip":"127.0.0.1","target":2448,"published":"2447","protocol":"tcp"}]
     and ($s["bot-api-ingress"].networks | keys) == ["bot_api_ingress"]
     and all(["bot-api-inner","bot-api-ingress"][];
-      $s[.].image == "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
+      $s[.].image == "mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
       and $s[.].entrypoint == null and $s[.].read_only == true and $s[.].cap_drop == ["ALL"])
   ' <<< "$1" >/dev/null
 }
@@ -226,7 +226,7 @@ verify_relays() {
   [[ "$inner_id" =~ ^[0-9a-f]{64}$ && "$ingress_id" =~ ^[0-9a-f]{64}$ ]] || { fail 'relays are missing'; return 1; }
   docker inspect "$inner_id" | jq -e --arg server "$server_id" '
     .[0] | .State.Running and .State.Health.Status == "healthy" and .Config.Entrypoint == ["socat"] and
-    .Config.Image == "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e" and
+    .Config.Image == "mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e" and
     .HostConfig.NetworkMode == ("container:" + $server)
     and .Config.Cmd == ["-d", "-d", "-T120", "UNIX-LISTEN:/run/bot-api/relay.sock,fork,unlink-early,mode=0600,max-children=128", "TCP:127.0.0.1:2447"]
     and (.HostConfig.PortBindings // {}) == {} and .HostConfig.ReadonlyRootfs
@@ -234,7 +234,7 @@ verify_relays() {
   ' >/dev/null || { fail 'inner relay validation failed'; return 1; }
   docker inspect "$ingress_id" | jq -e '
     .[0] | .State.Running and .State.Health.Status == "healthy" and .Config.Entrypoint == ["socat"] and
-    .Config.Image == "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e" and .HostConfig.ReadonlyRootfs
+    .Config.Image == "mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e" and .HostConfig.ReadonlyRootfs
     and .Config.Cmd == ["-d", "-d", "-T120", "TCP-LISTEN:2448,bind=0.0.0.0,reuseaddr,fork,max-children=128", "UNIX-CONNECT:/run/bot-api/relay.sock"]
     and .HostConfig.PortBindings["2448/tcp"] == [{"HostIp":"127.0.0.1","HostPort":"2447"}]
     and .NetworkSettings.Ports["2448/tcp"] == [{"HostIp":"127.0.0.1","HostPort":"2447"}]
