@@ -9,6 +9,7 @@ readonly NAMESPACE=teagram
 readonly K3S_VERSION=v1.37.1+k3s1
 readonly IMAGE_ALIAS=images:ubuntu/24.04
 readonly KUBECONFIG_PATH=/root/teagram-k3s-deploy.kubeconfig
+readonly CUTOVER_KUBECONFIG_PATH=/root/teagram-k3s-cutover.kubeconfig
 readonly BOOTSTRAP_MARKER=MAIN-3278
 readonly K3S_API_HOST_PORT=16443
 readonly OPS_SSH_HOST_PORT=12222
@@ -49,7 +50,8 @@ Would install the agents' forced-command SSH menu and the existing Multica publi
 Would create the teagram namespace with enforced Pod Security baseline, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
 Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, cloudflared-token, and ghcr-pull from the live teagram LXC (values are not displayed).
 Would configure Tailscale Serve TCP routes on alpha ports 6443 and 2222 to the loopback proxies; no public listener is configured.
-Would write /root/teagram-k3s-deploy.kubeconfig with mode 0600 and verify the k3s node, disabled components, namespace boundary, Serve routes, and kubeconfig permissions.
+Would write /root/teagram-k3s-deploy.kubeconfig with the namespace-restricted deployer token, plus /root/teagram-k3s-cutover.kubeconfig with the k3s admin client certificate for root-only cutover, rollback, and reset. Both files use mode 0600; the deployer Role remains restricted.
+Would verify the k3s node, disabled components, namespace boundary, Serve routes, and both kubeconfig permissions.
 Would verify Pod Security Admission rejects a privileged pod that mounts a hostPath.
 EOF
 }
@@ -327,6 +329,8 @@ TAILNET_IP=$(tailscale ip -4 | head -n 1)
     fail 'the deploy kubeconfig path exists and is not a regular file'
   fi
 }
+[[ ! -L $CUTOVER_KUBECONFIG_PATH && ( ! -e $CUTOVER_KUBECONFIG_PATH || -f $CUTOVER_KUBECONFIG_PATH ) ]] ||
+  fail 'the root-only cutover kubeconfig path is not a regular file'
 
 POSTGRES_PASSWORD=$(container_env teagram-postgres-1 POSTGRES_PASSWORD)
 TG_POSTGRES_DSN=$(container_env teagram-teagramd-1 TG_POSTGRES_DSN)
@@ -767,6 +771,98 @@ except BaseException:
     raise
 ' "$TAILNET_IP" "$KUBECONFIG_PATH"
 
+# The interactive cutover and its cleanup need cluster-admin operations. Keep
+# that client certificate separate from the restricted deployer token above.
+incus exec "$INSTANCE" -- k3s kubectl config view --raw --flatten --minify --output=json |
+  python3 -c '
+import base64
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+config = json.load(sys.stdin)
+tailnet_ip, path_text = sys.argv[1:]
+path = pathlib.Path(path_text)
+contexts = config.get("contexts", [])
+clusters = config.get("clusters", [])
+users = config.get("users", [])
+current = config.get("current-context")
+if (len(contexts) != 1 or len(clusters) != 1 or len(users) != 1 or
+        not current or contexts[0].get("name") != current):
+    print("k3s bootstrap: k3s admin kubeconfig is not a single flattened context",
+          file=sys.stderr)
+    raise SystemExit(1)
+context = contexts[0].get("context", {})
+cluster_name = context.get("cluster")
+user_name = context.get("user")
+cluster_entries = [entry["cluster"] for entry in clusters
+                   if entry.get("name") == cluster_name]
+user_entries = [entry["user"] for entry in users if entry.get("name") == user_name]
+if len(cluster_entries) != 1 or len(user_entries) != 1:
+    print("k3s bootstrap: k3s admin kubeconfig references are invalid", file=sys.stderr)
+    raise SystemExit(1)
+cluster, user = cluster_entries[0], user_entries[0]
+if cluster.get("server") != "https://127.0.0.1:6443":
+    print("k3s bootstrap: k3s admin kubeconfig has an unexpected API endpoint", file=sys.stderr)
+    raise SystemExit(1)
+for value, description in (
+        (cluster.get("certificate-authority-data"), "cluster CA"),
+        (user.get("client-certificate-data"), "admin client certificate"),
+        (user.get("client-key-data"), "admin client key")):
+    try:
+        if not value:
+            raise ValueError("missing")
+        base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        print("k3s bootstrap: k3s admin kubeconfig has an invalid " + description,
+              file=sys.stderr)
+        raise SystemExit(1)
+if any(field in user for field in ("token", "exec", "auth-provider")):
+    print("k3s bootstrap: k3s admin kubeconfig is not certificate-authenticated",
+          file=sys.stderr)
+    raise SystemExit(1)
+cluster["server"] = "https://" + tailnet_ip + ":6443"
+context["namespace"] = "teagram"
+payload = json.dumps(config, separators=(",", ":")) + "\n"
+if path.is_symlink() or (path.exists() and
+        (not path.is_file() or path.stat().st_uid != 0)):
+    print("k3s bootstrap: cutover kubeconfig is not a root-owned regular file",
+          file=sys.stderr)
+    raise SystemExit(1)
+if path.exists():
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print("k3s bootstrap: existing cutover kubeconfig is unreadable",
+              file=sys.stderr)
+        raise SystemExit(1)
+    if existing != config:
+        print("k3s bootstrap: existing cutover kubeconfig does not match this cluster",
+              file=sys.stderr)
+        raise SystemExit(1)
+    if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        os.chmod(path, 0o600)
+else:
+    fd, temporary = tempfile.mkstemp(prefix=".teagram-k3s-cutover-kubeconfig.",
+                                     dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+' "$TAILNET_IP" "$CUTOVER_KUBECONFIG_PATH"
+
 # `can-i` warns on stderr for cluster-scoped resources; compare stdout and status.
 expect_deployer_can_i() {
   local expected=$1 verb=$2 resource=$3 answer status
@@ -825,6 +921,9 @@ else
 fi
 [[ $(stat -c '%a:%u' "$KUBECONFIG_PATH") == 600:0 ]] ||
   fail 'the deploy kubeconfig is not root-only'
+[[ $(stat -c '%a:%u' "$CUTOVER_KUBECONFIG_PATH") == 600:0 ]] ||
+  fail 'the cutover kubeconfig is not root-only'
 
-printf 'k3s bootstrap complete: version=%s api=%s:%s namespace=%s kubeconfig=%s (mode 0600)\n' \
-  "$K3S_VERSION" "$TAILNET_IP" "$K3S_API_TAILNET_PORT" "$NAMESPACE" "$KUBECONFIG_PATH"
+printf 'k3s bootstrap complete: version=%s api=%s:%s namespace=%s deploy_kubeconfig=%s cutover_kubeconfig=%s (both mode 0600)\n' \
+  "$K3S_VERSION" "$TAILNET_IP" "$K3S_API_TAILNET_PORT" "$NAMESPACE" \
+  "$KUBECONFIG_PATH" "$CUTOVER_KUBECONFIG_PATH"

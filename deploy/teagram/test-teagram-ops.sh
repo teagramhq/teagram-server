@@ -224,7 +224,7 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa'* ]]
   [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
     "$help_output" == *'verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]

@@ -8,6 +8,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 bootstrap="$repo_root/deploy/k8s/bootstrap-alpha.sh"
 mock="$repo_root/deploy/k8s/test-bootstrap-alpha-mock.py"
 kubeconfig_path=/root/teagram-k3s-deploy.kubeconfig
+cutover_kubeconfig_path=/root/teagram-k3s-cutover.kubeconfig
 
 fail() {
   printf 'bootstrap-alpha test: %s\n' "$*" >&2
@@ -15,12 +16,14 @@ fail() {
 }
 
 [[ $(id -u) -eq 0 ]] || fail 'run as root (the bootstrap writes under /root)'
-[[ ! -e $kubeconfig_path && ! -L $kubeconfig_path ]] ||
-  fail "$kubeconfig_path exists; move it aside before running this test"
+for path in "$kubeconfig_path" "$cutover_kubeconfig_path"; do
+  [[ ! -e $path && ! -L $path ]] ||
+    fail "$path exists; move it aside before running this test"
+done
 
 work=$(mktemp -d)
 cleanup() {
-  rm -rf -- "$work" "$kubeconfig_path"
+  rm -rf -- "$work" "$kubeconfig_path" "$cutover_kubeconfig_path"
 }
 trap cleanup EXIT
 
@@ -32,6 +35,8 @@ rustfs_secret_key="$(printf 'e1%.0s' {1..32})"
 blob_access_key_id='2b3c4d5e6f708192a3b4'
 blob_secret_key="$(printf 'c3%.0s' {1..32})"
 media_key='tgtest-media-key-body-1'
+admin_cert='tgtest-k3s-admin-client-cert'
+admin_key='tgtest-k3s-admin-client-key'
 ghcr_auth=$(printf 'tgtest:ghcr-read' | base64 -w0)
 deployer_token='tgtest-deployer-token-7f3a9c'
 dsn="postgres://postgres:${pg_password}@postgres:5432/teagram?sslmode=disable"
@@ -42,7 +47,8 @@ export MOCK_HOST_TMP="$host_tmp"
 export MOCK_SECRET_VALUES
 MOCK_SECRET_VALUES=$(printf '%s\n' "$pg_password" "$dsn" "$tunnel_token" \
   "$rustfs_access_key" "$rustfs_secret_key" "$blob_access_key_id" "$blob_secret_key" \
-  "$media_key" "$ghcr_auth" "$deployer_token")
+  "$media_key" "$ghcr_auth" "$deployer_token" "$admin_cert" "$admin_key" \
+  "$(printf '%s' "$admin_cert" | base64 -w0)" "$(printf '%s' "$admin_key" | base64 -w0)")
 
 src="$work/src"
 containers="$src/containers"
@@ -110,14 +116,34 @@ run_bootstrap() {
   cp "$MOCK_ACTIONS" "$actions"
 }
 
-# First apply: builds the LXC and writes the deploy kubeconfig.
+# First apply: builds the LXC and writes separate deploy and cutover kubeconfigs.
 run_bootstrap "$work/run1.out" "$work/run1.actions"
 grep -Fq 'k3s bootstrap complete' "$work/run1.out" || fail 'first run did not report completion'
 grep -Fq "Warning: resource 'namespaces' is not namespace scoped" "$work/run1.out" ||
   fail 'cluster-scoped can-i warning was not exercised'
 [[ $(stat -c '%a:%u' "$kubeconfig_path") == 600:0 ]] || fail 'kubeconfig is not a root-only file'
 grep -Fq "$deployer_token" "$kubeconfig_path" || fail 'kubeconfig does not contain the deploy token'
+[[ $(stat -c '%a:%u' "$cutover_kubeconfig_path") == 600:0 ]] ||
+  fail 'cutover kubeconfig is not a root-only file'
+python3 - "$cutover_kubeconfig_path" <<'PY'
+import json
+import pathlib
+import sys
+
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert config["clusters"][0]["cluster"]["server"] == "https://100.100.1.2:6443"
+user = config["users"][0]["user"]
+assert user["client-certificate-data"]
+assert user["client-key-data"]
+assert "token" not in user
+assert config["contexts"][0]["context"]["namespace"] == "teagram"
+PY
+if grep -Fq "$deployer_token" "$cutover_kubeconfig_path"; then
+  fail 'cutover kubeconfig reused the restricted deployer token'
+fi
 grep -Fxq 'k3s-install' "$work/run1.actions" || fail 'first run did not install k3s'
+grep -Fxq 'kubeconfig-admin-view' "$work/run1.actions" ||
+  fail 'bootstrap did not obtain the separate k3s admin kubeconfig'
 grep -Fxq 'podsecurity-deny' "$work/run1.actions" || fail 'the escape pod was not rejected by admission'
 python3 - "$MOCK_STATE/state.json" <<'PY'
 import json
@@ -155,6 +181,7 @@ if "pod/teagram-deployer-escape-check" in state["objects"]:
 PY
 
 cp "$kubeconfig_path" "$work/kubeconfig.before"
+cp "$cutover_kubeconfig_path" "$work/cutover-kubeconfig.before"
 
 # Second apply: must change nothing and still exit 0.
 run_bootstrap "$work/run2.out" "$work/run2.actions"
@@ -165,10 +192,14 @@ if grep -E '^(init|device-add|device-override|start|serve |k3s-install|sysctl|sy
 fi
 grep -Fxq 'k3s-version-check' "$work/run2.actions" || fail 'rerun skipped the installed k3s version check'
 cmp -s "$work/kubeconfig.before" "$kubeconfig_path" || fail 'rerun changed the deploy kubeconfig'
+cmp -s "$work/cutover-kubeconfig.before" "$cutover_kubeconfig_path" ||
+  fail 'rerun changed the cutover kubeconfig'
 
 # No fixture secret may appear in what the script prints, on either run.
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
-  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token" \
+  "$admin_cert" "$admin_key" "$(printf '%s' "$admin_cert" | base64 -w0)" \
+  "$(printf '%s' "$admin_key" | base64 -w0)"; do
   if grep -Fq -- "$secret" "$work/run1.out" "$work/run2.out"; then
     fail 'the script printed a secret value'
   fi
@@ -187,7 +218,9 @@ if grep -Fq 'mock kubectl second diagnostic' "$work/failure.out"; then
   fail 'kubectl apply failure printed more than the first stderr line'
 fi
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
-  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token" \
+  "$admin_cert" "$admin_key" "$(printf '%s' "$admin_cert" | base64 -w0)" \
+  "$(printf '%s' "$admin_key" | base64 -w0)"; do
   if grep -Fq -- "$secret" "$work/failure.out"; then
     fail 'the script printed a secret value on an apply failure'
   fi

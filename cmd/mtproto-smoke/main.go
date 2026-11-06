@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -25,8 +27,10 @@ import (
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
@@ -41,7 +45,10 @@ const (
 	exchangeTimeout       = 15 * time.Second
 	probeTimeout          = 30 * time.Second
 	tempKeyLifetime       = 60
+	maxSmokeCredential    = 1024
 )
+
+var smokeUsernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{1,31}$`)
 
 type serverIdentity struct {
 	dcID      int
@@ -53,6 +60,8 @@ func main() {
 	endpoint := flag.String("endpoint", liveMTProtoEndpoint, "MTProto host:port to probe")
 	discoveryURL := flag.String("discovery-url", liveDiscoveryURL, "HTTPS client discovery URL")
 	discoveryFile := flag.String("discovery-file", "", "read client discovery JSON from a local file")
+	usernameFile := flag.String("username-file", "", "sign in using the username in this protected file")
+	passwordFile := flag.String("password-file", "", "sign in using the password in this protected file")
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
 	flag.Parse()
 	quotaExpectationSet := false
@@ -70,17 +79,32 @@ func main() {
 	if quotaExpectationSet && *discoveryFile != "" {
 		log.Fatal("--expect-user-invite-quota cannot be combined with --discovery-file")
 	}
-	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota); err != nil {
+	if (*usernameFile == "") != (*passwordFile == "") {
+		log.Fatal("--username-file and --password-file must be used together")
+	}
+	if *usernameFile != "" && (*discoveryFile == "" || quotaExpectationSet) {
+		log.Fatal("credential sign-in requires --discovery-file and cannot use --expect-user-invite-quota")
+	}
+	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota, *usernameFile, *passwordFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int) error {
+func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int, usernameFile, passwordFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
+	if usernameFile != "" {
+		if err := probeSignInFile(ctx, endpoint, discoveryFile, usernameFile, passwordFile); err != nil {
+			return fmt.Errorf("MTProto username/password sign-in on %s failed: %w", endpoint, err)
+		}
+		if _, err := fmt.Printf("MTProto username/password sign-in passed on %s\n", endpoint); err != nil {
+			return fmt.Errorf("write sign-in smoke result: %w", err)
+		}
+		return nil
+	}
 
 	client := &http.Client{
 		Timeout: discoveryTimeout,
@@ -222,13 +246,21 @@ func probe(ctx context.Context, endpoint, discoveryURL string, client *http.Clie
 	return probeIdentity(ctx, endpoint, identity)
 }
 
-func probeFile(ctx context.Context, endpoint, path string) (returnErr error) {
+func probeFile(ctx context.Context, endpoint, path string) error {
 	if err := discovery.ValidateEndpoint(endpoint); err != nil {
 		return fmt.Errorf("validate target endpoint: %w", err)
 	}
+	identity, err := readIdentityFile(path)
+	if err != nil {
+		return err
+	}
+	return probeIdentity(ctx, endpoint, identity)
+}
+
+func readIdentityFile(path string) (identity serverIdentity, returnErr error) {
 	file, err := os.Open(path) // #nosec G304 -- the operator selects a local discovery file; its contents are size-limited and parsed below.
 	if err != nil {
-		return fmt.Errorf("open client discovery file: %w", err)
+		return serverIdentity{}, fmt.Errorf("open client discovery file: %w", err)
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
@@ -237,16 +269,170 @@ func probeFile(ctx context.Context, endpoint, path string) (returnErr error) {
 	}()
 	body, err := io.ReadAll(io.LimitReader(file, maxDiscoveryBodyBytes+1))
 	if err != nil {
-		return fmt.Errorf("read client discovery file: %w", err)
+		return serverIdentity{}, fmt.Errorf("read client discovery file: %w", err)
 	}
 	if len(body) > maxDiscoveryBodyBytes {
-		return fmt.Errorf("client discovery exceeds %d bytes", maxDiscoveryBodyBytes)
+		return serverIdentity{}, fmt.Errorf("client discovery exceeds %d bytes", maxDiscoveryBodyBytes)
 	}
-	identity, err := parseIdentity(body)
+	return parseIdentity(body)
+}
+
+func probeSignInFile(ctx context.Context, endpoint, discoveryFile, usernameFile, passwordFile string) error {
+	if err := discovery.ValidateEndpoint(endpoint); err != nil {
+		return fmt.Errorf("validate target endpoint: %w", err)
+	}
+	identity, err := readIdentityFile(discoveryFile)
 	if err != nil {
 		return err
 	}
-	return probeIdentity(ctx, endpoint, identity)
+	targetPort, err := endpointPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("read target port: %w", err)
+	}
+	if targetPort != identity.port {
+		return fmt.Errorf("target port %d does not match discovery port %d", targetPort, identity.port)
+	}
+	username, err := readSmokeCredential(usernameFile, "username")
+	if err != nil {
+		return err
+	}
+	if !smokeUsernamePattern.Match(username) {
+		clear(username)
+		return errors.New("username file does not contain a lowercase account handle")
+	}
+	password, err := readSmokeCredential(passwordFile, "password")
+	if err != nil {
+		clear(username)
+		return err
+	}
+	defer clear(username)
+	defer clear(password)
+	return signIn(ctx, endpoint, identity, string(username), password)
+}
+
+func readSmokeCredential(path, name string) (value []byte, returnErr error) {
+	file, err := os.Open(path) // #nosec G304 -- CI supplies run-owned credential files with restrictive permissions.
+	if err != nil {
+		return nil, fmt.Errorf("open %s file: %w", name, err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close %s file: %w", name, err))
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s file: %w", name, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s file must be a regular file without group or other permissions", name)
+	}
+	value, err = io.ReadAll(io.LimitReader(file, maxSmokeCredential+2))
+	if err != nil {
+		return nil, fmt.Errorf("read %s file: %w", name, err)
+	}
+	if len(value) > maxSmokeCredential+1 {
+		clear(value)
+		return nil, fmt.Errorf("%s file exceeds %d bytes", name, maxSmokeCredential)
+	}
+	if len(value) > 0 && value[len(value)-1] == '\n' {
+		value[len(value)-1] = 0
+		value = value[:len(value)-1]
+	}
+	if len(value) > maxSmokeCredential {
+		clear(value)
+		return nil, fmt.Errorf("%s file exceeds %d bytes", name, maxSmokeCredential)
+	}
+	if len(value) == 0 || bytes.ContainsAny(value, "\r\n\x00") {
+		clear(value)
+		return nil, fmt.Errorf("%s file must contain exactly one non-empty line", name)
+	}
+	return value, nil
+}
+
+func smokeRPCError(operation string, err error) error {
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
+		return fmt.Errorf("%s failed: %w", operation, rpcErr)
+	}
+	return fmt.Errorf("%s transport failed: %w", operation, err)
+}
+
+func expectPasswordChallenge(err error) error {
+	if err == nil {
+		return errors.New("auth.signIn did not require the account password")
+	}
+	var rpcErr *tgerr.Error
+	if !errors.As(err, &rpcErr) {
+		return fmt.Errorf("auth.signIn transport failed: %w", err)
+	}
+	if rpcErr.Message != "SESSION_PASSWORD_NEEDED" {
+		return fmt.Errorf("auth.signIn failed: %w", rpcErr)
+	}
+	return nil
+}
+
+func signIn(ctx context.Context, endpoint string, identity serverIdentity, username string, password []byte) error {
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return errors.New("split sign-in endpoint")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return errors.New("parse sign-in endpoint")
+	}
+	client := telegram.NewClient(1, "hash", telegram.Options{
+		DC:             identity.dcID,
+		DCList:         dcs.List{Options: []tg.DCOption{{ID: identity.dcID, IPAddress: host, Port: port}}},
+		PublicKeys:     []telegram.PublicKey{{RSA: identity.publicKey}},
+		Resolver:       dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage: &session.StorageMemory{},
+	})
+	return client.Run(ctx, func(ctx context.Context) error {
+		api := client.API()
+		sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{
+			PhoneNumber: username,
+			APIID:       1,
+			APIHash:     "hash",
+		})
+		if err != nil {
+			return smokeRPCError("auth.sendCode", err)
+		}
+		code, ok := sent.(*tg.AuthSentCode)
+		if !ok {
+			return errors.New("auth.sendCode returned an unexpected response")
+		}
+		_, err = api.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: username, PhoneCodeHash: code.PhoneCodeHash})
+		if err := expectPasswordChallenge(err); err != nil {
+			return err
+		}
+		settings, err := api.AccountGetPassword(ctx)
+		if err != nil {
+			return smokeRPCError("account.getPassword", err)
+		}
+		proof, err := auth.PasswordHash(password, settings.SRPID, settings.SRPB, settings.SecureRandom, settings.CurrentAlgo)
+		if err != nil {
+			return errors.New("calculate account password proof")
+		}
+		defer clear(proof.A)
+		defer clear(proof.M1)
+		response, err := api.AuthCheckPassword(ctx, proof)
+		if err != nil {
+			return smokeRPCError("auth.checkPassword", err)
+		}
+		authorization, ok := response.(*tg.AuthAuthorization)
+		if !ok {
+			return errors.New("auth.checkPassword returned an unexpected response")
+		}
+		user, ok := authorization.User.(*tg.User)
+		if !ok || user.Username != username {
+			return errors.New("auth.checkPassword authorized a different account")
+		}
+		status, err := client.Auth().Status(ctx)
+		if err != nil || !status.Authorized {
+			return errors.New("client did not retain the restored account authorization")
+		}
+		return nil
+	})
 }
 
 func probeIdentity(ctx context.Context, endpoint string, identity serverIdentity) error {

@@ -30,7 +30,9 @@ fi
 manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Render and validate production and CI overlays") | .run' .github/workflows/ci.yml)"
 base_migration_check_line="$(grep -n -m 1 -F '.github/scripts/check-k8s-migration-version.sh' <<< "$manifest_step" | cut -d: -f1)"
 ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$manifest_step" | cut -d: -f1)"
-overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod prod-cutover ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+cutover_overlay_check_pattern="if [[ \"\$overlay\" == prod-cutover ]]"
+cutover_overlay_check_line="$(grep -n -m 1 -F "$cutover_overlay_check_pattern" <<< "$manifest_step" | cut -d: -f1)"
 base_sha_else_line="$(grep -n -m 1 -F 'else' <<< "$manifest_step" | cut -d: -f1)"
 base_sha_error_line="$(grep -n -m 1 -F 'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA' <<< "$manifest_step" | cut -d: -f1)"
 base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f1)"
@@ -47,9 +49,11 @@ base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f
    "$base_migration_check_line" =~ ^[0-9]+$ &&
    "$ci_migration_prepare_line" =~ ^[0-9]+$ &&
    "$overlay_render_line" =~ ^[0-9]+$ &&
+   "$cutover_overlay_check_line" =~ ^[0-9]+$ &&
    "$base_migration_check_line" -lt "$ci_migration_prepare_line" &&
-   "$ci_migration_prepare_line" -lt "$overlay_render_line" ]] ||
-  fail 'manifest validation must accept unchanged base pins and render CI against the newest migration'
+   "$ci_migration_prepare_line" -lt "$overlay_render_line" &&
+   "$overlay_render_line" -lt "$cutover_overlay_check_line" ]] ||
+  fail 'manifest validation must preserve migration checks and validate the cutover overlay'
 
 migration_fixture="$(mktemp -d)"
 trap 'rm -rf "$migration_fixture"' EXIT
@@ -150,6 +154,79 @@ prod_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/te
 bootstrap_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' deploy/k8s/bootstrap/kustomization.yaml)"
 [[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$bootstrap_teagramd_digest" ]] ||
   fail 'the production bootstrap Job must use the same pinned teagramd digest as the workload'
+cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' deploy/k8s/prod-cutover/kustomization.yaml)"
+[[ "$cutover_teagramd_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+  fail 'the cutover workload must use a pinned teagramd image digest'
+[[ "$cutover_teagramd_digest" != "sha256:$(printf '%064d' 0)" ]] ||
+  fail 'the cutover workload must not use a placeholder teagramd image digest'
+for overlay in prod prod-cutover; do
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
+      select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
+             .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
+    jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+      .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
+      .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
+      .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
+      .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
+    fail "$overlay must preserve the WebSocket and admin listeners and Secret references"
+  fi
+done
+[[ "$(yq -r '.spec.suspend' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == true ]] ||
+  fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||
+  fail 'the cutover blob migration must encrypt the private manifest and migrated media'
+cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .command | join(" ")' "$cutover_seed_job")" == '/usr/local/bin/teagramd' ]] ||
+  fail 'the cutover account seed Job must invoke teagramd directly for its distroless image'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .args | join(" ")' "$cutover_seed_job")" == 'admin create-user --username cutover_smoke' ]] ||
+  fail 'the cutover account seed Job must create the disposable smoke account'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdin' "$cutover_seed_job")" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .stdinOnce' "$cutover_seed_job")" == true ]] ||
+  fail 'the cutover account seed Job must accept the password through one stdin attachment'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.capabilities.add // [] | join(",")' "$cutover_seed_job")" == 'DAC_READ_SEARCH' ]] ||
+  fail 'the cutover account seed Job must grant only DAC_READ_SEARCH to read the runtime-owned key as root'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.capabilities.drop // [] | join(",")' "$cutover_seed_job")" == 'ALL' ]] ||
+  fail 'the cutover account seed Job must drop every other capability'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .securityContext.runAsUser' "$cutover_seed_job")" == 0 ]] ||
+  fail 'the cutover account seed Job must run as root for the guarded admin command'
+cutover_key_reader=deploy/k8s/test-cutover-key-reader.yaml
+[[ "$(yq -r '.spec.containers[] | select(.name == "reader") | .image' "$cutover_key_reader")" == \
+  'ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' ]] ||
+  fail 'the cutover key reader must use the pinned BusyBox image, not the distroless workload image'
+[[ "$(yq -r '.spec.securityContext.runAsUser' "$cutover_key_reader")" == 65532 &&
+   "$(yq -r '.spec.volumes[] | select(.name == "key-data") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'key-data-teagramd-0' &&
+   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "key-data") | .readOnly' "$cutover_key_reader")" == true &&
+   "$(yq -r '.spec.volumes[] | select(.name == "legacy-blobs") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'legacy-blobs-teagramd-0' &&
+   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "legacy-blobs") | .readOnly' "$cutover_key_reader")" == true ]] ||
+  fail 'the cutover helper must mount source identity and blob PVCs read-only as their owner'
+grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the actual cutover runner test adapter must read source identity from the BusyBox helper pod'
+grep --fixed-strings --quiet 'cutover-alpha.sh --apply --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must execute the actual apply runner in its disposable namespace'
+grep --fixed-strings --quiet 'cutover-alpha.sh --rollback --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise the actual rollback runner'
+grep --fixed-strings --quiet 'CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise failure handling after the first live route'
+grep --fixed-strings --quiet 'test-cutover-blob-seed.yaml' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must seed source blobs for the actual transfer and migration'
+cutover_blob_seed=deploy/k8s/test-cutover-blob-seed.yaml
+[[ "$(yq -r '.spec.containers[] | select(.name == "seed") | .image' "$cutover_blob_seed")" == \
+  'ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' ]] ||
+  fail 'the cutover blob seed must use the pinned BusyBox image'
+for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
+  yq -e "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$pvc\")" \
+    deploy/k8s/prod-cutover/persistentvolumeclaims.yaml >/dev/null 2>&1 ||
+    fail "the cutover overlay is missing PVC $pvc"
+done
+
+cutover_volume_importer=deploy/k8s/prod-cutover/volume-importer.yaml
+[[ "$(yq -r '.spec.containers[] | select(.name == "importer") | .securityContext.capabilities.add | join(",")' "$cutover_volume_importer")" == 'CHOWN,FOWNER' ]] ||
+  fail 'the cutover importer must retain only the capabilities needed to prepare target PVC ownership'
+script=deploy/k8s/cutover-alpha.sh
+grep --fixed-strings --quiet 'tar -xopf - -C /target/legacy-blobs' "$script" ||
+  fail "$script must preserve blob modes without restoring source ownership"
 
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do

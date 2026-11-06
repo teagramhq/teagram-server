@@ -1115,6 +1115,10 @@ jobs:
           bash -n deploy/k8s/bootstrap-alpha.sh
           bash -n deploy/k8s/test-bootstrap-alpha.sh
           sh -n deploy/k8s/teagram-k3s-ops.sh
+          ./deploy/k8s/cutover-alpha.sh --dry-run
+          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha-k3s.sh deploy/k8s/test-cutover-alpha-incus.sh \
+            deploy/k8s/cutover-dump-upload.sh deploy/k8s/test-cutover-dump-upload.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1128,6 +1132,7 @@ jobs:
           bash -n deploy/teagram/ops/apply-user-invite-quota.sh
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
           bash -n deploy/teagram/ops/start-server.sh
+          bash -n deploy/teagram/ops/bot-api-qa.sh deploy/teagram/test-bot-api-qa.sh deploy/teagram/test-bot-api-qa-ops.sh deploy/teagram/test-bot-api-relays.sh
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
           bash -n deploy/teagram/ops/backup-media-key.sh
@@ -1179,6 +1184,12 @@ jobs:
             deploy/k8s/bootstrap-alpha.sh \
             deploy/k8s/test-bootstrap-alpha.sh \
             deploy/k8s/teagram-k3s-ops.sh \
+            deploy/k8s/cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha.sh \
+            deploy/k8s/test-cutover-alpha-k3s.sh \
+            deploy/k8s/test-cutover-alpha-incus.sh \
+            deploy/k8s/cutover-dump-upload.sh \
+            deploy/k8s/test-cutover-dump-upload.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1192,6 +1203,10 @@ jobs:
             deploy/teagram/ops/apply-user-invite-quota.sh \
             deploy/teagram/test-apply-user-invite-quota.sh \
             deploy/teagram/ops/start-server.sh \
+            deploy/teagram/ops/bot-api-qa.sh \
+            deploy/teagram/test-bot-api-qa.sh \
+            deploy/teagram/test-bot-api-qa-ops.sh \
+            deploy/teagram/test-bot-api-relays.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
             deploy/teagram/ops/backup-media-key.sh \
@@ -1246,6 +1261,9 @@ jobs:
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
 
+      - name: Check alpha k3s cutover contract
+        run: deploy/k8s/test-cutover-alpha.sh
+
       - name: Check user invite quota operation
         run: deploy/teagram/test-apply-user-invite-quota.sh
 
@@ -1260,6 +1278,12 @@ jobs:
 
       - name: Check blob-mode report attestation fixtures
         run: python3 -B deploy/teagramd/rollout-runner/test-blob-mode-report-attestation.py
+
+      - name: Check Bot API QA isolation and Serve operations
+        run: |
+          bash deploy/teagram/test-bot-api-qa.sh
+          bash deploy/teagram/test-bot-api-qa-ops.sh
+          bash deploy/teagram/test-bot-api-relays.sh
 
       - name: Check media encryption and cleanup operations
         run: bash deploy/teagram/test-media-encryption-ops.sh
@@ -1478,10 +1502,15 @@ jobs:
           bash .github/scripts/check-k8s-migration-version.sh \
             migrations deploy/k8s/base/migration-version "$previous_migration_version"
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
-          for overlay in prod ci bootstrap bootstrap/ci; do
+          for overlay in prod prod-cutover ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
+            if [[ "$overlay" == prod-cutover ]]; then
+              yq -e 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.replicas == 0' "$rendered" >/dev/null
+              yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
+              yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
+            fi
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
@@ -1686,7 +1715,9 @@ jobs:
     needs:
       - check-sticker-license
     if: ${{ !cancelled() && needs.check-sticker-license.result == 'success' }}
-    runs-on: ubuntu-26.04
+    # Nested k3s/containerd volume provisioning has stalled on the Ubuntu 26.04
+    # runner image; keep this integration lane on the stable Ubuntu 24.04 image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
       actions: read
@@ -1861,6 +1892,12 @@ jobs:
           kubectl create secret generic teagramd-media-keys --namespace teagram \
             --from-file=1.key="$RUNNER_TEMP/media-key"
           rm -f "$RUNNER_TEMP/media-key"
+          printf '%064d' 0 > "$RUNNER_TEMP/admin-token-hash"
+          printf '%s' https://links.example.test > "$RUNNER_TEMP/admin-origin"
+          kubectl create secret generic teagramd-admin --namespace teagram \
+            --from-file=TG_ADMIN_TOKEN_HASH="$RUNNER_TEMP/admin-token-hash" \
+            --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
+          rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
             --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443
@@ -1986,16 +2023,38 @@ jobs:
             sleep 2
           done
 
+      - name: Exercise the pinned alpha cutover migration and rollback
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash deploy/k8s/test-cutover-alpha-k3s.sh
+
       - name: Collect k3s diagnostics on failure
         if: failure()
         run: |
           set +e
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl describe node
+          kubectl get pods --namespace kube-system --output wide
+          kubectl get events --namespace kube-system --sort-by=.lastTimestamp
+          kubectl describe pods --namespace kube-system
+          kubectl logs --namespace kube-system deployment/local-path-provisioner \
+            --all-containers --tail=100
+          while IFS= read -r pod; do
+            kubectl logs --namespace kube-system "$pod" --all-containers --tail=100
+          done < <(kubectl get pods --namespace kube-system --output name \
+            | grep 'helper-pod-create-pvc-' || true)
           kubectl get pods,jobs,persistentvolumeclaims --namespace teagram --output wide
           kubectl get events --namespace teagram --sort-by=.lastTimestamp
           kubectl describe pods --namespace teagram
           for pod in $(kubectl get pods --namespace teagram --output name); do
             kubectl logs --namespace teagram "$pod" --all-containers --tail=100
+          done
+          kubectl get pods,jobs,persistentvolumeclaims --namespace teagram-cutover --output wide
+          kubectl get events --namespace teagram-cutover --sort-by=.lastTimestamp
+          kubectl describe pods --namespace teagram-cutover
+          for pod in $(kubectl get pods --namespace teagram-cutover --output name); do
+            kubectl logs --namespace teagram-cutover "$pod" --all-containers --tail=100
           done
           docker logs --tail 100 teagram-k3s
 

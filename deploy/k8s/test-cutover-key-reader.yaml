@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cutover-key-reader
+  namespace: teagram
+  labels:
+    app.kubernetes.io/name: cutover-key-reader
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  imagePullSecrets:
+    - name: ghcr-pull
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: reader
+      image: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-ec"]
+      args: ["exec sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      volumeMounts:
+        - name: key-data
+          mountPath: /var/lib/teagramd
+          readOnly: true
+        - name: legacy-blobs
+          mountPath: /var/lib/teagramd-blobs
+          readOnly: true
+  volumes:
+    - name: key-data
+      persistentVolumeClaim:
+        claimName: key-data-teagramd-0
+        readOnly: true
+    - name: legacy-blobs
+      persistentVolumeClaim:
+        claimName: legacy-blobs-teagramd-0
+        readOnly: true

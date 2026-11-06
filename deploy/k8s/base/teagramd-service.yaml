@@ -12,6 +12,12 @@ spec:
     - name: mtproto
       port: 2443
       targetPort: mtproto
+    - name: websocket
+      port: 2444
+      targetPort: websocket
+    - name: admin
+      port: 2445
+      targetPort: admin
 ---
 apiVersion: v1
 kind: Service
@@ -27,3 +33,9 @@ spec:
     - name: mtproto
       port: 2443
       targetPort: mtproto
+    - name: websocket
+      port: 2444
+      targetPort: websocket
+    - name: admin
+      port: 2445
+      targetPort: admin

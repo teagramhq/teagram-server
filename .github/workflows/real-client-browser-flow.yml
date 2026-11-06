@@ -121,6 +121,14 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: corepack pnpm exec playwright install chromium
 
+      - name: Configure bounded APT retries
+        run: |
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "90";' \
+            'Acquire::https::Timeout "90";' \
+            | sudo tee /etc/apt/apt.conf.d/99-github-actions-download-retries >/dev/null
+
       # The GitHub-hosted Ubuntu mirror has repeatedly taken nearly ten minutes
       # to deliver Playwright's font packages. Use the shared apt-package cache
       # used by the e2e-admin job, and keep the slow path bounded for a cold

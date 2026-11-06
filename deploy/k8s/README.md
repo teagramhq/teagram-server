@@ -11,10 +11,13 @@ The script
 creates the `teagram` namespace, transfers only the production credentials and
 runtime values described below from the live `teagram` LXC, installs the
 namespace-scoped deploy account and agent operations menu, and writes the
-kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode `0600`. Store that
-file in the designated GitHub environment secret. The API and operations SSH
-menu are exposed through Tailscale Serve only; the Incus proxy listeners bind
-to host loopback.
+restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
+`0600`. Store that file in the designated GitHub environment secret. It also
+writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
+certificate, root-owned mode `0600`; use it only for the root-run cutover,
+rollback, and target reset on alpha. Never store this admin kubeconfig in GitHub
+or give it to the deploy job. The API and operations SSH menu are exposed
+through Tailscale Serve only; the Incus proxy listeners bind to host loopback.
 
 Before workloads have written production data, rollback on `alpha` with:
 
@@ -23,6 +26,7 @@ sudo tailscale serve --yes --tcp=6443 off
 sudo tailscale serve --yes --tcp=2222 off
 sudo incus delete --force teagram-k3s
 sudo rm -f /root/teagram-k3s-deploy.kubeconfig
+sudo rm -f /root/teagram-k3s-cutover.kubeconfig
 ```
 
 The old `teagram` LXC remains untouched. After production data is written,
@@ -42,6 +46,8 @@ the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
+Read the [alpha cutover threat model](cutover-threat-model.md) before moving
+production state or exposing the cutover listeners.
 Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a
@@ -77,8 +83,13 @@ by the cluster's secret and configuration management before it is applied:
 | `rustfs-credentials` Secret | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` |
 | `teagramd-blob-credentials` Secret | `TG_BLOB_S3_ACCESS_KEY_ID`, `TG_BLOB_S3_SECRET_ACCESS_KEY` |
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
+| `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
 | `cloudflared-token` Secret | `token` |
 | `ghcr-pull` Secret | Docker config for the private GHCR packages |
+
+The alpha cutover runner creates the `teagramd-admin` Secret from the existing
+Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
+either value. Subsequent production deployments use the same Secret.
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha
@@ -150,6 +161,98 @@ Cloudflared metrics endpoint is exposed only inside the cluster at
 service annotations. Container logs are written to stdout and stderr for the
 cluster's node or central log collector.
 
-This repository's CI renders the production, CI, and bootstrap overlays and
-deploys `ci/` to a disposable k3s cluster. It does not apply production
-manifests to a live cluster.
+## Alpha production cutover
+
+After `bootstrap-alpha.sh` has created `teagram-k3s` and its namespace
+credentials, run the cutover from a reviewed checkout on `alpha`:
+
+```sh
+sudo deploy/k8s/cutover-alpha.sh --dry-run
+sudo deploy/k8s/cutover-alpha.sh --apply
+```
+
+The script keeps the k8s app and tunnel connector at zero replicas while it
+restores PostgreSQL, copies `server_key.pem`, `enc_key.hex`, and the local blob
+tree into the new PVCs, applies the pinned Atlas migration, then encrypts and
+checksums the copied blobs into RustFS with the current media key. It saves a
+mode-0600 custom-format database dump on the PostgreSQL PVC and keeps a
+read-only local-blob copy in `legacy-blobs`. The database dump and old Compose
+volumes are recovery points for at least seven days. A fresh smoke test dumps
+and restores a provisioned account, then completes a new SRP login with the
+same password and RSA identity; CI runs it in `test: smoke`.
+
+Before the final snapshot, the script stops every running Compose service other
+than PostgreSQL, including `teagramd` and any active database or blob writer,
+and stops `teagram-web-cloudflared`. It verifies PostgreSQL has no remaining
+client connections. Compose volumes and PostgreSQL data are left intact. The
+fence-to-switch interval is planned downtime; a failure before the complete
+edge switch restarts the stopped Compose services.
+
+The cutover keeps the k8s app and connector at zero while it restores the
+database, identity and blobs. It then starts the WebSocket and admin listeners
+on the k3s teagramd Service and installs restartable `systemd` port-forwards in
+`teagram-k3s`. Tailscale Serve keeps all five existing paths and sends `/` to
+linkselector, `/apiws`, both client discovery paths, and `/admin` to the
+matching teagramd Service ports. It also forwards the existing raw MTProto TCP
+listener on port `2443` to the k3s teagramd Service and verifies the listener is
+reachable before changing Serve. Funnel remains off. The Cloudflare connector
+stays at zero until the dashboard route changes from `http://selector:8081` to
+`http://linkselector:8081`; confirm that change before the k8s connector starts.
+No Cloudflare API credential is provisioned.
+
+The first live Serve route is the switch boundary. A failure after that point
+leaves k3s serving and requires the printed explicit rollback command; it will
+not automatically restart Compose and discard writes accepted by k3s. Rollback
+requires confirmation of that data loss, scales the k8s app and connector to
+zero, and verifies their pods have stopped before restoring the Cloudflare
+route, all five Serve paths, and the MTProto TCP route. It then restarts the
+stopped Compose services and stops both port-forwards. PostgreSQL and PVC data
+remain intact. Writes made on k3s after the switch are not carried back to
+Compose.
+
+### Retry after a pre-switch failure
+
+An apply failure before the first live Serve route attempts to restart the
+stopped Compose services; if recovery reports incomplete, resolve that state
+before continuing. It leaves the cutover phase and target resources for
+diagnosis. The printed `--rollback` command restores the old routes and records
+`rolled-back`; it does not remove the imported target data. Do not reset the
+target until rollback has completed, the old Compose services and edges are
+healthy, and no cutover or rollback command is running. This reset deletes the
+failed target copy, so use it only after a pre-switch failure, when k3s has not
+served production traffic. A rollback after the first live Serve route warns
+that k3s writes are not copied back; preserve any such data before removing the
+target.
+
+After accepting that the failed target copy can be discarded, remove the
+resources from the cutover overlay and its separately-created admin Secret and
+PVCs, then remove the phase and recovery evidence directory. The namespace and
+bootstrap credentials are retained. The first command removes the importer and
+waits for its volume mounts to be released:
+
+```sh
+set -e
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete pod/cutover-volume-importer \
+  --namespace teagram --ignore-not-found=true --wait=true --timeout=300s
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
+  -k deploy/k8s/prod-cutover --ignore-not-found=true --wait=true
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
+  secret teagramd-admin --namespace teagram --ignore-not-found=true
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
+  pvc data-postgres-0 data-rustfs-0 key-data-teagramd-0 \
+  legacy-blobs-teagramd-0 blob-mode-teagramd-0 \
+  --namespace teagram --ignore-not-found=true --wait=true
+sudo rm -rf -- /var/lib/teagram-k3s-cutover
+```
+
+The overlay deletion removes the workloads, Services, Jobs and overlay PVCs.
+The explicit PVC command also removes the PostgreSQL and RustFS claims from the
+base production manifests. Once the commands complete, a fresh `--apply` can
+run from the same reviewed checkout.
+
+CI runs the actual cutover runner with a disposable source namespace and a
+separate target namespace in k3s. The source database, identity files, and a
+blob fixture pass through the runner's fence, snapshot, transfer, and pinned
+migration Job; CI signs into the restored account on the target, invokes the
+runner's explicit rollback, then signs into the untouched source. No production
+namespace or live cluster is used.

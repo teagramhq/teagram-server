@@ -88,6 +88,129 @@ func TestMigrateCopiesAndVerifiesEveryBlob(t *testing.T) {
 	}
 }
 
+func TestMigrateEncryptedCopiesAndVerifiesPlaintextManifests(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	source, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	want := bytes.Repeat([]byte("restored media"), 7000)
+	key := blob.Key(9271)
+	if _, err := source.Put(ctx, key, bytes.NewReader(want)); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("create media key ring: %v", err)
+	}
+	backend := &memoryStore{objects: make(map[string][]byte)}
+	encrypted, err := blob.NewEncrypted(backend, ring, blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("wrap destination: %v", err)
+	}
+	var manifest bytes.Buffer
+	summary, err := blobmigration.MigrateEncryptedWithManifest(ctx, source, encrypted, backend, io.Discard, &manifest)
+	if err != nil {
+		t.Fatalf("migrate encrypted source: %v", err)
+	}
+	if summary.Objects != 1 || summary.Bytes != int64(len(want)) || summary.SourceManifestSHA256 == "" ||
+		summary.SourceManifestSHA256 != summary.DestinationManifestSHA256 {
+		t.Fatalf("encrypted migration summary = %#v", summary)
+	}
+	if bytes.Equal(backend.objects[key], want) || !bytes.HasPrefix(backend.objects[key], []byte("TGME")) {
+		t.Fatal("destination did not contain an encrypted envelope")
+	}
+	got, err := encrypted.ReadAt(ctx, key, 0, int64(len(want)))
+	if err != nil {
+		t.Fatalf("read encrypted destination: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("encrypted destination did not restore the source plaintext")
+	}
+	if !strings.Contains(manifest.String(), key+"\t") {
+		t.Fatal("verified plaintext manifest omitted the source key")
+	}
+
+	if _, err := blobmigration.MigrateEncryptedWithManifest(ctx, source, encrypted, backend, io.Discard, io.Discard); err != nil {
+		t.Fatalf("retry encrypted migration: %v", err)
+	}
+}
+
+func TestEncryptedMigrationRejectsDestinationFailures(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		stage blobmigration.Stage
+	}{
+		{"corrupt", blobmigration.StageReadBack},
+		{"short-write", blobmigration.StageCopy},
+		{"missing-key", blobmigration.StageKeySet},
+		{"unexpected-key", blobmigration.StageKeySet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			source, err := blob.NewLocal(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := blob.Key(9271)
+			if _, err := source.Put(ctx, key, strings.NewReader("private fixture")); err != nil {
+				t.Fatal(err)
+			}
+			ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &encryptedFaultStore{memoryStore: &memoryStore{objects: make(map[string][]byte)}, fault: tc.name}
+			if tc.name == "unexpected-key" {
+				backend.objects[blob.Key(9272)] = []byte("unexpected")
+			}
+			encrypted, err := blob.NewEncrypted(backend, ring, blob.DefaultChunkSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = blobmigration.MigrateEncryptedWithManifest(ctx, source, encrypted, backend, io.Discard, io.Discard)
+			var staged *blobmigration.StageError
+			if !errors.As(err, &staged) || staged.Stage != tc.stage {
+				t.Fatalf("migration error = %v, want stage %s", err, tc.stage)
+			}
+		})
+	}
+}
+
+type encryptedFaultStore struct {
+	*memoryStore
+
+	fault string
+	walks int
+}
+
+func (s *encryptedFaultStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+	n, err := s.memoryStore.Put(ctx, key, r)
+	if err != nil {
+		return n, err
+	}
+	if s.fault == "corrupt" {
+		s.objects[key][len(s.objects[key])-1] ^= 1
+	}
+	if s.fault == "short-write" {
+		return n - 1, nil
+	}
+	return n, nil
+}
+
+func (s *encryptedFaultStore) Walk(ctx context.Context, fn func(blob.Entry) error) error {
+	s.walks++
+	if s.fault == "missing-key" && s.walks > 1 {
+		return nil
+	}
+	return s.memoryStore.Walk(ctx, fn)
+}
+
 func TestMigrateRejectsUnexpectedDestinationKey(t *testing.T) {
 	t.Parallel()
 

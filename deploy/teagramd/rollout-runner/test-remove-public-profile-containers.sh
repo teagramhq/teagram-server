@@ -26,6 +26,10 @@ docker() {
 		printf '%s\n' "$MOCK_PROJECT"
 		return 0
 	fi
+	if [[ "${1:-}" == inspect && "${2:-}" == "$BASELINE_CONTAINER" && "$#" == 2 ]]; then
+		printf '{"Config":{"Env":[]}}\n'
+		return 0
+	fi
 	if [[ "${1:-}" == inspect && "${2:-}" == "$PUBLIC_HAPROXY_CONTAINER" && "${3:-}" == --format &&
 		"${4:-}" == '{{ index .Config.Labels "com.docker.compose.project" }}' ]]; then
 		printf '%s\n' "$MOCK_PROJECT"

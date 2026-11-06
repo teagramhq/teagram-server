@@ -5,21 +5,90 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
+
+func TestPasswordChallengeErrors(t *testing.T) {
+	t.Parallel()
+	rpc := &tgerr.Error{Code: 400, Message: "PHONE_CODE_EXPIRED"}
+	if err := smokeRPCError("auth.sendCode", rpc); !errors.Is(err, rpc) {
+		t.Fatalf("sendCode RPC failure = %v, want wrapped original", err)
+	}
+	if err := expectPasswordChallenge(rpc); !errors.Is(err, rpc) {
+		t.Fatalf("RPC failure = %v, want wrapped original", err)
+	}
+	if err := expectPasswordChallenge(&tgerr.Error{Code: 401, Message: "SESSION_PASSWORD_NEEDED"}); err != nil {
+		t.Fatalf("password challenge = %v", err)
+	}
+	transportErr := errors.New("dial tcp 127.0.0.1:2443: connection refused")
+	if err := expectPasswordChallenge(transportErr); !errors.Is(err, transportErr) || !strings.Contains(err.Error(), "transport failed") {
+		t.Fatalf("transport failure = %v", err)
+	}
+	if err := smokeRPCError("auth.sendCode", transportErr); !errors.Is(err, transportErr) {
+		t.Fatalf("sendCode transport failure = %v, want wrapped original", err)
+	}
+	if err := expectPasswordChallenge(nil); err == nil || !strings.Contains(err.Error(), "did not require") {
+		t.Fatalf("unexpected success = %v", err)
+	}
+}
+
+func TestReadSmokeCredentialRequiresProtectedSingleLineFile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{name: "private line with newline", value: "cutover_smoke\n", mode: 0o600},
+		{name: "empty", value: "", mode: 0o600, wantErr: true},
+		{name: "multiple lines", value: "first\nsecond", mode: 0o600, wantErr: true},
+		{name: "world readable", value: "cutover_smoke", mode: 0o644, wantErr: true},
+		{name: "too large", value: strings.Repeat("x", maxSmokeCredential+1), mode: 0o600, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "credential")
+			if err := os.WriteFile(path, []byte(test.value), test.mode); err != nil {
+				t.Fatalf("write credential fixture: %v", err)
+			}
+			if err := os.Chmod(path, test.mode); err != nil {
+				t.Fatalf("set credential permissions: %v", err)
+			}
+			got, err := readSmokeCredential(path, "username")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("readSmokeCredential succeeded, want failure")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readSmokeCredential: %v", err)
+			}
+			if string(got) != "cutover_smoke" {
+				t.Fatalf("credential = %q, want cutover_smoke", got)
+			}
+			clear(got)
+		})
+	}
+}
 
 func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 	t.Parallel()
