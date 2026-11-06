@@ -86,6 +86,16 @@ if serve_apply "$marker" 2>/dev/null; then
   exit 1
 fi
 [[ ! -e "$marker" && $(wc -l < "$changes") == 2 ]]
+printf '%s\n' '{"TCP":{"2447":{"TCPForward":"127.0.0.1:2447"}}}' > "$mock_state"
+if serve_apply "$marker" 2>/dev/null; then
+  printf '%s\n' 'Serve mapping without PROXY protocol was accepted' >&2
+  exit 1
+fi
+if serve_verify 2>/dev/null; then
+  printf '%s\n' 'Serve verification accepted a mapping without PROXY protocol' >&2
+  exit 1
+fi
+[[ ! -e "$marker" && $(wc -l < "$changes") == 2 ]]
 printf '%s\n' '{"TCP":{"2447":{"TCPForward":"127.0.0.1:2447","ProxyProtocol":1}}}' > "$mock_state"
 serve_apply "$marker"
 serve_rollback "$marker"
@@ -143,6 +153,13 @@ fi
   runner_config=$(jq '.services.teagramd.networks.bot_api_ingress = {}' <<< "$config")
   if reconcile_bot_api_relays 2>/dev/null; then
     printf '%s\n' 'rollout accepted an unsafe relay network' >&2
+    exit 1
+  fi
+  [[ $(wc -l < "$calls") == 1 ]]
+  runner_config=$config
+  mock_listener=100.64.0.1:2447
+  if reconcile_bot_api_relays 2>/dev/null; then
+    printf '%s\n' 'rollout accepted a non-loopback Bot API listener' >&2
     exit 1
   fi
   [[ $(wc -l < "$calls") == 1 ]]

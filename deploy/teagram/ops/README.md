@@ -44,15 +44,8 @@ The CI fixture previews the resolved Compose isolation and exercises Serve
 apply, repeat, refusal and rollback against a mock. The relays expose Docker
 health status and bounded connection logs; inspect them and run `verify` after
 deployment. The rollout runner recreates them after a server restart so the
-inner relay joins the current network namespace. `Bot API QA monitor.` makes a
-synthetic tailnet request every 15 minutes, records its latency, and fails the
-workflow if the path does not return 401. Workflow failures are the operational
-alert. The monitor begins on merge and can report failures until `apply` runs;
-when deliberately rolling back to an absent mapping, run `gh workflow disable
-bot-api-qa-monitor.yml -R teagramhq/teagram-server` until the path is enabled
-again, then run `gh workflow enable bot-api-qa-monitor.yml -R
-teagramhq/teagram-server`. Production acceptance additionally needs
-`getMe` and the cross-peer revoked-token isolation test.
+inner relay joins the current network namespace. Production acceptance
+additionally needs `getMe` and the cross-peer revoked-token isolation test.
 
 ## Threat model
 

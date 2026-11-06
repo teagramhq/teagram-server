@@ -115,7 +115,7 @@ jobs:
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Install Chromium and NSS trust utility
-        timeout-minutes: 20
+        timeout-minutes: 10
         working-directory: web-source
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers

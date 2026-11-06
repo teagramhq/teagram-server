@@ -192,6 +192,8 @@ load_compose_authority() {
 TEMP_DIR=
 TEMP_ENV=
 TEMP_RECORD=
+RUNNER_LOG=
+RUNNER_STARTED=0
 cleanup() {
   local status=$?
   trap - EXIT
@@ -204,6 +206,12 @@ cleanup() {
   if [[ -n "$TEMP_RECORD" ]]; then
     case "$TEMP_RECORD" in
       "$STATE_DIR"/.rollout-env.main-3359.????????) rm -f -- "$TEMP_RECORD" || status=1 ;;
+      *) status=1 ;;
+    esac
+  fi
+  if [[ -n "$RUNNER_LOG" && "$RUNNER_STARTED" == 0 ]]; then
+    case "$RUNNER_LOG" in
+      "$STATE_DIR"/bot-api-qa-runner.????????) rm -f -- "$RUNNER_LOG" || status=1 ;;
       *) status=1 ;;
     esac
   fi
@@ -233,17 +241,6 @@ verify_base() {
   compose_selection=$(docker inspect --format "$COMPOSE_FILES_FORMAT" "$SERVICE") || return 1
   [[ "$compose_selection" == "$REPO/docker-compose.yml,$REPO/docker-compose.override.yml" ]] || { fail 'unexpected Compose selection'; return 1; }
   load_compose_authority
-}
-
-preserve_runner_log() {
-  local source=$TEMP_DIR/runner.log destination
-  [[ -f "$source" && ! -L "$source" ]] || return 1
-  destination=$(mktemp "$STATE_DIR/bot-api-qa-runner-failure.XXXXXXXX") || return 1
-  cat -- "$source" > "$destination" || return 1
-  chmod 600 -- "$destination" || return 1
-  sync || return 1
-  private_file "$destination" || return 1
-  printf '%s\n' "$destination"
 }
 
 restore_previous_runtime() {
@@ -454,40 +451,99 @@ if [[ "$MODE" == apply ]]; then
   fi
   expected_env_sha=$(file_sha256 "$TEMP_ENV") || { fail 'cannot hash the staged Bot API environment'; exit 1; }
   expected_record="env_sha256=$expected_env_sha source_sha=$target_sha"
+  RUNNER_LOG=$(mktemp "$STATE_DIR/bot-api-qa-runner.XXXXXXXX") || { fail 'cannot allocate a private rollout runner log'; exit 1; }
+  private_file "$RUNNER_LOG" || { fail 'rollout runner log failed ownership or mode checks'; exit 1; }
   mv -f -- "$TEMP_ENV" "$ENV_FILE" || { fail 'cannot publish the named Bot API environment additions'; exit 1; }
   TEMP_ENV=
   sync || { fail 'cannot sync the named Bot API environment additions'; exit 1; }
   flock -u 9 || { fail 'cannot release the deployment lock for the rollout runner'; exit 1; }
   runner_status=0
+  RUNNER_STARTED=1
   if env ROLLOUT_RUNNER_SOURCE_SHA="$OPS_SHA" \
       ROLLOUT_RUNNER_ADDED_ENV=TG_BOT_API_LISTEN_ADDR \
       ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$PREVIOUS_ENV_FILE" \
-      bash "$RUNNER" apply "$target_sha" "$target_sha" > "$TEMP_DIR/runner.log" 2>&1; then
+      bash "$RUNNER" apply "$target_sha" "$target_sha" > "$RUNNER_LOG" 2>&1; then
     :
   else
     runner_status=$?
   fi
-  runner_log_path=
-  if [[ "$runner_status" != 0 ]]; then
-    runner_log_path=$(preserve_runner_log 2>/dev/null) || runner_log_path=unavailable
+  runner_log_error=
+  if ! chmod 600 -- "$RUNNER_LOG"; then
+    runner_log_error='chmod 600 failed'
+  fi
+  if ! sync; then
+    if [[ -n "$runner_log_error" ]]; then runner_log_error+="; "; fi
+    runner_log_error+='sync failed'
+  fi
+  if ! private_file "$RUNNER_LOG"; then
+    if [[ -n "$runner_log_error" ]]; then runner_log_error+="; "; fi
+    runner_log_error+='root ownership or mode-0600 verification failed'
+  fi
+  if [[ "$runner_status" == 0 ]]; then
+    if [[ -n "$runner_log_error" ]]; then
+      fail "rollout runner succeeded but its log could not be secured at $RUNNER_LOG: $runner_log_error" || true
+      exit 1
+    fi
+    printf 'bot_api_qa=rollout_runner source_sha=%s log=%s\n' "$OPS_SHA" "$RUNNER_LOG"
   fi
   if ! flock -x 9; then
-    if [[ -n "$runner_log_path" && "$runner_log_path" != unavailable ]]; then
-      fail "cannot reacquire the deployment lock after rollout; runner log preserved at $runner_log_path" || true
+    if [[ -z "$runner_log_error" ]]; then
+      fail "cannot reacquire the deployment lock after rollout; runner log is at $RUNNER_LOG" || true
     else
-      fail 'cannot reacquire the deployment lock after rollout; runner output was not preserved' || true
+      fail "cannot reacquire the deployment lock after rollout; runner log could not be secured at $RUNNER_LOG: $runner_log_error" || true
     fi
     exit 1
   fi
   if [[ "$runner_status" != 0 ]]; then
-    failed_env_sha=$(file_sha256 "$ENV_FILE" 2>/dev/null || true)
-    failed_record=$(cat -- "$ENV_RECORD" 2>/dev/null || true)
-    failed_listener=$(container_value TG_BOT_API_LISTEN_ADDR 2>/dev/null || printf unavailable)
-    failed_image_sha=$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE" 2>/dev/null || true)
-    if [[ ( "$failed_env_sha" == "$recorded_env_sha" || "$failed_env_sha" == "$expected_env_sha" ) && \
-          ( "$failed_record" == "$record" || "$failed_record" == "$expected_record" ) && \
-          "$failed_image_sha" == "$target_sha" && \
-          ( "$failed_listener" == "$previous_listener" || "$failed_listener" == "$APP_LISTEN_ADDR" ) ]]; then
+    state_read_errors=()
+    if failed_env_sha=$(file_sha256 "$ENV_FILE" 2>&1); then
+      :
+    else
+      state_read_errors+=("current .env hash read failed: $failed_env_sha")
+      failed_env_sha=
+    fi
+    if failed_record=$(cat -- "$ENV_RECORD" 2>&1); then
+      :
+    else
+      state_read_errors+=("rollout record read failed: $failed_record")
+      failed_record=
+    fi
+    failed_listener_readable=1
+    if failed_listener=$(container_value TG_BOT_API_LISTEN_ADDR 2>&1); then
+      :
+    else
+      state_read_errors+=("running listener read failed: $failed_listener")
+      failed_listener=
+      failed_listener_readable=0
+    fi
+    failed_image_readable=1
+    if failed_image_sha=$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE" 2>&1); then
+      :
+    else
+      state_read_errors+=("running image revision read failed: $failed_image_sha")
+      failed_image_sha=
+      failed_image_readable=0
+    fi
+    state_read_report=
+    for state_read_error in "${state_read_errors[@]}"; do
+      if [[ -n "$state_read_report" ]]; then state_read_report+='; '; fi
+      state_read_report+="$state_read_error"
+    done
+    rollback_candidate=1
+    if [[ -n "$failed_env_sha" && "$failed_env_sha" != "$recorded_env_sha" && "$failed_env_sha" != "$expected_env_sha" ]]; then
+      rollback_candidate=0
+    fi
+    if [[ -n "$failed_record" && "$failed_record" != "$record" && "$failed_record" != "$expected_record" ]]; then
+      rollback_candidate=0
+    fi
+    if [[ "$failed_image_readable" == 1 && "$failed_image_sha" != "$target_sha" ]]; then
+      rollback_candidate=0
+    fi
+    if [[ "$failed_listener_readable" == 1 && \
+          "$failed_listener" != "$previous_listener" && "$failed_listener" != "$APP_LISTEN_ADDR" ]]; then
+      rollback_candidate=0
+    fi
+    if [[ "$rollback_candidate" == 1 ]]; then
       if restore_previous_runtime "$recorded_env_sha" "$record" "$previous_container_env_sha" "$target_sha"; then
         rollback_result='previous environment and server restored'
       else
@@ -496,11 +552,14 @@ if [[ "$MODE" == apply ]]; then
     else
       rollback_result='runner left an unrecognized rollout state'
     fi
-    if [[ -n "$runner_log_path" && "$runner_log_path" != unavailable ]]; then
-      fail "rollout runner failed with exit $runner_status; $rollback_result; runner log preserved at $runner_log_path" || true
+    failure_details="rollout runner failed with exit $runner_status; $rollback_result"
+    if [[ -n "$state_read_report" ]]; then failure_details+="; state read errors: $state_read_report"; fi
+    if [[ -z "$runner_log_error" ]]; then
+      failure_details+="; runner log preserved at $RUNNER_LOG"
     else
-      fail "rollout runner failed with exit $runner_status; $rollback_result; runner log preservation failed" || true
+      failure_details+="; runner log could not be secured at $RUNNER_LOG: $runner_log_error"
     fi
+    fail "$failure_details" || true
     exit "$runner_status"
   fi
   else
