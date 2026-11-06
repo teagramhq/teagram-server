@@ -191,7 +191,10 @@ systemctl_command() {
       [[ -n $command_line ]] || return 1
       local -a command=()
       read -r -a command <<< "$command_line"
-      kubectl "${command[@]:2}" >"$STATE_DIR/units/$unit.log" 2>&1 </dev/null &
+      # Close the runner's lock descriptor (9) in the stand-in unit: a real
+      # systemd unit does not inherit it, and a child that keeps it open would
+      # hold the cutover lock after the runner exits.
+      kubectl "${command[@]:2}" >"$STATE_DIR/units/$unit.log" 2>&1 </dev/null 9>&- &
       pid=$!
       printf '%s\n' "$pid" > "$pid_file"
       for _ in {1..50}; do
