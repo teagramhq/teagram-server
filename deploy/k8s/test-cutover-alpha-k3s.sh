@@ -266,6 +266,8 @@ for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-adm
   [[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
   rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 done
+printf '[Service]\n' > "$tmp_dir/incus-state/units/teagram-linkselector-port-forward.service"
+printf '[Service]\n' > "$tmp_dir/incus-state/units/teagramd-port-forward.service"
 if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" \
   CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true CUTOVER_FAIL_STOP_PORT_FORWARD=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
@@ -294,6 +296,9 @@ expect_log 'recovery was incomplete' "$tmp_dir/pre-switch-failure.log"
 [[ -z $(kubectl get pods --namespace "$TARGET_NAMESPACE" \
   --selector=app.kubernetes.io/name=cloudflared --output name) ]]
 [[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
+rm -f -- "$tmp_dir/incus-state/units/teagram-linkselector-port-forward.service" \
+  "$tmp_dir/incus-state/units/teagramd-port-forward.service" \
+  "$tmp_dir/incus-state/forward-stop-failure-injected"
 if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/pre-switch-failure.log"; then
   printf 'the pre-switch failure incorrectly selected post-switch recovery\n' >&2
   exit 1
