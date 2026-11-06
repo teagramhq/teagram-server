@@ -51,25 +51,26 @@ func (s *Store) CountSharedMedia(ctx context.Context, ownerID int64, peerType Pe
 			return nil, ErrNotMember
 		}
 	}
-	var values [9]int64
+	values := make(map[MediaSearchFilter]int, len(filters))
 	if peerType == PeerTypeChannel {
 		row, err := q.CountAllFilteredChannelPosts(ctx, db.CountAllFilteredChannelPostsParams{FilterMask: mask, ChannelID: peerID, OwnerID: ownerID})
 		if err != nil {
 			return nil, fmt.Errorf("count shared channel media: %w", err)
 		}
-		values = [9]int64{row.Documents, row.Photos, row.Urls, row.Videos, row.Gifs, row.Polls, row.Voice, row.Music, row.PhotoVideo}
+		for _, count := range row {
+			values[MediaSearchFilter(count.Filter)] = int(count.Count)
+		}
 	} else {
 		row, err := q.CountAllFilteredMessages(ctx, db.CountAllFilteredMessagesParams{FilterMask: mask, OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID})
 		if err != nil {
 			return nil, fmt.Errorf("count shared dialog media: %w", err)
 		}
-		values = [9]int64{row.Documents, row.Photos, row.Urls, row.Videos, row.Gifs, row.Polls, row.Voice, row.Music, row.PhotoVideo}
+		for _, count := range row {
+			values[MediaSearchFilter(count.Filter)] = int(count.Count)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit shared media counts: %w", err)
 	}
-	for _, filter := range filters {
-		counts[filter] = int(values[filter-1])
-	}
-	return counts, nil
+	return values, nil
 }

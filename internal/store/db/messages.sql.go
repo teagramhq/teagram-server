@@ -252,38 +252,145 @@ func (q *Queries) ChatMessageCopiesForDeletion(ctx context.Context, arg ChatMess
 	return items, nil
 }
 
-const countAllFilteredMessages = `-- name: CountAllFilteredMessages :one
-SELECT
-    count(*) FILTER (WHERE ($1::int & 1) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.media_kind = 'document'))::bigint AS documents,
-    count(*) FILTER (WHERE ($1::int & 2) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.media_kind = 'photo'))::bigint AS photos,
-    count(*) FILTER (WHERE ($1::int & 4) <> 0 AND (m.message ~*
-        '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'))::bigint -- noqa: LT05
-        AS urls,
-    count(*) FILTER (WHERE ($1::int & 8) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.subtype_rights @> ARRAY['send_videos']::text[]))::bigint AS videos,
-    count(*) FILTER (WHERE ($1::int & 16) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.subtype_rights @> ARRAY['send_gifs']::text[]))::bigint AS gifs,
-    count(*) FILTER (WHERE ($1::int & 32) <> 0 AND (EXISTS (SELECT 1 FROM
-        poll_message_copies pmc WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id)))::bigint AS
-        polls,
-    count(*) FILTER (WHERE ($1::int & 64) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]))::bigint AS voice,
-    count(*) FILTER (WHERE ($1::int & 128) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        f.subtype_rights @> ARRAY['send_audios']::text[]))::bigint AS music,
-    count(*) FILTER (WHERE ($1::int & 256) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
-        (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])))::bigint AS photo_video
+const countAllFilteredMessages = `-- name: CountAllFilteredMessages :many
+SELECT 1::smallint AS filter, count(*)::bigint AS count
 FROM messages m
-LEFT JOIN files f ON f.id = m.file_id
-WHERE m.owner_id = $2::bigint
+WHERE ($1::int & 1) <> 0
+  AND m.owner_id = $2::bigint
   AND m.peer_type = $3::smallint
   AND m.peer_id = $4::bigint
   AND m.peer_type IN (1, 2)
   AND m.deleted = false
   AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp
-      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id))
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.media_kind = 'document')
+UNION ALL
+SELECT 2::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 2) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.media_kind = 'photo')
+UNION ALL
+SELECT 3::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 4) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+UNION ALL
+SELECT 4::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 8) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_videos']::text[] )
+UNION ALL
+SELECT 5::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 16) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_gifs']::text[] )
+UNION ALL
+SELECT 6::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 32) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND EXISTS (SELECT 1 FROM poll_message_copies pmc WHERE pmc.owner_id = m.owner_id
+  AND pmc.local_id = m.local_id)
+UNION ALL
+SELECT 7::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 64) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[] )
+UNION ALL
+SELECT 8::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 128) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_audios']::text[] )
+UNION ALL
+SELECT 9::smallint AS filter, count(*)::bigint AS count
+FROM messages m
+WHERE ($1::int & 256) <> 0
+  AND m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $4::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
+  AND cp.user_id = m.owner_id))
+  AND m.file_id <> 0
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = m.file_id
+  AND f.stored = true
+  AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[]))
 `
 
 type CountAllFilteredMessagesParams struct {
@@ -294,39 +401,37 @@ type CountAllFilteredMessagesParams struct {
 }
 
 type CountAllFilteredMessagesRow struct {
-	Documents  int64
-	Photos     int64
-	Urls       int64
-	Videos     int64
-	Gifs       int64
-	Polls      int64
-	Voice      int64
-	Music      int64
-	PhotoVideo int64
+	Filter int16
+	Count  int64
 }
 
 // One bit per MediaSearchFilter, in enum order. Keep each predicate aligned
 // with CountFilteredMessages so batched counters match individual searches.
-func (q *Queries) CountAllFilteredMessages(ctx context.Context, arg CountAllFilteredMessagesParams) (CountAllFilteredMessagesRow, error) {
-	row := q.db.QueryRow(ctx, countAllFilteredMessages,
+// Each requested filter runs its original count predicate in one statement,
+// preserving its index plan while sharing the transaction and round trip.
+func (q *Queries) CountAllFilteredMessages(ctx context.Context, arg CountAllFilteredMessagesParams) ([]CountAllFilteredMessagesRow, error) {
+	rows, err := q.db.Query(ctx, countAllFilteredMessages,
 		arg.FilterMask,
 		arg.OwnerID,
 		arg.PeerType,
 		arg.PeerID,
 	)
-	var i CountAllFilteredMessagesRow
-	err := row.Scan(
-		&i.Documents,
-		&i.Photos,
-		&i.Urls,
-		&i.Videos,
-		&i.Gifs,
-		&i.Polls,
-		&i.Voice,
-		&i.Music,
-		&i.PhotoVideo,
-	)
-	return i, err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountAllFilteredMessagesRow
+	for rows.Next() {
+		var i CountAllFilteredMessagesRow
+		if err := rows.Scan(&i.Filter, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const countFilteredMessages = `-- name: CountFilteredMessages :one
