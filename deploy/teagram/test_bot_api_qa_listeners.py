@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import ipaddress
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 
@@ -53,6 +55,12 @@ class ListenerInspectionTests(unittest.TestCase):
     def inspect(self):
         return LISTENERS.inspect_listeners(self.proc, "100.64.1.1", "fd7a:115c:a1e0::1")
 
+    def inspect_cli(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = LISTENERS.main(["100.64.1.1", "fd7a:115c:a1e0::1", str(self.proc)])
+        return status, stderr.getvalue()
+
     def test_accepts_loopback_and_tailscale_listeners_owned_by_tailscaled(self):
         self.write_tables(
             [tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)],
@@ -60,6 +68,55 @@ class ListenerInspectionTests(unittest.TestCase):
         )
         self.add_process(50, "tailscaled", 1002, 1003)
         self.assertTrue(self.inspect())
+
+    def test_ignores_processes_that_exit_during_owner_scan(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        (self.proc / "49").mkdir()
+        exited_process = self.proc / "51"
+        (exited_process / "fd").mkdir(parents=True)
+        os.symlink("socket:[1002]", exited_process / "fd" / "3")
+
+        self.assertTrue(self.inspect())
+
+    def test_reports_fd_directory_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        fd_path = self.proc / "50" / "fd"
+        fd_path.parent.mkdir()
+        fd_path.write_text("not a directory")
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(fd_path), stderr)
+        self.assertIn("[Errno", stderr)
+
+    def test_reports_fd_readlink_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        fd_path = self.proc / "50" / "fd"
+        fd_path.mkdir(parents=True)
+        descriptor_path = fd_path / "3"
+        descriptor_path.write_text("not a symlink")
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(descriptor_path), stderr)
+        self.assertIn("[Errno", stderr)
+
+    def test_reports_process_name_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        process = self.proc / "50"
+        (process / "fd").mkdir(parents=True)
+        os.symlink("socket:[1002]", process / "fd" / "3")
+        comm_path = process / "comm"
+        comm_path.mkdir()
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(comm_path), stderr)
+        self.assertIn("[Errno", stderr)
 
     def test_accepts_no_listener(self):
         self.assertFalse(self.inspect())
@@ -73,7 +130,7 @@ class ListenerInspectionTests(unittest.TestCase):
 
     def test_rejects_tailscale_address_owned_by_another_process(self):
         self.write_tables([tcp_row("100.64.1.1", 1002)], [])
-        self.add_process(50, "python", 1002)
+        self.add_process(50, "not-tailscaled", 1002)
         with self.assertRaisesRegex(ValueError, "not owned by tailscaled"):
             self.inspect()
 

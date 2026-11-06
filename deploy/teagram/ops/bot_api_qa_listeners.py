@@ -56,7 +56,7 @@ def socket_owners(proc_root: Path, wanted: set[str]) -> dict[str, set[str]]:
     try:
         processes = os.scandir(proc_root)
     except OSError as error:
-        raise ValueError("cannot inspect process descriptors") from error
+        raise ValueError(f"cannot inspect {proc_root}: {error}") from error
 
     with processes:
         for process in processes:
@@ -65,28 +65,29 @@ def socket_owners(proc_root: Path, wanted: set[str]) -> dict[str, set[str]]:
             fd_path = proc_root / process.name / "fd"
             try:
                 descriptors = os.scandir(fd_path)
-            except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+            except FileNotFoundError:
                 continue
             except OSError as error:
-                raise ValueError("cannot inspect process descriptors") from error
+                raise ValueError(f"cannot inspect {fd_path}: {error}") from error
 
             with descriptors:
                 for descriptor in descriptors:
                     try:
                         target = os.readlink(descriptor.path)
-                    except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+                    except FileNotFoundError:
                         continue
                     except OSError as error:
-                        raise ValueError("cannot inspect process descriptors") from error
+                        raise ValueError(f"cannot read {descriptor.path}: {error}") from error
                     match = SOCKET_FD.fullmatch(target)
                     if not match or match.group(1) not in wanted:
                         continue
                     try:
-                        command = (proc_root / process.name / "comm").read_text(encoding="ascii").strip()
-                    except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+                        comm_path = proc_root / process.name / "comm"
+                        command = comm_path.read_text(encoding="ascii").strip()
+                    except FileNotFoundError:
                         continue
                     except OSError as error:
-                        raise ValueError("cannot identify listener process") from error
+                        raise ValueError(f"cannot read {comm_path}: {error}") from error
                     owners[match.group(1)].add(command)
     return owners
 
