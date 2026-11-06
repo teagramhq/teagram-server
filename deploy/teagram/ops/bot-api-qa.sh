@@ -547,7 +547,7 @@ if [[ "$MODE" == apply ]]; then
       if restore_previous_runtime "$recorded_env_sha" "$record" "$previous_container_env_sha" "$target_sha"; then
         rollback_result='previous environment and server restored'
       else
-        rollback_result='environment rollback could not be verified'
+        rollback_result="rollback incomplete: .env may be restored while teagramd still has TG_BOT_API_LISTEN_ADDR=$APP_LISTEN_ADDR, and rollout-env may not be the pre-change record; recover by restoring the previous .env, recreating teagramd from it, and restoring rollout-env to '$record' before retrying apply"
       fi
     else
       rollback_result='runner left an unrecognized rollout state'

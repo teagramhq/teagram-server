@@ -197,6 +197,7 @@ printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
 : > "$repo/.keep-listener-on-restore"
+rollback_record=$(cat "$repo/.state/rollout-env")
 cat > "$tmp/runner" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -210,7 +211,9 @@ chmod 600 "$tmp/runner"
 failure_status=0
 bash "$tmp/op.sh" apply > "$tmp/failed-restore.stdout" 2> "$tmp/failed-restore.stderr" || failure_status=$?
 [[ "$failure_status" == 24 ]]
-grep -q 'environment rollback could not be verified' "$tmp/failed-restore.stderr"
+grep -Fq 'rollback incomplete: .env may be restored while teagramd still has TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' "$tmp/failed-restore.stderr"
+grep -Fq 'recover by restoring the previous .env, recreating teagramd from it' "$tmp/failed-restore.stderr"
+grep -Fq "restoring rollout-env to '$rollback_record' before retrying apply" "$tmp/failed-restore.stderr"
 grep -q 'previous .env, running environment, or relay state failed rollback verification' "$tmp/failed-restore.stderr"
 [[ ! -s "$repo/.env" ]]
 jq -e '. == ["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]' "$repo/.runtime-env" >/dev/null
