@@ -368,6 +368,11 @@ cat > "$TMP/bin/sleep" <<'SLEEP'
 #!/usr/bin/env bash
 [[ "$#" == 1 ]] || exit 99
 SLEEP
+cat > "$TMP/bin/sync" <<'SYNC'
+#!/usr/bin/env bash
+[[ "${FIXTURE_SYNC_FAIL:-0}" != 1 ]] || exit 1
+exec /usr/bin/sync "$@"
+SYNC
 chmod 755 "$TMP/bin/"*
 
 FIXTURE_COMMON=$SCRIPT_DIR/ops/blob-encryption-common.inc
@@ -493,6 +498,7 @@ assert_hash_mismatch() {
 
 setup_case key-backup-create s3-accepted
 rm "$FIXTURE_EVIDENCE/media-key-backups/1.key"
+rmdir "$FIXTURE_EVIDENCE/media-key-backups"
 chmod 755 "$FIXTURE_EVIDENCE"
 sed -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
   -e "s|/etc/teagramd|$FIXTURE_EVIDENCE|g" \
@@ -503,10 +509,22 @@ run_backup() {
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$result"
 }
+chmod 777 "$FIXTURE_EVIDENCE"
+output=$(run_backup)
+[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'backup parent is writable by others'* ]]
+[[ ! -e "$FIXTURE_EVIDENCE/media-key-backups/1.key" ]]
+chmod 755 "$FIXTURE_EVIDENCE"
+export FIXTURE_SYNC_FAIL=1
+output=$(run_backup)
+unset FIXTURE_SYNC_FAIL
+[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'cannot sync backup'* ]]
+[[ ! -e "$FIXTURE_EVIDENCE/media-key-backups/1.key" ]]
+rmdir "$FIXTURE_EVIDENCE/media-key-backups"
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 0 && "$output" == *media_key_backup=verified* ]]
 cmp -s "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_EVIDENCE/media-key-backups/1.key"
 [[ "$(stat -c %a "$FIXTURE_EVIDENCE/media-key-backups/1.key")" == 600 ]]
+[[ "$(stat -c %a "$FIXTURE_EVIDENCE/media-key-backups")" == 700 ]]
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'refusing to overwrite'* ]]
 printf 'different fixture backup\n' > "$FIXTURE_EVIDENCE/media-key-backups/1.key"
@@ -515,7 +533,7 @@ output=$(run_backup)
 [[ "$(cat "$FIXTURE_EVIDENCE/media-key-backups/1.key")" == 'different fixture backup' ]]
 rm "$FIXTURE_KEY_DIR/1.key"
 output=$(run_backup)
-[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'live key is missing or unsafe'* ]]
+[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *"$FIXTURE_KEY_DIR/1.key"* && "$output" == *'65532:600:65532'* ]]
 printf '%s\n' 'PASS backup creates a matching private copy and refuses missing keys or existing backups'
 
 setup_case key-backup-missing s3-accepted
@@ -524,6 +542,13 @@ output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key metadata does not match reviewed preflight'* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
 printf '%s\n' 'PASS missing media-key backup stops preflight before teagramd'
+
+setup_case key-backup-unsafe s3-accepted
+chmod 755 "$FIXTURE_EVIDENCE/media-key-backups"
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key backup directory is unsafe'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS unsafe media-key backup directory stops preflight before teagramd'
 
 setup_case backup-failure s3-accepted
 output=$(run_encrypt)

@@ -16,7 +16,7 @@ fail() { printf 'media key backup rejected: %s\n' "$1" >&2; exit 1; }
 parent_mode=$(stat -c '%a' -- "$BACKUP_PARENT") || fail 'cannot inspect backup parent'
 [[ "$parent_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$parent_mode & 0022) == 0 )) || fail 'backup parent is writable by others'
 [[ -d "$KEY_DIR" && ! -L "$KEY_DIR" && "$(stat -c '%u:%a:%g' -- "$KEY_DIR")" == 65532:700:65532 ]] || fail 'live key directory is unsafe'
-[[ -f "$KEY_FILE" && ! -L "$KEY_FILE" && "$(stat -c '%u:%a:%g' -- "$KEY_FILE")" == 65532:600:65532 ]] || fail 'live key is missing or unsafe'
+[[ -f "$KEY_FILE" && ! -L "$KEY_FILE" && "$(stat -c '%u:%a:%g' -- "$KEY_FILE")" == 65532:600:65532 ]] || fail "live key $KEY_FILE is missing or unsafe; expected owner:mode:group 65532:600:65532"
 if [[ ! -e "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]]; then
   mkdir -m 700 -- "$BACKUP_DIR" || fail 'cannot create backup directory'
 fi
@@ -31,6 +31,6 @@ chmod 600 -- "$staged" || fail 'cannot protect backup'
 live_digest=$(sha256sum < "$KEY_FILE") || fail 'cannot fingerprint live key'
 backup_digest=$(sha256sum < "$staged") || fail 'cannot fingerprint backup'
 [[ "$live_digest" == "$backup_digest" ]] || fail 'backup differs from live key'
-ln -- "$staged" "$BACKUP_FILE" || fail 'cannot publish backup without overwrite'
 sync || fail 'cannot sync backup'
+ln -- "$staged" "$BACKUP_FILE" || fail 'cannot publish backup without overwrite'
 printf 'media_key_backup=verified path=%s\n' "$BACKUP_FILE"
