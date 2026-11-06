@@ -1186,6 +1186,7 @@ async function proveSharedWorkerWss(t, {
   delayedChild = false,
   workerSockets = [],
   expectedConnectionCount,
+  expectedCountForEarlyLoadOnly,
   unobservableAttach = false,
   contextInfo: suppliedContextInfo,
   progress: suppliedProgress,
@@ -1288,7 +1289,7 @@ async function proveSharedWorkerWss(t, {
       {endpoint},
       progress,
       tracker,
-      expectedConnectionCount === undefined ? undefined : {expectedConnectionCount},
+      expectedConnectionCount === undefined ? undefined : {expectedConnectionCount, expectedCountForEarlyLoadOnly},
     );
     return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit, contextInfo};
   } catch (error) {
@@ -1438,6 +1439,44 @@ function workerSockets(count, overrides = {}) {
   return Array.from({length: count}, (_, index) => ({url: `wss://${targetHost}/apiws`, ...overrides[index]}));
 }
 
+test("preflight uses the expected socket count for an early SharedWorker load", async (t) => {
+  const cases = {
+    ready: {sockets: workerSockets(4), exitCode: 0},
+    late: {sockets: workerSockets(1), exitCode: 0, scriptLoaded: "after"},
+    fewer: {sockets: workerSockets(3), exitCode: 1},
+    more: {sockets: workerSockets(5), exitCode: 1, diagnostic: "observation-malformed"},
+    mismatch: {sockets: workerSockets(4, {1: {url: `wss://${targetHost}/other`}}), exitCode: 1},
+    rejected: {sockets: workerSockets(4, {1: {statuses: [503]}}), exitCode: 1},
+    duplicate: {sockets: workerSockets(4, {1: {statuses: [101, 101]}}), exitCode: 1},
+    missing: {sockets: [], exitCode: 1},
+  };
+  for (const [name, {sockets, exitCode, scriptLoaded = "before", diagnostic = "worker-unobservable"}] of Object.entries(cases)) {
+    await t.test(name, async (t) => {
+      const fixture = createDependencies();
+      fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker, options) => {
+        const proof = await proveSharedWorkerWss(t, {
+          scriptLoaded, workerSockets: sockets, ...options,
+          contextInfo, progress, tracker,
+        });
+        if (proof.code) {
+          const error = new Error(proof.code);
+          error.code = proof.code;
+          error.wssDiagnostic = proof.wssDiagnostic;
+          throw error;
+        }
+        return proof.result;
+      };
+      const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+      assert.equal(result.exitCode, exitCode, result.output);
+      if (exitCode) {
+        const output = JSON.parse(result.output);
+        assert.equal(output.code, "websocket-not-ready");
+        assert.equal(output.wss_diagnostic, diagnostic);
+      }
+    });
+  }
+});
+
 test("preflight WSS proof accepts every count from one through the client's socket ceiling", async (t) => {
   for (let count = 1; count <= WSS_ACCOUNT_SLOT_CEILING; count += 1) {
     await t.test(`${count} worker sockets`, async (t) => {
@@ -1483,7 +1522,8 @@ test("acceptance reports a successful sign-in with all four account slots", asyn
 
 test("one logout reconnect after the four account-slot sockets is accepted", async (t) => {
   const {result, progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
-    workerSockets: workerSockets(4),
+    workerSockets: workerSockets(4), scriptLoaded: "before",
+    expectedConnectionCount: 4, expectedCountForEarlyLoadOnly: true,
   });
   assert.equal(result.connectionCount, 4);
   for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {

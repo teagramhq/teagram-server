@@ -213,7 +213,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/root}
+        source: ${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
         target: /run/teagramd/reports
         bind:
           create_host_path: false
