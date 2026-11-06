@@ -237,6 +237,10 @@ if [[ ${CUTOVER_DROP_BLOB:-} == true && " $* " == *' tar -xopf - -C /target/lega
     rm /target/legacy-blobs/parts/aa/1123456789abcdef0123456789abcd
   exit 0
 fi
+if [[ ${CUTOVER_FAIL_IMPORTER_DELETE:-} == true && " $* " == *' delete pod/cutover-volume-importer '* ]]; then
+  printf 'injected importer deletion failure\n' >&2
+  exit 42
+fi
 exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
@@ -548,7 +552,12 @@ PY
 printf 'interrupted partial Serve rollback left both connectors stopped and Compose fenced\n'
 
 printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode
+  CUTOVER_FAIL_IMPORTER_DELETE=true bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  > "$tmp_dir/importer-delete-failure.log" 2>&1
+expect_log 'injected importer deletion failure' "$tmp_dir/importer-delete-failure.log"
+expect_log 'manual cleanup is required' "$tmp_dir/importer-delete-failure.log"
+expect_log 'Rollback complete' "$tmp_dir/importer-delete-failure.log"
+[[ $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == rolled-back ]]
 python3 - "$tmp_dir/incus-state/serve.json" <<'PY'
 import json
 import pathlib

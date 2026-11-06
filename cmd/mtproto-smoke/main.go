@@ -354,7 +354,7 @@ func smokeRPCError(operation string, err error) error {
 	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
 		return fmt.Errorf("%s failed: %w", operation, rpcErr)
 	}
-	return fmt.Errorf("%s transport failed", operation)
+	return fmt.Errorf("%s transport failed: %w", operation, err)
 }
 
 func expectPasswordChallenge(err error) error {
@@ -363,7 +363,7 @@ func expectPasswordChallenge(err error) error {
 	}
 	var rpcErr *tgerr.Error
 	if !errors.As(err, &rpcErr) {
-		return errors.New("auth.signIn transport failed")
+		return fmt.Errorf("auth.signIn transport failed: %w", err)
 	}
 	if rpcErr.Message != "SESSION_PASSWORD_NEEDED" {
 		return fmt.Errorf("auth.signIn failed: %w", rpcErr)

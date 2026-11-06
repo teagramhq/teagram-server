@@ -36,8 +36,12 @@ func TestPasswordChallengeErrors(t *testing.T) {
 	if err := expectPasswordChallenge(&tgerr.Error{Code: 401, Message: "SESSION_PASSWORD_NEEDED"}); err != nil {
 		t.Fatalf("password challenge = %v", err)
 	}
-	if err := expectPasswordChallenge(errors.New("private transport detail")); err == nil || !strings.Contains(err.Error(), "transport failed") || strings.Contains(err.Error(), "private transport detail") {
+	transportErr := errors.New("dial tcp 127.0.0.1:2443: connection refused")
+	if err := expectPasswordChallenge(transportErr); !errors.Is(err, transportErr) || !strings.Contains(err.Error(), "transport failed") {
 		t.Fatalf("transport failure = %v", err)
+	}
+	if err := smokeRPCError("auth.sendCode", transportErr); !errors.Is(err, transportErr) {
+		t.Fatalf("sendCode transport failure = %v, want wrapped original", err)
 	}
 	if err := expectPasswordChallenge(nil); err == nil || !strings.Contains(err.Error(), "did not require") {
 		t.Fatalf("unexpected success = %v", err)

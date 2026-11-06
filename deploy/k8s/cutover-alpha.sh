@@ -608,8 +608,6 @@ rollback() {
 
   stop_k8s_connector
   stop_k8s_application
-  kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null ||
-    fail 'could not remove the temporary volume importer; rollback incomplete'
   set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
     "127.0.0.1:$MTPROTO_PORT"
   serve_after=$(mktemp)
@@ -628,6 +626,8 @@ rollback() {
   check_source_container teagram-postgres-1
   check_source_container teagram-web-cloudflared
   record_phase rolled-back
+  kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null ||
+    printf 'k3s cutover: could not remove the temporary volume importer; manual cleanup is required\n' >&2
   printf 'Rollback complete: all five Serve handlers, the old MTProto TCP route, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
 }
 
