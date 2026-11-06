@@ -59,7 +59,12 @@ cat > "$tmp/bin/tailscale" <<'SH'
 set -eu
 case "$*" in
   'serve status --json') cat "$MOCK_TMP/serve.json" ;;
-  'serve --help') printf '%s\n' --proxy-protocol >&2 ;;
+  'serve --help')
+    if [[ ${MOCK_TAILSCALE_HELP_FAIL:-} == 1 ]]; then
+      printf '%s\n' 'fixture tailscale serve help failed' >&2
+      exit 47
+    fi
+    printf '%s\n' --proxy-protocol >&2 ;;
   'ip -4') printf '%s\n' 100.64.1.1 ;;
   'ip -6') printf '%s\n' fd7a:115c:a1e0::1 ;;
   'serve --yes --bg --tcp=2447 --proxy-protocol=1 tcp://127.0.0.1:2447')
@@ -130,6 +135,22 @@ esac
 SH
 chmod 755 "$tmp/bin/"*
 export PATH="$tmp/bin:$PATH"
+help_failure_env_sha=$(sha256sum "$repo/.env")
+help_failure_serve=$(jq -cS . "$tmp/serve.json")
+for mode in check apply; do
+  failure_status=0
+  if MOCK_TAILSCALE_HELP_FAIL=1 bash "$tmp/op.sh" "$mode" > "$tmp/help-failure.stdout" 2> "$tmp/help-failure.stderr"; then
+    printf 'Bot API %s accepted a failed Tailscale Serve help command\n' "$mode" >&2
+    exit 1
+  else
+    failure_status=$?
+  fi
+  [[ "$failure_status" == 1 ]]
+  grep -Fxq 'Bot API QA operation rejected: cannot inspect Tailscale Serve capabilities (exit 47)' "$tmp/help-failure.stderr"
+  grep -Fxq 'fixture tailscale serve help failed' "$tmp/help-failure.stderr"
+  [[ "$(sha256sum "$repo/.env")" == "$help_failure_env_sha" ]]
+  [[ "$(jq -cS . "$tmp/serve.json")" == "$help_failure_serve" ]]
+done
 bash "$tmp/op.sh" check
 bash "$tmp/op.sh" apply
 bash "$tmp/op.sh" apply
