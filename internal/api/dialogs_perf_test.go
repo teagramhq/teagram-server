@@ -3,9 +3,27 @@
 package api
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
+
+func TestGetDialogsProfilerIdentifiesRateLimit(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{FloodWaitError(17), "first-page flood wait 17s"},
+		{errors.New("private detail"), "first-page rate limit error"},
+		{tgerr.New(400, "PRIVATE"), "first-page rate limit error"},
+	} {
+		if got := dialogsRateLimitStage(tc.err); got != tc.want {
+			t.Errorf("stage = %q, want %q", got, tc.want)
+		}
+	}
+}
 
 func TestGetDialogsProfilerEmitsCompletedStages(t *testing.T) {
 	var stages []string

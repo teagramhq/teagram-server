@@ -6,4 +6,5 @@ type getDialogsProfiler struct{}
 
 func startGetDialogsProfiler() *getDialogsProfiler { return nil }
 func (*getDialogsProfiler) mark(string)            {}
+func (*getDialogsProfiler) rateLimitError(error)   {}
 func (*getDialogsProfiler) finish()                {}

@@ -107,6 +107,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	firstPage := req.OffsetID == 0 && !hasOffsetPeer
 	if firstPage {
 		if err := h.checkChannelUnreadCountRateLimit(r); err != nil {
+			profile.rateLimitError(err)
 			return nil, err
 		}
 	}

@@ -3,16 +3,33 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
 
 type getDialogsProfileStage struct {
 	name     string
 	duration time.Duration
+}
+
+func dialogsRateLimitStage(err error) string {
+	var rpc *tgerr.Error
+	if errors.As(err, &rpc) && rpc.Code == 420 && rpc.Type == "FLOOD_WAIT" {
+		return fmt.Sprintf("first-page flood wait %ds", rpc.Argument)
+	}
+	return "first-page rate limit error"
+}
+
+func (p *getDialogsProfiler) rateLimitError(err error) {
+	if p != nil {
+		p.mark(dialogsRateLimitStage(err))
+	}
 }
 
 type getDialogsProfiler struct {
