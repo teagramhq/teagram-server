@@ -28,7 +28,7 @@ mode_fixtures = importlib.util.module_from_spec(FIXTURE_SPEC)
 FIXTURE_SPEC.loader.exec_module(mode_fixtures)
 
 S3_MANIFEST = f"01/1\t5\t{'a' * 64}\n".encode("ascii")
-REFERENCE_ROWS = b"01/1\t5\n"
+REFERENCE_ROWS = b"file\t1\t\t5\n"
 
 
 def import_operation(test: unittest.TestCase):
@@ -271,7 +271,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
     def test_live_census_accepts_legacy_flat_part_key(self) -> None:
         key = "parts/deadbeef000000000000000000000000"
         s3_manifest = f"{key}\t7\t{'b' * 64}\n".encode("ascii")
-        reference_rows = f"{key}\t7\n".encode("ascii")
+        reference_rows = f"part\t0\t{key}\t7\n".encode("ascii")
 
         census, object_count, byte_total = self.operation.validate_live_census(s3_manifest, reference_rows)
 
@@ -279,6 +279,83 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         self.assertEqual(object_count, 1)
         self.assertEqual(byte_total, 7)
         self.assertEqual(document["references"], [{"key": key, "logical_bytes": 7}])
+
+    def test_live_census_accepts_sharded_part_key_with_independent_shard(self) -> None:
+        part_suffix = "0123456789abcdef" + "0123456789abcdef"[:14]
+        key = f"parts/ab/{part_suffix}"
+        s3_manifest = f"{key}\t7\t{'b' * 64}\n".encode("ascii")
+        reference_rows = f"part\t0\t{key}\t7\n".encode("ascii")
+
+        census, object_count, byte_total = self.operation.validate_live_census(
+            s3_manifest, reference_rows
+        )
+
+        document = json.loads(census)
+        self.assertEqual(object_count, 1)
+        self.assertEqual(byte_total, 7)
+        self.assertEqual(document["references"], [{"key": key, "logical_bytes": 7}])
+
+        short_key = f"parts/ab/{part_suffix[:-1]}"
+        with self.assertRaises(self.operation.AttestationReject) as caught:
+            self.operation.validate_live_census(
+                f"{short_key}\t7\t{'b' * 64}\n".encode("ascii"),
+                f"{short_key}\t7\n".encode("ascii"),
+            )
+        self.assertEqual(str(caught.exception), "census-manifest-invalid")
+
+    def test_malformed_live_census_rows_refuse_before_creating_archive(self) -> None:
+        valid_hash = "a" * 64
+        malformed = [
+            (
+                "unsorted S3 rows",
+                f"02/2\t5\t{valid_hash}\n01/1\t5\t{valid_hash}\n".encode("ascii"),
+                b"",
+                "census-manifest-invalid",
+            ),
+            (
+                "duplicate S3 rows",
+                f"01/1\t5\t{valid_hash}\n01/1\t5\t{valid_hash}\n".encode("ascii"),
+                b"",
+                "census-manifest-invalid",
+            ),
+            ("malformed S3 row", b"01/1\t5\n", b"", "census-manifest-invalid"),
+            (
+                "duplicate reference rows",
+                S3_MANIFEST,
+                b"file\t1\t\t5\nfile\t1\t\t5\n",
+                "census-references-invalid",
+            ),
+            (
+                "malformed reference row",
+                S3_MANIFEST,
+                b"file\t1\t\t5\textra\n",
+                "census-references-invalid",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            before_state = snapshot_files(state_dir)
+            before_reports = snapshot_files(report_root)
+
+            for name, s3_manifest, reference_rows, expected_reason in malformed:
+                with self.subTest(name=name):
+                    patches = self.operation_context(
+                        root,
+                        state_dir,
+                        report_root,
+                        lock_path,
+                        census=(s3_manifest, reference_rows),
+                    )
+                    with contextlib.ExitStack() as stack:
+                        for item in patches:
+                            stack.enter_context(item)
+                        with self.assertRaises(self.operation.AttestationReject) as caught:
+                            self.operation.run_attestation()
+                    self.assertEqual(str(caught.exception), expected_reason)
+                    self.assertEqual(snapshot_files(state_dir), before_state)
+                    self.assertEqual(snapshot_files(report_root), before_reports)
+                    self.assertFalse((root / "archives").exists())
 
     def test_five_missing_reports_are_attested_and_encrypt_preflight_accepts_them(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -618,7 +695,13 @@ class BlobModeReportAttestationTests(unittest.TestCase):
 
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:
         calls: list[list[str]] = []
+        reasons: list[str] = []
         environment = {"TG_BLOB_S3_SECRET_ACCESS_KEY": "never-print-this"}
+        checkout = SCRIPT_DIR.parents[2]
+        sql_source = (checkout / "internal/store/queries/uploads.sql").read_text(encoding="utf-8")
+        query_start = sql_source.index("SELECT 'file'::text AS kind")
+        query_end = sql_source.index(";", query_start) + 1
+        canonical_query = sql_source[query_start:query_end]
         record = {
             "backend": {
                 "kind": "s3",
@@ -651,11 +734,12 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             [
                 "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
                 "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
-                "-c", self.operation.REFERENCE_QUERY,
+                "-c", canonical_query,
             ],
         ]
-        def run_compose(command, _env):
+        def run_compose(command, _env, *, reason):
             calls.append(command)
+            reasons.append(reason)
             if "config" in command:
                 return json.dumps(rendered).encode()
             if "s3-census" in command:
@@ -667,8 +751,8 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 self.operation.transition,
                 "rustfs_compose_environment_files",
                 return_value=[
-                    str(self.operation.CHECKOUT / ".env"),
-                    str(self.operation.CHECKOUT / ".env.rustfs-parked"),
+                    str(checkout / ".env"),
+                    str(checkout / ".env.rustfs-parked"),
                 ],
             ),
             patch.object(
@@ -676,6 +760,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 "compose_environment_for_files",
                 return_value=environment,
             ) as compose_environment,
+            patch.object(self.operation, "CHECKOUT", checkout),
             patch.object(self.operation.mode, "compose_inventory", return_value=object()) as compose_inventory,
             patch.object(self.operation.mode, "assert_compose_matches") as assert_compose_matches,
             patch.object(self.operation.mode, "backend_from_values", return_value=record["backend"]),
@@ -684,31 +769,168 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             s3_manifest, reference_rows = self.operation.capture_live_census(record)
 
         self.assertEqual(calls, expected)
+        self.assertEqual(
+            reasons,
+            ["live-compose-config", "live-s3-census", "live-reference-query"],
+        )
         self.assertEqual((s3_manifest, reference_rows), (S3_MANIFEST, REFERENCE_ROWS))
         compose_environment.assert_called_once_with(
-            self.operation.CHECKOUT,
+            checkout,
             ["docker-compose.yml", "docker-compose.override.yml"],
             include_rustfs_credentials=True,
         )
-        compose_inventory.assert_called_once_with(rendered, self.operation.CHECKOUT)
+        compose_inventory.assert_called_once_with(rendered, checkout)
         assert_compose_matches.assert_called_once()
         self.assertFalse(any(command in ("restart", "up", "stop") for call in calls for command in call))
         self.assertNotIn("never-print-this", repr(calls))
 
     def test_live_census_command_failure_does_not_echo_secret_output(self) -> None:
         secret = "fixture-secret-must-not-be-printed"
-        with patch.object(
-            self.operation.subprocess,
-            "run",
-            return_value=SimpleNamespace(returncode=1, stdout=secret.encode(), stderr=secret.encode()),
-        ) as run:
-            with self.assertRaises(self.operation.AttestationReject) as caught:
-                self.operation.run_compose(["docker", "compose", "config"], {"TG_SECRET": secret})
+        for reason in ("live-compose-config", "live-s3-census", "live-reference-query"):
+            with self.subTest(reason=reason):
+                with patch.object(
+                    self.operation.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(
+                        returncode=1, stdout=secret.encode(), stderr=secret.encode()
+                    ),
+                ) as run:
+                    with self.assertRaises(self.operation.AttestationReject) as caught:
+                        self.operation.run_compose(
+                            ["docker", "compose", "config"],
+                            {"TG_SECRET": secret},
+                            reason=reason,
+                        )
 
-        self.assertEqual(str(caught.exception), "live-census-rejected")
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertTrue(run.call_args.kwargs["stdout"] == self.operation.subprocess.PIPE)
-        self.assertTrue(run.call_args.kwargs["stderr"] == self.operation.subprocess.PIPE)
+                self.assertEqual(str(caught.exception), f"{reason}-rejected")
+                self.assertNotIn(secret, str(caught.exception))
+                self.assertTrue(run.call_args.kwargs["stdout"] == self.operation.subprocess.PIPE)
+                self.assertTrue(run.call_args.kwargs["stderr"] == self.operation.subprocess.PIPE)
+
+    def test_census_programming_errors_are_not_reported_as_live_system_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            before_state = snapshot_files(state_dir)
+            before_reports = snapshot_files(report_root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(
+                    self.operation,
+                    "capture_live_census",
+                    side_effect=RuntimeError("programming error"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "programming error"):
+                        self.operation.run_attestation()
+
+            self.assertEqual(snapshot_files(state_dir), before_state)
+            self.assertEqual(snapshot_files(report_root), before_reports)
+            self.assertFalse((root / "archives").exists())
+
+    def test_lock_refusal_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            before_state = snapshot_files(state_dir)
+            before_reports = snapshot_files(report_root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(
+                    self.operation.transition,
+                    "acquire_lock",
+                    side_effect=self.operation.transition.TransitionReject("deployment-lock-held"),
+                ):
+                    with self.assertRaises(self.operation.AttestationReject) as caught:
+                        self.operation.run_attestation()
+
+            self.assertEqual(str(caught.exception), "deployment-lock-held")
+            self.assertEqual(snapshot_files(state_dir), before_state)
+            self.assertEqual(snapshot_files(report_root), before_reports)
+            self.assertFalse((root / "archives").exists())
+
+    def test_write_private_file_names_file_when_cleanup_unlink_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "attestation-manifest.tmp"
+            root_uid = os.geteuid()
+            original_unlink = pathlib.Path.unlink
+
+            def fail_target_unlink(target, *args, **kwargs):
+                if target == path:
+                    raise PermissionError("injected unlink failure")
+                return original_unlink(target, *args, **kwargs)
+
+            with (
+                patch.object(self.operation, "ROOT_UID", root_uid),
+                patch.object(
+                    self.operation,
+                    "sync_directory",
+                    side_effect=self.operation.AttestationReject("attestation-output-sync"),
+                ),
+                patch.object(pathlib.Path, "unlink", new=fail_target_unlink),
+            ):
+                with self.assertRaises(self.operation.AttestationReject) as caught:
+                    self.operation.write_private_file(path, b"payload\n")
+
+            self.assertEqual(
+                str(caught.exception),
+                f"attestation-output-cleanup-failed:{path.name}",
+            )
+            self.assertTrue(path.exists())
+
+    def test_journal_head_read_failure_has_journal_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            original_iterdir = pathlib.Path.iterdir
+
+            def fail_journal_iteration(path):
+                if path == state_dir / "journal":
+                    raise OSError("injected journal read failure")
+                return original_iterdir(path)
+
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(pathlib.Path, "iterdir", new=fail_journal_iteration):
+                    with self.assertRaises(self.operation.AttestationReject) as caught:
+                        self.operation._journal_head_matches("a" * 64)
+
+            self.assertEqual(str(caught.exception), "journal-unavailable")
+
+    def test_archive_copy_failure_names_relative_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir(mode=0o700)
+            destination.mkdir(mode=0o700)
+            source_file = source / "report.json"
+            source_file.write_bytes(b"report\n")
+            source_file.chmod(0o600)
+            source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+            destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with (
+                    patch.object(self.operation, "ROOT_UID", os.geteuid()),
+                    patch.object(self.operation.os, "write", side_effect=OSError("injected write failure")),
+                ):
+                    with self.assertRaises(self.operation.AttestationReject) as caught:
+                        self.operation.copy_tree_contents(
+                            source_fd, destination_fd, "reports", []
+                        )
+            finally:
+                os.close(source_fd)
+                os.close(destination_fd)
+
+            self.assertEqual(
+                str(caught.exception),
+                "archive-copy-failed:reports/report.json",
+            )
 
     def test_refuses_journal_head_mismatch_without_writing_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -750,8 +972,16 @@ class BlobModeReportAttestationTests(unittest.TestCase):
 
     def test_refuses_missing_or_size_mismatched_referenced_s3_object_before_writing(self) -> None:
         cases = (
-            (b"02/2\t5\n", b"01/1\t5\t" + b"a" * 64 + b"\n", "census-reference-missing"),
-            (b"01/1\t5\n", b"01/1\t6\t" + b"a" * 64 + b"\n", "census-reference-size-mismatch"),
+            (
+                b"file\t2\t\t5\n",
+                b"01/1\t5\t" + b"a" * 64 + b"\n",
+                "census-reference-missing",
+            ),
+            (
+                b"file\t1\t\t6\n",
+                b"01/1\t5\t" + b"a" * 64 + b"\n",
+                "census-reference-size-mismatch",
+            ),
         )
         for reference_rows, s3_manifest, reason in cases:
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:

@@ -1138,8 +1138,6 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 		}
 	}
 	pool := store.StorePool(s)
-	// pg_stat_activity spans the cluster, including parallel tests' cloned databases.
-	// Keep both observations scoped to this fixture's database.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id, last_local_id)
 		VALUES ($1, $2, $3, 2)
@@ -1190,7 +1188,6 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 				SELECT 1
 				FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
-				  AND datname = current_database()
 				  AND state = 'active'
 				  AND wait_event = 'PgSleep'
 				  AND query ILIKE '%UPDATE messages SET deleted%'
@@ -1236,7 +1233,6 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 				SELECT 1
 				FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
-				  AND datname = current_database()
 				  AND state = 'active'
 				  AND wait_event_type = 'Lock'
 				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'

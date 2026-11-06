@@ -38,20 +38,7 @@ REPORT_ATTESTATION_PREFIX = ATTESTATION_PREFIX
 REPORT_LOSS_ARCHIVE_MANIFEST = ARCHIVE_MANIFEST_NAME
 REPORT_LOSS_CENSUS_MANIFEST = CENSUS_MANIFEST_NAME
 
-REFERENCE_QUERY = """
-SELECT key || chr(9) || logical_bytes::text
-FROM (
-    SELECT lpad(to_hex(f.id & 255), 2, '0') || '/' || f.id::text AS key,
-           f.size AS logical_bytes
-    FROM files AS f
-    WHERE f.stored = true
-    UNION ALL
-    SELECT up.blob_key AS key, up.size AS logical_bytes
-    FROM upload_parts AS up
-    WHERE up.blob_key <> ''
-) AS refs
-ORDER BY key;
-"""
+REFERENCE_QUERY_NAME = "BlobInventoryReferences"
 
 
 class AttestationReject(Exception):
@@ -172,7 +159,7 @@ def write_private_file(path: pathlib.Path, content: bytes) -> None:
             path.unlink()
             sync_directory(path.parent)
         except (OSError, AttestationReject):
-            pass
+            reject(f"attestation-output-cleanup-failed:{path.name}")
         if isinstance(error, AttestationReject):
             raise
         reject("attestation-output-write")
@@ -381,7 +368,9 @@ def _journal_head_matches(head_sha256: str) -> bool:
         mode_path = STATE_DIR / "mode.json"
         mode.file_stat(mode_path, stat.S_IFREG)
         return hash_bytes(head_bytes) == head_sha256 and mode_path.read_bytes() == head_bytes
-    except (mode.Reject, OSError):
+    except OSError:
+        reject("journal-unavailable")
+    except mode.Reject:
         return False
 
 
@@ -691,8 +680,7 @@ def valid_blob_key(key: str) -> bool:
         return file_id <= 9_223_372_036_854_775_807 and file_match.group(1) == f"{file_id & 0xff:02x}"
     if re.fullmatch(r"parts/[0-9a-f]{32}", key) is not None:
         return True
-    part_match = re.fullmatch(r"parts/([0-9a-f]{2})/([0-9a-f]{30})", key)
-    return part_match is not None and part_match.group(1) == part_match.group(2)[-2:]
+    return re.fullmatch(r"parts/[0-9a-f]{2}/[0-9a-f]{30}", key) is not None
 
 
 def parse_size(value: str, reason: str) -> int:
@@ -745,9 +733,20 @@ def parse_references(content: bytes) -> list[dict[str, object]]:
     seen: set[str] = set()
     for line in text.splitlines():
         columns = line.split("\t")
-        if len(columns) != 2:
+        if len(columns) != 4:
             reject("census-references-invalid")
-        key, size_text = columns
+        kind, file_id_text, blob_key, size_text = columns
+        if kind == "file":
+            if blob_key or re.fullmatch(r"[1-9][0-9]*", file_id_text) is None:
+                reject("census-references-invalid")
+            file_id = parse_size(file_id_text, "census-references-invalid")
+            key = f"{file_id & 0xff:02x}/{file_id}"
+        elif kind == "part":
+            if file_id_text != "0" or not blob_key:
+                reject("census-references-invalid")
+            key = blob_key
+        else:
+            reject("census-references-invalid")
         if not valid_blob_key(key) or key in seen:
             reject("census-references-invalid")
         seen.add(key)
@@ -781,7 +780,7 @@ def validate_live_census(
     return content, len(objects), byte_total
 
 
-def run_compose(command: list[str], environment: dict[str, str]) -> bytes:
+def run_compose(command: list[str], environment: dict[str, str], *, reason: str) -> bytes:
     try:
         full_command = transition.compose_command(command, environment)
         result = subprocess.run(
@@ -792,17 +791,41 @@ def run_compose(command: list[str], environment: dict[str, str]) -> bytes:
             stderr=subprocess.PIPE,
             check=False,
         )
+    except transition.TransitionReject:
+        reject(f"{reason}-rejected")
     except OSError:
-        reject("live-census-unavailable")
+        reject(f"{reason}-unavailable")
     if result.returncode != 0:
-        reject("live-census-rejected")
+        reject(f"{reason}-rejected")
     return result.stdout
+
+
+def blob_inventory_references_query() -> str:
+    source_path = CHECKOUT / "internal" / "store" / "queries" / "uploads.sql"
+    try:
+        lines = source_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        reject("live-reference-query-source-unavailable")
+    marker = f"-- name: {REFERENCE_QUERY_NAME} :many"
+    try:
+        start = lines.index(marker)
+    except ValueError:
+        reject("live-reference-query-source-invalid")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("-- name: ")),
+        len(lines),
+    )
+    query = "\n".join(lines[start + 1 : end]).strip()
+    if not query.endswith(";"):
+        reject("live-reference-query-source-invalid")
+    return query
 
 
 def validate_composed_authority(record: dict[str, object], environment: dict[str, str]) -> None:
     raw = run_compose(
         ["docker", "compose", "--profile", "migration", "config", "--format", "json"],
         environment,
+        reason="live-compose-config",
     )
     try:
         rendered = json.loads(raw.decode("utf-8"), object_pairs_hook=mode.strict_pairs)
@@ -864,14 +887,16 @@ def capture_live_census(record: dict[str, object]) -> tuple[bytes, bytes]:
             "blob-migrate", "--direction", "s3-census", "--manifest", "stdout",
         ],
         environment,
+        reason="live-s3-census",
     )
     reference_rows = run_compose(
         [
             "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
             "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
-            "-c", REFERENCE_QUERY,
+            "-c", blob_inventory_references_query(),
         ],
         environment,
+        reason="live-reference-query",
     )
     return s3_manifest, reference_rows
 
@@ -897,12 +922,12 @@ def close_descriptors(*descriptors: int) -> bool:
     return not failed
 
 
-def hash_open_file(directory_fd: int, name: str) -> tuple[str, int]:
+def hash_open_file(directory_fd: int, name: str, relative: str) -> tuple[str, int]:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
     except OSError:
-        reject("archive-copy-failed")
+        reject(f"archive-copy-failed:{relative}")
     digest = hashlib.sha256()
     size = 0
     try:
@@ -915,7 +940,7 @@ def hash_open_file(directory_fd: int, name: str) -> tuple[str, int]:
             digest.update(block)
             size += len(block)
     except OSError:
-        reject("archive-copy-failed")
+        reject(f"archive-copy-failed:{relative}")
     finally:
         os.close(fd)
     return digest.hexdigest(), size
@@ -955,7 +980,7 @@ def copy_tree_contents(
                 os.fchmod(destination_child, 0o700)
             except OSError:
                 close_descriptors(source_child, destination_child)
-                reject("archive-copy-failed")
+                reject(f"archive-copy-failed:{relative}")
             try:
                 if (os.fstat(source_child).st_dev, os.fstat(source_child).st_ino) != (source_info.st_dev, source_info.st_ino):
                     reject("archive-source-changed")
@@ -963,7 +988,7 @@ def copy_tree_contents(
                 os.fsync(destination_child)
             finally:
                 if not close_descriptors(source_child, destination_child):
-                    reject("archive-copy-failed")
+                    reject(f"archive-copy-failed:{relative}")
         elif stat.S_ISREG(source_info.st_mode):
             private_source_stat(source_info, stat.S_IFREG)
             source_file = -1
@@ -986,7 +1011,7 @@ def copy_tree_contents(
                 raise
             except OSError:
                 close_descriptors(source_file, destination_file)
-                reject("archive-copy-failed")
+                reject(f"archive-copy-failed:{relative}")
             digest = hashlib.sha256()
             size = 0
             try:
@@ -997,16 +1022,16 @@ def copy_tree_contents(
                     while remaining:
                         written = os.write(destination_file, remaining)
                         if written <= 0:
-                            reject("archive-copy-failed")
+                            reject(f"archive-copy-failed:{relative}")
                         remaining = remaining[written:]
                 os.fchown(destination_file, ROOT_UID, 0)
                 os.fchmod(destination_file, 0o600)
                 os.fsync(destination_file)
             except OSError:
-                reject("archive-copy-failed")
+                reject(f"archive-copy-failed:{relative}")
             finally:
                 if not close_descriptors(source_file, destination_file):
-                    reject("archive-copy-failed")
+                    reject(f"archive-copy-failed:{relative}")
             try:
                 source_after = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
                 if (
@@ -1017,8 +1042,8 @@ def copy_tree_contents(
                     or source_after.st_ctime_ns != source_info.st_ctime_ns
                 ):
                     reject("archive-source-changed")
-                source_hash, source_size = hash_open_file(source_fd, name)
-                destination_hash, destination_size = hash_open_file(destination_fd, name)
+                source_hash, source_size = hash_open_file(source_fd, name, relative)
+                destination_hash, destination_size = hash_open_file(destination_fd, name, relative)
                 if (
                     source_hash != digest.hexdigest()
                     or destination_hash != source_hash
@@ -1028,7 +1053,7 @@ def copy_tree_contents(
                     reject("archive-copy-mismatch")
                 entries.append({"path": relative, "size": size, "sha256": destination_hash})
             except OSError:
-                reject("archive-copy-failed")
+                reject(f"archive-copy-failed:{relative}")
         else:
             reject("archive-source-unsafe")
     try:
@@ -1050,7 +1075,7 @@ def copy_authority_tree(source: pathlib.Path, destination: pathlib.Path, relativ
         os.fchmod(destination_fd, 0o700)
     except OSError:
         close_descriptors(source_fd, destination_fd)
-        reject("archive-copy-failed")
+        reject(f"archive-copy-failed:{relative_root}")
     try:
         if (os.fstat(source_fd).st_dev, os.fstat(source_fd).st_ino) != (info.st_dev, info.st_ino):
             reject("archive-source-changed")
@@ -1058,7 +1083,7 @@ def copy_authority_tree(source: pathlib.Path, destination: pathlib.Path, relativ
         os.fsync(destination_fd)
     finally:
         if not close_descriptors(source_fd, destination_fd):
-            reject("archive-copy-failed")
+            reject(f"archive-copy-failed:{relative_root}")
 
 
 def create_archive(
@@ -1163,7 +1188,9 @@ def run_attestation() -> dict[str, object]:
         s3_manifest, reference_rows = capture_live_census(deployment_head)
     except AttestationReject:
         raise
-    except Exception:
+    except OSError:
+        reject("live-census-unavailable")
+    except transition.TransitionReject:
         reject("live-census-rejected")
     census_content, object_count, byte_total = validate_live_census(s3_manifest, reference_rows)
     census_sha256 = hash_bytes(census_content)
