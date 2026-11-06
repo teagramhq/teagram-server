@@ -717,3 +717,38 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
   AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC;
+
+-- One bit per MediaSearchFilter, in enum order. Keep each predicate aligned
+-- with CountFilteredMessages so batched counters match individual searches.
+-- name: CountAllFilteredMessages :one
+SELECT
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 1) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.media_kind = 'document'))::bigint AS documents,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 2) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.media_kind = 'photo'))::bigint AS photos,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 4) <> 0 AND (m.message ~*
+        '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'))::bigint -- noqa: LT05
+        AS urls,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 8) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.subtype_rights @> ARRAY['send_videos']::text[]))::bigint AS videos,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 16) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.subtype_rights @> ARRAY['send_gifs']::text[]))::bigint AS gifs,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 32) <> 0 AND (EXISTS (SELECT 1 FROM
+        poll_message_copies pmc WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id)))::bigint AS
+        polls,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 64) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]))::bigint AS voice,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 128) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        f.subtype_rights @> ARRAY['send_audios']::text[]))::bigint AS music,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 256) <> 0 AND (m.file_id <> 0 AND f.stored = true AND
+        (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])))::bigint AS photo_video
+FROM messages m
+LEFT JOIN files f ON f.id = m.file_id
+WHERE m.owner_id = sqlc.arg(owner_id)::bigint
+  AND m.peer_type = sqlc.arg(peer_type)::smallint
+  AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp
+      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id));
