@@ -13,6 +13,7 @@ readonly CUTOVER_IMAGE=ghcr.io/teagramhq/teagramd@sha256:e307d5d93ab000d61dc7725
 tmp_dir=$(mktemp -d "$RUNNER_TEMP/teagram-cutover.XXXXXX")
 port_forward_pid=''
 linkselector_forward_pid=''
+source_container=''
 
 stop_port_forward() {
   if [[ -n $port_forward_pid ]]; then
@@ -31,6 +32,9 @@ cleanup() {
   local status=$? mock_pid
   trap - EXIT
   stop_port_forward
+  if [[ -n $source_container ]]; then
+    docker rm --force "$source_container" >/dev/null 2>&1 || true
+  fi
   if [[ -d $tmp_dir/incus-state/units ]]; then
     for pid_file in "$tmp_dir"/incus-state/units/*.pid; do
       [[ -f $pid_file ]] || continue
@@ -186,6 +190,12 @@ kubectl delete pod cutover-blob-seed --namespace "$SOURCE_NAMESPACE" --wait=true
 kubectl apply --filename deploy/k8s/test-cutover-key-reader.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-key-reader \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
+# Copy the disposable identity into the actual distroless image so the source
+# adapter exercises Docker's archive API against a container without a shell.
+source_container=$(docker create ghcr.io/teagramhq/teagramd:ci)
+kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+  tar -cf - -C /var/lib/teagramd server_key.pem enc_key.hex |
+  docker cp - "$source_container:/var/lib/teagramd/"
 
 mkdir -p "$tmp_dir/bin" "$tmp_dir/incus-state/units"
 ln -s "$repo_root/deploy/k8s/test-cutover-alpha-incus.sh" "$tmp_dir/bin/incus"
@@ -203,14 +213,14 @@ path.write_text(json.dumps({
         "/.well-known/teagramd/client": {"Proxy": "http://127.0.0.1:2444/.well-known/teagramd/client"},
         "/.well-known/telegramd/client": {"Proxy": "http://127.0.0.1:2444/.well-known/telegramd/client"},
     }}},
-    "TCP": {"2443": {"TCPForward": "127.0.0.1:2443"}},
-    "AllowFunnel": {"443": False, "2443": False},
+    "TCP": {"443": {"HTTPS": True}, "2443": {"TCPForward": "127.0.0.1:2443"}},
 }))
 PY
 
 real_kubectl=$(command -v kubectl)
 incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state" \
-  INCUS_TEST_TARGET_IP=127.0.0.2 REAL_KUBECTL="$real_kubectl")
+  INCUS_TEST_SOURCE_CONTAINER="$source_container" \
+  REAL_KUBECTL="$real_kubectl" CUTOVER_FORWARD_DELAY_SECONDS=2)
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -398,7 +408,8 @@ assert handlers["/.well-known/teagramd/client"]["Proxy"] == \
 assert handlers["/.well-known/telegramd/client"]["Proxy"] == \
     "http://127.0.0.2:18444/.well-known/telegramd/client"
 assert serve["TCP"]["2443"]["TCPForward"] == "127.0.0.2:2443"
-assert all(value is False for value in serve["AllowFunnel"].values())
+assert not any(serve.get("AllowFunnel", {}).values())
+assert serve["TCP"]["443"] == {"HTTPS": True}
 PY
 printf 'post-switch failure kept k3s live and Compose fenced\n'
 cutover_job_image=$(kubectl get job local-blob-migration --namespace "$TARGET_NAMESPACE" \
@@ -552,12 +563,15 @@ PY
 printf 'interrupted partial Serve rollback left both connectors stopped and Compose fenced\n'
 
 if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
-  CUTOVER_FAIL_IMPORTER_DELETE=true bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  CUTOVER_FAIL_IMPORTER_DELETE=true CUTOVER_FAIL_STOP_PORT_FORWARD=true \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
   > "$tmp_dir/importer-delete-failure.log" 2>&1; then
   printf 'rollback reported success after importer deletion failed\n' >&2
   exit 1
 fi
 expect_log 'injected importer deletion failure' "$tmp_dir/importer-delete-failure.log"
+expect_log 'injected port-forward stop failure' "$tmp_dir/importer-delete-failure.log"
+expect_log 'could not stop all target port-forwards' "$tmp_dir/importer-delete-failure.log"
 expect_log 'manual cleanup is required' "$tmp_dir/importer-delete-failure.log"
 expect_log 'Serve routes and Compose services were restored' "$tmp_dir/importer-delete-failure.log"
 if grep --fixed-strings --quiet 'Rollback complete' "$tmp_dir/importer-delete-failure.log"; then

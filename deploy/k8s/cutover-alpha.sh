@@ -349,15 +349,17 @@ for path, target in expected.items():
     if not isinstance(handler, dict) or handler.get("Proxy") not in allowed:
         raise SystemExit("k3s cutover: Tailscale Serve handler target changed: " + path)
 tcp = status.get("TCP")
-if not isinstance(tcp, dict) or set(tcp) != {"2443"}:
+if not isinstance(tcp, dict) or set(tcp) != {"443", "2443"}:
     raise SystemExit("k3s cutover: the advertised MTProto TCP listener is missing or changed")
+if tcp["443"] != {"HTTPS": True}:
+    raise SystemExit("k3s cutover: the HTTPS listener is missing or changed")
 tcp_handler = tcp["2443"]
 allowed_tcp = {expected_tcp, "127.0.0.1:2443"} if allow_old_routes else {expected_tcp}
 if not isinstance(tcp_handler, dict) or tcp_handler.get("TCPForward") not in allowed_tcp:
     raise SystemExit("k3s cutover: the advertised MTProto TCP target changed")
-if "AllowFunnel" not in status or not isinstance(status["AllowFunnel"], dict):
+funnel = status.get("AllowFunnel", {})
+if not isinstance(funnel, dict):
     raise SystemExit("k3s cutover: Tailscale Funnel state is missing or invalid")
-funnel = status["AllowFunnel"]
 if any(value is not False for value in funnel.values()):
     raise SystemExit("k3s cutover: Tailscale Funnel is enabled or its state is unknown")
 ' "$status_file" "$expected_root" "$websocket_base" "$admin_base" "$expected_tcp" "$allow_old_routes"
@@ -457,14 +459,19 @@ print_rollback_command() {
 }
 
 stop_port_forward_units() {
-  local unit load_state
+  local unit load_state failed=false
   for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT"; do
-    load_state=$(incus exec "$TARGET_INSTANCE" -- systemctl show -p LoadState --value "$unit") || return 1
+    if ! load_state=$(incus exec "$TARGET_INSTANCE" -- systemctl show -p LoadState --value "$unit"); then
+      failed=true
+      continue
+    fi
     if [[ $load_state != not-found ]]; then
-      [[ $load_state == loaded ]] || return 1
-      incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$unit" >/dev/null || return 1
+      if [[ $load_state != loaded ]] || ! incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$unit" >/dev/null; then
+        failed=true
+      fi
     fi
   done
+  [[ $failed == false ]]
 }
 
 recover_before_edge_switch() {
@@ -575,7 +582,7 @@ trap handle_exit EXIT
 
 rollback() {
   local current_serve target_root target_websocket target_admin target_tcp target_ip serve_after
-  local current_phase
+  local current_phase cleanup_failed=false
   current_phase=$(<"$PHASE_FILE")
   case "$current_phase" in
     serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started|complete)
@@ -618,7 +625,6 @@ rollback() {
 
   printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
   confirm ROUTE-RESTORED 'If the route is already on the before value, leave it there. Otherwise restore the before value now.'
-  stop_port_forward_units || fail 'could not stop all target port-forwards before restarting Compose'
   if [[ -f $COMPOSE_STOPPED_FILE ]]; then
     restart_stopped_compose_services || fail 'one or more Compose services need manual restart; rollback incomplete'
   fi
@@ -626,8 +632,15 @@ rollback() {
   check_source_container teagram-postgres-1
   check_source_container teagram-web-cloudflared
   record_phase rolled-back
-  kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null ||
-    fail 'Serve routes and Compose services were restored, but the temporary volume importer could not be removed; manual cleanup is required'
+  if ! stop_port_forward_units; then
+    printf 'k3s cutover: could not stop all target port-forwards; manual cleanup is required\n' >&2
+    cleanup_failed=true
+  fi
+  if ! kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null; then
+    printf 'k3s cutover: could not remove the temporary volume importer; manual cleanup is required\n' >&2
+    cleanup_failed=true
+  fi
+  [[ $cleanup_failed == false ]] || fail 'Serve routes and Compose services were restored; manual cleanup is required'
   printf 'Rollback complete: all five Serve handlers, the old MTProto TCP route, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
 }
 
@@ -694,9 +707,22 @@ check_source_container teagram-teagramd-1
 check_source_container teagram-postgres-1
 check_source_container teagram-link-edge-selector-1
 check_source_container teagram-web-cloudflared
-incus exec "$SOURCE_INSTANCE" -- docker exec teagram-teagramd-1 test -s /var/lib/teagramd/server_key.pem
-incus exec "$SOURCE_INSTANCE" -- docker exec teagram-teagramd-1 test -s /var/lib/teagramd/enc_key.hex
-incus exec "$SOURCE_INSTANCE" -- docker exec teagram-teagramd-1 test -d /var/lib/teagramd-blobs
+check_source_key() {
+  local path=$1
+  incus exec "$SOURCE_INSTANCE" -- docker cp "teagram-teagramd-1:$path" - |
+    python3 -c '
+import pathlib, sys, tarfile
+name = pathlib.PurePosixPath(sys.argv[1]).name
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+    members = [member for member in archive if member.name == name]
+    if len(members) != 1 or not members[0].isfile() or members[0].size <= 0:
+        raise SystemExit("source identity file is missing or empty")
+while sys.stdin.buffer.read(1024 * 1024):
+    pass
+' "$path" || fail 'could not inspect the source identity file'
+}
+check_source_key /var/lib/teagramd/server_key.pem
+check_source_key /var/lib/teagramd/enc_key.hex
 
 SERVE_BEFORE=$(mktemp)
 serve_status_file "$SERVE_BEFORE"
@@ -986,6 +1012,45 @@ install_port_forward_unit "$LINKSELECTOR_PORT_FORWARD_UNIT" \
 install_port_forward_unit "$TEAGRAMD_PORT_FORWARD_UNIT" \
   'Tailnet-only teagramd MTProto, WebSocket, and admin port-forward' service/teagramd \
   "$MTPROTO_PORT:$MTPROTO_PORT $WEBSOCKET_PORT:2444 $ADMIN_PORT:2445"
+wait_for_forward() {
+  local port=$1 attempt
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if python3 - "$linkselector_ip" "$port" <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=1):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  printf 'k3s cutover: target port-forward did not become ready on port %s\n' "$port" >&2
+  return 1
+}
+wait_for_http_forward() {
+  local url=$1 attempt
+  shift
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if incus exec "$TARGET_INSTANCE" -- curl --silent --output /dev/null --max-time 3 "$@" "$url"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+wait_for_http_forward "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --fail ||
+  fail 'selector port-forward readiness timed out'
+wait_for_http_forward "http://$linkselector_ip:$WEBSOCKET_PORT/apiws" ||
+  fail 'WebSocket port-forward readiness timed out'
+wait_for_http_forward "http://$linkselector_ip:$ADMIN_PORT/admin" ||
+  fail 'admin port-forward readiness timed out'
+wait_for_forward "$MTPROTO_PORT" || fail 'MTProto port-forward readiness timed out'
 incus exec "$TARGET_INSTANCE" -- curl --fail --silent --show-error --max-time 10 \
   "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --output /dev/null
 incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
@@ -1002,15 +1067,6 @@ admin_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --out
   --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$ADMIN_PORT/admin") ||
   fail 'the new admin Service is not reachable from teagram-k3s'
 [[ $admin_status =~ ^(200|301|302|303|307|308|401|403)$ ]] || fail "the new admin Service returned unexpected HTTP status $admin_status"
-python3 - "$linkselector_ip" "$MTPROTO_PORT" <<'PY'
-import socket
-import sys
-
-address, port = sys.argv[1], int(sys.argv[2])
-with socket.create_connection((address, port), timeout=10):
-    pass
-PY
-
 record_phase ready-for-edge
 printf '%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \

@@ -90,6 +90,42 @@ fi
 fixture_dir=$(mktemp -d)
 trap 'rm -rf -- "$fixture_dir"' EXIT
 mkdir -p "$fixture_dir/bin" "$fixture_dir/state" "$fixture_dir/teagram-cutover-runner"
+# Exercise the runner's actual validator with realistic CLI output and unsafe
+# variants, independently of the disposable-cluster integration test.
+eval "$(sed -n '/^check_serve_status() {/,/^set_serve_routes() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
+python3 - "$fixture_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+routes = {
+    "/": "http://127.0.0.1:8081",
+    "/apiws": "http://127.0.0.1:2444/apiws",
+    "/admin": "http://127.0.0.1:2445/admin",
+    "/.well-known/teagramd/client": "http://127.0.0.1:2444/.well-known/teagramd/client",
+    "/.well-known/telegramd/client": "http://127.0.0.1:2444/.well-known/telegramd/client",
+}
+base = {"TCP": {"443": {"HTTPS": True}, "2443": {"TCPForward": "127.0.0.1:2443"}},
+        "Web": {"alpha.example.ts.net:443": {"Handlers": {k: {"Proxy": v} for k, v in routes.items()}}}}
+def write(name, value):
+    (root / name).write_text(json.dumps(value))
+write("serve-valid.json", base)
+write("serve-funnel-off.json", {**base, "AllowFunnel": {"alpha.example.ts.net:443": False}})
+write("serve-funnel.json", {**base, "AllowFunnel": {"alpha.example.ts.net:443": True}})
+write("serve-invalid-funnel.json", {**base, "AllowFunnel": None})
+write("serve-bad-https.json", {**base, "TCP": {**base["TCP"], "443": {"HTTPS": False}}})
+write("serve-extra-port.json", {**base, "TCP": {**base["TCP"], "444": {"TCPForward": "127.0.0.1:1"}}})
+PY
+serve_args=(http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 127.0.0.1:2443)
+check_serve_status "$fixture_dir/serve-valid.json" "${serve_args[@]}"
+check_serve_status "$fixture_dir/serve-funnel-off.json" "${serve_args[@]}"
+for invalid in serve-funnel serve-invalid-funnel serve-bad-https serve-extra-port; do
+  if check_serve_status "$fixture_dir/$invalid.json" "${serve_args[@]}" 2>/dev/null; then
+    printf 'cutover accepted unsafe Serve state: %s\n' "$invalid" >&2
+    exit 1
+  fi
+done
 cat > "$fixture_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

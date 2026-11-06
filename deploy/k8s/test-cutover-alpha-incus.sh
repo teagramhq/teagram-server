@@ -31,7 +31,7 @@ scale_container() {
 }
 
 docker_command() {
-  local subcommand=$1 format container service path basename
+  local subcommand=$1 format container service path
   shift
   local -a args=("$@")
   case "$subcommand" in
@@ -95,13 +95,8 @@ docker_command() {
           kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "$@"
           ;;
         teagram-teagramd-1)
-          # The teagramd image is distroless and has no test binary; the
-          # key-reader pod mounts the same volumes at the same paths.
-          if [[ ${1:-} == test ]]; then
-            kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- "$@"
-          else
-            kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
-          fi
+          # Exercise the real distroless container, which has no test binary.
+          kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
           ;;
         *) return 1 ;;
       esac
@@ -114,9 +109,7 @@ docker_command() {
         kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
           tar -cf - -C /var/lib/teagramd-blobs .
       else
-        basename=${path##*/}
-        kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
-          tar -cf - -C /var/lib/teagramd "$basename"
+        docker cp "${INCUS_TEST_SOURCE_CONTAINER:?}:$path" -
       fi
       ;;
     *) return 1 ;;
@@ -202,29 +195,17 @@ systemctl_command() {
       # Close the runner's lock descriptor (9) in the stand-in unit: a real
       # systemd unit does not inherit it, and a child that keeps it open would
       # hold the cutover lock after the runner exits.
-      kubectl "${command[@]:2}" >"$STATE_DIR/units/$unit.log" 2>&1 </dev/null 9>&- &
+      (sleep "${CUTOVER_FORWARD_DELAY_SECONDS:-0}"; exec kubectl "${command[@]:2}") >"$STATE_DIR/units/$unit.log" 2>&1 </dev/null 9>&- &
       pid=$!
       printf '%s\n' "$pid" > "$pid_file"
-      for _ in {1..50}; do
-        if python3 - "$INCUS_TEST_TARGET_IP" "${command[-1]%%:*}" <<'PY'
-import socket
-import sys
-
-try:
-    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=0.2):
-        pass
-except OSError:
-    raise SystemExit(1)
-PY
-        then
-          return 0
-        fi
-        sleep 0.2
-      done
-      cat "$STATE_DIR/units/$unit.log" >&2
-      return 1
+      return 0
       ;;
     disable)
+      if [[ ${CUTOVER_FAIL_STOP_PORT_FORWARD:-} == true && ! -e $STATE_DIR/forward-stop-failure-injected ]]; then
+        : > "$STATE_DIR/forward-stop-failure-injected"
+        printf 'injected port-forward stop failure\n' >&2
+        return 42
+      fi
       [[ -f $pid_file ]] || return 0
       pid=$(<"$pid_file")
       kill "$pid" 2>/dev/null || true
