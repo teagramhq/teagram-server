@@ -387,6 +387,9 @@ function clearCredentials(credentials) {
   if (typeof credentials.password === "string") credentials.password = "";
 }
 
+// The unauthenticated web client opens one socket for each of its four account slots.
+const PREFLIGHT_EXPECTED_SOCKET_COUNT = 4;
+
 function makeProgressDependencies(adapter) {
   return {
     readReleaseRecord: adapter.readReleaseRecord,
@@ -423,7 +426,8 @@ export async function prepareAcceptance(options, dependencies) {
     const normalizedManifest = validateManifest(manifest, release);
     tracker.expectedEndpoint = normalizedManifest.endpoint;
 
-    const wssAudit = await dependencies.proveWss(contextInfo, release, normalizedManifest, progress, tracker);
+    const wssAudit = await dependencies.proveWss(contextInfo, release, normalizedManifest, progress, tracker,
+      {expectedConnectionCount: PREFLIGHT_EXPECTED_SOCKET_COUNT, expectedCountForEarlyLoadOnly: true});
     await dependencies.verifyAssetLoading(contextInfo, release, tracker);
     const installedProgressState = await dependencies.installClientProgressObserver(
       contextInfo.page,
@@ -919,7 +923,7 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
   });
 }
 
-async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
+async function makeWssAudit(contextInfo, progress, expectedConnectionCount, expectedCountForEarlyLoadOnly) {
   if (expectedConnectionCount !== undefined && (!Number.isInteger(expectedConnectionCount) ||
       expectedConnectionCount < 1 || expectedConnectionCount > WSS_CONNECTION_CEILING)) {
     fail("arguments-invalid");
@@ -937,6 +941,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
   let orphanHandshake = false;
   let workerUnobservable = false;
   let earlyWorkerLoad = false;
+  let earlyWorkerProven = false;
   const handlers = {
     created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
@@ -1010,7 +1015,10 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
         finished = true;
         pendingWorkers -= 1;
         if (observable !== true) {
-          if (earlyLoad) earlyWorkerLoad = true;
+          if (earlyLoad) {
+            earlyWorkerLoad = true;
+            earlyWorkerProven = false;
+          }
           else workerUnobservable = true;
         }
       };
@@ -1037,7 +1045,12 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
   }
 
   function hasUnobservableWorker() {
-    return workerUnobservable || (earlyWorkerLoad && !completeExpectedSocketProof());
+    return workerUnobservable || (earlyWorkerLoad && !earlyWorkerProven && !completeExpectedSocketProof());
+  }
+
+  function enforceExpectedCount() {
+    return expectedConnectionCount !== undefined &&
+      (!expectedCountForEarlyLoadOnly || (earlyWorkerLoad && !earlyWorkerProven));
   }
 
   function diagnostic() {
@@ -1059,7 +1072,7 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
     if (hasUnobservableWorker()) return result("worker-unobservable");
     if (pendingWorkers > 0) return result("worker-pending");
     if (targets === 0) return result("no-target");
-    if (expectedConnectionCount !== undefined && targets !== expectedConnectionCount) {
+    if (enforceExpectedCount() && targets !== expectedConnectionCount) {
       return result("worker-pending");
     }
     const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
@@ -1096,9 +1109,9 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
     session,
     connections,
     isSettled() {
-      if (expectedConnectionCount !== undefined && connections.size > expectedConnectionCount) return true;
+      if (enforceExpectedCount() && connections.size > expectedConnectionCount) return true;
       return pendingWorkers === 0 && connections.size > 0 &&
-        (expectedConnectionCount === undefined || connections.size === expectedConnectionCount) &&
+        (!enforceExpectedCount() || connections.size === expectedConnectionCount) &&
         [...connections.values()].every((item) => item.responses === 1);
     },
     validate() {
@@ -1108,13 +1121,14 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
       const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
       const workerUnobservableWithoutCompleteSocketProof = hasUnobservableWorker();
       if (malformed || orphanHandshake || workerUnobservableWithoutCompleteSocketProof || pendingWorkers !== 0 ||
-          entries.length < 1 || (expectedConnectionCount !== undefined && entries.length !== expectedConnectionCount) ||
+          entries.length < 1 || (enforceExpectedCount() && entries.length !== expectedConnectionCount) ||
           activeConnections < 1 || entries.length > connectionCeiling ||
           activeAccountSlotMismatch(activeConnections) ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+      if (earlyWorkerLoad && completeExpectedSocketProof()) earlyWorkerProven = true;
       if (accountSlotCount === null && signedIn) accountSlotCount = activeConnections;
       return {connectionCount: entries.length, status101: true};
     },
@@ -1149,10 +1163,11 @@ async function makeWssAudit(contextInfo, progress, expectedConnectionCount) {
   };
 }
 
-export async function proveWss(contextInfo, release, manifest, progress, tracker, {expectedConnectionCount} = {}) {
+export async function proveWss(contextInfo, release, manifest, progress, tracker,
+  {expectedConnectionCount, expectedCountForEarlyLoadOnly = false} = {}) {
   contextInfo.manifest = manifest;
   tracker.expectedEndpoint = manifest.endpoint;
-  const audit = await makeWssAudit(contextInfo, progress, expectedConnectionCount);
+  const audit = await makeWssAudit(contextInfo, progress, expectedConnectionCount, expectedCountForEarlyLoadOnly);
   contextInfo.wssAudit = audit;
   let response;
   try {

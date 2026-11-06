@@ -58,6 +58,8 @@ REMOVED_PUBLIC_PROFILE_SERVICES=()
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
+REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 PREFLIGHT_EVIDENCE_OWNER=0
 if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
   LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
@@ -298,8 +300,13 @@ set_target_local_compose_pin() {
 }
 
 verify_runtime_sources() {
+  local source_scope=${1:-all}
   local -a tracked_paths source_paths
   local index source_sha target_sha runtime_source_sha
+  case "$source_scope" in
+    all|--support-only) ;;
+    *) fail 'invalid runtime source verification scope'; return 64 ;;
+  esac
   runtime_source_sha=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
   [[ "$runtime_source_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'rollout runtime source SHA must be a full commit ID'; return 1; }
   tracked_paths=(
@@ -316,7 +323,7 @@ verify_runtime_sources() {
   else
     source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
-  if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
+  if [ "$source_scope" = all ] && [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
     source_paths+=("$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE")
   fi
@@ -462,7 +469,7 @@ is_tracked_local_compose_selection() {
 activate_tracked_local_compose() {
   local authority_json outcome backend_kind blob_dir
   authority_json=$(python3 "$MODE_HELPER" authority \
-    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT") || {
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT") || {
     fail 'cannot read durable blob authority for the tracked local Compose selection'
     return 1
   }
@@ -496,6 +503,7 @@ activate_tracked_local_compose() {
 }
 
 verify_target_local_compose() {
+  local verify_authority=${1:-1}
   local artifact_path artifact_sha artifact_content_sha reviewed_content_sha override_path entry entry_path artifact_count=0 override_count=0
   local -a compose_files
   TRACKED_LOCAL_AUTHORITY=0
@@ -513,7 +521,7 @@ verify_target_local_compose() {
           ;;
       esac
     done
-    if is_tracked_local_compose_selection; then
+    if [ "$verify_authority" = 1 ] && is_tracked_local_compose_selection; then
       activate_tracked_local_compose || return 1
     fi
     return 0
@@ -595,7 +603,7 @@ verify_target_local_compose() {
   }
 }
 
-require_runtime() {
+require_runtime_preflight() {
   local uid expected_checkout expected_source_dir
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
   [ "$uid" = 0 ] || { fail 'production rollout requires uid 0'; return 1; }
@@ -626,9 +634,6 @@ require_runtime() {
     fail 'secret and override paths must be fixed within the checkout'
     return 1
   }
-  require_compose_override || return 1
-  verify_initial_local_compose || return 1
-  verify_target_local_compose || return 1
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
@@ -652,6 +657,18 @@ require_runtime() {
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
   fi
+}
+
+require_runtime() {
+  require_runtime_preflight || return 1
+  require_runtime_selection 1
+}
+
+require_runtime_selection() {
+  local verify_authority=${1:-1}
+  require_compose_override || return 1
+  verify_initial_local_compose || return 1
+  verify_target_local_compose "$verify_authority"
 }
 
 acquire_shared_lock() {
@@ -1374,7 +1391,7 @@ validate_blob_authority() {
   [ "$allow_unguarded_containers" = 1 ] && mode_args+=(--allow-unguarded-initial-local-containers)
   [ "$allow_unguarded_compose" = 1 ] && mode_args+=(--allow-unguarded-initial-local)
   python3 "$MODE_HELPER" "$mode_action" \
-    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT" \
     --containers "$containers_file" --compose "$compose_file" \
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
@@ -2939,7 +2956,6 @@ run_apply() {
     }
   fi
   verify_runtime_sources || return 1
-
   local layout_report layout_changed layout_diagnostics layout_differences difference
   layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
     --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" \
@@ -3110,7 +3126,7 @@ run_apply() {
   }
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     python3 "$MODE_HELPER" initialize-local \
-      --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+      --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT" \
       --baseline-containers "$BASELINE_DIR/initial-local-baseline-containers.json" \
       --current-containers "$target_blob_containers" \
       --preflight-target-compose "$BASELINE_DIR/initial-local-target-compose.json" \
@@ -3389,7 +3405,7 @@ run_stack_move() {
     --env-file "$ENV_FILE" --target-env-file "$TARGET_CHECKOUT/.env" \
     --evidence-dir "$TARGET_DIR" \
     --state-dir "$TARGET_CHECKOUT/.state/blob-mode" \
-    --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH" \
+    --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" \
     --blob-mode-helper "$MODE_HELPER"
 }
 
@@ -3402,7 +3418,7 @@ main() {
     configure_action_paths apply
     TARGET_SHA=$2
     [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { fail 'reconcile target SHA must be a full commit ID'; return 64; }
-    require_runtime || return 1
+    require_runtime_preflight || return 1
     local reconcile_branch reconcile_head
     reconcile_branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
     reconcile_head=$(git -C "$CHECKOUT" rev-parse HEAD) || { fail 'cannot read current checkout SHA'; return 1; }
@@ -3410,12 +3426,16 @@ main() {
       fail 'reconcile requires the exact reviewed target on the main checkout'
       return 1
     }
+    require_runtime_selection 0 || return 1
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
     verify_approved_gates || return 1
-    verify_runtime_sources || return 1
+    verify_runtime_sources --support-only || return 1
+    python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+      --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
+    require_runtime || return 1
     cd "$CHECKOUT"
     python3 "$MODE_HELPER" reconcile --state-dir "$CHECKOUT/.state/blob-mode" \
-      --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH"
+      --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH"
     return $?
   fi
   [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ] || [ "$1" = move-stack ]; } || { usage; return 64; }
@@ -3429,7 +3449,8 @@ main() {
     fail 'readiness bound must be 1 through 120 seconds'
     return 64
   }
-  require_runtime || return 1
+  require_runtime_preflight || return 1
+  require_runtime_selection 0 || return 1
   if [ "$RUNNER_ACTION" = move-stack ]; then
     LOCK_PATH=$TARGET_LOCK_PATH
     if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
@@ -3453,6 +3474,10 @@ main() {
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
   fi
   verify_approved_gates || return 1
+  verify_runtime_sources --support-only || return 1
+  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
+  require_runtime || return 1
   cd "$CHECKOUT"
   if [ "$RUNNER_ACTION" = move-stack ]; then
     run_stack_move

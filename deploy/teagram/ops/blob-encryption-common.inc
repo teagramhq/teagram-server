@@ -19,7 +19,8 @@ readonly MINIMUM_MEDIA_SHA=91e50a0
 declare -a COMPOSE=()
 declare -a SERVER_CONTAINERS=()
 COMPOSE_ENV_FILES=()
-REPORT_ROOT=
+REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 SERVER_STOPPED=0
 RUSTFS_STOPPED=0
 SERVER_IMAGE_ID=
@@ -179,7 +180,7 @@ validate_live_stack() {
 configure_compose() {
   local authority_json env_file_lines legacy_parked compose_stderr preflight_failed=0
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-transition-runner.py" deployment-env \
-    --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root /root --lock-path "$LOCK_FILE") || \
+    --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root "$REPORT_ROOT" --lock-path "$LOCK_FILE") || \
     ops_fail 'live S3 authority or credential selection is not verified'
   env_file_lines=$(jq -er '
     select(.outcome == "s3-accepted") | .env_files |
@@ -236,7 +237,7 @@ configure_compose() {
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   check_compose_invariant migration_reports_mount \
     '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/reports") | {source:(.source // null),target:(.target // null)} ]' \
-    '[{"source":"/root","target":"/run/teagramd/reports"}]' || preflight_failed=1
+    "$(jq -cn --arg root "$REPORT_ROOT" '[{source:$root,target:"/run/teagramd/reports"}]')" || preflight_failed=1
   check_compose_invariant migration_authority_mount \
     '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/blob-mode") | {source:(.source // null),target:(.target // null)} ]' \
     '[{"source":"/opt/teagram/.state/blob-mode","target":"/run/teagramd/blob-mode"}]' || preflight_failed=1
@@ -256,7 +257,6 @@ configure_compose() {
     '((.services // {}).teagramd // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   [[ "$preflight_failed" == 0 ]] || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
-  REPORT_ROOT=/root
 }
 
 check_media_key() {
