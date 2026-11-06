@@ -239,7 +239,7 @@ not require a second person to approve a run ([environment protection rules](htt
 The workflow rejects a direct run whose ref is not `main`, then requires its
 commit to equal the current `main` SHA and finds a successful push `CI` run for
 that exact SHA. It takes the image digest from that run and only publishes the
-pinned web artifact after its source and content checks pass. The workflow
+current live web artifact after its source and content checks pass. The workflow
 token has read-only repository and Actions permissions. The `demo` environment
 holds the Tailscale OAuth credentials and dedicated deploy key; a deployment
 also requires `TEAGRAM_DEMO_DEPLOY_ENABLED=true`. The SSH key is restricted to
@@ -275,28 +275,34 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 then separately accepts a bounded web archive tied to the current demo
 checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
 server deploys. `Deploy demo.` downloads the server digest from the successful
-server CI run named by the handoff artifact. `web-artifact-pin.json` first
-records teagram-web PR #121's head, successful validation run, and artifact
-digest reported by that run's log; this candidate pin is never deployed. After
-#121 merges, the pin changes to the green `master` publication. The
-read-only deploy preflight then requires the pin to match the public web
-manifest and a successful, checksum-named publication artifact. The
-secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned
-source, then uploads its archive and SHA-256 sidecar with that successful
-server CI run. The credentialed deploy job downloads the archive from that
-exact run and verifies its checksum; it does not check out teagram-web or run
-its dependency code. The forced command requires the release identity to match
-the checked-in published pin, and the LXC recomputes the published artifact's
-content digest before activation. The LXC never installs Node or builds the
-web app. The web source commit and artifact digest are stored in
-`.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
-server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
-only the supplied server digest and checks both its repository digest and
-revision label before touching the database. It revalidates the blob authority and
-running containers, then takes and validates a root-only PostgreSQL dump while
-the existing server and public edge keep running. It applies migrations while
-the old server remains live, starts the candidate in the inactive slot,
-verifies seeded API reads and both HAProxy listener checks, then sends new
+server CI run named by the handoff artifact. The read-only web resolver reads
+the current `mtproto-target.json`, validates its full source SHA and artifact
+digest, then requires a successful `master` publication run and an available
+matching artifact from `.github/workflows/private-artifact.yml`. It reads the
+manifest again after those checks and fails if the live identity changed during
+resolution. There is no checked-in web pin or cross-repository write credential.
+All resolver requests, including redirects, require HTTPS to `api.github.com`
+or `web.teagram.io`; JSON responses are limited to 1 MiB.
+At deployment time a separate secret-free job resolves the live publication,
+checks out its source, and rebuilds it with `build-web-artifact.sh`, which
+requires the result to reproduce the published digest. It uploads the archive
+and SHA-256 sidecar to the current demo deploy run, so a publication after the
+server CI run can still be deployed. The credentialed deploy job downloads
+that archive, verifies its checksum and streams it to the LXC. If the live
+identity changes during the rollout, the web deployment fails closed. The
+forced command checks the release identity against the current live publication,
+fetches the reviewed target and public key at its source commit, verifies the
+key hash and Telegram fingerprint, and requires the staged manifest's endpoint
+and fingerprint to match. The LXC recomputes the artifact content digest before
+activation. It never installs Node or builds the web app. The web source commit
+and artifact digest are stored in `.state/teagram-demo/active-release.json`. A PR workflow
+cannot influence the server image digest by overwriting the package's SHA tag.
+`deploy-main.sh` pulls only the supplied server digest and checks both its
+repository digest and revision label before touching the database. It revalidates
+the blob authority and running containers, then takes and validates a root-only
+PostgreSQL dump while the existing server and public edge keep running. It
+applies migrations while the old server remains live, starts the candidate in the
+inactive slot, verifies seeded API reads and both HAProxy listener checks, then sends new
 sessions to the candidate and drains the old server before stopping it.
 The active slot and image digest are persisted atomically so a host or proxy
 restart recreates the same release. WebSocket sessions already connected to
@@ -311,6 +317,22 @@ file inode. A config-only change is syntax-checked and applied with Nginx's
 graceful reload; the edge container is not recreated, and old workers drain
 existing requests and WebSockets. `nginx.conf` remains an identical compatibility
 copy for already-installed demo ops wrappers that fingerprint that path.
+
+The root-owned `.state/teagram-demo/web-publication.json` records the installed
+publication run and a high-water mark. On first use, the existing release is
+resolved against its successful upstream publication before a baseline is saved;
+if that evidence is unavailable, deployment fails closed. A verified newer run
+reserves its watermark before activation, including when activation later fails.
+The adjacent `web-publication.json.guard` prevents a missing state file from
+silently resetting the watermark; preserve both files together in backups.
+The same installed run is a no-op, while an older run is rejected. To roll back,
+first make the desired older publication live upstream, then dispatch `Deploy demo.`
+on `main` with an issue key and `web_rollback_run_id` set to that publication's
+exact upstream run ID. The host independently
+verifies that this is an in-progress, explicitly marked manual dispatch whose
+main-ref and issue validation succeeded; ordinary automatic deploys cannot request
+rollback. A failed activation restores the previous web link and keeps the
+watermark, so an interrupted newer publication can be retried safely.
 
 The first deploy that changes the existing single-file mount to this directory
 layout recreates the only edge container once. That migration briefly interrupts

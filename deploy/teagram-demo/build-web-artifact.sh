@@ -39,6 +39,6 @@ MTPROTO_TARGET_MODE="$reviewed_mode" \
 jq -e --arg sha "$WEB_SOURCE_SHA" --arg digest "$WEB_ARTIFACT_DIGEST" \
   '.sourceCommit == $sha and .artifactDigest == $digest' \
   "$BUILD_DIR/mtproto-target.json" >/dev/null || {
-  echo 'rebuilt web output differs from the pinned artifact identity' >&2
+  echo 'rebuilt web output differs from the live publication identity' >&2
   exit 1
 }

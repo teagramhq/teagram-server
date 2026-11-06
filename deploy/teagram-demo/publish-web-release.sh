@@ -10,11 +10,17 @@ readonly WEB_SOURCE_SHA=${DEPLOY_WEB_SOURCE_SHA:-}
 readonly WEB_ARTIFACT_DIGEST=${DEPLOY_WEB_ARTIFACT_DIGEST:-}
 readonly WEB_ARCHIVE_SHA256=${DEPLOY_WEB_ARCHIVE_SHA256:-}
 readonly WEB_ARCHIVE=${DEPLOY_WEB_ARCHIVE:-}
+readonly WEB_PUBLICATION_RUN_ID=${DEPLOY_WEB_PUBLICATION_RUN_ID:-}
+readonly WEB_EXPECTED_ENDPOINT=${DEPLOY_WEB_EXPECTED_ENDPOINT:-}
+readonly WEB_EXPECTED_FINGERPRINT=${DEPLOY_WEB_EXPECTED_FINGERPRINT:-}
+readonly WEB_ROLLBACK_ALLOWED=${DEPLOY_WEB_ROLLBACK_ALLOWED:-false}
+readonly WEB_PUBLICATION_STATE="$DEMO_STATE_DIR/web-publication.json"
 TMP_LINK=
 PREVIOUS_LINK_TARGET=
 PREVIOUS_WEB_RELEASE=
 WEB_ACTIVATED=0
 RELEASE_COMMITTED=0
+ACTIVE_RELEASE_WRITTEN=0
 
 cleanup() {
   local rc=$?
@@ -34,6 +40,14 @@ cleanup() {
     else
       rm -f -- "$DEMO_WEB_CURRENT_LINK" || rollback_failed=1
     fi
+    if (( ACTIVE_RELEASE_WRITTEN == 1 )); then
+      if [[ -n "$PREVIOUS_WEB_RELEASE" ]]; then
+        demo_write_active_release "$ACTIVE_SERVER" "$ACTIVE_IMAGE_REF" \
+          "${PREVIOUS_WEB_RELEASE%% *}" "sha256:${PREVIOUS_WEB_RELEASE#* }" || rollback_failed=1
+      else
+        demo_write_active_release "$ACTIVE_SERVER" "$ACTIVE_IMAGE_REF" || rollback_failed=1
+      fi
+    fi
     if (( rollback_failed == 0 )); then
       printf 'demo web release reverted to %s\n' "${PREVIOUS_WEB_RELEASE:-bootstrap status page}" >&2
     else
@@ -50,6 +64,8 @@ demo_require_env
 [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'web source SHA must be a full 40-hex commit'
 [[ "$WEB_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'web artifact digest must be sha256'
 [[ "$WEB_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || demo_fail 'web archive digest must be a full sha256'
+[[ "$WEB_PUBLICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] || demo_fail 'web publication run ID must be positive'
+[[ "$WEB_ROLLBACK_ALLOWED" == true || "$WEB_ROLLBACK_ALLOWED" == false ]] || demo_fail 'web rollback authorization is invalid'
 [[ -f "$WEB_ARCHIVE" && ! -L "$WEB_ARCHIVE" ]] || demo_fail 'received web artifact archive is missing or unsafe'
 [[ ! -L "$DEMO_STATE_DIR" && ! -L "$DEMO_CLIENT_CONFIG_DIR" && ! -L "$DEMO_WEB_ROOT" ]] ||
   demo_fail 'public web release path must not contain a symlinked parent'
@@ -66,11 +82,34 @@ fi
 
 demo_require_proxy_configuration_current edge
 STAGED_WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA256" \
+  DEPLOY_WEB_EXPECTED_ENDPOINT="$WEB_EXPECTED_ENDPOINT" \
+  DEPLOY_WEB_EXPECTED_FINGERPRINT="$WEB_EXPECTED_FINGERPRINT" \
   python3 "$SCRIPT_DIR/install-web-release.py" stage \
     "$WEB_ARCHIVE" "$DEMO_WEB_RELEASES_DIR" "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST")
 readonly STAGED_WEB_RELEASE
 [[ "$STAGED_WEB_RELEASE" == "$WEB_SOURCE_SHA-${WEB_ARTIFACT_DIGEST#sha256:}" ]] ||
   demo_fail 'staged web release directory does not match its artifact identity'
+
+state_args=(prepare "$WEB_PUBLICATION_STATE" "$WEB_PUBLICATION_RUN_ID" "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST")
+if [[ -n "$PREVIOUS_WEB_RELEASE" ]]; then
+  previous_source=${PREVIOUS_WEB_RELEASE%% *}
+  previous_digest="sha256:${PREVIOUS_WEB_RELEASE#* }"
+  state_args+=(--current-source "$previous_source" --current-digest "$previous_digest")
+  if [[ ! -e "$WEB_PUBLICATION_STATE" && ! -L "$WEB_PUBLICATION_STATE" ]]; then
+    baseline=$(python3 "$SCRIPT_DIR/resolve_web_artifact_pin.py" --verify-published-identity "$previous_source" "$previous_digest")
+    baseline_run_id=$(jq -er '.runId | numbers | select(. > 0) | tostring' <<< "$baseline")
+    state_args+=(--baseline-run-id "$baseline_run_id")
+  fi
+fi
+if [[ "$WEB_ROLLBACK_ALLOWED" == true ]]; then
+  state_args+=(--allow-rollback)
+fi
+decision=$(python3 "$SCRIPT_DIR/web-publication-state.py" "${state_args[@]}")
+if [[ "$decision" == noop ]]; then
+  printf 'demo web publication already installed run_id=%s\n' "$WEB_PUBLICATION_RUN_ID"
+  exit 0
+fi
+[[ "$decision" == install ]] || demo_fail 'web publication ordering decision is invalid'
 
 TMP_LINK="$DEMO_WEB_CURRENT_LINK.next.$$"
 [[ ! -e "$TMP_LINK" && ! -L "$TMP_LINK" ]] || demo_fail 'temporary web release link already exists'
@@ -85,5 +124,9 @@ python3 "$SCRIPT_DIR/smoke.py" \
   "$DEMO_CLIENT_CONFIG"
 
 demo_write_active_release "$ACTIVE_SERVER" "$ACTIVE_IMAGE_REF" "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
+ACTIVE_RELEASE_WRITTEN=1
+python3 "$SCRIPT_DIR/web-publication-state.py" commit "$WEB_PUBLICATION_STATE" \
+  "$WEB_PUBLICATION_RUN_ID" "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
 RELEASE_COMMITTED=1
-printf 'demo web deployed source_commit=%s artifact_digest=%s\n' "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
+printf 'demo web deployed source_commit=%s artifact_digest=%s publication_run_id=%s\n' \
+  "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST" "$WEB_PUBLICATION_RUN_ID"
