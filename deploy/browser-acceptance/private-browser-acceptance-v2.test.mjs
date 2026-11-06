@@ -716,6 +716,70 @@ test("client observer records only bounded auth and in-band logout events", asyn
   ]);
 });
 
+test("client observer attributes passwordManager.getState failures to account.getPassword", async () => {
+  const progress = createAcceptanceProgress({sourceCommit});
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssHandshake(101), true);
+  const errorSentinel = "PRIVATE_WORKER_ERROR_SENTINEL";
+  const bridgeEvents = [];
+  const browserWindow = {
+    apiManagerProxy: {
+      async invoke(_type, payload) {
+        if (payload.name === "apiManager" && payload.args?.[0] === "auth.signIn") {
+          throw {type: "SESSION_PASSWORD_NEEDED"};
+        }
+        if (payload.name === "passwordManager" && payload.method === "getState") {
+          throw {error_message: errorSentinel};
+        }
+        return null;
+      },
+    },
+  };
+  const page = {
+    async exposeFunction(name, callback) {
+      browserWindow[name] = (event) => {
+        const serializedEvent = JSON.parse(JSON.stringify(event));
+        bridgeEvents.push(serializedEvent);
+        return callback(serializedEvent);
+      };
+    },
+    async evaluate(callback, bridgeName) {
+      return runInNewContext(`(${callback.toString()})(bridgeName)`, {window: browserWindow, bridgeName});
+    },
+  };
+
+  await installClientProgressObserver(page, progress, acceptanceRpcOutcome);
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "apiManager",
+      method: "invokeApi",
+      args: ["auth.signIn", {}],
+    }),
+    (error) => error.type === "SESSION_PASSWORD_NEEDED",
+  );
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "passwordManager",
+      method: "getState",
+    }),
+    (error) => error.error_message === errorSentinel,
+  );
+
+  const result = await progress.finish();
+  assert.equal(result.phase, "password-challenge");
+  assert.equal(result.outcome, "other");
+  assert.equal(result.authMethod, "account.getPassword");
+  assert.equal(result.errorCategory, "unknown");
+  assert.deepEqual(bridgeEvents, [
+    {kind: "transport-ready"},
+    {kind: "auth-call", method: "auth.signIn"},
+    {kind: "password-challenge"},
+    {kind: "rpc-failure", method: "account.getPassword", outcome: "other"},
+  ]);
+  assert.equal(JSON.stringify(result).includes(errorSentinel), false);
+  assert.equal(JSON.stringify(bridgeEvents).includes(errorSentinel), false);
+});
+
 test("client observer blocks auth.signUp and latches the signup attempt", async () => {
   const calls = [];
   const browserWindow = {

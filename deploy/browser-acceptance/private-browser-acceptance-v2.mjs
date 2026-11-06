@@ -1396,7 +1396,26 @@ export async function installClientProgressObserver(page, progress, acceptanceRp
         if (!isManager) return original.call(this, type, payload, ...rest);
         const isApiManager = payload.name === "apiManager";
         const isPasswordManagerCheck = payload.name === "passwordManager" && payload.method === "check";
-        if (!isApiManager && !isPasswordManagerCheck) return original.call(this, type, payload, ...rest);
+        const isPasswordManagerGetState = payload.name === "passwordManager" && payload.method === "getState";
+        if (!isApiManager && !isPasswordManagerCheck && !isPasswordManagerGetState) {
+          return original.call(this, type, payload, ...rest);
+        }
+        if (isPasswordManagerGetState) {
+          if (!transportReported) {
+            transportReported = true;
+            await report({kind: "transport-ready"});
+          }
+          try {
+            return await original.call(this, type, payload, ...rest);
+          } catch (error) {
+            await report({
+              kind: "rpc-failure",
+              method: "account.getPassword",
+              outcome: rpcOutcome(error),
+            });
+            throw error;
+          }
+        }
         if (isPasswordManagerCheck) {
           if (!transportReported) {
             transportReported = true;

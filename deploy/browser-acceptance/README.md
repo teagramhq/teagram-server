@@ -382,6 +382,26 @@ independently, rejects extra lines, duplicate keys and unknown fields, and
 requires both results for success. Its exit trap tears down this project's
 containers and local image.
 
+## Sign-in observer threat model
+
+The browser page and its worker are untrusted diagnostic inputs. Their RPC
+payloads and thrown errors can contain usernames, passwords, phone numbers,
+SRP values, tokens, or private server details. The observer handles those values
+inside the browser call path but sends only a fixed auth method and normalized
+error category through its bridge. A rejected `passwordManager.getState` call
+is attributed to the fixed `account.getPassword` method because the worker
+performs that RPC for the password card. Raw errors and call arguments are not
+copied into events, results, logs, or evidence.
+
+The result validator and host wrapper accept only the bounded result schema and
+its enumerated fields; unknown methods and error categories become `unknown`.
+The QA script is pinned by digest, and the wrapper rejects extra keys and
+unrecognized values. The page can still fabricate an otherwise valid event,
+so this result localizes a browser failure but does not prove that an RPC
+reached the server or provide an authorization decision. This model assumes the
+host probe, Node process, and pinned runner are intact; compromise of those
+components is outside the observer's protection.
+
 ## Host probe
 
 The host needs Node 24 or newer, `psql`, and the wrapper's existing tools.
