@@ -77,7 +77,7 @@ func (h *handlers) handleGetMessageReactionsList(r *mtproto.Request) (bin.Encode
 		reactions[i] = tg.MessagePeerReaction{
 			PeerID:   &tg.PeerUser{UserID: item.ReactorID},
 			Date:     int(item.Date.Unix()),
-			Reaction: &tg.ReactionEmoji{Emoticon: item.Reaction},
+			Reaction: reactionToTL(item.Reaction),
 		}
 	}
 	users, err := h.loadUsersWithAuthorizedIDs(r.Ctx, usersByID, r.UserID, usersByID)
@@ -105,11 +105,24 @@ func reactionListFilter(req tg.MessagesGetMessageReactionsListRequest) (string, 
 	if !ok {
 		return "", nil
 	}
-	emoji, ok := reaction.(*tg.ReactionEmoji)
-	if !ok || emoji == nil || utf8.RuneCountInString(emoji.Emoticon) < 1 || utf8.RuneCountInString(emoji.Emoticon) > 32 || !isStandardReactionEmoji(emoji.Emoticon) {
+	switch value := reaction.(type) {
+	case *tg.ReactionEmoji:
+		if value == nil || utf8.RuneCountInString(value.Emoticon) < 1 || utf8.RuneCountInString(value.Emoticon) > 32 || !isStandardReactionEmoji(value.Emoticon) {
+			return "", errReactionInvalid
+		}
+		return value.Emoticon, nil
+	case *tg.ReactionCustomEmoji:
+		if value == nil {
+			return "", errReactionInvalid
+		}
+		encoded, valid := store.CustomEmojiReactionValue(value.DocumentID)
+		if !valid {
+			return "", errReactionInvalid
+		}
+		return encoded, nil
+	default:
 		return "", errReactionInvalid
 	}
-	return emoji.Emoticon, nil
 }
 
 func parseMessageReactionListOffset(offset string) (int64, error) {

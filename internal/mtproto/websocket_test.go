@@ -496,6 +496,246 @@ func TestServeWebSocketWithHandlerUsesListenerOriginPolicy(t *testing.T) {
 	}
 }
 
+func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build public discovery document: %v", err)
+	}
+	gotAddr := make(chan netip.Addr, 1)
+	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+		gotAddr <- req.ClientAddr
+		return nil
+	})
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	serveCloudflarePublicWebSocket(t, ctx, server, listener, handler, doc)
+
+	for _, tt := range []struct {
+		name string
+		addr string
+		want netip.Addr
+	}{
+		{name: "IPv4", addr: "198.51.100.31", want: netip.MustParseAddr("198.51.100.31")},
+		{name: "IPv4-mapped IPv6", addr: "::ffff:198.51.100.31", want: netip.MustParseAddr("198.51.100.31")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			ws, status, err := dialWebSocketWithHeaders(requestCtx, listener.Addr().String(), http.Header{
+				"CF-Connecting-IP": []string{tt.addr},
+				"X-Forwarded-For":  []string{"203.0.113.99"},
+			})
+			if err != nil {
+				if status != 0 {
+					t.Fatalf("public WebSocket handshake: %v (HTTP %d)", err, status)
+				}
+				t.Fatalf("public WebSocket handshake: %v", err)
+			}
+			defer closeWebSocket(t, ws)
+
+			sendAddressProbe(t, requestCtx, ws, rsaKey)
+			select {
+			case got := <-gotAddr:
+				if got != tt.want {
+					t.Errorf("public request address = %s, want %s after parsing %q", got, tt.want, tt.addr)
+				}
+			case <-requestCtx.Done():
+				t.Fatal("public request did not reach the handler")
+			}
+		})
+	}
+}
+
+func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	gotAddr := make(chan netip.Addr, 1)
+	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+		gotAddr <- req.ClientAddr
+		return nil
+	})
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), handler, nil)
+	serveWebSocketWithHandler(t, ctx, server, listener, handler, nil)
+
+	ws, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{
+		"CF-Connecting-IP": []string{"198.51.100.32"},
+	})
+	if err != nil {
+		t.Fatalf("tailnet WebSocket handshake: %v", err)
+	}
+	defer closeWebSocket(t, ws)
+
+	sendAddressProbe(t, ctx, ws, rsaKey)
+	select {
+	case got := <-gotAddr:
+		if got != netip.MustParseAddr("127.0.0.1") {
+			t.Errorf("tailnet request address = %s, want socket peer 127.0.0.1", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("tailnet request did not reach the handler")
+	}
+}
+
+func TestPublicWebSocketRejectsInvalidCFConnectingIP(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build public discovery document: %v", err)
+	}
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	serveCloudflarePublicWebSocket(t, ctx, server, listener, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }), doc)
+
+	tests := []struct {
+		name    string
+		headers http.Header
+	}{
+		{name: "missing"},
+		{name: "spoofed forwarded-for only", headers: http.Header{"X-Forwarded-For": []string{"198.51.100.33"}}},
+		{name: "malformed", headers: http.Header{"CF-Connecting-IP": []string{"not-an-ip"}}},
+		{name: "zone-scoped IPv6", headers: http.Header{"CF-Connecting-IP": []string{"fe80::1%eth0"}}},
+		{name: "multiple addresses", headers: http.Header{"CF-Connecting-IP": []string{"198.51.100.33, 203.0.113.2"}}},
+		{name: "duplicate", headers: http.Header{"Cf-Connecting-Ip": []string{"198.51.100.33", "203.0.113.2"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws, status, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), tt.headers)
+			if err == nil {
+				closeWebSocket(t, ws)
+				t.Fatal("public WebSocket accepted an invalid client address header")
+			}
+			if status != http.StatusBadRequest {
+				t.Fatalf("handshake error = %v, response status = %d; want HTTP 400", err, status)
+			}
+		})
+	}
+}
+
+func TestPublicWebSocketPreAuthCapUsesCFConnectingIP(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build public discovery document: %v", err)
+	}
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := server.SetPreAuthLimits(mtproto.PreAuthLimits{MaxConnsPerNet: 1}); err != nil {
+		t.Fatalf("set pre-auth limits: %v", err)
+	}
+	serveCloudflarePublicWebSocket(t, ctx, server, listener, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }), doc)
+
+	first, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"198.51.100.34"}})
+	if err != nil {
+		t.Fatalf("first public handshake: %v", err)
+	}
+	defer closeWebSocket(t, first)
+
+	second, status, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"198.51.100.34"}})
+	if err == nil {
+		closeWebSocket(t, second)
+		t.Fatal("second connection from the same client network passed the pre-auth cap")
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("same-network handshake error = %v, response status = %d; want HTTP 429", err, status)
+	}
+
+	other, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"198.51.100.35"}})
+	if err != nil {
+		t.Fatalf("different public client network was refused: %v", err)
+	}
+	defer closeWebSocket(t, other)
+
+	ipv6First, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"2001:db8:1::1"}})
+	if err != nil {
+		t.Fatalf("first public handshake from IPv6 /64: %v", err)
+	}
+	defer closeWebSocket(t, ipv6First)
+
+	ipv6Second, status, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{"CF-Connecting-IP": []string{"2001:db8:1::2"}})
+	if err == nil {
+		closeWebSocket(t, ipv6Second)
+		t.Fatal("second connection from the same IPv6 /64 passed the pre-auth cap")
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("same-/64 handshake error = %v, response status = %d; want HTTP 429", err, status)
+	}
+}
+
+func serveCloudflarePublicWebSocket(t *testing.T, ctx context.Context, server *mtproto.Server, listener net.Listener, handler mtproto.Handler, doc discovery.Document) {
+	t.Helper()
+	served := make(chan error, 1)
+	go func() {
+		served <- server.ServePublicWebSocketWithCFConnectingIP(ctx, listener, handler, nil, doc)
+	}()
+	t.Cleanup(func() {
+		if err := <-served; err != nil {
+			t.Errorf("serve public WebSocket: %v", err)
+		}
+	})
+}
+
+func serveWebSocketWithHandler(t *testing.T, ctx context.Context, server *mtproto.Server, listener net.Listener, handler mtproto.Handler, origins []string) {
+	t.Helper()
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocketWithHandler(ctx, listener, handler, origins) }()
+	t.Cleanup(func() {
+		if err := <-served; err != nil {
+			t.Errorf("serve WebSocket: %v", err)
+		}
+	})
+}
+
+func sendAddressProbe(t *testing.T, ctx context.Context, ws *websocket.Conn, rsaKey *rsa.PrivateKey) {
+	t.Helper()
+	client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+	if err != nil {
+		t.Fatalf("intermediate transport handshake: %v", err)
+	}
+	result, err := exchange.NewExchanger(client, 2).
+		Client([]exchange.PublicKey{exchange.PrivateKey{RSA: rsaKey}.Public()}).Run(ctx)
+	if err != nil {
+		t.Fatalf("auth-key exchange: %v", err)
+	}
+	frame := clientFrame(t, result.AuthKey, 42, int64(1)<<32, &tg.HelpGetNearestDCRequest{})
+	if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send address probe: %v", err)
+	}
+}
+
+func dialWebSocketWithHeaders(ctx context.Context, addr string, headers http.Header) (*websocket.Conn, int, error) {
+	ws, resp, err := websocket.Dial(ctx, "ws://"+addr+"/apiws", &websocket.DialOptions{
+		HTTPHeader:   headers,
+		Subprotocols: []string{"binary"},
+	})
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	if resp != nil && resp.Body != nil {
+		if closeErr := resp.Body.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	return ws, status, err
+}
+
 func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	t.Parallel()
 
@@ -1669,4 +1909,20 @@ func (c *webSocketBoundaryConn) Flush() error {
 	c.pending = nil
 	_, err := c.Conn.Write(pending)
 	return err
+}
+
+var cloudflareTestKey = sync.OnceValues(func() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
+})
+
+// cloudflareTestRSAKey returns one RSA key shared by the Cloudflare address
+// tests, so key generation neither repeats per test nor counts against the
+// per-test deadlines on a loaded runner.
+func cloudflareTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := cloudflareTestKey()
+	if err != nil {
+		t.Fatalf("generate server RSA key: %v", err)
+	}
+	return key
 }

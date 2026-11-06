@@ -1,0 +1,10 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.report#fc78af9b
+  peer: { inputPeerUser#dde8a54c
+    user_id: 1 [LONG],
+    access_hash: 2 [LONG],
+  },
+  id: [1 [INT]],
+  option: bytes [114 101 97 115 111 110 58 99 111 112 121 114 105 103 104 116] [BYTES],
+  message: "" [STRING],
+},

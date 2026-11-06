@@ -319,16 +319,18 @@ DELETE FROM chat_about WHERE chat_id = $1;
 -- ChatAvailableReactionsByIDs reads explicit settings only. A missing row is
 -- the inherited all-reactions setting for old and new basic groups.
 -- name: ChatAvailableReactionsByIDs :many
-SELECT chat_id, mode, reactions
+SELECT chat_id, mode, reactions, allow_custom, custom_emoji_ids
 FROM chat_available_reactions
 WHERE chat_id = ANY(sqlc.arg(chat_ids)::bigint[])
 ORDER BY chat_id;
 
 -- name: SetChatAvailableReactions :exec
-INSERT INTO chat_available_reactions (chat_id, mode, reactions)
-VALUES (sqlc.arg(chat_id)::bigint, sqlc.arg(mode)::text, sqlc.arg(reactions)::text[])
+INSERT INTO chat_available_reactions (chat_id, mode, reactions, allow_custom, custom_emoji_ids)
+VALUES (sqlc.arg(chat_id)::bigint, sqlc.arg(mode)::text, sqlc.arg(reactions)::text[],
+        sqlc.arg(allow_custom)::boolean, sqlc.arg(custom_emoji_ids)::bigint[])
 ON CONFLICT (chat_id)
-DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions;
+DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions,
+              allow_custom = EXCLUDED.allow_custom, custom_emoji_ids = EXCLUDED.custom_emoji_ids;
 
 -- ChatAboutsByIDsForMember hydrates descriptions only for the selected member
 -- chats in the same read snapshot as the rest of full-chat info.

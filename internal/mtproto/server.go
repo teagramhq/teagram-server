@@ -183,6 +183,10 @@ type Server struct {
 	globalCapLog logSampler
 	netCapLog    logSampler
 	ceilingLog   logSampler
+	// A bad trusted-address header can turn a tunnel configuration error into
+	// an outage for every public visitor; keep this signal independent and
+	// sampled so malformed requests cannot flood the operator's logs.
+	clientAddrHeaderLog logSampler
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler
@@ -1108,6 +1112,13 @@ func isWebSocketProtocolDecodeError(err error) bool {
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
+	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout {
+		if isWebSocketDisconnect(err) {
+			reason = transportCloseReasonClientClose
+		} else if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			reason = transportCloseReasonServerError
+		}
+	}
 	attrs := []any{
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
@@ -1276,7 +1287,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	}
 	failureStage := "connection_cleanup"
 	defer func() {
-		if closeDiagnostics.transport != websocketPath || rErr == nil || isDisconnect(rErr) {
+		if closeDiagnostics.transport != websocketPath || rErr == nil || isWebSocketDisconnect(rErr) {
 			return
 		}
 		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {

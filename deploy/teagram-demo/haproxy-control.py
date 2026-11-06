@@ -10,6 +10,7 @@ import pathlib
 import socket
 import sys
 import time
+from collections.abc import Callable
 
 
 SOCKET_PATH = pathlib.Path(".state/teagram-demo/haproxy-run/admin.sock")
@@ -44,7 +45,12 @@ def exchange(socket_path: pathlib.Path, command: str) -> str:
         fail(f"runtime socket command failed ({command.split()[0]}): {error}")
     finally:
         client.close()
-    if not response or "Unknown command" in response or "Permission denied" in response:
+    if (
+        not response
+        or (command != "show stat" and response.strip())
+        or "Unknown command" in response
+        or "Permission denied" in response
+    ):
         fail(f"HAProxy rejected runtime command: {command.split()[0]}")
     return response
 
@@ -58,27 +64,43 @@ def server_row(socket_path: pathlib.Path, backend: str, server: str) -> dict[str
     return None
 
 
-def wait_healthy(socket_path: pathlib.Path, slot: str, timeout: int) -> None:
+def wait_healthy(
+    socket_path: pathlib.Path,
+    slot: str,
+    timeout: int,
+    allow_drained: bool = False,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
     servers = (
         ("teagramd", slot),
         ("teagramd_mtproto", f"{slot}-mtproto"),
     )
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
         if all(
             (row := server_row(socket_path, backend, server)) is not None
-            and row.get("status") == "UP"
+            and row.get("status") in ({"UP", "DRAIN"} if allow_drained else {"UP"})
             and row.get("check_status") in GOOD_CHECKS
             for backend, server in servers
         ):
             return
-        time.sleep(1)
+        sleep(1)
     fail(f"{slot} did not pass both HAProxy server checks")
 
 
 def slot_command(socket_path: pathlib.Path, action: str, slot: str) -> None:
     if slot not in SLOTS:
         fail("invalid service slot")
+    if action == "shutdown-sessions":
+        servers = (
+            ("teagramd", slot),
+            ("teagramd_mtproto", f"{slot}-mtproto"),
+        )
+        for backend, server in servers:
+            exchange(socket_path, f"shutdown sessions server {backend}/{server}")
+        return
     state = "ready" if action == "enable" else "drain"
     exchange(socket_path, f"set server teagramd/{slot} state {state}")
     exchange(socket_path, f"set server teagramd_mtproto/{slot}-mtproto state {state}")
@@ -88,15 +110,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=pathlib.Path, default=SOCKET_PATH)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    for action in ("enable", "drain"):
+    for action in ("enable", "drain", "shutdown-sessions"):
         subparser = subparsers.add_parser(action)
         subparser.add_argument("slot", choices=sorted(SLOTS))
     wait = subparsers.add_parser("wait-healthy")
     wait.add_argument("slot", choices=sorted(SLOTS))
     wait.add_argument("--timeout", type=int, default=60)
+    wait.add_argument("--allow-drained", action="store_true")
     args = parser.parse_args()
     if args.action == "wait-healthy":
-        wait_healthy(args.socket, args.slot, args.timeout)
+        wait_healthy(args.socket, args.slot, args.timeout, args.allow_drained)
         print(f"HAProxy server checks=passed slot={args.slot}")
         return
     slot_command(args.socket, args.action, args.slot)

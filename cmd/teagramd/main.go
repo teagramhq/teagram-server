@@ -74,10 +74,11 @@ func deliverWithBotAPINotify(ctx context.Context, notifier botUpdateNotifier, de
 }
 
 type publicWebSocketListener struct {
-	listener       net.Listener
-	handler        mtproto.Handler
-	originPatterns []string
-	discovery      discovery.Document
+	listener            net.Listener
+	handler             mtproto.Handler
+	originPatterns      []string
+	discovery           discovery.Document
+	trustCFConnectingIP bool
 }
 
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
@@ -963,6 +964,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredAdminSessions(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredUserStickerSetReports(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		sweepExpiredSRPChallenges(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
@@ -1328,6 +1332,11 @@ func trustClientAddr(server *mtproto.Server, cfg config.Config, log *slog.Logger
 			"trust", string(cfg.ClientAddrTrust),
 			"balancers", cfg.ClientAddrProxies)
 		server.TrustProxyV2Headers(cfg.ClientAddrProxies)
+		return nil
+	case config.ClientAddrCFConnectingIP:
+		log.Info("public WebSocket client addresses are read from CF-Connecting-IP",
+			"trust", string(cfg.ClientAddrTrust),
+			"other_listeners", "socket")
 		return nil
 	default:
 		return fmt.Errorf("unsupported client address trust mode %q", cfg.ClientAddrTrust)
@@ -1823,6 +1832,26 @@ func sweepExpiredAdminSessions(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired admin sessions", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredUserStickerSetReports purges dismissed or actioned reports after
+// their 180-day retention window. The store deletes in bounded batches.
+func sweepExpiredUserStickerSetReports(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := st.SweepExpiredUserStickerSetReports(ctx)
+			if err != nil {
+				log.Error("sweep expired user sticker-set reports", "deleted", deleted, "err", err)
+				continue
+			}
+			log.Info("swept expired user sticker-set reports", "deleted", deleted)
 		}
 	}
 }
