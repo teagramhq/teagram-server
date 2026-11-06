@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
-import io
 import json
 import os
 import pathlib
+import shlex
+import stat
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -105,6 +108,166 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             patch.object(operation, "capture_live_census", return_value=census),
         )
 
+    def run_encrypt_media_preflight(
+        self,
+        root: pathlib.Path,
+        checkout: pathlib.Path,
+        state_dir: pathlib.Path,
+        report_root: pathlib.Path,
+        lock_path: pathlib.Path,
+    ) -> None:
+        preflight_root = root / "encrypt-media-preflight"
+        preflight_root.mkdir(mode=0o700)
+        runtime_dir = preflight_root / "runtime"
+        runtime_dir.mkdir(mode=0o700)
+        bin_dir = preflight_root / "bin"
+        bin_dir.mkdir(mode=0o700)
+        key_dir = preflight_root / "media-keys"
+        key_dir.mkdir(mode=0o700)
+        evidence_root = preflight_root / "evidence"
+        evidence_root.mkdir(mode=0o700)
+
+        actual_common = SCRIPT_DIR.parents[2] / "deploy" / "teagram" / "ops" / "blob-encryption-common.inc"
+        common_source = actual_common.read_text(encoding="utf-8")
+        replacements = {
+            "readonly REPO=/opt/teagram": f"readonly REPO={shlex.quote(str(checkout))}",
+            "readonly LOCK_FILE=/tmp/teagram-deploy.lock": f"readonly LOCK_FILE={shlex.quote(str(lock_path))}",
+            "readonly EXPECTED_ROOT_UID=0": f"readonly EXPECTED_ROOT_UID={os.geteuid()}",
+            "readonly KEY_DIR=/etc/teagramd/media-keys": f"readonly KEY_DIR={shlex.quote(str(key_dir))}",
+            "readonly EVIDENCE_ROOT=/root/teagram-media-encryption": f"readonly EVIDENCE_ROOT={shlex.quote(str(evidence_root))}",
+            "/opt/teagram/.state/blob-mode": str(state_dir),
+        }
+        for old, new in replacements.items():
+            self.assertIn(old, common_source)
+            common_source = common_source.replace(old, new)
+        common_path = preflight_root / "blob-encryption-common.inc"
+        common_path.write_text(common_source, encoding="utf-8")
+        common_path.chmod(0o600)
+        (checkout / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        (checkout / "docker-compose.override.yml").write_text("services: {}\n", encoding="utf-8")
+
+        migration_mounts = [
+            {"type": "bind", "source": str(key_dir), "target": "/run/teagramd/media-keys", "read_only": True},
+            {"type": "bind", "source": str(report_root), "target": "/run/teagramd/reports"},
+            {"type": "bind", "source": str(state_dir), "target": "/run/teagramd/blob-mode"},
+        ]
+        compose = {
+            "services": {
+                "blob-encrypt-migrate": {
+                    "image": "teagramd:local",
+                    "entrypoint": ["/usr/local/bin/blob-encrypt-migrate"],
+                    "user": "0:0",
+                    "read_only": True,
+                    "profiles": ["migration"],
+                    "volumes": migration_mounts,
+                    "networks": {"default": {}, "rustfs_private": {}},
+                },
+                "teagramd": {
+                    "image": "teagramd:local",
+                    "environment": {
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                    },
+                    "volumes": [migration_mounts[0]],
+                },
+            },
+        }
+        compose_path = preflight_root / "compose.json"
+        compose_path.write_text(json.dumps(compose), encoding="utf-8")
+        (runtime_dir / "blob-transition-runner.py").write_bytes(
+            (SCRIPT_DIR / "blob-transition-runner.py").read_bytes()
+        )
+        (runtime_dir / "blob-transition-runner.py").chmod(0o600)
+        (runtime_dir / "blob-mode-state.py").write_bytes(
+            (SCRIPT_DIR / "blob-mode-state.py").read_bytes()
+        )
+        (runtime_dir / "blob-mode-state.py").chmod(0o600)
+
+        docker_stub = bin_dir / "docker"
+        docker_stub.write_text(
+            "#!/bin/sh\nset -eu\n[ \"$1\" = compose ] || exit 64\ncat -- \"$BLOB_TEST_COMPOSE_JSON\"\n",
+            encoding="utf-8",
+        )
+        docker_stub.chmod(0o755)
+        python_stub = bin_dir / "python3"
+        python_stub.write_text(
+            textwrap.dedent(
+                f"""\
+                #!{sys.executable}
+                import importlib.util
+                import os
+                import pathlib
+                import stat
+                import sys
+
+                runner_path = pathlib.Path(sys.argv[1])
+                mode_path = pathlib.Path(os.environ["BLOB_TEST_MODE_HELPER"])
+
+                def load(name, path):
+                    spec = importlib.util.spec_from_file_location(name, path)
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[name] = module
+                    spec.loader.exec_module(module)
+                    return module
+
+                mode = load("encrypt_preflight_fixture_mode", mode_path)
+                runner = load("encrypt_preflight_fixture_runner", runner_path)
+
+                def fixture_file_stat(path, kind, expected_mode=None):
+                    info = pathlib.Path(path).lstat()
+                    if stat.S_ISLNK(info.st_mode) or stat.S_IFMT(info.st_mode) != kind:
+                        raise mode.Reject("fixture-state-type")
+                    if info.st_mode & 0o022:
+                        raise mode.Reject("fixture-state-permissions")
+                    if expected_mode is not None and stat.S_IMODE(info.st_mode) != expected_mode:
+                        raise mode.Reject("fixture-state-permissions")
+                    return info
+
+                mode.file_stat = fixture_file_stat
+                mode.require_runner_lock = lambda _path: None
+                runner.import_mode_helper = lambda: mode
+                runner.rustfs_compose_environment_files = lambda checkout: [
+                    str(checkout / ".env"), str(checkout / ".env.rustfs-parked")
+                ]
+                runner.TEST_MODE = True
+                sys.argv = [str(runner_path), *sys.argv[2:]]
+                raise SystemExit(runner.main())
+                """
+            ),
+            encoding="utf-8",
+        )
+        python_stub.chmod(0o755)
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "BLOB_TEST_COMMON": str(common_path),
+                "BLOB_TEST_COMPOSE_JSON": str(compose_path),
+                "BLOB_TEST_MODE_HELPER": str(SCRIPT_DIR / "blob-mode-state.py"),
+                "BLOB_TRANSITION_TEST_MODE": "1",
+                "OPS_TEMP_DIR": str(runtime_dir),
+                "PATH": f"{bin_dir}:{environment.get('PATH', '')}",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "RUN_ID": "attested-fixture",
+                "TEAGRAM_BLOB_MODE_REPORT_ROOT": str(report_root),
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'set -Eeuo pipefail\nsource "$BLOB_TEST_COMMON"\nconfigure_compose\nprintf "authority_preflight=pass\\n"',
+            ],
+            cwd=checkout,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "authority_preflight=pass")
+
     def test_live_census_accepts_legacy_flat_part_key(self) -> None:
         key = "parts/deadbeef000000000000000000000000"
         s3_manifest = f"{key}\t7\t{'b' * 64}\n".encode("ascii")
@@ -167,38 +330,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 (secret_dir / "teagramd-blob-secret-key").write_text("d" * 64, encoding="ascii")
                 os.chmod(secret_dir / "teagramd-blob-secret-key", 0o444)
 
-                transition = self.operation.transition
-                authority_helper = transition.import_mode_helper()
-                args = [
-                    "blob-transition-runner.py",
-                    "deployment-env",
-                    "--checkout", str(checkout),
-                    "--state-dir", str(state_dir),
-                    "--report-root", str(report_root),
-                    "--lock-path", str(lock_path),
-                ]
-                credential_fixture = contextlib.nullcontext()
-                if os.geteuid() != 0:
-                    credential_fixture = patch.object(
-                        transition,
-                        "rustfs_compose_environment_files",
-                        return_value=[str(checkout / ".env"), str(checkout / ".env.rustfs-parked")],
-                    )
-                with (
-                    patch.object(transition, "TEST_MODE", True),
-                    patch.object(transition, "import_mode_helper", return_value=authority_helper),
-                    patch.object(authority_helper, "require_runner_lock"),
-                    patch.object(
-                        authority_helper,
-                        "file_stat",
-                        side_effect=self.fixture.allow_unowned_private_files,
-                    ),
-                    credential_fixture,
-                    patch.object(sys, "argv", args),
-                    contextlib.redirect_stdout(io.StringIO()) as output,
-                ):
-                    self.assertEqual(transition.main(), 0)
-                self.assertEqual(json.loads(output.getvalue())["outcome"], "s3-accepted")
+                self.run_encrypt_media_preflight(root, checkout, state_dir, report_root, lock_path)
 
     def test_retry_cleans_publication_after_manifest_write_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -290,6 +422,64 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 self.assertTrue((report_root / self.operation.ARCHIVE_MANIFEST_NAME).exists())
                 result = self.operation.run_attestation()
                 self.assertEqual(result["missing_report_count"], 5)
+                self.assertFalse(self.operation.recovery_marker_path().exists())
+
+    def test_committed_publication_survives_later_authority_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(
+                    self.operation,
+                    "_remove_recovery_marker",
+                    side_effect=self.operation.AttestationReject("simulated-process-interruption"),
+                ):
+                    with self.assertRaises(self.operation.AttestationReject):
+                        self.operation.run_attestation()
+
+                marker = json.loads(self.operation.recovery_marker_path().read_text(encoding="ascii"))
+                self.assertEqual(marker["phase"], "committed")
+                archive_path = next((root / "archives").glob("attestation-*"))
+                archive_before = snapshot_files(archive_path)
+                published_names = [
+                    self.operation.ARCHIVE_MANIFEST_NAME,
+                    self.operation.CENSUS_MANIFEST_NAME,
+                    *[
+                        path.name
+                        for path in report_root.glob(f"{self.operation.ATTESTATION_PREFIX}*.json")
+                    ],
+                ]
+                published_before = {name: (report_root / name).read_bytes() for name in published_names}
+
+                with (
+                    patch.object(mode_fixtures.blob_mode, "require_runner_lock"),
+                    patch.object(
+                        mode_fixtures.blob_mode,
+                        "file_stat",
+                        side_effect=self.fixture.allow_unowned_private_files,
+                    ),
+                    patch.object(mode_fixtures.blob_mode.os, "fchown"),
+                    patch.object(mode_fixtures.blob_mode.os, "chown"),
+                ):
+                    self.fixture.publish(state_dir, report_root, lock_path, root, "recovered-local")
+                    records, _head, _mode_bytes = mode_fixtures.blob_mode.read_authority(
+                        state_dir, report_root
+                    )
+                    mode_fixtures.blob_mode.report_read_path(
+                        report_root, records[-1]["transition_id"]
+                    ).unlink()
+
+                with self.assertRaises(self.operation.AttestationReject):
+                    self.operation.run_attestation()
+
+                self.assertEqual(snapshot_files(archive_path), archive_before)
+                self.assertEqual(
+                    {name: (report_root / name).read_bytes() for name in published_names},
+                    published_before,
+                )
                 self.assertFalse(self.operation.recovery_marker_path().exists())
 
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:

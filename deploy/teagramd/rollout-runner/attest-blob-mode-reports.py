@@ -26,7 +26,8 @@ TEST_MODE = False
 ATTESTATION_SCHEMA = "teagram.blob-mode-report-loss-attestation/v1"
 ARCHIVE_SCHEMA = "teagram.blob-mode-report-loss-archive/v1"
 CENSUS_SCHEMA = "teagram.blob-mode-report-loss-census/v1"
-RECOVERY_SCHEMA = "teagram.blob-mode-report-loss-recovery/v1"
+RECOVERY_SCHEMA = "teagram.blob-mode-report-loss-recovery/v2"
+LEGACY_RECOVERY_SCHEMA = "teagram.blob-mode-report-loss-recovery/v1"
 ATTESTATION_PREFIX = "teagramd-blob-mode-report-loss-attestation-"
 ARCHIVE_MANIFEST_NAME = "teagramd-blob-mode-report-loss-archive-manifest.json"
 CENSUS_MANIFEST_NAME = "teagramd-blob-mode-report-loss-census-manifest.json"
@@ -311,21 +312,32 @@ def _remove_private_tree_at(parent_fd: int, name: str) -> None:
         reject("attestation-recovery-failed")
 
 
-def _read_recovery_marker(archive_root_fd: int) -> str:
+def _read_recovery_marker(archive_root_fd: int) -> tuple[str, str]:
     try:
         content = _read_private_at(archive_root_fd, RECOVERY_MARKER_NAME, maximum=4096)
         document = json.loads(content.decode("ascii"))
     except (AttestationReject, UnicodeDecodeError, json.JSONDecodeError):
         reject("attestation-recovery-marker-invalid")
+    phase = "publishing"
     if (
         not isinstance(document, dict)
-        or set(document) != {"schema", "head_bytes_sha256"}
-        or document.get("schema") != RECOVERY_SCHEMA
         or not isinstance(document.get("head_bytes_sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", document["head_bytes_sha256"]) is None
     ):
         reject("attestation-recovery-marker-invalid")
-    return document["head_bytes_sha256"]
+    if document.get("schema") == LEGACY_RECOVERY_SCHEMA:
+        if set(document) != {"schema", "head_bytes_sha256"}:
+            reject("attestation-recovery-marker-invalid")
+    elif document.get("schema") == RECOVERY_SCHEMA:
+        if set(document) != {"schema", "head_bytes_sha256", "phase"}:
+            reject("attestation-recovery-marker-invalid")
+        phase_value = document.get("phase")
+        if not isinstance(phase_value, str) or phase_value not in ("publishing", "committed"):
+            reject("attestation-recovery-marker-invalid")
+        phase = phase_value
+    else:
+        reject("attestation-recovery-marker-invalid")
+    return document["head_bytes_sha256"], phase
 
 
 def _remove_recovery_marker_temporaries(archive_root_fd: int) -> None:
@@ -423,7 +435,24 @@ def _recover_incomplete_publication() -> bool:
             return False
         except OSError:
             reject("attestation-recovery-marker-invalid")
-        head_sha256 = _read_recovery_marker(archive_root_fd)
+        head_sha256, phase = _read_recovery_marker(archive_root_fd)
+        if phase == "committed":
+            try:
+                report_fd = os.open(
+                    REPORT_ROOT,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                )
+            except OSError:
+                reject("attestation-recovery-failed")
+            try:
+                _remove_attestation_temporaries(report_fd)
+            finally:
+                try:
+                    os.close(report_fd)
+                except OSError:
+                    reject("attestation-recovery-failed")
+            _remove_recovery_marker(archive_root_fd)
+            return False
         try:
             mode.current_authority(STATE_DIR, REPORT_ROOT)
         except mode.Reject:
@@ -456,7 +485,7 @@ def _publish_recovery_marker(head_sha256: str) -> None:
     temporary = ARCHIVE_ROOT / f"{RECOVERY_MARKER_TEMP_PREFIX}{os.urandom(8).hex()}"
     content = (
         json.dumps(
-            {"schema": RECOVERY_SCHEMA, "head_bytes_sha256": head_sha256},
+            {"schema": RECOVERY_SCHEMA, "head_bytes_sha256": head_sha256, "phase": "publishing"},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -472,6 +501,46 @@ def _publish_recovery_marker(head_sha256: str) -> None:
         reject("attestation-recovery-marker-exists")
     except OSError:
         reject("attestation-recovery-marker-publish")
+
+
+def _mark_recovery_marker_committed(head_sha256: str) -> None:
+    try:
+        archive_root_fd = os.open(
+            ARCHIVE_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("attestation-recovery-failed")
+    temporary = ARCHIVE_ROOT / f"{RECOVERY_MARKER_TEMP_PREFIX}{os.urandom(8).hex()}"
+    marker_path = recovery_marker_path()
+    try:
+        marker_head_sha256, phase = _read_recovery_marker(archive_root_fd)
+        if marker_head_sha256 != head_sha256 or phase != "publishing":
+            reject("attestation-recovery-marker-invalid")
+        content = (
+            json.dumps(
+                {"schema": RECOVERY_SCHEMA, "head_bytes_sha256": head_sha256, "phase": "committed"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+        write_private_file(temporary, content)
+        try:
+            os.replace(temporary, marker_path)
+            sync_directory(ARCHIVE_ROOT)
+        except OSError:
+            reject("attestation-recovery-marker-publish")
+    finally:
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except OSError:
+            reject("attestation-recovery-marker-publish")
+        try:
+            os.close(archive_root_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
 
 
 def _rollback_incomplete_publication(head_sha256: str) -> None:
@@ -503,8 +572,12 @@ def _rollback_incomplete_publication(head_sha256: str) -> None:
             return
         except OSError:
             reject("attestation-recovery-failed")
-        if _read_recovery_marker(archive_root_fd) != head_sha256:
+        marker_head_sha256, phase = _read_recovery_marker(archive_root_fd)
+        if marker_head_sha256 != head_sha256:
             reject("attestation-recovery-marker-invalid")
+        if phase == "committed":
+            _remove_recovery_marker_temporaries(archive_root_fd)
+            return
         _remove_incomplete_publication(head_sha256, archive_root_fd)
         _remove_recovery_marker(archive_root_fd)
         _remove_recovery_marker_temporaries(archive_root_fd)
@@ -1068,6 +1141,7 @@ def run_attestation() -> dict[str, object]:
             mode.current_authority(STATE_DIR, REPORT_ROOT)
         except mode.Reject as error:
             reject(f"post-attestation-{error}")
+        _mark_recovery_marker_committed(head_sha256)
     except Exception:
         _rollback_incomplete_publication(head_sha256)
         raise
