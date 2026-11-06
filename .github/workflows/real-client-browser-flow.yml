@@ -16,7 +16,7 @@ jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
@@ -115,11 +115,18 @@ jobs:
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Install Chromium and NSS trust utility
-        timeout-minutes: 10
+        # Playwright's cold dependency install downloads Ubuntu font packages
+        # from the archive mirror; bounded APT retries handle slow responses.
+        timeout-minutes: 20
         working-directory: web-source
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "90";' \
+            'Acquire::https::Timeout "90";' \
+            | sudo tee /etc/apt/apt.conf.d/99-github-actions-download-retries >/dev/null
           sudo apt-get update
           sudo apt-get install -y libnss3-tools
           corepack pnpm exec playwright install --with-deps chromium
@@ -233,7 +240,7 @@ jobs:
           finished="$(date +%s)"
           elapsed=$((finished - started))
           printf 'Complete job duration: %dm %02ds\n' "$((elapsed / 60))" "$((elapsed % 60))" | tee -a "$GITHUB_STEP_SUMMARY"
-          if ((elapsed >= 1800)); then
-            echo "::error::real-client browser-flow job exceeded 30 minutes"
+          if ((elapsed >= 2700)); then
+            echo "::error::real-client browser-flow job exceeded 45 minutes"
             exit 1
           fi
