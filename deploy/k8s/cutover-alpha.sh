@@ -949,7 +949,7 @@ incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
 admin_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --output /dev/null \
   --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$ADMIN_PORT/admin") ||
   fail 'the new admin Service is not reachable from teagram-k3s'
-[[ $admin_status =~ ^(200|302|401|403)$ ]] || fail 'the new admin Service returned an unexpected HTTP status'
+[[ $admin_status =~ ^(200|301|302|303|307|308|401|403)$ ]] || fail "the new admin Service returned unexpected HTTP status $admin_status"
 python3 - "$linkselector_ip" "$MTPROTO_PORT" <<'PY'
 import socket
 import sys
