@@ -1939,7 +1939,11 @@ WHERE ($1::int & 4) <> 0
   AND cp.user_id = $3::bigint
   AND post.local_id > cp.available_min_id
   AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
-  AND post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+  -- Every URL match contains a dot or "://"; the substring test is far cheaper
+  -- than the regex, and CASE keeps the planner from running the regex first.
+  AND CASE WHEN strpos(post.message, '.') > 0 OR strpos(post.message, '://') > 0
+    THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+    ELSE false END
 UNION ALL
 SELECT 4::smallint AS filter, count(*)::bigint AS count
 FROM channel_messages post
