@@ -17,6 +17,13 @@ const PHASES = new Set([
   "signed-in",
 ]);
 
+const AUTH_METHODS = new Set([
+  "auth.sendCode",
+  "auth.signIn",
+  "account.getPassword",
+  "auth.checkPassword",
+]);
+
 const CLIENT_EVENT_TRANSITIONS = new Map([
   ["req-pq", ["req-pq", "req-pq"]],
   ["req-dh-params", ["req-pq", "req-dh-params"]],
@@ -89,6 +96,8 @@ export function createAcceptanceProgress({ sourceCommit }) {
   const revision = safeRevision(sourceCommit);
   let phase = "wss-not-opened";
   let outcome = "other";
+  let authMethod = "unknown";
+  let errorCategory = "unknown";
   let outcomeIsFinal = false;
   let wssConnections = 0;
   let activeWssConnections = 0;
@@ -110,7 +119,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
     finished = true;
     const success = phase === "signed-in" && outcome === "ok" && logout === "ok" &&
       wssConnections >= 1 && wssConnections <= WSS_CONNECTION_CEILING && !unexpectedWssConnection;
-    return {
+    const result = {
       schemaVersion: 2,
       ok: success,
       phase,
@@ -120,6 +129,20 @@ export function createAcceptanceProgress({ sourceCommit }) {
       sourceCommit: revision,
       wssConnections,
     };
+    if (phase !== "signed-in") {
+      result.authMethod = authMethod;
+      result.errorCategory = errorCategory;
+    }
+    return result;
+  }
+
+  function recordAuthFailureValue(method, error, classify = clientFailureOutcome) {
+    if (outcomeIsFinal || finishPromise) return false;
+    const normalizedMethod = AUTH_METHODS.has(method) ? method : "unknown";
+    const mappedOutcome = classify(error);
+    authMethod = normalizedMethod;
+    errorCategory = mappedOutcome === "other" ? "unknown" : mappedOutcome;
+    return recordFailure(mappedOutcome);
   }
 
   return {
@@ -173,10 +196,13 @@ export function createAcceptanceProgress({ sourceCommit }) {
       return true;
     },
     recordRpcError(error) {
-      return recordFailure(rpcOutcome(error));
+      return recordAuthFailureValue("unknown", error, rpcOutcome);
     },
     recordClientFailure(error) {
-      return recordFailure(clientFailureOutcome(error));
+      return recordAuthFailureValue("unknown", error);
+    },
+    recordAuthFailure(method, error) {
+      return recordAuthFailureValue(method, error);
     },
     markSignedIn() {
       if (finishPromise || outcomeIsFinal || phase !== "password-check") return false;

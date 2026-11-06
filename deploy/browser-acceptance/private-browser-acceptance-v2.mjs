@@ -66,6 +66,22 @@ const RESULT_KEYS = [
   "chatListRows",
   "wssEndpointMatched",
 ];
+const AUTH_METHODS = new Set([
+  "auth.sendCode",
+  "auth.signIn",
+  "account.getPassword",
+  "auth.checkPassword",
+  "unknown",
+]);
+const AUTH_ERROR_CATEGORIES = new Set([
+  "credential-rejected",
+  "auth-key-unregistered",
+  "flood",
+  "internal",
+  "timeout",
+  "closed",
+  "unknown",
+]);
 const SAFE_FAILURES = new Set([
   "arguments-invalid",
   "asset-server-error",
@@ -346,7 +362,13 @@ function validateV3Result(value, sourceCommit) {
   ]);
   const submissionValues = new Set(["none", "username", "password"]);
   const chatListValues = new Set(["not-reached", "missing", "rendered"]);
-  if (!exactKeys(value, RESULT_KEYS) || value.schemaVersion !== 3 || typeof value.ok !== "boolean" ||
+  const hasAuthFailureDetails = isRecord(value) && ("authMethod" in value || "errorCategory" in value);
+  const validKeys = exactKeys(value, RESULT_KEYS) || exactKeys(value, [
+    ...RESULT_KEYS,
+    "authMethod",
+    "errorCategory",
+  ]);
+  if (!validKeys || value.schemaVersion !== 3 || typeof value.ok !== "boolean" ||
       !phases.has(value.phase) || !outcomes.has(value.outcome) || !logoutValues.has(value.logout) ||
       value.targetHost !== TARGET_HOST || value.sourceCommit !== sourceCommit ||
       !Number.isInteger(value.wssConnections) || value.wssConnections < 0 ||
@@ -356,6 +378,8 @@ function validateV3Result(value, sourceCommit) {
       !submissionValues.has(value.submission) || !chatListValues.has(value.chatList) ||
       !Number.isInteger(value.chatListRows) || value.chatListRows < 0 || value.chatListRows > 10 ||
       typeof value.wssEndpointMatched !== "boolean" ||
+      (hasAuthFailureDetails && (!AUTH_METHODS.has(value.authMethod) ||
+        !AUTH_ERROR_CATEGORIES.has(value.errorCategory))) ||
       (value.ok && (value.phase !== "signed-in" || value.outcome !== "ok" || value.logout !== "ok" ||
         value.wssConnections < 1 || value.wssConnections > WSS_CONNECTION_CEILING ||
         value.submission !== "password" || value.chatList !== "rendered" ||
@@ -479,14 +503,17 @@ function rpcErrorForOutcome(outcome) {
   }
 }
 
-function recordRpcFailure(progress, acceptanceRpcOutcome, outcome, state) {
+function recordRpcFailure(progress, acceptanceRpcOutcome, outcome, state, authMethod = null) {
   if (outcome === "timeout" || outcome === "closed") {
-    progress.recordClientFailure({kind: outcome});
+    const error = {kind: outcome};
+    if (authMethod === null) progress.recordClientFailure(error);
+    else progress.recordAuthFailure(authMethod, error);
     return;
   }
   const normalizedError = rpcErrorForOutcome(outcome);
   if (acceptanceRpcOutcome(normalizedError) !== outcome) fail("unexpected-failure", state);
-  progress.recordRpcError(normalizedError);
+  if (authMethod === null) progress.recordRpcError(normalizedError);
+  else progress.recordAuthFailure(authMethod, normalizedError);
 }
 
 async function failedAcceptanceResult(prepared, dependencies, error) {
@@ -1276,6 +1303,7 @@ function createProgressState() {
     logoutRpcSuccesses: 0,
     logoutRpcFailures: [],
     authFailureOutcome: null,
+    authFailureMethod: null,
     qaFailureCode: null,
     submission: "none",
     chatList: "not-reached",
@@ -1312,12 +1340,14 @@ function handleClientProgressEvent(event, progress, acceptanceRpcOutcome, state)
       if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
       return fail("signup-attempted", state);
     case "rpc-failure":
-      if (!exactKeys(event, ["kind", "outcome"]) || typeof event.outcome !== "string" ||
+      if (!exactKeys(event, ["kind", "method", "outcome"]) || typeof event.method !== "string" ||
+          typeof event.outcome !== "string" ||
           !["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "other"].includes(event.outcome)) {
         fail("client-progress-unavailable", state);
       }
       state.authFailureOutcome = event.outcome;
-      recordRpcFailure(progress, acceptanceRpcOutcome, event.outcome, state);
+      state.authFailureMethod = AUTH_METHODS.has(event.method) ? event.method : "unknown";
+      recordRpcFailure(progress, acceptanceRpcOutcome, event.outcome, state, event.method);
       return;
     case "logout-rpc-start":
       if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
@@ -1376,7 +1406,7 @@ export async function installClientProgressObserver(page, progress, acceptanceRp
           try {
             return await original.call(this, type, payload, ...rest);
           } catch (error) {
-            await report({kind: "rpc-failure", outcome: rpcOutcome(error)});
+            await report({kind: "rpc-failure", method: "auth.checkPassword", outcome: rpcOutcome(error)});
             throw error;
           }
         }
@@ -1403,7 +1433,7 @@ export async function installClientProgressObserver(page, progress, acceptanceRp
           if (method === "auth.signIn" && errorType === "SESSION_PASSWORD_NEEDED") {
             await report({kind: "password-challenge"});
           } else if (["auth.sendCode", "auth.signIn", "account.getPassword", "auth.checkPassword"].includes(method)) {
-            await report({kind: "rpc-failure", outcome: rpcOutcome(error)});
+            await report({kind: "rpc-failure", method, outcome: rpcOutcome(error)});
           }
           if (watchedLogoutCall) await report({kind: "logout-rpc-failure", outcome: rpcOutcome(error)});
           throw error;
@@ -1539,7 +1569,13 @@ export async function performAcceptance(prepared, credentials) {
     ]);
     state.cancelAuthFailureWaiters();
     if (chatResult.kind === "failure") {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, chatResult.outcome, state);
+      recordRpcFailure(
+        progress,
+        prepared.dependencies.acceptanceRpcOutcome,
+        chatResult.outcome,
+        state,
+        chatResult.method,
+      );
       fail("authentication-failed-once");
     }
     if (chatResult.kind !== "signed-in") fail("authentication-failed-once");
@@ -1590,9 +1626,21 @@ export async function performAcceptance(prepared, credentials) {
     latchQaFailure(state, safeFailureCode(error));
     if (error instanceof AcceptanceFailure && error.code === "authentication-failed-once" &&
         state.authFailureOutcome) {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome, state);
+      recordRpcFailure(
+        progress,
+        prepared.dependencies.acceptanceRpcOutcome,
+        state.authFailureOutcome,
+        state,
+        state.authFailureMethod,
+      );
     } else if (state.authFailureOutcome) {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome, state);
+      recordRpcFailure(
+        progress,
+        prepared.dependencies.acceptanceRpcOutcome,
+        state.authFailureOutcome,
+        state,
+        state.authFailureMethod,
+      );
     } else {
       const outcome = rpcOutcomeForPageError(error);
       if (outcome === "timeout" || outcome === "closed") progress.recordClientFailure({kind: outcome});
@@ -1626,7 +1674,11 @@ function addLogoutWaiters(state) {
   state.authFailureWaiters = [];
   state.waitForAuthFailure = (timeoutMs) => new Promise((resolveWaiter) => {
     if (state.authFailureOutcome) {
-      resolveWaiter({kind: "failure", outcome: state.authFailureOutcome});
+      resolveWaiter({
+        kind: "failure",
+        method: state.authFailureMethod,
+        outcome: state.authFailureOutcome,
+      });
       return;
     }
     const timer = setTimeout(() => resolveWaiter({kind: "timeout"}), timeoutMs);

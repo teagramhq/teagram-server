@@ -279,8 +279,13 @@ is `credential-rejected`, `401/AUTH_KEY_UNREGISTERED` is
 `500/INTERNAL` is `internal`; other pairs are `other`. Timeout and
 closed-connection signals map to `timeout` and `closed`.
 
-The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
-`outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
+The result is one JSON line with `schemaVersion`, `ok`, `phase`, `outcome`,
+`logout`, `targetHost`, `sourceCommit`, and `wssConnections`. A failed sign-in
+also reports `authMethod` (`auth.sendCode`, `auth.signIn`,
+`account.getPassword`, `auth.checkPassword`, or `unknown`) and `errorCategory`
+(`credential-rejected`, `auth-key-unregistered`, `flood`, `internal`, `timeout`,
+`closed`, or `unknown`). An unrecognized method or error maps to `unknown`; raw
+error text and credential material are never included.
 Version 2 binds the compiled host and mounted source revision, and clamps the
 WSS count at seven to represent six observed openings or an overflow. A
 successful sign-in allows four initial account-slot sockets, one replacement
@@ -295,7 +300,8 @@ successful probe's exit status of zero.
 The QA v3 result retains the version 2 fields and adds `qaFailureCode`
 (`SAFE_FAILURES` or `none`), `submission` (`none`, `username`, or `password`),
 `chatList` (`not-reached`, `missing`, or `rendered`), `chatListRows` (integer
-0–10, where 10 means ten or more), and `wssEndpointMatched` (boolean). A
+0–10, where 10 means ten or more), and `wssEndpointMatched` (boolean). Failed
+sign-in results include the same `authMethod` and `errorCategory` fields. A
 rendered chat list includes the visible empty state, which reports zero rows.
 A v3 success requires `qaFailureCode: "none"`, a password submission, a
 rendered chat list, a matching WSS endpoint, and the existing successful
@@ -540,7 +546,7 @@ unsuccessfully. Every other post-launch failure without proven cleanup remains
 fingerprints or raw Docker, DB, server or browser errors are emitted or saved.
 
 Once the wrapper validates a v5 probe line in acceptance mode, it prints one
-flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
+flat JSON line with these keys: `evidenceVersion` (2), `status`,
 `code`, `teardown`, `targetHost`, `sourceCommit`, `serverSourceCommit`,
 `registrationMode`, `accountEvidence`, `accountsUnchanged`,
 `loginCodesDisabled`, `revisionMatched`,
@@ -552,8 +558,9 @@ flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `captureTelegramSuffix`, `captureOther`, `captureBlocked`,
 `captureUpstreamFailures`, `qaResult`, `phase`, `outcome`, `logout`,
 `wssConnections`, `wssEndpointMatched`, `submission`, `chatList`,
-`chatListRows`, and `qaFailureCode`. `databaseFailureCategory` is also present
-only when `code` is `database-unavailable`. `sourceCommit` comes from the manifest;
+`chatListRows`, and `qaFailureCode`. `authMethod` and `errorCategory` are also
+present for failed sign-ins. `databaseFailureCategory` is present only when
+`code` is `database-unavailable`. `sourceCommit` comes from the manifest;
 all probe fields except `schemaVersion`, `ok`, and `code` are retained. Invalid
 QA fields use `unknown`, zero, or false defaults; malformed, absent, and v2 QA
 lines cannot erase probe evidence. QA v2 is invalid under this contract.
