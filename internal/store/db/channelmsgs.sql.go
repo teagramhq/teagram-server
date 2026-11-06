@@ -1895,36 +1895,144 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 	return items, nil
 }
 
-const countAllFilteredChannelPosts = `-- name: CountAllFilteredChannelPosts :one
-SELECT
-    count(*) FILTER (WHERE ($1::int & 1) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
-        true AND f.media_kind = 'document'))::bigint AS documents,
-    count(*) FILTER (WHERE ($1::int & 2) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
-        true AND f.media_kind = 'photo'))::bigint AS photos,
-    count(*) FILTER (WHERE ($1::int & 4) <> 0 AND (post.message ~*
-        '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'))::bigint -- noqa: LT05
-        AS urls,
-    count(*) FILTER (WHERE ($1::int & 8) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
-        true AND f.subtype_rights @> ARRAY['send_videos']::text[]))::bigint AS videos,
-    count(*) FILTER (WHERE ($1::int & 16) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
-        true AND f.subtype_rights @> ARRAY['send_gifs']::text[]))::bigint AS gifs,
-    count(*) FILTER (WHERE ($1::int & 32) <> 0 AND (false))::bigint AS polls,
-    count(*) FILTER (WHERE ($1::int & 64) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
-        true AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]))::bigint AS voice,
-    count(*) FILTER (WHERE ($1::int & 128) <> 0 AND (post.file_id IS NOT NULL AND f.stored
-        = true AND f.subtype_rights @> ARRAY['send_audios']::text[]))::bigint AS music,
-    count(*) FILTER (WHERE ($1::int & 256) <> 0 AND (post.file_id IS NOT NULL AND f.stored
-        = true AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])))::bigint AS
-        photo_video
+const countAllFilteredChannelPosts = `-- name: CountAllFilteredChannelPosts :many
+SELECT 1::smallint AS filter, count(*)::bigint AS count
 FROM channel_messages post
-LEFT JOIN files f ON f.id = post.file_id
-WHERE post.channel_id = $2::bigint
+WHERE ($1::int & 1) <> 0
+  AND post.channel_id = $2::bigint
   AND post.deleted = false
   AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
   AND post.action_type = 0
-  AND EXISTS (SELECT 1 FROM channel_participants cp
-      WHERE cp.channel_id = post.channel_id AND cp.user_id = $3::bigint
-        AND post.local_id > cp.available_min_id AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.media_kind = 'document')
+UNION ALL
+SELECT 2::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 2) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.media_kind = 'photo')
+UNION ALL
+SELECT 3::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 4) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+UNION ALL
+SELECT 4::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 8) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_videos']::text[] )
+UNION ALL
+SELECT 5::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 16) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_gifs']::text[] )
+UNION ALL
+SELECT 6::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 32) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND false
+UNION ALL
+SELECT 7::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 64) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[] )
+UNION ALL
+SELECT 8::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 128) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND f.subtype_rights @> ARRAY['send_audios']::text[] )
+UNION ALL
+SELECT 9::smallint AS filter, count(*)::bigint AS count
+FROM channel_messages post
+WHERE ($1::int & 256) <> 0
+  AND post.channel_id = $2::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp WHERE cp.channel_id = post.channel_id
+  AND cp.user_id = $3::bigint
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now()))
+  AND post.file_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.id = post.file_id
+  AND f.stored = true
+  AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[]))
 `
 
 type CountAllFilteredChannelPostsParams struct {
@@ -1934,34 +2042,32 @@ type CountAllFilteredChannelPostsParams struct {
 }
 
 type CountAllFilteredChannelPostsRow struct {
-	Documents  int64
-	Photos     int64
-	Urls       int64
-	Videos     int64
-	Gifs       int64
-	Polls      int64
-	Voice      int64
-	Music      int64
-	PhotoVideo int64
+	Filter int16
+	Count  int64
 }
 
 // One bit per MediaSearchFilter, in enum order. Keep each predicate aligned
 // with CountFilteredChannelPosts so batched counters match individual searches.
-func (q *Queries) CountAllFilteredChannelPosts(ctx context.Context, arg CountAllFilteredChannelPostsParams) (CountAllFilteredChannelPostsRow, error) {
-	row := q.db.QueryRow(ctx, countAllFilteredChannelPosts, arg.FilterMask, arg.ChannelID, arg.OwnerID)
-	var i CountAllFilteredChannelPostsRow
-	err := row.Scan(
-		&i.Documents,
-		&i.Photos,
-		&i.Urls,
-		&i.Videos,
-		&i.Gifs,
-		&i.Polls,
-		&i.Voice,
-		&i.Music,
-		&i.PhotoVideo,
-	)
-	return i, err
+// Each requested filter runs its original count predicate in one statement,
+// preserving its index plan while sharing the transaction and round trip.
+func (q *Queries) CountAllFilteredChannelPosts(ctx context.Context, arg CountAllFilteredChannelPostsParams) ([]CountAllFilteredChannelPostsRow, error) {
+	rows, err := q.db.Query(ctx, countAllFilteredChannelPosts, arg.FilterMask, arg.ChannelID, arg.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountAllFilteredChannelPostsRow
+	for rows.Next() {
+		var i CountAllFilteredChannelPostsRow
+		if err := rows.Scan(&i.Filter, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const countChannelHistory = `-- name: CountChannelHistory :one
