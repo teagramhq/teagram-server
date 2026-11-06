@@ -3387,8 +3387,8 @@ main() {
       fail 'reconcile requires the exact reviewed target on the main checkout'
       return 1
     }
-    acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
     require_runtime_selection 0 || return 1
+    acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
     verify_approved_gates || return 1
     verify_runtime_sources --support-only || return 1
     python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
@@ -3411,6 +3411,7 @@ main() {
     return 64
   }
   require_runtime_preflight || return 1
+  require_runtime_selection 0 || return 1
   if [ "$RUNNER_ACTION" = move-stack ]; then
     LOCK_PATH=$TARGET_LOCK_PATH
     if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
@@ -3433,7 +3434,6 @@ main() {
   else
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
   fi
-  require_runtime_selection 0 || return 1
   verify_approved_gates || return 1
   verify_runtime_sources --support-only || return 1
   python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
