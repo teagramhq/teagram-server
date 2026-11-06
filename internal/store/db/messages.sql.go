@@ -74,6 +74,90 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 	return i, err
 }
 
+const backfillMessageSearchDialogPostings = `-- name: BackfillMessageSearchDialogPostings :one
+WITH source_messages AS MATERIALIZED (
+    SELECT message.local_id, message.message_tsv, message.deleted
+    FROM messages AS message
+    WHERE message.owner_id = $2::bigint
+      AND message.peer_type = $3::smallint
+      AND message.peer_id = $4::bigint
+      AND message.local_id > $1::bigint
+    ORDER BY message.local_id
+    LIMIT $5::int
+    FOR SHARE OF message
+),
+posting_locks AS MATERIALIZED (
+    SELECT public.lock_message_search_posting_dialogs(
+               ARRAY[$2::bigint],
+               ARRAY[$3::smallint],
+               ARRAY[$4::bigint]
+           ) AS locked
+    -- Consume and lock every source row before taking the dialog bucket.
+    FROM (SELECT count(*) AS locked_rows FROM source_messages) AS rows_locked
+),
+locked_source_messages AS MATERIALIZED (
+    SELECT source.local_id, source.message_tsv, source.deleted
+    FROM source_messages AS source
+    CROSS JOIN posting_locks AS locks
+    WHERE locks.locked
+),
+cleared_postings AS (
+    DELETE FROM message_search_postings AS posting
+    USING locked_source_messages AS source
+    WHERE posting.owner_id = $2::bigint
+      AND posting.peer_type = $3::smallint
+      AND posting.peer_id = $4::bigint
+      AND posting.local_id = source.local_id
+    RETURNING 1
+),
+inserted_postings AS (
+INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
+SELECT $2::bigint, source.local_id,
+       $3::smallint, $4::bigint, term.lexeme
+FROM locked_source_messages AS source
+CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
+CROSS JOIN (SELECT count(*) FROM cleared_postings) AS cleared
+WHERE source.deleted = false
+ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
+RETURNING 1
+)
+SELECT COALESCE(MAX(source.local_id), $1::bigint)::bigint AS next_local_id,
+       COUNT(source.local_id)::bigint AS processed_count
+FROM source_messages AS source
+CROSS JOIN (SELECT count(*) FROM inserted_postings) AS inserted
+`
+
+type BackfillMessageSearchDialogPostingsParams struct {
+	LastLocalID int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+	BatchSize   int32
+}
+
+type BackfillMessageSearchDialogPostingsRow struct {
+	NextLocalID    int64
+	ProcessedCount int64
+}
+
+// Rebuild one bounded range of a marked dialog. The source CTE locks at most
+// batch_size message rows in local_id order before clearing their postings.
+// Deletes and inserts update posting counts in this transaction; the source
+// snapshot, row locks, and dialog lock bucket keep writers from deadlocking
+// with this chunk or restoring stale terms.
+func (q *Queries) BackfillMessageSearchDialogPostings(ctx context.Context, arg BackfillMessageSearchDialogPostingsParams) (BackfillMessageSearchDialogPostingsRow, error) {
+	row := q.db.QueryRow(ctx, backfillMessageSearchDialogPostings,
+		arg.LastLocalID,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.BatchSize,
+	)
+	var i BackfillMessageSearchDialogPostingsRow
+	err := row.Scan(&i.NextLocalID, &i.ProcessedCount)
+	return i, err
+}
+
 const botHasStartedPrivateChat = `-- name: BotHasStartedPrivateChat :one
 SELECT EXISTS (
     SELECT 1 FROM messages
@@ -859,6 +943,124 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 	return err
 }
 
+const lockMessageCopiesForSearchPostings = `-- name: LockMessageCopiesForSearchPostings :many
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT owner_values.owner_id, local_values.local_id
+    FROM unnest($1::bigint[]) WITH ORDINALITY
+        AS owner_values(owner_id, ordinal)
+    JOIN unnest($2::bigint[]) WITH ORDINALITY
+        AS local_values(local_id, ordinal) USING (ordinal)
+)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
+FROM messages AS message
+JOIN requested USING (owner_id, local_id)
+ORDER BY message.owner_id, message.local_id
+FOR UPDATE OF message
+`
+
+type LockMessageCopiesForSearchPostingsParams struct {
+	OwnerIds []int64
+	LocalIds []int64
+}
+
+type LockMessageCopiesForSearchPostingsRow struct {
+	OwnerID  int64
+	LocalID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// Lock all existing copies before acquiring any posting buckets. Callers pass
+// the full mutation set so multi-copy edits and deletes use one stable row
+// order before their transaction-wide bucket lock set.
+func (q *Queries) LockMessageCopiesForSearchPostings(ctx context.Context, arg LockMessageCopiesForSearchPostingsParams) ([]LockMessageCopiesForSearchPostingsRow, error) {
+	rows, err := q.db.Query(ctx, lockMessageCopiesForSearchPostings, arg.OwnerIds, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockMessageCopiesForSearchPostingsRow
+	for rows.Next() {
+		var i LockMessageCopiesForSearchPostingsRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerType,
+			&i.PeerID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockMessageSearchPostingDialogBuckets = `-- name: LockMessageSearchPostingDialogBuckets :one
+SELECT public.lock_message_search_posting_dialogs(
+    $1::bigint[],
+    $2::smallint[],
+    $3::bigint[]
+)
+`
+
+type LockMessageSearchPostingDialogBucketsParams struct {
+	OwnerIds  []int64
+	PeerTypes []int16
+	PeerIds   []int64
+}
+
+// Lock the complete affected dialog-bucket set in one sorted helper call,
+// after all message rows have been locked.
+func (q *Queries) LockMessageSearchPostingDialogBuckets(ctx context.Context, arg LockMessageSearchPostingDialogBucketsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, lockMessageSearchPostingDialogBuckets, arg.OwnerIds, arg.PeerTypes, arg.PeerIds)
+	var lock_message_search_posting_dialogs bool
+	err := row.Scan(&lock_message_search_posting_dialogs)
+	return lock_message_search_posting_dialogs, err
+}
+
+const lockMessageSearchUnreadyDialog = `-- name: LockMessageSearchUnreadyDialog :one
+SELECT last_local_id
+FROM message_search_unready_dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+FOR UPDATE
+`
+
+type LockMessageSearchUnreadyDialogParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+func (q *Queries) LockMessageSearchUnreadyDialog(ctx context.Context, arg LockMessageSearchUnreadyDialogParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockMessageSearchUnreadyDialog, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var last_local_id int64
+	err := row.Scan(&last_local_id)
+	return last_local_id, err
+}
+
+const markMessageSearchDialogReady = `-- name: MarkMessageSearchDialogReady :exec
+DELETE FROM message_search_unready_dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+`
+
+type MarkMessageSearchDialogReadyParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+func (q *Queries) MarkMessageSearchDialogReady(ctx context.Context, arg MarkMessageSearchDialogReadyParams) error {
+	_, err := q.db.Exec(ctx, markMessageSearchDialogReady, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
+}
+
 const messageByOwnerLocal = `-- name: MessageByOwnerLocal :one
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages WHERE owner_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -1002,6 +1204,41 @@ func (q *Queries) MessageSearchDialogReady(ctx context.Context, arg MessageSearc
 	var not_exists bool
 	err := row.Scan(&not_exists)
 	return not_exists, err
+}
+
+const messageSearchUnreadyDialogs = `-- name: MessageSearchUnreadyDialogs :many
+SELECT owner_id, peer_type, peer_id
+FROM message_search_unready_dialogs
+ORDER BY owner_id, peer_type, peer_id
+LIMIT $1::int
+`
+
+type MessageSearchUnreadyDialogsRow struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
+// The initializer locks and rechecks each marker inside its dialog transaction.
+func (q *Queries) MessageSearchUnreadyDialogs(ctx context.Context, batchSize int32) ([]MessageSearchUnreadyDialogsRow, error) {
+	rows, err := q.db.Query(ctx, messageSearchUnreadyDialogs, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MessageSearchUnreadyDialogsRow
+	for rows.Next() {
+		var i MessageSearchUnreadyDialogsRow
+		if err := rows.Scan(&i.OwnerID, &i.PeerType, &i.PeerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const messagesByFanout = `-- name: MessagesByFanout :many
@@ -1826,6 +2063,31 @@ func (q *Queries) SetEditedTextWithEntities(ctx context.Context, arg SetEditedTe
 		arg.LocalID,
 		arg.Message,
 		arg.Entities,
+	)
+	return err
+}
+
+const updateMessageSearchUnreadyDialogProgress = `-- name: UpdateMessageSearchUnreadyDialogProgress :exec
+UPDATE message_search_unready_dialogs
+SET last_local_id = $1::bigint
+WHERE owner_id = $2::bigint
+  AND peer_type = $3::smallint
+  AND peer_id = $4::bigint
+`
+
+type UpdateMessageSearchUnreadyDialogProgressParams struct {
+	LastLocalID int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+}
+
+func (q *Queries) UpdateMessageSearchUnreadyDialogProgress(ctx context.Context, arg UpdateMessageSearchUnreadyDialogProgressParams) error {
+	_, err := q.db.Exec(ctx, updateMessageSearchUnreadyDialogProgress,
+		arg.LastLocalID,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
 	)
 	return err
 }

@@ -888,6 +888,15 @@ func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref Po
 					active[copy.OwnerID] = true
 				}
 			}
+			postingRefs := make([]messageCopyRef, 0, len(copies))
+			for _, copy := range copies {
+				if !copy.Deleted && active[copy.OwnerID] {
+					postingRefs = append(postingRefs, messageCopyRef{ownerID: copy.OwnerID, localID: copy.LocalID})
+				}
+			}
+			if err = lockMessageCopiesForSearchPostings(ctx, qtx, postingRefs); err != nil {
+				return false, nil, err
+			}
 			for _, copy := range copies {
 				if copy.Deleted || !active[copy.OwnerID] {
 					continue

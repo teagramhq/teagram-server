@@ -768,6 +768,12 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDel
 	if err := lockPollsForDeletedMessageCopies(ctx, qtx, refs); err != nil {
 		return ChatDeletion{}, err
 	}
+	// Lock the complete existing copy set before removeParticipant can fan out
+	// service messages or the deletion loop reaches individual copies. This
+	// keeps DeleteChat in the initializer's message-row-before-bucket order.
+	if err := lockMessageCopiesForSearchPostings(ctx, qtx, refs); err != nil {
+		return ChatDeletion{}, err
+	}
 
 	for _, part := range parts {
 		removed, err := removeParticipant(ctx, tx, qtx, chatID, part.UserID)

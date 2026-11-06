@@ -516,6 +516,9 @@ func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (A
 			return AlbumResult{}, err
 		}
 	}
+	if err = lockMessageSearchPostingBucketsForOwners(ctx, qtx, owners, PeerTypeChat, chatID); err != nil {
+		return AlbumResult{}, err
+	}
 
 	fanoutIDs := make([]int64, n)
 	for i := range fanoutIDs {

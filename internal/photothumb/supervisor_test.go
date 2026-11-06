@@ -426,7 +426,9 @@ func TestProcessTimeoutKillsChildGroupAndReleasesSlots(t *testing.T) {
 func TestProcessCancellationKillsBlockedChild(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pid")
-	worker := writeFakeWorker(t, fmt.Sprintf("printf '%%s' \"$$\" > '%s'\n/bin/sleep 10\n", pidFile))
+	// Publish the PID only after it is fully written, so waitForFile cannot
+	// cancel the worker between file creation and the shell's printf.
+	worker := writeFakeWorker(t, fmt.Sprintf("printf '%%s' \"$$\" > '%[1]s.pending'\n/bin/mv '%[1]s.pending' '%[1]s'\n/bin/sleep 10\n", pidFile))
 	s := newTestSupervisor(worker, 5*time.Second, time.Second)
 	lease, reason := s.TryAcquire(56)
 	if reason != FailureNone {

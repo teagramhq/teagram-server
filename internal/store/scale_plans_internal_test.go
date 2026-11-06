@@ -775,7 +775,8 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 	}
 	defer pool.Close()
 	// This fixture has no history TTL settings and checks read plans, so skip
-	// row-wise TTL stamping while bulk-seeding message rows.
+	// row-wise TTL stamping and search-posting maintenance while bulk-seeding
+	// message rows; neither behavior is under test here.
 	// Different owners/channels interleave on disk, as independent traffic
 	// does. Expired fleet generations dominate retained telemetry; four are live.
 	for _, sql := range []string{
@@ -789,9 +790,11 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		`INSERT INTO update_state (user_id, pts, next_local_id)
 		 SELECT n, 100, 101 FROM generate_series(1, 10000) n`,
 		`ALTER TABLE messages DISABLE TRIGGER messages_stamp_history_ttl`,
+		`ALTER TABLE messages DISABLE TRIGGER messages_search_postings_after_insert`,
 		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
 		 SELECT u, m, 1, (u + m % 10) % 10000 + 1, u, 'scale message', true
 		 FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 10000) u`,
+		`ALTER TABLE messages ENABLE TRIGGER messages_search_postings_after_insert`,
 		`ALTER TABLE messages ENABLE TRIGGER messages_stamp_history_ttl`,
 		`INSERT INTO message_events (owner_id, pts, type, local_id)
 		 SELECT u, m, 1, m FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 10000) u`,

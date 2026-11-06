@@ -54,7 +54,6 @@ WHERE message.owner_id = $1::bigint
   AND message.deleted = false
   AND message.expires_at <= statement_timestamp()
 ORDER BY message.local_id
-FOR UPDATE OF message
 `
 
 type ExpiredMessageCopyRowsForDeleteParams struct {
@@ -69,8 +68,9 @@ type ExpiredMessageCopyRowsForDeleteRow struct {
 	PeerID   int64
 }
 
-// ExpiredMessageCopyRowsForDelete rechecks eligibility after the owner locks
-// and takes message row locks in a stable order.
+// ExpiredMessageCopyRowsForDelete rechecks eligibility after the owner locks.
+// The caller takes any poll locks, then locks all selected message rows and
+// their posting buckets together before changing them.
 func (q *Queries) ExpiredMessageCopyRowsForDelete(ctx context.Context, arg ExpiredMessageCopyRowsForDeleteParams) ([]ExpiredMessageCopyRowsForDeleteRow, error) {
 	rows, err := q.db.Query(ctx, expiredMessageCopyRowsForDelete, arg.OwnerID, arg.LocalIds)
 	if err != nil {

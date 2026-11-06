@@ -219,6 +219,32 @@ UPDATE messages
 SET message = $3, edit_date = now(), entities = NULLIF(sqlc.arg(entities)::text, '')::jsonb
 WHERE owner_id = $1 AND local_id = $2;
 
+-- Lock all existing copies before acquiring any posting buckets. Callers pass
+-- the full mutation set so multi-copy edits and deletes use one stable row
+-- order before their transaction-wide bucket lock set.
+-- name: LockMessageCopiesForSearchPostings :many
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT owner_values.owner_id, local_values.local_id
+    FROM unnest(sqlc.arg(owner_ids)::bigint[]) WITH ORDINALITY
+        AS owner_values(owner_id, ordinal)
+    JOIN unnest(sqlc.arg(local_ids)::bigint[]) WITH ORDINALITY
+        AS local_values(local_id, ordinal) USING (ordinal)
+)
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
+FROM messages AS message
+JOIN requested USING (owner_id, local_id)
+ORDER BY message.owner_id, message.local_id
+FOR UPDATE OF message;
+
+-- Lock the complete affected dialog-bucket set in one sorted helper call,
+-- after all message rows have been locked.
+-- name: LockMessageSearchPostingDialogBuckets :one
+SELECT public.lock_message_search_posting_dialogs(
+    sqlc.arg(owner_ids)::bigint[],
+    sqlc.arg(peer_types)::smallint[],
+    sqlc.arg(peer_ids)::bigint[]
+);
+
 -- SetDeleted marks one owner-local message deleted and reports how many rows
 -- it changed. The `AND NOT deleted` predicate is the whole point: it makes the
 -- write the authority on whether the row was already gone, so a caller decides
@@ -278,6 +304,92 @@ SELECT NOT EXISTS (
       AND peer_type = sqlc.arg(peer_type)::smallint
       AND peer_id = sqlc.arg(peer_id)::bigint
 );
+
+-- MessageSearchUnreadyDialogs returns one bounded, stable batch of dialogs.
+-- The initializer locks and rechecks each marker inside its dialog transaction.
+-- name: MessageSearchUnreadyDialogs :many
+SELECT owner_id, peer_type, peer_id
+FROM message_search_unready_dialogs
+ORDER BY owner_id, peer_type, peer_id
+LIMIT sqlc.arg(batch_size)::int;
+
+-- name: LockMessageSearchUnreadyDialog :one
+SELECT last_local_id
+FROM message_search_unready_dialogs
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+FOR UPDATE;
+
+-- Rebuild one bounded range of a marked dialog. The source CTE locks at most
+-- batch_size message rows in local_id order before clearing their postings.
+-- Deletes and inserts update posting counts in this transaction; the source
+-- snapshot, row locks, and dialog lock bucket keep writers from deadlocking
+-- with this chunk or restoring stale terms.
+-- name: BackfillMessageSearchDialogPostings :one
+WITH source_messages AS MATERIALIZED (
+    SELECT message.local_id, message.message_tsv, message.deleted
+    FROM messages AS message
+    WHERE message.owner_id = sqlc.arg(owner_id)::bigint
+      AND message.peer_type = sqlc.arg(peer_type)::smallint
+      AND message.peer_id = sqlc.arg(peer_id)::bigint
+      AND message.local_id > sqlc.arg(last_local_id)::bigint
+    ORDER BY message.local_id
+    LIMIT sqlc.arg(batch_size)::int
+    FOR SHARE OF message
+),
+posting_locks AS MATERIALIZED (
+    SELECT public.lock_message_search_posting_dialogs(
+               ARRAY[sqlc.arg(owner_id)::bigint],
+               ARRAY[sqlc.arg(peer_type)::smallint],
+               ARRAY[sqlc.arg(peer_id)::bigint]
+           ) AS locked
+    -- Consume and lock every source row before taking the dialog bucket.
+    FROM (SELECT count(*) AS locked_rows FROM source_messages) AS rows_locked
+),
+locked_source_messages AS MATERIALIZED (
+    SELECT source.*
+    FROM source_messages AS source
+    CROSS JOIN posting_locks AS locks
+    WHERE locks.locked
+),
+cleared_postings AS (
+    DELETE FROM message_search_postings AS posting
+    USING locked_source_messages AS source
+    WHERE posting.owner_id = sqlc.arg(owner_id)::bigint
+      AND posting.peer_type = sqlc.arg(peer_type)::smallint
+      AND posting.peer_id = sqlc.arg(peer_id)::bigint
+      AND posting.local_id = source.local_id
+    RETURNING 1
+),
+inserted_postings AS (
+INSERT INTO message_search_postings (owner_id, local_id, peer_type, peer_id, lexeme)
+SELECT sqlc.arg(owner_id)::bigint, source.local_id,
+       sqlc.arg(peer_type)::smallint, sqlc.arg(peer_id)::bigint, term.lexeme
+FROM locked_source_messages AS source
+CROSS JOIN LATERAL unnest(tsvector_to_array(source.message_tsv)) AS term(lexeme)
+CROSS JOIN (SELECT count(*) FROM cleared_postings) AS cleared
+WHERE source.deleted = false
+ON CONFLICT (owner_id, local_id, lexeme) DO NOTHING
+RETURNING 1
+)
+SELECT COALESCE(MAX(source.local_id), sqlc.arg(last_local_id)::bigint)::bigint AS next_local_id,
+       COUNT(source.local_id)::bigint AS processed_count
+FROM source_messages AS source
+CROSS JOIN (SELECT count(*) FROM inserted_postings) AS inserted;
+
+-- name: UpdateMessageSearchUnreadyDialogProgress :exec
+UPDATE message_search_unready_dialogs
+SET last_local_id = sqlc.arg(last_local_id)::bigint
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
+
+-- name: MarkMessageSearchDialogReady :exec
+DELETE FROM message_search_unready_dialogs
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
 
 -- SearchMessagesByPostings reads only the ordered lexeme postings for one
 -- ready dialog. The per-dialog posting counts choose the rarest query lexeme
