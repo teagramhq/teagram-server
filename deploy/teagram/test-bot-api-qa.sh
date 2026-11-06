@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+python3 -B "$ROOT/deploy/teagram/test_bot_api_qa_listeners.py"
 config=$(POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://example.invalid \
   docker compose -f "$ROOT/docker-compose.yml" --profile bot-api-qa config --format json)
 
@@ -117,15 +118,6 @@ fi
 [[ -f "$marker" && $(jq -r '.TCP["2447"].TCPForward' "$mock_state") == 127.0.0.1:9999 ]]
 rm -- "$marker"
 printf '%s\n' 'Serve apply, re-apply, conflict refusal and rollback verified'
-ss() { cat "$tmp/listeners"; }
-printf '%s\n' 'LISTEN 0 128 127.0.0.1:2447 0.0.0.0:* users:(("docker-proxy"))' > "$tmp/listeners"
-printf '%s\n' 'LISTEN 0 128 100.64.1.1:2447 0.0.0.0:* users:(("tailscaled"))' >> "$tmp/listeners"
-verify_host_listeners
-printf '%s\n' 'LISTEN 0 128 0.0.0.0:2447 0.0.0.0:* users:(("docker-proxy"))' >> "$tmp/listeners"
-if verify_host_listeners; then
-  printf '%s\n' 'wildcard host listener was accepted' >&2; exit 1
-fi
-
 (
   export ROLLOUT_RUNNER_SOURCE_ONLY=1
   # shellcheck disable=SC1091

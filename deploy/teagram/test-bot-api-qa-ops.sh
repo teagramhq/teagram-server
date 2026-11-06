@@ -5,6 +5,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 repo="$tmp/teagram"
 mkdir -p "$repo/.state" "$tmp/bin"
+mkdir -p "$tmp/proc/net"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp6"
 chmod 700 "$repo/.state"
 export MOCK_REPO="$repo" MOCK_TMP="$tmp"
 export OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -14,7 +17,6 @@ export MOCK_INGRESS=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 printf '%s\n' 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' > "$repo/.env"
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]' > "$repo/.runtime-env"
-: > "$repo/.runtime-relays"
 : > "$tmp/runner"
 cat > "$tmp/helper.py" <<'PY'
 import json, os
@@ -22,6 +24,8 @@ repo = os.environ['MOCK_REPO']
 print(json.dumps({'outcome': 's3-accepted', 'env_files': [repo + '/.env', repo + '/.env.rustfs-parked']}))
 PY
 chmod 600 "$repo/.env" "$repo/.state/rollout-env" "$tmp/runner" "$tmp/helper.py"
+cp "$ROOT/deploy/teagram/ops/bot_api_qa_listeners.py" "$tmp/bot_api_qa_listeners.py"
+chmod 600 "$tmp/bot_api_qa_listeners.py"
 POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://example.invalid \
   docker compose -f "$ROOT/docker-compose.yml" --profile bot-api-qa config --format json > "$tmp/config.json"
 printf '%s\n' '{"TCP":{"443":{"HTTPS":true}}}' > "$tmp/serve.json"
@@ -35,6 +39,7 @@ changes = {
     'readonly RUNNER=$RUNNER_DIR/rollout-runner.sh': f'readonly RUNNER={sys.argv[4]}/runner',
     'readonly BLOB_HELPER=$RUNNER_DIR/blob-transition-runner.py': f'readonly BLOB_HELPER={sys.argv[4]}/helper.py',
     'readonly EXPECTED_ROOT_UID=0': f'readonly EXPECTED_ROOT_UID={sys.argv[5]}',
+    'readonly PROC_ROOT=/proc': f'readonly PROC_ROOT={sys.argv[4]}/proc',
     '[[ $(id -u) == 0 &&': f'[[ $(id -u) == {sys.argv[5]} &&',
     'readonly LOCK_PATH=/tmp/teagram-deploy.lock': f'readonly LOCK_PATH={sys.argv[4]}/lock',
 }
@@ -51,6 +56,7 @@ case "$*" in
   *'rev-parse HEAD') printf '%s\n' "$OPS_SHA" ;;
   *'branch --show-current') printf '%s\n' main ;;
   *'diff --quiet '*docker-compose.yml) : ;;
+  *'show '*bot_api_qa_listeners.py) cat "$MOCK_TMP/bot_api_qa_listeners.py" ;;
   *) exit 1 ;;
 esac
 SH
@@ -79,16 +85,17 @@ case "$*" in
   *) printf 'unexpected tailscale command: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
-cat > "$tmp/bin/ss" <<'SH'
-#!/usr/bin/env bash
-if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then
-  printf '%s\n' 'LISTEN 0 128 127.0.0.1:2447 0.0.0.0:* users:(("docker-proxy"))'
-fi
-SH
 cat > "$tmp/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -eu
 image='mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e'
+write_listener_table() {
+  printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$MOCK_TMP/proc/net/tcp"
+  printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$MOCK_TMP/proc/net/tcp6"
+  if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then
+    printf '%s\n' '0: 0100007F:098F 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 9002' >> "$MOCK_TMP/proc/net/tcp"
+  fi
+}
 case "$*" in
   'inspect --format '*org.opencontainers*) printf '%s\n' "$OPS_SHA" ;;
   'inspect --format '*com.docker.compose.project.config_files*) printf '%s/docker-compose.yml,%s/docker-compose.override.yml\n' "$MOCK_REPO" "$MOCK_REPO" ;;
@@ -105,15 +112,21 @@ case "$*" in
   'compose --profile bot-api-qa ps -q bot-api-inner')
     if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then printf '%s\n' "$MOCK_INNER"; fi ;;
   'compose --profile bot-api-qa ps -q bot-api-ingress')
-    if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then printf '%s\n' "$MOCK_INGRESS"; fi ;;
-  'compose --profile bot-api-qa rm --stop --force bot-api-inner bot-api-ingress') rm -f "$MOCK_REPO/.runtime-relays" ;;
+    if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then
+      printf '%s\n' ingress >> "$MOCK_TMP/ingress-lookups"
+      printf '%s\n' "$MOCK_INGRESS"
+    fi ;;
+  'compose --profile bot-api-qa rm --stop --force bot-api-inner bot-api-ingress')
+    rm -f "$MOCK_REPO/.runtime-relays"
+    write_listener_table ;;
   'compose --profile bot-api-qa up '*)
     if [[ -f "$MOCK_REPO/.fail-relay-up-once" ]]; then
       rm -f "$MOCK_REPO/.fail-relay-up-once"
       printf '%s\n' 'fixture relay start failed once' >&2
       exit 42
     fi
-    : > "$MOCK_REPO/.runtime-relays" ;;
+    : > "$MOCK_REPO/.runtime-relays"
+    write_listener_table ;;
   'compose up -d --no-deps --force-recreate --wait --wait-timeout 60 teagramd')
     listener=$(awk -F= '$1 == "TG_BOT_API_LISTEN_ADDR" { value=substr($0, index($0, "=") + 1) } END { print value }' "$MOCK_REPO/.env")
     if [[ -f "$MOCK_REPO/.keep-listener-on-restore" ]]; then listener=127.0.0.1:2447; fi
@@ -151,8 +164,45 @@ for mode in check apply; do
   [[ "$(sha256sum "$repo/.env")" == "$help_failure_env_sha" ]]
   [[ "$(jq -cS . "$tmp/serve.json")" == "$help_failure_serve" ]]
 done
+printf '%s\n' '0: 00000000:098F 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 9001' >> "$tmp/proc/net/tcp"
+listener_failure_status=0
+bash "$tmp/op.sh" check > "$tmp/listener-failure.stdout" 2> "$tmp/listener-failure.stderr" || listener_failure_status=$?
+[[ "$listener_failure_status" == 1 ]]
+grep -Fxq 'Bot API QA operation rejected: unexpected host port listener' "$tmp/listener-failure.stderr"
+grep -Fxq 'Bot API QA listener inspection failed: unexpected listener address 0.0.0.0' "$tmp/listener-failure.stderr"
+[[ "$(sha256sum "$repo/.env")" == "$help_failure_env_sha" ]]
+[[ "$(jq -cS . "$tmp/serve.json")" == "$help_failure_serve" ]]
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp6"
 bash "$tmp/op.sh" check
+cat > "$repo/ipaddress.py" <<'PY'
+raise RuntimeError("untrusted ipaddress.py was imported")
+PY
+python_isolation_status=0
+(cd "$repo" && bash "$tmp/op.sh" check) > "$tmp/python-isolation.stdout" 2> "$tmp/python-isolation.stderr" || python_isolation_status=$?
+[[ "$python_isolation_status" == 0 ]]
+grep -Fxq "would_apply source_sha=$OPS_SHA serve=absent" "$tmp/python-isolation.stdout"
+if grep -Fq 'untrusted ipaddress.py was imported' "$tmp/python-isolation.stderr"; then
+  printf '%s\n' 'Bot API listener check imported ipaddress.py from its current directory' >&2
+  exit 1
+fi
+rm -- "$repo/ipaddress.py"
 bash "$tmp/op.sh" apply
+grep -Fq '0100007F:098F' "$tmp/proc/net/tcp"
+owned_lookups=$(wc -l < "$tmp/ingress-lookups")
+bash "$tmp/op.sh" check
+[[ "$(wc -l < "$tmp/ingress-lookups")" == "$((owned_lookups + 1))" ]]
+rm -f "$repo/.runtime-relays"
+grep -Fq '0100007F:098F' "$tmp/proc/net/tcp"
+foreign_env_sha=$(sha256sum "$repo/.env")
+foreign_serve=$(jq -cS . "$tmp/serve.json")
+foreign_status=0
+bash "$tmp/op.sh" check > "$tmp/foreign-listener.stdout" 2> "$tmp/foreign-listener.stderr" || foreign_status=$?
+[[ "$foreign_status" == 1 ]]
+grep -Fxq 'Bot API QA operation rejected: loopback port is occupied by another process' "$tmp/foreign-listener.stderr"
+[[ "$(sha256sum "$repo/.env")" == "$foreign_env_sha" ]]
+[[ "$(jq -cS . "$tmp/serve.json")" == "$foreign_serve" ]]
+: > "$repo/.runtime-relays"
 bash "$tmp/op.sh" apply
 bash "$tmp/op.sh" verify
 bash "$tmp/op.sh" rollback
@@ -161,6 +211,7 @@ jq -e '.TCP == {"443":{"HTTPS":true}}' "$tmp/serve.json" >/dev/null
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 write_success_runner() {
   cat > "$tmp/runner" <<'SH'
 #!/usr/bin/env bash
@@ -186,6 +237,7 @@ bash "$tmp/op.sh" rollback
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 cat > "$tmp/runner" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -217,6 +269,7 @@ grep -Fq "$failure_log" "$tmp/after-replacement.stderr"
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 : > "$repo/.keep-listener-on-restore"
 rollback_record=$(cat "$repo/.state/rollout-env")
 cat > "$tmp/runner" <<'SH'
@@ -271,6 +324,7 @@ bash "$tmp/op.sh" rollback
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 write_success_runner
 : > "$repo/.fail-serve-once"
 failure_status=0

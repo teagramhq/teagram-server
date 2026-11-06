@@ -57,22 +57,12 @@ serve_rollback() {
   rm -- "$marker"
 }
 
-verify_host_listeners() {
-  local ipv4 ipv6 output line address
+host_listener_state() {
+  local ipv4 ipv6
   ipv4=$(tailscale ip -4) || return 1
   ipv6=$(tailscale ip -6) || return 1
-  [[ "$ipv4" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ipv6" == fd7a:115c:a1e0:* ]] || return 1
-  output=$(ss -Hltnp 'sport = :2447') || return 1
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    read -r _ _ _ address _ <<< "$line"
-    case "$address" in
-      127.0.0.1:2447) ;;
-      "$ipv4:2447"|"[$ipv6]:2447")
-        [[ "$line" == *'"tailscaled"'* ]] || return 1 ;;
-      *) return 1 ;;
-    esac
-  done <<< "$output"
+  git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot_api_qa_listeners.py" |
+    python3 -I - "$ipv4" "$ipv6" "$PROC_ROOT"
 }
 
 validate_relay_config() {
@@ -106,6 +96,7 @@ readonly ENV_FILE=$REPO/.env
 readonly ENV_RECORD=$STATE_DIR/rollout-env
 readonly PREVIOUS_ENV_FILE=$STATE_DIR/.env.main-3359-before-bot-api
 readonly SERVE_MARKER=$STATE_DIR/bot-api-qa-serve-before
+readonly PROC_ROOT=/proc
 readonly SERVICE=teagram-teagramd-1
 readonly COMPOSE_SERVICE=teagramd
 readonly RUNNER_DIR=/root/teagramd-rollout-runner
@@ -335,7 +326,7 @@ verify_relays() {
   docker network inspect "$network_id" | jq -e --arg id "$ingress_id" '
     (.[0].Internal | not) and (.[0].Containers | keys) == [$id]
   ' >/dev/null || { fail 'ingress network contains another container'; return 1; }
-  verify_host_listeners || { fail 'unexpected host port listener'; return 1; }
+  host_listener_state >/dev/null || { fail 'unexpected host port listener'; return 1; }
   config=$(docker compose --profile bot-api-qa config --format json) || return 1
   validate_relay_config "$config" || { fail 'unsafe relay configuration'; return 1; }
 }
@@ -389,9 +380,8 @@ preflight() {
     return 1
   fi
   [[ "$help" == *--proxy-protocol* ]] || { fail 'PROXY protocol is unsupported'; return 1; }
-  verify_host_listeners || { fail 'unexpected host port listener'; return 1; }
-  listeners=$(ss -Hltnp 'sport = :2447') || return 1
-  if [[ "$listeners" == *'127.0.0.1:2447'* ]]; then
+  listeners=$(host_listener_state) || { fail 'unexpected host port listener'; return 1; }
+  if [[ "$listeners" == loopback ]]; then
     ingress_id=$(docker compose --profile bot-api-qa ps -q bot-api-ingress) || return 1
     [[ "$ingress_id" =~ ^[0-9a-f]{64}$ ]] || { fail 'loopback port is occupied by another process'; return 1; }
     docker inspect "$ingress_id" | jq -e '.[0].HostConfig.PortBindings["2448/tcp"] == [{"HostIp":"127.0.0.1","HostPort":"2447"}]' >/dev/null || {
@@ -578,7 +568,7 @@ if [[ "$MODE" == apply ]]; then
   docker compose --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-inner bot-api-ingress </dev/null || { fail 'cannot start relays'; exit 1; }
   verify_relays || exit 1
   serve_apply "$SERVE_MARKER" || { fail 'cannot configure Serve'; exit 1; }
-  verify_host_listeners || { fail 'unexpected host port listener'; exit 1; }
+  host_listener_state >/dev/null || { fail 'unexpected host port listener'; exit 1; }
 else
   verify_relays || exit 1
   serve_verify || { fail 'Serve mapping differs from the required mapping'; exit 1; }
