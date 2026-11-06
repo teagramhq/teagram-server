@@ -183,6 +183,10 @@ type Server struct {
 	globalCapLog logSampler
 	netCapLog    logSampler
 	ceilingLog   logSampler
+	// A bad trusted-address header can turn a tunnel configuration error into
+	// an outage for every public visitor; keep this signal independent and
+	// sampled so malformed requests cannot flood the operator's logs.
+	clientAddrHeaderLog logSampler
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler
@@ -1108,6 +1112,13 @@ func isWebSocketProtocolDecodeError(err error) bool {
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
+	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout {
+		if isWebSocketDisconnect(err) {
+			reason = transportCloseReasonClientClose
+		} else if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			reason = transportCloseReasonServerError
+		}
+	}
 	attrs := []any{
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
@@ -1276,7 +1287,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	}
 	failureStage := "connection_cleanup"
 	defer func() {
-		if closeDiagnostics.transport != websocketPath || rErr == nil || isDisconnect(rErr) {
+		if closeDiagnostics.transport != websocketPath || rErr == nil || isWebSocketDisconnect(rErr) {
 			return
 		}
 		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {
@@ -1288,11 +1299,18 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
-	conn.ackFailed = func(err error) {
+	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
 		if !isDisconnect(err) {
 			failure := requestFailureContext(nil, err)
-			failure.errorCategory = RPCResultTransportFailure
+			if failure.cause == requestFailureTransport {
+				failure.errorCategory = RPCResultTransportFailure
+			}
 			details := append([]any{"operation", "msgs_ack"}, failure.logAttrs()...)
+			if len(rpcTypeIDs) == 1 {
+				details = append(details, "rpc_type_id", rpcTypeIDs[0])
+			} else if len(rpcTypeIDs) > 1 {
+				details = append(details, "rpc_type_ids", rpcTypeIDs)
+			}
 			s.logServerFailure(serverFailureRequest, details...)
 		}
 	}

@@ -76,6 +76,7 @@ SELECT uc.contact_id,
        u.last_seen_at,
        un.handle AS username,
        u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id,
        visible_photos.current_file_id AS photo_file_id
 FROM owned_contacts uc
 JOIN users u ON u.id = uc.contact_id

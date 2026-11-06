@@ -187,6 +187,51 @@ func (h *handlers) handleUpdateStatus(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.BoolTrue{}, nil
 }
 
+// handleUpdateEmojiStatus sets or clears the caller's custom emoji status.
+// Only a live custom emoji document is accepted; historical statuses remain
+// visible after a set is taken down.
+func (h *handlers) handleUpdateEmojiStatus(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountUpdateEmojiStatusRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	documentID := int64(0)
+	switch status := req.EmojiStatus.(type) {
+	case *tg.EmojiStatusEmpty:
+		if status == nil {
+			return nil, errInputRequestInvalid
+		}
+	case *tg.EmojiStatus:
+		if status == nil || status.DocumentID == 0 {
+			return nil, errInputRequestInvalid
+		}
+		if _, ok := status.GetUntil(); ok {
+			return nil, errInputRequestInvalid
+		}
+		documentID = status.DocumentID
+		live, err := h.liveCustomEmojiDocument(r.Ctx, r.UserID, documentID)
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			return nil, errInputRequestInvalid
+		}
+	default:
+		return nil, errInputRequestInvalid
+	}
+	if err := h.store.SetUserEmojiStatus(r.Ctx, r.UserID, documentID); err != nil {
+		if errors.Is(err, store.ErrMediaInvalid) || errors.Is(err, store.ErrReactionInvalid) {
+			return nil, errInputRequestInvalid
+		}
+		h.log.Error("update emoji status", "user_id", r.UserID, "document_id", documentID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // reservedUsernames is the blocklist of handles that must never be claimed.
 var reservedUsernames = map[string]bool{
 	"admin":            true,

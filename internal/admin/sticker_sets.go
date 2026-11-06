@@ -7,6 +7,8 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +43,62 @@ var adminStickerSetsPageTemplate = template.Must(template.New("admin-sticker-set
     </header>
     {{if .Notice}}<p role="status" class="mb-4">{{.Notice}}</p>{{end}}
     {{if .Error}}<p role="alert" class="mb-4">{{.Error}}</p>{{end}}
+
+    <section class="dashboard-section" aria-labelledby="reports-heading">
+      <div class="dashboard-section-heading">
+        <div>
+          <h2 id="reports-heading" class="dashboard-section-title">Open reports</h2>
+          <p class="dashboard-section-subtitle">Reports are grouped by user sticker set. Taking a set down closes its open reports as actioned.</p>
+        </div>
+      </div>
+      {{range .ReportGroups}}
+        <article class="dashboard-section" aria-labelledby="report-set-{{.SetID}}">
+          <h3 id="report-set-{{.SetID}}">{{.SetTitle}} ({{.SetShortName}}, ID {{.SetID}})</h3>
+          {{if .SetIsLive}}
+          <form method="post" action="/admin/sticker-sets/takedown" class="dashboard-controls">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="id" value="{{.SetID}}">
+            <input type="hidden" name="reason" value="User report">
+            <button type="submit">Take down reported set</button>
+          </form>
+          {{else}}<p>This set is already taken down.</p>{{end}}
+          <div class="dashboard-table-wrap">
+            <table class="dashboard-table">
+              <caption class="sr-only">Open reports for {{.SetTitle}}</caption>
+              <thead><tr><th scope="col">Reporter</th><th scope="col">Message</th><th scope="col">Reason</th><th scope="col">Comment</th><th scope="col">Received</th><th scope="col">Action</th></tr></thead>
+              <tbody>
+              {{range .Reports}}
+                <tr>
+                  <td>{{.ReporterID}}</td>
+                  <td>{{.MessagePeerType}} {{.MessagePeerID}}, message {{.MessageID}}</td>
+                  <td>{{.Reason}}</td><td>{{.Comment}}</td><td>{{.CreatedAt}}</td>
+                  <td>
+                    <form method="post" action="/admin/sticker-reports/dismiss">
+                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="id" value="{{.ID}}">
+                      <button type="submit">Dismiss report</button>
+                    </form>
+                  </td>
+                </tr>
+              {{end}}
+              </tbody>
+            </table>
+          </div>
+          <nav aria-label="Reports for {{.SetTitle}}" class="dashboard-controls">
+            {{if .HasPrevious}}<a href="/admin/sticker-sets?page={{$.Page}}&amp;report_set_id={{.SetID}}&amp;report_page={{.PreviousPage}}">Previous reports</a>{{end}}
+            <span>Report page {{.Page}}</span>
+            {{if .HasNext}}<a href="/admin/sticker-sets?page={{$.Page}}&amp;report_set_id={{.SetID}}&amp;report_page={{.NextPage}}">Next reports</a>{{end}}
+          </nav>
+        </article>
+      {{else}}
+        <p>No open user sticker-set reports.</p>
+      {{end}}
+      <nav aria-label="Report group pages" class="dashboard-controls">
+        {{if .HasPrevious}}<a href="/admin/sticker-sets?page={{.PreviousPage}}">Previous</a>{{end}}
+        <span>Page {{.Page}}</span>
+        {{if .HasNext}}<a href="/admin/sticker-sets?page={{.NextPage}}">Next</a>{{end}}
+      </nav>
+    </section>
 
     <section class="dashboard-section" aria-labelledby="sets-heading">
       <div class="dashboard-section-heading">
@@ -140,10 +198,35 @@ type adminStickerSetEventRow struct {
 	CreatedAt          string
 }
 
+type adminStickerSetReportRow struct {
+	ID              int64
+	ReporterID      int64
+	MessagePeerType string
+	MessagePeerID   int64
+	MessageID       int64
+	Reason          string
+	Comment         string
+	CreatedAt       string
+}
+
+type adminStickerSetReportGroup struct {
+	SetID        int64
+	SetTitle     string
+	SetShortName string
+	SetIsLive    bool
+	Reports      []adminStickerSetReportRow
+	Page         int32
+	PreviousPage int32
+	NextPage     int32
+	HasPrevious  bool
+	HasNext      bool
+}
+
 type adminStickerSetsPageData struct {
 	CSRFToken    string
 	Sets         []adminStickerSetRow
 	Events       []adminStickerSetEventRow
+	ReportGroups []adminStickerSetReportGroup
 	Page         int
 	PreviousPage int
 	NextPage     int
@@ -163,6 +246,11 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 				return
 			}
 			page = parsed
+		}
+		reportSetID, reportPage, err := parseAdminStickerSetReportPage(r.URL.Query())
+		if err != nil {
+			http.Error(w, "invalid report page", http.StatusBadRequest)
+			return
 		}
 		sessionCookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
@@ -187,10 +275,36 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		reportSetIDs, err := cfg.Store.AdminOpenUserStickerSetReportSetIDsPage(r.Context(), offset, store.AdminUserStickerSetReportPageSize+1)
+		if err != nil {
+			adminStickerSetLog(cfg).Error("list admin open sticker-set report groups", "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		hasMoreReportGroups := len(reportSetIDs) > int(store.AdminUserStickerSetReportPageSize)
+		if hasMoreReportGroups {
+			reportSetIDs = reportSetIDs[:store.AdminUserStickerSetReportPageSize]
+		}
+		if reportSetID != 0 && !slices.Contains(reportSetIDs, reportSetID) {
+			http.Redirect(w, r, "/admin/sticker-sets?notice=no-reports", http.StatusSeeOther)
+			return
+		}
+		reportOffset := int32(0)
+		if reportSetID != 0 {
+			reportOffset = (reportPage - 1) * store.AdminUserStickerSetReportsPerGroupPageSize
+		}
+		reports, err := cfg.Store.AdminOpenUserStickerSetReportsForSets(
+			r.Context(), reportSetIDs, reportSetID, reportOffset, store.AdminUserStickerSetReportsPerGroupPageSize+1,
+		)
+		if err != nil {
+			adminStickerSetLog(cfg).Error("list admin open sticker-set reports", "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		data := adminStickerSetsPageData{
 			CSRFToken: csrfToken, Page: page, PreviousPage: page - 1, NextPage: page + 1,
 			HasPrevious: page > 1,
-			HasNext:     len(sets) > int(store.AdminStickerSetPageSize) || len(events) > int(store.AdminStickerSetPageSize),
+			HasNext:     len(sets) > int(store.AdminStickerSetPageSize) || len(events) > int(store.AdminStickerSetPageSize) || hasMoreReportGroups,
 			Notice:      adminStickerSetNotice(r.URL.Query().Get("notice")),
 		}
 		if len(sets) > int(store.AdminStickerSetPageSize) {
@@ -213,12 +327,88 @@ func adminStickerSetsGET(cfg LoginHandlerConfig) http.HandlerFunc {
 				CreatedAt:          event.CreatedAt.Format(time.RFC3339),
 			})
 		}
+		reportsBySet := make(map[int64][]store.AdminUserStickerSetReport, len(reportSetIDs))
+		for _, report := range reports {
+			reportsBySet[report.SetID] = append(reportsBySet[report.SetID], report)
+		}
+		for _, setID := range reportSetIDs {
+			setReports := reportsBySet[setID]
+			if len(setReports) == 0 {
+				if setID == reportSetID {
+					http.Redirect(w, r, "/admin/sticker-sets?notice=no-reports", http.StatusSeeOther)
+					return
+				}
+				continue
+			}
+			hasMore := len(setReports) > int(store.AdminUserStickerSetReportsPerGroupPageSize)
+			if hasMore {
+				setReports = setReports[:store.AdminUserStickerSetReportsPerGroupPageSize]
+			}
+			groupPage := int32(1)
+			if setID == reportSetID {
+				groupPage = reportPage
+			}
+			first := setReports[0]
+			group := adminStickerSetReportGroup{
+				SetID: first.SetID, SetTitle: first.SetTitle,
+				SetShortName: first.SetShortName, SetIsLive: first.SetIsLive,
+				Reports: make([]adminStickerSetReportRow, 0, len(setReports)),
+				Page:    groupPage, PreviousPage: groupPage - 1, NextPage: groupPage + 1,
+				HasPrevious: groupPage > 1, HasNext: hasMore,
+			}
+			for _, report := range setReports {
+				group.Reports = append(group.Reports, adminStickerSetReportRow{
+					ID: report.ID, ReporterID: report.ReporterID,
+					MessagePeerType: adminStickerSetReportPeerType(report.MessagePeerType),
+					MessagePeerID:   report.MessagePeerID, MessageID: report.MessageID,
+					Reason: report.Reason, Comment: report.Comment, CreatedAt: report.CreatedAt.Format(time.RFC3339),
+				})
+			}
+			data.ReportGroups = append(data.ReportGroups, group)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := adminStickerSetsPageTemplate.Execute(w, data); err != nil {
 			adminStickerSetLog(cfg).Error("render admin user sticker sets", "err", err)
 		}
+	}
+}
+
+func parseAdminStickerSetReportPage(query url.Values) (int64, int32, error) {
+	setIDValue := query.Get("report_set_id")
+	pageValue := query.Get("report_page")
+	if setIDValue == "" {
+		if pageValue != "" {
+			return 0, 0, errors.New("report page requires a set id")
+		}
+		return 0, 1, nil
+	}
+	setID, err := strconv.ParseInt(setIDValue, 10, 64)
+	if err != nil || setID <= 0 {
+		return 0, 0, errors.New("invalid report set id")
+	}
+	page := int64(1)
+	if pageValue != "" {
+		page, err = strconv.ParseInt(pageValue, 10, 32)
+		maxPage := int64(^uint32(0)>>1) / int64(store.AdminUserStickerSetReportsPerGroupPageSize)
+		if err != nil || page < 1 || page > maxPage {
+			return 0, 0, errors.New("invalid report page")
+		}
+	}
+	return setID, int32(page), nil
+}
+
+func adminStickerSetReportPeerType(peerType store.PeerType) string {
+	switch peerType {
+	case store.PeerTypeUser:
+		return "User"
+	case store.PeerTypeChat:
+		return "Chat"
+	case store.PeerTypeChannel:
+		return "Channel"
+	default:
+		return "Peer"
 	}
 }
 
@@ -288,6 +478,43 @@ func adminStickerSetAction(cfg LoginHandlerConfig, action string) http.HandlerFu
 	}
 }
 
+func adminStickerSetReportDismiss(cfg LoginHandlerConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, adminStickerSetActionBodyBytes)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if !validAdminSessionCSRF(cfg.TokenHash, r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		idValues := r.PostForm["id"]
+		if len(idValues) != 1 {
+			http.Error(w, "provide one report id", http.StatusBadRequest)
+			return
+		}
+		reportID, err := strconv.ParseInt(strings.TrimSpace(idValues[0]), 10, 64)
+		if err != nil || reportID <= 0 {
+			http.Error(w, "invalid report id", http.StatusBadRequest)
+			return
+		}
+		if err := cfg.Store.DismissUserStickerSetReport(r.Context(), reportID); err != nil {
+			switch {
+			case errors.Is(err, store.ErrUserStickerSetReportInputInvalid):
+				http.Error(w, "invalid report id", http.StatusBadRequest)
+			case errors.Is(err, store.ErrUserStickerSetReportNotFound):
+				http.Error(w, "open report not found", http.StatusNotFound)
+			default:
+				adminStickerSetLog(cfg).Error("dismiss user sticker-set report", "report_id", reportID, "err", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+			return
+		}
+		http.Redirect(w, r, "/admin/sticker-sets?notice=dismiss", http.StatusSeeOther)
+	}
+}
+
 func validAdminSessionCSRF(tokenHash string, r *http.Request) bool {
 	if tokenHash == "" {
 		return false
@@ -342,6 +569,10 @@ func adminStickerSetNotice(value string) string {
 		return "Sticker set taken down."
 	case "restore":
 		return "Sticker set restored."
+	case "dismiss":
+		return "Report dismissed."
+	case "no-reports":
+		return "That sticker set has no open reports."
 	default:
 		return ""
 	}

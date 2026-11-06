@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -12,8 +14,34 @@ import (
 
 // Reaction is a single reaction on a message copy.
 type Reaction struct {
-	ReactorID int64
-	Reaction  string
+	ReactorID             int64
+	Reaction              string
+	CustomEmojiDocumentID int64
+}
+
+const customEmojiReactionPrefix = "c:"
+
+// CustomEmojiReactionValue encodes a custom emoji document id for the durable
+// reaction text column. A false result means the document id is invalid.
+func CustomEmojiReactionValue(documentID int64) (string, bool) {
+	if documentID == 0 {
+		return "", false
+	}
+	return customEmojiReactionPrefix + strconv.FormatInt(documentID, 10), true
+}
+
+// CustomEmojiDocumentID decodes a custom emoji reaction value stored by this
+// package. Other reaction values return false.
+func CustomEmojiDocumentID(reaction string) (int64, bool) {
+	if !strings.HasPrefix(reaction, customEmojiReactionPrefix) {
+		return 0, false
+	}
+	value := strings.TrimPrefix(reaction, customEmojiReactionPrefix)
+	documentID, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || documentID == 0 || strconv.FormatInt(documentID, 10) != value {
+		return 0, false
+	}
+	return documentID, true
 }
 
 // ReactionTarget identifies one message copy to push a reaction update to.
@@ -23,9 +51,11 @@ type ReactionTarget struct {
 }
 
 func reactionFromRow(r db.MessageReaction) Reaction {
+	documentID, _ := CustomEmojiDocumentID(r.Reaction)
 	return Reaction{
-		ReactorID: r.ReactorID,
-		Reaction:  r.Reaction,
+		ReactorID:             r.ReactorID,
+		Reaction:              r.Reaction,
+		CustomEmojiDocumentID: documentID,
 	}
 }
 
@@ -37,6 +67,24 @@ func reactionFromRow(r db.MessageReaction) Reaction {
 // Returns the set of (ownerID, localID) pairs whose copies were affected,
 // for the NOTIFY fan-out that pushes updateMessageReactions.
 func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reaction string) ([]ReactionTarget, error) {
+	if strings.HasPrefix(reaction, customEmojiReactionPrefix) {
+		return nil, ErrReactionInvalid
+	}
+	return s.sendReaction(ctx, ownerID, localID, reaction, 0)
+}
+
+// SendCustomEmojiReaction records the caller's custom emoji reaction on a
+// message they own. User-created documents are locked and checked live in the
+// same transaction as the reaction write.
+func (s *Store) SendCustomEmojiReaction(ctx context.Context, ownerID, localID, documentID int64) ([]ReactionTarget, error) {
+	reaction, ok := CustomEmojiReactionValue(documentID)
+	if !ok {
+		return nil, ErrReactionInvalid
+	}
+	return s.sendReaction(ctx, ownerID, localID, reaction, documentID)
+}
+
+func (s *Store) sendReaction(ctx context.Context, ownerID, localID int64, reaction string, customDocumentID int64) ([]ReactionTarget, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -60,7 +108,7 @@ func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reacti
 
 	if peerType == PeerTypeChat {
 		// For chat messages, fan out to all current members.
-		affected, err := sendChatReaction(ctx, tx, qtx, ownerID, msg, reaction)
+		affected, err := sendChatReaction(ctx, tx, qtx, ownerID, msg, reaction, customDocumentID)
 		if err != nil {
 			return nil, err
 		}
@@ -86,6 +134,11 @@ func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reacti
 	}
 	if msg.Deleted {
 		return nil, ErrMessageInvalid
+	}
+	// The custom-emoji set row FOR SHARE lock follows the message-owner
+	// advisory locks and message reload; no owner-row lock is taken afterward.
+	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
+		return nil, err
 	}
 	peerLocalID := msg.PeerLocalID
 	// A reaction on a mirrored 1:1 copy is a new outbound action toward the
@@ -235,7 +288,7 @@ func (s *Store) ClearReaction(ctx context.Context, ownerID, localID int64) ([]Re
 //
 // Takes the chats row lock before the member-owner advisory locks so a
 // concurrent settings or membership change is serialized with this write.
-func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID int64, pre db.Message, reaction string) ([]ReactionTarget, error) {
+func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID int64, pre db.Message, reaction string, customDocumentID int64) ([]ReactionTarget, error) {
 	member, err := chatHasMember(ctx, qtx, pre.PeerID, reactorID)
 	if err != nil {
 		return nil, err
@@ -289,6 +342,11 @@ func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID
 	if !members[reactorID] {
 		return nil, ErrNotMember
 	}
+	// The custom-emoji set row FOR SHARE lock follows the chat row, member-owner
+	// advisory locks, and message reload; no earlier lock class is taken after it.
+	if err = lockLiveReactionCustomEmoji(ctx, qtx, customDocumentID); err != nil {
+		return nil, err
+	}
 
 	affected := make([]ReactionTarget, 0, len(members))
 	for _, c := range copies {
@@ -309,6 +367,25 @@ func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID
 		return nil, ErrNotMember
 	}
 	return affected, nil
+}
+
+func lockLiveReactionCustomEmoji(ctx context.Context, qtx *db.Queries, documentID int64) error {
+	if documentID <= 0 {
+		return nil
+	}
+	if err := lockLiveUserStickerDocuments(ctx, qtx, documentID); err != nil {
+		if errors.Is(err, ErrMediaInvalid) {
+			return ErrReactionInvalid
+		}
+		return err
+	}
+	if err := validateLiveUserCustomEmojiDocuments(ctx, qtx, documentID); err != nil {
+		if errors.Is(err, ErrMediaInvalid) {
+			return ErrReactionInvalid
+		}
+		return err
+	}
+	return nil
 }
 
 // clearChatReaction removes the caller's reaction from every current member's

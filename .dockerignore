@@ -14,6 +14,7 @@ testdata/photothumb/
 # Full history — anything ever committed and later removed comes back with it.
 .git
 /build/
+/qa-demo-web-source/
 **/node_modules/
 
 # Local-only and agent-runtime directories; the latter can hold credentials.

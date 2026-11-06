@@ -26,6 +26,76 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestServerWriteGateCanPassOneWriteAndDropTheNext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+		if err := server.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	})
+	gate := &serverWriteGate{}
+	conn := &serverWriteGateConn{Conn: server, gate: gate}
+	attempt, err := gate.arm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(attempt.stop)
+
+	reads := make(chan []byte, 2)
+	readErrs := make(chan error, 1)
+	go func() {
+		for range 2 {
+			frame := make([]byte, len("frame"))
+			if _, err := io.ReadFull(client, frame); err != nil {
+				readErrs <- err
+				return
+			}
+			reads <- frame
+		}
+	}()
+
+	firstWrite := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("frame"))
+		firstWrite <- err
+	}()
+	recvOrCtx(t, ctx, attempt.entered, "first write to reach the gate")
+	attempt.decide(false)
+	if err := recvOrCtx(t, ctx, firstWrite, "first write to complete"); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if got := string(<-reads); got != "frame" {
+		t.Fatalf("first write = %q, want frame", got)
+	}
+
+	secondWrite := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("frame"))
+		secondWrite <- err
+	}()
+	select {
+	case <-attempt.entered:
+		attempt.decide(true)
+	case err := <-secondWrite:
+		if err == nil {
+			t.Fatal("second write passed after the gate was told to pass only the first")
+		}
+	case err := <-readErrs:
+		t.Fatalf("second write read: %v", err)
+	case <-ctx.Done():
+		t.Fatal("second write neither reached the gate nor completed")
+	}
+	if err := recvOrCtx(t, ctx, secondWrite, "second write to fail after dropping"); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("second write error = %v, want net.ErrClosed", err)
+	}
+}
+
 func TestMessagingRetryAcrossReplicas(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -106,15 +176,27 @@ func TestMessagingRetryAcrossReplicas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { attempt.decide(true) })
+	t.Cleanup(attempt.stop)
 	close(sendNow)
-	recvOrCtx(t, ctx, attempt.entered, "A's committed send response write")
+	for {
+		recvOrCtx(t, ctx, attempt.entered, "A's send connection write")
+		_, committed, err := st.MessageByRandomID(ctx, aID, randomID)
+		if err != nil {
+			t.Fatalf("check A's send commit before dropping its connection: %v", err)
+		}
+		if committed {
+			// Stop gotd from transparently retrying this failed call back to replica 1.
+			cancelA()
+			attempt.decide(true)
+			break
+		}
+		// A delayed msgs_ack can be written before the handler commits. Let it
+		// through and keep the gate armed for a write after the send commits.
+		attempt.decide(false)
+	}
 
 	originalA := assertSingleOwnerMessage(t, ctx, st, aID, bID, text, true, 1)
 	assertSingleOwnerMessage(t, ctx, st, bID, aID, text, false, 1)
-	// Stop gotd from transparently retrying this failed call back to replica 1.
-	cancelA()
-	attempt.decide(true)
 	if err := recvOrCtx(t, ctx, aSendErr, "A send with its response dropped"); err == nil {
 		t.Fatal("A send RPC succeeded even though its response was dropped")
 	}
@@ -637,15 +719,11 @@ func (c *serverWriteGateConn) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if attempt := c.gate.claim(); attempt != nil {
-		close(attempt.entered)
-		<-attempt.decided
-		if attempt.drop {
-			if err := c.Close(); err != nil {
-				return 0, errors.Join(net.ErrClosed, fmt.Errorf("close response-loss socket: %w", err))
-			}
-			return 0, net.ErrClosed
+	if attempt := c.gate.current(); attempt != nil && attempt.wait() {
+		if err := c.Close(); err != nil {
+			return 0, errors.Join(net.ErrClosed, fmt.Errorf("close response-loss socket: %w", err))
 		}
+		return 0, net.ErrClosed
 	}
 	return c.Conn.Write(p)
 }
@@ -656,10 +734,11 @@ type serverWriteGate struct {
 }
 
 type serverWriteAttempt struct {
-	entered chan struct{}
-	decided chan struct{}
-	once    sync.Once
-	drop    bool
+	gate     *serverWriteGate
+	entered  chan struct{}
+	decided  chan bool
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func (g *serverWriteGate) arm() (*serverWriteAttempt, error) {
@@ -668,22 +747,51 @@ func (g *serverWriteGate) arm() (*serverWriteAttempt, error) {
 	if g.active != nil {
 		return nil, errors.New("server write gate already armed")
 	}
-	attempt := &serverWriteAttempt{entered: make(chan struct{}), decided: make(chan struct{})}
+	attempt := &serverWriteAttempt{
+		gate:    g,
+		entered: make(chan struct{}, 1),
+		decided: make(chan bool),
+		stopped: make(chan struct{}),
+	}
 	g.active = attempt
 	return attempt, nil
 }
 
-func (g *serverWriteGate) claim() *serverWriteAttempt {
+func (g *serverWriteGate) current() *serverWriteAttempt {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	attempt := g.active
-	g.active = nil
-	return attempt
+	return g.active
+}
+
+func (g *serverWriteGate) disarm(attempt *serverWriteAttempt) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active == attempt {
+		g.active = nil
+	}
+}
+
+func (a *serverWriteAttempt) wait() bool {
+	select {
+	case a.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case drop := <-a.decided:
+		return drop
+	case <-a.stopped:
+		return true
+	}
 }
 
 func (a *serverWriteAttempt) decide(drop bool) {
-	a.once.Do(func() {
-		a.drop = drop
-		close(a.decided)
-	})
+	if drop {
+		a.gate.disarm(a)
+	}
+	a.decided <- drop
+}
+
+func (a *serverWriteAttempt) stop() {
+	a.gate.disarm(a)
+	a.stopOnce.Do(func() { close(a.stopped) })
 }

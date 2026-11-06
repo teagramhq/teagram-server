@@ -1,0 +1,7 @@
+# source: gotd v0.162.0 layer-228 client request
+body: { account_updateEmojiStatus
+  emoji_status: { emojiStatus
+    flags: 0 [INT],
+    document_id: <N> [LONG],
+  },
+},

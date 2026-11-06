@@ -251,6 +251,11 @@ func (s *Store) setUserStickerSetLive(
 	if updated != 1 {
 		return nil, fmt.Errorf("set user sticker set %d live state: updated %d rows, want 1", row.ID, updated)
 	}
+	if !live {
+		if _, err = qtx.ActionOpenUserStickerSetReports(ctx, row.ID); err != nil {
+			return nil, fmt.Errorf("close open reports for sticker set %d: %w", row.ID, err)
+		}
+	}
 	if err = qtx.InsertAdminStickerSetEvent(ctx, db.InsertAdminStickerSetEventParams{
 		Action: action, SetID: row.ID, SetTitle: row.Title, SetShortName: row.ShortName,
 		Reason: reason, SessionFingerprint: sessionFingerprint,

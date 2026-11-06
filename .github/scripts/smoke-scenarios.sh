@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 SMOKE_SCENARIOS=(
   launch-getters
   sticker-set-catalogue
@@ -34,6 +36,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  custom-emoji-actions
   bot-api-get-me
   bot-api-get-updates-stock-client
   bot-api-send-message
@@ -60,6 +63,7 @@ SMOKE_SCENARIOS=(
   username-registration
   user-invites
   turnstile-signup
+  turnstile-signup-from-send-code
   turnstile-signin
   username-password-reset
   pollprobe

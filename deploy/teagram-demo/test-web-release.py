@@ -103,10 +103,33 @@ def main() -> None:
         if received_path.stat().st_mode & 0o777 != 0o600:
             raise SystemExit("web archive receipt did not create a mode 0600 file")
 
+        qa_script = (SCRIPT_DIR.parent / "qa-invite/test-qa-invite-browser-flow.sh").read_text()
+        qa_start = qa_script.index("WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256=")
+        qa_end = qa_script.index('\n[[ "$WEB_RELEASE"', qa_start)
+        qa_client = root / "qa-client"
+        (qa_client / "web/releases").mkdir(parents=True, mode=0o755)
+        qa_archive = root / "demo-web.tar.gz"
+        qa_archive.write_bytes(archive_bytes)
+        qa_archive.chmod(0o600)
+        qa_env = {**os.environ, "TMP_ROOT": str(root), "WEB_CLIENT_DIR": str(qa_client),
+                  "REPO_ROOT": str(SCRIPT_DIR.parent.parent), "WEB_ARCHIVE_SHA": archive_sha256,
+                  "PIN_SOURCE_SHA": SOURCE_SHA, "PIN_ARTIFACT_DIGEST": artifact_digest_value,
+                  "WEB_EXPECTED_ENDPOINT": "wss://web.example/apiws", "WEB_EXPECTED_FINGERPRINT": "c" * 16}
+        qa_command = ['bash', '-e', '-c', 'fail() { echo "$*" >&2; exit 1; }\n' + qa_script[qa_start:qa_end]]
+        qa_staged = subprocess.run(qa_command, env=qa_env, capture_output=True)
+        if qa_staged.returncode != 0:
+            raise SystemExit(f"QA web staging failed: {qa_staged.stderr.decode(errors='replace')}")
+        qa_env["WEB_EXPECTED_ENDPOINT"] = "wss://wrong.example/apiws"
+        qa_staged = subprocess.run(qa_command, env=qa_env, capture_output=True)
+        if qa_staged.returncode == 0:
+            raise SystemExit("QA web staging accepted an unexpected target")
+
         releases = root / "releases"
         releases.mkdir(mode=0o755)
         install_env = os.environ.copy()
         install_env["DEPLOY_WEB_ARCHIVE_SHA256"] = archive_sha256
+        install_env["DEPLOY_WEB_EXPECTED_ENDPOINT"] = "wss://web.example/apiws"
+        install_env["DEPLOY_WEB_EXPECTED_FINGERPRINT"] = "c" * 16
         install_args = (
             str(SCRIPT_DIR / "install-web-release.py"),
             "stage",
@@ -125,6 +148,23 @@ def main() -> None:
         repeated = run(*install_args, env=install_env)
         if repeated.returncode != 0 or repeated.stdout.decode().strip() != expected_release:
             raise SystemExit("web release staging is not idempotent")
+
+        for field, value in (("endpoint", "wss://untrusted.example/apiws"), ("fingerprint", "d" * 16)):
+            changed = entries.copy()
+            manifest = json.loads(changed["./mtproto-target.json"])
+            manifest[field] = value
+            changed["./mtproto-target.json"] = json.dumps(manifest).encode()
+            changed_archive = root / f"bad-{field}.tar.gz"
+            write_archive(changed_archive, changed)
+            changed_archive.chmod(0o600)
+            changed_env = install_env.copy()
+            changed_env["DEPLOY_WEB_ARCHIVE_SHA256"] = hashlib.sha256(changed_archive.read_bytes()).hexdigest()
+            result = run(
+                str(SCRIPT_DIR / "install-web-release.py"), "stage", str(changed_archive),
+                str(releases), SOURCE_SHA, artifact_digest_value, env=changed_env,
+            )
+            if result.returncode == 0:
+                raise SystemExit(f"web installer accepted a changed {field} with an unchanged digest")
 
         altered_entries = entries.copy()
         altered_entries["./assets/app.js"] = b"console.log('unverified payload');"

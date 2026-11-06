@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
@@ -385,6 +386,132 @@ func TestServeWebSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 				t.Fatalf("transport close records = %d, want one: %+v", len(closeRecords), closeRecords)
 			}
 			return
+		}
+	}
+}
+
+func TestServeWebSocketLogsCloseAfterUnknownAuthKeyAsClientDisconnect(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	serverReturned := false
+	t.Cleanup(func() {
+		cancel()
+		if serverReturned {
+			return
+		}
+		select {
+		case err := <-served:
+			serverReturned = true
+			if err != nil {
+				t.Errorf("serve WebSocket: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("ServeWebSocket did not stop")
+		}
+	})
+
+	dialCtx, stopDial := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopDial()
+	ws, response, err := websocket.Dial(dialCtx, "ws://"+listener.Addr().String()+"/apiws", &websocket.DialOptions{
+		Subprotocols: []string{"binary"},
+	})
+	if response != nil && response.Body != nil {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Errorf("close WebSocket response body: %v", closeErr)
+		}
+	}
+	if err != nil {
+		t.Fatalf("dial WebSocket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
+			t.Errorf("close WebSocket client: %v", err)
+		}
+	})
+
+	client, err := transport.Intermediate.Handshake(websocket.NetConn(context.Background(), ws, websocket.MessageBinary))
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	var frame bin.Buffer
+	frame.Put(make([]byte, 16))
+	frame.Buf[0] = 1
+	if err := client.Send(dialCtx, &frame); err != nil {
+		t.Fatalf("send unknown-key frame: %v", err)
+	}
+	var responseFrame bin.Buffer
+	if err := client.Recv(dialCtx, &responseFrame); err == nil {
+		t.Fatal("receive unknown-key response succeeded, want -404")
+	} else {
+		var protocolErr *codec.ProtocolErr
+		if !errors.As(err, &protocolErr) || protocolErr.Code != codec.CodeAuthKeyNotFound {
+			t.Fatalf("receive unknown-key response = %v, want -404", err)
+		}
+	}
+	if err := ws.Close(websocket.StatusPolicyViolation, "client disconnect"); err != nil {
+		t.Fatalf("close WebSocket after -404: %v", err)
+	}
+
+	var records []serverErrorLogRecord
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 3*time.Second)
+	defer stopWait()
+	for {
+		select {
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message != "transport connection closed" {
+				continue
+			}
+			cancel()
+			select {
+			case err := <-served:
+				serverReturned = true
+				if err != nil {
+					t.Fatalf("serve WebSocket: %v", err)
+				}
+			case <-waitCtx.Done():
+				t.Fatal("ServeWebSocket did not stop after the client closed")
+			}
+			for {
+				select {
+				case record := <-sink.events:
+					records = append(records, record)
+				default:
+					var closeRecords []serverErrorLogRecord
+					for _, record := range records {
+						if record.message == "transport connection closed" {
+							closeRecords = append(closeRecords, record)
+						}
+					}
+					if len(closeRecords) != 1 {
+						t.Fatalf("transport close records = %d, want one; all records: %+v", len(closeRecords), records)
+					}
+					for key, want := range map[string]any{
+						"transport": "/apiws",
+						"step":      "none",
+						"reason":    "client close",
+					} {
+						if got := closeRecords[0].attrs[key]; got != want {
+							t.Errorf("transport close %s = %v, want %v", key, got, want)
+						}
+					}
+					for _, record := range records {
+						if record.message == "server operation failed" {
+							t.Fatalf("client close after -404 logged a server failure: %+v", record)
+						}
+					}
+					return
+				}
+			}
+		case <-waitCtx.Done():
+			t.Fatal("no transport close log after client closed following -404")
 		}
 	}
 }

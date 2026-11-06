@@ -1,0 +1,23 @@
+{
+  "observedAt": "2026-11-04T22:46:00Z",
+  "sourceSha": "0fb617f1b518929d49720f8fefa8187e01060fe7",
+  "workflowRun": 41928140381,
+  "projectName": "teagram-qa-invite",
+  "activeServices": [
+    "haproxy",
+    "postgres",
+    "teagramd",
+    "tls-edge"
+  ],
+  "bindAddress": "10.96.46.70",
+  "bindPort": 443,
+  "persistentVolumeNames": [
+    "teagram-qa-invite-blobs",
+    "teagram-qa-invite-identity",
+    "teagram-qa-invite-postgres"
+  ],
+  "registrationMode": "invite",
+  "inviteQuota": 5,
+  "turnstileEnabled": false,
+  "publicDemo": "separate-compose-project"
+}

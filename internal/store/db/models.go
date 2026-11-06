@@ -100,9 +100,11 @@ type Channel struct {
 }
 
 type ChannelAvailableReaction struct {
-	ChannelID int64
-	Mode      string
-	Reactions []string
+	ChannelID      int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 type ChannelDeletionJob struct {
@@ -259,9 +261,11 @@ type ChatAdminStateMarker struct {
 }
 
 type ChatAvailableReaction struct {
-	ChatID    int64
-	Mode      string
-	Reactions []string
+	ChatID         int64
+	Mode           string
+	Reactions      []string
+	AllowCustom    bool
+	CustomEmojiIds []int64
 }
 
 type ChatParticipant struct {
@@ -643,9 +647,10 @@ type MessageSearchPostingCount struct {
 }
 
 type MessageSearchUnreadyDialog struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
+	OwnerID     int64
+	PeerType    int16
+	PeerID      int64
+	LastLocalID int64
 }
 
 type NotifySettingsDifferenceCursor struct {
@@ -681,14 +686,16 @@ type PeerSettingsBarDismissal struct {
 }
 
 type PhoneCode struct {
-	Phone      string
-	CodeHash   string
-	Code       string
-	ExpiresAt  pgtype.Timestamptz
-	Attempts   int32
-	ConsumedAt pgtype.Timestamptz
-	CreatedAt  pgtype.Timestamptz
-	ID         *int64
+	Phone              string
+	CodeHash           string
+	Code               string
+	ExpiresAt          pgtype.Timestamptz
+	Attempts           int32
+	ConsumedAt         pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	ID                 *int64
+	TurnstileAction    *string
+	TurnstileAuthKeyID *int64
 }
 
 type PhoneLookup struct {
@@ -905,19 +912,20 @@ type UploadPart struct {
 }
 
 type User struct {
-	ID                   int64
-	Phone                *string
-	FirstName            string
-	LastName             string
-	CreatedAt            pgtype.Timestamptz
-	IsOnline             bool
-	LastSeenAt           pgtype.Timestamptz
-	Username             *string
-	NameTsv              interface{}
-	LoginMode            string
-	AuthorizationTtlDays int32
-	About                string
-	Kind                 string
+	ID                    int64
+	Phone                 *string
+	FirstName             string
+	LastName              string
+	CreatedAt             pgtype.Timestamptz
+	IsOnline              bool
+	LastSeenAt            pgtype.Timestamptz
+	Username              *string
+	NameTsv               interface{}
+	LoginMode             string
+	AuthorizationTtlDays  int32
+	About                 string
+	Kind                  string
+	EmojiStatusDocumentID *int64
 }
 
 type UserContact struct {
@@ -1076,6 +1084,20 @@ type UserStickerSet struct {
 	SetID        int64
 	InstalledAt  pgtype.Timestamptz
 	SortPosition *int32
+}
+
+type UserStickerSetReport struct {
+	ID              int64
+	ReporterID      int64
+	SetID           int64
+	MessagePeerType int16
+	MessagePeerID   int64
+	MessageID       int64
+	Reason          string
+	Comment         string
+	Status          string
+	CreatedAt       pgtype.Timestamptz
+	ClosedAt        pgtype.Timestamptz
 }
 
 type Username struct {

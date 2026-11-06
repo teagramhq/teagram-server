@@ -67,6 +67,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignUp(t)
 	})
+	t.Run("turnstile-signup-from-send-code", func(t *testing.T) {
+		t.Parallel()
+		testSmokeTurnstileSignUpFromSendCode(t)
+	})
 	t.Run("turnstile-signin", func(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignIn(t)
@@ -214,6 +218,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("basic-group-reactions", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupReactions(t)
+	})
+	t.Run("custom-emoji-actions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeCustomEmojiActions(t)
 	})
 	t.Run("channel-reactions", func(t *testing.T) {
 		t.Parallel()

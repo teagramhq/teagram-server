@@ -192,6 +192,9 @@ services:
         source: ./.state/teagram-demo/public-client/client
         target: /run/teagram-demo/client.json
         read_only: true
+    # Only the deploy-time probe needs the signup-only token to wrap auth.sendCode.
+    secrets:
+      - teagram_demo_turnstile_qa_bypass
     networks: [backend]
     logging: *logging
 

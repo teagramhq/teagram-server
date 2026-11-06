@@ -16,13 +16,13 @@ jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 0a36b3b2a40a715e4db8e1ce82f5f9b5be08c16c
+      REAL_CLIENT_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -36,6 +36,25 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve the live Web publication
+        id: qa-web-pin
+        run: |
+          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
+          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
+          [[ "$(jq -er '.deployable | tostring' <<<"$publication")" == true ]]
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'source_commit=%s\nartifact_digest=%s\n' "$source_commit" "$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the deployed Web source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: teagramhq/teagram-web
+          ref: ${{ steps.qa-web-pin.outputs.source_commit }}
+          path: qa-demo-web-source
           persist-credentials: false
 
       - name: Check out pinned web companion
@@ -65,15 +84,25 @@ jobs:
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
       - name: Test real-client worker source observation
-        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/patch_real_client_guest_signup.test.mjs
 
       # Keep the web app revision fixed; overlay runner-side evidence checks.
       - name: Patch pinned real-client runner evidence
-        run: node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+        run: |
+          node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+          node test/e2e/real_server_fixture/patch_real_client_guest_signup.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
 
       - name: Install pinned web dependencies
         working-directory: web-source
         run: pnpm install --frozen-lockfile
+
+      # The QA stack serves this exact artifact, including its embedded target.
+      - name: Rebuild the resolved demo Web artifact
+        working-directory: qa-demo-web-source
+        env:
+          WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}
+        run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
 
       # Pre-pull the Dockerfile base and runtime images; the fixture starts
       # Postgres directly, so it must be available under this mirror-qualified name.
@@ -84,6 +113,25 @@ jobs:
       - name: Run fixture, private build, and all six browser scenarios
         id: browser-flow
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Install Chromium and NSS trust utility
+        timeout-minutes: 10
+        working-directory: web-source
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3-tools
+          corepack pnpm exec playwright install --with-deps chromium
+
+      - name: Exercise the QA invite TLS edge and Web artifact
+        timeout-minutes: 15
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          QA_WEB_SOURCE_DIR: ${{ github.workspace }}/qa-demo-web-source
+          QA_WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}
+          QA_WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}
+        run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh
 
       - name: Upload Playwright failure trace
         if: ${{ always() && steps.browser-flow.outputs.trace_ready == 'true' }}
@@ -103,6 +151,81 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Run fresh-browser guest signup with the sign-in gate enabled
+        id: guest-signup-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+        run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload guest-signup Playwright failure trace
+        if: ${{ always() && steps.guest-signup-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload guest-signup run report
+        if: ${{ always() && steps.guest-signup-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run gate-off fresh-browser guest signup with the real challenge
+        id: guest-signup-gate-off-challenge-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
+        run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload gate-off challenge Playwright failure trace
+        if: ${{ always() && steps.guest-signup-gate-off-challenge-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-challenge-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-challenge-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload gate-off challenge run report
+        if: ${{ always() && steps.guest-signup-gate-off-challenge-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-challenge-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-challenge-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run gate-off fresh-browser guest signup with the QA bypass
+        id: guest-signup-gate-off-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
+          REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS: '1'
+        run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload gate-off guest-signup Playwright failure trace
+        if: ${{ always() && steps.guest-signup-gate-off-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-qa-bypass-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload gate-off guest-signup run report
+        if: ${{ always() && steps.guest-signup-gate-off-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-gate-off-qa-bypass-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-gate-off-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Report complete job duration
         if: always()
         run: |
@@ -110,7 +233,7 @@ jobs:
           finished="$(date +%s)"
           elapsed=$((finished - started))
           printf 'Complete job duration: %dm %02ds\n' "$((elapsed / 60))" "$((elapsed % 60))" | tee -a "$GITHUB_STEP_SUMMARY"
-          if ((elapsed >= 900)); then
-            echo "::error::real-client browser-flow job exceeded 15 minutes"
+          if ((elapsed >= 1800)); then
+            echo "::error::real-client browser-flow job exceeded 30 minutes"
             exit 1
           fi

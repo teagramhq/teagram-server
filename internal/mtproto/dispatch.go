@@ -69,10 +69,12 @@ type Request struct {
 	ackQueued bool
 
 	// rpcMethod and rpcResult are set by the dispatcher and reply path for the
-	// optional RPC tracing boundary. rpcLogMethod preserves a decoded method for
-	// failure diagnostics before dispatch. They stay inside this package so
-	// request data can never become trace data by accident.
+	// optional RPC tracing boundary. rpcTypeID supports acknowledgement failure
+	// diagnostics, while rpcLogMethod preserves a decoded method before dispatch.
+	// They stay inside this package so request data cannot become trace data.
 	rpcMethod    string
+	rpcTypeID    uint32
+	rpcTypeIDSet bool
 	rpcLogMethod string
 	rpcResult    RPCResultClass
 	rpcStart     func(string)
@@ -156,6 +158,13 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 	id, err := req.Buf.PeekID()
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
+	}
+	req.rpcTypeID = id
+	req.rpcTypeIDSet = true
+	if c != nil && needsAck(req.seqNo, id) {
+		// Wrapper and gzip constructors are replaced before dispatch. Refresh
+		// the queued acknowledgement with the leaf RPC used by its handler.
+		c.queueRPCAck(req.MsgID, id)
 	}
 
 	d.mux.Lock()

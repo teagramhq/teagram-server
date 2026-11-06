@@ -1074,6 +1074,9 @@ jobs:
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
 
+      - name: Test QA invite TLS constraints and renewal
+        run: sudo -n bash deploy/qa-invite/test-qa-invite-tls.sh
+
       - name: Test immutable K8s image digest publication
         run: .github/scripts/test-k8s-image-digests.sh
 
@@ -1141,14 +1144,18 @@ jobs:
           bash -n deploy/teagram-demo/forced-command.sh
           bash -n deploy/qa-invite/remote.sh
           bash -n deploy/qa-invite/rollback.sh
+          bash -n deploy/qa-invite/tls.sh
           bash -n deploy/qa-invite/qa-account-writer.sh
+          bash -n deploy/qa-invite/test-qa-invite-browser-flow.sh
           bash -n deploy/qa-invite/test-qa-invite-contract.sh
           bash -n deploy/qa-invite/test-qa-invite-rollback.sh
+          bash -n deploy/qa-invite/test-qa-invite-tls.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
           sh -n deploy/teagram-demo/ops/install-qa-invite-command.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollback.sh
+          bash -n deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-on.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-off.sh
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
@@ -1203,9 +1210,12 @@ jobs:
             deploy/teagram-demo/forced-command.sh \
             deploy/qa-invite/remote.sh \
             deploy/qa-invite/rollback.sh \
+            deploy/qa-invite/tls.sh \
             deploy/qa-invite/qa-account-writer.sh \
+            deploy/qa-invite/test-qa-invite-browser-flow.sh \
             deploy/qa-invite/test-qa-invite-contract.sh \
             deploy/qa-invite/test-qa-invite-rollback.sh \
+            deploy/qa-invite/test-qa-invite-tls.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
             deploy/teagram-demo/ops/install-qa-invite-command.sh \
@@ -1237,6 +1247,7 @@ jobs:
             .github/scripts/test-perf-postgres.sh \
             .github/scripts/test-deploy-workflow-contract.sh
           shellcheck --shell=bash deploy/teagram/ops/blob-encryption-common.inc
+          shellcheck deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
@@ -1280,11 +1291,18 @@ jobs:
       - name: Check pinned demo web artifact handling
         run: python3 deploy/teagram-demo/test-web-release.py
 
-      - name: Check demo web artifact pin contract
+      - name: Check demo web live publication resolution
         run: python3 deploy/teagram-demo/test-web-artifact-pin.py
 
+      - name: Check demo web publication ordering
+        run: |
+          python3 deploy/teagram-demo/test-web-publication-state.py
+          python3 deploy/teagram-demo/test-web-publication-rollout.py
+
       - name: Check demo Turnstile secret access
-        run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
+        run: |
+          sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
+          sudo -n python3 deploy/teagram-demo/test-rotate-qa-bypass-token.py
 
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
@@ -1295,7 +1313,7 @@ jobs:
     runs-on: ubuntu-26.04
     continue-on-error: ${{ github.event_name == 'push' }}
     outputs:
-      result: ${{ steps.pin_result.outputs.result }}
+      result: ${{ steps.publication_result.outputs.result }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1303,14 +1321,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Verify the pinned upstream artifact
-        id: pin
+      - name: Resolve the current live web publication
+        id: publication
         run: |
-          pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
-          mode=$(jq -er '.mode' <<<"$pin")
-          source_commit=$(jq -er '.sourceCommit' <<<"$pin")
-          artifact_digest=$(jq -er '.artifactDigest' <<<"$pin")
-          [[ "$mode" == candidate || "$mode" == published ]]
+          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
+          mode=$(jq -er '.mode' <<<"$publication")
+          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
+          [[ "$mode" == published ]]
           [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
           [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
@@ -1320,37 +1338,37 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7.0.1
-        if: steps.pin.outputs.mode == 'published'
+        if: steps.publication.outputs.mode == 'published'
         with:
           repository: teagramhq/teagram-web
-          ref: ${{ steps.pin.outputs.source_commit }}
+          ref: ${{ steps.publication.outputs.source_commit }}
           path: teagram-web
           persist-credentials: false
 
       - uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
-        if: steps.pin.outputs.mode == 'published'
+        if: steps.publication.outputs.mode == 'published'
         with:
           version: 11.16.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        if: steps.pin.outputs.mode == 'published'
+        if: steps.publication.outputs.mode == 'published'
         with:
           node-version: 24.18.0
           cache: pnpm
           cache-dependency-path: teagram-web/pnpm-lock.yaml
 
-      - name: Rebuild and verify the pinned web artifact
-        if: steps.pin.outputs.mode == 'published'
+      - name: Rebuild and verify the current live web artifact
+        if: steps.publication.outputs.mode == 'published'
         working-directory: teagram-web
         env:
-          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.publication.outputs.artifact_digest }}
         run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
 
       - name: Package the verified demo web artifact
-        if: steps.pin.outputs.mode == 'published'
+        if: steps.publication.outputs.mode == 'published'
         env:
-          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
+          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
         run: |
           [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
@@ -1360,22 +1378,22 @@ jobs:
           printf '%s\n' "$archive_sha256" > "$archive.sha256"
 
       - name: Upload the verified demo web artifact
-        if: steps.pin.outputs.mode == 'published'
+        if: steps.publication.outputs.mode == 'published'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: demo-web-release-${{ steps.pin.outputs.source_commit }}
+          name: demo-web-release-${{ steps.publication.outputs.source_commit }}
           path: |
-            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz
-            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz.sha256
+            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz
+            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Expose the pin result to the demo publisher
+      - name: Expose the publication result to the demo publisher
         if: ${{ always() }}
-        id: pin_result
+        id: publication_result
         env:
-          PIN_JOB_STATUS: ${{ job.status }}
-        run: printf 'result=%s\n' "$PIN_JOB_STATUS" >> "$GITHUB_OUTPUT"
+          PUBLICATION_JOB_STATUS: ${{ job.status }}
+        run: printf 'result=%s\n' "$PUBLICATION_JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   check-k8s-manifests:
     name: "check: k8s-manifests"

@@ -33,9 +33,10 @@ func newListenerScopedServer(
 
 func newPublicWebSocketListener(cfg config.Config, listener net.Listener, handler mtproto.Handler, doc discovery.Document) *publicWebSocketListener {
 	return &publicWebSocketListener{
-		listener:       listener,
-		handler:        handler,
-		originPatterns: cfg.PublicWebSocketOriginPatterns,
-		discovery:      doc,
+		listener:            listener,
+		handler:             handler,
+		originPatterns:      cfg.PublicWebSocketOriginPatterns,
+		discovery:           doc,
+		trustCFConnectingIP: cfg.ClientAddrTrust == config.ClientAddrCFConnectingIP,
 	}
 }

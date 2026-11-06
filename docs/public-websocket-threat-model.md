@@ -48,23 +48,27 @@ a new username.
 
 ## Abuse limits and residual risk
 
-The production Compose configuration uses `TG_CLIENT_ADDR_TRUST=socket`. The
-authentication counters therefore use the address of the socket peer, not a
-forwarded HTTP header. With a host-local tunnel connection, public visitors
-may share one observed network bucket. This caps aggregate public RPC traffic
-but is not a per-visitor limit and may also throttle legitimate users together.
-The public listener's budgets are selected from the accepted listener; request
-headers cannot select or merge them with the tailnet budget. Do not trust
-`X-Forwarded-For` to change this; any client-address proxy mode requires an
-explicitly allowlisted, trusted proxy that supplies the supported PROXY-v2
-metadata.
+When `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` is enabled in the production Compose
+stack, Compose selects `TG_CLIENT_ADDR_TRUST=cf-connecting-ip`. The host
+publishes port 2446 only on `127.0.0.1`, and the Cloudflare Tunnel is the only
+intended ingress path. The public listener requires exactly one parseable
+`CF-Connecting-IP` value and uses it for RPC and pre-auth per-network limits;
+missing, repeated, comma-separated, or malformed values receive HTTP 400.
+`X-Forwarded-For` is ignored. The loopback publish prevents direct access from
+other network hosts, with the Tunnel as the intended external ingress. Host
+processes, Docker, the Cloudflare zone and tunnel administrators remain trusted
+boundaries.
 
-The 20-per-hour `account.checkUsername` budget shares this source-address
-behavior. With the host-local tunnel, all public visitors may contend for one
-bucket; 20 checks per hour is an aggregate ceiling, not a per-person allowance.
-The key is the existing listener-scoped IPv4 `/32` or IPv6 `/64` bucket, shared
-across unauthenticated auth keys; invalid and reserved-name probes consume it
-because charging precedes validation. The four-to-one ratio against
+The default TCP listener and tailnet WebSocket listener continue to use their
+socket peers. Public and tailnet RPC budgets remain listener-scoped; request
+headers cannot choose or merge the tailnet budget. For an L4 deployment, use
+`proxy-v2` with its explicit balancer allowlist instead.
+
+The 20-per-hour `account.checkUsername` budget uses the Cloudflare client IP
+for public WebSocket requests. Its key is the existing listener-scoped IPv4
+`/32` or IPv6 `/64` bucket, shared across unauthenticated auth keys; invalid
+and reserved-name probes consume it because charging precedes validation. The
+four-to-one ratio against
 `auth.signUp` is correction headroom, not a measured anonymity threshold. The
 limit slows broad probing from one network, but a small targeted list fits
 within a window and multiple networks can multiply it. Deployments relying on

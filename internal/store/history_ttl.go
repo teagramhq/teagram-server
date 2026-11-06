@@ -35,8 +35,9 @@ func historyTTLPeriodValue(period int) int32 {
 // SweepExpiredMessageCopies deletes one bounded batch of expired per-owner
 // copies through the existing pts and message-event path. Candidate IDs are
 // read without row locks so the transaction can acquire owner locks first; it
-// then rechecks and locks the rows before deleting. Stamps remain on the rows,
-// so a later process can continue the scan after a restart.
+// then rechecks the candidates, locks poll rows, message rows, and posting
+// buckets before deleting. Stamps remain on the rows, so a later process can
+// continue the scan after a restart.
 func (s *Store) SweepExpiredMessageCopies(ctx context.Context, batchSize int) (int, bool, error) {
 	limit, err := historyTTLSweepLimit(batchSize)
 	if err != nil {
@@ -82,6 +83,9 @@ func (s *Store) SweepExpiredMessageCopies(ctx context.Context, batchSize int) (i
 		refs[i] = messageCopyRef{ownerID: row.OwnerID, localID: row.LocalID}
 	}
 	if err = lockPollsForDeletedMessageCopies(ctx, qtx, refs); err != nil {
+		return 0, false, err
+	}
+	if err = lockMessageCopiesForSearchPostings(ctx, qtx, refs); err != nil {
 		return 0, false, err
 	}
 

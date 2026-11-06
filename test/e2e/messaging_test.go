@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -31,11 +32,18 @@ import (
 // --- per-phone code sink (two clients log in at once) ---
 
 type multiCodeSink struct {
-	mu    sync.Mutex
-	chans map[string]chan string
+	mu                  sync.Mutex
+	chans               map[string]chan string
+	internalAckFailures []string
+	successfulAckEvents chan []uint32
 }
 
-func newMultiCodeSink() *multiCodeSink { return &multiCodeSink{chans: map[string]chan string{}} }
+func newMultiCodeSink() *multiCodeSink {
+	return &multiCodeSink{
+		chans:               map[string]chan string{},
+		successfulAckEvents: make(chan []uint32, 32),
+	}
+}
 
 func (m *multiCodeSink) chFor(phone string) chan string {
 	m.mu.Lock()
@@ -63,16 +71,34 @@ func (m *multiCodeSink) WithAttrs([]slog.Attr) slog.Handler       { return m }
 func (m *multiCodeSink) WithGroup(string) slog.Handler            { return m }
 
 func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
-	var identity, code string
+	var identity, code, operation, errorName string
+	var rpcTypeIDs []uint32
 	r.Attrs(func(a slog.Attr) bool {
 		switch a.Key {
 		case "phone":
 			identity = a.Value.String()
 		case "code":
 			code = a.Value.String()
+		case "operation":
+			operation = a.Value.String()
+		case "error":
+			errorName = a.Value.String()
+		case "rpc_type_id", "rpc_type_ids":
+			rpcTypeIDs = appendRPCTypeIDs(rpcTypeIDs, a.Value)
 		}
 		return true
 	})
+	if r.Message == "server operation succeeded" && operation == "msgs_ack" && len(rpcTypeIDs) > 0 {
+		select {
+		case m.successfulAckEvents <- append([]uint32(nil), rpcTypeIDs...):
+		default:
+		}
+	}
+	if r.Message == "server operation failed" && operation == "msgs_ack" && errorName == "internal" {
+		m.mu.Lock()
+		m.internalAckFailures = append(m.internalAckFailures, "msgs_ack error=internal")
+		m.mu.Unlock()
+	}
 	if identity != "" && code != "" {
 		keys := []string{identity}
 		if phone, ok := smokePhoneForUsername(identity); ok {
@@ -86,6 +112,70 @@ func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 	return nil
+}
+
+func appendRPCTypeIDs(dst []uint32, value slog.Value) []uint32 {
+	appendID := func(id uint64) []uint32 {
+		if id > uint64(^uint32(0)) {
+			return dst
+		}
+		return append(dst, uint32(id))
+	}
+	switch value.Kind() {
+	case slog.KindUint64:
+		return appendID(value.Uint64())
+	case slog.KindAny:
+		switch ids := value.Any().(type) {
+		case uint32:
+			return append(dst, ids)
+		case uint64:
+			return appendID(ids)
+		case []uint32:
+			return append(dst, ids...)
+		}
+	}
+	return dst
+}
+
+func (m *multiCodeSink) internalAckFailureRecords() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.internalAckFailures...)
+}
+
+func (m *multiCodeSink) drainSuccessfulAckEvents() {
+	for {
+		select {
+		case <-m.successfulAckEvents:
+		default:
+			return
+		}
+	}
+}
+
+func (m *multiCodeSink) waitForSuccessfulAck(ctx context.Context, targetRPCTypeIDs ...uint32) error {
+	if len(targetRPCTypeIDs) == 0 {
+		return errors.New("wait for successful msgs_ack requires target RPC constructor IDs")
+	}
+	for {
+		select {
+		case rpcTypeIDs := <-m.successfulAckEvents:
+			if hasMatchingRPCTypeID(rpcTypeIDs, targetRPCTypeIDs) {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func hasMatchingRPCTypeID(actual, target []uint32) bool {
+	for _, actualID := range actual {
+		if slices.Contains(target, actualID) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- client-side update collector ---

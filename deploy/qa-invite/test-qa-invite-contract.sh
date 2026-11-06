@@ -6,12 +6,19 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 COMPOSE=$SCRIPT_DIR/compose.yaml
 WORKFLOW=$REPO_ROOT/.github/workflows/deploy-qa-invite.yml
+BROWSER_WORKFLOW=$REPO_ROOT/.github/workflows/real-client-browser-flow.yml
 FORCED_COMMAND=$REPO_ROOT/deploy/teagram-demo/forced-command.sh
 WRITER=$SCRIPT_DIR/qa-account-writer.sh
 REMOTE=$SCRIPT_DIR/remote.sh
 INSTALLER=$REPO_ROOT/deploy/teagram-demo/ops/install-qa-invite-command.sh
 ROLLBACK_TEST=$SCRIPT_DIR/test-qa-invite-rollback.sh
 ROLLBACK=$SCRIPT_DIR/rollback.sh
+TLS_HELPER=$SCRIPT_DIR/tls.sh
+TLS_TEST=$SCRIPT_DIR/test-qa-invite-tls.sh
+NGINX=$SCRIPT_DIR/nginx.conf
+QA_BROWSER_FLOW=$SCRIPT_DIR/test-qa-invite-browser-flow.sh
+QA_BROWSER_RUNNER=$SCRIPT_DIR/test-qa-invite-browser-flow.cjs
+LIVE_SNAPSHOT=$SCRIPT_DIR/testdata/live-state.json
 CONTRACT_TMP=$(mktemp -d)
 trap 'rm -rf -- "$CONTRACT_TMP"' EXIT
 
@@ -20,11 +27,20 @@ fail() {
   exit 1
 }
 
-for path in "$COMPOSE" "$WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST"; do
+for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular file: $path"
 done
 
-bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" || fail 'shell syntax failed'
+bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$QA_BROWSER_FLOW" || fail 'shell syntax failed'
+node --check "$QA_BROWSER_RUNNER" || fail 'QA browser runner syntax failed'
+grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
+grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
+grep -Fq "certutil -d \"sql:\$TEST_HOME/.pki/nssdb\" -A -t 'C,,'" "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not trust the test CA in Chromium'
+! grep -Eq 'ignoreHTTPSErrors|ignore-certificate-errors|--insecure' "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" || fail 'QA browser smoke bypasses TLS verification'
+grep -Fq 'attempt <= 3' "$QA_BROWSER_RUNNER" || fail 'QA Web browser smoke does not repeat sign-in three times'
+if ! grep -Fq 'HTTP/[0-9.]+' "$QA_BROWSER_FLOW" || ! grep -Fq ' 101(' "$QA_BROWSER_FLOW"; then
+  fail 'QA browser smoke does not assert accepted WebSocket upgrades'
+fi
 
 [[ $(grep -c '^[[:space:]]*ports:' "$COMPOSE") -eq 1 ]] || fail 'Compose must publish exactly one service port'
 grep -Fq 'TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70' "$SCRIPT_DIR/.env.example" || fail 'Compose bind is not private to the demo LXC address'
@@ -37,6 +53,7 @@ grep -Fq 'TG_REGISTRATION: invite' "$COMPOSE" || fail 'raw MTProto registration 
 grep -Fq 'TG_USER_INVITE_QUOTA: "5"' "$COMPOSE" || fail 'invite quota must be five'
 grep -Fq 'TG_USER_INVITE_MIN_ACCOUNT_AGE: 0' "$COMPOSE" || fail 'new operator accounts must be allowed to issue invites'
 grep -Fq 'TG_PUBLIC_REGISTRATION: invite' "$COMPOSE" || fail 'WebSocket registration must use invite mode'
+grep -Fq 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://teagram-demo.incus' "$COMPOSE" || fail 'QA Web origin is not allowed for API WebSockets'
 grep -Fq 'TG_TURNSTILE_SIGNIN_ENABLED: "false"' "$COMPOSE" || fail 'Turnstile must be disabled and reported absent'
 grep -Fq 'TEAGRAM_QA_INVITE_IMAGE_REF' "$COMPOSE" || fail 'server image must be selected by immutable digest'
 grep -Fq 'RELEASES_DIR=$STATE_DIR/releases' "$FORCED_COMMAND" || fail 'reviewed Compose snapshots must be retained under QA state'
@@ -57,10 +74,41 @@ ENV
 docker compose --project-name teagram-qa-invite --project-directory "$test_project_dir" \
   --env-file "$CONTRACT_TMP/qa-invite.env" --file "$COMPOSE" config --format json > "$CONTRACT_TMP/compose.json" ||
   fail 'could not render QA Compose bind sources'
+jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/teagram-demo/public-client \
+  --slurpfile live "$LIVE_SNAPSHOT" '
+  . as $config
+  | $live[0] as $snapshot
+  | ($config.name == $snapshot.projectName)
+    and all($snapshot.activeServices[]; $config.services[.] != null)
+    and $config.services.haproxy.ports[0].host_ip == $snapshot.bindAddress
+    and ($config.services.haproxy.ports[0].published | tonumber) == $snapshot.bindPort
+    and $config.services.teagramd.environment.TG_REGISTRATION == $snapshot.registrationMode
+    and ($config.services.teagramd.environment.TG_USER_INVITE_QUOTA | tonumber) == $snapshot.inviteQuota
+    and ($config.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == ($snapshot.turnstileEnabled | tostring))
+    and (($config.volumes | [to_entries[].value.name] | sort) == ($snapshot.persistentVolumeNames | sort))
+    and ($snapshot.publicDemo == "separate-compose-project")
+    and (
+      [$config.services[] | .volumes[]? | select(.type == "bind")] as $binds
+      | ($binds | length == 7)
+        and all($binds[]; (.source | startswith($state + "/") or . == $web_source))
+        and any($binds[]; .source == $web_source and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only == true)
+        and any($binds[]; .source == ($state + "/tls/identity/public") and .target == "/run/qa-invite/tls" and .read_only == true)
+        and any($binds[]; .source == ($state + "/client") and .target == "/run/qa-invite/client" and .read_only == true)
+        and all($binds[]; .source != ($state + "/tls"))
+    )
+    and all(
+      [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
+      startswith($state + "/") or . == $web_source
+    )
+    and all(
+      [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
+      startswith("/tmp/") | not
+    )
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'rendered QA Compose differs from the sanitized live target snapshot or escapes its isolated state'
 jq -e --arg state "$test_state_dir" '
   [.services[] | .volumes[]? | select(.type == "bind") | .source] as $sources
-  | ($sources | length == 5)
-    and all($sources[]; startswith($state + "/") and (startswith("/tmp/") | not))
+  | ($sources | length == 7)
+    and all($sources[]; (startswith($state + "/") or . == "/opt/teagram-demo/.state/teagram-demo/public-client") and (startswith("/tmp/") | not))
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'a QA bind source is missing, outside persistent state, or under /tmp'
 jq -e '
   . as $config
@@ -72,6 +120,19 @@ jq -e '
     ] | length > 0)
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'published QA service must join a non-internal network while backend stays internal'
 grep -Fq 'compose down --remove-orphans' "$REMOTE" || fail 'down must remove only QA project containers'
+grep -Fq 'openssl verify -CAfile "$ca_cert" -purpose sslserver -verify_hostname "$HOST_NAME" "$cert"' "$TLS_HELPER" || fail 'QA server certificate chain and DNS name are not checked'
+grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/tls.sh"' "$REMOTE" || fail 'QA TLS identity helper is not loaded'
+grep -Fq '|| ! reload_qa_tls || ! probe_endpoint' "$REMOTE" || fail 'TLS certificates are not reloaded and checked'
+grep -Fq 'curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt"' "$REMOTE" || fail 'QA endpoint probes do not validate the private CA chain'
+! grep -Fq -- '--insecure' "$REMOTE" || fail 'QA endpoint probes must not skip TLS verification'
+grep -Fq 'tls_ca_sha256=%s' "$REMOTE" || fail 'deployment summary does not report the QA root fingerprint'
+grep -Fq 'TLS CA certificate for the one-time QA trust setup' "$REMOTE" || fail 'deployment summary does not publish the public QA root certificate'
+grep -Fq 'root /usr/share/nginx/html/.well-known/teagramd/web/current;' "$NGINX" || fail 'QA Web root does not serve the verified web artifact'
+grep -Fq 'alias /run/qa-invite/client/teagram-config.json;' "$NGINX" || fail 'QA Web client config is missing'
+grep -Fq 'alias /run/qa-invite/tls/ca.crt;' "$NGINX" || fail 'QA root certificate endpoint is missing'
+grep -Fq 'proxy_read_timeout 1h;' "$NGINX" || fail 'QA API WebSockets have a shorter idle timeout than the public edge'
+grep -Fq 'proxy_buffering off;' "$NGINX" || fail 'QA API WebSocket proxy buffering is enabled'
+! grep -Fq 'SSL_CERT_FILE=' "$SCRIPT_DIR/README.md" || fail 'smoke instructions must use normal system trust'
 grep -Fq -- '--project-directory "$REPO_ROOT/deploy/qa-invite"' "$REMOTE" || fail 'Compose must resolve bind sources from the persistent release'
 grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/rollback.sh"' "$REMOTE" || fail 'up rollback helper is not loaded'
 grep -Fq 'compose down --remove-orphans' "$ROLLBACK" || fail 'rollback must stop QA project containers'

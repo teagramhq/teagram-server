@@ -283,6 +283,14 @@ case "$1" in
         echo 'fixture Compose render failure' >&2
         exit 42
       fi
+      # Compose omits services whose profiles are inactive from config output.
+      if [[ " $* " != *' --profile migration config --format json'* ]]; then
+        jq -cn --arg key "$FIXTURE_KEY_DIR" \
+          '{services:{teagramd:{image:"teagramd:local",
+            environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys"},
+            volumes:[{source:$key,target:"/run/teagramd/media-keys",read_only:true}]}}}'
+        exit
+      fi
       jq -cn --arg key "$FIXTURE_KEY_DIR" --arg evidence "$FIXTURE_EVIDENCE" \
         --arg scenario "$FIXTURE_SCENARIO" \
         --arg state "$FIXTURE_REPO/.state/blob-mode" '
@@ -476,6 +484,12 @@ run_cleanup() {
   printf '%s\n' "$output"
 }
 
+assert_hash_mismatch() {
+  local invariant=$1
+  grep -Eq "preflight mismatch invariant=${invariant} expected_sha256=[0-9a-f]{64} actual_sha256=[0-9a-f]{64}" \
+    <<< "$output"
+}
+
 setup_case backup-failure s3-accepted
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
@@ -592,15 +606,19 @@ setup_case compose-mount-failure s3-accepted
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Compose migration or media-key mount failed reviewed preflight'* ]]
+assert_hash_mismatch migration_media_key_mount
+[[ "$output" != *'/unexpected/media-keys'* && "$output" != *"$FIXTURE_KEY_DIR"* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
-printf '%s\n' 'PASS Compose media-key mount drift rejects before stopping teagramd'
+printf '%s\n' 'PASS Compose media-key mount drift reports only invariant hashes before stopping teagramd'
 
 setup_case key-backup-mismatch s3-accepted
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'host-local media key backup differs from the mounted key'* ]]
+assert_hash_mismatch media_key_backup_matches_mounted_key
+[[ "$output" != *'different fixture backup'* && "$output" != *"$(printf '%064d' 0)"* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
-printf '%s\n' 'PASS mismatched media-key backup rejects before stopping teagramd'
+printf '%s\n' 'PASS mismatched media-key backup reports only key hashes before stopping teagramd'
 
 setup_case compose-render-failure s3-accepted
 output=$(run_encrypt)

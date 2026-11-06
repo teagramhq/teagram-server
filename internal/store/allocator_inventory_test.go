@@ -239,6 +239,16 @@ func allocatorInventory() []allocatorFact {
 			noReuse: "monotone non-cycling sequence",
 		},
 		{
+			// The report id is rendered into an admin dismissal form and can be
+			// submitted to any server replica; it is not a Telegram wire id.
+			name: "public.user_sticker_set_reports.id", sequence: "public.user_sticker_set_reports_id_seq",
+			table: "user_sticker_set_reports", column: "id",
+			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
+			colType: "bigint", widthBits: 64, class: classCrossReplica,
+			guard: guardSequenceCeiling, wire: "",
+			noReuse: "monotone non-cycling sequence",
+		},
+		{
 			name: "public.language_catalog_publication_audit.id", sequence: "public.language_catalog_publication_audit_id_seq",
 			table: "language_catalog_publication_audit", column: "id",
 			kind: kindSequenceDefault, owned: true, columnDefault: defaultNextval,
@@ -932,7 +942,7 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 		},
 		classCrossReplica: {
 			"public.messages.fanout_id", "public.chat_admin_events.id",
-			"public.browser_acceptance_binding_evidence.epoch",
+			"public.browser_acceptance_binding_evidence.epoch", "public.user_sticker_set_reports.id",
 		},
 		classInternalOnly: {
 			"public.phone_codes.id", "public.registration_invites.id",

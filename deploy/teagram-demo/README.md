@@ -78,8 +78,10 @@ catalogue packs remain available to install and send.
 secret to `/var/lib/teagram-demo/secrets/turnstile-secret-key`. The merged demo
 setup and deploy scripts provision a separate random QA bypass token at
 `/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token`; neither token is
-printed. Both files are root-owned, group-readable only by runtime gid 65532,
-and mounted only into teagramd. The demo sets
+printed. Both files are root-owned and group-readable only by runtime gid
+65532. The Siteverify secret is mounted only into teagramd. The QA bypass is
+mounted into teagramd and the isolated `demo-probe` service for the deploy-time
+signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 `TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
@@ -237,7 +239,7 @@ not require a second person to approve a run ([environment protection rules](htt
 The workflow rejects a direct run whose ref is not `main`, then requires its
 commit to equal the current `main` SHA and finds a successful push `CI` run for
 that exact SHA. It takes the image digest from that run and only publishes the
-pinned web artifact after its source and content checks pass. The workflow
+current live web artifact after its source and content checks pass. The workflow
 token has read-only repository and Actions permissions. The `demo` environment
 holds the Tailscale OAuth credentials and dedicated deploy key; a deployment
 also requires `TEAGRAM_DEMO_DEPLOY_ENABLED=true`. The SSH key is restricted to
@@ -273,28 +275,34 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 then separately accepts a bounded web archive tied to the current demo
 checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
 server deploys. `Deploy demo.` downloads the server digest from the successful
-server CI run named by the handoff artifact. `web-artifact-pin.json` first
-records teagram-web PR #121's head, successful validation run, and artifact
-digest reported by that run's log; this candidate pin is never deployed. After
-#121 merges, the pin changes to the green `master` publication. The
-read-only deploy preflight then requires the pin to match the public web
-manifest and a successful, checksum-named publication artifact. The
-secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned
-source, then uploads its archive and SHA-256 sidecar with that successful
-server CI run. The credentialed deploy job downloads the archive from that
-exact run and verifies its checksum; it does not check out teagram-web or run
-its dependency code. The forced command requires the release identity to match
-the checked-in published pin, and the LXC recomputes the published artifact's
-content digest before activation. The LXC never installs Node or builds the
-web app. The web source commit and artifact digest are stored in
-`.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
-server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
-only the supplied server digest and checks both its repository digest and
-revision label before touching the database. It revalidates the blob authority and
-running containers, then takes and validates a root-only PostgreSQL dump while
-the existing server and public edge keep running. It applies migrations while
-the old server remains live, starts the candidate in the inactive slot,
-verifies seeded API reads and both HAProxy listener checks, then sends new
+server CI run named by the handoff artifact. The read-only web resolver reads
+the current `mtproto-target.json`, validates its full source SHA and artifact
+digest, then requires a successful `master` publication run and an available
+matching artifact from `.github/workflows/private-artifact.yml`. It reads the
+manifest again after those checks and fails if the live identity changed during
+resolution. There is no checked-in web pin or cross-repository write credential.
+All resolver requests, including redirects, require HTTPS to `api.github.com`
+or `web.teagram.io`; JSON responses are limited to 1 MiB.
+At deployment time a separate secret-free job resolves the live publication,
+checks out its source, and rebuilds it with `build-web-artifact.sh`, which
+requires the result to reproduce the published digest. It uploads the archive
+and SHA-256 sidecar to the current demo deploy run, so a publication after the
+server CI run can still be deployed. The credentialed deploy job downloads
+that archive, verifies its checksum and streams it to the LXC. If the live
+identity changes during the rollout, the web deployment fails closed. The
+forced command checks the release identity against the current live publication,
+fetches the reviewed target and public key at its source commit, verifies the
+key hash and Telegram fingerprint, and requires the staged manifest's endpoint
+and fingerprint to match. The LXC recomputes the artifact content digest before
+activation. It never installs Node or builds the web app. The web source commit
+and artifact digest are stored in `.state/teagram-demo/active-release.json`. A PR workflow
+cannot influence the server image digest by overwriting the package's SHA tag.
+`deploy-main.sh` pulls only the supplied server digest and checks both its
+repository digest and revision label before touching the database. It revalidates
+the blob authority and running containers, then takes and validates a root-only
+PostgreSQL dump while the existing server and public edge keep running. It
+applies migrations while the old server remains live, starts the candidate in the
+inactive slot, verifies seeded API reads and both HAProxy listener checks, then sends new
 sessions to the candidate and drains the old server before stopping it.
 The active slot and image digest are persisted atomically so a host or proxy
 restart recreates the same release. WebSocket sessions already connected to
@@ -309,6 +317,22 @@ file inode. A config-only change is syntax-checked and applied with Nginx's
 graceful reload; the edge container is not recreated, and old workers drain
 existing requests and WebSockets. `nginx.conf` remains an identical compatibility
 copy for already-installed demo ops wrappers that fingerprint that path.
+
+The root-owned `.state/teagram-demo/web-publication.json` records the installed
+publication run and a high-water mark. On first use, the existing release is
+resolved against its successful upstream publication before a baseline is saved;
+if that evidence is unavailable, deployment fails closed. A verified newer run
+reserves its watermark before activation, including when activation later fails.
+The adjacent `web-publication.json.guard` prevents a missing state file from
+silently resetting the watermark; preserve both files together in backups.
+The same installed run is a no-op, while an older run is rejected. To roll back,
+first make the desired older publication live upstream, then dispatch `Deploy demo.`
+on `main` with an issue key and `web_rollback_run_id` set to that publication's
+exact upstream run ID. The host independently
+verifies that this is an in-progress, explicitly marked manual dispatch whose
+main-ref and issue validation succeeded; ordinary automatic deploys cannot request
+rollback. A failed activation restores the previous web link and keeps the
+watermark, so an interrupted newer publication can be retried safely.
 
 The first deploy that changes the existing single-file mount to this directory
 layout recreates the only edge container once. That migration briefly interrupts
@@ -368,6 +392,43 @@ signin challenge, run `ssh -T teagram-demo 'run <main-sha> turnstile-signin-off'
 to restore it, use `turnstile-signin-on`. If a deployment fails, the script
 restores the prior `.env` snapshot and redeploys that flag state. It never prints
 Turnstile key values.
+
+The reviewed rotate-turnstile-qa-bypass-token operation snapshots the old
+token under the root-only /var/backups/teagram-demo-turnstile-qa-bypass
+directory, atomically installs a new random token with the existing runtime
+ownership and mode, then recreates the active server slot with the current
+pinned image. This briefly interrupts the public demo. If the new server does
+not become healthy, the operation stops it. If container stop commands fail,
+it tries a forced stop, then drains the slot from HAProxy and shuts down
+existing sessions in both public backends. The old container can retain the old
+token because its bind mount may pin the prior file inode. If stop, drain or
+session shutdown cannot be confirmed, the operation reports that the old token
+may still be live and leaves the compromised token snapshot untouched. Rerun
+the reviewed operation to generate another fresh token; never restore the
+snapshot, because the old value is compromised.
+On a rerun, it accepts healthy HAProxy checks in `UP` or `DRAIN` state and only
+enables the active slot after both checks pass. The operation prints only the
+snapshot path, token length, active slot and HAProxy readiness.
+Run it with ssh -T teagram-demo 'run <main-sha> rotate-turnstile-qa-bypass-token'.
+
+After rotation, an authorized workspace admin must copy the new value into
+QA's existing audited custom_env entry without printing it. QA should read
+TEAGRAM_DEMO_TURNSTILE_QA_BYPASS_TOKEN inside its Playwright Node process and
+pass it directly to page.evaluate for localStorage setup. Do not expand it in
+a shell command, echo it, list the process environment or log it.
+
+### QA bypass token threat model
+
+The token bypasses Turnstile for demo signup, so anyone who obtains it can
+create demo accounts without that challenge. Treat the active token and its
+root-only recovery snapshot as secrets. Demo host root can read both; the
+server and isolated probe services can read the mounted token as gid 65532. An
+authorized workspace admin transfers the new value into QA's audited custom_env
+entry, where the QA runtime is an intentional consumer. Keep it out of shell
+history and snapshots, CI output, logs and comments; QA reads it only from
+`process.env` and must not log it. The secret mount and runtime variable are
+demo-only; production has no bypass-token mount or configured token. Never
+restore the old snapshot because the old value is compromised.
 
 After enabling public signin, verify signin and signup challenges from the
 public web origin with

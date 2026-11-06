@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 
 const SCENARIOS = 'sign-in,first-message,message,group,channel,poll';
+const GUEST_SIGNUP_SCENARIOS = 'guest-signup';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const EVENT_TIMEOUTS = {serverReady: 8 * 60_000, artifactReady: 3 * 60_000};
 const TOTAL_BUDGET_MS = 12 * 60_000;
@@ -242,7 +243,9 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath}) {
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass}) {
+  const scenarios = guestSignupOnly ? (guestSignupGateOff ?
+    (guestSignupQaBypass ? 'guest-signup-gate-off-qa-bypass' : 'guest-signup-gate-off') : GUEST_SIGNUP_SCENARIOS) : SCENARIOS;
   const result = {
     status,
     runId,
@@ -250,7 +253,7 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
     webRevision,
     pullRequestHead: headRevision,
     testedRevision,
-    scenarios: SCENARIOS.split(','),
+    scenarios: scenarios.split(','),
     elapsedMs,
     fixtureCleanup: cleanupVerified ? 'verified' : 'failed',
     traceArtifact: traceReady ? 'uploaded on this workflow run' : 'not produced'
@@ -276,7 +279,7 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
       `Web revision: \`${webRevision}\``,
       `Pull request head: \`${headRevision}\``,
       `Tested revision: \`${testedRevision}\``,
-      `Scenarios: \`${SCENARIOS}\``,
+      `Scenarios: \`${scenarios}\``,
       `Elapsed through fixture cleanup: **${formatDuration(elapsedMs)}**`,
       `Fixture cleanup: **${cleanupVerified ? 'verified' : 'failed'}**`,
       traceReady ? `Playwright trace artifact: [open workflow artifacts](${artifactLink})` : 'Playwright trace artifact: not produced',
@@ -288,6 +291,27 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
 
 async function main() {
   const startedAt = Date.now();
+  const guestSignupOnlyValue = process.env.REAL_CLIENT_GUEST_SIGNUP_ONLY || '0';
+  if(guestSignupOnlyValue !== '0' && guestSignupOnlyValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_ONLY must be 0 or 1');
+  }
+  const guestSignupGateOffValue = process.env.REAL_CLIENT_GUEST_SIGNUP_GATE_OFF || '0';
+  if(guestSignupGateOffValue !== '0' && guestSignupGateOffValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF must be 0 or 1');
+  }
+  const guestSignupOnly = guestSignupOnlyValue === '1';
+  const guestSignupGateOff = guestSignupGateOffValue === '1';
+  const guestSignupQaBypassValue = process.env.REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS || '0';
+  if(guestSignupQaBypassValue !== '0' && guestSignupQaBypassValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS must be 0 or 1');
+  }
+  const guestSignupQaBypass = guestSignupQaBypassValue === '1';
+  if(guestSignupGateOff && !guestSignupOnly) {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF requires REAL_CLIENT_GUEST_SIGNUP_ONLY=1');
+  }
+  if(guestSignupQaBypass && (!guestSignupOnly || !guestSignupGateOff)) {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS requires gate-off guest signup mode');
+  }
   const serverRevision = requiredRevision('REAL_CLIENT_SERVER_REVISION');
   const webRevision = requiredRevision('REAL_CLIENT_WEB_REVISION');
   const headRevision = requiredRevision('REAL_CLIENT_PR_HEAD');
@@ -295,6 +319,7 @@ async function main() {
   const serverRoot = resolve(process.env.REAL_CLIENT_SERVER_ROOT || process.cwd());
   const webRoot = resolve(process.env.REAL_CLIENT_WEB_ROOT || process.cwd());
   const runId = randomBytes(16).toString('hex');
+  const guestSignupQaBypassToken = guestSignupQaBypass ? randomBytes(32).toString('hex') : undefined;
   const runTemp = createDirectory('/dev/shm', 'real-client-run-');
   const artifactParent = createDirectory(process.env.RUNNER_TEMP || tmpdir(), 'real-client-artifact-');
   const traceDirectory = join(process.env.RUNNER_TEMP || tmpdir(), `real-client-traces-${runId}`);
@@ -320,8 +345,11 @@ async function main() {
     fixtureProcess = spawnTracked('bash', [fixtureScript,
       '--server-revision', serverRevision,
       '--web-revision', webRevision,
-      '--run-id', runId
-    ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe']});
+      '--run-id', runId,
+      ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : [])
+    ], {cwd: serverRoot, env: cleanEnvironment(guestSignupQaBypassToken ? {
+      REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken
+    } : {}), stdio: ['pipe', 'pipe', 'pipe']});
     fixtureStarted = true;
     const output = createInterface({input: fixtureProcess.stdout});
     output.on('line', receiveFixtureEvent);
@@ -385,7 +413,10 @@ async function main() {
     artifactAttached = true;
 
     runStage = 'browser-scenarios';
-    const runnerEnvironment = cleanEnvironment({REAL_CLIENT_TRACE_DIR: traceDirectory});
+    const runnerEnvironment = cleanEnvironment({
+      REAL_CLIENT_TRACE_DIR: traceDirectory,
+      ...(guestSignupQaBypassToken ? {REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken} : {})
+    });
     let runnerError;
     try {
       await runCommand('corepack', ['pnpm', 'run', 'test:real-client', '--',
@@ -394,7 +425,7 @@ async function main() {
         '--server-revision', serverRevision,
         '--web-revision', webRevision,
         '--run-id', runId,
-        '--scenarios', SCENARIOS
+        ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : ['--scenarios', SCENARIOS])
       ], {
         cwd: webRoot,
         env: runnerEnvironment,
@@ -439,7 +470,7 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath});
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
       status = 'failed';

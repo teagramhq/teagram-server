@@ -333,15 +333,16 @@ const (
 
 type registrationTestTurnstileVerifier struct{}
 
-func (registrationTestTurnstileVerifier) Verify(_ context.Context, token, action, _ string) error {
-	switch {
-	case action == "signin" && token == registrationSignInToken:
-		return nil
-	case action == "signup" && token == registrationSignUpToken:
-		return nil
-	default:
-		return fmt.Errorf("unexpected Turnstile action %q or token", action)
+func (registrationTestTurnstileVerifier) Verify(_ context.Context, token string, allowedActions []string, _ string) (string, error) {
+	for _, action := range allowedActions {
+		switch {
+		case action == "signin" && token == registrationSignInToken:
+			return action, nil
+		case action == "signup" && token == registrationSignUpToken:
+			return action, nil
+		}
 	}
+	return "", fmt.Errorf("unexpected Turnstile actions %q or token", allowedActions)
 }
 
 func sendCodeWithTurnstile(ctx context.Context, client *telegram.Client, request *tg.AuthSendCodeRequest, token string) (tg.AuthSentCodeClass, error) {

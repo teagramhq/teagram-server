@@ -17,13 +17,24 @@ import (
 // deadline. Without this, the first e2e run on a fresh machine can exceed the
 // per-test timeout while the container boots.
 func TestMain(m *testing.M) {
-	if !fixtureAuthProgressFocusedRun(os.Args) && !runningServerStickerBundleFocusedRun(os.Args) {
+	runFocusedWithoutPostgres := fixtureAuthProgressFocusedRun(os.Args) ||
+		runningServerStickerBundleFocusedRun(os.Args) || multiCodeSinkAckFocusedRun(os.Args)
+	if !runFocusedWithoutPostgres {
 		if err := pgtest.Prewarm(); err != nil {
 			fmt.Fprintf(os.Stderr, "pgtest prewarm: %v\n", err)
 			os.Exit(1)
 		}
 	}
 	os.Exit(m.Run())
+}
+
+func multiCodeSinkAckFocusedRun(args []string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-test.run=") && strings.HasPrefix(strings.TrimPrefix(arg, "-test.run="), "^TestMultiCodeSinkWaitForSuccessfulAck") {
+			return true
+		}
+	}
+	return false
 }
 
 func runningServerStickerBundleFocusedRun(args []string) bool {

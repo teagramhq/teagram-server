@@ -162,6 +162,7 @@ func (s *Store) ChatInfoForMemberSnapshot(ctx context.Context, viewerID int64, c
 	for _, row := range reactionRows {
 		snapshot.AvailableReactions[row.ChatID] = ChatAvailableReactions{
 			Mode: row.Mode, Emoticons: row.Reactions,
+			AllowCustom: row.AllowCustom, CustomEmojiIDs: row.CustomEmojiIds,
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -74,10 +75,11 @@ func deliverWithBotAPINotify(ctx context.Context, notifier botUpdateNotifier, de
 }
 
 type publicWebSocketListener struct {
-	listener       net.Listener
-	handler        mtproto.Handler
-	originPatterns []string
-	discovery      discovery.Document
+	listener            net.Listener
+	handler             mtproto.Handler
+	originPatterns      []string
+	discovery           discovery.Document
+	trustCFConnectingIP bool
 }
 
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
@@ -355,6 +357,7 @@ func readAdminPassword(stdin io.Reader) ([]byte, error) {
 
 func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr io.Writer) (err error) {
 	var channelSummaryID int64
+	var messageSearchPostingsBatchSize int
 	if len(args) == 0 {
 		return maintenanceUsageError()
 	}
@@ -374,6 +377,14 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		if err != nil || channelSummaryID <= 0 {
 			return maintenanceUsageError()
 		}
+	case "initialize-message-search-postings":
+		flagSet := flag.NewFlagSet("initialize-message-search-postings", flag.ContinueOnError)
+		flagSet.SetOutput(io.Discard)
+		batchSize := flagSet.Int("batch-size", 100, "messages per dialog transaction (1-1000)")
+		if err := flagSet.Parse(args[1:]); err != nil || flagSet.NArg() != 0 || *batchSize < 1 || *batchSize > store.MessageSearchPostingsInitializationMaxBatchSize {
+			return maintenanceUsageError()
+		}
+		messageSearchPostingsBatchSize = *batchSize
 	default:
 		return maintenanceUsageError()
 	}
@@ -386,14 +397,17 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	// Maintenance commands deliberately do not validate TG_REGISTRATION or
 	// initialize any of the server's listeners, keys, blob backends, or sweeps.
 	ctx := context.Background()
-	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
+	storeOptions := []store.Option{
 		store.WithLogger(log),
 		store.WithPoolConfig(cfg.PostgresPool),
-		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithSessionIP(cfg.SessionIP),
 		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
-	)
+	}
+	if messageSearchPostingsBatchSize == 0 {
+		storeOptions = append(storeOptions, store.WithStatementTimeout(cfg.StatementTimeout))
+	}
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, storeOptions...)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -412,6 +426,16 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		}
 		return nil
 	}
+	if messageSearchPostingsBatchSize > 0 {
+		initialized, err := st.InitializeMessageSearchPostings(ctx, messageSearchPostingsBatchSize)
+		if err != nil {
+			return fmt.Errorf("initialize message search postings: %w", err)
+		}
+		if _, err := fmt.Fprintf(stderr, "Message search postings initialized: %d dialogs\n", initialized); err != nil {
+			return fmt.Errorf("write message search postings confirmation: %w", err)
+		}
+		return nil
+	}
 	if err := st.AssignOperatorServerAdministrator(ctx); err != nil {
 		return fmt.Errorf("assign operator server administrator: %w", err)
 	}
@@ -422,7 +446,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 }
 
 func maintenanceUsageError() error {
-	return errors.New("usage: teagramd maintenance assign-operator | initialize-channel-post-summaries --channel-id <positive-id>")
+	return errors.New("usage: teagramd maintenance assign-operator | initialize-channel-post-summaries --channel-id <positive-id> | initialize-message-search-postings [--batch-size <1-1000>]")
 }
 
 func writeClientConfigUsage(w io.Writer) error {
@@ -963,6 +987,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredAdminSessions(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredUserStickerSetReports(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		sweepExpiredSRPChallenges(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
@@ -1328,6 +1355,11 @@ func trustClientAddr(server *mtproto.Server, cfg config.Config, log *slog.Logger
 			"trust", string(cfg.ClientAddrTrust),
 			"balancers", cfg.ClientAddrProxies)
 		server.TrustProxyV2Headers(cfg.ClientAddrProxies)
+		return nil
+	case config.ClientAddrCFConnectingIP:
+		log.Info("public WebSocket client addresses are read from CF-Connecting-IP",
+			"trust", string(cfg.ClientAddrTrust),
+			"other_listeners", "socket")
 		return nil
 	default:
 		return fmt.Errorf("unsupported client address trust mode %q", cfg.ClientAddrTrust)
@@ -1823,6 +1855,26 @@ func sweepExpiredAdminSessions(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired admin sessions", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredUserStickerSetReports purges dismissed or actioned reports after
+// their 180-day retention window. The store deletes in bounded batches.
+func sweepExpiredUserStickerSetReports(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := st.SweepExpiredUserStickerSetReports(ctx)
+			if err != nil {
+				log.Error("sweep expired user sticker-set reports", "deleted", deleted, "err", err)
+				continue
+			}
+			log.Info("swept expired user sticker-set reports", "deleted", deleted)
 		}
 	}
 }
