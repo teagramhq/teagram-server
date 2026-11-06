@@ -336,9 +336,6 @@ services:
       TG_PUBLIC_REGISTRATION: ${TG_PUBLIC_REGISTRATION:-closed}
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
       TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
-      # The sidecar publishes this loopback-only application listener on the
-      # host's tailnet address.
-      TG_BOT_API_LISTEN_ADDR: ${TG_BOT_API_LISTEN_ADDR:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       # Keep the Compose deployment count aligned across the legacy listener
       # and any explicitly enabled replacement replicas. The default remains
@@ -376,9 +373,6 @@ services:
       - "127.0.0.1:2443:2443"
       # The public WebSocket listener is reached through the host-side tunnel.
       - "127.0.0.1:2446:2446"
-      # The sidecar forwards only Bot API traffic. Its host port is loopback by
-      # default and changes to the tailnet IP through the named env path.
-      - "${TEAGRAM_BOT_API_HOST_IP:-127.0.0.1}:2447:2448"
     # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
@@ -415,31 +409,6 @@ services:
         condition: service_completed_successfully
       rustfs-init:
         condition: service_completed_successfully
-
-  bot-api-forwarder:
-    image: teagramd:local
-    entrypoint: ["/usr/local/bin/bot-api-forwarder"]
-    environment:
-      TG_BOT_API_LISTEN_ADDR: ${TG_BOT_API_LISTEN_ADDR:-}
-    network_mode: service:teagramd
-    depends_on:
-      teagramd:
-        condition: service_started
-    restart: unless-stopped
-    read_only: true
-    logging:
-      driver: syslog
-      options:
-        syslog-address: "unixgram:///dev/log"
-        syslog-facility: daemon
-        syslog-format: rfc5424
-        tag: teagramd-bot-api-forwarder
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/bot-api-forwarder", "-healthcheck"]
-      interval: 5s
-      timeout: 2s
-      retries: 12
-      start_period: 2s
 
 volumes:
   pgdata:

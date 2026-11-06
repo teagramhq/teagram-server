@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=0c4bb2cfdd6cb6e9d1998296ce64a3d1514639a2a8bc5f1ef0c4ee3c18c2c993
+readonly APPROVED_VERIFIER_SHA=89567aa8ee3b5fee3c3dbfe98876873b04fac213d1c02a4f05aa81ac236dded4
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -873,90 +873,6 @@ current_service_id() {
   printf '%s' "$id"
 }
 
-bot_api_forwarder_health_required() {
-  local services compose_json listener_enabled service_status
-  services=$(docker compose config --services </dev/null) || return 2
-  if grep -Fxq -- bot-api-forwarder <<< "$services"; then :; else
-    service_status=$?
-    [ "$service_status" -eq 1 ] && return 1
-    return 2
-  fi
-  compose_json=$(docker compose config --format json </dev/null) || return 2
-  listener_enabled=$(jq -r --arg service "$(rollout_compose_service)" '
-    .services[$service].environment.TG_BOT_API_LISTEN_ADDR as $listener
-    | if ($listener | type) == "string" then ($listener != "") else error("Bot API listener is missing") end
-  ' <<< "$compose_json") || return 2
-  [ "$listener_enabled" = true ]
-}
-
-wait_for_bot_api_forwarder() {
-  local check_status rc
-  if bot_api_forwarder_health_required; then
-    if docker compose up -d --no-build --no-deps --wait --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null; then
-      return 0
-    else
-      rc=$?
-      rollback_after_target_failure "bot_api_forwarder_health_exit_$rc" || return 2
-      return 1
-    fi
-  else
-    check_status=$?
-    if [ "$check_status" -eq 1 ]; then
-      return 0
-    fi
-    rollback_after_target_failure bot_api_forwarder_configuration_check_failed || return 2
-    return 1
-  fi
-}
-
-restore_bot_api_forwarder() {
-  local rollback_id=$1 services project container_ids container_id
-  local -a remove_ids=()
-  services=$(docker compose config --services </dev/null) || {
-    fail 'cannot inspect baseline Compose services before restoring the Bot API forwarder'
-    return 1
-  }
-  if printf '%s\n' "$services" | grep -Fxq -- bot-api-forwarder; then
-    docker compose up -d --no-build --no-deps --force-recreate --wait \
-      --wait-timeout "$READY_SECONDS" bot-api-forwarder </dev/null || {
-      fail 'baseline Bot API forwarder recreation or health check failed'
-      return 1
-    }
-    return 0
-  fi
-
-  project=$(docker inspect "$rollback_id" \
-    --format '{{ index .Config.Labels "com.docker.compose.project" }}' </dev/null) || {
-    fail 'cannot read the baseline Compose project before removing the Bot API forwarder orphan'
-    return 1
-  }
-  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
-    fail 'baseline Compose project label is missing or invalid before Bot API forwarder cleanup'
-    return 1
-  }
-  container_ids=$(docker ps --all --quiet --no-trunc \
-    --filter "label=com.docker.compose.project=$project" \
-    --filter 'label=com.docker.compose.service=bot-api-forwarder' </dev/null) || {
-    fail 'cannot list orphaned Bot API forwarder containers'
-    return 1
-  }
-  [ -n "$container_ids" ] || return 0
-  while IFS= read -r container_id; do
-    [ -n "$container_id" ] || continue
-    [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
-      fail 'orphaned Bot API forwarder has an invalid container ID'
-      return 1
-    }
-    remove_ids+=("$container_id")
-  done <<< "$container_ids"
-  [ "${#remove_ids[@]}" -gt 0 ] || return 0
-  docker rm --force "${remove_ids[@]}" </dev/null >/dev/null || {
-    fail 'cannot remove the orphaned Bot API forwarder after restoring teagramd'
-    return 1
-  }
-  printf 'removed orphaned Bot API forwarder project=%s\n' "$project"
-}
-
 remove_orphaned_public_profile_services() {
   local baseline_container=$1 project target_services service container_ids container_id container_state stop_timeout found=0
   local -a observed_services=() remove_ids=()
@@ -1674,7 +1590,7 @@ named_env_addition_requested() {
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   for name in "${requested[@]}"; do
     case "$name" in
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA|TG_BOT_API_LISTEN_ADDR|TEAGRAM_BOT_API_HOST_IP)
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA)
         return 0
         ;;
     esac
@@ -2899,11 +2815,10 @@ perform_rollback() {
     return 1
   }
   docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
-  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
-  restore_bot_api_forwarder "$rollback_id" || return 1
   restore_removed_public_profile_services || return 1
   local public_profile_readiness_rc=0
   if wait_for_restored_public_profile_health; then :; else public_profile_readiness_rc=$?; fi
+  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
@@ -3247,11 +3162,6 @@ run_apply() {
   if docker compose up -d </dev/null; then :; else
     rc=$?
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
-    return 1
-  fi
-  if wait_for_bot_api_forwarder; then :; else
-    rc=$?
-    [ "$rc" -eq 2 ] && return 2
     return 1
   fi
   target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
