@@ -9,6 +9,7 @@ import io
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -149,23 +150,147 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 self.assertEqual(stat_mode(archive), 0o700)
                 self.assertEqual(stat_mode(report_root / self.operation.mode.REPORT_LOSS_CENSUS_MANIFEST), 0o600)
 
-                with (
-                    patch.object(self.operation.transition, "TEST_MODE", True),
-                    patch.object(self.operation.transition, "import_mode_helper", return_value=self.operation.mode),
-                    patch.object(
-                        self.operation.transition,
+                checkout = state_dir.parents[1]
+                (checkout / ".env").write_text("fixture environment\n", encoding="utf-8")
+                (checkout / ".env.rustfs-parked").write_text(
+                    "RUSTFS_ROOT_ACCESS_KEY=" + "a" * 20 + "\n"
+                    "RUSTFS_ROOT_SECRET_KEY=" + "b" * 64 + "\n"
+                    "TG_BLOB_S3_ACCESS_KEY_ID=" + "c" * 20 + "\n"
+                    "TG_BLOB_S3_SECRET_ACCESS_KEY=" + "d" * 64 + "\n",
+                    encoding="utf-8",
+                )
+                os.chmod(checkout / ".env", 0o600)
+                os.chmod(checkout / ".env.rustfs-parked", 0o600)
+                secret_dir = checkout / ".secrets"
+                secret_dir.mkdir(mode=0o700)
+                os.chmod(secret_dir, 0o700)
+                (secret_dir / "teagramd-blob-secret-key").write_text("d" * 64, encoding="ascii")
+                os.chmod(secret_dir / "teagramd-blob-secret-key", 0o444)
+
+                transition = self.operation.transition
+                authority_helper = transition.import_mode_helper()
+                args = [
+                    "blob-transition-runner.py",
+                    "deployment-env",
+                    "--checkout", str(checkout),
+                    "--state-dir", str(state_dir),
+                    "--report-root", str(report_root),
+                    "--lock-path", str(lock_path),
+                ]
+                credential_fixture = contextlib.nullcontext()
+                if os.geteuid() != 0:
+                    credential_fixture = patch.object(
+                        transition,
                         "rustfs_compose_environment_files",
-                        return_value=[str(state_dir.parents[1] / ".env"), str(state_dir.parents[1] / ".env.rustfs-parked")],
+                        return_value=[str(checkout / ".env"), str(checkout / ".env.rustfs-parked")],
+                    )
+                with (
+                    patch.object(transition, "TEST_MODE", True),
+                    patch.object(transition, "import_mode_helper", return_value=authority_helper),
+                    patch.object(authority_helper, "require_runner_lock"),
+                    patch.object(
+                        authority_helper,
+                        "file_stat",
+                        side_effect=self.fixture.allow_unowned_private_files,
                     ),
+                    credential_fixture,
+                    patch.object(sys, "argv", args),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                 ):
-                    self.operation.transition.deployment_environment(SimpleNamespace(
-                        checkout=state_dir.parents[1],
-                        state_dir=state_dir,
-                        report_root=report_root,
-                        lock_path=lock_path,
-                    ))
-                    self.assertEqual(json.loads(output.getvalue())["outcome"], "s3-accepted")
+                    self.assertEqual(transition.main(), 0)
+                self.assertEqual(json.loads(output.getvalue())["outcome"], "s3-accepted")
+
+    def test_retry_cleans_publication_after_manifest_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            original_write = self.operation.write_private_file
+
+            def fail_after_census_write(path: pathlib.Path, content: bytes) -> None:
+                original_write(path, content)
+                if path.name == self.operation.CENSUS_MANIFEST_NAME:
+                    raise self.operation.AttestationReject("attestation-output-sync")
+
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(self.operation, "write_private_file", side_effect=fail_after_census_write):
+                    with self.assertRaises(self.operation.AttestationReject):
+                        self.operation.run_attestation()
+
+                self.assertFalse((report_root / self.operation.ARCHIVE_MANIFEST_NAME).exists())
+                self.assertFalse((report_root / self.operation.CENSUS_MANIFEST_NAME).exists())
+                self.assertEqual(list((root / "archives").iterdir()), [])
+                self.assertFalse(self.operation.recovery_marker_path().exists())
+
+                result = self.operation.run_attestation()
+                self.assertEqual(result["missing_report_count"], 5)
+
+    def test_retry_cleans_publication_after_post_verification_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            original_authority = self.operation.mode.current_authority
+            calls = 0
+
+            def fail_after_publication(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise self.operation.mode.Reject("report-unavailable")
+                return original_authority(*args, **kwargs)
+
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with patch.object(self.operation.mode, "current_authority", side_effect=fail_after_publication):
+                    with self.assertRaises(self.operation.AttestationReject):
+                        self.operation.run_attestation()
+
+                self.assertFalse((report_root / self.operation.ARCHIVE_MANIFEST_NAME).exists())
+                self.assertFalse((report_root / self.operation.CENSUS_MANIFEST_NAME).exists())
+                self.assertEqual(list((root / "archives").iterdir()), [])
+                self.assertFalse(self.operation.recovery_marker_path().exists())
+
+                result = self.operation.run_attestation()
+                self.assertEqual(result["missing_report_count"], 5)
+
+    def test_retry_recovers_stale_publication_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            original_authority = self.operation.mode.current_authority
+            calls = 0
+
+            def invalidate_post_publication(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    (report_root / self.operation.CENSUS_MANIFEST_NAME).write_bytes(b"damaged\n")
+                return original_authority(*args, **kwargs)
+
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with (
+                    patch.object(self.operation.mode, "current_authority", side_effect=invalidate_post_publication),
+                    patch.object(
+                        self.operation,
+                        "_rollback_incomplete_publication",
+                        side_effect=self.operation.AttestationReject("simulated-process-interruption"),
+                    ),
+                ):
+                    with self.assertRaises(self.operation.AttestationReject):
+                        self.operation.run_attestation()
+
+                self.assertTrue(self.operation.recovery_marker_path().exists())
+                self.assertTrue((report_root / self.operation.ARCHIVE_MANIFEST_NAME).exists())
+                result = self.operation.run_attestation()
+                self.assertEqual(result["missing_report_count"], 5)
+                self.assertFalse(self.operation.recovery_marker_path().exists())
 
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:
         calls: list[list[str]] = []

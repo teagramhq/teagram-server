@@ -26,9 +26,13 @@ TEST_MODE = False
 ATTESTATION_SCHEMA = "teagram.blob-mode-report-loss-attestation/v1"
 ARCHIVE_SCHEMA = "teagram.blob-mode-report-loss-archive/v1"
 CENSUS_SCHEMA = "teagram.blob-mode-report-loss-census/v1"
+RECOVERY_SCHEMA = "teagram.blob-mode-report-loss-recovery/v1"
 ATTESTATION_PREFIX = "teagramd-blob-mode-report-loss-attestation-"
 ARCHIVE_MANIFEST_NAME = "teagramd-blob-mode-report-loss-archive-manifest.json"
 CENSUS_MANIFEST_NAME = "teagramd-blob-mode-report-loss-census-manifest.json"
+RECOVERY_MARKER_NAME = ".teagramd-blob-mode-report-loss-attestation-in-progress.json"
+RECOVERY_MARKER_TEMP_PREFIX = ".tmp-report-loss-recovery-"
+ATTESTATION_TEMP_PREFIX = ".tmp-report-loss-attestation-"
 REPORT_ATTESTATION_PREFIX = ATTESTATION_PREFIX
 REPORT_LOSS_ARCHIVE_MANIFEST = ARCHIVE_MANIFEST_NAME
 REPORT_LOSS_CENSUS_MANIFEST = CENSUS_MANIFEST_NAME
@@ -162,7 +166,14 @@ def write_private_file(path: pathlib.Path, content: bytes) -> None:
             os.fchmod(output.fileno(), 0o600)
             os.fsync(output.fileno())
         sync_directory(path.parent)
-    except OSError:
+    except (OSError, AttestationReject) as error:
+        try:
+            path.unlink()
+            sync_directory(path.parent)
+        except (OSError, AttestationReject):
+            pass
+        if isinstance(error, AttestationReject):
+            raise
         reject("attestation-output-write")
 
 
@@ -175,6 +186,372 @@ def sync_directory(path: pathlib.Path) -> None:
             os.close(fd)
     except OSError:
         reject("attestation-output-sync")
+
+
+def recovery_marker_path() -> pathlib.Path:
+    return ARCHIVE_ROOT / RECOVERY_MARKER_NAME
+
+
+def _private_regular_info(directory_fd: int, name: str) -> os.stat_result:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError:
+        reject("attestation-recovery-failed")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != ROOT_UID
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        reject("attestation-recovery-failed")
+    return info
+
+
+def _read_private_at(directory_fd: int, name: str, maximum: int = 1_048_576) -> bytes:
+    _private_regular_info(directory_fd, name)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError:
+        reject("attestation-recovery-failed")
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != ROOT_UID
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > maximum
+        ):
+            reject("attestation-recovery-failed")
+        chunks = []
+        total = 0
+        while True:
+            block = os.read(fd, min(65536, maximum + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+            if total > maximum:
+                reject("attestation-recovery-failed")
+        return b"".join(chunks)
+    except OSError:
+        reject("attestation-recovery-failed")
+    finally:
+        os.close(fd)
+
+
+def _unlink_private_at(directory_fd: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        reject("attestation-recovery-failed")
+    _private_regular_info(directory_fd, name)
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError:
+        reject("attestation-recovery-failed")
+
+
+def _remove_private_tree_at(parent_fd: int, name: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        reject("attestation-recovery-failed")
+    if stat.S_ISREG(info.st_mode):
+        if info.st_uid != ROOT_UID or stat.S_IMODE(info.st_mode) != 0o600:
+            reject("attestation-recovery-failed")
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+        return
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != ROOT_UID
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        reject("attestation-recovery-failed")
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        reject("attestation-recovery-failed")
+    try:
+        opened = os.fstat(child_fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            reject("attestation-recovery-failed")
+        try:
+            names = sorted(os.listdir(child_fd))
+        except OSError:
+            reject("attestation-recovery-failed")
+        for child_name in names:
+            if child_name in (".", "..") or "/" in child_name or "\\" in child_name:
+                reject("attestation-recovery-failed")
+            _remove_private_tree_at(child_fd, child_name)
+        try:
+            os.fsync(child_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+    finally:
+        try:
+            os.close(child_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except OSError:
+        reject("attestation-recovery-failed")
+
+
+def _read_recovery_marker(archive_root_fd: int) -> str:
+    try:
+        content = _read_private_at(archive_root_fd, RECOVERY_MARKER_NAME, maximum=4096)
+        document = json.loads(content.decode("ascii"))
+    except (AttestationReject, UnicodeDecodeError, json.JSONDecodeError):
+        reject("attestation-recovery-marker-invalid")
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "head_bytes_sha256"}
+        or document.get("schema") != RECOVERY_SCHEMA
+        or not isinstance(document.get("head_bytes_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", document["head_bytes_sha256"]) is None
+    ):
+        reject("attestation-recovery-marker-invalid")
+    return document["head_bytes_sha256"]
+
+
+def _remove_recovery_marker_temporaries(archive_root_fd: int) -> None:
+    try:
+        names = sorted(os.listdir(archive_root_fd))
+    except OSError:
+        reject("attestation-recovery-failed")
+    for name in names:
+        if re.fullmatch(re.escape(RECOVERY_MARKER_TEMP_PREFIX) + r"[0-9a-f]{16}", name):
+            _unlink_private_at(archive_root_fd, name)
+
+
+def _remove_attestation_temporaries(report_root_fd: int) -> None:
+    try:
+        names = sorted(os.listdir(report_root_fd))
+    except OSError:
+        reject("attestation-recovery-failed")
+    for name in names:
+        if re.fullmatch(re.escape(ATTESTATION_TEMP_PREFIX) + r"[0-9a-f]{16}", name):
+            _unlink_private_at(report_root_fd, name)
+
+
+def _remove_incomplete_publication(head_sha256: str, archive_root_fd: int) -> None:
+    archive_name = f"attestation-{head_sha256}"
+    _remove_private_tree_at(archive_root_fd, archive_name)
+    try:
+        report_fd = os.open(
+            REPORT_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("attestation-recovery-failed")
+    try:
+        for name in (ARCHIVE_MANIFEST_NAME, CENSUS_MANIFEST_NAME):
+            _unlink_private_at(report_fd, name)
+        _remove_attestation_temporaries(report_fd)
+        try:
+            names = sorted(os.listdir(report_fd))
+        except OSError:
+            reject("attestation-recovery-failed")
+        for name in names:
+            match = re.fullmatch(re.escape(ATTESTATION_PREFIX) + r"([0-9a-f]{64})\.json", name)
+            if match is None:
+                continue
+            content = _read_private_at(report_fd, name)
+            try:
+                document = json.loads(content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                reject("attestation-recovery-failed")
+            if (
+                not isinstance(document, dict)
+                or document.get("schema") != ATTESTATION_SCHEMA
+                or document.get("head_bytes_sha256") != head_sha256
+                or hash_bytes(content) != match.group(1)
+            ):
+                reject("attestation-recovery-failed")
+            _unlink_private_at(report_fd, name)
+    finally:
+        try:
+            os.close(report_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+
+
+def _remove_recovery_marker(archive_root_fd: int) -> None:
+    _unlink_private_at(archive_root_fd, RECOVERY_MARKER_NAME)
+
+
+def _recover_incomplete_publication() -> bool:
+    try:
+        archive_root_info = ARCHIVE_ROOT.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        reject("archive-path-invalid")
+    if (
+        not stat.S_ISDIR(archive_root_info.st_mode)
+        or stat.S_ISLNK(archive_root_info.st_mode)
+        or archive_root_info.st_uid != ROOT_UID
+        or stat.S_IMODE(archive_root_info.st_mode) != 0o700
+    ):
+        reject("path-permissions")
+    try:
+        archive_root_fd = os.open(
+            ARCHIVE_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("archive-path-invalid")
+    try:
+        _remove_recovery_marker_temporaries(archive_root_fd)
+        try:
+            os.stat(RECOVERY_MARKER_NAME, dir_fd=archive_root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            reject("attestation-recovery-marker-invalid")
+        head_sha256 = _read_recovery_marker(archive_root_fd)
+        try:
+            mode.current_authority(STATE_DIR, REPORT_ROOT)
+        except mode.Reject:
+            _remove_incomplete_publication(head_sha256, archive_root_fd)
+            _remove_recovery_marker(archive_root_fd)
+            return False
+        try:
+            report_fd = os.open(
+                REPORT_ROOT,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+        except OSError:
+            reject("attestation-recovery-failed")
+        try:
+            _remove_attestation_temporaries(report_fd)
+        finally:
+            os.close(report_fd)
+        _remove_recovery_marker(archive_root_fd)
+        return True
+    finally:
+        try:
+            os.close(archive_root_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+
+
+def _publish_recovery_marker(head_sha256: str) -> None:
+    require_directory(ARCHIVE_ROOT, expected_mode=0o700, create=True)
+    marker_path = recovery_marker_path()
+    temporary = ARCHIVE_ROOT / f"{RECOVERY_MARKER_TEMP_PREFIX}{os.urandom(8).hex()}"
+    content = (
+        json.dumps(
+            {"schema": RECOVERY_SCHEMA, "head_bytes_sha256": head_sha256},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+    write_private_file(temporary, content)
+    try:
+        os.link(temporary, marker_path, follow_symlinks=False)
+        sync_directory(ARCHIVE_ROOT)
+        temporary.unlink()
+        sync_directory(ARCHIVE_ROOT)
+    except FileExistsError:
+        reject("attestation-recovery-marker-exists")
+    except OSError:
+        reject("attestation-recovery-marker-publish")
+
+
+def _rollback_incomplete_publication(head_sha256: str) -> None:
+    try:
+        archive_root_info = ARCHIVE_ROOT.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        reject("attestation-recovery-failed")
+    if (
+        not stat.S_ISDIR(archive_root_info.st_mode)
+        or stat.S_ISLNK(archive_root_info.st_mode)
+        or archive_root_info.st_uid != ROOT_UID
+        or stat.S_IMODE(archive_root_info.st_mode) != 0o700
+    ):
+        reject("attestation-recovery-failed")
+    try:
+        archive_root_fd = os.open(
+            ARCHIVE_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("attestation-recovery-failed")
+    try:
+        try:
+            os.stat(RECOVERY_MARKER_NAME, dir_fd=archive_root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            _remove_recovery_marker_temporaries(archive_root_fd)
+            return
+        except OSError:
+            reject("attestation-recovery-failed")
+        if _read_recovery_marker(archive_root_fd) != head_sha256:
+            reject("attestation-recovery-marker-invalid")
+        _remove_incomplete_publication(head_sha256, archive_root_fd)
+        _remove_recovery_marker(archive_root_fd)
+        _remove_recovery_marker_temporaries(archive_root_fd)
+    finally:
+        try:
+            os.close(archive_root_fd)
+        except OSError:
+            reject("attestation-recovery-failed")
+
+
+def _reject_existing_publication_outputs(archive_path: pathlib.Path) -> None:
+    for name in (ARCHIVE_MANIFEST_NAME, CENSUS_MANIFEST_NAME):
+        try:
+            (REPORT_ROOT / name).lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            reject("attestation-output-exists")
+        else:
+            reject("attestation-output-exists")
+    try:
+        archive_path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        reject("archive-already-exists")
+    else:
+        reject("archive-already-exists")
+    try:
+        report_fd = os.open(
+            REPORT_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("path-unavailable")
+    try:
+        names = os.listdir(report_fd)
+    except OSError:
+        reject("path-unavailable")
+    finally:
+        os.close(report_fd)
+    if any(
+        name.startswith(ATTESTATION_PREFIX)
+        or name.startswith(ATTESTATION_TEMP_PREFIX)
+        for name in names
+    ):
+        reject("attestation-output-exists")
 
 
 def valid_blob_key(key: str) -> bool:
@@ -612,6 +989,8 @@ def run_attestation() -> dict[str, object]:
 
     require_directory(STATE_DIR)
     require_directory(REPORT_ROOT, expected_mode=0o700)
+    if _recover_incomplete_publication():
+        reject("authority-already-valid")
     try:
         mode.current_authority(STATE_DIR, REPORT_ROOT)
     except mode.Reject as error:
@@ -651,11 +1030,7 @@ def run_attestation() -> dict[str, object]:
     head_sha256 = hash_bytes(head_bytes)
     archive_path = ARCHIVE_ROOT / f"attestation-{head_sha256}"
     check_path_boundaries(STATE_DIR, REPORT_ROOT, archive_path)
-    for name in (ARCHIVE_MANIFEST_NAME, CENSUS_MANIFEST_NAME):
-        if (REPORT_ROOT / name).exists() or (REPORT_ROOT / name).is_symlink():
-            reject("attestation-output-exists")
-    if archive_path.exists() or archive_path.is_symlink():
-        reject("archive-already-exists")
+    _reject_existing_publication_outputs(archive_path)
 
     try:
         s3_manifest, reference_rows = capture_live_census(deployment_head)
@@ -666,31 +1041,45 @@ def run_attestation() -> dict[str, object]:
     census_content, object_count, byte_total = validate_live_census(s3_manifest, reference_rows)
     census_sha256 = hash_bytes(census_content)
 
-    archive_content, archive_sha256 = create_archive(archive_path, STATE_DIR, REPORT_ROOT)
-    write_private_file(REPORT_ROOT / ARCHIVE_MANIFEST_NAME, archive_content)
-    write_private_file(REPORT_ROOT / CENSUS_MANIFEST_NAME, census_content)
-    journal_prefix_sha256 = hash_bytes(b"".join(
-        (STATE_DIR / "journal" / f"{generation:010d}.json").read_bytes()
-        for generation in range(1, len(records) + 1)
-    ))
-    document = {
-        "schema": ATTESTATION_SCHEMA,
-        "head_generation": len(records),
-        "head_transition_id": deployment_head["transition_id"],
-        "head_bytes_sha256": head_sha256,
-        "journal_prefix_sha256": journal_prefix_sha256,
-        "missing_transition_ids": sorted(missing_ids),
-        "reason": "MAIN-2610",
-        "archive_manifest_sha256": archive_sha256,
-        "census_manifest_sha256": census_sha256,
-        "object_count": object_count,
-        "byte_total": byte_total,
-    }
-    attestation_path, attestation_sha256 = publish_attestation(REPORT_ROOT, document)
     try:
-        mode.current_authority(STATE_DIR, REPORT_ROOT)
-    except mode.Reject as error:
-        reject(f"post-attestation-{error}")
+        _publish_recovery_marker(head_sha256)
+        archive_content, archive_sha256 = create_archive(archive_path, STATE_DIR, REPORT_ROOT)
+        write_private_file(REPORT_ROOT / ARCHIVE_MANIFEST_NAME, archive_content)
+        write_private_file(REPORT_ROOT / CENSUS_MANIFEST_NAME, census_content)
+        journal_prefix_sha256 = hash_bytes(b"".join(
+            (STATE_DIR / "journal" / f"{generation:010d}.json").read_bytes()
+            for generation in range(1, len(records) + 1)
+        ))
+        document = {
+            "schema": ATTESTATION_SCHEMA,
+            "head_generation": len(records),
+            "head_transition_id": deployment_head["transition_id"],
+            "head_bytes_sha256": head_sha256,
+            "journal_prefix_sha256": journal_prefix_sha256,
+            "missing_transition_ids": sorted(missing_ids),
+            "reason": "MAIN-2610",
+            "archive_manifest_sha256": archive_sha256,
+            "census_manifest_sha256": census_sha256,
+            "object_count": object_count,
+            "byte_total": byte_total,
+        }
+        attestation_path, attestation_sha256 = publish_attestation(REPORT_ROOT, document)
+        try:
+            mode.current_authority(STATE_DIR, REPORT_ROOT)
+        except mode.Reject as error:
+            reject(f"post-attestation-{error}")
+    except Exception:
+        _rollback_incomplete_publication(head_sha256)
+        raise
+
+    archive_root_fd = os.open(
+        ARCHIVE_ROOT,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        _remove_recovery_marker(archive_root_fd)
+    finally:
+        os.close(archive_root_fd)
     return {
         "attestation_path": attestation_path,
         "attestation_sha256": attestation_sha256,
