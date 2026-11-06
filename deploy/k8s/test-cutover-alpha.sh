@@ -94,6 +94,11 @@ set -euo pipefail
 printf '1\n'
 SH
 chmod 0700 "$fixture_dir/bin/kubectl"
+if ! env "INCUS_STATE_DIR=$fixture_dir/state" \
+  bash deploy/k8s/test-cutover-alpha-incus.sh exec teagram-k3s -- systemctl daemon-reload; then
+  printf 'cutover fixture could not reload systemd without a unit name\n' >&2
+  exit 1
+fi
 fixture=(env "PATH=$fixture_dir/bin:$PATH" "RUNNER_TEMP=$fixture_dir" \
   "INCUS_STATE_DIR=$fixture_dir/state" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
   bash deploy/k8s/test-cutover-alpha-incus.sh exec teagram -- \

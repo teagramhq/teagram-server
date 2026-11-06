@@ -175,13 +175,17 @@ PY
 systemctl_command() {
   local subcommand=$1 unit unit_path command_line pid_file pid
   shift
+  if [[ $subcommand == daemon-reload ]]; then
+    [[ $# -eq 0 ]]
+    return
+  fi
+  (( $# > 0 )) || return 1
   local -a args=("$@")
   unit=${args[-1]}
   unit_path="$STATE_DIR/units/$unit"
   pid_file="$STATE_DIR/units/$unit.pid"
   case "$subcommand" in
     cat) [[ -f $unit_path ]] && cat "$unit_path" ;;
-    daemon-reload) : ;;
     enable)
       command_line=$(sed -n 's/^ExecStart=//p' "$unit_path")
       [[ -n $command_line ]] || return 1
