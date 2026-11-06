@@ -475,7 +475,7 @@ stop_port_forward_units() {
 }
 
 recover_before_edge_switch() {
-  local phase=${1:-} recovery_failed=false lookup_status
+  local phase=${1:-} recovery_failed=false workloads_stopped=true lookup_status
   case "$phase" in
     serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started|complete)
       recover_after_serve_switch
@@ -486,40 +486,46 @@ recover_before_edge_switch() {
     if ! kubectl scale deployment/cloudflared --replicas=0 --namespace "$NAMESPACE" >/dev/null; then
       printf 'k3s cutover: failed to scale down the k8s Cloudflare connector during recovery\n' >&2
       recovery_failed=true
+      workloads_stopped=false
     fi
   else
     lookup_status=$?
     if [[ $lookup_status != 1 ]]; then
       printf 'k3s cutover: could not determine whether the k8s Cloudflare connector exists during recovery\n' >&2
       recovery_failed=true
+      workloads_stopped=false
     fi
   fi
   if kubectl_resource_exists statefulset/teagramd; then
     if ! kubectl scale statefulset/teagramd --replicas=0 --namespace "$NAMESPACE" >/dev/null; then
       printf 'k3s cutover: failed to scale down k8s teagramd during recovery\n' >&2
       recovery_failed=true
+      workloads_stopped=false
     fi
   else
     lookup_status=$?
     if [[ $lookup_status != 1 ]]; then
       printf 'k3s cutover: could not determine whether k8s teagramd exists during recovery\n' >&2
       recovery_failed=true
+      workloads_stopped=false
     fi
   fi
   if ! wait_for_no_pods app.kubernetes.io/name=cloudflared 180; then
     printf 'k3s cutover: failed to verify no k8s Cloudflare connector pods remain during recovery\n' >&2
     recovery_failed=true
+    workloads_stopped=false
   fi
   if ! wait_for_no_pods app.kubernetes.io/name=teagramd 180; then
     printf 'k3s cutover: failed to verify no k8s teagramd pods remain during recovery\n' >&2
     recovery_failed=true
+    workloads_stopped=false
   fi
 
   if ! stop_port_forward_units; then
     printf 'k3s cutover: failed to stop target port-forward units during recovery\n' >&2
     recovery_failed=true
   fi
-  if [[ -f $COMPOSE_STOPPED_FILE && $recovery_failed == false ]]; then
+  if [[ -f $COMPOSE_STOPPED_FILE && $workloads_stopped == true ]]; then
     if ! restart_stopped_compose_services; then
       printf 'k3s cutover: one or more old Compose services need manual restart\n' >&2
       recovery_failed=true
