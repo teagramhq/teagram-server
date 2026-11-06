@@ -388,8 +388,6 @@ expect_log 'could not determine whether deployment/cloudflared exists' "$tmp_dir
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get statefulset teagramd --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
-[[ -z $(kubectl get pods --namespace "$TARGET_NAMESPACE" \
-  --selector=app.kubernetes.io/name=cloudflared --output name) ]]
 
 if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   CUTOVER_FAIL_RESOURCE_LOOKUP=teagramd \
@@ -401,6 +399,8 @@ fi
 expect_log 'could not determine whether statefulset/teagramd exists' "$tmp_dir/teagramd-lookup-failure.log"
 [[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
+[[ -z $(kubectl get pods --namespace "$TARGET_NAMESPACE" \
+  --selector=app.kubernetes.io/name=cloudflared --output name) ]]
 [[ $(kubectl get statefulset teagramd --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
