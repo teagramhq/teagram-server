@@ -225,6 +225,7 @@ bash "$tmp/op.sh" rollback
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
 printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 rm -f "$repo/.runtime-relays"
+printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 cat > "$tmp/runner" <<'SH'
 #!/usr/bin/env bash
 set -eu
