@@ -11,10 +11,13 @@ The script
 creates the `teagram` namespace, transfers only the production credentials and
 runtime values described below from the live `teagram` LXC, installs the
 namespace-scoped deploy account and agent operations menu, and writes the
-kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode `0600`. Store that
-file in the designated GitHub environment secret. The API and operations SSH
-menu are exposed through Tailscale Serve only; the Incus proxy listeners bind
-to host loopback.
+restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
+`0600`. Store that file in the designated GitHub environment secret. It also
+writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
+certificate, root-owned mode `0600`; use it only for the root-run cutover,
+rollback, and target reset on alpha. Never store this admin kubeconfig in GitHub
+or give it to the deploy job. The API and operations SSH menu are exposed
+through Tailscale Serve only; the Incus proxy listeners bind to host loopback.
 
 Before workloads have written production data, rollback on `alpha` with:
 
@@ -23,6 +26,7 @@ sudo tailscale serve --yes --tcp=6443 off
 sudo tailscale serve --yes --tcp=2222 off
 sudo incus delete --force teagram-k3s
 sudo rm -f /root/teagram-k3s-deploy.kubeconfig
+sudo rm -f /root/teagram-k3s-cutover.kubeconfig
 ```
 
 The old `teagram` LXC remains untouched. After production data is written,
@@ -228,13 +232,13 @@ waits for its volume mounts to be released:
 
 ```sh
 set -e
-sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete pod/cutover-volume-importer \
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete pod/cutover-volume-importer \
   --namespace teagram --ignore-not-found=true --wait=true --timeout=300s
-sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
   -k deploy/k8s/prod-cutover --ignore-not-found=true --wait=true
-sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
   secret teagramd-admin --namespace teagram --ignore-not-found=true
-sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
   pvc data-postgres-0 data-rustfs-0 key-data-teagramd-0 \
   legacy-blobs-teagramd-0 blob-mode-teagramd-0 \
   --namespace teagram --ignore-not-found=true --wait=true

@@ -18,7 +18,7 @@ if [[ ${2:-} == --test-mode ]]; then
   readonly LOCK_PATH=$EVIDENCE_DIR/cutover.lock
 else
   readonly NAMESPACE=teagram
-  readonly KUBECONFIG_PATH=/root/teagram-k3s-deploy.kubeconfig
+  readonly KUBECONFIG_PATH=/root/teagram-k3s-cutover.kubeconfig
   readonly EVIDENCE_DIR=/var/lib/teagram-k3s-cutover
   readonly LOCK_PATH=/run/lock/teagram-k3s-cutover.lock
 fi
@@ -60,7 +60,7 @@ EOF
 
 dry_run() {
   cat <<'EOF'
-Would verify alpha, the bootstrap kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
+Would verify alpha, the root-only cutover kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
@@ -103,9 +103,9 @@ for command_name in incus kubectl readlink stat install sha256sum python3 awk gr
 done
 
 export KUBECONFIG=$KUBECONFIG_PATH
-[[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] || fail 'bootstrap deploy kubeconfig is missing or not a regular file'
+[[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] || fail 'root-only cutover kubeconfig is missing or not a regular file'
 if [[ $TEST_MODE == false ]]; then
-  [[ $(stat -c '%a:%u' "$KUBECONFIG_PATH") == 600:0 ]] || fail 'bootstrap deploy kubeconfig must be root-owned mode 0600'
+  [[ $(stat -c '%a:%u' "$KUBECONFIG_PATH") == 600:0 ]] || fail 'root-only cutover kubeconfig must be root-owned mode 0600'
 else
   [[ $(stat -c '%a' "$KUBECONFIG_PATH") == 600 ]] || fail 'disposable test kubeconfig must have mode 0600'
 fi

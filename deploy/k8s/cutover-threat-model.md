@@ -7,6 +7,13 @@ to create workloads or exec into pods in the teagram namespace. Compromise of
 any of these can expose or replace the copied identity or data. The separate
 [identity threat model](identity-threat-model.md) covers key storage and backup.
 
+The runner and recovery commands use the root-owned, mode-0600
+`/root/teagram-k3s-cutover.kubeconfig`, which contains the k3s admin client
+certificate. It is separate from the restricted `teagram-deployer` token and
+must remain on alpha; it is never stored in GitHub or passed to deployment
+jobs. A holder can administer the cluster, including reading and changing
+Secrets and workloads, so alpha root and the k3s control plane are trusted.
+
 The temporary importer mounts the identity, legacy blobs and blob-mode PVCs
 read-write. It runs as root with CHOWN and FOWNER, no service account token,
 no privilege escalation, a read-only root filesystem and runtime-default

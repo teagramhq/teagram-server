@@ -260,6 +260,77 @@ chmod 0600 "$KUBECONFIG"
   exit 1
 }
 
+kubectl apply --filename deploy/k8s/deployer-access.yaml >/dev/null
+kubectl wait --for=create secret/teagram-deployer-token \
+  --namespace "$SOURCE_NAMESPACE" --timeout=60s >/dev/null
+kubectl wait --for='jsonpath={.data.token}' secret/teagram-deployer-token \
+  --namespace "$SOURCE_NAMESPACE" --timeout=120s >/dev/null
+kubectl wait --for='jsonpath={.data.ca\.crt}' secret/teagram-deployer-token \
+  --namespace "$SOURCE_NAMESPACE" --timeout=120s >/dev/null
+kubectl config view --raw --minify --output=json > "$tmp_dir/admin-kubeconfig.json"
+kubectl get secret teagram-deployer-token --namespace "$SOURCE_NAMESPACE" --output=json \
+  > "$tmp_dir/deployer-token.json"
+chmod 0600 "$tmp_dir/admin-kubeconfig.json" "$tmp_dir/deployer-token.json"
+python3 - "$tmp_dir/admin-kubeconfig.json" "$tmp_dir/deployer-token.json" \
+  "$tmp_dir/deployer.kubeconfig" <<'PY'
+import base64
+import json
+import os
+import pathlib
+import sys
+
+admin_path, token_path, output_path = map(pathlib.Path, sys.argv[1:])
+admin = json.loads(admin_path.read_text())
+secret = json.loads(token_path.read_text())
+context_name = admin.get("current-context")
+contexts = [entry["context"] for entry in admin.get("contexts", [])
+            if entry.get("name") == context_name]
+if len(contexts) != 1:
+    raise SystemExit("CI admin kubeconfig has no unique current context")
+cluster_name = contexts[0].get("cluster")
+clusters = [entry["cluster"] for entry in admin.get("clusters", [])
+            if entry.get("name") == cluster_name]
+if len(clusters) != 1:
+    raise SystemExit("CI admin kubeconfig has no unique current cluster")
+server = clusters[0].get("server")
+ca = clusters[0].get("certificate-authority-data")
+encoded_token = secret.get("data", {}).get("token")
+if not server or not ca or not encoded_token:
+    raise SystemExit("CI deployer kubeconfig inputs are incomplete")
+token = base64.b64decode(encoded_token, validate=True).decode("ascii")
+config = {
+    "apiVersion": "v1",
+    "kind": "Config",
+    "clusters": [{"name": cluster_name, "cluster": {
+        "server": server,
+        "certificate-authority-data": ca,
+    }}],
+    "contexts": [{"name": "teagram-deployer", "context": {
+        "cluster": cluster_name,
+        "namespace": "teagram",
+        "user": "teagram-deployer",
+    }}],
+    "current-context": "teagram-deployer",
+    "users": [{"name": "teagram-deployer", "user": {"token": token}}],
+}
+fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as output:
+    json.dump(config, output, separators=(",", ":"))
+    output.write("\n")
+PY
+[[ $(stat -c '%a' "$tmp_dir/deployer.kubeconfig") == 600 ]]
+if env "${incus_test_env[@]}" KUBECONFIG="$tmp_dir/deployer.kubeconfig" \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/deployer-boundary.log" 2>&1; then
+  printf 'cutover runner passed preflight with the restricted deployer kubeconfig\n' >&2
+  exit 1
+fi
+expect_log 'Forbidden' "$tmp_dir/deployer-boundary.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+printf 'bootstrap deployer kubeconfig was denied before cutover mutation\n'
+
 if env "${incus_test_env[@]}" CUTOVER_TEST_S3_BLOB_SOURCE=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
   > "$tmp_dir/s3-source.log" 2>&1; then

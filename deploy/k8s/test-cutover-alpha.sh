@@ -6,6 +6,7 @@ cd "$repo_root"
 
 plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"
 for required in \
+  'root-only cutover kubeconfig' \
   'Would server-dry-run and apply deploy/k8s/prod-cutover' \
   'TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
   'fence writes before the final PostgreSQL snapshot' \
@@ -31,6 +32,19 @@ for required in \
     exit 1
   fi
 done
+
+if ! grep --fixed-strings --quiet -- \
+  'readonly KUBECONFIG_PATH=/root/teagram-k3s-cutover.kubeconfig' deploy/k8s/cutover-alpha.sh ||
+  ! grep --fixed-strings --quiet -- \
+  'KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete' deploy/k8s/README.md; then
+  printf 'alpha cutover or retry cleanup does not use the root-only admin kubeconfig\n' >&2
+  exit 1
+fi
+if sed -n '/^After accepting the failed target copy/,$p' deploy/k8s/README.md |
+  grep --fixed-strings --quiet -- 'KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig'; then
+  printf 'alpha cutover retry cleanup uses the restricted deployer kubeconfig\n' >&2
+  exit 1
+fi
 
 for required in \
   'Retry after a pre-switch failure' \
