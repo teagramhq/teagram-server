@@ -45,6 +45,25 @@ type ManifestSummary struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
+// StageError identifies a safe-to-log migration stage while retaining the
+// underlying error for callers that can handle private object details.
+type StageError struct {
+	Stage Stage
+	Err   error
+}
+
+type Stage string
+
+const (
+	StageCopy     Stage = "copy"
+	StageReadBack Stage = "read-back"
+	StageKeySet   Stage = "key-set"
+	StageManifest Stage = "manifest"
+)
+
+func (e *StageError) Error() string { return fmt.Sprintf("%s: %v", e.Stage, e.Err) }
+func (e *StageError) Unwrap() error { return e.Err }
+
 type objectReport struct {
 	Type              string `json:"type"`
 	Key               string `json:"key"`
@@ -105,10 +124,10 @@ func MigrateEncryptedWithManifest(
 	}
 	entries, sourceEntries, err := collectEntries(ctx, source, "walk source blob store")
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, &StageError{Stage: StageCopy, Err: err}
 	}
 	if err := verifyEncryptedDestinationKeys(ctx, destinationTree, sourceEntries, false); err != nil {
-		return Summary{}, err
+		return Summary{}, &StageError{Stage: StageKeySet, Err: err}
 	}
 
 	sourceManifest := sha256.New()
@@ -121,34 +140,34 @@ func MigrateEncryptedWithManifest(
 		}
 		body, err := migrationReader(ctx, source, entry)
 		if err != nil {
-			return Summary{}, err
+			return Summary{}, &StageError{Stage: StageCopy, Err: err}
 		}
 		sourceDigest, err := digestStore(ctx, source, entry)
 		if err != nil {
-			return Summary{}, err
+			return Summary{}, &StageError{Stage: StageCopy, Err: err}
 		}
 		written, err := destination.Put(ctx, entry.Key, body)
 		if err != nil {
-			return Summary{}, fmt.Errorf("copy blob %q to encrypted destination: %w", entry.Key, err)
+			return Summary{}, &StageError{Stage: StageCopy, Err: fmt.Errorf("copy blob %q to encrypted destination: %w", entry.Key, err)}
 		}
 		if written != entry.Size {
-			return Summary{}, fmt.Errorf("copy blob %q wrote %d plaintext bytes, source has %d", entry.Key, written, entry.Size)
+			return Summary{}, &StageError{Stage: StageCopy, Err: fmt.Errorf("copy blob %q wrote %d plaintext bytes, source has %d", entry.Key, written, entry.Size)}
 		}
 		destinationDigest, err := digestRemote(ctx, destination, entry.Key, entry.Size)
 		if err != nil {
-			return Summary{}, fmt.Errorf("verify encrypted destination blob %q: %w", entry.Key, err)
+			return Summary{}, &StageError{Stage: StageReadBack, Err: fmt.Errorf("verify encrypted destination blob %q: %w", entry.Key, err)}
 		}
 		if sourceDigest != destinationDigest {
-			return Summary{}, fmt.Errorf("blob %q checksum mismatch: source %s destination %s", entry.Key, sourceDigest, destinationDigest)
+			return Summary{}, &StageError{Stage: StageReadBack, Err: fmt.Errorf("blob %q checksum mismatch: source %s destination %s", entry.Key, sourceDigest, destinationDigest)}
 		}
 		if err := writeManifestLeaf(sourceManifest, entry.Key, entry.Size, sourceDigest); err != nil {
-			return Summary{}, fmt.Errorf("checksum source manifest: %w", err)
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("checksum source manifest: %w", err)}
 		}
 		if err := writeManifestLeaf(destinationManifest, entry.Key, entry.Size, destinationDigest); err != nil {
-			return Summary{}, fmt.Errorf("checksum destination manifest: %w", err)
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("checksum destination manifest: %w", err)}
 		}
 		if _, err := fmt.Fprintf(manifest, "%s\t%d\t%s\n", entry.Key, entry.Size, sourceDigest); err != nil {
-			return Summary{}, fmt.Errorf("write verified copy manifest: %w", err)
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("write verified copy manifest: %w", err)}
 		}
 		if entry.Size > math.MaxInt64-summary.Bytes {
 			return Summary{}, errors.New("blob migration byte total overflows int64")
@@ -163,12 +182,12 @@ func MigrateEncryptedWithManifest(
 		}
 	}
 	if err := verifyEncryptedDestinationKeys(ctx, destinationTree, sourceEntries, true); err != nil {
-		return Summary{}, err
+		return Summary{}, &StageError{Stage: StageKeySet, Err: err}
 	}
 	summary.SourceManifestSHA256 = hex.EncodeToString(sourceManifest.Sum(nil))
 	summary.DestinationManifestSHA256 = hex.EncodeToString(destinationManifest.Sum(nil))
 	if summary.SourceManifestSHA256 != summary.DestinationManifestSHA256 {
-		return Summary{}, errors.New("blob migration manifest checksums do not match")
+		return Summary{}, &StageError{Stage: StageManifest, Err: errors.New("blob migration manifest checksums do not match")}
 	}
 	if err := encoder.Encode(summaryReport{Type: "summary", Summary: summary}); err != nil {
 		return Summary{}, fmt.Errorf("write migration summary: %w", err)

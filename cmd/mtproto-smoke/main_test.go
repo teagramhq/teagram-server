@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,10 +18,31 @@ import (
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
+
+func TestPasswordChallengeErrors(t *testing.T) {
+	t.Parallel()
+	rpc := &tgerr.Error{Code: 400, Message: "PHONE_CODE_EXPIRED"}
+	if err := smokeRPCError("auth.sendCode", rpc); !errors.Is(err, rpc) {
+		t.Fatalf("sendCode RPC failure = %v, want wrapped original", err)
+	}
+	if err := expectPasswordChallenge(rpc); !errors.Is(err, rpc) {
+		t.Fatalf("RPC failure = %v, want wrapped original", err)
+	}
+	if err := expectPasswordChallenge(&tgerr.Error{Code: 401, Message: "SESSION_PASSWORD_NEEDED"}); err != nil {
+		t.Fatalf("password challenge = %v", err)
+	}
+	if err := expectPasswordChallenge(errors.New("private transport detail")); err == nil || !strings.Contains(err.Error(), "transport failed") || strings.Contains(err.Error(), "private transport detail") {
+		t.Fatalf("transport failure = %v", err)
+	}
+	if err := expectPasswordChallenge(nil); err == nil || !strings.Contains(err.Error(), "did not require") {
+		t.Fatalf("unexpected success = %v", err)
+	}
+}
 
 func TestReadSmokeCredentialRequiresProtectedSingleLineFile(t *testing.T) {
 	t.Parallel()

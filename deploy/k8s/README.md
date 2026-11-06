@@ -42,6 +42,8 @@ the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
+Read the [alpha cutover threat model](cutover-threat-model.md) before moving
+production state or exposing the cutover listeners.
 Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a

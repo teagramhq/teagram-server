@@ -1,0 +1,37 @@
+# Threat model: alpha cutover
+
+The cutover moves the existing server identity, database and media from the
+Compose LXC to k3s. The trusted boundary includes alpha root, both LXCs, the
+k3s control plane and nodes, storage administrators, and principals allowed
+to create workloads or exec into pods in the teagram namespace. Compromise of
+any of these can expose or replace the copied identity or data. The separate
+[identity threat model](identity-threat-model.md) covers key storage and backup.
+
+The temporary importer mounts the identity, legacy blobs and blob-mode PVCs
+read-write. It runs as root with CHOWN and FOWNER, no service account token,
+no privilege escalation, a read-only root filesystem and runtime-default
+seccomp. It can read or alter the mounted identity despite file permissions.
+Only trusted operators may create or exec into it. The runner deletes it after
+copying, on failure and on rollback; an API or node failure can prevent removal,
+so operators must inspect and remove any remaining importer before granting
+additional namespace access. Its one-day sleep is not a security boundary.
+
+The teagramd ClusterIP Service exposes MTProto, WebSocket and admin ports to
+cluster workloads. The cutover also binds port-forwards to the k3s LXC's bridge
+address so the source LXC can reach them. These listeners are reachable from
+other systems with network access to that address, not only through Tailscale
+Serve. Network access to the bridge and cluster must therefore be restricted to
+trusted hosts and workloads; the manifests do not enforce a NetworkPolicy or a
+host firewall. Bridge HTTP traffic is unencrypted and a network observer can
+capture administrative session credentials. WebSocket and MTProto clients must be treated as untrusted, and
+the admin endpoint requires its existing authentication and origin controls;
+network reachability alone is not authorization. Funnel must remain off, and
+operators must verify Serve routes and bridge firewall policy before switching.
+
+The fenced source is retained for rollback. Once any new Serve route is live,
+the target may have accepted writes; switching back discards those writes from
+the restored source. If route state cannot be verified, recovery fails closed
+and requires an explicit rollback decision. Temporary admin credentials and
+the dump spool are private files and are removed after use; evidence and the
+database dump remain private for recovery. A failed cleanup requires operator
+attention and does not guarantee secret deletion from storage or backups.

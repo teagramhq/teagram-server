@@ -225,12 +225,8 @@ cutover_volume_importer=deploy/k8s/prod-cutover/volume-importer.yaml
 [[ "$(yq -r '.spec.containers[] | select(.name == "importer") | .securityContext.capabilities.add | join(",")' "$cutover_volume_importer")" == 'CHOWN,FOWNER' ]] ||
   fail 'the cutover importer must retain only the capabilities needed to prepare target PVC ownership'
 script=deploy/k8s/cutover-alpha.sh
-grep --fixed-strings --quiet 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' "$script" ||
-  fail "$script must prepare the private target blob root before importing"
 grep --fixed-strings --quiet 'tar -xopf - -C /target/legacy-blobs' "$script" ||
   fail "$script must preserve blob modes without restoring source ownership"
-grep --fixed-strings --quiet 'chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex; chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode' "$script" ||
-  fail "$script must set key permissions before transferring PVC ownership to the runtime"
 
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do

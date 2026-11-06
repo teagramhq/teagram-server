@@ -131,6 +131,11 @@ tailscale_command() {
     return
   fi
   [[ $subcommand == serve ]] || return 1
+  if [[ ${CUTOVER_FAIL_FIRST_SERVE_ROUTE:-} == true && ! -e $STATE_DIR/serve-route-failure-injected ]]; then
+    : > "$STATE_DIR/serve-route-failure-injected"
+    printf 'injected disposable-cluster failure before the first Serve route changed\n' >&2
+    return 42
+  fi
   for arg in "$@"; do
     case "$arg" in
       --set-path=*) path=${arg#*=} ;;
@@ -186,6 +191,9 @@ systemctl_command() {
   pid_file="$STATE_DIR/units/$unit.pid"
   case "$subcommand" in
     cat) [[ -f $unit_path ]] && cat "$unit_path" ;;
+    show)
+      if [[ -f $unit_path ]]; then printf 'loaded\n'; else printf 'not-found\n'; fi
+      ;;
     enable)
       command_line=$(sed -n 's/^ExecStart=//p' "$unit_path")
       [[ -n $command_line ]] || return 1

@@ -350,6 +350,27 @@ func readSmokeCredential(path, name string) (value []byte, returnErr error) {
 	return value, nil
 }
 
+func smokeRPCError(operation string, err error) error {
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
+		return fmt.Errorf("%s failed: %w", operation, rpcErr)
+	}
+	return fmt.Errorf("%s transport failed", operation)
+}
+
+func expectPasswordChallenge(err error) error {
+	if err == nil {
+		return errors.New("auth.signIn did not require the account password")
+	}
+	var rpcErr *tgerr.Error
+	if !errors.As(err, &rpcErr) {
+		return errors.New("auth.signIn transport failed")
+	}
+	if rpcErr.Message != "SESSION_PASSWORD_NEEDED" {
+		return fmt.Errorf("auth.signIn failed: %w", rpcErr)
+	}
+	return nil
+}
+
 func signIn(ctx context.Context, endpoint string, identity serverIdentity, username string, password []byte) error {
 	host, portText, err := net.SplitHostPort(endpoint)
 	if err != nil {
@@ -374,20 +395,19 @@ func signIn(ctx context.Context, endpoint string, identity serverIdentity, usern
 			APIHash:     "hash",
 		})
 		if err != nil {
-			return errors.New("auth.sendCode failed")
+			return smokeRPCError("auth.sendCode", err)
 		}
 		code, ok := sent.(*tg.AuthSentCode)
 		if !ok {
 			return errors.New("auth.sendCode returned an unexpected response")
 		}
 		_, err = api.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: username, PhoneCodeHash: code.PhoneCodeHash})
-		var rpcErr *tgerr.Error
-		if !errors.As(err, &rpcErr) || rpcErr.Message != "SESSION_PASSWORD_NEEDED" {
-			return errors.New("auth.signIn did not require the account password")
+		if err := expectPasswordChallenge(err); err != nil {
+			return err
 		}
 		settings, err := api.AccountGetPassword(ctx)
 		if err != nil {
-			return errors.New("account.getPassword failed")
+			return smokeRPCError("account.getPassword", err)
 		}
 		proof, err := auth.PasswordHash(password, settings.SRPID, settings.SRPB, settings.SecureRandom, settings.CurrentAlgo)
 		if err != nil {
@@ -397,7 +417,7 @@ func signIn(ctx context.Context, endpoint string, identity serverIdentity, usern
 		defer clear(proof.M1)
 		response, err := api.AuthCheckPassword(ctx, proof)
 		if err != nil {
-			return errors.New("auth.checkPassword failed")
+			return smokeRPCError("auth.checkPassword", err)
 		}
 		authorization, ok := response.(*tg.AuthAuthorization)
 		if !ok {

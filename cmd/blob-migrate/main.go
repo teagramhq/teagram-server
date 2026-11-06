@@ -28,7 +28,14 @@ func main() {
 func logFailure(args []string, err error, stderr io.Writer) {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	if hasPrivateManifestOutput(args) {
-		logger.Error("blob-migrate private evidence operation failed")
+		stage := "setup"
+		if staged, ok := errors.AsType[*blobmigration.StageError](err); ok {
+			switch staged.Stage {
+			case blobmigration.StageCopy, blobmigration.StageReadBack, blobmigration.StageKeySet, blobmigration.StageManifest:
+				stage = string(staged.Stage)
+			}
+		}
+		logger.Error("blob-migrate private evidence operation failed", "stage", stage)
 		return
 	}
 	logger.Error("blob-migrate failed", "err", err)

@@ -214,7 +214,13 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n ${CUTOVER_FAIL_PREFLIGHT_RESOURCE:-} &&
+  " $* " == *" get $CUTOVER_FAIL_PREFLIGHT_RESOURCE "* && " $* " == *' --ignore-not-found '* ]]; then
+  printf 'injected preflight API failure\n' >&2
+  exit 42
+fi
 if [[ ${CUTOVER_FAIL_RESOURCE_LOOKUP:-} == cloudflared &&
+  ( ${CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE:-} != true || -f $RUNNER_TEMP/teagram-cutover-runner/phase ) &&
   " $* " == *' get deployment/cloudflared '* && " $* " == *' --ignore-not-found '* ]]; then
   printf 'injected disposable-cluster Cloudflare lookup failure\n' >&2
   exit 42
@@ -225,10 +231,27 @@ if [[ ${CUTOVER_FAIL_RESOURCE_LOOKUP:-} == teagramd &&
   printf 'injected disposable-cluster teagramd lookup failure\n' >&2
   exit 42
 fi
+if [[ ${CUTOVER_DROP_BLOB:-} == true && " $* " == *' tar -xopf - -C /target/legacy-blobs '* ]]; then
+  "$REAL_KUBECTL" "$@"
+  "$REAL_KUBECTL" exec --namespace teagram-cutover pod/cutover-volume-importer -c importer -- \
+    rm /target/legacy-blobs/parts/aa/1123456789abcdef0123456789abcd
+  exit 0
+fi
 exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
 chmod 0600 "$KUBECONFIG"
+for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-admin; do
+  if env "${incus_test_env[@]}" CUTOVER_FAIL_PREFLIGHT_RESOURCE="$resource" \
+    bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/preflight-failure.log" 2>&1; then
+    printf 'cutover accepted a failed preflight lookup for %s\n' "$resource" >&2
+    exit 1
+  fi
+  expect_log 'injected preflight API failure' "$tmp_dir/preflight-failure.log"
+  expect_log 'could not determine whether' "$tmp_dir/preflight-failure.log"
+  [[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
+  rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
+done
 if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
   > "$tmp_dir/pre-switch-failure.log" 2>&1; then
@@ -244,6 +267,7 @@ fi
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
 if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/pre-switch-failure.log"; then
   printf 'the pre-switch failure incorrectly selected post-switch recovery\n' >&2
   exit 1
@@ -277,6 +301,35 @@ printf 'ROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
+kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
+rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
+create_target_namespace
+
+if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_DROP_BLOB=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/dropped-blob.log" 2>&1; then
+  printf 'cutover runner accepted a truncated blob tree\n' >&2
+  exit 1
+fi
+expect_log 'encrypted legacy blob migration totals do not match the fenced source tree' "$tmp_dir/dropped-blob.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
+kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
+rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
+create_target_namespace
+
+if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_FIRST_SERVE_ROUTE=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/first-route-failure.log" 2>&1; then
+  printf 'cutover runner accepted a failed first Serve route\n' >&2
+  exit 1
+fi
+expect_log 'injected disposable-cluster failure before the first Serve route changed' "$tmp_dir/first-route-failure.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.spec.replicas}') == 1 ]]
+if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/first-route-failure.log"; then
+  printf 'unchanged Serve routes incorrectly selected post-switch recovery\n' >&2
+  exit 1
+fi
+rm -f "$tmp_dir/incus-state/serve-route-failure-injected"
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
@@ -351,7 +404,7 @@ cutover_job_image=$(kubectl get job local-blob-migration --namespace "$TARGET_NA
   exit 1
 }
 kubectl logs --namespace "$TARGET_NAMESPACE" job/local-blob-migration -c migrate |
-  grep --fixed-strings 'blob_copy=pass mode=encrypted objects=1 bytes=32' >/dev/null
+  grep --fixed-strings 'blob_copy=pass mode=encrypted objects=2 bytes=44' >/dev/null
 printf 'actual runner completed the snapshot and encrypted blob migration before the injected post-switch failure\n'
 
 target_pod=$(kubectl get pods --namespace "$TARGET_NAMESPACE" \

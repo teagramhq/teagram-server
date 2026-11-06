@@ -62,6 +62,9 @@ dry_run() {
   cat <<'EOF'
 Would verify alpha, the bootstrap kubeconfig, source Compose containers, the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
+Would create the teagramd-admin Secret from the old Compose environment without printing its values.
+Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
+Would keep private phase, Serve route, and recovery evidence under /var/lib/teagram-k3s-cutover.
 Would wait for PostgreSQL and RustFS, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
 Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before that switch restarts every stopped Compose service.
 Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file, sent over a temporary loopback port-forward, and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
@@ -294,13 +297,12 @@ install_admin_secret() {
   chmod 0600 "$admin_origin_file"
   kubectl create secret generic teagramd-admin --namespace "$NAMESPACE" \
     --from-file=TG_ADMIN_TOKEN_HASH="$admin_hash_file" \
-    --from-file=TG_ADMIN_ORIGIN="$admin_origin_file" --dry-run=client --output yaml |
-    kubectl apply --filename - >/dev/null
+    --from-file=TG_ADMIN_ORIGIN="$admin_origin_file" >/dev/null
 }
 
 serve_status_file() {
   local destination=$1
-  incus exec "$SOURCE_INSTANCE" -- tailscale serve status --json > "$destination"
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve status --json > "$destination" || return 1
   chmod 0600 "$destination"
 }
 
@@ -362,8 +364,10 @@ if any(value is not False for value in funnel.values()):
 }
 
 set_serve_routes() {
-  local root=$1 websocket_base=$2 admin_base=$3 tcp_target=$4
-  incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ "$root" >/dev/null
+  local root=$1 websocket_base=$2 admin_base=$3 tcp_target=$4 skip_root=${5:-false}
+  if [[ $skip_root != true ]]; then
+    incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ "$root" >/dev/null
+  fi
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/apiws \
     "$websocket_base/apiws" >/dev/null
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/admin \
@@ -453,9 +457,11 @@ print_rollback_command() {
 }
 
 stop_port_forward_units() {
-  local unit
+  local unit load_state
   for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT"; do
-    if incus exec "$TARGET_INSTANCE" -- systemctl cat "$unit" >/dev/null 2>&1; then
+    load_state=$(incus exec "$TARGET_INSTANCE" -- systemctl show -p LoadState --value "$unit") || return 1
+    if [[ $load_state != not-found ]]; then
+      [[ $load_state == loaded ]] || return 1
       incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$unit" >/dev/null || return 1
     fi
   done
@@ -523,7 +529,7 @@ admin_origin_file=''
 cutover_manifest=''
 dump_spool=''
 handle_exit() {
-  local status=$? phase=''
+  local status=$? phase='' current_serve=''
   trap - EXIT
   [[ -z ${unit_file:-} ]] || rm -f -- "$unit_file"
   [[ -z ${admin_hash_file:-} ]] || rm -f -- "$admin_hash_file"
@@ -532,9 +538,24 @@ handle_exit() {
   [[ -z ${dump_spool:-} ]] || rm -f -- "$dump_spool"
   if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
     phase=$(<"$PHASE_FILE")
+    case "$phase" in
+      prepared) ;;
+      *) kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null ||
+           printf 'k3s cutover: could not remove the temporary volume importer; manual cleanup is required\n' >&2 ;;
+    esac
     if [[ $phase != complete && $phase != rolled-back ]]; then
       case "$phase" in
-        serve-switch-started|serve-switched|route-change-requested|route-switched|k8s-connector-started)
+        serve-switch-started)
+          current_serve=$(mktemp)
+          if serve_status_file "$current_serve" && check_serve_status "$current_serve" http://127.0.0.1:8081 \
+            http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"; then
+            recover_before_edge_switch ready-for-edge
+          else
+            recover_after_serve_switch
+          fi
+          rm -f -- "$current_serve"
+          ;;
+        serve-switched|route-change-requested|route-switched|k8s-connector-started)
           recover_after_serve_switch
           ;;
         *)
@@ -564,7 +585,7 @@ rollback() {
   current_serve=$(mktemp)
   serve_status_file "$current_serve"
   if ! check_serve_status "$current_serve" http://127.0.0.1:8081 \
-    http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" 2>/dev/null; then
+    http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"; then
     [[ -f $EVIDENCE_DIR/serve-target && ! -L $EVIDENCE_DIR/serve-target ]] ||
       fail 'Tailscale Serve is not on the old routes, and no verified cutover routes were recorded'
     mapfile -t target_routes < "$EVIDENCE_DIR/serve-target"
@@ -587,6 +608,8 @@ rollback() {
 
   stop_k8s_connector
   stop_k8s_application
+  kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=300s >/dev/null ||
+    fail 'could not remove the temporary volume importer; rollback incomplete'
   set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
     "127.0.0.1:$MTPROTO_PORT"
   serve_after=$(mktemp)
@@ -599,7 +622,7 @@ rollback() {
   confirm ROUTE-RESTORED 'If the route is already on the before value, leave it there. Otherwise restore the before value now.'
   stop_port_forward_units || fail 'could not stop all target port-forwards before restarting Compose'
   if [[ -f $COMPOSE_STOPPED_FILE ]]; then
-    restart_stopped_compose_services
+    restart_stopped_compose_services || fail 'one or more Compose services need manual restart; rollback incomplete'
   fi
   check_source_container teagram-teagramd-1
   check_source_container teagram-postgres-1
@@ -610,7 +633,11 @@ rollback() {
 
 if [[ $ACTION == --rollback ]]; then
   [[ -f $PHASE_FILE && ! -L $PHASE_FILE ]] || fail 'no recorded cutover phase exists to roll back'
-  kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || fail 'teagram namespace is unavailable; cannot verify the rollback target'
+  if kubectl_resource_exists "namespace/$NAMESPACE"; then :; else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] && fail 'teagram namespace is missing; cannot verify the rollback target'
+    fail 'could not determine whether the teagram namespace exists'
+  fi
   check_source_container teagram-postgres-1
   trap - EXIT
   rollback
@@ -624,8 +651,11 @@ for resource in \
   service/postgres service/postgres-headless service/rustfs service/rustfs-headless \
   service/teagramd service/teagramd-headless service/linkselector service/linklanding \
   service/cloudflared-metrics pod/cutover-volume-importer; do
-  if kubectl get "$resource" --namespace "$NAMESPACE" >/dev/null 2>&1; then
+  if kubectl_resource_exists "$resource"; then
     fail "target production workload already exists: $resource"
+  else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] || fail "could not determine whether $resource exists"
   fi
 done
 for selector in app.kubernetes.io/name=db-migrations app.kubernetes.io/name=rustfs-init app.kubernetes.io/name=local-blob-migration; do
@@ -633,16 +663,31 @@ for selector in app.kubernetes.io/name=db-migrations app.kubernetes.io/name=rust
   [[ -z $existing_jobs ]] || fail "target production Job already exists: $selector"
 done
 for claim in data-postgres-0 data-rustfs-0 key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
-  if kubectl get pvc "$claim" --namespace "$NAMESPACE" >/dev/null 2>&1; then
+  if kubectl_resource_exists "pvc/$claim"; then
     fail "target cutover PVC already exists: $claim"
+  else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] || fail "could not determine whether pvc/$claim exists"
   fi
 done
-kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || fail 'the bootstrap teagram namespace is missing'
+if kubectl_resource_exists "namespace/$NAMESPACE"; then :; else
+  lookup_status=$?
+  [[ $lookup_status == 1 ]] && fail 'the bootstrap teagram namespace is missing'
+  fail 'could not determine whether the bootstrap teagram namespace exists'
+fi
 for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys cloudflared-token ghcr-pull; do
-  kubectl get secret "$secret" --namespace "$NAMESPACE" >/dev/null 2>&1 || fail "required namespace Secret is missing: $secret"
+  if kubectl_resource_exists "secret/$secret"; then :; else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] && fail "required namespace Secret is missing: $secret"
+    fail "could not determine whether Secret $secret exists"
+  fi
 done
 for configmap in teagramd-runtime link-edge-runtime; do
-  kubectl get configmap "$configmap" --namespace "$NAMESPACE" >/dev/null 2>&1 || fail "required namespace ConfigMap is missing: $configmap"
+  if kubectl_resource_exists "configmap/$configmap"; then :; else
+    lookup_status=$?
+    [[ $lookup_status == 1 ]] && fail "required namespace ConfigMap is missing: $configmap"
+    fail "could not determine whether ConfigMap $configmap exists"
+  fi
 done
 
 check_source_container teagram-teagramd-1
@@ -662,8 +707,11 @@ record_phase prepared
 ensure_private_dir "$EVIDENCE_DIR"
 install_private_file 0600 "$SERVE_BEFORE" "$EVIDENCE_DIR/serve-before.json"
 rm -f -- "$SERVE_BEFORE"
-if kubectl get secret teagramd-admin --namespace "$NAMESPACE" >/dev/null 2>&1; then
+if kubectl_resource_exists secret/teagramd-admin; then
   fail 'target teagramd-admin Secret already exists; refusing to overwrite the cutover identity'
+else
+  lookup_status=$?
+  [[ $lookup_status == 1 ]] || fail 'could not determine whether the teagramd-admin Secret exists'
 fi
 admin_hash_file=$(mktemp)
 admin_origin_file=$(mktemp)
@@ -885,6 +933,10 @@ migration_summary=$(kubectl logs --namespace "$NAMESPACE" job/local-blob-migrati
   sed -n '/^blob_copy=pass mode=encrypted /p')
 [[ $migration_summary == blob_copy=pass\ mode=encrypted\ objects=* ]] ||
   fail 'encrypted legacy blob migration did not report a verified copy'
+[[ $migration_summary =~ ^blob_copy=pass\ mode=encrypted\ objects=([0-9]+)\ bytes=([0-9]+)\  ]] ||
+  fail 'encrypted legacy blob migration returned an invalid copy summary'
+[[ ${BASH_REMATCH[1]} == "$blob_objects" && ${BASH_REMATCH[2]} == "$blob_bytes" ]] ||
+  fail 'encrypted legacy blob migration totals do not match the fenced source tree'
 
 kubectl scale statefulset/teagramd --replicas=1 --namespace "$NAMESPACE" >/dev/null
 kubectl rollout status statefulset/teagramd --namespace "$NAMESPACE" --timeout=900s >/dev/null
@@ -966,9 +1018,12 @@ printf '%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
 record_phase serve-switch-started
+incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
+  "http://$linkselector_ip:$LINKSELECTOR_PORT" >/dev/null
+record_phase serve-switched
 set_serve_routes "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
-  "$linkselector_ip:$MTPROTO_PORT"
+  "$linkselector_ip:$MTPROTO_PORT" true
 SERVE_AFTER=$(mktemp)
 serve_status_file "$SERVE_AFTER"
 check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$LINKSELECTOR_PORT" \

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/blobmigration"
 )
 
 func TestEncryptedDestinationWritesUnderEncryptedNamespace(t *testing.T) {
@@ -96,7 +97,7 @@ func TestLogFailureRedactsDiscardManifestErrors(t *testing.T) {
 	var stderr bytes.Buffer
 	logFailure(
 		[]string{"--direction", "local-to-s3", "--manifest", "discard", "--encrypt"},
-		errors.New("secret object key and backend response"),
+		&blobmigration.StageError{Stage: blobmigration.StageReadBack, Err: errors.New("secret object key and backend response")},
 		&stderr,
 	)
 	if strings.Contains(stderr.String(), "secret object key") || strings.Contains(stderr.String(), "backend response") {
@@ -104,5 +105,8 @@ func TestLogFailureRedactsDiscardManifestErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "blob-migrate private evidence operation failed") {
 		t.Fatalf("private migration failure was not identified: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stage=read-back") {
+		t.Fatalf("private migration stage was not identified: %q", stderr.String())
 	}
 }

@@ -14,6 +14,9 @@ for required in \
   'sent over a temporary loopback port-forward' \
   '8 GiB PostgreSQL PVC can hold both the protected dump and restored database' \
   'server_key.pem, enc_key.hex, and local blobs' \
+  'teagramd-admin Secret' \
+  'importer pod' \
+  '/var/lib/teagram-k3s-cutover' \
   'encrypt and checksum-copy its objects to RustFS' \
   'all five tailnet-only Serve handlers' \
   'planned downtime from the write fence until all edges switch' \

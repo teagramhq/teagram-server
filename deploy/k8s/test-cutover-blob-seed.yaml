@@ -22,7 +22,7 @@ spec:
       imagePullPolicy: IfNotPresent
       command: ["sh", "-ec"]
       args:
-        - mkdir -p /blobs/parts/aa; printf 'alpha cutover migration fixture\n' > /blobs/parts/aa/0123456789abcdef0123456789abcd; exec sleep 3600
+        - mkdir -p /blobs/parts/aa; printf 'alpha cutover migration fixture\n' > /blobs/parts/aa/0123456789abcdef0123456789abcd; printf 'second blob\n' > /blobs/parts/aa/1123456789abcdef0123456789abcd; exec sleep 3600
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
