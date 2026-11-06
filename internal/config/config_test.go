@@ -2534,3 +2534,51 @@ func TestMediaErasureMinAgeDefaultsToAtLeastADay(t *testing.T) {
 		t.Errorf("MediaErasureMinAge default = %v, want at least 24h", cfg.MediaErasureMinAge)
 	}
 }
+
+func TestChannelUnreadRateLimitRejectsInvalidValues(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	for _, tc := range []struct{ name, limit, window, wantErr string }{
+		{"non-integer", "many", "", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT"},
+		{"negative limit", "-1", "", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT"},
+		{"invalid window", "", "soon", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW"},
+		{"negative window", "", "-1m", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW"},
+		{"zero enabled window", "", "0s", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT", tc.limit)
+			t.Setenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW", tc.window)
+			_, err := config.Load(discardLog())
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Load error = %v, want error naming %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadChannelUnreadRateLimit(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	for _, tc := range []struct {
+		name, limit, window string
+		wantLimit           int
+		wantWindow          time.Duration
+	}{
+		{"default", "", "", 60, time.Minute},
+		{"configured", "120", "30s", 120, 30 * time.Second},
+		{"disabled", "0", "0s", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT", tc.limit)
+			t.Setenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW", tc.window)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.RateLimits.ChannelUnreadCount
+			if got.Limit != tc.wantLimit || got.Window != tc.wantWindow {
+				t.Fatalf("limit/window = %d/%v, want %d/%v", got.Limit, got.Window, tc.wantLimit, tc.wantWindow)
+			}
+		})
+	}
+}
