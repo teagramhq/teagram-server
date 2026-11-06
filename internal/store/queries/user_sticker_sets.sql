@@ -284,21 +284,13 @@ visible_channels AS MATERIALIZED (
     WHERE cp.user_id = sqlc.arg(owner_id)
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND c.deleted_at IS NULL
-), visible_channel_ids AS MATERIALIZED (
-    SELECT COALESCE(array_agg(channel_id), ARRAY[]::bigint[]) AS channel_ids
-    FROM visible_channels
 ), channel_candidates AS MATERIALIZED (
     SELECT cm.entities
-    FROM channel_messages cm
-    CROSS JOIN visible_channel_ids ids
-    WHERE cm.channel_id = ANY(ids.channel_ids)
-      AND EXISTS (
-          SELECT 1
-          FROM visible_channels vc
-          WHERE vc.channel_id = cm.channel_id
-            AND cm.local_id > vc.available_min_id
-      )
-      AND cm.deleted = false
+    FROM visible_channels vc
+    JOIN channel_messages cm
+      ON cm.channel_id = vc.channel_id
+     AND cm.local_id > vc.available_min_id
+    WHERE cm.deleted = false
       AND cm.entities IS NOT NULL
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
