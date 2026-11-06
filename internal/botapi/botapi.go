@@ -19,9 +19,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/teagramhq/teagram-server/internal/proxyv1"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -132,8 +134,17 @@ func NewServerWithHandler(addr string, h http.Handler, logger *slog.Logger) *htt
 		WriteTimeout:      getUpdatesWriteTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          log.New(errorLogWriter{logger: logger}, "", 0),
+		// Only the trusted listener can mark a connection as carrying a peer.
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			if c, ok := conn.(*limitedConn); ok && c.proxied {
+				return context.WithValue(ctx, proxyPeerContextKey{}, true)
+			}
+			return ctx
+		},
 	}
 }
+
+type proxyPeerContextKey struct{}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var botID int64
@@ -145,14 +156,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if !h.limiter.reserve(r.RemoteAddr, time.Now()) {
+	// Preserve network buckets for direct clients; Serve authenticates the
+	// individual tailnet peer named by a trusted PROXY header.
+	key := sourceNetwork(r.RemoteAddr)
+	if r.Context().Value(proxyPeerContextKey{}) != nil {
+		key = remoteIP(r.RemoteAddr).String()
+	}
+	if !h.limiter.reserve(key, time.Now()) {
 		h.rateLimited(w, botID, method)
 		return
 	}
 	authAttemptReserved := true
 	defer func() {
 		if authAttemptReserved {
-			h.limiter.refund(r.RemoteAddr, time.Now())
+			h.limiter.refund(key, time.Now())
 		}
 	}()
 	unauthorized := func(id int64, requestMethod string) {
@@ -580,16 +597,15 @@ func newAuthLimiter() *authLimiter {
 	return &authLimiter{buckets: make(map[string]authBucket)}
 }
 
-func (l *authLimiter) reserve(remoteAddr string, now time.Time) bool {
-	return l.update(remoteAddr, now, true)
+func (l *authLimiter) reserve(key string, now time.Time) bool {
+	return l.update(key, now, true)
 }
 
-func (l *authLimiter) refund(remoteAddr string, now time.Time) {
-	l.update(remoteAddr, now, false)
+func (l *authLimiter) refund(key string, now time.Time) {
+	l.update(key, now, false)
 }
 
-func (l *authLimiter) update(remoteAddr string, now time.Time, reserve bool) bool {
-	key := sourceNetwork(remoteAddr)
+func (l *authLimiter) update(key string, now time.Time, reserve bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -673,20 +689,24 @@ func remoteIP(remoteAddr string) netip.Addr {
 type connectionLimitListener struct {
 	net.Listener
 
-	mu     sync.Mutex
-	limit  int
-	active map[netip.Addr]int
+	mu      sync.Mutex
+	limit   int
+	active  map[netip.Addr]int
+	results chan acceptResult
+	done    chan struct{}
+	closed  atomic.Bool
 }
 
 func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	if limit < 1 {
 		limit = DefaultMaxConnectionsPerIP
 	}
-	return &connectionLimitListener{
-		Listener: listener,
-		limit:    limit,
-		active:   make(map[netip.Addr]int),
+	l := &connectionLimitListener{
+		Listener: listener, limit: limit, active: make(map[netip.Addr]int),
+		results: make(chan acceptResult), done: make(chan struct{}),
 	}
+	go l.acceptConnections()
+	return l
 }
 
 // LimitConnectionsPerIP bounds the number of open HTTP connections from one
@@ -695,31 +715,134 @@ func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	return limitConnectionsPerIP(listener, limit)
 }
 
-func (l *connectionLimitListener) Accept() (net.Conn, error) {
+type acceptResult struct {
+	conn     net.Conn
+	err      error
+	proxied  bool
+	reserved bool
+}
+
+// Bound loopback connections awaiting a preface before their peer is known.
+const maxPendingPrefaces = 128
+
+func (l *connectionLimitListener) acceptConnections() {
+	pending := make(chan struct{}, maxPendingPrefaces)
 	for {
 		conn, err := l.Listener.Accept()
 		if err != nil {
-			return nil, err
+			select {
+			case l.results <- acceptResult{err: err}:
+				continue
+			case <-l.done:
+				return
+			}
 		}
 		ip := remoteIP(conn.RemoteAddr().String())
-		l.mu.Lock()
-		if l.active[ip] >= l.limit {
-			l.mu.Unlock()
-			if err := conn.Close(); err != nil {
-				return nil, err
-			}
+		// A direct connection's transport address is its final client address.
+		// Reserve it before reading so idle sockets count against the same cap.
+		reserved := !ip.IsLoopback()
+		if reserved && !l.reserveIP(ip) {
+			closeBotConn(conn)
 			continue
 		}
-		l.active[ip]++
-		l.mu.Unlock()
-		return &limitedConn{Conn: conn, release: func() {
-			l.mu.Lock()
-			defer l.mu.Unlock()
-			l.active[ip]--
-			if l.active[ip] == 0 {
-				delete(l.active, ip)
+		// Direct peers already hold a per-IP reservation. Keep the shared
+		// preface pool for loopback, where the conveyed peer is not known yet.
+		if !reserved {
+			select {
+			case pending <- struct{}{}:
+			default:
+				slog.Warn("Bot API pending preface limit reached", "remote_ip", ip.String(), "limit", maxPendingPrefaces)
+				closeBotConn(conn)
+				continue
 			}
-		}}, nil
+		}
+		go func(conn net.Conn, ip netip.Addr, reserved bool) {
+			if !reserved {
+				defer func() { <-pending }()
+			}
+			parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					slog.Debug("empty Bot API connection", "remote_ip", ip.String(), "err", err)
+				} else {
+					slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
+				}
+				if reserved {
+					l.releaseIP(ip)
+				}
+				closeBotConn(conn)
+				return
+			}
+			select {
+			case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0, reserved: reserved}:
+			case <-l.done:
+				if reserved {
+					l.releaseIP(ip)
+				}
+				closeBotConn(parsed)
+			}
+		}(conn, ip, reserved)
+	}
+}
+
+func (l *connectionLimitListener) reserveIP(ip netip.Addr) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[ip] >= l.limit {
+		return false
+	}
+	l.active[ip]++
+	return true
+}
+
+func (l *connectionLimitListener) releaseIP(ip netip.Addr) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.active[ip]--
+	if l.active[ip] == 0 {
+		delete(l.active, ip)
+	}
+}
+
+func closeBotConn(conn net.Conn) {
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		slog.Debug("close Bot API connection", "err", err)
+	}
+}
+
+func (l *connectionLimitListener) Close() error {
+	if l.closed.CompareAndSwap(false, true) {
+		close(l.done)
+		return l.Listener.Close()
+	}
+	return net.ErrClosed
+}
+
+func (l *connectionLimitListener) Accept() (net.Conn, error) {
+	for {
+		var result acceptResult
+		select {
+		case <-l.done:
+			return nil, net.ErrClosed
+		case result = <-l.results:
+		}
+		if result.err != nil {
+			return nil, result.err
+		}
+		conn := result.conn
+		ip := remoteIP(conn.RemoteAddr().String())
+		if l.closed.Load() {
+			if result.reserved {
+				l.releaseIP(ip)
+			}
+			closeBotConn(conn)
+			return nil, net.ErrClosed
+		}
+		if !result.reserved && !l.reserveIP(ip) {
+			closeBotConn(conn)
+			continue
+		}
+		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() { l.releaseIP(ip) }}, nil
 	}
 }
 
@@ -727,6 +850,7 @@ type limitedConn struct {
 	net.Conn
 
 	once    sync.Once
+	proxied bool
 	release func()
 	err     error
 }

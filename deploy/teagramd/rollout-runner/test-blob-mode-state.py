@@ -51,6 +51,52 @@ class BlobModeStateTests(unittest.TestCase):
         }
         self.override = pathlib.Path("/dev/null")
 
+    def test_report_migration_preserves_surviving_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, old_root, lock_path = self.create_initial_authority(root)
+            new_root = root / "new-reports"
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, old_root, lock_path, root, outcome)
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, old_root)
+                for record in records[:5]:
+                    blob_mode.report_read_path(old_root, record["transition_id"]).unlink()
+                before = blob_mode.current_deployment_authority(state_dir, old_root)
+                self.assertEqual(before[1], 5)
+                journal_before = {p.name: p.read_bytes() for p in (state_dir / "journal").iterdir()}
+                blob_mode.migrate_reports(state_dir, old_root, new_root, lock_path)
+                self.assertEqual(blob_mode.current_deployment_authority(state_dir, new_root), before)
+                self.assertEqual((state_dir / "mode.json").read_bytes(), mode_bytes)
+                self.assertEqual({p.name: p.read_bytes() for p in (state_dir / "journal").iterdir()}, journal_before)
+                self.assertEqual((state_dir / "journal" / f"{len(records):010d}.json").read_bytes(), head)
+                self.assertTrue(blob_mode.report_read_path(new_root, records[-1]["transition_id"]).exists())
+                blob_mode.migrate_reports(state_dir, old_root, new_root, lock_path)
+                copied = blob_mode.report_read_path(new_root, records[-1]["transition_id"])
+                copied.write_bytes(b"conflicting report")
+                self.assert_rejects(
+                    lambda: blob_mode.migrate_reports(state_dir, old_root, new_root, lock_path),
+                    "report-migration-conflict",
+                )
+                self.assertEqual(copied.read_bytes(), b"conflicting report")
+
+    def test_report_migration_rejects_root_inside_legacy_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            old_root = root / "old"
+            old_root.mkdir()
+            (root / "alias").symlink_to(old_root, target_is_directory=True)
+            with patch.object(blob_mode, "require_runner_lock"):
+                self.assert_rejects(
+                    lambda: blob_mode.migrate_reports(root / "state", old_root, root / "alias" / "reports", root / "lock"),
+                    "report-root-invalid",
+                )
+
     def test_private_rustfs_network_name_comes_from_rustfs_volume(self) -> None:
         record = {
             "volumes": {

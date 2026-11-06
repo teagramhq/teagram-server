@@ -120,9 +120,14 @@ set -euo pipefail
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
+cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-mode-state.py" <<'PYTHON'
+import sys
+if sys.argv[1] != "migrate-reports" or sys.argv[sys.argv.index("--report-root") + 1] != "/var/lib/teagram-blob-mode-reports":
+    raise SystemExit(1)
+PYTHON
 cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-transition-runner.py" <<'PYTHON'
 #!/usr/bin/env python3
 import json

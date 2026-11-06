@@ -107,9 +107,10 @@ chmod 600 "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/blob-mode-state.py" \
   fail 'cannot protect the staged blob authority validators'
 }
 
+export TEAGRAM_BLOB_MODE_REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
 authority_json=$(cd "$REPO" && python3 "$TEMP_DIR/blob-transition-runner.py" deployment-env \
   --checkout "$REPO" --state-dir "$REPO/.state/blob-mode" \
-  --report-root /root --lock-path /tmp/teagram-deploy.lock) || {
+  --report-root "$TEAGRAM_BLOB_MODE_REPORT_ROOT" --lock-path /tmp/teagram-deploy.lock) || {
   fail 'live S3 authority or credential selection is not verified'
 }
 env_file_lines=$(jq -er '

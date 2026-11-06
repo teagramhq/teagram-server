@@ -391,7 +391,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		rateLimitGetMessages:         rateLimits.GetMessages,
 		rateLimitSearchContacts:      rateLimits.SearchContacts,
 		rateLimitSearchGlobal:        rateLimits.SearchGlobal,
-		rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,
+		rateLimitChannelUnreadCounts: rateLimits.ChannelUnreadCount,
 		rateLimitSaveFilePart:        rateLimits.SaveFilePart,
 		rateLimitUploadBytes:         rateLimits.UploadBytes,
 		rateLimitGetFile:             rateLimits.GetFile,

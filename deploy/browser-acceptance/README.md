@@ -185,6 +185,9 @@ reported as `worker-unobservable` or `worker-pending`. The QA runner's preflight
 proof accepts up to four active connections, each matching the endpoint with
 exactly one 101 response. The web client's SharedWorker keeps four account
 slots, and an unauthenticated page load opens one base-DC socket for each slot.
+For an early-loaded worker, preflight accepts the observation only after all
+four expected sockets have one matching 101 handshake. An extra socket opened
+before observation can go undetected; that residual risk is accepted.
 Sign-in and chat-list rendering normally reuse those transports. If one closes
 during sign-in, the client may replace that slot once; the replacement must use
 the validated endpoint and complete with one 101, leaving the same four active

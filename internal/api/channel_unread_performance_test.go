@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -46,7 +47,7 @@ func TestChannelUnreadSummaryP99At500Memberships(t *testing.T) {
 		handlersBySession[i] = &handlers{
 			store:                        s,
 			log:                          slog.New(slog.DiscardHandler),
-			rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,
+			rateLimitChannelUnreadCounts: config.DefaultRateLimits().ChannelUnreadCount,
 		}
 	}
 
@@ -221,7 +222,7 @@ FROM channel_post_unread_suffix_counts($1::bigint, $2::bigint, $3::bigint)
 	}
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
 	p99 := samples[int(math.Ceil(0.99*float64(len(samples))))-1]
-	t.Logf("500 memberships, %d sessions, %d admitted requests at %d/min: p50=%s p99=%s", sessionCount, requests, channelUnreadCountRateLimit.Limit, samples[len(samples)/2], p99)
+	t.Logf("500 memberships, %d sessions, %d admitted requests at %d/min: p50=%s p99=%s", sessionCount, requests, config.DefaultRateLimits().ChannelUnreadCount.Limit, samples[len(samples)/2], p99)
 	if p99 > time.Second {
 		t.Fatalf("p99 %s exceeds the one-second per-account sustained interval", p99)
 	}

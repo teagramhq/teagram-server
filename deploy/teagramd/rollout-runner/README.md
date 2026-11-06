@@ -32,8 +32,8 @@ from PostgreSQL, streams each referenced plaintext object into the `encrypted/`
 S3 namespace, authenticates a full readback, checks that the database inventory
 did not change, and only then appends `encrypted` authority. It leaves source
 objects and unreferenced strays untouched. The private progress journal,
-inventory artifact, and authority report persist under `/root` by default and
-survive interruption.
+inventory artifact, and authority report persist under
+`/var/lib/teagram-blob-mode-reports` by default and survive interruption.
 
 Run from the deployment checkout as root after choosing and recording the
 actual write-quiescence state. `stopped` means every `teagramd` writer is
@@ -66,9 +66,8 @@ docker compose --profile migration run --rm blob-encrypt-migrate \
 
 Use the same `--writes` value recorded for migration. Cleanup reauthenticates
 each encrypted copy and compares it with the plaintext source before removing
-that referenced source. It does not remove unreferenced objects. If changing
-`TEAGRAM_BLOB_MODE_REPORT_ROOT`, set `ROLLOUT_RUNNER_EVIDENCE_ROOT` to the same
-host directory so later authority validation reads the published report.
+that referenced source. It does not remove unreferenced objects. The report root defaults to `/var/lib/teagram-blob-mode-reports` and is configured
+with `TEAGRAM_BLOB_MODE_REPORT_ROOT`. Rollout evidence remains under `/root`.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as
@@ -900,7 +899,7 @@ cd /opt/teagram
 python3 deploy/teagramd/rollout-runner/blob-transition-runner.py accept-s3 \
   --checkout /opt/teagram \
   --state-dir /opt/teagram/.state/blob-mode \
-  --report-root /root \
+  --report-root /var/lib/teagram-blob-mode-reports \
   --lock-path /tmp/teagram-deploy.lock
 ```
 
@@ -922,7 +921,7 @@ cd /opt/teagram
 python3 deploy/teagramd/rollout-runner/blob-transition-runner.py recover-local \
   --checkout /opt/teagram \
   --state-dir /opt/teagram/.state/blob-mode \
-  --report-root /root \
+  --report-root /var/lib/teagram-blob-mode-reports \
   --lock-path /tmp/teagram-deploy.lock
 ```
 

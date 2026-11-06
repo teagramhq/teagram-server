@@ -5,7 +5,8 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/stack-move-entrypoint.XXXXXXXX")
 chmod 700 "$TMP"
-trap 'rm -rf -- "$TMP"' EXIT
+REPORT_ROOT=$(mktemp -d /var/lib/stack-move-reports.XXXXXXXX)
+trap 'rm -rf -- "$TMP" "$REPORT_ROOT"' EXIT
 
 FAILURES=()
 record_failure() {
@@ -200,6 +201,7 @@ export ROLLOUT_RUNNER_TEST_MODE=1
 export ROLLOUT_RUNNER_CHECKOUT="$CHECKOUT"
 export ROLLOUT_RUNNER_TARGET_CHECKOUT="$TARGET_CHECKOUT"
 export ROLLOUT_RUNNER_EVIDENCE_ROOT=/root
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 export ROLLOUT_RUNNER_BASELINE_DIR="$RUNTIME_DIR"
 export ROLLOUT_RUNNER_TEST_SOURCE_DIR="$RUNTIME_DIR"
 export ROLLOUT_RUNNER_TEST_CHECKOUT="$CHECKOUT"
@@ -327,6 +329,9 @@ if [ -e "$TMP/target-worktree-created" ]; then
   fi
 fi
 rm -rf -- "$TARGET_CHECKOUT"
+
+# Earlier invocations may hold the target lock through the inherited descriptor.
+exec 8>&- 9>&-
 
 cat > "$TMP/lock-probe.sh" <<'SH'
 #!/usr/bin/env bash

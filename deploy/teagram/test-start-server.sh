@@ -73,7 +73,7 @@ helper_dir=$(dirname "$1")
 shift
 [[ "$1" == deployment-env && "$2" == --checkout && "$3" == "$FIXTURE_REPO" &&
    "$4" == --state-dir && "$5" == "$FIXTURE_REPO/.state/blob-mode" &&
-   "$6" == --report-root && "$7" == /root &&
+   "$6" == --report-root && "$7" == /var/lib/teagram-blob-mode-reports &&
    "$8" == --lock-path && "$9" == /tmp/teagram-deploy.lock ]] || {
   echo "unexpected deployment-env arguments: $*" >&2
   exit 99

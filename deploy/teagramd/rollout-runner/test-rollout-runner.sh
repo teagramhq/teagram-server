@@ -16,8 +16,11 @@ fi
 bash "$SCRIPT_DIR/test-rollout-verifier-env-additions.sh"
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
+REPORT_ROOT=$(mktemp -d /var/lib/teagram-report-fixtures.XXXXXXXX)
+chmod 700 "$REPORT_ROOT"
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 cleanup_fixtures() {
-  local root_file root phase checkout transition record_file report phase_dir
+  local root_file root phase checkout transition record_file report legacy_report phase_dir
   for root_file in "$TMP"/*-root-path; do
     [ -f "$root_file" ] || continue
     root=$(cat "$root_file")
@@ -26,17 +29,31 @@ cleanup_fixtures() {
       for record_file in "$checkout"/.state/blob-mode/journal/*.json "$checkout"/.state/blob-mode/mode.json; do
         [ -f "$record_file" ] || continue
         transition=$(jq -r '.transition_id' "$record_file")
-        report="/root/teagramd-blob-mode-report-$transition.json"
+        report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
         if [ -f "$report" ]; then
           while IFS= read -r phase_dir; do
             case "$phase_dir" in
-              transition-proof-fixtures-*) rm -rf -- "/root/$phase_dir" ;;
+              transition-proof-fixtures-*|stack-move-*)
+                rm -rf -- "$REPORT_ROOT/$phase_dir" "/root/$phase_dir"
+                ;;
             esac
           done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
           rm -f -- "$report"
         fi
-        if [ "$(jq -r '.outcome' "$record_file")" = stack-moved-local ]; then
+        if [[ "$transition" =~ ^[0-9a-f-]{36}$ ]]; then
+          legacy_report="/root/teagramd-blob-mode-report-$transition.json"
+          if [ -f "$legacy_report" ]; then
+            while IFS= read -r phase_dir; do
+              case "$phase_dir" in
+                transition-proof-fixtures-*|stack-move-*) rm -rf -- "/root/$phase_dir" ;;
+              esac
+            done < <(jq -r '.phase_files[]? | split("/")[0]' "$legacy_report" | sort -u)
+            rm -f -- "$legacy_report"
+          fi
           rm -rf -- "/root/stack-move-$transition"
+        fi
+        if [ "$(jq -r '.outcome' "$record_file")" = stack-moved-local ]; then
+          rm -rf -- "$REPORT_ROOT/stack-move-$transition"
         fi
       done
     fi
@@ -44,6 +61,7 @@ cleanup_fixtures() {
       rm -rf -- "$root.$phase"
     done
   done
+  rm -rf -- "$REPORT_ROOT"
   rm -rf -- "$TMP"
 }
 if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
@@ -228,6 +246,13 @@ set -eu
 script_name=${1:-}
 script_name=${script_name##*/}
 printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --report-root ]; then
+    [ "$argument" = "$TEAGRAM_BLOB_MODE_REPORT_ROOT" ] && [ "$argument" != "${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}" ] || exit 95
+  fi
+  previous=$argument
+done
 if { [ "$script_name" = stack-move-runner.py ] || [ "$script_name" = stack-move-runner.pinned ]; } && \
    [ "${2:-}" = inspect ]; then
   case "${MOCK_SCENARIO:-}" in
@@ -1500,7 +1525,7 @@ run_fixture() {
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
-    ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
+    TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT" ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_LOG_ARCHIVE="$TMP/$name-legacy.log" \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
@@ -1897,6 +1922,29 @@ remove_authority_reports() {
   done
 }
 
+move_authority_reports_to_legacy_root() {
+  local state_dir=$1 report_root=$2 record transition report legacy_report phase_dir
+  for record in "$state_dir"/journal/*.json; do
+    [ -f "$record" ] || continue
+    transition=$(jq -er '.transition_id' "$record") || return 1
+    [[ "$transition" =~ ^[0-9a-f-]{36}$ ]] || return 1
+    report="$report_root/teagramd-blob-mode-report-$transition.json"
+    legacy_report="/root/teagramd-blob-mode-report-$transition.json"
+    [ -f "$report" ] && [ ! -e "$legacy_report" ] || return 1
+    while IFS= read -r phase_dir; do
+      case "$phase_dir" in
+        transition-proof-fixtures-*|stack-move-*) ;;
+        *) return 1 ;;
+      esac
+      [ -d "$report_root/$phase_dir" ] && [ ! -e "/root/$phase_dir" ] || return 1
+      cp -a -- "$report_root/$phase_dir" /root/ || return 1
+      rm -rf -- "$report_root/$phase_dir" || return 1
+    done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
+    cp -p -- "$report" "$legacy_report" || return 1
+    rm -f -- "$report" || return 1
+  done
+}
+
 configure_s3_compose_fixture() {
   local state=$1 rustfs_volume=$2 private_network=$3
   local config next
@@ -1946,11 +1994,11 @@ prepare_moved_stack_apply_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   previous_record="$checkout/.state/blob-mode/mode.json"
   previous_transition=$(jq -er '.transition_id' "$previous_record") || return 1
-  rm -f -- "/root/teagramd-blob-mode-report-$previous_transition.json" || return 1
+  rm -f -- "$REPORT_ROOT/teagramd-blob-mode-report-$previous_transition.json" || return 1
   rm -rf -- "$checkout/.state/blob-mode" || return 1
   create_moved_blob_authority_fixture \
     "$SCRIPT_DIR/test-blob-mode-state.py" "$TMP/$name-moved-authority" \
-    "$checkout/.state/blob-mode" /root || return 1
+    "$checkout/.state/blob-mode" "$REPORT_ROOT" || return 1
   printf '%s\n' "$baseline_sha" > "$state/head" || return 1
   printf '%s\n' "$target_sha" > "$state/origin" || return 1
   printf '%s\n' "$baseline_sha" > "$TMP/$name-baseline-sha-path" || return 1
@@ -2369,7 +2417,7 @@ transition=''
 report=''
 if [ -f "$checkout/.state/blob-mode/mode.json" ]; then
   transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-  report="/root/teagramd-blob-mode-report-$transition.json"
+  report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
 fi
 preflight_line=$(grep -n '^python3 blob-mode-state.pinned preflight-initial-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 dump_line=$(grep -n '^docker compose exec -T postgres pg_dump -U postgres ' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
@@ -2479,7 +2527,7 @@ fi
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
 transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-mode_report="/root/teagramd-blob-mode-report-$transition.json"
+mode_report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
 if cmp -s "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json" && \
    [ "$(stat -c %a "$mode_report")" = 600 ] && [ "$(stat -c %u "$mode_report")" = 0 ] && \
    [ "$(jq -r '.evidence.report_sha256' "$checkout/.state/blob-mode/mode.json")" = "$(sha256sum "$mode_report" | awk '{print $1}')" ] && \
@@ -2519,7 +2567,7 @@ if prepare_apply_fixture apply-unpinned-local success; then
   live_id=$(cat "$state/teagramd")
   checkout=$(cat "$TMP/apply-unpinned-local-checkout-path")
   transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-  report="/root/teagramd-blob-mode-report-$transition.json"
+  report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
   authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
   printf 'services:\n  teagramd:\n    image: fixture:unreviewed\n' > "$checkout/docker-compose.unreviewed.yml"
   chmod 600 "$checkout/docker-compose.unreviewed.yml"
@@ -2598,7 +2646,7 @@ if prepare_apply_fixture s3-accepted-apply s3-accepted-apply; then
   checkout=$(cat "$TMP/s3-accepted-apply-checkout-path")
   root=$(cat "$TMP/s3-accepted-apply-root-path")
   if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
-    "$TMP/s3-accepted-apply-authority" "$checkout/.state/blob-mode" /root s3-accepted && \
+    "$TMP/s3-accepted-apply-authority" "$checkout/.state/blob-mode" "$REPORT_ROOT" s3-accepted && \
     configure_s3_compose_fixture "$state" fixture_rustfsdata fixture_rustfs_private; then
     printf '%s\n' 'TG_BLOB_S3_ACCESS_KEY_ID=fixture-access-key' \
       'TG_BLOB_S3_SECRET_ACCESS_KEY=fixture-secret' > "$checkout/.env.rustfs-parked"
@@ -2641,20 +2689,20 @@ if prepare_apply_fixture "$missing_reports_apply_name" s3-accepted-apply; then
   checkout=$(cat "$TMP/$missing_reports_apply_name-checkout-path")
   root=$(cat "$TMP/$missing_reports_apply_name-root-path")
   if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
-    "$TMP/$missing_reports_apply_name-authority" "$checkout/.state/blob-mode" /root s3-accepted && \
+    "$TMP/$missing_reports_apply_name-authority" "$checkout/.state/blob-mode" "$REPORT_ROOT" s3-accepted && \
     configure_s3_compose_fixture "$state" fixture_rustfsdata fixture_rustfs_private; then
     printf '%s\n' 'TG_BLOB_S3_ACCESS_KEY_ID=fixture-access-key' \
       'TG_BLOB_S3_SECRET_ACCESS_KEY=fixture-secret' > "$checkout/.env.rustfs-parked"
     chmod 600 "$checkout/.env.rustfs-parked"
     expected_env_files="$checkout/.env,$checkout/.env.rustfs-parked"
     printf '%s\n' "$expected_env_files" > "$TMP/$missing_reports_apply_name-compose-env-files"
-    if remove_authority_reports "$checkout/.state/blob-mode" /root; then
+    if remove_authority_reports "$checkout/.state/blob-mode" "$REPORT_ROOT"; then
       status=$(run_fixture "$missing_reports_apply_name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
       deployment_validation_count=$(grep -c \
         '^python3 blob-mode-state.pinned deployment-validate$' \
         "$TMP/$missing_reports_apply_name-events" || true)
       if python3 "$SCRIPT_DIR/blob-mode-state.py" validate \
-        --state-dir "$checkout/.state/blob-mode" --report-root /root \
+        --state-dir "$checkout/.state/blob-mode" --report-root "$REPORT_ROOT" \
         --containers "$root.target/pre-backup-blob-containers.json" \
         --compose "$root.target/pre-backup-blob-compose.json" \
         --override "$checkout/docker-compose.override.yml" --checkout "$checkout" \
@@ -2688,11 +2736,30 @@ if prepare_moved_stack_apply_fixture "$recovered_apply_name" recovered-local-app
   state=$(cat "$TMP/$recovered_apply_name-state-path")
   checkout=$(cat "$TMP/$recovered_apply_name-checkout-path")
   root=$(cat "$TMP/$recovered_apply_name-root-path")
+  legacy_reports_migrated=0
   if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
-    "$TMP/$recovered_apply_name-authority" "$checkout/.state/blob-mode" /root recovered-local 1; then
-    status=$(run_fixture "$recovered_apply_name" built 0 '' 2 '' '' apply da0107dfeadbeafbc1abfc4dd1594796ae661ed1)
+    "$TMP/$recovered_apply_name-authority" "$checkout/.state/blob-mode" "$REPORT_ROOT" recovered-local 1; then
+    if move_authority_reports_to_legacy_root "$checkout/.state/blob-mode" "$REPORT_ROOT"; then
+      status=$(run_fixture "$recovered_apply_name" built 0 '' 2 '' '' apply da0107dfeadbeafbc1abfc4dd1594796ae661ed1)
+      legacy_reports_migrated=1
+      for record in "$checkout"/.state/blob-mode/journal/*.json; do
+        transition=$(jq -er '.transition_id' "$record")
+        if ! cmp -s "/root/teagramd-blob-mode-report-$transition.json" \
+          "$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"; then
+          legacy_reports_migrated=0
+        fi
+      done
+    else
+      status=1
+    fi
     compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$recovered_apply_name-compose-selections" | sort -u)
     if [ "$status" = 0 ] && \
+       [ "$legacy_reports_migrated" = 1 ] && \
+       awk '
+         $1 == "python3" && $2 ~ /^blob-mode-state(\.pinned)?$/ && $3 == "migrate-reports" && !migration {migration=NR}
+         $1 == "python3" && $2 ~ /^blob-mode-state(\.pinned)?$/ && $3 == "authority" && !authority {authority=NR}
+         END {exit !(migration > 0 && authority > migration)}
+       ' "$TMP/$recovered_apply_name-events" && \
        grep -q 'rollout=verified sha=da0107dfeadbeafbc1abfc4dd1594796ae661ed1' \
          "$TMP/$recovered_apply_name.stdout" && \
        [ "$(cat "$state/head")" = da0107dfeadbeafbc1abfc4dd1594796ae661ed1 ] && \
@@ -2707,10 +2774,10 @@ if prepare_moved_stack_apply_fixture "$recovered_apply_name" recovered-local-app
        ' "$root.target/pre-backup-blob-compose.json" >/dev/null && \
        grep -q 'compose_contract=tracked-local-authority blob_dir=/var/lib/telegramd-blobs' \
          "$root.target/pre-backup-blob-authority.txt" && assert_evidence_mode "$root"; then
-      pass 'ordinary deploy after recovery renders the tracked local Compose pair from recovered-local authority'
+      pass 'tracked local apply migrates reports from the legacy root before reading recovered-local authority'
     else
       show_fixture_failure "$recovered_apply_name" "$status"
-      fail 'ordinary deploy after recovery must render the authority directory before backup and pass rollout gates'
+      fail 'tracked local apply must migrate legacy-root reports before strict authority validation'
     fi
   else
     fail 'recovered-local apply fixture requires a valid moved-stack S3 and recovery authority chain'
@@ -2724,7 +2791,7 @@ if prepare_apply_fixture apply-backend-flip runtime-backend-mismatch; then
   checkout=$(cat "$TMP/apply-backend-flip-checkout-path")
   live_id=$(cat "$state/teagramd")
   transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-  report="/root/teagramd-blob-mode-report-$transition.json"
+  report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
   authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
   status=$(run_fixture apply-backend-flip built 0 '' 2 '' '' apply)
   authority_after=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
@@ -2747,7 +2814,7 @@ if prepare_apply_fixture apply-s3-render success; then
   checkout=$(cat "$TMP/apply-s3-render-checkout-path")
   live_id=$(cat "$state/teagramd")
   transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-  report="/root/teagramd-blob-mode-report-$transition.json"
+  report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
   authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
   jq -c '
     .services.teagramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" |
@@ -4309,7 +4376,7 @@ new_transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json" 
 if [ "$status" = 0 ] && [ -n "$new_transition" ] && \
    [ "$new_transition" != 00000000-0000-4000-8000-000000000099 ] && \
    [ ! -e "$checkout/.state/blob-mode/journal/.tmp-00000000-0000-4000-8000-000000000099" ] && \
-   [ -f "/root/teagramd-blob-mode-report-$new_transition.json" ]; then
+   [ -f "$REPORT_ROOT/teagramd-blob-mode-report-$new_transition.json" ]; then
   pass 'abandoned pre-publication staging is cleared and retry creates fresh transition evidence'
 else
   fail 'abandoned initial publication retry'
@@ -4338,7 +4405,7 @@ root=$(cat "$TMP/interrupted-initial-publication-root-path")
 authority="$checkout/.state/blob-mode"
 journal="$authority/journal/0000000001.json"
 transition=$(jq -er '.transition_id' "$journal" 2>/dev/null || true)
-report="/root/teagramd-blob-mode-report-$transition.json"
+report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
 if [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
    [ -n "$transition" ] && [ -f "$journal" ] && [ ! -e "$authority/mode.json" ] && \
    [ -f "$report" ] && ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/interrupted-initial-publication-events" && \
@@ -4431,7 +4498,7 @@ checkout=$(cat "$TMP/blob-report-tamper-checkout-path")
 root=$(cat "$TMP/blob-report-tamper-root-path")
 bin=$(cat "$TMP/blob-report-tamper-bin-path")
 transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
-mode_report="/root/teagramd-blob-mode-report-$transition.json"
+mode_report="$REPORT_ROOT/teagramd-blob-mode-report-$transition.json"
 printf ' ' >> "$mode_report"
 state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json")
 if [ "$status" = 0 ]; then
@@ -4440,8 +4507,8 @@ if [ "$status" = 0 ]; then
   real_bash=$(command -v bash)
   real_python3=$(command -v python3)
   PATH="$bin:$PATH" MOCK_REAL_BASH="$real_bash" MOCK_REAL_PYTHON3="$real_python3" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
-    timeout --signal=TERM --kill-after=2s 15s bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
-      _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
+    timeout --signal=TERM --kill-after=2s 15s bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root "$4" --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
+      _ "$MODE_HELPER" "$checkout" "$root" "$REPORT_ROOT" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
   validation_status=$?
   set -e
   printf 'fixture validation finished: blob-report-tamper status=%s\n' "$validation_status" >&2

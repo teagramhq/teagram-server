@@ -11,7 +11,7 @@ readonly RUSTFS_CONTAINER=teagram-rustfs-1
 readonly EXPECTED_ROOT_UID=0
 readonly KEY_DIR=/etc/teagramd/media-keys
 readonly KEY_FILE="$KEY_DIR/1.key"
-readonly KEY_BACKUP=/root/teagram-media-key-v1-20261024T192020Z.key
+readonly KEY_BACKUP=/etc/teagramd/media-key-backups/1.key
 readonly EVIDENCE_ROOT=/root/teagram-media-encryption
 readonly PROGRESS_PATH=/run/teagramd/reports/blob-encryption-progress.jsonl
 readonly MINIMUM_MEDIA_SHA=91e50a0
@@ -19,7 +19,8 @@ readonly MINIMUM_MEDIA_SHA=91e50a0
 declare -a COMPOSE=()
 declare -a SERVER_CONTAINERS=()
 COMPOSE_ENV_FILES=()
-REPORT_ROOT=
+REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 SERVER_STOPPED=0
 RUSTFS_STOPPED=0
 SERVER_IMAGE_ID=
@@ -48,11 +49,6 @@ report_hash_mismatch() {
   actual_sha=$(sha256_text "$actual") || ops_fail 'cannot fingerprint preflight invariant'
   printf 'preflight mismatch invariant=%s expected_sha256=%s actual_sha256=%s\n' \
     "$invariant" "$expected_sha" "$actual_sha" >&2
-}
-
-report_digest_mismatch() {
-  printf 'preflight mismatch invariant=%s expected_sha256=%s actual_sha256=%s\n' \
-    "$1" "$2" "$3" >&2
 }
 
 check_hash_value() {
@@ -184,7 +180,7 @@ validate_live_stack() {
 configure_compose() {
   local authority_json env_file_lines legacy_parked compose_stderr preflight_failed=0
   authority_json=$(cd "$REPO" && python3 "$OPS_TEMP_DIR/blob-transition-runner.py" deployment-env \
-    --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root /root --lock-path "$LOCK_FILE") || \
+    --checkout "$REPO" --state-dir "$AUTHORITY_DIR" --report-root "$REPORT_ROOT" --lock-path "$LOCK_FILE") || \
     ops_fail 'live S3 authority or credential selection is not verified'
   env_file_lines=$(jq -er '
     select(.outcome == "s3-accepted") | .env_files |
@@ -241,7 +237,7 @@ configure_compose() {
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   check_compose_invariant migration_reports_mount \
     '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/reports") | {source:(.source // null),target:(.target // null)} ]' \
-    '[{"source":"/root","target":"/run/teagramd/reports"}]' || preflight_failed=1
+    "$(jq -cn --arg root "$REPORT_ROOT" '[{source:$root,target:"/run/teagramd/reports"}]')" || preflight_failed=1
   check_compose_invariant migration_authority_mount \
     '((.services // {})["blob-encrypt-migrate"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/blob-mode") | {source:(.source // null),target:(.target // null)} ]' \
     '[{"source":"/opt/teagram/.state/blob-mode","target":"/run/teagramd/blob-mode"}]' || preflight_failed=1
@@ -261,7 +257,6 @@ configure_compose() {
     '((.services // {}).teagramd // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   [[ "$preflight_failed" == 0 ]] || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
-  REPORT_ROOT=/root
 }
 
 check_media_key() {
@@ -270,6 +265,14 @@ check_media_key() {
     "$(media_path_metadata "$KEY_DIR" directory '%u:%a:%g')" || invalid_metadata=1
   check_hash_value media_key_file_metadata 'file:65532:600:65532' \
     "$(media_path_metadata "$KEY_FILE" file '%u:%a:%g')" || invalid_metadata=1
+  local backup_parent_mode backup_parent=${KEY_BACKUP%/*}
+  backup_parent=${backup_parent%/*}
+  [[ -d "$backup_parent" && ! -L "$backup_parent" && "$(stat -c '%u' -- "$backup_parent")" == "$EXPECTED_ROOT_UID" ]] || \
+    ops_fail 'media key backup parent is unsafe'
+  backup_parent_mode=$(stat -c '%a' -- "$backup_parent") || ops_fail 'cannot inspect media key backup parent'
+  [[ "$backup_parent_mode" =~ ^[0-7]{3,4}$ ]] || ops_fail 'media key backup parent is unsafe'
+  (( (8#$backup_parent_mode & 0022) == 0 )) || ops_fail 'media key backup parent is unsafe'
+  private_dir "${KEY_BACKUP%/*}" || ops_fail 'media key backup directory is unsafe'
   check_hash_value media_key_backup_metadata 'file:0:600' \
     "$(media_path_metadata "$KEY_BACKUP" file '%u:%a')" || invalid_metadata=1
   [[ "$invalid_metadata" == 0 ]] || ops_fail 'media key metadata does not match reviewed preflight'
@@ -277,7 +280,6 @@ check_media_key() {
   key_sha=$(sha256_file_contents "$KEY_FILE") || ops_fail 'cannot fingerprint mounted media key'
   backup_sha=$(sha256_file_contents "$KEY_BACKUP") || ops_fail 'cannot fingerprint media key backup'
   if [[ "$key_sha" != "$backup_sha" ]]; then
-    report_digest_mismatch media_key_backup_matches_mounted_key "$key_sha" "$backup_sha"
     ops_fail 'host-local media key backup differs from the mounted key'
   fi
 
