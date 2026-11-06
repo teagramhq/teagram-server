@@ -456,6 +456,31 @@ def _recover_incomplete_publication() -> bool:
         try:
             mode.current_authority(STATE_DIR, REPORT_ROOT)
         except mode.Reject:
+            try:
+                published = mode.read_report_loss_attestation(REPORT_ROOT)
+            except mode.Reject:
+                published = None
+            if (
+                published is not None
+                and published[0].get("head_bytes_sha256") == head_sha256
+            ):
+                # A usable publication may already have authorized a later transition.
+                try:
+                    report_fd = os.open(
+                        REPORT_ROOT,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    )
+                except OSError:
+                    reject("attestation-recovery-failed")
+                try:
+                    _remove_attestation_temporaries(report_fd)
+                finally:
+                    try:
+                        os.close(report_fd)
+                    except OSError:
+                        reject("attestation-recovery-failed")
+                _remove_recovery_marker(archive_root_fd)
+                return False
             _remove_incomplete_publication(head_sha256, archive_root_fd)
             _remove_recovery_marker(archive_root_fd)
             return False
