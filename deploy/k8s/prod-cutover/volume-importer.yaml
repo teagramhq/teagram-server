@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cutover-volume-importer
+  labels:
+    app.kubernetes.io/name: teagram-cutover
+    app.kubernetes.io/component: volume-importer
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  imagePullSecrets:
+    - name: ghcr-pull
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: importer
+      image: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-ec", "sleep 86400"]
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+          add: ["CHOWN", "FOWNER"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      volumeMounts:
+        - name: key-data
+          mountPath: /target/key-data
+        - name: legacy-blobs
+          mountPath: /target/legacy-blobs
+        - name: blob-mode
+          mountPath: /target/blob-mode
+  volumes:
+    - name: key-data
+      persistentVolumeClaim:
+        claimName: key-data-teagramd-0
+    - name: legacy-blobs
+      persistentVolumeClaim:
+        claimName: legacy-blobs-teagramd-0
+    - name: blob-mode
+      persistentVolumeClaim:
+        claimName: blob-mode-teagramd-0

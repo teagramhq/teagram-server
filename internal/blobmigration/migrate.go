@@ -45,6 +45,25 @@ type ManifestSummary struct {
 	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
+// StageError identifies a safe-to-log migration stage while retaining the
+// underlying error for callers that can handle private object details.
+type StageError struct {
+	Stage Stage
+	Err   error
+}
+
+type Stage string
+
+const (
+	StageCopy     Stage = "copy"
+	StageReadBack Stage = "read-back"
+	StageKeySet   Stage = "key-set"
+	StageManifest Stage = "manifest"
+)
+
+func (e *StageError) Error() string { return fmt.Sprintf("%s: %v", e.Stage, e.Err) }
+func (e *StageError) Unwrap() error { return e.Err }
+
 type objectReport struct {
 	Type              string `json:"type"`
 	Key               string `json:"key"`
@@ -86,6 +105,94 @@ func MigrateWithManifest(ctx context.Context, source *blob.Local, destination bl
 		return Summary{}, errors.New("blob migration destination does not support full-tree enumeration")
 	}
 	return copyBlobs(ctx, source, destination, destinationTree, report, manifest, true)
+}
+
+// MigrateEncryptedWithManifest streams local plaintext into an encrypted S3
+// destination and verifies each object after reading it back through the
+// encrypted store. The full-tree view is the raw S3 backend, whose listed
+// sizes are ciphertext sizes and therefore cannot be compared with source
+// plaintext sizes.
+func MigrateEncryptedWithManifest(
+	ctx context.Context,
+	source *blob.Local,
+	destination *blob.Encrypted,
+	destinationTree fullTreeStore,
+	report, manifest io.Writer,
+) (Summary, error) {
+	if source == nil || destination == nil || destinationTree == nil || report == nil || manifest == nil {
+		return Summary{}, errors.New("encrypted blob migration requires source, destination, tree, report writer, and manifest writer")
+	}
+	entries, sourceEntries, err := collectEntries(ctx, source, "walk source blob store")
+	if err != nil {
+		return Summary{}, &StageError{Stage: StageCopy, Err: err}
+	}
+	if err := verifyEncryptedDestinationKeys(ctx, destinationTree, sourceEntries, false); err != nil {
+		return Summary{}, &StageError{Stage: StageKeySet, Err: err}
+	}
+
+	sourceManifest := sha256.New()
+	destinationManifest := sha256.New()
+	encoder := json.NewEncoder(report)
+	var summary Summary
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return Summary{}, err
+		}
+		body, err := migrationReader(ctx, source, entry)
+		if err != nil {
+			return Summary{}, &StageError{Stage: StageCopy, Err: err}
+		}
+		sourceDigest, err := digestStore(ctx, source, entry)
+		if err != nil {
+			return Summary{}, &StageError{Stage: StageCopy, Err: err}
+		}
+		written, err := destination.Put(ctx, entry.Key, body)
+		if err != nil {
+			return Summary{}, &StageError{Stage: StageCopy, Err: fmt.Errorf("copy blob %q to encrypted destination: %w", entry.Key, err)}
+		}
+		if written != entry.Size {
+			return Summary{}, &StageError{Stage: StageCopy, Err: fmt.Errorf("copy blob %q wrote %d plaintext bytes, source has %d", entry.Key, written, entry.Size)}
+		}
+		destinationDigest, err := digestRemote(ctx, destination, entry.Key, entry.Size)
+		if err != nil {
+			return Summary{}, &StageError{Stage: StageReadBack, Err: fmt.Errorf("verify encrypted destination blob %q: %w", entry.Key, err)}
+		}
+		if sourceDigest != destinationDigest {
+			return Summary{}, &StageError{Stage: StageReadBack, Err: fmt.Errorf("blob %q checksum mismatch: source %s destination %s", entry.Key, sourceDigest, destinationDigest)}
+		}
+		if err := writeManifestLeaf(sourceManifest, entry.Key, entry.Size, sourceDigest); err != nil {
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("checksum source manifest: %w", err)}
+		}
+		if err := writeManifestLeaf(destinationManifest, entry.Key, entry.Size, destinationDigest); err != nil {
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("checksum destination manifest: %w", err)}
+		}
+		if _, err := fmt.Fprintf(manifest, "%s\t%d\t%s\n", entry.Key, entry.Size, sourceDigest); err != nil {
+			return Summary{}, &StageError{Stage: StageManifest, Err: fmt.Errorf("write verified copy manifest: %w", err)}
+		}
+		if entry.Size > math.MaxInt64-summary.Bytes {
+			return Summary{}, errors.New("blob migration byte total overflows int64")
+		}
+		summary.Objects++
+		summary.Bytes += entry.Size
+		if err := encoder.Encode(objectReport{
+			Type: "object", Key: entry.Key, Bytes: entry.Size,
+			SourceSHA256: sourceDigest, DestinationSHA256: destinationDigest,
+		}); err != nil {
+			return Summary{}, fmt.Errorf("write migration object report: %w", err)
+		}
+	}
+	if err := verifyEncryptedDestinationKeys(ctx, destinationTree, sourceEntries, true); err != nil {
+		return Summary{}, &StageError{Stage: StageKeySet, Err: err}
+	}
+	summary.SourceManifestSHA256 = hex.EncodeToString(sourceManifest.Sum(nil))
+	summary.DestinationManifestSHA256 = hex.EncodeToString(destinationManifest.Sum(nil))
+	if summary.SourceManifestSHA256 != summary.DestinationManifestSHA256 {
+		return Summary{}, &StageError{Stage: StageManifest, Err: errors.New("blob migration manifest checksums do not match")}
+	}
+	if err := encoder.Encode(summaryReport{Type: "summary", Summary: summary}); err != nil {
+		return Summary{}, fmt.Errorf("write migration summary: %w", err)
+	}
+	return summary, nil
 }
 
 // Restore copies every object from source into the retained local destination.
@@ -323,6 +430,38 @@ func verifyDestinationKeys(ctx context.Context, destination tree, source map[str
 	}
 	if requireComplete && len(seen) != len(source) {
 		return fmt.Errorf("destination has %d of %d source blobs", len(seen), len(source))
+	}
+	return nil
+}
+
+func verifyEncryptedDestinationKeys(ctx context.Context, destination tree, source map[string]blob.Entry, requireComplete bool) error {
+	seen := make(map[string]struct{}, len(source))
+	if err := destination.Walk(ctx, func(entry blob.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Dir {
+			return nil
+		}
+		if !entry.Regular || entry.Size < 0 {
+			return fmt.Errorf("encrypted destination contains a non-regular blob entry %q", entry.Key)
+		}
+		if err := blob.ValidateKey(entry.Key); err != nil {
+			return fmt.Errorf("encrypted destination blob key %q is invalid: %w", entry.Key, err)
+		}
+		if _, ok := source[entry.Key]; !ok {
+			return fmt.Errorf("encrypted destination contains unexpected blob %q", entry.Key)
+		}
+		if _, duplicate := seen[entry.Key]; duplicate {
+			return fmt.Errorf("encrypted destination listed blob %q more than once", entry.Key)
+		}
+		seen[entry.Key] = struct{}{}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("verify encrypted destination blob key set: %w", err)
+	}
+	if requireComplete && len(seen) != len(source) {
+		return fmt.Errorf("encrypted destination has %d of %d source blobs", len(seen), len(source))
 	}
 	return nil
 }

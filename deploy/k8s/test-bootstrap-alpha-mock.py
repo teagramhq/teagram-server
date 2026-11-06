@@ -34,6 +34,8 @@ SOURCE_CONTAINERS = [
 ]
 TOKEN = "tgtest-deployer-token-7f3a9c"
 CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBtgtestonly\n-----END CERTIFICATE-----\n"
+ADMIN_CERT = base64.b64encode(b"tgtest-k3s-admin-client-cert").decode()
+ADMIN_KEY = base64.b64encode(b"tgtest-k3s-admin-client-key").decode()
 TAILNET_IP = "100.100.1.2"
 K3S_VERSION = "v1.37.1+k3s1"
 PATH_PREFIXES = ("/root/", "/etc/", "/usr/", "/run/", "/var/", "/opt/")
@@ -211,6 +213,27 @@ def create_from_env(args, text):
 def kubectl(args, state):
     if args[0].startswith("--as="):
         args = args[1:]
+    if args[:2] == ["config", "view"]:
+        if not all(option in args for option in ("--raw", "--flatten", "--minify")):
+            fail("admin kubeconfig view omitted a required protection option")
+        log_action("kubeconfig-admin-view")
+        print(json.dumps({
+            "apiVersion": "v1",
+            "kind": "Config",
+            "clusters": [{"name": "teagram-k3s", "cluster": {
+                "server": "https://127.0.0.1:6443",
+                "certificate-authority-data": base64.b64encode(CA_PEM.encode()).decode(),
+            }}],
+            "contexts": [{"name": "default", "context": {
+                "cluster": "teagram-k3s", "user": "default", "namespace": "default",
+            }}],
+            "current-context": "default",
+            "users": [{"name": "default", "user": {
+                "client-certificate-data": ADMIN_CERT,
+                "client-key-data": ADMIN_KEY,
+            }}],
+        }))
+        sys.exit(0)
     if args[0] == "apply":
         log_action("kubectl-apply-attempt")
         manifest = sys.stdin.read()

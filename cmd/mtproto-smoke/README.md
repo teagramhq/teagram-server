@@ -17,6 +17,15 @@ identifier, or application RPC. The generated auth key exists in process
 memory only and is not logged or written to the runner workspace; Go does not
 guarantee zeroization before process exit.
 
+The separate `--username-file` and `--password-file` mode signs in to a
+provisioned account and verifies that the authenticated username matches. It
+requires `--discovery-file`, protected regular files with one line each, and is
+used only by the disposable k8s cutover migration test. That test creates a
+temporary account in the source database, migrates its account and server
+identity, signs in on the restored target, then repeats sign-in against the
+source after the target is stopped for rollback. The default deployment probe
+does not enable this mode or read credentials.
+
 The client requests a 60-second temporary key, but that is not a server-side
 expiry guarantee today. The MTProto server's exchange path drops the temporary
 expiry metadata and persists every resulting key in Postgres, encrypted at
