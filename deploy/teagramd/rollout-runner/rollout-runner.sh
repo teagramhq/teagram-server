@@ -300,8 +300,13 @@ set_target_local_compose_pin() {
 }
 
 verify_runtime_sources() {
+  local source_scope=${1:-all}
   local -a tracked_paths source_paths
   local index source_sha target_sha runtime_source_sha
+  case "$source_scope" in
+    all|--support-only) ;;
+    *) fail 'invalid runtime source verification scope'; return 64 ;;
+  esac
   runtime_source_sha=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
   [[ "$runtime_source_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'rollout runtime source SHA must be a full commit ID'; return 1; }
   tracked_paths=(
@@ -318,7 +323,7 @@ verify_runtime_sources() {
   else
     source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
-  if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
+  if [ "$source_scope" = all ] && [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
     source_paths+=("$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE")
   fi
@@ -498,6 +503,7 @@ activate_tracked_local_compose() {
 }
 
 verify_target_local_compose() {
+  local verify_authority=${1:-1}
   local artifact_path artifact_sha artifact_content_sha reviewed_content_sha override_path entry entry_path artifact_count=0 override_count=0
   local -a compose_files
   TRACKED_LOCAL_AUTHORITY=0
@@ -515,7 +521,7 @@ verify_target_local_compose() {
           ;;
       esac
     done
-    if is_tracked_local_compose_selection; then
+    if [ "$verify_authority" = 1 ] && is_tracked_local_compose_selection; then
       activate_tracked_local_compose || return 1
     fi
     return 0
@@ -655,9 +661,14 @@ require_runtime_preflight() {
 
 require_runtime() {
   require_runtime_preflight || return 1
+  require_runtime_selection 1
+}
+
+require_runtime_selection() {
+  local verify_authority=${1:-1}
   require_compose_override || return 1
   verify_initial_local_compose || return 1
-  verify_target_local_compose || return 1
+  verify_target_local_compose "$verify_authority"
 }
 
 acquire_shared_lock() {
@@ -3377,8 +3388,9 @@ main() {
       return 1
     }
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
+    require_runtime_selection 0 || return 1
     verify_approved_gates || return 1
-    verify_runtime_sources || return 1
+    verify_runtime_sources --support-only || return 1
     python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
       --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
     require_runtime || return 1
@@ -3421,8 +3433,9 @@ main() {
   else
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
   fi
+  require_runtime_selection 0 || return 1
   verify_approved_gates || return 1
-  verify_runtime_sources || return 1
+  verify_runtime_sources --support-only || return 1
   python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
     --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
   require_runtime || return 1
