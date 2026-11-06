@@ -206,6 +206,46 @@ stopped Compose services and stops both port-forwards. PostgreSQL and PVC data
 remain intact. Writes made on k3s after the switch are not carried back to
 Compose.
 
+### Retry after a pre-switch failure
+
+An apply failure before the first live Serve route attempts to restart the
+stopped Compose services; if recovery reports incomplete, resolve that state
+before continuing. It leaves the cutover phase and target resources for
+diagnosis. The printed `--rollback` command restores the old routes and records
+`rolled-back`; it does not remove the imported target data. Do not reset the
+target until rollback has completed, the old Compose services and edges are
+healthy, and no cutover or rollback command is running. This reset deletes the
+failed target copy, so use it only after a pre-switch failure, when k3s has not
+served production traffic. A rollback after the first live Serve route warns
+that k3s writes are not copied back; preserve any such data before removing the
+target.
+
+After accepting that the failed target copy can be discarded, remove the
+resources from the cutover overlay and its separately-created admin Secret and
+PVCs, then remove the phase and recovery evidence directory. The namespace and
+bootstrap credentials are retained. The first command removes the importer and
+waits for its volume mounts to be released:
+
+```sh
+set -e
+sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete pod/cutover-volume-importer \
+  --namespace teagram --ignore-not-found=true --wait=true --timeout=300s
+sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+  -k deploy/k8s/prod-cutover --ignore-not-found=true --wait=true
+sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+  secret teagramd-admin --namespace teagram --ignore-not-found=true
+sudo env KUBECONFIG=/root/teagram-k3s-deploy.kubeconfig kubectl delete \
+  pvc data-postgres-0 data-rustfs-0 key-data-teagramd-0 \
+  legacy-blobs-teagramd-0 blob-mode-teagramd-0 \
+  --namespace teagram --ignore-not-found=true --wait=true
+sudo rm -rf -- /var/lib/teagram-k3s-cutover
+```
+
+The overlay deletion removes the workloads, Services, Jobs and overlay PVCs.
+The explicit PVC command also removes the PostgreSQL and RustFS claims from the
+base production manifests. Once the commands complete, a fresh `--apply` can
+run from the same reviewed checkout.
+
 CI runs the actual cutover runner with a disposable source namespace and a
 separate target namespace in k3s. The source database, identity files, and a
 blob fixture pass through the runner's fence, snapshot, transfer, and pinned

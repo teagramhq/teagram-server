@@ -7,6 +7,7 @@ cd "$repo_root"
 plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"
 for required in \
   'Would server-dry-run and apply deploy/k8s/prod-cutover' \
+  'TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
   'fence writes before the final PostgreSQL snapshot' \
   'stop all running Compose services except PostgreSQL' \
   'verify no PostgreSQL client connections remain' \
@@ -27,6 +28,27 @@ for required in \
   'k3s writes since the switch are not carried back'; do
   if [[ $plan != *"$required"* ]]; then
     printf 'alpha cutover dry-run omitted: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+for required in \
+  'Retry after a pre-switch failure' \
+  '-k deploy/k8s/prod-cutover' \
+  'secret teagramd-admin' \
+  'data-postgres-0' \
+  'data-rustfs-0' \
+  'key-data-teagramd-0' \
+  'legacy-blobs-teagramd-0' \
+  'blob-mode-teagramd-0' \
+  '/var/lib/teagram-k3s-cutover'; do
+  if [[ $required == 'Retry after a pre-switch failure' ]]; then
+    file=deploy/k8s/cutover-alpha.sh
+  else
+    file=deploy/k8s/README.md
+  fi
+  if ! grep --fixed-strings --quiet -- "$required" "$file"; then
+    printf 'alpha cutover retry instructions omit: %s\n' "$required" >&2
     exit 1
   fi
 done
@@ -93,6 +115,24 @@ mkdir -p "$fixture_dir/bin" "$fixture_dir/state" "$fixture_dir/teagram-cutover-r
 # Exercise the runner's actual validator with realistic CLI output and unsafe
 # variants, independently of the disposable-cluster integration test.
 eval "$(sed -n '/^check_serve_status() {/,/^set_serve_routes() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
+eval "$(sed -n '/^capture_compose_environment() {/,/^install_admin_secret() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
+fixture_source_env='TG_BLOB_DIR=/var/lib/teagramd-blobs'
+capture_compose_environment() { printf '%s\n' "$fixture_source_env"; }
+fail() { printf '%s\n' "$*" >&2; return 1; }
+validate_source_blob_backend || {
+  printf 'cutover rejected the local Compose blob source\n' >&2
+  exit 1
+}
+fixture_source_env+=$'\nTG_BLOB_S3_ENDPOINT='
+if validate_source_blob_backend 2>/dev/null; then
+  printf 'cutover accepted a configured S3 Compose blob source\n' >&2
+  exit 1
+fi
+fixture_source_env='TG_BLOB_DIR=/mnt/teagram-blobs'
+if validate_source_blob_backend 2>/dev/null; then
+  printf 'cutover accepted a nonstandard Compose blob directory\n' >&2
+  exit 1
+fi
 python3 - "$fixture_dir" <<'PY'
 import json
 import pathlib

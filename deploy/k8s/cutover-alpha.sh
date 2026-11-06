@@ -60,7 +60,7 @@ EOF
 
 dry_run() {
   cat <<'EOF'
-Would verify alpha, the bootstrap kubeconfig, source Compose containers, the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
+Would verify alpha, the bootstrap kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
@@ -273,16 +273,38 @@ fence_source_writes() {
   record_phase fenced
 }
 
-capture_admin_token_hash() {
+capture_compose_environment() {
   incus exec "$SOURCE_INSTANCE" -- docker inspect \
-    --format '{{range .Config.Env}}{{println .}}{{end}}' teagram-teagramd-1 |
+    --format '{{range .Config.Env}}{{println .}}{{end}}' teagram-teagramd-1
+}
+
+capture_admin_token_hash() {
+  capture_compose_environment |
     awk -F= '$1 == "TG_ADMIN_TOKEN_HASH" { print substr($0, index($0, "=") + 1) }'
 }
 
 capture_admin_origin() {
-  incus exec "$SOURCE_INSTANCE" -- docker inspect \
-    --format '{{range .Config.Env}}{{println .}}{{end}}' teagram-teagramd-1 |
+  capture_compose_environment |
     awk -F= '$1 == "TG_ADMIN_ORIGIN" { print substr($0, index($0, "=") + 1) }'
+}
+
+validate_source_blob_backend() {
+  local source_environment
+  source_environment=$(capture_compose_environment) ||
+    fail 'could not inspect the old teagramd blob configuration'
+  if ! awk -F= '
+    $1 == "TG_BLOB_DIR" {
+      blob_dir_count++
+      blob_dir = substr($0, index($0, "=") + 1)
+    }
+    $1 == "TG_BLOB_S3_ENDPOINT" { s3_endpoint_count++ }
+    END {
+      exit !(blob_dir_count == 1 && blob_dir == "/var/lib/teagramd-blobs" &&
+        s3_endpoint_count == 0)
+    }
+  ' <<< "$source_environment"; then
+    fail 'source teagramd must use local blobs at /var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset'
+  fi
 }
 
 install_admin_secret() {
@@ -663,7 +685,7 @@ if [[ $ACTION == --rollback ]]; then
   exit 0
 fi
 
-[[ ! -e $PHASE_FILE ]] || fail 'a prior cutover phase exists; inspect the evidence and use --rollback before attempting another run'
+[[ ! -e $PHASE_FILE ]] || fail 'a prior cutover phase exists; inspect the evidence, use --rollback if needed, then follow "Retry after a pre-switch failure" in deploy/k8s/README.md before another run'
 for resource in \
   statefulset/postgres statefulset/teagramd statefulset/rustfs \
   deployment/cloudflared deployment/linkselector deployment/linklanding \
@@ -710,6 +732,7 @@ for configmap in teagramd-runtime link-edge-runtime; do
 done
 
 check_source_container teagram-teagramd-1
+validate_source_blob_backend
 check_source_container teagram-postgres-1
 check_source_container teagram-link-edge-selector-1
 check_source_container teagram-web-cloudflared

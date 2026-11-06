@@ -72,6 +72,10 @@ docker_command() {
         *'.Config.Env'*)
           printf 'TG_ADMIN_TOKEN_HASH=%064d\n' 0
           printf 'TG_ADMIN_ORIGIN=https://links.example.test\n'
+          printf 'TG_BLOB_DIR=/var/lib/teagramd-blobs\n'
+          if [[ ${CUTOVER_TEST_S3_BLOB_SOURCE:-} == true ]]; then
+            printf 'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\n'
+          fi
           ;;
         *) return 1 ;;
       esac
