@@ -308,9 +308,13 @@ for key_file in server_key.pem enc_key.hex; do
     printf 'cutover identity file does not match its source: %s\n' "$key_file" >&2
     exit 1
   }
-  [[ $(kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-key-reader -c reader -- \
-    stat -c '%a:%u' "/var/lib/teagramd/$key_file") == 600:65532 ]] || {
-    printf 'cutover identity file is not private and owned by teagramd: %s\n' "$key_file" >&2
+  target_stat=$(kubectl exec --namespace "$TARGET_NAMESPACE" pod/cutover-key-reader -c reader -- \
+    stat -c '%a:%u:%g' "/var/lib/teagramd/$key_file")
+  # Once teagramd starts, kubelet applies the pod fsGroup, which adds group
+  # access to the file (0660); the file must still be closed to everyone else.
+  [[ $target_stat =~ ^[0-7][0-7]0:65532:65532$ ]] || {
+    printf 'cutover identity file is not private and owned by teagramd: %s (mode:uid:gid is %s)\n' \
+      "$key_file" "$target_stat" >&2
     exit 1
   }
 done
