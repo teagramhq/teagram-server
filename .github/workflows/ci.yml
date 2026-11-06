@@ -1130,6 +1130,7 @@ jobs:
           bash -n deploy/teagram/ops/start-server.sh
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
+          bash -n deploy/teagram/ops/backup-media-key.sh
           bash -n deploy/teagram/ops/blob-encryption-common.inc
           bash -n deploy/teagram/test-media-encryption-ops.sh
           bash -n deploy/teagram/test-start-server.sh
@@ -1192,6 +1193,7 @@ jobs:
             deploy/teagram/ops/start-server.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
+            deploy/teagram/ops/backup-media-key.sh \
             deploy/teagram/test-start-server.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
