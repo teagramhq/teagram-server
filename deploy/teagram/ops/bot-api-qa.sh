@@ -107,6 +107,7 @@ readonly ENV_RECORD=$STATE_DIR/rollout-env
 readonly PREVIOUS_ENV_FILE=$STATE_DIR/.env.main-3359-before-bot-api
 readonly SERVE_MARKER=$STATE_DIR/bot-api-qa-serve-before
 readonly SERVICE=teagram-teagramd-1
+readonly COMPOSE_SERVICE=teagramd
 readonly RUNNER_DIR=/root/teagramd-rollout-runner
 readonly RUNNER=$RUNNER_DIR/rollout-runner.sh
 readonly BLOB_HELPER=$RUNNER_DIR/blob-transition-runner.py
@@ -150,6 +151,17 @@ container_value() {
   awk -F= -v name="$name" '$1 == name { count++; value=substr($0, index($0, "=") + 1) } END { if (count > 1) exit 1; if (count == 1) printf "%s", value }' <<< "$output"
 }
 
+container_environment_sha() {
+  local environment normalized digest
+  environment=$(docker inspect --format '{{json .Config.Env}}' "$SERVICE") || return 1
+  normalized=$(jq -er '
+    if type == "array" and all(.[]; type == "string") then sort | @json
+    else error("invalid container environment") end
+  ' <<< "$environment") || return 1
+  digest=$(printf '%s\n' "$normalized" | sha256sum) || return 1
+  printf '%s\n' "${digest%% *}"
+}
+
 load_compose_authority() {
   local authority_json env_file_lines legacy_parked
   authority_json=$(python3 "$BLOB_HELPER" deployment-env \
@@ -179,12 +191,19 @@ load_compose_authority() {
 
 TEMP_DIR=
 TEMP_ENV=
+TEMP_RECORD=
 cleanup() {
   local status=$?
   trap - EXIT
   if [[ -n "$TEMP_ENV" ]]; then
     case "$TEMP_ENV" in
       "$REPO"/.env.main-3359.????????) rm -f -- "$TEMP_ENV" || status=1 ;;
+      *) status=1 ;;
+    esac
+  fi
+  if [[ -n "$TEMP_RECORD" ]]; then
+    case "$TEMP_RECORD" in
+      "$STATE_DIR"/.rollout-env.main-3359.????????) rm -f -- "$TEMP_RECORD" || status=1 ;;
       *) status=1 ;;
     esac
   fi
@@ -214,6 +233,72 @@ verify_base() {
   compose_selection=$(docker inspect --format "$COMPOSE_FILES_FORMAT" "$SERVICE") || return 1
   [[ "$compose_selection" == "$REPO/docker-compose.yml,$REPO/docker-compose.override.yml" ]] || { fail 'unexpected Compose selection'; return 1; }
   load_compose_authority
+}
+
+preserve_runner_log() {
+  local source=$TEMP_DIR/runner.log destination
+  [[ -f "$source" && ! -L "$source" ]] || return 1
+  destination=$(mktemp "$STATE_DIR/bot-api-qa-runner-failure.XXXXXXXX") || return 1
+  cat -- "$source" > "$destination" || return 1
+  chmod 600 -- "$destination" || return 1
+  sync || return 1
+  private_file "$destination" || return 1
+  printf '%s\n' "$destination"
+}
+
+restore_previous_runtime() {
+  local previous_env_sha=$1 previous_record=$2 previous_container_env_sha=$3 expected_image_sha=$4
+  local actual_env_sha actual_record actual_container_env_sha actual_image_sha listener inner_id ingress_id
+  if ! private_file "$ENV_FILE" || ! private_file "$ENV_RECORD" || ! private_file "$PREVIOUS_ENV_FILE"; then
+    fail 'rollback inputs failed ownership or mode checks'
+    return 1
+  fi
+  [[ "$(file_sha256 "$PREVIOUS_ENV_FILE")" == "$previous_env_sha" ]] || {
+    fail 'pre-change .env backup changed before rollback'
+    return 1
+  }
+  TEMP_ENV=$(mktemp "$REPO/.env.main-3359.XXXXXXXX") || { fail 'cannot stage the previous .env for rollback'; return 1; }
+  if ! cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" || ! chmod 600 -- "$TEMP_ENV" || ! sync || \
+     ! mv -f -- "$TEMP_ENV" "$ENV_FILE" || ! sync; then
+    fail 'cannot restore the previous .env after runner failure'
+    return 1
+  fi
+  TEMP_ENV=
+
+  if ! docker compose --profile bot-api-qa rm --stop --force bot-api-inner bot-api-ingress; then
+    fail 'cannot remove the Bot API relays during rollback'
+    return 1
+  fi
+  if ! docker compose up -d --no-deps --force-recreate --wait --wait-timeout 60 "$COMPOSE_SERVICE" </dev/null; then
+    fail 'cannot restore the server with the previous environment'
+    return 1
+  fi
+
+  actual_env_sha=$(file_sha256 "$ENV_FILE") || return 1
+  actual_container_env_sha=$(container_environment_sha) || return 1
+  actual_image_sha=$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE") || return 1
+  listener=$(container_value TG_BOT_API_LISTEN_ADDR) || return 1
+  inner_id=$(docker compose --profile bot-api-qa ps -q bot-api-inner) || return 1
+  ingress_id=$(docker compose --profile bot-api-qa ps -q bot-api-ingress) || return 1
+  [[ "$actual_env_sha" == "$previous_env_sha" && \
+     "$actual_container_env_sha" == "$previous_container_env_sha" && "$actual_image_sha" == "$expected_image_sha" && \
+     -z "$listener" && -z "$inner_id" && -z "$ingress_id" ]] || {
+    fail 'previous .env, running environment, or relay state failed rollback verification'
+    return 1
+  }
+
+  TEMP_RECORD=$(mktemp "$STATE_DIR/.rollout-env.main-3359.XXXXXXXX") || { fail 'cannot stage the previous rollout record'; return 1; }
+  if ! printf '%s\n' "$previous_record" > "$TEMP_RECORD" || ! chmod 600 -- "$TEMP_RECORD" || ! sync || \
+     ! mv -f -- "$TEMP_RECORD" "$ENV_RECORD" || ! sync; then
+    fail 'cannot restore the previous rollout record'
+    return 1
+  fi
+  TEMP_RECORD=
+  actual_record=$(cat -- "$ENV_RECORD") || return 1
+  [[ "$actual_record" == "$previous_record" ]] || {
+    fail 'previous rollout record failed rollback verification'
+    return 1
+  }
 }
 
 verify_relays() {
@@ -356,6 +441,9 @@ if [[ "$MODE" == apply ]]; then
   fi
   private_file "$PREVIOUS_ENV_FILE" || { fail 'pre-change .env backup is unsafe'; exit 1; }
   [[ "$(file_sha256 "$PREVIOUS_ENV_FILE")" == "$recorded_env_sha" ]] || { fail 'pre-change .env backup is not the last verified file'; exit 1; }
+  previous_listener=$(container_value TG_BOT_API_LISTEN_ADDR) || { fail 'cannot inspect the current listener setting'; exit 1; }
+  [[ -z "$previous_listener" ]] || { fail 'running server already has the Bot API listener'; exit 1; }
+  previous_container_env_sha=$(container_environment_sha) || { fail 'cannot inspect the current server environment'; exit 1; }
   load_compose_authority || exit 1
   TEMP_ENV=$(mktemp "$REPO/.env.main-3359.XXXXXXXX") || { fail 'cannot stage the Bot API environment settings'; exit 1; }
   if ! cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" || \
@@ -365,6 +453,7 @@ if [[ "$MODE" == apply ]]; then
     exit 1
   fi
   expected_env_sha=$(file_sha256 "$TEMP_ENV") || { fail 'cannot hash the staged Bot API environment'; exit 1; }
+  expected_record="env_sha256=$expected_env_sha source_sha=$target_sha"
   mv -f -- "$TEMP_ENV" "$ENV_FILE" || { fail 'cannot publish the named Bot API environment additions'; exit 1; }
   TEMP_ENV=
   sync || { fail 'cannot sync the named Bot API environment additions'; exit 1; }
@@ -378,24 +467,39 @@ if [[ "$MODE" == apply ]]; then
   else
     runner_status=$?
   fi
-  flock -x 9 || { fail 'cannot reacquire the deployment lock after the rollout'; exit 1; }
+  runner_log_path=
+  if [[ "$runner_status" != 0 ]]; then
+    runner_log_path=$(preserve_runner_log 2>/dev/null) || runner_log_path=unavailable
+  fi
+  if ! flock -x 9; then
+    if [[ -n "$runner_log_path" && "$runner_log_path" != unavailable ]]; then
+      fail "cannot reacquire the deployment lock after rollout; runner log preserved at $runner_log_path" || true
+    else
+      fail 'cannot reacquire the deployment lock after rollout; runner output was not preserved' || true
+    fi
+    exit 1
+  fi
   if [[ "$runner_status" != 0 ]]; then
     failed_env_sha=$(file_sha256 "$ENV_FILE" 2>/dev/null || true)
     failed_record=$(cat -- "$ENV_RECORD" 2>/dev/null || true)
-    if [[ "$failed_env_sha" == "$recorded_env_sha" && "$failed_record" == "$record" ]]; then
-      fail "rollout runner failed with exit $runner_status and restored the verified environment" || true
-    elif [[ "$failed_env_sha" == "$expected_env_sha" && "$failed_record" == "$record" && \
-            "$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE" 2>/dev/null || true)" == "$target_sha" ]]; then
-      TEMP_ENV=$(mktemp "$REPO/.env.main-3359.XXXXXXXX") || { fail 'rollout failed and the previous environment cannot be staged'; exit "$runner_status"; }
-      if cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" && chmod 600 -- "$TEMP_ENV" && sync && \
-         mv -f -- "$TEMP_ENV" "$ENV_FILE" && sync; then
-        TEMP_ENV=
-        fail "rollout runner failed with exit $runner_status; prior environment restored" || true
+    failed_listener=$(container_value TG_BOT_API_LISTEN_ADDR 2>/dev/null || printf unavailable)
+    failed_image_sha=$(docker inspect --format "$CONTAINER_PORT_FORMAT" "$SERVICE" 2>/dev/null || true)
+    if [[ ( "$failed_env_sha" == "$recorded_env_sha" || "$failed_env_sha" == "$expected_env_sha" ) && \
+          ( "$failed_record" == "$record" || "$failed_record" == "$expected_record" ) && \
+          "$failed_image_sha" == "$target_sha" && \
+          ( "$failed_listener" == "$previous_listener" || "$failed_listener" == "$APP_LISTEN_ADDR" ) ]]; then
+      if restore_previous_runtime "$recorded_env_sha" "$record" "$previous_container_env_sha" "$target_sha"; then
+        rollback_result='previous environment and server restored'
       else
-        fail "rollout runner failed with exit $runner_status; environment restore is unverified" || true
+        rollback_result='environment rollback could not be verified'
       fi
     else
-      fail "rollout runner failed with exit $runner_status; inspect the reviewed rollout evidence" || true
+      rollback_result='runner left an unrecognized rollout state'
+    fi
+    if [[ -n "$runner_log_path" && "$runner_log_path" != unavailable ]]; then
+      fail "rollout runner failed with exit $runner_status; $rollback_result; runner log preserved at $runner_log_path" || true
+    else
+      fail "rollout runner failed with exit $runner_status; $rollback_result; runner log preservation failed" || true
     fi
     exit "$runner_status"
   fi

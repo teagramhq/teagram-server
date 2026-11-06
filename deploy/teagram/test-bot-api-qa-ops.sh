@@ -13,6 +13,8 @@ export MOCK_INNER=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 export MOCK_INGRESS=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 printf '%s\n' 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' > "$repo/.env"
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
+printf '%s\n' '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]' > "$repo/.runtime-env"
+: > "$repo/.runtime-relays"
 : > "$tmp/runner"
 cat > "$tmp/helper.py" <<'PY'
 import json, os
@@ -69,7 +71,9 @@ esac
 SH
 cat > "$tmp/bin/ss" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' 'LISTEN 0 128 127.0.0.1:2447 0.0.0.0:* users:(("docker-proxy"))'
+if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then
+  printf '%s\n' 'LISTEN 0 128 127.0.0.1:2447 0.0.0.0:* users:(("docker-proxy"))'
+fi
 SH
 cat > "$tmp/bin/docker" <<'SH'
 #!/usr/bin/env bash
@@ -78,12 +82,19 @@ image='mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c
 case "$*" in
   'inspect --format '*org.opencontainers*) printf '%s\n' "$OPS_SHA" ;;
   'inspect --format '*com.docker.compose.project.config_files*) printf '%s/docker-compose.yml,%s/docker-compose.override.yml\n' "$MOCK_REPO" "$MOCK_REPO" ;;
-  'inspect --format '*Config.Env*) printf '%s\n' 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' ;;
+  'inspect --format {{json .Config.Env}} teagram-teagramd-1') cat "$MOCK_REPO/.runtime-env" ;;
+  'inspect --format {{range .Config.Env}}{{println .}}{{end}} teagram-teagramd-1') jq -r '.[]' "$MOCK_REPO/.runtime-env" ;;
   'inspect --format {{.Id}} '*) printf '%s\n' "$MOCK_SERVER" ;;
   'compose --profile bot-api-qa config --format json') cat "$MOCK_TMP/config.json" ;;
-  'compose --profile bot-api-qa ps -q bot-api-inner') printf '%s\n' "$MOCK_INNER" ;;
-  'compose --profile bot-api-qa ps -q bot-api-ingress') printf '%s\n' "$MOCK_INGRESS" ;;
-  'compose --profile bot-api-qa up '*) : ;;
+  'compose --profile bot-api-qa ps -q bot-api-inner')
+    if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then printf '%s\n' "$MOCK_INNER"; fi ;;
+  'compose --profile bot-api-qa ps -q bot-api-ingress')
+    if [[ -f "$MOCK_REPO/.runtime-relays" ]]; then printf '%s\n' "$MOCK_INGRESS"; fi ;;
+  'compose --profile bot-api-qa rm --stop --force bot-api-inner bot-api-ingress') rm -f "$MOCK_REPO/.runtime-relays" ;;
+  'compose --profile bot-api-qa up '*) : > "$MOCK_REPO/.runtime-relays" ;;
+  'compose up -d --no-deps --force-recreate --wait --wait-timeout 60 teagramd')
+    listener=$(awk -F= '$1 == "TG_BOT_API_LISTEN_ADDR" { value=substr($0, index($0, "=") + 1) } END { print value }' "$MOCK_REPO/.env")
+    jq -nc --arg listener "$listener" '["TG_BOT_API_LISTEN_ADDR=" + $listener]' > "$MOCK_REPO/.runtime-env" ;;
   'ps --all --quiet --no-trunc --filter volume=teagram_bot_api_socket') printf '%s\n%s\n' "$MOCK_INNER" "$MOCK_INGRESS" ;;
   'ps --all --quiet --no-trunc') printf '%s\n%s\n%s\n' "$MOCK_SERVER" "$MOCK_INNER" "$MOCK_INGRESS" ;;
   'network inspect teagram_bot_api_ingress --format {{.Id}}') printf '%s\n' network ;;
@@ -109,11 +120,14 @@ bash "$tmp/op.sh" rollback
 jq -e '.TCP == {"443":{"HTTPS":true}}' "$tmp/serve.json" >/dev/null
 : > "$repo/.env"
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
+printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
+rm -f "$repo/.runtime-relays"
 cat > "$tmp/runner" <<'SH'
 #!/usr/bin/env bash
 set -eu
 [[ "$*" == "apply $OPS_SHA $OPS_SHA" && "$ROLLOUT_RUNNER_ADDED_ENV" == TG_BOT_API_LISTEN_ADDR ]]
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$MOCK_REPO/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$MOCK_REPO/.state/rollout-env"
+jq -nc '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]' > "$MOCK_REPO/.runtime-env"
 SH
 chmod 600 "$tmp/runner"
 bash "$tmp/op.sh" apply
@@ -123,9 +137,35 @@ bash "$tmp/op.sh" verify
 bash "$tmp/op.sh" rollback
 : > "$repo/.env"
 printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
+printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
+rm -f "$repo/.runtime-relays"
+cat > "$tmp/runner" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[[ "$*" == "apply $OPS_SHA $OPS_SHA" && "$ROLLOUT_RUNNER_ADDED_ENV" == TG_BOT_API_LISTEN_ADDR ]]
+jq -nc '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]' > "$MOCK_REPO/.runtime-env"
+: > "$MOCK_REPO/.runtime-relays"
+printf '%s\n' 'fixture runner failed after replacing the server' >&2
+exit 23
+SH
+chmod 600 "$tmp/runner"
+failure_status=0
+bash "$tmp/op.sh" apply > "$tmp/after-replacement.stdout" 2> "$tmp/after-replacement.stderr" || failure_status=$?
+[[ "$failure_status" == 23 ]]
+[[ ! -s "$repo/.env" ]]
+[[ "$(cat "$repo/.state/rollout-env")" == "env_sha256=$(sha256sum "$repo/.env" | cut -d' ' -f1) source_sha=$OPS_SHA" ]]
+jq -e '. == ["TG_BOT_API_LISTEN_ADDR="]' "$repo/.runtime-env" >/dev/null
+[[ ! -e "$repo/.runtime-relays" ]]
+failure_log=$(find "$repo/.state" -maxdepth 1 -type f -name 'bot-api-qa-runner-failure.*' -print -quit)
+[[ -n "$failure_log" && "$(stat -c '%u:%a' "$failure_log")" == "$(id -u):600" ]]
+grep -Fxq 'fixture runner failed after replacing the server' "$failure_log"
+grep -q 'previous environment and server restored' "$tmp/after-replacement.stderr"
+: > "$repo/.env"
+printf 'env_sha256=%s source_sha=%s\n' "$(sha256sum "$repo/.env" | cut -d' ' -f1)" "$OPS_SHA" > "$repo/.state/rollout-env"
+printf '%s\n' '["TG_BOT_API_LISTEN_ADDR="]' > "$repo/.runtime-env"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 23' > "$tmp/runner"
 chmod 600 "$tmp/runner"
-if bash "$tmp/op.sh" apply 2>/dev/null; then
+if bash "$tmp/op.sh" apply > "$tmp/before-replacement.stdout" 2> "$tmp/before-replacement.stderr"; then
   printf '%s\n' 'failed runner was accepted' >&2; exit 1
 fi
 [[ ! -s "$repo/.env" ]]
