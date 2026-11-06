@@ -103,6 +103,27 @@ def main() -> None:
         if received_path.stat().st_mode & 0o777 != 0o600:
             raise SystemExit("web archive receipt did not create a mode 0600 file")
 
+        qa_script = (SCRIPT_DIR.parent / "qa-invite/test-qa-invite-browser-flow.sh").read_text()
+        qa_start = qa_script.index("WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256=")
+        qa_end = qa_script.index('\n[[ "$WEB_RELEASE"', qa_start)
+        qa_client = root / "qa-client"
+        (qa_client / "web/releases").mkdir(parents=True, mode=0o755)
+        qa_archive = root / "demo-web.tar.gz"
+        qa_archive.write_bytes(archive_bytes)
+        qa_archive.chmod(0o600)
+        qa_env = {**os.environ, "TMP_ROOT": str(root), "WEB_CLIENT_DIR": str(qa_client),
+                  "REPO_ROOT": str(SCRIPT_DIR.parent.parent), "WEB_ARCHIVE_SHA": archive_sha256,
+                  "PIN_SOURCE_SHA": SOURCE_SHA, "PIN_ARTIFACT_DIGEST": artifact_digest_value,
+                  "WEB_EXPECTED_ENDPOINT": "wss://web.example/apiws", "WEB_EXPECTED_FINGERPRINT": "c" * 16}
+        qa_command = ['bash', '-e', '-c', 'fail() { echo "$*" >&2; exit 1; }\n' + qa_script[qa_start:qa_end]]
+        qa_staged = subprocess.run(qa_command, env=qa_env, capture_output=True)
+        if qa_staged.returncode != 0:
+            raise SystemExit(f"QA web staging failed: {qa_staged.stderr.decode(errors='replace')}")
+        qa_env["WEB_EXPECTED_ENDPOINT"] = "wss://wrong.example/apiws"
+        qa_staged = subprocess.run(qa_command, env=qa_env, capture_output=True)
+        if qa_staged.returncode == 0:
+            raise SystemExit("QA web staging accepted an unexpected target")
+
         releases = root / "releases"
         releases.mkdir(mode=0o755)
         install_env = os.environ.copy()

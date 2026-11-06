@@ -76,8 +76,10 @@ PIN_SOURCE_SHA=${QA_WEB_SOURCE_SHA:-}
 PIN_ARTIFACT_DIGEST=${QA_WEB_ARTIFACT_DIGEST:-}
 [[ "$PIN_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'demo Web source identity is invalid'
 [[ "$PIN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'demo Web artifact identity is invalid'
-python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST" >/dev/null ||
+WEB_IDENTITY=$(python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
   fail 'demo Web release identity does not match the published pin'
+WEB_EXPECTED_ENDPOINT=$(jq -er '.endpoint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web endpoint is invalid'
+WEB_EXPECTED_FINGERPRINT=$(jq -er '.fingerprint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web fingerprint is invalid'
 [[ "$(git -C "$PUBLIC_WEB_ROOT" rev-parse HEAD)" == "$PIN_SOURCE_SHA" ]] || fail 'demo Web checkout does not match the deployed pin'
 [[ -d "$PUBLIC_WEB_ROOT/dist-private" && ! -L "$PUBLIC_WEB_ROOT/dist-private" ]] || fail 'pinned demo Web artifact is unavailable'
 PUBLIC_TARGET=$PUBLIC_WEB_ROOT/ci/private-mtproto-target.json
@@ -95,7 +97,10 @@ chmod 0700 "$TLS_PRIVATE_DIR" "$TEST_HOME"
 
 tar -czf "$TMP_ROOT/demo-web.tar.gz" -C "$PUBLIC_WEB_ROOT/dist-private" . || fail 'could not archive the pinned demo Web artifact'
 WEB_ARCHIVE_SHA=$(sha256sum "$TMP_ROOT/demo-web.tar.gz" | cut -d' ' -f1)
-WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA" python3 "$REPO_ROOT/deploy/teagram-demo/install-web-release.py" stage \
+WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA" \
+  DEPLOY_WEB_EXPECTED_ENDPOINT="$WEB_EXPECTED_ENDPOINT" \
+  DEPLOY_WEB_EXPECTED_FINGERPRINT="$WEB_EXPECTED_FINGERPRINT" \
+  python3 "$REPO_ROOT/deploy/teagram-demo/install-web-release.py" stage \
   "$TMP_ROOT/demo-web.tar.gz" "$WEB_CLIENT_DIR/web/releases" "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
   fail 'pinned demo Web artifact did not pass deployment verification'
 [[ "$WEB_RELEASE" == "$PIN_SOURCE_SHA-${PIN_ARTIFACT_DIGEST#sha256:}" ]] || fail 'staged demo Web release identity changed'
