@@ -551,12 +551,19 @@ assert handlers["/apiws"]["Proxy"] == "http://127.0.0.2:18444/apiws"
 PY
 printf 'interrupted partial Serve rollback left both connectors stopped and Compose fenced\n'
 
-printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
+if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
   CUTOVER_FAIL_IMPORTER_DELETE=true bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
-  > "$tmp_dir/importer-delete-failure.log" 2>&1
+  > "$tmp_dir/importer-delete-failure.log" 2>&1; then
+  printf 'rollback reported success after importer deletion failed\n' >&2
+  exit 1
+fi
 expect_log 'injected importer deletion failure' "$tmp_dir/importer-delete-failure.log"
 expect_log 'manual cleanup is required' "$tmp_dir/importer-delete-failure.log"
-expect_log 'Rollback complete' "$tmp_dir/importer-delete-failure.log"
+expect_log 'Serve routes and Compose services were restored' "$tmp_dir/importer-delete-failure.log"
+if grep --fixed-strings --quiet 'Rollback complete' "$tmp_dir/importer-delete-failure.log"; then
+  printf 'rollback claimed completion despite importer cleanup failure\n' >&2
+  exit 1
+fi
 [[ $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == rolled-back ]]
 python3 - "$tmp_dir/incus-state/serve.json" <<'PY'
 import json
