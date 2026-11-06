@@ -65,7 +65,7 @@ def socket_owners(proc_root: Path, wanted: set[str]) -> dict[str, set[str]]:
             fd_path = proc_root / process.name / "fd"
             try:
                 descriptors = os.scandir(fd_path)
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError as error:
                 raise ValueError(f"cannot inspect {fd_path}: {error}") from error
@@ -74,7 +74,7 @@ def socket_owners(proc_root: Path, wanted: set[str]) -> dict[str, set[str]]:
                 for descriptor in descriptors:
                     try:
                         target = os.readlink(descriptor.path)
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         continue
                     except OSError as error:
                         raise ValueError(f"cannot read {descriptor.path}: {error}") from error
@@ -84,7 +84,7 @@ def socket_owners(proc_root: Path, wanted: set[str]) -> dict[str, set[str]]:
                     try:
                         comm_path = proc_root / process.name / "comm"
                         command = comm_path.read_text(encoding="ascii").strip()
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         continue
                     except OSError as error:
                         raise ValueError(f"cannot read {comm_path}: {error}") from error

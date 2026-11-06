@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import importlib.util
 import io
 import ipaddress
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("ops") / "bot_api_qa_listeners.py"
@@ -78,6 +80,29 @@ class ListenerInspectionTests(unittest.TestCase):
         os.symlink("socket:[1002]", exited_process / "fd" / "3")
 
         self.assertTrue(self.inspect())
+
+    def test_ignores_esrch_for_exiting_pids_when_a_tailscaled_owner_survives(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        self.add_process(51, "tailscaled", 1002)
+        process = self.proc / "51"
+        failures = (
+            ("fd scan", LISTENERS.os, "scandir", process / "fd"),
+            ("fd readlink", LISTENERS.os, "readlink", process / "fd" / "0"),
+            ("comm read", Path, "read_text", process / "comm"),
+        )
+
+        for stage, owner, method, failed_path in failures:
+            original = getattr(owner, method)
+
+            def raise_esrch(path, *args, target=failed_path, delegate=original, **kwargs):
+                if Path(path) == target:
+                    raise ProcessLookupError(errno.ESRCH, "process exited", str(path))
+                return delegate(path, *args, **kwargs)
+
+            with self.subTest(stage=stage):
+                with patch.object(owner, method, side_effect=raise_esrch, autospec=True):
+                    self.assertTrue(self.inspect())
 
     def test_reports_fd_directory_errors_with_path_and_cause(self):
         self.write_tables([tcp_row("100.64.1.1", 1002)], [])
