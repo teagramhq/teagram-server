@@ -15,8 +15,10 @@ concurrency:
 jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # Playwright's system-dependency install stalled against the 26.04 apt mirror.
+    # Keep this browser lane on the stable image used by the k3s integration lane.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
@@ -115,7 +117,7 @@ jobs:
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Install Chromium and NSS trust utility
-        timeout-minutes: 10
+        timeout-minutes: 20
         working-directory: web-source
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
