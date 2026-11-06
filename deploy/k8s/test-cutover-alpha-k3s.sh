@@ -254,6 +254,11 @@ fi
 exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
+chmod 0600 "$KUBECONFIG"
+[[ $(stat -c '%a' "$KUBECONFIG") == 600 ]] || {
+  printf 'disposable test kubeconfig must be private before runner fixtures execute\n' >&2
+  exit 1
+}
 
 if env "${incus_test_env[@]}" CUTOVER_TEST_S3_BLOB_SOURCE=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
@@ -274,7 +279,6 @@ expect_log 'source teagramd must use local blobs at /var/lib/teagramd-blobs with
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
 printf 'S3-mode source was refused before fencing or applying target resources\n'
 
-chmod 0600 "$KUBECONFIG"
 for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-admin; do
   if env "${incus_test_env[@]}" CUTOVER_FAIL_PREFLIGHT_RESOURCE="$resource" \
     bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/preflight-failure.log" 2>&1; then
