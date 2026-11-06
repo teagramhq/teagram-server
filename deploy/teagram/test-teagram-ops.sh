@@ -37,6 +37,7 @@ export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_START_SERVER_SCRIPT="$tmp/start-server.sh"
+export MOCK_ATTEST_SCRIPT="$ops_dir/attest-blob-mode-reports.sh"
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_SHOW_LOG="$tmp/show.log"
@@ -93,6 +94,16 @@ case "$1" in
       "$OPS_SHA:deploy/teagram/ops/start-server.sh")
         cat "$MOCK_START_SERVER_SCRIPT"
         ;;
+      "$OPS_SHA:deploy/teagram/ops/attest-blob-mode-reports.sh")
+        sed "s|/opt/teagram|$MOCK_REPO|g" "$MOCK_ATTEST_SCRIPT"
+        ;;
+      "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
+        printf '%s\n' 'print("attestation-operation fixture")'
+        ;;
+      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
+      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py")
+        printf '%s\n' '# staged reviewed helper fixture'
+        ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
         printf '#!/bin/sh\ntouch "%s"\n' "$MOCK_RETIRED_SCRIPT_MARKER"
@@ -128,10 +139,14 @@ cat > "$tmp/bin/hostname" <<'HOSTNAME'
 #!/bin/sh
 printf '%s\n' fixture-host
 HOSTNAME
+cat > "$tmp/bin/id" <<'ID'
+#!/bin/sh
+if [ "${MOCK_ROOT_MODE:-}" = true ] && [ "${1:-}" = -u ]; then printf '0\n'; else exec /usr/bin/id "$@"; fi
+ID
 cat > "$tmp/bin/mktemp" <<'MKTEMP'
 #!/bin/sh
 for arg do
-  if [ "$arg" = /tmp/teagram-ops.XXXXXX ]; then
+  if [ "$arg" = /tmp/teagram-ops.XXXXXX ] || [ "$arg" = /tmp/teagram-blob-report-attestation.XXXXXXXX ]; then
     path=$(/usr/bin/mktemp "$@")
     printf '%s\n' "$path" >> "$MOCK_RUN_TEMP_LOG"
     printf '%s\n' "$path"
@@ -144,7 +159,7 @@ cat > "$tmp/bin/rm" <<'RM'
 #!/bin/sh
 for arg do
   case "$arg" in
-    /tmp/teagram-ops.*) printf '%s\n' "$arg" >> "$MOCK_RM_LOG" ;;
+    /tmp/teagram-ops.*|/tmp/teagram-blob-report-attestation.????????) printf '%s\n' "$arg" >> "$MOCK_RM_LOG" ;;
   esac
 done
 exec /bin/rm "$@"
@@ -216,6 +231,7 @@ for help in help -h --help; do
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
   [[ "$help_output" == *'encrypt-media backs up and encrypts referenced media'* ]]
   [[ "$help_output" == *'cleanup-media --acceptance-passed removes plaintext media'* ]]
+  [[ "$help_output" == *'attest-blob-mode-reports preserves missing reports after a live S3 census'* ]]
 done
 
 active_operation_count=0
@@ -248,6 +264,10 @@ invite_rollback=$(run_command "run $OPS_SHA invite-web-signup-url --rollback")
 [[ "$invite_rollback" == 'invite-operation args: <--rollback>' ]]
 start_server=$(run_command "run $OPS_SHA start-server")
 [[ "$start_server" == 'start-server-operation args: <>' ]]
+export MOCK_ROOT_MODE=true
+attestation=$(run_command "run $OPS_SHA attest-blob-mode-reports")
+unset MOCK_ROOT_MODE
+[[ "$attestation" == 'attestation-operation fixture' ]]
 
 sentinel="$tmp/arbitrary-command-ran"
 expect_status 64 "touch $sentinel"
@@ -265,6 +285,7 @@ expect_status 66 "run $OLD_MAIN_SHA start-server"
 expect_status 66 "run $OLD_MAIN_SHA encrypt-media"
 expect_status 66 "run $OLD_MAIN_SHA cleanup-media"
 expect_status 66 "run $OLD_MAIN_SHA backup-media-key"
+expect_status 66 "run $OLD_MAIN_SHA attest-blob-mode-reports"
 [[ ! -e "$MOCK_RETIRED_SCRIPT_MARKER" ]]
 for bad_name in 'nested/name' . .. 'Uppercase'; do
   expect_status 64 "run $OPS_SHA $bad_name $TARGET_SHA"
@@ -338,12 +359,13 @@ output=$(run_command "run $OPS_SHA rollout-evidence")
    "$output" != *"runner_log=rollout-${TARGET_SHA:0:7}-20261028T035454Z.log"* ]]
 expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
-mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
-mapfile -t removed_temps < "$MOCK_RM_LOG"
-expected_runner_temps=$((8 + active_operation_count))
+mapfile -t runner_temps < <(sort "$MOCK_RUN_TEMP_LOG")
+mapfile -t removed_temps < <(sort "$MOCK_RM_LOG")
+expected_runner_temps=$((10 + active_operation_count))
 [[ "${#runner_temps[@]}" == "$expected_runner_temps" && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
-  [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
+  [[ ( "$runner_temp" == /tmp/teagram-ops.* || "$runner_temp" == /tmp/teagram-blob-report-attestation.???????? ) && \
+    "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
 done
 printf '%s\n' 'teagram-ops fixture cases pass'

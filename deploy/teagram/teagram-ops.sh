@@ -22,7 +22,7 @@ teagram-ops verbs (read-only unless noted):
   logs <since>              teagramd logs since an RFC3339 UTC time (same as teagram-logs)
   env-names                 names of keys in /opt/teagram/.env, never values
   fingerprints              sha256 of .env, override, rollout-env record and compose files
-  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key> [args]
+  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports> [args]
                             runs an allowlisted script from that commit only if
                             the commit is on origin/main
                             apply-user-invite-quota default mutates live state;
@@ -33,6 +33,7 @@ teagram-ops verbs (read-only unless noted):
                             backup-media-key creates a private media key backup
                             encrypt-media backs up and encrypts referenced media
                             cleanup-media --acceptance-passed removes plaintext media
+                            attest-blob-mode-reports preserves missing reports after a live S3 census
 EOF
 }
 
@@ -66,7 +67,7 @@ case "$VERB" in
     case "$NAME" in [a-z0-9]*) ;; *) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in *[!a-z0-9-]*) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in
-      target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key) ;;
+      target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports) ;;
       *)
         logger -t teagram-ops "refused operation: $NAME"
         echo "teagram-ops: operation is not allowlisted" >&2
