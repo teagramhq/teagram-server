@@ -13,7 +13,6 @@ MOCK_PROJECT=teagram
 MOCK_ORPHANS=1
 MOCK_STOP_TIMEOUT=120
 MOCK_TARGET_SERVICES=$'postgres\nteagramd'
-MOCK_BASELINE_SERVICES=$'postgres\nteagramd'
 MOCK_HAPROXY_HEALTH=healthy
 MOCK_PUBLIC_PROBE_FAILURE_IP=
 MOCK_NO_PUBLIC_NETWORK=0
@@ -116,10 +115,6 @@ docker() {
 	if [[ "${1:-}" == compose && "${2:-}" == --profile && "${3:-}" == public &&
 		"${4:-}" == config && "${5:-}" == --services ]]; then
 		printf '%s\n' "$MOCK_TARGET_SERVICES"
-		return 0
-	fi
-	if [[ "${1:-}" == compose && "${2:-}" == config && "${3:-}" == --services ]]; then
-		printf '%s\n' "$MOCK_BASELINE_SERVICES"
 		return 0
 	fi
 	if [[ "${1:-}" == rm && "${2:-}" == -f ]]; then

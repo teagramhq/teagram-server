@@ -183,6 +183,10 @@ type Server struct {
 	globalCapLog logSampler
 	netCapLog    logSampler
 	ceilingLog   logSampler
+	// A bad trusted-address header can turn a tunnel configuration error into
+	// an outage for every public visitor; keep this signal independent and
+	// sampled so malformed requests cannot flood the operator's logs.
+	clientAddrHeaderLog logSampler
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler

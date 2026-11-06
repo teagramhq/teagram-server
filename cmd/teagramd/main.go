@@ -75,10 +75,11 @@ func deliverWithBotAPINotify(ctx context.Context, notifier botUpdateNotifier, de
 }
 
 type publicWebSocketListener struct {
-	listener       net.Listener
-	handler        mtproto.Handler
-	originPatterns []string
-	discovery      discovery.Document
+	listener            net.Listener
+	handler             mtproto.Handler
+	originPatterns      []string
+	discovery           discovery.Document
+	trustCFConnectingIP bool
 }
 
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
@@ -1354,6 +1355,11 @@ func trustClientAddr(server *mtproto.Server, cfg config.Config, log *slog.Logger
 			"trust", string(cfg.ClientAddrTrust),
 			"balancers", cfg.ClientAddrProxies)
 		server.TrustProxyV2Headers(cfg.ClientAddrProxies)
+		return nil
+	case config.ClientAddrCFConnectingIP:
+		log.Info("public WebSocket client addresses are read from CF-Connecting-IP",
+			"trust", string(cfg.ClientAddrTrust),
+			"other_listeners", "socket")
 		return nil
 	default:
 		return fmt.Errorf("unsupported client address trust mode %q", cfg.ClientAddrTrust)

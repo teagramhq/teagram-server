@@ -163,9 +163,31 @@ func TestLoadClientAddrTrustRejectsUnsupported(t *testing.T) {
 	if !strings.Contains(err.Error(), "TG_CLIENT_ADDR_TRUST") {
 		t.Errorf("error %q does not name the variable", err)
 	}
-	for _, want := range []config.ClientAddrTrust{config.ClientAddrSocket, config.ClientAddrProxyV2} {
+	for _, want := range []config.ClientAddrTrust{config.ClientAddrSocket, config.ClientAddrProxyV2, config.ClientAddrCFConnectingIP} {
 		if !strings.Contains(err.Error(), string(want)) {
 			t.Errorf("error %q does not name the supported value %q", err, want)
+		}
+	}
+}
+
+func TestWarnClientAddrTrustForCloudflareNamesOnlyTailnetSocketRisk(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust:           config.ClientAddrCFConnectingIP,
+		PublicWebSocketListenAddr: "127.0.0.1:2446",
+		RateLimits: config.RateLimitsConfig{
+			SignUpIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	cfg.WarnClientAddrTrust(log)
+	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
+		t.Fatalf("emitted %d warn lines, want one warning for the tailnet socket assumption:\n%s", n, buf.String())
+	}
+	for _, want := range []string{"tailnet", "socket", "carrier NAT"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("warning does not mention %q:\n%s", want, buf.String())
 		}
 	}
 }
@@ -183,6 +205,48 @@ func TestLoadClientAddrTrustAcceptsSocket(t *testing.T) {
 	}
 	if cfg.ClientAddrTrust != config.ClientAddrSocket {
 		t.Errorf("ClientAddrTrust = %q, want %q", cfg.ClientAddrTrust, config.ClientAddrSocket)
+	}
+}
+
+func TestLoadClientAddrTrustAcceptsCloudflareOnPublicWebSocket(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ClientAddrTrust != config.ClientAddrCFConnectingIP {
+		t.Errorf("ClientAddrTrust = %q, want %q", cfg.ClientAddrTrust, config.ClientAddrCFConnectingIP)
+	}
+	if cfg.PublicWebSocketListenAddr != "127.0.0.1:2446" {
+		t.Errorf("PublicWebSocketListenAddr = %q, want 127.0.0.1:2446", cfg.PublicWebSocketListenAddr)
+	}
+}
+
+func TestLoadClientAddrProxyCIDRsRejectedWithCFConnectingIP(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_PROXY_CIDRS", "192.0.2.1")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_CLIENT_ADDR_PROXY_CIDRS") {
+		t.Fatalf("Load with proxy CIDRs in CF-Connecting-IP mode = %v, want error naming TG_CLIENT_ADDR_PROXY_CIDRS", err)
+	}
+}
+
+func TestLoadClientAddrTrustCFConnectingIPRequiresPublicWebSocket(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "")
+
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR") {
+		t.Fatalf("Load without public listener = %v, want an error naming TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", err)
 	}
 }
 

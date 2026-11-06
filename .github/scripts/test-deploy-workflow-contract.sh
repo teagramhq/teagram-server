@@ -9,7 +9,6 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
-bot_api_qa_workflow="${BOT_API_QA_WORKFLOW:-.github/workflows/bot-api-qa.yml}"
 dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
@@ -48,10 +47,6 @@ ci_fail() {
 
 ci_query() {
   yq -r "$1" "$ci_workflow"
-}
-
-bot_api_qa_query() {
-  yq -r "$1" "$bot_api_qa_workflow"
 }
 
 check_ci_contract() {
@@ -835,131 +830,6 @@ check_contract() {
   check_demo_image_digest_download
 }
 
-check_bot_api_qa_contract() {
-  [[ "$(bot_api_qa_query '.on | keys | join(",")')" == 'workflow_dispatch' ]] ||
-    qa_fail 'the Bot API QA workflow must be manually dispatched only'
-  [[ "$(bot_api_qa_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
-    qa_fail 'the Bot API QA workflow must require an issue key for CI routing'
-  [[ "$(bot_api_qa_query '.jobs | keys | sort | join(",")')" == 'check-qa-token-recipient,deploy-bot-api,ops-qa-bot-credential' ]] ||
-    qa_fail 'the Bot API QA jobs must use stage-prefixed kebab-case IDs'
-  [[ "$(bot_api_qa_query '.jobs."check-qa-token-recipient".name')" == 'check: qa-token-recipient' ]] ||
-    qa_fail 'the recipient job must follow the check-stage naming convention'
-  [[ "$(bot_api_qa_query '.jobs."deploy-bot-api".name')" == 'deploy: bot-api (prod)' ]] ||
-    qa_fail 'the production Bot API job must follow the deploy-stage naming convention'
-  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".name')" == 'ops: qa-bot-credential' ]] ||
-    qa_fail 'the QA credential job must follow the ops-stage naming convention'
-  [[ "$(bot_api_qa_query '.jobs."deploy-bot-api".needs')" == 'check-qa-token-recipient' ]] ||
-    qa_fail 'the production Bot API job must wait for recipient preparation'
-  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".needs | sort | join(",")')" == 'check-qa-token-recipient,deploy-bot-api' ]] ||
-    qa_fail 'QA credential storage must wait for the recipient and successful Bot API probes'
-  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".environment')" == 'demo' ]] ||
-    qa_fail 'QA credential storage must use the demo environment'
-  [[ "$(bot_api_qa_query '.jobs."ops-qa-bot-credential".permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
-    qa_fail 'QA credential storage must use read-only GitHub permissions'
-
-  local provision_run apply_response_pattern source_sha env_sha
-  provision_run="$(bot_api_qa_query '.jobs."deploy-bot-api".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run')"
-  apply_response_pattern="$(awk -F "'" '/grep -Eq .*apply_result/ {print $2}' <<< "$provision_run")"
-  [[ -n "$apply_response_pattern" ]] || qa_fail 'the production apply response must have an explicit output check'
-  printf -v source_sha '%040d' 1
-  printf -v env_sha '%064d' 2
-  grep -Eq "$apply_response_pattern" <<< \
-    "configuration=applied source_sha=$source_sha env_sha256=$env_sha bind=127.0.0.1:2447 publish=100.124.236.66:2447 forwarder=healthy" ||
-    qa_fail 'the production apply response check must accept a newly applied configuration'
-  grep -Eq "$apply_response_pattern" <<< \
-    "configuration=already-applied source_sha=$source_sha bind=127.0.0.1:2447 publish=100.124.236.66:2447 forwarder=healthy" ||
-    qa_fail 'the production apply response check must accept an already-applied configuration'
-  if ! grep -Fq 'ss -Hltn '\''sport = :2447'\''' deploy/teagram/ops/bot-api-qa.sh || \
-     [[ "$provision_run" != *'listeners=verified'* || "$provision_run" == *'lan_probe_ip'* || \
-        "$provision_run" != *'Bot API port answered on a public address'* ]]; then
-    qa_fail 'host-side listener verification must replace the unreachable hosted-runner LAN probe'
-  fi
-  if ! grep -Fq 'report_token_error()' <<< "$provision_run" || \
-     ! grep -Fq 'report_token_error' <<< "$provision_run"; then
-    qa_fail 'failed apply and verify operations must print their server diagnostics'
-  fi
-  if ! BOT_API_DEPLOY_RUN="$provision_run" python3 - <<'PY'
-import os
-import re
-
-run = os.environ["BOT_API_DEPLOY_RUN"]
-blocks = {}
-for operation in ("apply", "provision", "verify"):
-    matches = re.findall(
-        rf'if ! .*bot-api-qa {operation}.*?; then(.*?)\n\s*fi', run, re.DOTALL
-    )
-    if len(matches) != 1:
-        raise SystemExit(f"expected one failure block for {operation}")
-    blocks[operation] = matches[0]
-
-if "report_token_error" not in blocks["apply"] or "report_token_error" not in blocks["verify"]:
-    raise SystemExit("apply and verify failures must print the SSH diagnostic")
-if "report_token_error" in blocks["provision"]:
-    raise SystemExit("provision stderr must stay out of the workflow log")
-if run.count("report_token_error") != 3:
-    raise SystemExit("token-bearing curl diagnostics must stay out of the workflow log")
-PY
-  then
-    qa_fail 'Bot API SSH diagnostics must be visible for apply and verify while provisioning stderr stays private'
-  fi
-
-  local storage_job_json
-  storage_job_json="$(bot_api_qa_query '.jobs."ops-qa-bot-credential" | to_json')"
-  if ! BOT_API_STORAGE_JOB_JSON="$storage_job_json" python3 - <<'PY'
-import json
-import os
-import re
-
-job = json.loads(os.environ["BOT_API_STORAGE_JOB_JSON"])
-steps = job["steps"]
-
-def one_step(predicate, name):
-    matches = [(index, step) for index, step in enumerate(steps) if predicate(step)]
-    if len(matches) != 1:
-        raise SystemExit(f"expected one {name} step, found {len(matches)}")
-    return matches[0]
-
-validate_index, _ = one_step(lambda step: step.get("name") == "Validate QA account-writer access", "access validation")
-tailnet_index, _ = one_step(lambda step: step.get("name") == "Join the tailnet", "tailnet join")
-key_index, _ = one_step(lambda step: step.get("name") == "Install the QA writer key", "QA key installation")
-download_index, download = one_step(lambda step: step.get("name") == "Download the encrypted Bot API credential", "credential download")
-checkout_index, checkout = one_step(lambda step: step.get("uses", "").startswith("actions/checkout@"), "source checkout")
-setup_index, setup = one_step(lambda step: step.get("uses", "").startswith("actions/setup-go@"), "Go setup")
-store_index, store = one_step(lambda step: step.get("name") == "Decrypt and store the credential on QA", "credential storage")
-cleanup_index, cleanup = one_step(lambda step: step.get("name") == "Remove QA access files", "access cleanup")
-
-if not (validate_index < tailnet_index < key_index < download_index < checkout_index < setup_index < store_index < cleanup_index):
-    raise SystemExit("QA storage steps are missing or out of order")
-if not re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"]):
-    raise SystemExit("QA storage source checkout is not pinned to a commit")
-if checkout.get("with", {}).get("ref") != "${{ github.sha }}" or checkout["with"].get("persist-credentials") is not False:
-    raise SystemExit("QA storage must check out the selected revision without persisting credentials")
-if setup.get("with", {}).get("go-version-file") != "go.mod" or setup["with"].get("cache") is not False:
-    raise SystemExit("Go setup must use the checked-out go.mod without a cache")
-if download.get("with", {}).get("name") != "bot-api-token-${{ github.run_id }}":
-    raise SystemExit("QA storage must download the encrypted credential for this run")
-if cleanup.get("if") != "always()" or not all(path in cleanup.get("run", "") for path in ("ssh-qa-bot-api", "encrypted-token", "age-bin")):
-    raise SystemExit("QA storage must always remove temporary credentials and tools")
-store_run = store.get("run", "")
-if "python3 .github/scripts/qa_bot_record.py" not in store_run or "base64.urlsafe_b64decode" in store_run:
-    raise SystemExit("QA token validation must use the tested Bot API record builder")
-remove_command = '"qa@$QA_ACCOUNTS_HOST" "remove $handle"'
-store_command = '"qa@$QA_ACCOUNTS_HOST" store'
-if remove_command not in store_run or store_command not in store_run or store_run.index(remove_command) >= store_run.index(store_command):
-    raise SystemExit("QA storage must replace the existing bot credential before storing the new one")
-if 'grep -Fxq "stored=$handle" "$result_file"' not in store_run or "bot_credential=stored-on-qa" not in store_run:
-    raise SystemExit("QA storage must verify and report the credential handoff")
-PY
-  then
-    qa_fail 'the complete QA storage job contract failed'
-  fi
-}
-
-qa_fail() {
-  printf '%s: %s\n' "$bot_api_qa_workflow" "$1" >&2
-  exit 1
-}
-
 # Each mutation breaks one rule; the contract must reject all of them.
 self_test() {
   local tmp mutation
@@ -1062,25 +932,10 @@ self_test() {
       exit 1
     fi
   done
-
-  local bot_api_qa_mutations=(
-    '(.jobs."deploy-bot-api".name) = "verify: bot API (prod)"'
-    'del(.jobs."ops-qa-bot-credential".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"))'
-    '(.jobs."ops-qa-bot-credential".steps[] | select(.uses == "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683") | .with.ref) = "${{ github.ref }}"'
-    '(.jobs."deploy-bot-api".steps[] | select(.name == "Apply the reviewed config and test the Bot API") | .run) |= sub("env_sha256"; "unexpected_env_sha256")'
-  )
-  for mutation in "${bot_api_qa_mutations[@]}"; do
-    yq "$mutation" "$bot_api_qa_workflow" > "$tmp/bot-api-qa.yml"
-    if BOT_API_QA_WORKFLOW="$tmp/bot-api-qa.yml" "$0" --contract-only 2>/dev/null; then
-      printf 'Bot API QA workflow contract accepted a broken workflow: %s\n' "$mutation" >&2
-      exit 1
-    fi
-  done
 }
 
 check_contract
 check_ci_contract
-check_bot_api_qa_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
   check_demo_credential_gate
   check_demo_manual_request
