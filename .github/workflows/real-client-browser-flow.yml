@@ -129,6 +129,8 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
           QA_WEB_SOURCE_DIR: ${{ github.workspace }}/qa-demo-web-source
+          QA_WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}
+          QA_WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}
         run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh
 
       - name: Upload Playwright failure trace

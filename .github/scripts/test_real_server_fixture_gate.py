@@ -178,6 +178,41 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_qa_invite_uses_resolved_live_publication(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
+        self.assertIn("QA_WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}", workflow)
+        self.assertIn("QA_WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}", workflow)
+        script = (repo_root / "deploy/qa-invite/test-qa-invite-browser-flow.sh").read_text(encoding="utf-8")
+        start = script.index('[[ -n "$WEB_ROOT"')
+        end = script.index("\nPUBLIC_TARGET=", start)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dist-private").mkdir()
+            git = root / "git"
+            git.write_text('#!/bin/sh\nprintf \'%s\\n\' "$FAKE_SHA"\n', encoding="utf-8")
+            git.chmod(0o755)
+            python = root / "python3"
+            python.write_text(
+                '#!/bin/sh\n[ "$2" = --verify-release-identity ] && '
+                '[ "$3" = "$QA_WEB_SOURCE_SHA" ] && [ "$4" = "$QA_WEB_ARTIFACT_DIGEST" ]\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            sha = "a" * 40
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "FAKE_SHA": sha,
+                   "WEB_ROOT": temp, "WEB_REVISION": sha, "PUBLIC_WEB_ROOT": temp,
+                   "QA_WEB_SOURCE_SHA": sha, "QA_WEB_ARTIFACT_DIGEST": "sha256:" + "b" * 64,
+                   "REPO_ROOT": str(repo_root)}
+            command = ["bash", "-e", "-c", 'fail() { echo "$*" >&2; exit 1; }\n' + script[start:end]]
+            result = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name, value in (("QA_WEB_SOURCE_SHA", "bad"), ("QA_WEB_ARTIFACT_DIGEST", "bad")):
+                with self.subTest(name=name):
+                    invalid = {**env, name: value}
+                    result = subprocess.run(command, env=invalid, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+
     def test_real_client_resolves_live_web_without_checked_in_pin(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")

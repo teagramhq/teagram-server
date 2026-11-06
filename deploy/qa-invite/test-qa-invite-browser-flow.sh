@@ -7,7 +7,6 @@ REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 WEB_ROOT=${REAL_CLIENT_WEB_ROOT:-}
 WEB_REVISION=${REAL_CLIENT_WEB_REVISION:-}
 PUBLIC_WEB_ROOT=${QA_WEB_SOURCE_DIR:-}
-WEB_PIN=$REPO_ROOT/deploy/teagram-demo/web-artifact-pin.json
 HOST_NAME=teagram-demo.incus
 HOST_ADDRESS=127.0.0.1
 CERT_ADDRESS=10.96.46.70
@@ -73,8 +72,10 @@ trap cleanup EXIT
 [[ "$(git -C "$WEB_ROOT" rev-parse HEAD)" == "$WEB_REVISION" ]] || fail 'teagram-web checkout does not match its pinned revision'
 [[ -n "$PUBLIC_WEB_ROOT" && -d "$PUBLIC_WEB_ROOT" && ! -L "$PUBLIC_WEB_ROOT" ]] || fail 'pinned demo Web checkout is unavailable'
 PUBLIC_WEB_ROOT=$(cd -P "$PUBLIC_WEB_ROOT" && pwd)
-PIN_SOURCE_SHA=$(jq -er '.sourceCommit' "$WEB_PIN") || fail 'demo Web source pin is invalid'
-PIN_ARTIFACT_DIGEST=$(jq -er '.artifactDigest' "$WEB_PIN") || fail 'demo Web artifact pin is invalid'
+PIN_SOURCE_SHA=${QA_WEB_SOURCE_SHA:-}
+PIN_ARTIFACT_DIGEST=${QA_WEB_ARTIFACT_DIGEST:-}
+[[ "$PIN_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'demo Web source identity is invalid'
+[[ "$PIN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'demo Web artifact identity is invalid'
 python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST" >/dev/null ||
   fail 'demo Web release identity does not match the published pin'
 [[ "$(git -C "$PUBLIC_WEB_ROOT" rev-parse HEAD)" == "$PIN_SOURCE_SHA" ]] || fail 'demo Web checkout does not match the deployed pin'
