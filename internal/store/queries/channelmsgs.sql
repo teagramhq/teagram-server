@@ -1315,3 +1315,36 @@ WHERE c.id = sqlc.arg(channel_id)::bigint
   AND (sqlc.arg(offset_id)::bigint = 0 OR post.local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY post.local_id DESC
 LIMIT sqlc.arg(lim)::int;
+
+-- One bit per MediaSearchFilter, in enum order. Keep each predicate aligned
+-- with CountFilteredChannelPosts so batched counters match individual searches.
+-- name: CountAllFilteredChannelPosts :one
+SELECT
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 1) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
+        true AND f.media_kind = 'document'))::bigint AS documents,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 2) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
+        true AND f.media_kind = 'photo'))::bigint AS photos,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 4) <> 0 AND (post.message ~*
+        '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'))::bigint -- noqa: LT05
+        AS urls,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 8) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
+        true AND f.subtype_rights @> ARRAY['send_videos']::text[]))::bigint AS videos,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 16) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
+        true AND f.subtype_rights @> ARRAY['send_gifs']::text[]))::bigint AS gifs,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 32) <> 0 AND (false))::bigint AS polls,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 64) <> 0 AND (post.file_id IS NOT NULL AND f.stored =
+        true AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]))::bigint AS voice,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 128) <> 0 AND (post.file_id IS NOT NULL AND f.stored
+        = true AND f.subtype_rights @> ARRAY['send_audios']::text[]))::bigint AS music,
+    count(*) FILTER (WHERE (sqlc.arg(filter_mask)::int & 256) <> 0 AND (post.file_id IS NOT NULL AND f.stored
+        = true AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])))::bigint AS
+        photo_video
+FROM channel_messages post
+LEFT JOIN files f ON f.id = post.file_id
+WHERE post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.action_type = 0
+  AND EXISTS (SELECT 1 FROM channel_participants cp
+      WHERE cp.channel_id = post.channel_id AND cp.user_id = sqlc.arg(owner_id)::bigint
+        AND post.local_id > cp.available_min_id AND (cp.banned_until IS NULL OR cp.banned_until <= now()));

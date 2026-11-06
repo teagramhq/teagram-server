@@ -790,29 +790,13 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 			return nil, err
 		}
 	}
-	counts := make(map[store.MediaSearchFilter]int, len(uniqueFilters))
-	for _, mediaFilter := range uniqueFilters {
-		var count int
-		if peerType == store.PeerTypeChannel {
-			_, count, err = h.store.SearchFilteredChannelPosts(r.Ctx, r.UserID, peerID, "", mediaFilter, 0, 0)
-			if errors.Is(err, store.ErrNotMember) {
-				return nil, errPeerIDInvalid
-			}
-			if err != nil {
-				h.log.Error("count filtered channel posts", "user_id", r.UserID, "channel_id", peerID, "err", err)
-				return nil, errInternal
-			}
-		} else {
-			_, count, err = h.store.SearchFilteredMessages(r.Ctx, r.UserID, peerType, peerID, "", mediaFilter, 0, 0, 0, 0, 0)
-			if errors.Is(err, store.ErrNotMember) {
-				return nil, errPeerIDInvalid
-			}
-			if err != nil {
-				h.log.Error("count filtered messages", "user_id", r.UserID, "err", err)
-				return nil, errInternal
-			}
-		}
-		counts[mediaFilter] = count
+	counts, err := h.store.CountSharedMedia(r.Ctx, r.UserID, peerType, peerID, uniqueFilters)
+	if errors.Is(err, store.ErrNotMember) {
+		return nil, errPeerIDInvalid
+	}
+	if err != nil {
+		h.log.Error("count shared media", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 	counters := make([]tg.MessagesSearchCounter, len(req.Filters))
 	for i, filter := range req.Filters {
