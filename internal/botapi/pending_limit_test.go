@@ -36,6 +36,12 @@ func (l mappedPeerListener) Accept() (net.Conn, error) {
 		return &overrideConn{Conn: c, remote: "192.0.2.2"}, nil
 	case "127.0.0.3":
 		return &overrideConn{Conn: c, remote: "192.0.2.3"}, nil
+	case "127.0.0.4":
+		return &overrideConn{Conn: c, remote: "192.0.2.4"}, nil
+	case "127.0.0.5":
+		return &overrideConn{Conn: c, remote: "192.0.2.5"}, nil
+	case "127.0.0.6":
+		return &overrideConn{Conn: c, remote: "192.0.2.6"}, nil
 	default:
 		if closeErr := c.Close(); closeErr != nil {
 			return nil, closeErr
@@ -46,13 +52,18 @@ func (l mappedPeerListener) Accept() (net.Conn, error) {
 
 func pendingTestServer(t *testing.T) string {
 	t.Helper()
+	return pendingTestServerWithLimit(t, 2)
+}
+
+func pendingTestServerWithLimit(t *testing.T, limit int) string {
+	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := botapi.NewServer("", newFakeStore(), slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	done := make(chan error, 1)
-	go func() { done <- srv.Serve(botapi.LimitConnectionsPerIP(mappedPeerListener{ln}, 2)) }()
+	go func() { done <- srv.Serve(botapi.LimitConnectionsPerIP(mappedPeerListener{ln}, limit)) }()
 	t.Cleanup(func() {
 		if err := srv.Close(); err != nil {
 			t.Error(err)
@@ -132,5 +143,22 @@ func TestDirectPendingReservationReleasedOnDisconnect(t *testing.T) {
 	replacement, reader := pendingDial(t, addr, "127.0.0.2")
 	if status := proxyRequest(t, replacement, reader); status != http.StatusUnauthorized {
 		t.Fatalf("replacement status = %d, want 401", status)
+	}
+}
+
+func TestDirectPeersDoNotSharePendingPrefacePool(t *testing.T) {
+	addr := pendingTestServerWithLimit(t, botapi.DefaultMaxConnectionsPerIP)
+	start := time.Now()
+	for _, source := range []string{"127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"} {
+		for range botapi.DefaultMaxConnectionsPerIP {
+			pendingDial(t, addr, source)
+		}
+	}
+	if time.Since(start) >= 2*time.Second {
+		t.Fatal("fixtures took too long to establish before the preface timeout")
+	}
+	other, reader := pendingDial(t, addr, "127.0.0.6")
+	if status := proxyRequest(t, other, reader); status != http.StatusUnauthorized {
+		t.Fatalf("fifth peer status = %d, want 401", status)
 	}
 }

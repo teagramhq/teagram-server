@@ -722,7 +722,7 @@ type acceptResult struct {
 	reserved bool
 }
 
-// Bound connections waiting for a preface separately from per-client limits.
+// Bound loopback connections awaiting a preface before their peer is known.
 const maxPendingPrefaces = 128
 
 func (l *connectionLimitListener) acceptConnections() {
@@ -745,39 +745,43 @@ func (l *connectionLimitListener) acceptConnections() {
 			closeBotConn(conn)
 			continue
 		}
-		select {
-		case pending <- struct{}{}:
-			go func(conn net.Conn, ip netip.Addr, reserved bool) {
-				defer func() { <-pending }()
-				parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
-				if err != nil {
-					if errors.Is(err, io.EOF) {
-						slog.Debug("empty Bot API connection", "remote_ip", ip.String(), "err", err)
-					} else {
-						slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
-					}
-					if reserved {
-						l.releaseIP(ip)
-					}
-					closeBotConn(conn)
-					return
-				}
-				select {
-				case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0, reserved: reserved}:
-				case <-l.done:
-					if reserved {
-						l.releaseIP(ip)
-					}
-					closeBotConn(parsed)
-				}
-			}(conn, ip, reserved)
-		default:
-			slog.Warn("Bot API pending preface limit reached", "remote_ip", ip.String(), "limit", maxPendingPrefaces)
-			if reserved {
-				l.releaseIP(ip)
+		// Direct peers already hold a per-IP reservation. Keep the shared
+		// preface pool for loopback, where the conveyed peer is not known yet.
+		if !reserved {
+			select {
+			case pending <- struct{}{}:
+			default:
+				slog.Warn("Bot API pending preface limit reached", "remote_ip", ip.String(), "limit", maxPendingPrefaces)
+				closeBotConn(conn)
+				continue
 			}
-			closeBotConn(conn)
 		}
+		go func(conn net.Conn, ip netip.Addr, reserved bool) {
+			if !reserved {
+				defer func() { <-pending }()
+			}
+			parsed, header, err := proxyv1.Read(conn, false, ip.IsLoopback())
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					slog.Debug("empty Bot API connection", "remote_ip", ip.String(), "err", err)
+				} else {
+					slog.Warn("rejected Bot API preface", "remote_ip", ip.String(), "err", err)
+				}
+				if reserved {
+					l.releaseIP(ip)
+				}
+				closeBotConn(conn)
+				return
+			}
+			select {
+			case l.results <- acceptResult{conn: parsed, proxied: len(header) > 0, reserved: reserved}:
+			case <-l.done:
+				if reserved {
+					l.releaseIP(ip)
+				}
+				closeBotConn(parsed)
+			}
+		}(conn, ip, reserved)
 	}
 }
 
