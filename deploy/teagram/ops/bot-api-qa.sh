@@ -364,7 +364,7 @@ verify_base
 state=$(serve_state) || { fail 'cannot inspect Serve'; exit 1; }
 [[ "$state" != foreign ]] || { fail 'port 2447 is already in use'; exit 1; }
 preflight() {
-  local config count help listeners ingress_id
+  local config count help help_status listeners ingress_id
   config=$(docker compose --profile bot-api-qa config --format json) || { fail 'cannot render relay configuration'; return 1; }
   validate_relay_config "$config" || { fail 'unsafe relay configuration'; return 1; }
   count=$(dotenv_count "$ENV_FILE" TG_BOT_API_LISTEN_ADDR)
@@ -380,7 +380,14 @@ preflight() {
     private_file "$SERVE_MARKER" || { fail 'unsafe Serve state record'; return 1; }
     grep -Exq 'absent|owned' "$SERVE_MARKER" || { fail 'invalid Serve state record'; return 1; }
   fi
-  help=$(tailscale serve --help) || return 1
+  if help=$(tailscale serve --help 2>&1); then
+    :
+  else
+    help_status=$?
+    fail "cannot inspect Tailscale Serve capabilities (exit $help_status)"
+    printf '%s\n' "$help" >&2
+    return 1
+  fi
   [[ "$help" == *--proxy-protocol* ]] || { fail 'PROXY protocol is unsupported'; return 1; }
   verify_host_listeners || { fail 'unexpected host port listener'; return 1; }
   listeners=$(ss -Hltnp 'sport = :2447') || return 1
