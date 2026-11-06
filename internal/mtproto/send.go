@@ -1522,9 +1522,11 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		return markRequestFailureCause(requestFailureResponseEncoding, fmt.Errorf("encode result envelope: %w", err))
 	}
 	var sendErr error
+	perfRPCEvent(c, req.MsgID, req.rpcMethod, "write-wait")
 	func() {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
+		perfRPCEvent(c, req.MsgID, req.rpcMethod, "write-start")
 		c.answeredLocked(req.MsgID)
 		// sendLocked encrypts wire in place, so the copy kept for answering a
 		// resend is taken first.
@@ -1534,6 +1536,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 			replay = slices.Clone(wire.Buf)
 		}
 		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &wire)
+		perfRPCEvent(c, req.MsgID, req.rpcMethod, "write-end")
 		if sendErr != nil {
 			req.rpcResult = RPCResultTransportFailure
 			return

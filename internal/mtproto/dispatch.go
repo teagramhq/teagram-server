@@ -183,6 +183,7 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 		}
 	}
 	req.rpcLogMethod = logMethod
+	perfRPCEvent(c, req.MsgID, method, "handler-start")
 	if req.rpcStart != nil {
 		req.rpcStart(method)
 	}

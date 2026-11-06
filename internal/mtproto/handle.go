@@ -265,6 +265,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecrypt, fmt.Errorf("decrypt message: %w", err))
 	}
+	perfRPCFrameEvent(c, msg.Data(), msg.MessageID, "dispatch-frame")
 	// The moment the connection stops being one of the anonymous ones the
 	// pre-auth bounds hold back: the frame's MAC verified under a key this
 	// server issued. Here rather than after the dispatch below, because

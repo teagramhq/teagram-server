@@ -232,6 +232,7 @@ func (c *Conn) queueReadAheadAcks(frame []byte) {
 	if err != nil || msg.SessionID != session {
 		return
 	}
+	perfRPCFrameEvent(c, msg.Data(), msg.MessageID, "receive")
 	body := &bin.Buffer{Buf: msg.Data()}
 	typeID, err := body.PeekID()
 	if err != nil {
