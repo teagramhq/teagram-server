@@ -1367,7 +1367,7 @@ WHERE (sqlc.arg(filter_mask)::int & 4) <> 0
   -- Every URL match contains a dot or "://"; the substring test is far cheaper
   -- than the regex, and CASE keeps the planner from running the regex first.
   AND CASE WHEN strpos(post.message, '.') > 0 OR strpos(post.message, '://') > 0
-    THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+    THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
     ELSE false END
 UNION ALL
 SELECT 4::smallint AS filter, count(*)::bigint AS count
