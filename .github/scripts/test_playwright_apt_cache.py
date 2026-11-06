@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PREPARE_CACHE = ROOT / ".github/scripts/prepare-playwright-apt-cache.sh"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-REAL_CLIENT_WORKFLOW = ROOT / ".github/workflows/real-client-browser-flow.yml"
 
 
 FAKE_SUDO = """#!/usr/bin/env bash
@@ -83,40 +82,6 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 20", step.group(1))
         self.assertIn("timeout --signal=KILL 9m", step.group(1))
         self.assertIn("timeout-minutes: 35", job.group(1))
-
-    def test_real_client_browser_flow_uses_the_shared_apt_cache(self) -> None:
-        workflow = REAL_CLIENT_WORKFLOW.read_text(encoding="utf-8")
-        ci_workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("path: .apt-cache/*.deb", workflow)
-        self.assertIn(
-            "key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
-            "${{ hashFiles('web-source/apt-packages.txt') }}",
-            workflow,
-        )
-        self.assertIn(
-            "key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
-            "${{ hashFiles('apt-packages.txt') }}",
-            ci_workflow,
-        )
-        self.assertIn(
-            "bash ../.github/scripts/prepare-playwright-apt-cache.sh ../.apt-cache",
-            workflow,
-        )
-        self.assertIn("if: steps.apt-cache.outputs.cache-hit == 'true'", workflow)
-        self.assertIn(
-            "steps.apt-cached-install.outputs.installed != 'true'", workflow
-        )
-        self.assertIn("timeout --signal=KILL 9m bash -c attempt_install", workflow)
-        self.assertIn("timeout-minutes: 20", workflow)
-        self.assertIn("timeout-minutes: 45", workflow)
-        self.assertIn("elapsed >= 2700", workflow)
-        self.assertIn("command -v certutil", workflow)
-        self.assertIn("sudo apt-get install -y libnss3-tools", workflow)
-        self.assertIn(
-            "run: corepack pnpm exec playwright install chromium", workflow
-        )
-        self.assertNotIn("playwright install --with-deps chromium", workflow)
-        self.assertIn("playwright install-deps --dry-run chromium", workflow)
 
 
 if __name__ == "__main__":

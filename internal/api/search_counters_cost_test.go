@@ -11,6 +11,88 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+type searchCounterFileFixture struct {
+	name          string
+	mediaKind     string
+	subtypeRights []string
+}
+
+func searchCounterFileFixtures() []searchCounterFileFixture {
+	return []searchCounterFileFixture{
+		{name: "document.bin", mediaKind: "document"},
+		{name: "photo.jpg", mediaKind: "photo", subtypeRights: []string{"send_photos"}},
+		{name: "video.mp4", mediaKind: "document", subtypeRights: []string{"send_videos"}},
+		{name: "animation.mp4", mediaKind: "document", subtypeRights: []string{"send_gifs"}},
+		{name: "voice.ogg", mediaKind: "document", subtypeRights: []string{"send_voices"}},
+		{name: "round.ogg", mediaKind: "document", subtypeRights: []string{"send_roundvideos"}},
+		{name: "audio.mp3", mediaKind: "document", subtypeRights: []string{"send_audios"}},
+	}
+}
+
+func insertSearchCounterFile(t *testing.T, ctx context.Context, conn *pgx.Conn, ownerID int64, fixture searchCounterFileFixture, localID int64) int64 {
+	t.Helper()
+	var fileID int64
+	err := conn.QueryRow(ctx, `INSERT INTO files (
+ uploader_id, access_hash, size, mime_type, file_name, stored, subtype_rights,
+ media_kind, width, height
+) VALUES ($1, $2, 1, 'application/octet-stream', $3, true, $4, $5,
+ CASE WHEN $5 = 'photo' THEN 16 ELSE NULL END,
+ CASE WHEN $5 = 'photo' THEN 16 ELSE NULL END)
+RETURNING id`, ownerID, 700000000+localID, fixture.name, fixture.subtypeRights, fixture.mediaKind).Scan(&fileID)
+	if err != nil {
+		t.Fatalf("insert %s search-counter file: %v", fixture.name, err)
+	}
+	return fileID
+}
+
+func seedSearchCounterDialogMedia(t *testing.T, ctx context.Context, conn *pgx.Conn, s *store.Store, ownerID, peerID int64) {
+	t.Helper()
+	for i, fixture := range searchCounterFileFixtures() {
+		localID := int64(10001 + i)
+		fileID := insertSearchCounterFile(t, ctx, conn, ownerID, fixture, localID)
+		if _, err := conn.Exec(ctx, `INSERT INTO messages (
+ owner_id, local_id, peer_id, peer_type, from_id, message, out, file_id
+) VALUES ($1, $2, $3, 1, $1, 'counter media fixture', true, $4)`, ownerID, localID, peerID, fileID); err != nil {
+			t.Fatalf("insert %s search-counter message: %v", fixture.name, err)
+		}
+	}
+
+	const pollLocalID = int64(10020)
+	const peerLocalID = int64(1)
+	if _, err := conn.Exec(ctx, `INSERT INTO messages (
+ owner_id, local_id, peer_id, peer_type, from_id, message, out, peer_local_id
+) VALUES
+ ($1, $2, $3, 1, $1, 'counter poll fixture', true, $4),
+ ($3, $4, $1, 1, $1, 'counter poll fixture', false, $2)`, ownerID, pollLocalID, peerID, peerLocalID); err != nil {
+		t.Fatalf("insert search-counter poll messages: %v", err)
+	}
+	_, duplicate, err := s.CreatePoll(ctx, ownerID, store.PollMessageRef{
+		PeerType: store.PeerTypeUser, PeerID: peerID, LocalID: pollLocalID,
+	}, store.PollDraft{
+		Question: []byte("counter poll"),
+		Answers: []store.PollAnswer{
+			{Option: []byte("yes"), Text: []byte("Yes")},
+			{Option: []byte("no"), Text: []byte("No")},
+		},
+	})
+	if err != nil || duplicate {
+		t.Fatalf("create search-counter poll: duplicate=%v err=%v", duplicate, err)
+	}
+}
+
+func seedSearchCounterChannelMedia(t *testing.T, ctx context.Context, conn *pgx.Conn, ownerID, channelID int64) {
+	t.Helper()
+	for i, fixture := range searchCounterFileFixtures() {
+		localID := int64(102 + i)
+		fileID := insertSearchCounterFile(t, ctx, conn, ownerID, fixture, localID)
+		if _, err := conn.Exec(ctx, `INSERT INTO channel_messages (
+ channel_id, local_id, from_id, message, file_id
+) VALUES ($1, $2, $3, 'counter media fixture', $4)`, channelID, localID, ownerID, fileID); err != nil {
+			t.Fatalf("insert %s search-counter channel post: %v", fixture.name, err)
+		}
+	}
+}
+
 func TestSearchCountersStatementCostAtScale(t *testing.T) {
 	ctx := context.Background()
 	tracer := &historyQueryCounter{}
@@ -37,6 +119,7 @@ func TestSearchCountersStatementCostAtScale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedSearchCounterDialogMedia(t, ctx, conn, s, owner.ID, peer.ID)
 	filters := []tg.MessagesFilterClass{&tg.InputMessagesFilterDocument{}, &tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterURL{}, &tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{}, &tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{}, &tg.InputMessagesFilterPhotoVideo{}}
 	request := &tg.MessagesGetSearchCountersRequest{Peer: api.InputPeerUser(owner.ID, peer.ID), Filters: filters[:1]}
 	tracer.reset()
@@ -61,6 +144,7 @@ func TestSearchCountersStatementCostAtScale(t *testing.T) {
 	if counters.Elems[2].Count != 5000 {
 		t.Fatalf("URL count = %d, want 5000", counters.Elems[2].Count)
 	}
+	wantCounts := []int{6, 1, 5000, 1, 1, 1, 2, 1, 2}
 	for i, filter := range []store.MediaSearchFilter{
 		store.MediaSearchFilterDocument, store.MediaSearchFilterPhoto, store.MediaSearchFilterURL,
 		store.MediaSearchFilterVideo, store.MediaSearchFilterGif, store.MediaSearchFilterPoll, store.MediaSearchFilterRoundVoice,
@@ -72,6 +156,12 @@ func TestSearchCountersStatementCostAtScale(t *testing.T) {
 		}
 		if counters.Elems[i].Count != want {
 			t.Fatalf("filter %v count = %d, individual count = %d", filter, counters.Elems[i].Count, want)
+		}
+		if want == 0 {
+			t.Fatalf("filter %v fixture count = 0, want a non-zero count", filter)
+		}
+		if want != wantCounts[i] {
+			t.Fatalf("filter %v individual fixture count = %d, want %d", filter, want, wantCounts[i])
 		}
 	}
 }
@@ -102,6 +192,7 @@ func TestChannelSearchCountersStatementCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedSearchCounterChannelMedia(t, ctx, conn, owner.ID, channel.ID)
 	filters := []tg.MessagesFilterClass{&tg.InputMessagesFilterDocument{}, &tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterURL{}, &tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{}, &tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{}, &tg.InputMessagesFilterPhotoVideo{}}
 	request := &tg.MessagesGetSearchCountersRequest{Peer: channelPeer(owner.ID, channel.ID), Filters: filters[:1]}
 	tracer.reset()
@@ -125,6 +216,7 @@ func TestChannelSearchCountersStatementCost(t *testing.T) {
 	if counters.Elems[2].Count != 50 {
 		t.Fatalf("URL count = %d, want 50", counters.Elems[2].Count)
 	}
+	wantCounts := []int{6, 1, 50, 1, 1, 0, 2, 1, 2}
 	for i, filter := range []store.MediaSearchFilter{store.MediaSearchFilterDocument, store.MediaSearchFilterPhoto, store.MediaSearchFilterURL, store.MediaSearchFilterVideo, store.MediaSearchFilterGif, store.MediaSearchFilterPoll, store.MediaSearchFilterRoundVoice, store.MediaSearchFilterMusic, store.MediaSearchFilterPhotoVideo} {
 		_, want, err := s.SearchFilteredChannelPosts(ctx, owner.ID, channel.ID, "", filter, 0, 0)
 		if err != nil {
@@ -132,6 +224,15 @@ func TestChannelSearchCountersStatementCost(t *testing.T) {
 		}
 		if counters.Elems[i].Count != want {
 			t.Fatalf("filter %v count = %d, individual count = %d", filter, counters.Elems[i].Count, want)
+		}
+		if filter != store.MediaSearchFilterPoll && want == 0 {
+			t.Fatalf("filter %v fixture count = 0, want a non-zero count", filter)
+		}
+		if filter == store.MediaSearchFilterPoll && want != 0 {
+			t.Fatalf("filter %v count = %d, want zero because channel polls are unsupported", filter, want)
+		}
+		if want != wantCounts[i] {
+			t.Fatalf("filter %v individual fixture count = %d, want %d", filter, want, wantCounts[i])
 		}
 	}
 }

@@ -795,7 +795,7 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 		return nil, errPeerIDInvalid
 	}
 	if err != nil {
-		h.log.Error("count shared media", "user_id", r.UserID, "err", err)
+		h.log.Error("count shared media", "user_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "err", err)
 		return nil, errInternal
 	}
 	counters := make([]tg.MessagesSearchCounter, len(req.Filters))
