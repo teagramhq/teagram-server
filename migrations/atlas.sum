@@ -1,4 +1,4 @@
-h1:U2KQR6I+OZsN0s+aJnWJQoPKFC78HjVnvPn09D7w5oE=
+h1:HIlJXLsHgO2Or6f+UUGLTQ78gxkFuUKMIPMoNolPRKA=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -183,3 +183,4 @@ h1:U2KQR6I+OZsN0s+aJnWJQoPKFC78HjVnvPn09D7w5oE=
 20261105000017_user_sticker_set_reports.sql h1:dlar3lmoeLi1Dj4wUQSDSJpiTPGr9bNYoJ+vVy435bM=
 20261105000018_user_sticker_set_report_open_identity_idx.sql h1:81pQsDV/YevxKe3WyRlze1WfD+7cso/HoePxAiA1EDM=
 20261105000019_user_sticker_set_report_identity_constraint.sql h1:91II2INiYGQ6oqHbj7VBfXcSkHOL4mGDBijTGeHkRGQ=
+20261105000020_custom_emoji_reactions_status.sql h1:iTdfe/E+2Q0HzO4QQ9nsJV+mo+8pakQB4ssVCDb/78g=

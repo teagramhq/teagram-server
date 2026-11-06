@@ -280,7 +280,8 @@ type Config struct {
 	// these limits cover the response attempts that pass admission.
 	DiscoveryLimits mtproto.DiscoveryLimits
 	// ClientAddrTrust names where the address a request is attributed to comes
-	// from: the connection's own peer address, or a PROXY protocol v2 header.
+	// from: the socket peer, a PROXY protocol v2 header, or the CF-Connecting-IP
+	// header on the public WebSocket listener only.
 	ClientAddrTrust ClientAddrTrust
 	// ClientAddrProxies is the allowlist of balancer source addresses a PROXY
 	// header is honoured from. It is the whole of the trust decision in
@@ -437,13 +438,18 @@ const ClientAddrSocket ClientAddrTrust = "socket"
 //
 // The allowlist is the entire reason the header can be believed: it is
 // client-supplied bytes, so a sender outside the allowlist is refused rather
-// than credited with an address it chose. There is no third source.
+// than credited with an address it chose.
 const ClientAddrProxyV2 ClientAddrTrust = "proxy-v2"
+
+// ClientAddrCFConnectingIP attributes public WebSocket requests to the
+// CF-Connecting-IP header. The other listeners continue to use their socket
+// peer address.
+const ClientAddrCFConnectingIP ClientAddrTrust = "cf-connecting-ip"
 
 // clientAddrTrustValues lists every supported value, for the startup error. An
 // operator naming a mode this build does not implement must be told plainly
 // rather than silently served socket addresses that all belong to the balancer.
-var clientAddrTrustValues = []ClientAddrTrust{ClientAddrSocket, ClientAddrProxyV2}
+var clientAddrTrustValues = []ClientAddrTrust{ClientAddrSocket, ClientAddrProxyV2, ClientAddrCFConnectingIP}
 
 // RateLimitsConfig holds the rate-limit parameters for each RPC surface.
 type RateLimitsConfig struct {
@@ -1754,6 +1760,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if trust == ClientAddrCFConnectingIP && cfg.PublicWebSocketListenAddr == "" {
+		return Config{}, errors.New("TG_CLIENT_ADDR_TRUST=cf-connecting-ip requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR")
+	}
 	cfg.ClientAddrTrust = trust
 	proxies, err := clientAddrProxies(os.Getenv("TG_CLIENT_ADDR_PROXY_CIDRS"), trust)
 	if err != nil {
@@ -2353,9 +2362,8 @@ func discoveryEnvValue(primary, alias string) (value, name string, err error) {
 }
 
 // clientAddrTrust resolves the client-address source. An unset value is the
-// socket, which is the only one implemented; anything else is refused by name
-// rather than falling back, because a silent fallback to socket addresses
-// behind a load balancer would key every client in the world to one bucket.
+// socket. Unsupported values are refused by name rather than falling back,
+// because a silent fallback behind a proxy would key every client to one bucket.
 func clientAddrTrust(raw string) (ClientAddrTrust, error) {
 	if raw == "" {
 		return ClientAddrSocket, nil
@@ -2380,11 +2388,8 @@ func clientAddrTrust(raw string) (ClientAddrTrust, error) {
 // client address, and guessing between them is not the config loader's call. So
 // the mode requires the list.
 //
-// The reverse mismatch fails just as hard. A list set while the mode is socket
-// is an operator who believes they are behind a balancer and is in fact keying
-// every client on the balancer's address — the collapsed global bucket this mode
-// exists to prevent, and the one misconfiguration that looks fine at startup and
-// locks out every login at once.
+// Outside proxy-v2 mode the list is rejected instead of ignored, so an operator
+// cannot believe an unconsumed balancer allowlist protects a socket-keyed path.
 func clientAddrProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error) {
 	prefixes, err := parsePrefixes(raw)
 	if err != nil {
@@ -2392,7 +2397,7 @@ func clientAddrProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error
 	}
 	if trust != ClientAddrProxyV2 {
 		if len(prefixes) > 0 {
-			return nil, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS is set while TG_CLIENT_ADDR_TRUST is %q: the allowlist is only read in %q mode, and %q keys every client on the balancer's own address", trust, ClientAddrProxyV2, trust)
+			return nil, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS is set while TG_CLIENT_ADDR_TRUST is %q: the allowlist is only read in %q mode", trust, ClientAddrProxyV2)
 		}
 		return nil, nil
 	}
@@ -2493,8 +2498,8 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 	return patterns, nil
 }
 
-// WarnClientAddrTrust states the operational assumption socket mode makes,
-// once, at startup.
+// WarnClientAddrTrust states any socket-mode assumption still in use, once, at
+// startup.
 //
 // It is not decoration. Per-IP limits in socket mode assume one peer address is
 // one client, and the same collapse breaks that from either end. In front of
@@ -2508,10 +2513,10 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 // The balancer half has an answer now — ClientAddrProxyV2 keys on the address
 // the balancer reports rather than its own — and this line is what tells an
 // operator running without it where the support tickets will come from before
-// they arrive. The carrier-NAT half remains an accepted risk in every mode.
-// Silent in proxy-v2 mode, where the assumption it names is not the one being
-// made, and silent when no per-IP limit is enabled, since nothing is then keyed
-// on an address at all.
+// they arrive. The carrier-NAT half remains an accepted risk in every mode. CF
+// mode removes the proxy assumption only on the public WebSocket listener;
+// tailnet requests still use their socket peers. No warning is needed when no
+// per-IP limit is enabled, since nothing is then keyed on an address at all.
 //
 // Every limit keyed on a client address has to be in the condition below, or an
 // operator turns one off and stops being warned about the other. The pre-auth
@@ -2524,7 +2529,21 @@ func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 		c.RateLimits.CheckPasswordIP.Enabled() || c.RateLimits.GetPasswordIP.Enabled() ||
 		c.RateLimits.SignUpIP.Enabled() || c.RateLimits.CheckUsernameIP.Enabled() ||
 		c.PreAuth.MaxConnsPerNet > 0
-	if c.ClientAddrTrust != ClientAddrSocket || !perIPLimits {
+	if !perIPLimits {
+		return
+	}
+	if c.ClientAddrTrust == ClientAddrProxyV2 {
+		return
+	}
+	if c.ClientAddrTrust == ClientAddrCFConnectingIP {
+		log.Warn("tailnet per-IP limits remain keyed on each connection's own peer address",
+			"trust", string(ClientAddrSocket),
+			"listener", "tailnet",
+			"assumes", "one peer address is one client, reaching this process directly",
+			"risk", "behind a proxy or L4 load balancer every tailnet client shares one bucket; behind a carrier NAT a whole mobile network shares one bucket and its subscribers are refused on each other's traffic")
+		return
+	}
+	if c.ClientAddrTrust != ClientAddrSocket {
 		return
 	}
 	log.Warn("per-IP limits are keyed on each connection's own peer address",

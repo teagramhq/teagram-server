@@ -20,21 +20,24 @@ RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at,
 
 -- name: UserByPhone :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.phone = $1;
 
 -- name: UserByID :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = $1;
 
 -- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = ANY(sqlc.arg(ids)::bigint[]);
@@ -86,6 +89,7 @@ SELECT u.id,
        u.last_seen_at,
        un.handle AS username,
        u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id,
        (entitled.id IS NOT NULL)::boolean AS entitled,
        (viewer_contact.contact_id IS NOT NULL)::boolean AS has_contact,
        COALESCE(reverse_contact.owner_id IS NOT NULL, false)::boolean AS mutual_contact,
@@ -227,6 +231,11 @@ ORDER BY candidate.ordinality;
 -- name: SetUserStatus :execrows
 UPDATE users SET is_online = $2, last_seen_at = now() WHERE id = $1;
 
+-- name: SetUserEmojiStatus :execrows
+UPDATE users
+SET emoji_status_document_id = NULLIF(sqlc.arg(document_id)::bigint, 0)
+WHERE id = sqlc.arg(id);
+
 -- name: UpdateUserProfile :execrows
 -- A nil first_name or last_name leaves that column unchanged. An empty string
 -- is a real write: signup accepts an empty display name, so the update path
@@ -307,7 +316,8 @@ WITH matched AS MATERIALIZED (
       )
 )
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username, u.kind
+       un.handle AS username, u.kind,
+       COALESCE(u.emoji_status_document_id, 0::bigint) AS emoji_status_document_id
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id IN (SELECT id FROM matched)

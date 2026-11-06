@@ -10,6 +10,7 @@ import pathlib
 import socket
 import sys
 import time
+from collections.abc import Callable
 
 
 SOCKET_PATH = pathlib.Path(".state/teagram-demo/haproxy-run/admin.sock")
@@ -44,7 +45,12 @@ def exchange(socket_path: pathlib.Path, command: str) -> str:
         fail(f"runtime socket command failed ({command.split()[0]}): {error}")
     finally:
         client.close()
-    if not response or "Unknown command" in response or "Permission denied" in response:
+    if (
+        not response
+        or (command != "show stat" and response.strip())
+        or "Unknown command" in response
+        or "Permission denied" in response
+    ):
         fail(f"HAProxy rejected runtime command: {command.split()[0]}")
     return response
 
@@ -59,14 +65,20 @@ def server_row(socket_path: pathlib.Path, backend: str, server: str) -> dict[str
 
 
 def wait_healthy(
-    socket_path: pathlib.Path, slot: str, timeout: int, allow_drained: bool = False
+    socket_path: pathlib.Path,
+    slot: str,
+    timeout: int,
+    allow_drained: bool = False,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     servers = (
         ("teagramd", slot),
         ("teagramd_mtproto", f"{slot}-mtproto"),
     )
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
         if all(
             (row := server_row(socket_path, backend, server)) is not None
             and row.get("status") in ({"UP", "DRAIN"} if allow_drained else {"UP"})
@@ -74,7 +86,7 @@ def wait_healthy(
             for backend, server in servers
         ):
             return
-        time.sleep(1)
+        sleep(1)
     fail(f"{slot} did not pass both HAProxy server checks")
 
 

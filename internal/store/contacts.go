@@ -303,13 +303,14 @@ func (s *Store) ContactsWithUsers(ctx context.Context, ownerID int64) ([]Contact
 		contacts[i] = ContactWithUser{
 			Contact: Contact{UserID: row.ContactID, Mutual: row.Mutual},
 			User: UserFromDB(db.UserByIDRow{
-				ID:         row.ContactID,
-				FirstName:  row.FirstName,
-				LastName:   row.LastName,
-				IsOnline:   row.IsOnline,
-				LastSeenAt: row.LastSeenAt,
-				Username:   row.Username,
-				Kind:       row.Kind,
+				ID:                    row.ContactID,
+				FirstName:             row.FirstName,
+				LastName:              row.LastName,
+				IsOnline:              row.IsOnline,
+				LastSeenAt:            row.LastSeenAt,
+				Username:              row.Username,
+				Kind:                  row.Kind,
+				EmojiStatusDocumentID: row.EmojiStatusDocumentID,
 			}),
 			PhotoID: photoID,
 		}

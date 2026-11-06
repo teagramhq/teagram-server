@@ -480,6 +480,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"help_getAppConfig.1",
 		"account_updatePasswordSettings.contact.1",
 		"account_getCollectibleEmojiStatuses.1",
+		"account_updateEmojiStatus.1",
 		"auth.invokeWithReCaptcha.signUp.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
@@ -548,8 +549,11 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
 		"messages_sendReaction.1",
+		"messages_sendReaction.customEmoji.1",
 		"messages_sendReaction.channel.1",
 		"messages_setChatAvailableReactions.1",
+		"messages_setChatAvailableReactions.allowCustom.1",
+		"messages_setChatAvailableReactions.customEmojiSome.1",
 		"messages_setChatAvailableReactions.channel.1",
 		"messages_getMessagesReactions.1",
 		"messages_getMessagesReactions.channel.1",
@@ -1561,6 +1565,22 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		t.Fatalf("replay getReplies fixture: %v", err)
 	}
 
+	customEmojiDocument := getSmokeBundleStickerDocument(t, f, creator, "openmoji_emoji_animals_nature", 1)
+	if err := creator.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{
+			Stickerset: &tg.InputStickerSetShortName{ShortName: "openmoji_emoji_animals_nature"},
+		})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+			return fmt.Errorf("install custom emoji fixture set = %T, want successful install", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("install custom emoji fixture set: %v", err)
+	}
+
 	var groupMessageID int
 	var channelMessageID int
 	for i, message := range []struct {
@@ -1636,6 +1656,68 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("replay send-reaction fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.allowCustom.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, AvailableReactions: &tg.ChatReactionsAll{AllowCustom: true},
+		})
+		if err == nil && result == nil {
+			return errors.New("allow custom chat reactions returned nil Updates")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay allow-custom reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_sendReaction.customEmoji.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: groupMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionCustomEmoji{DocumentID: customEmojiDocument.ID}},
+		})
+		if err == nil {
+			if _, ok := result.(*tg.Updates); !ok {
+				return fmt.Errorf("custom sendReaction result = %T, want *tg.Updates", result)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay custom send-reaction fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.customEmojiSome.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+			AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+				&tg.ReactionCustomEmoji{DocumentID: customEmojiDocument.ID},
+			}},
+		})
+		if err == nil && result == nil {
+			return errors.New("set custom-only reactions returned nil Updates")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay custom-only reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_sendReaction.customEmoji.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: groupMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionCustomEmoji{DocumentID: customEmojiDocument.ID}},
+		})
+		if err == nil {
+			if _, ok := result.(*tg.Updates); !ok {
+				return fmt.Errorf("custom sendReaction result = %T, want *tg.Updates", result)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay custom send-reaction fixture against explicit list: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "account_updateEmojiStatus.1", func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.AccountUpdateEmojiStatus(ctx, &tg.EmojiStatus{DocumentID: customEmojiDocument.ID})
+		if err == nil && !updated {
+			return errors.New("updateEmojiStatus returned false")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay update-emoji-status fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_getMessagesReactions.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetMessagesReactions(ctx, &tg.MessagesGetMessagesReactionsRequest{

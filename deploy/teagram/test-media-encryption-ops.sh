@@ -283,6 +283,14 @@ case "$1" in
         echo 'fixture Compose render failure' >&2
         exit 42
       fi
+      # Compose omits services whose profiles are inactive from config output.
+      if [[ " $* " != *' --profile migration config --format json'* ]]; then
+        jq -cn --arg key "$FIXTURE_KEY_DIR" \
+          '{services:{teagramd:{image:"teagramd:local",
+            environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys"},
+            volumes:[{source:$key,target:"/run/teagramd/media-keys",read_only:true}]}}}'
+        exit
+      fi
       jq -cn --arg key "$FIXTURE_KEY_DIR" --arg evidence "$FIXTURE_EVIDENCE" \
         --arg scenario "$FIXTURE_SCENARIO" \
         --arg state "$FIXTURE_REPO/.state/blob-mode" '

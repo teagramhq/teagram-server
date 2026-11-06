@@ -770,6 +770,91 @@ public_ws_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
 printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
 
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446\n' > "$ENV_FILE"
+cf_test_logging='{"driver":"syslog","options":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+cf_test_log_options=$(jq -c '.options' <<< "$cf_test_logging")
+public_ws_loopback_compose=$(jq -c --argjson logging "$cf_test_logging" '
+  .services.teagramd.environment.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=":2446"
+  | .services.teagramd.ports=[{target:2446,published:"2446",host_ip:"127.0.0.1"}]
+  | .services.teagramd.logging=$logging
+' <<< "$public_ws_compose")
+public_ws_loopback_inspect=$(printf '%s' "$legacy_inspect" | jq -c --argjson log_options "$cf_test_log_options" '
+  .Config.Env |= (map(select((startswith("TG_CLIENT_ADDR_TRUST=") or startswith("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=")) | not)) + [
+    "TG_CLIENT_ADDR_TRUST=socket",
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446",
+    "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
+    "TG_PUBLIC_REGISTRATION=closed",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+    "TG_WELCOME_CHANNEL="
+  ])
+  | .HostConfig.PortBindings={"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
+  | .HostConfig.LogConfig={Type:"syslog",Config:$log_options}
+')
+public_ws_socket_snapshot=$(snapshot_from_json \
+  "$public_ws_loopback_inspect" "$public_ws_loopback_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+public_ws_cf_compose=$(jq -c '.services.teagramd.environment.TG_CLIENT_ADDR_TRUST="cf-connecting-ip"' <<< "$public_ws_loopback_compose")
+public_ws_cf_inspect=$(printf '%s' "$public_ws_loopback_inspect" | jq -c '
+  .Config.Env |= map(select(startswith("TG_CLIENT_ADDR_TRUST=") | not)) + ["TG_CLIENT_ADDR_TRUST=cf-connecting-ip"]
+')
+public_ws_cf_snapshot=$(snapshot_from_json \
+  "$public_ws_cf_inspect" "$public_ws_cf_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
+[ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_cf_snapshot")" = cf-connecting-ip ]
+public_ws_cf_preflight_snapshot=$(snapshot_from_json \
+  "$public_ws_loopback_inspect" "$public_ws_cf_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+[ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_cf_preflight_snapshot")" = cf-connecting-ip ]
+[ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_cf_preflight_snapshot")" = socket ]
+if snapshot_from_json "$public_ws_loopback_inspect" "$public_ws_cf_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>"$TMP/public-ws-cf-target-mismatch.err"; then
+  printf '%s\n' 'FAIL target snapshot accepted the still-running socket-mode container for CF trust' >&2
+  exit 1
+fi
+public_ws_unset_compose=$(jq -c 'del(.services.teagramd.environment.TG_CLIENT_ADDR_TRUST)' <<< "$public_ws_loopback_compose")
+public_ws_unset_inspect=$(printf '%s' "$public_ws_loopback_inspect" | jq -c \
+  '.Config.Env |= map(select(startswith("TG_CLIENT_ADDR_TRUST=") | not))')
+public_ws_unset_snapshot=$(snapshot_from_json \
+  "$public_ws_unset_inspect" "$public_ws_unset_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.compose_client_addr_trust' <<< "$public_ws_unset_snapshot")" = unset ]
+[ "$(jq -r '.container_client_addr_trust' <<< "$public_ws_unset_snapshot")" = unset ]
+printf '%s\n' "$public_ws_socket_snapshot" > "$TMP/public-ws-socket.snapshot.json"
+printf '%s\n' "$public_ws_cf_snapshot" > "$TMP/public-ws-cf.snapshot.json"
+if ! compare_snapshots "$TMP/public-ws-socket.snapshot.json" "$TMP/public-ws-cf.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/public-ws-client-address-comparisons.tsv"; then
+  printf '%s\n' 'FAIL loopback public WebSocket client-address transition was rejected' >&2
+  cat "$TMP/public-ws-client-address-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Cloudflare client-address mode transition is accepted with the verified loopback listener'
+
+public_ws_wildcard_compose=$(jq -c '.services.teagramd.ports[0].host_ip="0.0.0.0"' <<< "$public_ws_cf_compose")
+public_ws_wildcard_inspect=$(printf '%s' "$public_ws_cf_inspect" | jq -c \
+  '.HostConfig.PortBindings["2446/tcp"][0].HostIp="0.0.0.0"')
+if snapshot_from_json "$public_ws_wildcard_inspect" "$public_ws_wildcard_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>"$TMP/public-ws-wildcard.err"; then
+  printf '%s\n' 'FAIL Cloudflare client-address mode accepted a wildcard host publish' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Cloudflare client-address mode rejects a non-loopback host publish'
+
+public_ws_missing_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=""' <<< "$public_ws_cf_compose")
+public_ws_missing_inspect=$(printf '%s' "$public_ws_cf_inspect" | jq -c \
+  '.Config.Env |= map(select(startswith("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=") | not)) + ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="]')
+if snapshot_from_json "$public_ws_missing_inspect" "$public_ws_missing_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>"$TMP/public-ws-missing-listener.err"; then
+  printf '%s\n' 'FAIL Cloudflare client-address mode accepted a missing public listener' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Cloudflare client-address mode rejects a missing public listener'
+
+if compare_snapshots "$TMP/public-ws-cf.snapshot.json" "$TMP/public-ws-socket.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/public-ws-client-address-downgrade.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL client-address trust downgrade from Cloudflare to socket was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS verified Cloudflare client-address mode cannot silently downgrade to socket'
+
 syslog_logging='{"driver":"syslog","options":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 legacy_login_codes_compose=$(jq -c \
   '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' <<< "$COMPOSE_JSON")
@@ -1693,6 +1778,45 @@ printf '%s\n' "$turnstile_default_preflight" > "$TARGET_DIR/preflight.snapshot.j
 printf '%s\n' "$turnstile_default_target" > "$TARGET_DIR/target.snapshot.json"
 chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json
 INITIALIZE_LOCAL=0
+turnstile_baseline_dir=$BASELINE_DIR
+turnstile_target_dir=$TARGET_DIR
+assert_resolved_preflight_trust_rejected() {
+  local name=$1 baseline_snapshot=$2 target_snapshot=$3 expected_before=$4 expected_after=$5
+  local baseline_dir="$TMP/$name.baseline" target_dir="$TMP/$name.target"
+  mkdir -m 700 "$baseline_dir" "$target_dir"
+  printf '%s\n' "$baseline_snapshot" > "$baseline_dir/baseline.snapshot.json"
+  printf '%s\n' "$target_snapshot" > "$target_dir/preflight.snapshot.json"
+  BASELINE_DIR=$baseline_dir
+  TARGET_DIR=$target_dir
+  PREFLIGHT_BASELINE_SNAPSHOT="$baseline_dir/baseline.snapshot.json"
+  PREFLIGHT_TARGET_SNAPSHOT="$target_dir/preflight.snapshot.json"
+  PREFLIGHT_RESULTS_FILE="$target_dir/preflight-comparisons.tsv"
+  if compare_resolved_preflight 2>"$TMP/$name.err"; then
+    printf 'FAIL resolved preflight accepted client-address trust transition %s to %s\n' \
+      "$expected_before" "$expected_after" >&2
+    exit 1
+  fi
+  if [ ! -f "$PREFLIGHT_RESULTS_FILE" ] || \
+    ! grep -Fq $'preflight\tcompose_client_addr_trust\t'"$expected_before"$'\t'"$expected_after"$'\tfail' \
+      "$PREFLIGHT_RESULTS_FILE"; then
+    printf 'FAIL resolved preflight did not reject client-address trust transition %s to %s\n' \
+      "$expected_before" "$expected_after" >&2
+    cat "$TMP/$name.err" >&2
+    if [ -f "$PREFLIGHT_RESULTS_FILE" ]; then cat "$PREFLIGHT_RESULTS_FILE" >&2; fi
+    exit 1
+  fi
+  unset PREFLIGHT_BASELINE_SNAPSHOT PREFLIGHT_TARGET_SNAPSHOT PREFLIGHT_RESULTS_FILE
+}
+
+assert_resolved_preflight_trust_rejected public-ws-cf-to-socket \
+  "$public_ws_cf_snapshot" "$public_ws_socket_snapshot" cf-connecting-ip socket
+printf '%s\n' 'PASS resolved Compose preflight rejects Cloudflare client-address downgrade to socket'
+assert_resolved_preflight_trust_rejected public-ws-unset-to-cf \
+  "$public_ws_unset_snapshot" "$public_ws_cf_snapshot" unset cf-connecting-ip
+printf '%s\n' 'PASS resolved Compose preflight rejects unset client-address trust changing to Cloudflare'
+BASELINE_DIR=$turnstile_baseline_dir
+TARGET_DIR=$turnstile_target_dir
+
 if ! compare_resolved_preflight; then
   printf '%s\n' 'FAIL safe Turnstile runtime defaults changed the resolved Compose preflight' >&2
   cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
