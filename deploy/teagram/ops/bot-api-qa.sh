@@ -380,7 +380,7 @@ preflight() {
     private_file "$SERVE_MARKER" || { fail 'unsafe Serve state record'; return 1; }
     grep -Exq 'absent|owned' "$SERVE_MARKER" || { fail 'invalid Serve state record'; return 1; }
   fi
-  help=$(tailscale serve --help) || return 1
+  help=$(tailscale serve --help 2>&1) || return 1
   [[ "$help" == *--proxy-protocol* ]] || { fail 'PROXY protocol is unsupported'; return 1; }
   verify_host_listeners || { fail 'unexpected host port listener'; return 1; }
   listeners=$(ss -Hltnp 'sport = :2447') || return 1

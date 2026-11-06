@@ -59,7 +59,7 @@ cat > "$tmp/bin/tailscale" <<'SH'
 set -eu
 case "$*" in
   'serve status --json') cat "$MOCK_TMP/serve.json" ;;
-  'serve --help') printf '%s\n' --proxy-protocol ;;
+  'serve --help') printf '%s\n' --proxy-protocol >&2 ;;
   'ip -4') printf '%s\n' 100.64.1.1 ;;
   'ip -6') printf '%s\n' fd7a:115c:a1e0::1 ;;
   'serve --yes --bg --tcp=2447 --proxy-protocol=1 tcp://127.0.0.1:2447')
