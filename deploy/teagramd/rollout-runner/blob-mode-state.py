@@ -2006,6 +2006,74 @@ def _read_authority(
     return records, head, mode_bytes, missing_report_count
 
 
+def migrate_reports(state_dir: pathlib.Path, old_root: pathlib.Path, report_root: pathlib.Path, lock_path: pathlib.Path) -> None:
+    require_runner_lock(lock_path)
+    if not report_root.is_absolute() or report_root.resolve() != report_root:
+        reject("report-root-invalid")
+    old_root = old_root.resolve()
+    resolved_state = state_dir.resolve()
+    if (report_root.is_relative_to(old_root) or report_root.is_relative_to(resolved_state)
+            or resolved_state.is_relative_to(report_root)):
+        reject("report-root-invalid")
+    secure_dir(report_root.parent)
+    root_created = not report_root.exists()
+    secure_dir(report_root, create=True, mode=0o700)
+    file_stat(report_root, stat.S_IFDIR, 0o700)
+    if root_created:
+        fsync_dir(report_root.parent)
+    if not (state_dir / "journal" / "0000000001.json").exists():
+        return
+    records, _head, _mode, _missing = _read_authority(state_dir, old_root, allow_missing_reports=True)
+    for record in records:
+        source = report_read_path(old_root, record["transition_id"])
+        if not source.exists():
+            continue
+        report = read_json(source)
+        paths = [source.relative_to(old_root)]
+        paths.extend(pathlib.Path(value) for value in report.get("phase_files", {}).values())
+        if record["outcome"] == "encrypted":
+            paths.append(pathlib.Path(report["inventory_report"]))
+        for relative in paths:
+            source_path = old_root / relative
+            file_stat(source_path, stat.S_IFREG, 0o600)
+            destination = report_root / relative
+            parent = report_root
+            for part in relative.parts[:-1]:
+                parent = parent / part
+                created = not parent.exists()
+                secure_dir(parent, create=True, mode=0o700)
+                file_stat(parent, stat.S_IFDIR, 0o700)
+                if created:
+                    fsync_dir(parent.parent)
+            if destination.exists() or destination.is_symlink():
+                if hash_phase_file(destination) != hash_phase_file(source_path):
+                    reject("report-migration-conflict")
+                continue
+            temp = parent / (".report-copy-" + uuid.uuid4().hex)
+            try:
+                source_fd = os.open(source_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+                with os.fdopen(source_fd, "rb") as source_file:
+                    target_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+                    with os.fdopen(target_fd, "wb") as target_file:
+                        while chunk := source_file.read(1024 * 1024):
+                            target_file.write(chunk)
+                        target_file.flush()
+                        os.fchown(target_file.fileno(), 0, 0)
+                        os.fchmod(target_file.fileno(), 0o600)
+                        os.fsync(target_file.fileno())
+                if hash_phase_file(temp) != hash_phase_file(source_path):
+                    reject("report-migration-changed")
+                os.link(temp, destination)
+                fsync_dir(parent)
+            except OSError:
+                reject("report-migration-write")
+            finally:
+                if temp.exists():
+                    temp.unlink()
+                    fsync_dir(parent)
+    _read_authority(state_dir, report_root, allow_missing_reports=True)
+
+
 def current_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> dict[str, object]:
     records, head, mode_bytes = read_authority(state_dir, report_root)
     if mode_bytes != head:
@@ -3012,6 +3080,11 @@ def main() -> int:
     initial = commands.add_parser("initialize-local")
     initial.add_argument("--report-root", type=pathlib.Path, required=True)
     add_initial_local_arguments(initial, include_current=True)
+    migration = commands.add_parser("migrate-reports")
+    migration.add_argument("--state-dir", type=pathlib.Path, required=True)
+    migration.add_argument("--old-root", type=pathlib.Path, required=True)
+    migration.add_argument("--report-root", type=pathlib.Path, required=True)
+    migration.add_argument("--lock-path", type=pathlib.Path, required=True)
     recovery = commands.add_parser("reconcile")
     recovery.add_argument("--state-dir", type=pathlib.Path, required=True)
     recovery.add_argument("--report-root", type=pathlib.Path, required=True)
@@ -3032,6 +3105,8 @@ def main() -> int:
         elif args.command == "authority":
             record = current_authority(args.state_dir, args.report_root)
             print(json.dumps({"outcome": record["outcome"], "backend": record["backend"]}, sort_keys=True, separators=(",", ":")))
+        elif args.command == "migrate-reports":
+            migrate_reports(args.state_dir, args.old_root, args.report_root, args.lock_path)
         elif args.command == "preflight-initial-local":
             preflight_initial_local(args)
         elif args.command == "initialize-local":

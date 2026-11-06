@@ -58,6 +58,8 @@ REMOVED_PUBLIC_PROFILE_SERVICES=()
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
+REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 PREFLIGHT_EVIDENCE_OWNER=0
 if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
   LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
@@ -462,7 +464,7 @@ is_tracked_local_compose_selection() {
 activate_tracked_local_compose() {
   local authority_json outcome backend_kind blob_dir
   authority_json=$(python3 "$MODE_HELPER" authority \
-    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT") || {
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT") || {
     fail 'cannot read durable blob authority for the tracked local Compose selection'
     return 1
   }
@@ -1374,7 +1376,7 @@ validate_blob_authority() {
   [ "$allow_unguarded_containers" = 1 ] && mode_args+=(--allow-unguarded-initial-local-containers)
   [ "$allow_unguarded_compose" = 1 ] && mode_args+=(--allow-unguarded-initial-local)
   python3 "$MODE_HELPER" "$mode_action" \
-    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT" \
     --containers "$containers_file" --compose "$compose_file" \
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
@@ -2904,6 +2906,8 @@ run_apply() {
     }
   fi
   verify_runtime_sources || return 1
+  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
 
   local layout_report layout_changed layout_diagnostics layout_differences difference
   layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
@@ -3075,7 +3079,7 @@ run_apply() {
   }
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     python3 "$MODE_HELPER" initialize-local \
-      --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+      --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$REPORT_ROOT" \
       --baseline-containers "$BASELINE_DIR/initial-local-baseline-containers.json" \
       --current-containers "$target_blob_containers" \
       --preflight-target-compose "$BASELINE_DIR/initial-local-target-compose.json" \
@@ -3279,6 +3283,8 @@ run_stack_move() {
     return 1
   }
   verify_runtime_sources || return 1
+  python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+    --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
   require_clean_build_checkout || return 1
   [ "$TARGET_CHECKOUT" != "$CHECKOUT" ] || {
     fail 'target checkout path must differ from the source checkout'
@@ -3350,7 +3356,7 @@ run_stack_move() {
     --env-file "$ENV_FILE" --target-env-file "$TARGET_CHECKOUT/.env" \
     --evidence-dir "$TARGET_DIR" \
     --state-dir "$TARGET_CHECKOUT/.state/blob-mode" \
-    --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH" \
+    --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" \
     --blob-mode-helper "$MODE_HELPER"
 }
 
@@ -3374,9 +3380,11 @@ main() {
     acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
     verify_approved_gates || return 1
     verify_runtime_sources || return 1
+    python3 "$MODE_HELPER" migrate-reports --state-dir "$CHECKOUT/.state/blob-mode" \
+      --old-root /root --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH" || return 1
     cd "$CHECKOUT"
     python3 "$MODE_HELPER" reconcile --state-dir "$CHECKOUT/.state/blob-mode" \
-      --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH"
+      --report-root "$REPORT_ROOT" --lock-path "$LOCK_PATH"
     return $?
   fi
   [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ] || [ "$1" = move-stack ]; } || { usage; return 64; }

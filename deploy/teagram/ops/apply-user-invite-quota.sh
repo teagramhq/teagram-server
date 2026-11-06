@@ -342,9 +342,10 @@ origin_sha=$(git -C "$REPO" rev-parse --verify 'origin/main^{commit}') || { fail
 git -C "$REPO" merge-base --is-ancestor "$target_sha" "$origin_sha" || { fail 'live target is no longer on origin/main'; exit 1; }
 git -C "$REPO" merge-base --is-ancestor "$OPS_SHA" "$origin_sha" || { fail 'reviewed operation source is no longer on origin/main'; exit 1; }
 
+export TEAGRAM_BLOB_MODE_REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
 authority_json=$(python3 "$BLOB_HELPER" deployment-env \
   --checkout "$REPO" --state-dir "$STATE_DIR/blob-mode" \
-  --report-root /root --lock-path /tmp/teagram-deploy.lock) || {
+  --report-root "$TEAGRAM_BLOB_MODE_REPORT_ROOT" --lock-path /tmp/teagram-deploy.lock) || {
   fail 'live S3 authority or credential selection is not verified'
   exit 1
 }

@@ -311,6 +311,8 @@ SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
 R=${DEPLOY_ROOT:-/root}
+REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 exec 9>/tmp/teagram-deploy.lock; flock -x 9   # wait out a running deploy; released before the runner takes the same lock
 cd "${DEPLOY_DIR:-/opt/teagram}"
 normalize_tracked_file_modes || { echo "cannot normalize tracked checkout modes"; exit 1; }
@@ -333,6 +335,9 @@ mkdir -m 700 -p "$R/teagramd-rollout-runner"
 for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
   git show "$SHA:deploy/teagramd/rollout-runner/$f" > "$R/teagramd-rollout-runner/$f"; chmod 600 "$R/teagramd-rollout-runner/$f"
 done
+python3 "$R/teagramd-rollout-runner/blob-mode-state.py" migrate-reports \
+  --state-dir "$LIVE_CHECKOUT/.state/blob-mode" --old-root /root \
+  --report-root "$REPORT_ROOT" --lock-path /tmp/teagram-deploy.lock || exit 1
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)
 S3_ENV_FILES=()
 case "$LIVE_CF" in
@@ -341,7 +346,7 @@ case "$LIVE_CF" in
   "$LIVE_CHECKOUT"/docker-compose.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml)
     if ! authority_json=$(python3 "$R/teagramd-rollout-runner/blob-transition-runner.py" deployment-env \
       --checkout "$LIVE_CHECKOUT" --state-dir "$LIVE_CHECKOUT/.state/blob-mode" \
-      --report-root "$R" --lock-path /tmp/teagram-deploy.lock); then
+      --report-root "$REPORT_ROOT" --lock-path /tmp/teagram-deploy.lock); then
       echo 'live S3 Compose has no valid s3-accepted authority or credentials; refusing' >&2
       exit 1
     fi
