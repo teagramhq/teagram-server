@@ -191,7 +191,7 @@ jobs:
               echo "::error::fuser could not be executed to wait for the dpkg lock (exit $probe_status)"
               return 1
             fi
-            for _ in $(seq 1 30); do
+            for ((attempt = 0; attempt < 30; attempt++)); do
               probe_status=0
               probe_output=$(sudo "$fuser_path" /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>&1) || probe_status=$?
               if [ "$probe_status" -eq 0 ]; then
@@ -206,6 +206,7 @@ jobs:
             sudo dpkg --configure -a || true
           }
 
+          # shellcheck disable=SC2329 # Exported and invoked by the timeout child Bash below.
           attempt_install() {
             set -e
             if [ "$MODE" = "packages" ]; then
@@ -230,9 +231,10 @@ jobs:
                 return 1
               fi
               if [ -s apt-install-packages.txt ]; then
+                mapfile -t apt_packages <apt-install-packages.txt
                 sudo apt-get install -y --no-install-recommends \
                   -o "Dir::Cache::archives=$GITHUB_WORKSPACE/.apt-cache" \
-                  $(tr '\n' ' ' <apt-install-packages.txt)
+                  "${apt_packages[@]}"
               fi
               sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.apt-cache"
             else
