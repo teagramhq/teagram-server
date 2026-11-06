@@ -464,6 +464,8 @@ type RateLimitsConfig struct {
 	CreateChannel store.RateLimitConfig
 	// SearchMessages limits messages.search per account.
 	SearchMessages store.RateLimitConfig
+	// ChannelUnreadCount limits account-wide unread summary aggregation across sessions.
+	ChannelUnreadCount store.RateLimitConfig
 	// GetMessages limits messages.getMessages per account, shared across sessions.
 	GetMessages store.RateLimitConfig
 	// SearchContacts limits contacts.search per account.
@@ -583,20 +585,21 @@ type RateLimitsConfig struct {
 // instead of at ones it invented.
 func DefaultRateLimits() RateLimitsConfig {
 	return RateLimitsConfig{
-		MessageSend:      store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
-		CreateChat:       store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
-		AddChatUser:      store.RateLimitConfig{Limit: 120, Window: 24 * time.Hour},
-		CreateChannel:    store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
-		SearchMessages:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		GetMessages:      store.RateLimitConfig{Limit: 120, Window: time.Minute},
-		SearchContacts:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		SearchGlobal:     store.RateLimitConfig{Limit: 300, Window: time.Hour},
-		PollVote:         store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
-		CreateStickerSet: store.RateLimitConfig{Limit: 3, Window: time.Minute},
-		SaveFilePart:     store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
-		UploadBytes:      store.RateLimitConfig{Window: time.Hour},
-		GetFile:          store.RateLimitConfig{Limit: 50, Window: time.Second},
-		GetFileReplica:   store.RateLimitConfig{Limit: 400, Window: time.Second},
+		MessageSend:        store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
+		CreateChat:         store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		AddChatUser:        store.RateLimitConfig{Limit: 120, Window: 24 * time.Hour},
+		CreateChannel:      store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		SearchMessages:     store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		GetMessages:        store.RateLimitConfig{Limit: 120, Window: time.Minute},
+		ChannelUnreadCount: store.RateLimitConfig{Limit: 60, Window: time.Minute},
+		SearchContacts:     store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		SearchGlobal:       store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		PollVote:           store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
+		CreateStickerSet:   store.RateLimitConfig{Limit: 3, Window: time.Minute},
+		SaveFilePart:       store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
+		UploadBytes:        store.RateLimitConfig{Window: time.Hour},
+		GetFile:            store.RateLimitConfig{Limit: 50, Window: time.Second},
+		GetFileReplica:     store.RateLimitConfig{Limit: 400, Window: time.Second},
 		SendCodeIP: store.SendCodeIPLimits{
 			Calls:  store.RateLimitConfig{Limit: 10, Window: time.Hour},
 			Phones: store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
@@ -1657,6 +1660,23 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_UPDATE_PROFILE_WINDOW must be a duration")
 		}
 		cfg.RateLimits.UpdateProfile.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT must be an integer")
+		}
+		cfg.RateLimits.ChannelUnreadCount.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW must be a duration")
+		}
+		cfg.RateLimits.ChannelUnreadCount.Window = d
+	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT", "TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT_WINDOW", cfg.RateLimits.ChannelUnreadCount); err != nil {
+		return Config{}, err
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_CREATE_STICKER_SET"); v != "" {
 		n, err := strconv.Atoi(v)
