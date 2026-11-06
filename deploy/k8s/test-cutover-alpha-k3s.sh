@@ -183,25 +183,6 @@ bash deploy/k8s/test-cutover-dump-upload.sh "$SOURCE_NAMESPACE" postgres-0
 kubectl label namespace "$SOURCE_NAMESPACE" cutover-test=true --overwrite >/dev/null
 create_target_namespace
 
-if env "${incus_test_env[@]}" CUTOVER_TEST_S3_BLOB_SOURCE=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
-  > "$tmp_dir/s3-source.log" 2>&1; then
-  printf 'cutover runner accepted an S3-mode Compose source\n' >&2
-  exit 1
-fi
-expect_log 'source teagramd must use local blobs at /var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
-  "$tmp_dir/s3-source.log"
-[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
-  --output 'jsonpath={.spec.replicas}') == 1 ]]
-[[ $(kubectl get statefulset postgres --namespace "$SOURCE_NAMESPACE" \
-  --output 'jsonpath={.spec.replicas}') == 1 ]]
-[[ -z $(kubectl get statefulset postgres --namespace "$TARGET_NAMESPACE" \
-  --ignore-not-found --output name) ]]
-[[ -z $(kubectl get secret teagramd-admin --namespace "$TARGET_NAMESPACE" \
-  --ignore-not-found --output name) ]]
-[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
-printf 'S3-mode source was refused before fencing or applying target resources\n'
-
 kubectl apply --filename deploy/k8s/test-cutover-blob-seed.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-blob-seed \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
@@ -273,6 +254,26 @@ fi
 exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
+
+if env "${incus_test_env[@]}" CUTOVER_TEST_S3_BLOB_SOURCE=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/s3-source.log" 2>&1; then
+  printf 'cutover runner accepted an S3-mode Compose source\n' >&2
+  exit 1
+fi
+expect_log 'source teagramd must use local blobs at /var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
+  "$tmp_dir/s3-source.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ $(kubectl get statefulset postgres --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ -z $(kubectl get statefulset postgres --namespace "$TARGET_NAMESPACE" \
+  --ignore-not-found --output name) ]]
+[[ -z $(kubectl get secret teagramd-admin --namespace "$TARGET_NAMESPACE" \
+  --ignore-not-found --output name) ]]
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+printf 'S3-mode source was refused before fencing or applying target resources\n'
+
 chmod 0600 "$KUBECONFIG"
 for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-admin; do
   if env "${incus_test_env[@]}" CUTOVER_FAIL_PREFLIGHT_RESOURCE="$resource" \
