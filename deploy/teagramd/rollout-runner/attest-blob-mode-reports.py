@@ -360,25 +360,29 @@ def _remove_attestation_temporaries(report_root_fd: int) -> None:
             _unlink_private_at(report_root_fd, name)
 
 
-def _has_published_attestation_candidate() -> bool:
+def _journal_head_matches(head_sha256: str) -> bool:
     try:
-        report_fd = os.open(
-            REPORT_ROOT,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-        )
-    except OSError:
-        reject("attestation-recovery-evidence-unavailable")
-    try:
-        try:
-            names = os.listdir(report_fd)
-        except OSError:
-            reject("attestation-recovery-evidence-unavailable")
-    finally:
-        try:
-            os.close(report_fd)
-        except OSError:
-            reject("attestation-recovery-evidence-unavailable")
-    return any(name.startswith(ATTESTATION_PREFIX) for name in names)
+        mode.secure_dir(STATE_DIR)
+        state_names = {path.name for path in STATE_DIR.iterdir()}
+        if state_names != {"journal", "mode.json"}:
+            return False
+        journal_path = STATE_DIR / "journal"
+        mode.secure_dir(journal_path)
+        names = sorted(path.name for path in journal_path.iterdir())
+        if (
+            not names
+            or len(names) > 1000
+            or names != [f"{index:010d}.json" for index in range(1, len(names) + 1)]
+        ):
+            return False
+        head_path = journal_path / names[-1]
+        mode.file_stat(head_path, stat.S_IFREG)
+        head_bytes = head_path.read_bytes()
+        mode_path = STATE_DIR / "mode.json"
+        mode.file_stat(mode_path, stat.S_IFREG)
+        return hash_bytes(head_bytes) == head_sha256 and mode_path.read_bytes() == head_bytes
+    except (mode.Reject, OSError):
+        return False
 
 
 def _remove_incomplete_publication(head_sha256: str, archive_root_fd: int) -> None:
@@ -476,18 +480,17 @@ def _recover_incomplete_publication() -> bool:
             return False
         try:
             mode.current_authority(STATE_DIR, REPORT_ROOT)
-        except mode.Reject:
+        except mode.Reject as authority_error:
             try:
                 published = mode.read_report_loss_attestation(REPORT_ROOT)
-            except mode.Reject as error:
-                # A final-name attestation may already have authorized a later transition.
-                if _has_published_attestation_candidate():
-                    reject(f"attestation-recovery-{error}")
+            except mode.Reject as evidence_error:
+                # Keep uncertain output if the journal advanced beyond the marked head.
+                if not _journal_head_matches(head_sha256):
+                    reject(f"attestation-recovery-{evidence_error}")
                 published = None
-            if (
-                published is not None
-                and published[0].get("head_bytes_sha256") == head_sha256
-            ):
+            if published is not None:
+                if published[0].get("head_bytes_sha256") != head_sha256:
+                    reject("attestation-recovery-head-mismatch")
                 # A usable publication may already have authorized a later transition.
                 try:
                     report_fd = os.open(
@@ -505,6 +508,8 @@ def _recover_incomplete_publication() -> bool:
                         reject("attestation-recovery-failed")
                 _remove_recovery_marker(archive_root_fd)
                 return False
+            if published is None and not _journal_head_matches(head_sha256):
+                reject(f"attestation-recovery-{authority_error}")
             _remove_incomplete_publication(head_sha256, archive_root_fd)
             _remove_recovery_marker(archive_root_fd)
             return False
