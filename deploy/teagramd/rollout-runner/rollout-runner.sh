@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=89567aa8ee3b5fee3c3dbfe98876873b04fac213d1c02a4f05aa81ac236dded4
+readonly APPROVED_VERIFIER_SHA=6f9748fcc2124862150ca138eede791bdc2800511680de04c20f789a949ed4f1
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -1590,7 +1590,7 @@ named_env_addition_requested() {
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   for name in "${requested[@]}"; do
     case "$name" in
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA)
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET|TG_USER_INVITE_QUOTA|TG_BOT_API_LISTEN_ADDR)
         return 0
         ;;
     esac
@@ -2801,6 +2801,40 @@ require_clean_build_checkout() {
   [ -z "$build_inputs" ] || { fail 'deployment checkout has untracked Docker build inputs'; return 1; }
 }
 
+reconcile_bot_api_relays() {
+  local container_id listener config
+  container_id=$(current_service_id "$(rollout_compose_service)") || return 1
+  listener=$(docker inspect "$container_id" | jq -er '
+    (if type == "array" then .[0] else . end).Config.Env as $env
+    | if ($env | type) != "array" then error("invalid container environment") else
+        [$env[] | select(startswith("TG_BOT_API_LISTEN_ADDR=")) | ltrimstr("TG_BOT_API_LISTEN_ADDR=")] as $values
+        | if ($values | length) > 1 then error("duplicate Bot API listener") else ($values[0] // "") end
+      end
+  ') || return 1
+  [ -n "$listener" ] || return 0
+  [ "$listener" = 127.0.0.1:2447 ] || { fail 'Bot API listener is not loopback'; return 1; }
+  config=$(docker compose --profile bot-api-qa config --format json </dev/null) || return 1
+  jq -e '
+    .services as $s
+    | ([ $s | to_entries[] | select(any(.value.volumes[]?; .source == "bot_api_socket")) | .key ] | sort) == ["bot-api-ingress","bot-api-inner"]
+    and ([ $s | to_entries[] | select((.value.networks // {}) | has("bot_api_ingress")) | .key ] == ["bot-api-ingress"])
+    and (.networks.bot_api_ingress.internal // false) == false
+    and $s["bot-api-inner"].network_mode == "service:teagramd"
+    and ([ $s | to_entries[] | select((.value.network_mode // "") == "service:teagramd") | .key ] == ["bot-api-inner"])
+    and ([ $s | to_entries[] | select((.value.network_mode // "") | startswith("container:")) ] | length) == 0
+    and ($s["bot-api-inner"].ports // [] | length) == 0
+    and ($s["bot-api-inner"].volumes | length) == 1 and ($s["bot-api-ingress"].volumes | length) == 1
+    and $s["bot-api-inner"].command == ["-d", "-d", "-T120", "UNIX-LISTEN:/run/bot-api/relay.sock,fork,unlink-early,mode=0600,max-children=128", "TCP:127.0.0.1:2447"]
+    and $s["bot-api-ingress"].command == ["-d", "-d", "-T120", "TCP-LISTEN:2448,bind=0.0.0.0,reuseaddr,fork,max-children=128", "UNIX-CONNECT:/run/bot-api/relay.sock"]
+    and $s["bot-api-ingress"].ports == [{"mode":"ingress","host_ip":"127.0.0.1","target":2448,"published":"2447","protocol":"tcp"}]
+    and ($s["bot-api-ingress"].networks | keys) == ["bot_api_ingress"]
+    and all(["bot-api-inner","bot-api-ingress"][];
+      $s[.].image == "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
+      and $s[.].entrypoint == null and $s[.].read_only == true and $s[.].cap_drop == ["ALL"])
+  ' <<< "$config" >/dev/null || { fail 'Bot API relay configuration is unsafe'; return 1; }
+  docker compose --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout "$READY_SECONDS" bot-api-inner bot-api-ingress </dev/null
+}
+
 perform_rollback() {
   local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
@@ -2823,6 +2857,7 @@ perform_rollback() {
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
+  if [ "$readiness_rc" -eq 0 ] && ! reconcile_bot_api_relays; then readiness_rc=1; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ] && [ "$public_profile_readiness_rc" -eq 0 ]; then
     if [ -n "$ADDED_ENV" ]; then
       rollback_env_record=$(jq -er '.container_env_added' "$ROLLBACK_DIR/rollback.snapshot.json") || {
@@ -3207,6 +3242,10 @@ run_apply() {
   if bash "$SCHEMA_GATE" check post "$TARGET_DIR" "$CHECKOUT" >/dev/null; then :; else
     rc=$?
     rollback_after_target_failure "schema_gate_rejected_exit_$rc" || return 2
+    return 1
+  fi
+  if ! reconcile_bot_api_relays; then
+    rollback_after_target_failure bot_api_relay_health_failed || return 2
     return 1
   fi
   record_verified_env "$TARGET_DIR/target.snapshot.json" "$TARGET_SHA" || return 1

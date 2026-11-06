@@ -196,6 +196,28 @@ invite_quota_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
+# The disabled listener is equivalent to its absence; the named activation
+# must not hide unrelated environment changes.
+: > "$ENV_FILE"
+bot_old=$(snapshot_from_json "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+bot_compose=$(jq -c '.services.teagramd.environment.TG_BOT_API_LISTEN_ADDR=""' <<< "$COMPOSE_JSON")
+bot_empty=$(snapshot_from_json "$(inspect_json 'TG_BOT_API_LISTEN_ADDR=')" "$bot_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+for field in config_sha256 container_env_sha256; do
+  [[ "$(jq -r --arg field "$field" '.[$field]' <<< "$bot_old")" == "$(jq -r --arg field "$field" '.[$field]' <<< "$bot_empty")" ]] || {
+    printf 'FAIL disabled Bot API default changed %s\n' "$field" >&2; exit 1;
+  }
+done
+printf 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447\n' > "$ENV_FILE"
+bot_compose=$(jq -c '.services.teagramd.environment.TG_BOT_API_LISTEN_ADDR="127.0.0.1:2447"' <<< "$COMPOSE_JSON")
+bot_target=$(ROLLOUT_ADDED_ENV=TG_BOT_API_LISTEN_ADDR snapshot_from_json "$(inspect_json 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447')" "$bot_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+for field in config_sha256 container_env_sha256; do
+  [[ "$(jq -r --arg field "$field" '.[$field]' <<< "$bot_old")" == "$(jq -r --arg field "$field" '.[$field]' <<< "$bot_target")" ]] || {
+    printf 'FAIL named Bot API activation changed %s\n' "$field" >&2; exit 1;
+  }
+done
+[[ "$(jq -r '.container_env_added' <<< "$bot_target")" == TG_BOT_API_LISTEN_ADDR ]]
+printf '%s\n' 'PASS Bot API default and named activation preserve unrelated rollout digests'
+
 : > "$ENV_FILE"
 default_compose_json=$COMPOSE_JSON
 COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")

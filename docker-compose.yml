@@ -336,6 +336,7 @@ services:
       TG_PUBLIC_REGISTRATION: ${TG_PUBLIC_REGISTRATION:-closed}
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
       TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
+      TG_BOT_API_LISTEN_ADDR: ${TG_BOT_API_LISTEN_ADDR:+127.0.0.1:2447}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       # Keep the Compose deployment count aligned across the legacy listener
       # and any explicitly enabled replacement replicas. The default remains
@@ -410,6 +411,60 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  bot-api-inner:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: ["bot-api-qa"]
+    network_mode: service:teagramd
+    depends_on:
+      teagramd:
+        condition: service_started
+    command: ["-d", "-d", "-T120", "UNIX-LISTEN:/run/bot-api/relay.sock,fork,unlink-early,mode=0600,max-children=128", "TCP:127.0.0.1:2447"]
+    volumes:
+      - bot_api_socket:/run/bot-api
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 150
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/bot-api/relay.sock && socat -T2 -u /dev/null TCP:127.0.0.1:2447"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bot-api-ingress:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: ["bot-api-qa"]
+    depends_on:
+      bot-api-inner:
+        condition: service_started
+    command: ["-d", "-d", "-T120", "TCP-LISTEN:2448,bind=0.0.0.0,reuseaddr,fork,max-children=128", "UNIX-CONNECT:/run/bot-api/relay.sock"]
+    ports:
+      - "127.0.0.1:2447:2448"
+    networks: [bot_api_ingress]
+    volumes:
+      - bot_api_socket:/run/bot-api
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 150
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 -u /dev/null TCP:127.0.0.1:2448"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   pgdata:
   tgkey:
@@ -417,11 +472,15 @@ volumes:
   # default S3 render mounts it read-only; the local overlay writes it.
   tgblobs:
   rustfsdata:
+  bot_api_socket:
   blob_key_rotate_reports:
     name: teagram_blob_key_rotate_reports
     driver: local
 
 networks:
+  bot_api_ingress:
+    driver: bridge
+    enable_ipv6: false
   # `internal` blocks external routing from attached containers. The isolated
   # gateway mode also removes the host bridge address, so host processes cannot
   # reach RustFS by its container IP.

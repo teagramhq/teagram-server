@@ -1,0 +1,45 @@
+name: Bot API QA monitor.
+
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue key for the CI router
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: 'ops: bot-api-qa-monitor'
+    runs-on: ubuntu-26.04
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: 100.124.236.66
+
+      - name: Check the Bot API path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          result=$(curl --silent --show-error --connect-timeout 5 --max-time 10 \
+            --output /dev/null --write-out '%{http_code} %{time_total}' \
+            'http://100.124.236.66:2447/bot1:0000000000000000000000000000000000000000000/getMe')
+          read -r status seconds <<< "$result"
+          printf 'Bot API synthetic status: %s; latency: %s seconds\n' "$status" "$seconds" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$status" != 401 ]]; then
+            printf '::error::Bot API QA path returned HTTP %s instead of 401\n' "$status"
+            exit 1
+          fi
