@@ -3,18 +3,49 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|bot-api-qa> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the seven current operations: `target-failure-report`, `rollout-evidence`,
+the nine current operations: `target-failure-report`, `rollout-evidence`,
 `invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
-`encrypt-media`, and `cleanup-media`. A script's presence in an older main
-commit does not authorize a retired operation. The allowlist lives in
+`encrypt-media`, `cleanup-media`, `backup-media-key`, and `bot-api-qa`. A
+script's presence in an older main commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
 secrets in arguments, logs, or output.
+
+## Bot API QA
+
+The optional `bot-api-qa` Compose profile uses two pinned TCP relays. The
+host publishes the ingress relay on `127.0.0.1:2447` on a dedicated bridge
+network. Only the two relays mount the private socket volume; the inner relay
+shares teagramd's network namespace and forwards that socket to the Bot API
+listener on `127.0.0.1:2447`. Tailscale Serve is the only tailnet entry point
+and supplies a PROXY v1 header. The relays pass the bytes unchanged.
+
+After deploying the reviewed SHA, run `ssh teagram run <sha> bot-api-qa check`
+to check the live environment and Serve port, followed by `ssh teagram run
+<sha> bot-api-qa apply`. Apply enables the listener through the named rollout
+path, starts the relays and creates the Serve mapping without overwriting a
+foreign mapping. `ssh teagram run <sha> bot-api-qa verify` checks the mapping,
+container topology, health and volume isolation. Repeating apply preserves the
+original mapping record. `ssh teagram run <sha> bot-api-qa rollback` restores
+the previous Serve mapping without touching other ports. When the previous port
+was absent, the rollback takes effect as soon as Tailscale applies the command,
+leaving the listener and relays reachable only on host loopback. The operation
+does not remove the listener environment setting or the relay containers.
+
+Enabling the listener runs the server rollout and can interrupt all connected
+clients during replacement. A wrong relay or Serve mapping can also make the QA
+endpoint unreachable or permit peer-address forgery. There is no staging LXC.
+The CI fixture previews the resolved Compose isolation and exercises Serve
+apply, repeat, refusal and rollback against a mock. The relays expose Docker
+health status and bounded connection logs; inspect them and run `verify` after
+deployment. The rollout runner recreates them after a server restart so the
+inner relay joins the current network namespace. Production acceptance
+additionally needs `getMe` and the cross-peer revoked-token isolation test.
 
 ## Threat model
 
@@ -30,8 +61,7 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the seven
-current operation names before fetching Git data, verifies the full SHA is on
+therefore become host-root execution. The dispatcher limits `run` to the current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs
 and emit bounded, sanitized output. `invite-web-signup-url` accepts only the
