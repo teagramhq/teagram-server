@@ -162,6 +162,15 @@ assignment. The target is the live Web app root at
 `https://web.teagram.io/`; the `/signup` path is not the app route. To undo the
 addition, run `ssh teagram run <main-sha> invite-web-signup-url --rollback`.
 
+## Backing up the media key
+
+After deploying the reviewed SHA, run `ssh teagram run <deployed-main-sha>
+backup-media-key`. The operation copies the mounted version 1 key to
+`/etc/teagramd/media-key-backups/1.key`, verifies it without displaying key
+material or digests, and refuses to overwrite an existing backup. Retain the
+backup for recovery; investigate any mismatch before proceeding. The operation
+does not restart services.
+
 ## Encrypting and cleaning up media
 
 `encrypt-media` converts the accepted S3 media authority to encrypted media.
@@ -216,7 +225,8 @@ The encrypted copies and encrypted authority remain in place after cleanup.
 If cleanup stops partway through, retain encrypted authority and rerun it only
 after the acceptance checks still pass; cleanup revalidates the encrypted
 copies before removing any remaining source. The verified pre-migration dump
-and media key backup remain in `/root` as recovery evidence.
+remains in `/root` as recovery evidence; the media key backup is at
+`/etc/teagramd/media-key-backups/1.key`.
 
 The transition's threat boundary is the reviewed `main` SHA, the single
 verified Compose stack, the root-owned media key and database backup, the
