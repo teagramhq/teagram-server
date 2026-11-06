@@ -46,8 +46,13 @@ git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"
   > "$TEMP_DIR/blob-mode-state.py" || fail 'cannot stage the reviewed blob authority validator'
 git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py" \
   > "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot stage the reviewed deployment authority validator'
+git -C "$REPO" show "$OPS_SHA:internal/store/queries/uploads.sql" \
+  > "$TEMP_DIR/uploads.sql" || fail 'cannot stage the reviewed blob inventory query'
+git -C "$REPO" rev-parse --verify "$OPS_SHA:internal/store/queries/uploads.sql" \
+  > "$TEMP_DIR/uploads.sql.git-blob" || fail 'cannot validate the reviewed blob inventory query'
 chmod 600 "$TEMP_DIR/attest-blob-mode-reports.py" "$TEMP_DIR/blob-mode-state.py" \
-  "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot protect the staged report attestation helpers'
+  "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/uploads.sql" \
+  "$TEMP_DIR/uploads.sql.git-blob" || fail 'cannot protect the staged report attestation helpers'
 
 cd "$REPO"
 python3 "$TEMP_DIR/attest-blob-mode-reports.py"

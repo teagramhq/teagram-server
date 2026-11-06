@@ -16,6 +16,9 @@ chmod 700 "$tmp/root"
 MOCK_OWNER_UID=$(id -u)
 export MOCK_OWNER_UID
 export MOCK_OPS_DIR="$ops_dir"
+export MOCK_QUERY_SQL="$(cd "$ops_dir/../../.." && pwd)/internal/store/queries/uploads.sql"
+MOCK_QUERY_BLOB_OID=$(git hash-object "$MOCK_QUERY_SQL")
+export MOCK_QUERY_BLOB_OID
 printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$tmp/repo/.env"
 printf 'override fixture\n' > "$tmp/repo/docker-compose.override.yml"
 printf 'state fixture\n' > "$tmp/repo/.state/rollout-env"
@@ -50,7 +53,16 @@ set -euo pipefail
 [[ "$1" == -C ]] || { echo "unexpected git call: $*" >&2; exit 99; }
 shift 2
 case "$1" in
-  rev-parse) [[ "${2:-}" == HEAD ]] && printf '%s\n' "$MOCK_CURRENT_SHA" ;;
+  rev-parse)
+    case "${2:-}" in
+      HEAD) printf '%s\n' "$MOCK_CURRENT_SHA" ;;
+      --verify)
+        [[ "${3:-}" == "$OPS_SHA:internal/store/queries/uploads.sql" ]] || exit 99
+        printf '%s\n' "$MOCK_QUERY_BLOB_OID"
+        ;;
+      *) exit 99 ;;
+    esac
+    ;;
   branch) [[ "${2:-}" == --show-current ]] && printf '%s\n' main ;;
   status) [[ "${2:-}" == --porcelain ]] && printf ' M fixture\n' ;;
   fetch) exit 0 ;;
@@ -98,11 +110,25 @@ case "$1" in
         sed "s|/opt/teagram|$MOCK_REPO|g" "$MOCK_ATTEST_SCRIPT"
         ;;
       "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
-        printf '%s\n' 'print("attestation-operation fixture")'
+        cat <<'PY'
+import os
+from pathlib import Path
+import re
+
+helper_dir = Path(__file__).resolve().parent
+assert (helper_dir / "uploads.sql").is_file()
+assert (helper_dir / "uploads.sql.git-blob").read_text().strip() == os.environ["MOCK_QUERY_BLOB_OID"]
+assert re.search(r"^-- name: BlobInventoryReferences :many\n.*;$", (helper_dir / "uploads.sql").read_text(), re.M | re.S)
+print("attestation-operation fixture")
+PY
         ;;
       "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
       "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py")
         printf '%s\n' '# staged reviewed helper fixture'
+        ;;
+      "$OPS_SHA:internal/store/queries/uploads.sql")
+        printf '%s\n' "$2" >> "$MOCK_SHOW_LOG"
+        cat "$MOCK_QUERY_SQL"
         ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
@@ -268,6 +294,7 @@ export MOCK_ROOT_MODE=true
 attestation=$(run_command "run $OPS_SHA attest-blob-mode-reports")
 unset MOCK_ROOT_MODE
 [[ "$attestation" == 'attestation-operation fixture' ]]
+grep -Fxq "$OPS_SHA:internal/store/queries/uploads.sql" "$MOCK_SHOW_LOG"
 
 sentinel="$tmp/arbitrary-command-ran"
 expect_status 64 "touch $sentinel"

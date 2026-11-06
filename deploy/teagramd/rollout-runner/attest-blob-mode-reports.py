@@ -39,6 +39,8 @@ REPORT_LOSS_ARCHIVE_MANIFEST = ARCHIVE_MANIFEST_NAME
 REPORT_LOSS_CENSUS_MANIFEST = CENSUS_MANIFEST_NAME
 
 REFERENCE_QUERY_NAME = "BlobInventoryReferences"
+REFERENCE_QUERY_SOURCE = SCRIPT_DIR / "uploads.sql"
+REFERENCE_QUERY_BLOB_OID = SCRIPT_DIR / "uploads.sql.git-blob"
 
 
 class AttestationReject(Exception):
@@ -801,11 +803,22 @@ def run_compose(command: list[str], environment: dict[str, str], *, reason: str)
 
 
 def blob_inventory_references_query() -> str:
-    source_path = CHECKOUT / "internal" / "store" / "queries" / "uploads.sql"
     try:
-        lines = source_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        source = REFERENCE_QUERY_SOURCE.read_bytes()
+        expected_blob_oid = REFERENCE_QUERY_BLOB_OID.read_text(encoding="ascii").strip()
+    except OSError:
         reject("live-reference-query-source-unavailable")
+    except UnicodeDecodeError:
+        reject("live-reference-query-source-invalid")
+    # The wrapper stages this blob from OPS_SHA and records its Git object ID.
+    git_blob_header = f"blob {len(source)}\0".encode("ascii")
+    actual_blob_oid = hashlib.sha1(git_blob_header + source, usedforsecurity=False).hexdigest()
+    if re.fullmatch(r"[0-9a-f]{40}", expected_blob_oid) is None or actual_blob_oid != expected_blob_oid:
+        reject("live-reference-query-source-invalid")
+    try:
+        lines = source.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        reject("live-reference-query-source-invalid")
     marker = f"-- name: {REFERENCE_QUERY_NAME} :many"
     try:
         start = lines.index(marker)
@@ -893,7 +906,8 @@ def capture_live_census(record: dict[str, object]) -> tuple[bytes, bytes]:
         [
             "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
             "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
-            "-c", blob_inventory_references_query(),
+            "--single-transaction", "-c",
+            f"SET TRANSACTION READ ONLY;\n{blob_inventory_references_query()}",
         ],
         environment,
         reason="live-reference-query",

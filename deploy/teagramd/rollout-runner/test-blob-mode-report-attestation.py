@@ -52,6 +52,16 @@ def snapshot_files(root: pathlib.Path) -> dict[str, bytes]:
     return result
 
 
+def git_blob_oid(content: bytes) -> str:
+    result = subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        input=content,
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    return result.stdout.decode("ascii").strip()
+
+
 class BlobModeReportAttestationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.operation = import_operation(self)
@@ -734,7 +744,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             [
                 "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
                 "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
-                "-c", canonical_query,
+                "--single-transaction", "-c", f"SET TRANSACTION READ ONLY;\n{canonical_query}",
             ],
         ]
         def run_compose(command, _env, *, reason):
@@ -746,27 +756,36 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 return S3_MANIFEST
             return REFERENCE_ROWS
 
-        with (
-            patch.object(
-                self.operation.transition,
-                "rustfs_compose_environment_files",
-                return_value=[
-                    str(checkout / ".env"),
-                    str(checkout / ".env.rustfs-parked"),
-                ],
-            ),
-            patch.object(
-                self.operation.transition,
-                "compose_environment_for_files",
-                return_value=environment,
-            ) as compose_environment,
-            patch.object(self.operation, "CHECKOUT", checkout),
-            patch.object(self.operation.mode, "compose_inventory", return_value=object()) as compose_inventory,
-            patch.object(self.operation.mode, "assert_compose_matches") as assert_compose_matches,
-            patch.object(self.operation.mode, "backend_from_values", return_value=record["backend"]),
-            patch.object(self.operation, "run_compose", side_effect=run_compose),
-        ):
-            s3_manifest, reference_rows = self.operation.capture_live_census(record)
+        with tempfile.TemporaryDirectory() as temporary:
+            staged_dir = pathlib.Path(temporary)
+            staged_query = staged_dir / "uploads.sql"
+            staged_blob_oid = staged_dir / "uploads.sql.git-blob"
+            sql_bytes = (checkout / "internal/store/queries/uploads.sql").read_bytes()
+            staged_query.write_bytes(sql_bytes)
+            staged_blob_oid.write_text(git_blob_oid(sql_bytes) + "\n", encoding="ascii")
+            with (
+                patch.object(
+                    self.operation.transition,
+                    "rustfs_compose_environment_files",
+                    return_value=[
+                        str(checkout / ".env"),
+                        str(checkout / ".env.rustfs-parked"),
+                    ],
+                ),
+                patch.object(
+                    self.operation.transition,
+                    "compose_environment_for_files",
+                    return_value=environment,
+                ) as compose_environment,
+                patch.object(self.operation, "CHECKOUT", checkout),
+                patch.object(self.operation, "REFERENCE_QUERY_SOURCE", staged_query),
+                patch.object(self.operation, "REFERENCE_QUERY_BLOB_OID", staged_blob_oid),
+                patch.object(self.operation.mode, "compose_inventory", return_value=object()) as compose_inventory,
+                patch.object(self.operation.mode, "assert_compose_matches") as assert_compose_matches,
+                patch.object(self.operation.mode, "backend_from_values", return_value=record["backend"]),
+                patch.object(self.operation, "run_compose", side_effect=run_compose),
+            ):
+                s3_manifest, reference_rows = self.operation.capture_live_census(record)
 
         self.assertEqual(calls, expected)
         self.assertEqual(
@@ -783,6 +802,28 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         assert_compose_matches.assert_called_once()
         self.assertFalse(any(command in ("restart", "up", "stop") for call in calls for command in call))
         self.assertNotIn("never-print-this", repr(calls))
+
+    def test_reference_query_refuses_staged_bytes_that_do_not_match_reviewed_git_blob(self) -> None:
+        checkout = SCRIPT_DIR.parents[2]
+        sql_bytes = (checkout / "internal/store/queries/uploads.sql").read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "uploads.sql"
+            blob_oid_path = root / "uploads.sql.git-blob"
+            source.write_bytes(sql_bytes)
+            blob_oid_path.write_text(git_blob_oid(sql_bytes) + "\n", encoding="ascii")
+            with (
+                patch.object(self.operation, "REFERENCE_QUERY_SOURCE", source),
+                patch.object(self.operation, "REFERENCE_QUERY_BLOB_OID", blob_oid_path),
+            ):
+                query = self.operation.blob_inventory_references_query()
+                self.assertIn("FROM upload_parts up", query)
+
+                source.write_bytes(sql_bytes.replace(b"up.size AS logical_bytes", b"0 AS logical_bytes"))
+                with self.assertRaises(self.operation.AttestationReject) as caught:
+                    self.operation.blob_inventory_references_query()
+
+        self.assertEqual(str(caught.exception), "live-reference-query-source-invalid")
 
     def test_live_census_command_failure_does_not_echo_secret_output(self) -> None:
         secret = "fixture-secret-must-not-be-printed"
