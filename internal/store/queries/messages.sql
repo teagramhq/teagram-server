@@ -766,7 +766,11 @@ WHERE (sqlc.arg(filter_mask)::int & 4) <> 0
   AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND (m.peer_type <> 2 OR EXISTS (SELECT 1 FROM chat_participants cp WHERE cp.chat_id = m.peer_id
   AND cp.user_id = m.owner_id))
-  AND m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+  -- Every URL match contains a dot or "://"; the substring test is far cheaper
+  -- than the regex, and CASE keeps the planner from running the regex first.
+  AND CASE WHEN strpos(m.message, '.') > 0 OR strpos(m.message, '://') > 0
+    THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+    ELSE false END
 UNION ALL
 SELECT 4::smallint AS filter, count(*)::bigint AS count
 FROM messages m
