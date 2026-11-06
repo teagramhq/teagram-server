@@ -270,8 +270,8 @@ check_media_key() {
   [[ -d "$backup_parent" && ! -L "$backup_parent" && "$(stat -c '%u' -- "$backup_parent")" == "$EXPECTED_ROOT_UID" ]] || \
     ops_fail 'media key backup parent is unsafe'
   backup_parent_mode=$(stat -c '%a' -- "$backup_parent") || ops_fail 'cannot inspect media key backup parent'
-  [[ "$backup_parent_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$backup_parent_mode & 0022) == 0 )) || \
-    ops_fail 'media key backup parent is unsafe'
+  [[ "$backup_parent_mode" =~ ^[0-7]{3,4}$ ]] || ops_fail 'media key backup parent is unsafe'
+  (( (8#$backup_parent_mode & 0022) == 0 )) || ops_fail 'media key backup parent is unsafe'
   private_dir "${KEY_BACKUP%/*}" || ops_fail 'media key backup directory is unsafe'
   check_hash_value media_key_backup_metadata 'file:0:600' \
     "$(media_path_metadata "$KEY_BACKUP" file '%u:%a')" || invalid_metadata=1

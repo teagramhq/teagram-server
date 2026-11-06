@@ -14,7 +14,8 @@ fail() { printf 'media key backup rejected: %s\n' "$1" >&2; exit 1; }
 [[ "$#" == 0 ]] || fail 'no arguments are accepted'
 [[ -d "$BACKUP_PARENT" && ! -L "$BACKUP_PARENT" && "$(stat -c '%u' -- "$BACKUP_PARENT")" == 0 ]] || fail 'backup parent is unsafe'
 parent_mode=$(stat -c '%a' -- "$BACKUP_PARENT") || fail 'cannot inspect backup parent'
-[[ "$parent_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$parent_mode & 0022) == 0 )) || fail 'backup parent is writable by others'
+[[ "$parent_mode" =~ ^[0-7]{3,4}$ ]] || fail 'backup parent is writable by others'
+(( (8#$parent_mode & 0022) == 0 )) || fail 'backup parent is writable by others'
 [[ -d "$KEY_DIR" && ! -L "$KEY_DIR" && "$(stat -c '%u:%a:%g' -- "$KEY_DIR")" == 65532:700:65532 ]] || fail 'live key directory is unsafe'
 [[ -f "$KEY_FILE" && ! -L "$KEY_FILE" && "$(stat -c '%u:%a:%g' -- "$KEY_FILE")" == 65532:600:65532 ]] || fail "live key $KEY_FILE is missing or unsafe; expected owner:mode:group 65532:600:65532"
 if [[ ! -e "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]]; then
