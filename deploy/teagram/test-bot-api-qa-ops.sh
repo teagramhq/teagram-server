@@ -175,6 +175,18 @@ grep -Fxq 'Bot API QA listener inspection failed: unexpected listener address 0.
 printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp"
 printf '%s\n' 'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode' > "$tmp/proc/net/tcp6"
 bash "$tmp/op.sh" check
+cat > "$repo/ipaddress.py" <<'PY'
+raise RuntimeError("untrusted ipaddress.py was imported")
+PY
+python_isolation_status=0
+(cd "$repo" && bash "$tmp/op.sh" check) > "$tmp/python-isolation.stdout" 2> "$tmp/python-isolation.stderr" || python_isolation_status=$?
+[[ "$python_isolation_status" == 0 ]]
+grep -Fxq "would_apply source_sha=$OPS_SHA serve=absent" "$tmp/python-isolation.stdout"
+if grep -Fq 'untrusted ipaddress.py was imported' "$tmp/python-isolation.stderr"; then
+  printf '%s\n' 'Bot API listener check imported ipaddress.py from its current directory' >&2
+  exit 1
+fi
+rm -- "$repo/ipaddress.py"
 bash "$tmp/op.sh" apply
 grep -Fq '0100007F:098F' "$tmp/proc/net/tcp"
 owned_lookups=$(wc -l < "$tmp/ingress-lookups")

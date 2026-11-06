@@ -62,7 +62,7 @@ host_listener_state() {
   ipv4=$(tailscale ip -4) || return 1
   ipv6=$(tailscale ip -6) || return 1
   git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot_api_qa_listeners.py" |
-    python3 - "$ipv4" "$ipv6" "$PROC_ROOT"
+    python3 -I - "$ipv4" "$ipv6" "$PROC_ROOT"
 }
 
 validate_relay_config() {
