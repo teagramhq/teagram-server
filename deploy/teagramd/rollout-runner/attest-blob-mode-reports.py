@@ -360,6 +360,27 @@ def _remove_attestation_temporaries(report_root_fd: int) -> None:
             _unlink_private_at(report_root_fd, name)
 
 
+def _has_published_attestation_candidate() -> bool:
+    try:
+        report_fd = os.open(
+            REPORT_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError:
+        reject("attestation-recovery-evidence-unavailable")
+    try:
+        try:
+            names = os.listdir(report_fd)
+        except OSError:
+            reject("attestation-recovery-evidence-unavailable")
+    finally:
+        try:
+            os.close(report_fd)
+        except OSError:
+            reject("attestation-recovery-evidence-unavailable")
+    return any(name.startswith(ATTESTATION_PREFIX) for name in names)
+
+
 def _remove_incomplete_publication(head_sha256: str, archive_root_fd: int) -> None:
     archive_name = f"attestation-{head_sha256}"
     _remove_private_tree_at(archive_root_fd, archive_name)
@@ -458,7 +479,10 @@ def _recover_incomplete_publication() -> bool:
         except mode.Reject:
             try:
                 published = mode.read_report_loss_attestation(REPORT_ROOT)
-            except mode.Reject:
+            except mode.Reject as error:
+                # A final-name attestation may already have authorized a later transition.
+                if _has_published_attestation_candidate():
+                    reject(f"attestation-recovery-{error}")
                 published = None
             if (
                 published is not None

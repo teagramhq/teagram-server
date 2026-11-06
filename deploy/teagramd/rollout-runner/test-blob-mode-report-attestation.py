@@ -547,6 +547,75 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 )
                 self.assertFalse(self.operation.recovery_marker_path().exists())
 
+    def test_damaged_manifest_does_not_delete_possible_published_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path, _records = self.make_authority(root)
+            patches = self.operation_context(root, state_dir, report_root, lock_path)
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with (
+                    patch.object(
+                        self.operation,
+                        "_mark_recovery_marker_committed",
+                        side_effect=self.operation.AttestationReject("simulated-process-interruption"),
+                    ),
+                    patch.object(
+                        self.operation,
+                        "_rollback_incomplete_publication",
+                        side_effect=self.operation.AttestationReject("simulated-process-interruption"),
+                    ),
+                ):
+                    with self.assertRaises(self.operation.AttestationReject):
+                        self.operation.run_attestation()
+
+                archive_path = next((root / "archives").glob("attestation-*"))
+                archive_before = snapshot_files(archive_path)
+                published_names = [
+                    self.operation.ARCHIVE_MANIFEST_NAME,
+                    self.operation.CENSUS_MANIFEST_NAME,
+                    *[
+                        path.name
+                        for path in report_root.glob(f"{self.operation.ATTESTATION_PREFIX}*.json")
+                    ],
+                ]
+
+                with (
+                    patch.object(mode_fixtures.blob_mode, "require_runner_lock"),
+                    patch.object(
+                        mode_fixtures.blob_mode,
+                        "file_stat",
+                        side_effect=self.fixture.allow_unowned_private_files,
+                    ),
+                    patch.object(mode_fixtures.blob_mode.os, "fchown"),
+                    patch.object(mode_fixtures.blob_mode.os, "chown"),
+                ):
+                    self.fixture.publish(state_dir, report_root, lock_path, root, "recovered-local")
+                    records, _head, _mode_bytes = mode_fixtures.blob_mode.read_authority(
+                        state_dir, report_root
+                    )
+                    mode_fixtures.blob_mode.report_read_path(
+                        report_root, records[-1]["transition_id"]
+                    ).unlink()
+
+                census_path = report_root / self.operation.CENSUS_MANIFEST_NAME
+                census_path.write_bytes(b"damaged\n")
+                published_before = {
+                    name: (report_root / name).read_bytes() for name in published_names
+                }
+
+                with self.assertRaises(self.operation.AttestationReject) as raised:
+                    self.operation.run_attestation()
+
+                self.assertIn("report-attestation-evidence", str(raised.exception))
+                self.assertEqual(snapshot_files(archive_path), archive_before)
+                self.assertEqual(
+                    {name: (report_root / name).read_bytes() for name in published_names},
+                    published_before,
+                )
+                self.assertTrue(self.operation.recovery_marker_path().exists())
+
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:
         calls: list[list[str]] = []
         environment = {"TG_BLOB_S3_SECRET_ACCESS_KEY": "never-print-this"}
