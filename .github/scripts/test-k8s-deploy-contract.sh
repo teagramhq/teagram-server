@@ -159,6 +159,33 @@ cutover_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq
   fail 'the cutover workload must use a pinned teagramd image digest'
 [[ "$cutover_teagramd_digest" != "sha256:$(printf '%064d' 0)" ]] ||
   fail 'the cutover workload must not use a placeholder teagramd image digest'
+web_base='https://github.com/teagramhq/teagram-web//deploy/k8s/base?ref=6947c892793562a8413d59cc741a123fe728da5d&timeout=120&submodules=false'
+grep --fixed-strings --quiet -- "$web_base" deploy/k8s/prod-cutover/kustomization.yaml ||
+  fail 'the cutover overlay must pin teagram-web k8s manifests to the reviewed commit'
+cutover_web_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-web") | .digest' deploy/k8s/prod-cutover/kustomization.yaml)"
+[[ "$cutover_web_digest" =~ ^sha256:[0-9a-f]{64}$ &&
+   "$cutover_web_digest" != "sha256:$(printf '%064d' 0)" ]] ||
+  fail 'the cutover web app must use a pinned image digest'
+[[ "$(yq -r '.spec.selector."app.kubernetes.io/name"' deploy/k8s/prod-cutover/web-service.yaml)" == teagram-web &&
+   "$(yq -r '.spec.ports[] | select(.name == "http") | .port' deploy/k8s/prod-cutover/web-service.yaml)" == 8080 &&
+   "$(yq -r '.spec.ports[] | select(.name == "http") | .targetPort' deploy/k8s/prod-cutover/web-service.yaml)" == 8080 ]] ||
+  fail 'the cutover web Service must address the teagram-web deployment on port 8080'
+grep --fixed-strings --quiet -- 'http://web:8080' deploy/k8s/base/linkselector-deployment.yaml ||
+  fail 'linkselector must resolve its web backend through the in-cluster web Service'
+if [[ "$(yq -r '.jobs."test-k8s-deploy".permissions.packages // "none"' .github/workflows/ci.yml)" != none ]]; then
+  fail 'the k3s deployment lane must not require GHCR package credentials'
+fi
+k8s_deploy_run="$(yq -r '.jobs."test-k8s-deploy".steps[] | .run // ""' .github/workflows/ci.yml)"
+if grep --extended-regexp --quiet 'docker login ghcr.io|ghcr-pull|GITHUB_TOKEN' <<< "$k8s_deploy_run"; then
+  fail 'the k3s deployment lane must pull public images without registry credentials'
+fi
+for overlay in prod prod-cutover bootstrap bootstrap/ci ci; do
+  rendered_overlay="$(kubectl kustomize "deploy/k8s/$overlay")" ||
+    fail "could not render $overlay while checking public image pulls"
+  if grep --fixed-strings --quiet -- 'imagePullSecrets:' <<< "$rendered_overlay"; then
+    fail "$overlay must not require a registry pull Secret"
+  fi
+done
 for overlay in prod prod-cutover; do
   if ! kubectl kustomize "deploy/k8s/$overlay" |
     yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
@@ -193,7 +220,7 @@ cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
   fail 'the cutover account seed Job must run as root for the guarded admin command'
 cutover_key_reader=deploy/k8s/test-cutover-key-reader.yaml
 [[ "$(yq -r '.spec.containers[] | select(.name == "reader") | .image' "$cutover_key_reader")" == \
-  'ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' ]] ||
+  'mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec' ]] ||
   fail 'the cutover key reader must use the pinned BusyBox image, not the distroless workload image'
 [[ "$(yq -r '.spec.securityContext.runAsUser' "$cutover_key_reader")" == 65532 &&
    "$(yq -r '.spec.volumes[] | select(.name == "key-data") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'key-data-teagramd-0' &&
@@ -213,8 +240,24 @@ grep --fixed-strings --quiet 'test-cutover-blob-seed.yaml' deploy/k8s/test-cutov
   fail 'the k3s cutover test must seed source blobs for the actual transfer and migration'
 cutover_blob_seed=deploy/k8s/test-cutover-blob-seed.yaml
 [[ "$(yq -r '.spec.containers[] | select(.name == "seed") | .image' "$cutover_blob_seed")" == \
-  'ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' ]] ||
+  'mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec' ]] ||
   fail 'the cutover blob seed must use the pinned BusyBox image'
+bot_api_inner="$(yq -r '.spec.template.spec.containers[] | select(.name == "bot-api-inner") | .args | join(" ")' deploy/k8s/base/teagramd-statefulset.yaml)"
+compose_bot_api_inner="$(yq -r '.services["bot-api-inner"].command | join(" ")' docker-compose.yml)"
+bot_api_ingress="$(yq -r '.spec.template.spec.containers[] | select(.name == "bot-api-ingress") | .args | join(" ")' deploy/k8s/base/teagramd-statefulset.yaml)"
+compose_bot_api_ingress="$(yq -r '.services["bot-api-ingress"].command | join(" ")' docker-compose.yml)"
+[[ "$bot_api_inner" == "$compose_bot_api_inner" && "$bot_api_ingress" == "$compose_bot_api_ingress" &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_BOT_API_LISTEN_ADDR") | .value' deploy/k8s/base/teagramd-statefulset.yaml)" == '127.0.0.1:2447' &&
+   "$(yq -r '.spec.ports[] | select(.name == "bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == bot-api-ingress ]] ||
+  fail 'the k3s Bot API relays must preserve the Compose listener and socket relay behavior'
+grep --fixed-strings --quiet -- 'socat -T2 -u /dev/null TCP:127.0.0.1:2447' deploy/k8s/base/teagramd-statefulset.yaml ||
+  fail 'the Bot API inner relay must be ready only after its socket and application listener are reachable'
+grep --fixed-strings --quiet -- 'socat -T2 -u /dev/null TCP:127.0.0.1:2448' deploy/k8s/base/teagramd-statefulset.yaml ||
+  fail 'the Bot API ingress relay must verify its local TCP listener before serving traffic'
+grep --fixed-strings --quiet -- 'smoke_bot_api' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the throwaway cutover integration must send a Bot API request through the k3s relay'
+grep --fixed-strings --quiet -- 'ProxyProtocol": 1' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the throwaway cutover integration must verify the Bot API PROXY protocol route'
 for pvc in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
   yq -e "select(.kind == \"PersistentVolumeClaim\" and .metadata.name == \"$pvc\")" \
     deploy/k8s/prod-cutover/persistentvolumeclaims.yaml >/dev/null 2>&1 ||

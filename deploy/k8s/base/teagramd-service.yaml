@@ -18,6 +18,9 @@ spec:
     - name: admin
       port: 2445
       targetPort: admin
+    - name: bot-api
+      port: 2447
+      targetPort: bot-api-ingress
 ---
 apiVersion: v1
 kind: Service

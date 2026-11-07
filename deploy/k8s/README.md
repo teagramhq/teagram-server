@@ -85,7 +85,11 @@ by the cluster's secret and configuration management before it is applied:
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
 | `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
 | `cloudflared-token` Secret | `token` |
-| `ghcr-pull` Secret | Docker config for the private GHCR packages |
+
+All images used by the production overlays are publicly pullable. Bootstrap does
+not read Docker credentials or create a registry Secret; this also keeps the
+cutover usable on an LXC with no Docker registry configuration. Public utility
+images such as BusyBox are pinned from `mirror.gcr.io`.
 
 The alpha cutover runner creates the `teagramd-admin` Secret from the existing
 Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
@@ -189,14 +193,18 @@ fence-to-switch interval is planned downtime; a failure before the complete
 edge switch restarts the stopped Compose services.
 
 The cutover keeps the k8s app and connector at zero while it restores the
-database, identity and blobs. It then starts the WebSocket and admin listeners
-on the k3s teagramd Service and installs restartable `systemd` port-forwards in
-`teagram-k3s`. Tailscale Serve keeps all five existing paths and sends `/` to
-linkselector, `/apiws`, both client discovery paths, and `/admin` to the
-matching teagramd Service ports. It also forwards the existing raw MTProto TCP
-listener on port `2443` to the k3s teagramd Service and verifies the listener is
-reachable before changing Serve. Funnel remains off. The Cloudflare connector
-stays at zero until the dashboard route changes from `http://selector:8081` to
+database, identity and blobs. It applies teagram-web's pinned k8s base and adds
+the `web` Service on port `8080`, which lets linkselector reach the app inside
+the cluster. It then starts the WebSocket and admin listeners on the k3s
+teagramd Service and installs restartable `systemd` port-forwards in
+`teagram-k3s`. The Bot API binds to pod loopback and uses the same Unix socket
+and TCP relay arrangement as Compose, preserving Tailscale's PROXY protocol.
+Tailscale Serve keeps all five existing paths and sends `/` to linkselector,
+`/apiws`, both client discovery paths, and `/admin` to the matching teagramd
+Service ports. It forwards the existing raw MTProto TCP listener on port
+`2443` and Bot API on `2447` to their k3s Service ports, verifying both before
+changing Serve. Funnel remains off. The Cloudflare connector stays at zero
+until the dashboard route changes from `http://selector:8081` to
 `http://linkselector:8081`; confirm that change before the k8s connector starts.
 No Cloudflare API credential is provisioned.
 
@@ -205,10 +213,10 @@ leaves k3s serving and requires the printed explicit rollback command; it will
 not automatically restart Compose and discard writes accepted by k3s. Rollback
 requires confirmation of that data loss, scales the k8s app and connector to
 zero, and verifies their pods have stopped before restoring the Cloudflare
-route, all five Serve paths, and the MTProto TCP route. It then restarts the
-stopped Compose services and stops both port-forwards. PostgreSQL and PVC data
-remain intact. Writes made on k3s after the switch are not carried back to
-Compose.
+route, all five Serve paths, the MTProto TCP route, and the old Bot API route.
+It then restarts the stopped Compose services and stops both port-forwards.
+PostgreSQL and PVC data remain intact. Writes made on k3s after the switch are
+not carried back to Compose.
 
 ### Retry after a pre-switch failure
 
