@@ -37,7 +37,7 @@ func (h *handlers) handleGetPinnedDialogs(r *mtproto.Request) (bin.Encoder, erro
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesGetPinnedDialogsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if req.FolderID == 1 {
@@ -75,7 +75,7 @@ func (h *handlers) handleToggleDialogPin(r *mtproto.Request) (bin.Encoder, error
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesToggleDialogPinRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	peer, err := h.inputDialogPinPeer(req.Peer, r.UserID)
@@ -99,7 +99,7 @@ func (h *handlers) handleReorderPinnedDialogs(r *mtproto.Request) (bin.Encoder, 
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesReorderPinnedDialogsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if req.FolderID != 0 {

@@ -92,7 +92,7 @@ func (h *handlers) handleCreateUserInvite(r *mtproto.Request) (bin.Encoder, erro
 	if h.userInviteQuota <= 0 {
 		return nil, errUserInvitesDisabled
 	}
-	if err := decodeUserInviteRequest(r.Buf, createUserInviteRequestTypeID); err != nil {
+	if err := decodeUserInviteRequest(r.BodyBuffer(), createUserInviteRequestTypeID); err != nil {
 		return nil, err
 	}
 	if h.store == nil || h.cfg == nil {
@@ -122,7 +122,7 @@ func (h *handlers) handleListUserInvites(r *mtproto.Request) (bin.Encoder, error
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if err := decodeUserInviteRequest(r.Buf, listUserInvitesRequestTypeID); err != nil {
+	if err := decodeUserInviteRequest(r.BodyBuffer(), listUserInvitesRequestTypeID); err != nil {
 		return nil, err
 	}
 	if h.store == nil {
@@ -154,7 +154,7 @@ func (h *handlers) handleRevokeUserInvite(r *mtproto.Request) (bin.Encoder, erro
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	id, err := decodeUserInviteIDRequest(r.Buf, revokeUserInviteRequestTypeID)
+	id, err := decodeUserInviteIDRequest(r.BodyBuffer(), revokeUserInviteRequestTypeID)
 	if err != nil {
 		return nil, err
 	}

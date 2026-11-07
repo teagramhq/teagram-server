@@ -31,7 +31,7 @@ func (h *handlers) handleDeleteProfilePhotos(r *mtproto.Request) (bin.Encoder, e
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.PhotosDeletePhotosRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	inputs := req.GetID()

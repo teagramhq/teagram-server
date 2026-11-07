@@ -184,7 +184,7 @@ func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSignUpRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		h.logSignUpRejection(signUpMalformedRequest)
 		return nil, errMethodNotImpl
 	}
@@ -361,7 +361,7 @@ func (h *handlers) warnWelcomeChannel(handle, reason string) {
 
 func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSendCodeRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	verifiedAction := store.TurnstileAction("")
@@ -489,7 +489,7 @@ func (h *handlers) logIssuedCode(phone, code string) {
 
 func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSignInRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -607,7 +607,7 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 // definition and its eviction closes the socket the reply goes out on.
 func (h *handlers) handleLogOut(r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.AuthLogOutRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)

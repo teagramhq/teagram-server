@@ -16,7 +16,7 @@ func (h *handlers) handleGetConfig(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleGetConfigWithSystemLangCode(r *mtproto.Request, systemLangCode string) (bin.Encoder, error) {
 	var req tg.HelpGetConfigRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	// Both time fields are stamped per response, not once at startup: a client

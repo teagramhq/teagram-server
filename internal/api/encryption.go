@@ -86,7 +86,7 @@ func (h *handlers) notifyEncryption(ctx context.Context, userID int64, chatID in
 // is exactly the position from which the key exchange can be weakened.
 func (h *handlers) handleGetDhConfig(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetDhConfigRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if req.RandomLength < 0 || req.RandomLength > maxDhRandomLength {
@@ -118,7 +118,7 @@ func (h *handlers) handleGetDhConfig(r *mtproto.Request) (bin.Encoder, error) {
 // and probe which are taken.
 func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesRequestEncryptionRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	participantID, err := h.inputUserID(req.UserID, r.UserID)
@@ -199,7 +199,7 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 // under a chat the initiator has already keyed.
 func (h *handlers) handleAcceptEncryption(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesAcceptEncryptionRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	chatID, err := h.secretChatID(req.Peer, r.UserID)
@@ -286,7 +286,7 @@ func (h *handlers) staleAcceptError(ctx context.Context, chatID int32) error {
 // sendEncryptedMessage (MAIN-139).
 func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesDiscardEncryptionRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	existing, err := h.store.SecretChatByID(r.Ctx, int32(req.ChatID)) //nolint:gosec // chat_id is int32 on the wire
@@ -348,7 +348,7 @@ const maxEncryptedData = 512 * 1024
 // CHAT_ID_INVALID, preventing id enumeration via distinguishable errors.
 func (h *handlers) handleSendEncryptedMessage(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSendEncryptedRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	// 1. Size cap before any DB work.

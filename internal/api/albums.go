@@ -27,7 +27,7 @@ import (
 // client.
 func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesSendMultiMediaRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

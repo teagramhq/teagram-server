@@ -248,7 +248,7 @@ func channelPollUpdateDate(messageDate time.Time, now func() time.Time) int {
 
 func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSendVoteRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
@@ -293,7 +293,7 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleGetPollResults(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetPollResultsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
@@ -322,7 +322,7 @@ func (h *handlers) handleGetPollResults(r *mtproto.Request) (bin.Encoder, error)
 
 func (h *handlers) handleGetPollVotes(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetPollVotesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errInputRequestInvalid
 	}
 	if uint32(req.Flags)&^uint32(3) != 0 {

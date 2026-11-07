@@ -12,7 +12,7 @@ import (
 // state. They authorize the read and leave history and update delivery untouched.
 func (h *handlers) handleReadMessageContents(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReadMessageContentsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -48,7 +48,7 @@ func (h *handlers) handleReadMessageContents(r *mtproto.Request) (bin.Encoder, e
 
 func (h *handlers) handleReadMentions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReadMentionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	return h.acknowledgeUnreadPeer(r, req.Peer)
@@ -56,7 +56,7 @@ func (h *handlers) handleReadMentions(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleReadReactions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReadReactionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	return h.acknowledgeUnreadPeer(r, req.Peer)
@@ -64,7 +64,7 @@ func (h *handlers) handleReadReactions(r *mtproto.Request) (bin.Encoder, error) 
 
 func (h *handlers) handleGetUnreadMentions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetUnreadMentionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if err := h.authorizeUnreadPeer(r, req.Peer); err != nil {

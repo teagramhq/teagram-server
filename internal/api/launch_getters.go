@@ -20,7 +20,7 @@ func decodeLaunchGetterRequest(r *mtproto.Request, req bin.Decoder) error {
 	if r.UserID == 0 {
 		return errAuthKeyUnreg
 	}
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return errMethodNotImpl
 	}
 	return nil

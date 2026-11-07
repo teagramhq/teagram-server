@@ -19,7 +19,7 @@ func emptySavedDialogs() *tg.MessagesSavedDialogs {
 
 func (h *handlers) handleGetSavedDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetSavedDialogsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -82,7 +82,7 @@ func (h *handlers) handleGetSavedDialogs(r *mtproto.Request) (bin.Encoder, error
 
 func (h *handlers) handleGetPinnedSavedDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetPinnedSavedDialogsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

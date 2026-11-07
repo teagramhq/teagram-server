@@ -30,7 +30,7 @@ func (h *handlers) contactMutationError(op string, userID int64, err error) erro
 // ignored, and the peer is rendered from the global user record.
 func (h *handlers) handleAddContact(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsAddContactRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -73,7 +73,7 @@ func (h *handlers) handleAddContact(r *mtproto.Request) (bin.Encoder, error) {
 // existing owner lock.
 func (h *handlers) handleDeleteContacts(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsDeleteContactsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -139,7 +139,7 @@ func (h *handlers) handleDeleteContacts(r *mtproto.Request) (bin.Encoder, error)
 // sorted contact ids only, matching Telegram's pagination hash scheme.
 func (h *handlers) handleGetContacts(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsGetContactsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -226,7 +226,7 @@ func (h *handlers) handleGetContactStatuses(r *mtproto.Request) (bin.Encoder, er
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.ContactsGetStatusesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -277,7 +277,7 @@ func (h *handlers) handleGetContactStatuses(r *mtproto.Request) (bin.Encoder, er
 // empty int vector.
 func (h *handlers) handleGetContactIDs(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsGetContactIDsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

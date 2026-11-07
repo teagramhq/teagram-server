@@ -13,7 +13,7 @@ import (
 // one database statement so a stale access hash cannot preserve read access.
 func (h *handlers) handleGetReplies(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetRepliesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

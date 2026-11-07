@@ -67,7 +67,7 @@ func parseChannelParticipantsFilter(filter tg.ChannelParticipantsFilterClass) (c
 // can list current participants, while banned rows require admin rights.
 func (h *handlers) handleGetParticipants(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetParticipantsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -136,7 +136,7 @@ func (h *handlers) handleGetParticipants(r *mtproto.Request) (bin.Encoder, error
 // Megagroup members and channel admins can inspect rows their role permits.
 func (h *handlers) handleGetParticipant(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetParticipantRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
