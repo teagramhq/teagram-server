@@ -65,6 +65,8 @@ jobs:
 
       - name: Resolve the live Web publication
         id: qa-web-pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
           source_commit=$(jq -er '.sourceCommit' <<<"$publication")

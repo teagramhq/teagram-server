@@ -164,8 +164,13 @@ stage_runtime_helpers() {
     > "$OPS_TEMP_DIR/blob-transition-runner.py" || ops_fail 'cannot stage the reviewed blob transition verifier'
   git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py" \
     > "$OPS_TEMP_DIR/blob-mode-state.py" || ops_fail 'cannot stage the reviewed blob authority verifier'
-  chmod 600 -- "$OPS_TEMP_DIR/blob-transition-runner.py" "$OPS_TEMP_DIR/blob-mode-state.py" || \
-    ops_fail 'cannot protect staged blob authority verifiers'
+  git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot-api-qa.sh" \
+    > "$OPS_TEMP_DIR/bot-api-qa.sh" || ops_fail 'cannot stage the reviewed Bot API relay recovery helper'
+  chmod 600 -- "$OPS_TEMP_DIR/blob-transition-runner.py" "$OPS_TEMP_DIR/blob-mode-state.py" \
+    "$OPS_TEMP_DIR/bot-api-qa.sh" || \
+    ops_fail 'cannot protect staged runtime helpers'
+  # shellcheck disable=SC1091
+  source "$OPS_TEMP_DIR/bot-api-qa.sh"
 }
 
 validate_source_and_runtime() {
@@ -497,11 +502,13 @@ start_server_and_smoke() {
     sleep 1
   done
   [[ "$INSPECT_STATE" == running ]] || ops_fail 'teagramd did not enter the running state'
+  SERVER_IMAGE_ID=$INSPECT_IMAGE
+  [[ "$INSPECT_REVISION" == "$LIVE_IMAGE_SHA" ]] || ops_fail 'teagramd restarted with a different image revision'
+  restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || \
+    ops_fail 'Bot API relays did not recover after teagramd startup'
   # Caller EXIT traps use this flag to avoid restarting an already recovered service.
   # shellcheck disable=SC2034
   SERVER_STOPPED=0
-  SERVER_IMAGE_ID=$INSPECT_IMAGE
-  [[ "$INSPECT_REVISION" == "$LIVE_IMAGE_SHA" ]] || ops_fail 'teagramd restarted with a different image revision'
   if ! docker run --rm --network host --read-only --cap-drop ALL \
     --security-opt no-new-privileges --user 65532:65532 \
     --entrypoint /usr/local/bin/mtproto-smoke "$SERVER_IMAGE_ID" > "$smoke_log" 2>&1; then

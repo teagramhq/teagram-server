@@ -29,8 +29,10 @@ and supplies a PROXY v1 header. The relays pass the bytes unchanged.
 After deploying the reviewed SHA, run `ssh teagram run <sha> bot-api-qa check`
 to check the live environment and Serve port, followed by `ssh teagram run
 <sha> bot-api-qa apply`. Apply enables the listener through the named rollout
-path, starts the relays and creates the Serve mapping without overwriting a
-foreign mapping. `ssh teagram run <sha> bot-api-qa verify` checks the mapping,
+path, recreates the inner relay in teagramd's current network namespace,
+starts the ingress relay and creates the Serve mapping without overwriting a
+foreign mapping. Repeating apply recovers an inner relay left in an old
+teagramd network namespace. `ssh teagram run <sha> bot-api-qa verify` checks the mapping,
 container topology, health and volume isolation. Repeating apply preserves the
 original mapping record. `ssh teagram run <sha> bot-api-qa rollback` restores
 the previous Serve mapping without touching other ports. When the previous port
@@ -169,7 +171,9 @@ selection is accepted. It starts the existing `postgres` container, waits five
 seconds and checks `pg_isready` for up to 60 seconds before starting only the
 inspected `teagramd` container. It uses `docker start` on each existing
 container, not Compose dependency startup, so this recovery cannot restart the
-`migrate` container. It does not create or replace containers, run migrations,
+`migrate` container. When the Bot API listener is enabled, it recreates the
+inner relay in the started server's network namespace and waits for both relay
+health checks. It does not create or replace server containers, run migrations,
 or issue volume operations; the resumed server can make its normal database
 writes after it is running.
 
@@ -264,7 +268,8 @@ existing `teagramd` writer, creates a custom-format `pg_dump`, and restores
 that archive into an isolated PostgreSQL container with no network before
 accepting the backup. It then migrates and reads back every referenced object,
 publishes encrypted authority, restarts RustFS, repeats encrypted readback,
-starts `teagramd`, and runs the deployed image's MTProto smoke probe.
+starts `teagramd`, restores the configured Bot API relays in its current network
+namespace, and runs the deployed image's MTProto smoke probe.
 The operation fails closed if the full-tree inventory reports an object with no
 database reference; its key is retained in the private inventory report for
 review, and the script does not claim migration completion.
@@ -299,7 +304,8 @@ checks encrypted authority, the verified database dump and key backup, the
 stopped-writer progress journal, and every encrypted reference. It removes only
 verified plaintext copies, runs a second cleanup pass that must remove zero
 objects, repeats encrypted readback across a RustFS restart, restarts
-`teagramd`, and runs the MTProto smoke probe. Before deleting referenced
+`teagramd`, restores the configured Bot API relays in its current network
+namespace, and runs the MTProto smoke probe. Before deleting referenced
 plaintext, it also rejects any unaccounted objects reported by the current
 full-tree inventory. These objects have no database reference and remain
 untouched for explicit operator review; cleanup cannot report success while
