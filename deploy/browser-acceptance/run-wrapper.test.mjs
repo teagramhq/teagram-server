@@ -378,7 +378,16 @@ if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
   fi
   if [[ "\${WRAPPER_ACCEPTANCE_NUL:-0}" == 1 ]]; then printf '\\000' >&3; fi
   if [[ -v WRAPPER_VALIDATE_CREDENTIALS ]]; then
-    '${process.execPath}' --input-type=module -e 'import { readCredentialsFromStdin } from "${credentialReaderUrl}"; await readCredentialsFromStdin();'
+    '${process.execPath}' --input-type=module -e '
+      import { readCredentialsFromStdin } from "${credentialReaderUrl}";
+      const credentials = await readCredentialsFromStdin();
+      const values = [credentials.username, credentials.password];
+      const exposed = process.argv.some((value) => values.some((secret) => value.includes(secret))) ||
+        Object.values(process.env).some((value) => values.some((secret) => value.includes(secret)));
+      credentials.username = "";
+      credentials.password = "";
+      if (exposed) process.exitCode = 97;
+    '
   fi
   if [[ -v WRAPPER_ACCEPTANCE_OUTPUT ]]; then printf '%s' "$WRAPPER_ACCEPTANCE_OUTPUT" >&3;
   else printf '%s' '${acceptanceResult}' >&3; fi
