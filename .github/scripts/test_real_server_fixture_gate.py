@@ -218,7 +218,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
         step = re.search(
-            r"(?m)^        id: qa-web-pin\n        run: \|\n(?P<script>(?:          [^\n]*\n)+)",
+            r"(?m)^        id: qa-web-pin\n        env:\n          GITHUB_TOKEN: \$\{\{ github\.token \}\}\n"
+            r"        run: \|\n(?P<script>(?:          [^\n]*\n)+)",
             workflow,
         )
         self.assertIsNotNone(step)

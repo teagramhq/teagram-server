@@ -136,6 +136,8 @@ check_ci_contract() {
     ci_fail 'the demo web build must use the commit resolved from the live manifest'
   [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "publication").run')" == *'resolve_web_artifact_pin.py'* ]] ||
     ci_fail 'the secret-free CI job must resolve its source from the live publication'
+  [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "publication").env.GITHUB_TOKEN')" == '${{ github.token }}' ]] ||
+    ci_fail 'the demo web publication lookup must use the read-only workflow token'
   if [[ -e deploy/teagram-demo/web-artifact-pin.json ]]; then
     ci_fail 'the live publication flow must not depend on a checked-in web pin'
   fi
@@ -859,6 +861,8 @@ check_contract() {
     fail 'rollback must default to denied and be enabled only after dispatch verification'
   local pin_resolver_run
   pin_resolver_run="$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Resolve the current live web publication") | .run')"
+  [[ "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Resolve the current live web publication") | .env.GITHUB_TOKEN')" == '${{ github.token }}' ]] ||
+    fail 'the demo web publication lookup must use the read-only workflow token'
   grep -Fq 'resolve_web_artifact_pin.py' <<< "$pin_resolver_run" ||
     fail 'the deploy preflight must resolve the current live manifest and publication run'
   query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .run' |

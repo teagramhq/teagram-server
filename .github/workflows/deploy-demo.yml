@@ -96,6 +96,8 @@ jobs:
 
       - name: Resolve the current live web publication
         id: publication
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
           deployable=$(jq -er '.deployable | tostring' <<<"$publication")

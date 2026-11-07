@@ -104,6 +104,32 @@ def check_fetch_retries_transient_errors() -> None:
             raise SystemExit("upstream retry delays were not respected")
 
 
+def check_fetch_uses_github_token_when_configured() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}"
+    with (
+        patch.dict(MODULE.os.environ, {"GITHUB_TOKEN": "ghs_fixture_token"}),
+        patch.object(
+            MODULE.HTTP_OPENER, "open", return_value=io.BytesIO(b'{"ok":true}')
+        ) as open_url,
+    ):
+        if MODULE.fetch_json(url) != {"ok": True}:
+            raise SystemExit("authenticated upstream request did not return its response")
+        request = open_url.call_args.args[0]
+        if request.get_header("Authorization") != "Bearer ghs_fixture_token":
+            raise SystemExit("configured GitHub token was not sent as a bearer token")
+
+    with (
+        patch.dict(MODULE.os.environ, {"GITHUB_TOKEN": "ghs_fixture_token"}),
+        patch.object(
+            MODULE.HTTP_OPENER, "open", return_value=io.BytesIO(b'{"ok":true}')
+        ) as open_url,
+    ):
+        MODULE.fetch_json(MODULE.LIVE_MANIFEST_URL)
+        request = open_url.call_args.args[0]
+        if request.get_header("Authorization") is not None:
+            raise SystemExit("GitHub token was sent to the live web origin")
+
+
 def check_fetch_retries_secondary_rate_limit_reset() -> None:
     url = f"{API_ROOT}/actions/runs/{RUN_ID}"
     headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1005"}
@@ -215,6 +241,15 @@ def check_untrusted_redirect_is_rejected() -> None:
     for target in ("https://api.github.com/test", "https://web.teagram.io/test"):
         if handler.redirect_request(request, None, 302, "Found", {}, target) is None:
             raise SystemExit(f"resolver rejected an allowed HTTPS redirect: {target}")
+    authenticated_request = MODULE.urllib.request.Request(
+        f"{API_ROOT}/actions/runs/{RUN_ID}",
+        headers={"Authorization": "Bearer ghs_fixture_token"},
+    )
+    redirected = handler.redirect_request(
+        authenticated_request, None, 302, "Found", {}, "https://web.teagram.io/test"
+    )
+    if redirected is not None and redirected.get_header("Authorization") is not None:
+        raise SystemExit("resolver forwarded GitHub credentials across hosts")
     with patch.object(MODULE.HTTP_OPENER, "open") as open_url:
         try:
             MODULE.fetch_json("https://attacker.example/")
@@ -444,6 +479,7 @@ def check_live_publication_fails_closed() -> None:
 
 def main() -> None:
     check_fetch_retries_transient_errors()
+    check_fetch_uses_github_token_when_configured()
     check_fetch_retries_secondary_rate_limit_reset()
     check_fetch_aborts_excessive_secondary_rate_limit_delay()
     check_fetch_exhausts_secondary_rate_limit_attempts()

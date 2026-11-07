@@ -213,7 +213,7 @@ setup_case() {
   printf 'exited\n' > "$MOCK_MIGRATE_STATE_FILE"
   : > "$MOCK_EVENTS"
   if [[ "$name" == ordered-start || "$name" == relay-recovery-fails ]]; then
-    MOCK_TELEGRAMD_ENV_JSON='["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]'
+    MOCK_TELEGRAMD_ENV_JSON=$(jq -cn --arg addr 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' '[$addr]')
     export MOCK_TELEGRAMD_ENV_JSON
   fi
   sed "s|/opt/teagram|$FIXTURE_REPO|g" "$OP_SCRIPT" > "$dir/op.sh"
