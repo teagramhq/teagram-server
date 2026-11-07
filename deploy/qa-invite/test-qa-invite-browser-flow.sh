@@ -24,7 +24,6 @@ TLS_DIR=$STATE_DIR/tls
 CLIENT_CONFIG=$CLIENT_DIR/teagram-config.json
 ENV_FILE=$TMP_ROOT/qa-invite.env
 COMPOSE_FILE=$TMP_ROOT/compose.yaml
-IMAGE_BUILD_LOG=$TMP_ROOT/server-image-build.log
 TEST_HOME=$TMP_ROOT/home
 ACCOUNT_FILE=$TMP_ROOT/account-password
 COMPOSE_READY=0
@@ -191,15 +190,8 @@ sed \
   "$SCRIPT_DIR/compose.yaml" > "$COMPOSE_FILE"
 grep -Fq "name: $PROJECT" "$COMPOSE_FILE" || fail 'isolated Compose project name was not set'
 grep -Fq "source: $WEB_CLIENT_DIR" "$COMPOSE_FILE" || fail 'QA Web artifact mount was not redirected to isolated state'
-[[ -s "$REPO_ROOT/build/sticker-bundle/manifest.json" ]] || fail 'validated sticker bundle is unavailable'
 
-if ! docker buildx build --progress=plain \
-  --build-context sticker-bundle="$REPO_ROOT/build" \
-  --build-arg STICKER_BUNDLE_SOURCE=sticker-bundle \
-  --tag "$IMAGE_REF" --load "$REPO_ROOT" >"$IMAGE_BUILD_LOG" 2>&1; then
-  cat "$IMAGE_BUILD_LOG" >&2
-  fail 'could not build the server image for the isolated invite stack'
-fi
+docker build --quiet --tag "$IMAGE_REF" "$REPO_ROOT" >/dev/null || fail 'could not build the server image for the isolated invite stack'
 IMAGE_BUILT=1
 compose pull postgres migrate tls-edge haproxy >/dev/null || fail 'could not pull the pinned QA stack support images'
 COMPOSE_READY=1
