@@ -16,7 +16,8 @@ chmod 700 "$tmp/root"
 MOCK_OWNER_UID=$(id -u)
 export MOCK_OWNER_UID
 export MOCK_OPS_DIR="$ops_dir"
-export MOCK_QUERY_SQL="$(cd "$ops_dir/../../.." && pwd)/internal/store/queries/uploads.sql"
+MOCK_QUERY_SQL="$(cd "$ops_dir/../../.." && pwd)/internal/store/queries/uploads.sql"
+export MOCK_QUERY_SQL
 MOCK_QUERY_BLOB_OID=$(git hash-object "$MOCK_QUERY_SQL")
 export MOCK_QUERY_BLOB_OID
 printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$tmp/repo/.env"
