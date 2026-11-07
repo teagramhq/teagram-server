@@ -72,6 +72,36 @@ func TestPeerDisconnectCancelsAndChargesOnlyAnActiveRPC(t *testing.T) {
 	}
 }
 
+func TestPeerDisconnectCancelsEveryActiveRPCWithOneReservation(t *testing.T) {
+	budget := testPeerCancelBudget()
+	conn := &Conn{peerCancels: budget}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	defer cancelSecond()
+	first := &activePeerRPC{userID: 31, ctx: firstCtx, cancel: cancelFirst}
+	second := &activePeerRPC{userID: 31, ctx: secondCtx, cancel: cancelSecond}
+	if !conn.beginActiveRPC(first) || !conn.beginActiveRPC(second) {
+		t.Fatal("connection refused overlapping active RPCs")
+	}
+
+	conn.observePeerDisconnect()
+	if !errorsIsCanceled(firstCtx) || !errorsIsCanceled(secondCtx) {
+		t.Fatalf("peer disconnect contexts = %v, %v; want both canceled", firstCtx.Err(), secondCtx.Err())
+	}
+	if _, denial := budget.reserve(31); denial != peerCancelDeniedUserWindow {
+		t.Fatalf("post-cancel user reservation = %q, want one committed user reservation", denial)
+	}
+	if _, denial := budget.reserve(0); denial != peerCancelAllowed {
+		t.Fatalf("first global reservation = %q, want one remaining token", denial)
+	}
+	if _, denial := budget.reserve(0); denial != peerCancelDeniedGlobal {
+		t.Fatalf("second global reservation = %q, want the one connection cancellation to spend one token", denial)
+	}
+	conn.finishActiveRPC(first)
+	conn.finishActiveRPC(second)
+}
+
 func TestServerCloseCancelsWithoutSpendingPeerAllowance(t *testing.T) {
 	budget := testPeerCancelBudget()
 	conn := &Conn{peerCancels: budget, transport: newDrainWriteTestTransport()}

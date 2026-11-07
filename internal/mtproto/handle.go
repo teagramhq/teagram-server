@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -265,6 +266,14 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecrypt, fmt.Errorf("decrypt message: %w", err))
 	}
+	if err := c.concurrentRPCFailure(); err != nil {
+		return err
+	}
+	if c.sessionID != msg.SessionID {
+		if err := c.waitConcurrentRPCs(); err != nil {
+			return err
+		}
+	}
 	// The moment the connection stops being one of the anonymous ones the
 	// pre-auth bounds hold back: the frame's MAC verified under a key this
 	// server issued. Here rather than after the dispatch below, because
@@ -296,8 +305,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	// Buffer now holds the plaintext message body.
 	b.ResetTo(msg.Data())
 	c.prefetchPeerFrame()
-
-	return s.handleWithHandler(c, &Request{
+	req := &Request{
 		AuthKeyID:             c.authKey.ID,
 		UserID:                userID,
 		Provisional:           provisional,
@@ -306,10 +314,30 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		ClientAddrFromProxyV2: s.proxyV2 != nil,
 		SessionID:             msg.SessionID,
 		MsgID:                 msg.MessageID,
+		ReceivedAt:            c.frameReceivedAt,
 		seqNo:                 int(msg.SeqNo),
 		Buf:                   b,
 		Ctx:                   ctx,
-	}, handler)
+	}
+	if concurrentRPCBarrier(req) && c.concurrentRPCsPending() {
+		if err := c.waitConcurrentRPCs(); err != nil {
+			return err
+		}
+	}
+	if handler == nil {
+		handler = s.handler
+	}
+	if classifier, ok := handler.(ConcurrentRPCClassifier); ok && classifier.CanRunConcurrently(req) {
+		if c.startConcurrentRPC(req.MsgID) {
+			req.Buf = &bin.Buffer{Buf: slices.Clone(req.Buf.Buf)}
+			go s.runConcurrentRPC(c, req, handler)
+			return nil
+		}
+		if err := c.waitConcurrentRPCs(); err != nil {
+			return err
+		}
+	}
+	return s.handleWithHandler(c, req, handler)
 }
 
 func pingDelayDisconnectReadTimeout(disconnectDelay int, fallback time.Duration) time.Duration {

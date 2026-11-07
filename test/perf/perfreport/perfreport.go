@@ -20,8 +20,10 @@ const Version = 2
 
 // Fixture names.
 const (
-	Small = "1x"
-	Large = "100x"
+	Small                = "1x"
+	Large                = "100x"
+	dispatchWaitScenario = "messages.getSearchCounters dispatch wait"
+	dispatchWaitBudgetMs = 50.0
 )
 
 // Kind selects a scenario's latency budget.
@@ -92,10 +94,17 @@ type Result struct {
 	// FullSet marks an RPC whose answer is the whole collection by protocol
 	// (contacts.getContacts). Its latency and rows grow with the collection, so
 	// only its query count is held to scale invariance.
-	FullSet bool    `json:"full_set,omitempty"`
-	Samples int     `json:"samples"`
-	P50Ms   float64 `json:"p50_ms"`
-	P95Ms   float64 `json:"p95_ms"`
+	FullSet bool `json:"full_set,omitempty"`
+	// ScaleIndependent marks a probe whose timing and row counts are measured
+	// against its own hard limit, not compared between fixture sizes.
+	ScaleIndependent bool    `json:"scale_independent,omitempty"`
+	Samples          int     `json:"samples"`
+	P50Ms            float64 `json:"p50_ms"`
+	P95Ms            float64 `json:"p95_ms"`
+	// MaxReceiveToDispatchWaitMs is the maximum server-side delay from frame
+	// receipt until the RPC handler starts, across the measured samples.
+	MaxReceiveToDispatchWaitMs float64 `json:"max_receive_to_dispatch_wait_ms"`
+	ReceiveToDispatchSamples   int     `json:"receive_to_dispatch_samples"`
 	// Queries is the median statement count per call, including the delivery
 	// work the call triggered after its reply.
 	Queries int `json:"queries"`
@@ -132,7 +141,10 @@ const (
 	CheckRows    = "rows"
 	CheckAlloc   = "alloc"
 	CheckSeqScan = "seqscan"
-	CheckError   = "error"
+	// CheckDispatchWait is the hard receive-to-dispatch ceiling for the
+	// messages.getSearchCounters concurrency scenario.
+	CheckDispatchWait = "dispatch_wait"
+	CheckError        = "error"
 	// CheckUnexplained fails a statement whose plan could not be read.
 	CheckUnexplained = "unexplained"
 	checkMissing     = "missing"
@@ -356,13 +368,21 @@ func Evaluate(in Input) Verdict {
 			continue
 		}
 		s, l := row.Small, row.Large
+		if name == dispatchWaitScenario {
+			if l.ReceiveToDispatchSamples == 0 {
+				fail(checkMissing, "no receive-to-dispatch wait samples at %s", Large)
+			} else if l.MaxReceiveToDispatchWaitMs > dispatchWaitBudgetMs {
+				fail(CheckDispatchWait, "max receive-to-dispatch wait %.1f ms at %s, budget %.0f ms",
+					l.MaxReceiveToDispatchWaitMs, Large, dispatchWaitBudgetMs)
+			}
+		}
 		if budget := budgetFor(name, l.Kind); l.P95Ms > budget {
 			fail(CheckBudget, "p95 %.1f ms at %s, budget %.0f ms", l.P95Ms, Large, budget)
 		}
 		if s.Queries != l.Queries {
 			fail(CheckQueries, "queries %d at %s, %d at %s", s.Queries, Small, l.Queries, Large)
 		}
-		if !l.FullSet {
+		if !l.FullSet && !l.ScaleIndependent {
 			if l.P50Ms > scaleRatio*s.P50Ms && l.P50Ms-s.P50Ms > scaleSlackMs {
 				fail(CheckLatency, "p50 %.1f ms at %s is %.1fx the %s %.1f ms", l.P50Ms, Large, l.P50Ms/s.P50Ms, Small, s.P50Ms)
 			}
@@ -540,6 +560,13 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 		agg.Queries = int(median(rs, func(r Result) float64 { return float64(r.Queries) }))
 		agg.RowsRead = int64(median(rs, func(r Result) float64 { return float64(r.RowsRead) }))
 		agg.AllocBytes = int64(median(rs, func(r Result) float64 { return float64(r.AllocBytes) }))
+		agg.MaxReceiveToDispatchWaitMs = 0
+		agg.ReceiveToDispatchSamples = 0
+		for _, r := range rs {
+			agg.MaxReceiveToDispatchWaitMs = max(agg.MaxReceiveToDispatchWaitMs, r.MaxReceiveToDispatchWaitMs)
+			agg.ReceiveToDispatchSamples += r.ReceiveToDispatchSamples
+			agg.ScaleIndependent = agg.ScaleIndependent || r.ScaleIndependent
+		}
 		agg.SeqScans, agg.Unexplained, agg.Error = nil, nil, ""
 		for _, r := range rs {
 			for _, scan := range r.SeqScans {
@@ -678,6 +705,10 @@ func Markdown(v Verdict) string {
 	for _, row := range v.Rows {
 		if row.Large != nil && row.Large.Note != "" {
 			notes = append(notes, fmt.Sprintf("- `%s`: %s", row.Name, row.Large.Note))
+		}
+		if row.Name == dispatchWaitScenario && row.Large != nil {
+			notes = append(notes, fmt.Sprintf("- `%s`: head maximum receive-to-dispatch wait %.1f ms across %d samples; limit %.0f ms",
+				row.Name, row.Large.MaxReceiveToDispatchWaitMs, row.Large.ReceiveToDispatchSamples, dispatchWaitBudgetMs))
 		}
 	}
 	if len(notes) > 0 {
