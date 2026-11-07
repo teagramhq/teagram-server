@@ -768,9 +768,12 @@ class LiveMCStorage:
             "-ec", script, "mc", *args,
         ]
 
-    def _error_path(self, operation: str) -> pathlib.Path:
+    def _new_error_path(self, operation: str) -> pathlib.Path:
         self.calls += 1
-        path = self.evidence_dir / f"media-quarantine-{self.run_id}-{self.calls:04d}-{operation}.stderr"
+        return self.evidence_dir / f"media-quarantine-{self.run_id}-{self.calls:04d}-{operation}.stderr"
+
+    def _error_path(self, operation: str) -> pathlib.Path:
+        path = self._new_error_path(operation)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -780,6 +783,9 @@ class LiveMCStorage:
         except OSError:
             fail("cannot preserve private RustFS diagnostics")
         return path
+
+    def query_current_reference_count(self, query_path: pathlib.Path) -> int:
+        return query_live_reference_count(query_path, self._new_error_path("postgres"))
 
     def list_jsonl(self, destination: pathlib.Path) -> None:
         error_path = self._error_path("list")
@@ -973,8 +979,7 @@ def main(argv: list[str] | None = None) -> int:
                 nonlocal reference_queries
                 reference_queries += 1
                 query_path = args.work_dir / f"restore-references-{reference_queries:02d}.tsv"
-                error_path = storage._error_path("postgres")
-                return query_live_reference_count(query_path, error_path)
+                return storage.query_current_reference_count(query_path)
 
             validate_restore_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
             restored, already = restore_quarantine(

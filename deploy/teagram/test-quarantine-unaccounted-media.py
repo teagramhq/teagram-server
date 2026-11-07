@@ -545,6 +545,9 @@ class QuarantineFixtures(unittest.TestCase):
 
         query_calls = 0
         envelope_counts: list[int] = []
+        diagnostic_storage = MEDIA.LiveMCStorage(
+            [], self.root, self.root, PREFIX, self.root, self.run_id
+        )
 
         def fake_psql(command, *, input, stdout, stderr, check):
             self.assertIn("psql", command)
@@ -556,9 +559,8 @@ class QuarantineFixtures(unittest.TestCase):
         def current_reference_count() -> int:
             nonlocal query_calls
             query_calls += 1
-            return MEDIA.query_live_reference_count(
-                self.root / f"restore-references-{query_calls:02d}.tsv",
-                self.root / f"restore-references-{query_calls:02d}.stderr",
+            return diagnostic_storage.query_current_reference_count(
+                self.root / f"restore-references-{query_calls:02d}.tsv"
             )
 
         def listing_provider() -> tuple[dict[str, MEDIA.ObjectMeta], dict[str, MEDIA.ObjectMeta]]:
@@ -582,6 +584,12 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual((restored, already), (len(CANDIDATE_BYTES), 0))
         self.assertEqual(query_calls, 2)
         self.assertEqual(envelope_counts, [2, 2])
+        error_paths = [
+            self.root / f"media-quarantine-{self.run_id}-{index:04d}-postgres.stderr"
+            for index in (1, 2)
+        ]
+        self.assertTrue(all(path.is_file() for path in error_paths))
+        self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in error_paths))
         self.assertEqual(store.objects, CANDIDATE_BYTES)
 
     def test_fresh_envelope_inventory_accepts_all_valid_references(self) -> None:
