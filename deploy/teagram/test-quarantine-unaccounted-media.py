@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 HELPER_PATH = pathlib.Path(__file__).with_name("ops") / "quarantine_unaccounted_media.py"
@@ -32,6 +33,9 @@ CANDIDATE_BYTES = {
     "parts/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": b"plain-part",
 }
 MODIFIED = "2026-09-01T00:00:00Z"
+# PostgreSQL COPY text output uses tabs between columns and escapes tabs inside a field.
+POSTGRES_COPY_OUTPUT = b"file\t1\t01/1\t5\n"
+POSTGRES_ESCAPED_SINGLE_COLUMN_COPY_OUTPUT = b"file\\t1\\t01/1\\t5\n"
 
 
 def digest_references(references: list[MEDIA.Reference]) -> str:
@@ -221,6 +225,48 @@ class QuarantineFixtures(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         self.assertEqual(manifest["status"], "complete")
         self.assertEqual(manifest["delete_after_utc"], "2026-12-07")
+
+    def test_live_postgres_copy_output_parses_and_matches_journal_digest(self) -> None:
+        fixture = self
+        store = FakeStorage(dict(CANDIDATE_BYTES), self.root / "unused")
+        captured_sql: list[str] = []
+
+        class LiveListing:
+            evidence_dir = fixture.root
+            run_id = fixture.run_id
+
+            def list_jsonl(_self, destination: pathlib.Path) -> None:
+                fixture.write_listing(store.objects, destination, fixture.references)
+
+        def fake_psql(command, *, input, stdout, stderr, check):
+            self.assertIn("psql", command)
+            self.assertFalse(check)
+            sql = input.decode("utf-8")
+            captured_sql.append(sql)
+            if r"SELECT kind || E'\t' || object_id" in sql:
+                stdout.write(POSTGRES_ESCAPED_SINGLE_COLUMN_COPY_OUTPUT)
+            else:
+                self.assertIn("SELECT kind, object_id, key, logical_bytes", sql)
+                stdout.write(POSTGRES_COPY_OUTPUT)
+            return subprocess.CompletedProcess(command, 0)
+
+        provider = MEDIA.LiveSnapshotProvider(
+            LiveListing(),
+            self.inventory_path,
+            self.inventory_sha(),
+            len(self.references),
+            self.journal_path,
+            PREFIX,
+            self.root,
+        )
+        with mock.patch.object(MEDIA.subprocess, "run", side_effect=fake_psql):
+            snapshot = provider("before")
+
+        self.assertIn("SELECT kind, object_id, key, logical_bytes", captured_sql[0])
+        self.assertEqual(snapshot.references, {REFERENCE.key: REFERENCE})
+        _journal_keys, journal_sha = MEDIA.parse_journal(self.journal_path)
+        self.assertEqual(snapshot.reference_sha256, journal_sha)
+        self.assertEqual((self.root / "references-01.tsv").read_bytes(), POSTGRES_COPY_OUTPUT)
 
     def test_refuses_when_candidate_became_referenced(self) -> None:
         candidate = MEDIA.Reference("file", "2", "02/2", len(CANDIDATE_BYTES["02/2"]))

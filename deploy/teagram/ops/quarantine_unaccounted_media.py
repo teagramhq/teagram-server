@@ -27,6 +27,21 @@ ENVELOPE_INVENTORY_SERVICE = "blob-key-rotate"
 ENVELOPE_INVENTORY_BINARY = "/usr/local/bin/blob-inventory"
 S3_ALIAS = "local"
 S3_BUCKET = "teagram"
+REFERENCE_INVENTORY_SQL = """COPY (
+  SELECT kind, object_id, key, logical_bytes
+  FROM (
+    SELECT 'file'::text AS kind, f.id::text AS object_id,
+      lpad(to_hex((f.id & 255)::integer), 2, '0') || '/' || f.id::text AS key,
+      f.size::bigint AS logical_bytes
+    FROM files f WHERE f.stored = true
+    UNION ALL
+    SELECT 'part'::text AS kind, up.blob_key AS object_id, up.blob_key AS key,
+      up.size::bigint AS logical_bytes
+    FROM upload_parts up WHERE up.blob_key <> ''
+  ) refs
+  ORDER BY key
+) TO STDOUT;
+"""
 
 
 class QuarantineError(Exception):
@@ -851,21 +866,6 @@ class LiveSnapshotProvider:
         self.storage.list_jsonl(listing_path)
         query_path = self.work_dir / f"references-{self.calls:02d}.tsv"
         error_path = self.storage.evidence_dir / f"media-quarantine-{self.storage.run_id}-{self.calls:04d}-postgres.stderr"
-        sql = """COPY (
-  SELECT kind || E'\\t' || object_id || E'\\t' || key || E'\\t' || logical_bytes::text
-  FROM (
-    SELECT 'file'::text AS kind, f.id::text AS object_id,
-      lpad(to_hex((f.id & 255)::integer), 2, '0') || '/' || f.id::text AS key,
-      f.size::bigint AS logical_bytes
-    FROM files f WHERE f.stored = true
-    UNION ALL
-    SELECT 'part'::text AS kind, up.blob_key AS object_id, up.blob_key AS key,
-      up.size::bigint AS logical_bytes
-    FROM upload_parts up WHERE up.blob_key <> ''
-  ) refs
-  ORDER BY key
-) TO STDOUT;
-"""
         command = [
             "docker", "exec", "-i", "-u", "postgres", POSTGRES_CONTAINER,
             "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
@@ -874,7 +874,13 @@ class LiveSnapshotProvider:
         try:
             descriptor = os.open(error_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "wb") as errors, query_path.open("xb") as output:
-                result = subprocess.run(command, input=sql.encode("utf-8"), stdout=output, stderr=errors, check=False)
+                result = subprocess.run(
+                    command,
+                    input=REFERENCE_INVENTORY_SQL.encode("utf-8"),
+                    stdout=output,
+                    stderr=errors,
+                    check=False,
+                )
         except OSError:
             fail("cannot query current media references")
         if result.returncode != 0:
