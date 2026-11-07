@@ -339,12 +339,75 @@ else
   exec /usr/bin/sha256sum "$@"
 fi
 `);
+  await writeFile(join(bin, "cat"), `#!/usr/bin/env bash
+set -eu
+if [[ "\${1:-}" == -- && -n "\${WRAPPER_INPUT_CAT_LOG:-}" ]]; then
+  printf '%s\\n' "$2" >>"$WRAPPER_INPUT_CAT_LOG"
+fi
+if [[ -n "\${WRAPPER_FAIL_COPY_SOURCE:-}" ]]; then
+  for input in "$@"; do
+    if [[ "$input" == "\$WRAPPER_FAIL_COPY_SOURCE" ]]; then
+      if [[ -n "\${WRAPPER_COPY_OUTPUT_LOG:-}" ]]; then
+        snapshot_output="$(readlink -- "/proc/$$/fd/1")"
+        printf '%s\\n' "$snapshot_output" >>"$WRAPPER_COPY_OUTPUT_LOG"
+      fi
+      exit 1
+    fi
+  done
+fi
+if [[ -n "\${WRAPPER_REPLACE_BEFORE_COPY_PATH:-}" ]]; then
+  for input in "$@"; do
+    if [[ "$input" == "\$WRAPPER_REPLACE_BEFORE_COPY_PATH" ]]; then
+      printf '%s\\n' 'replacement before snapshot copy' >"$input"
+      break
+    fi
+  done
+fi
+exec /bin/cat "$@"
+`);
+  await writeFile(join(bin, "chmod"), `#!/usr/bin/env bash
+set -eu
+target="\${@: -1}"
+if [[ -n "\${WRAPPER_FAIL_SNAPSHOT_CHMOD:-}" && "$target" == */"$WRAPPER_FAIL_SNAPSHOT_CHMOD" ]]; then
+  if [[ -n "\${WRAPPER_CHMOD_TARGET_LOG:-}" ]]; then
+    printf '%s\\n' "$target" >>"$WRAPPER_CHMOD_TARGET_LOG"
+  fi
+  exit 1
+fi
+exec /bin/chmod "$@"
+`);
   await writeFile(join(bin, "node"), `#!/usr/bin/env bash
 set -eu
 if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 [[ "$1" == */host-probe.mjs ]] || exit 97
 [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
+if [[ -n "\${WRAPPER_SNAPSHOT_PROBE_RESULT:-}" ]]; then
+  original_args=("$@")
+  manifest_arg=''
+  script_arg=''
+  for ((index = 0; index < \${#original_args[@]}; index++)); do
+    case "\${original_args[$index]}" in
+      --manifest) index=$((index + 1)); manifest_arg="\${original_args[$index]}" ;;
+      --script) index=$((index + 1)); script_arg="\${original_args[$index]}" ;;
+    esac
+  done
+  [[ -n "$manifest_arg" && -n "$script_arg" ]] || exit 95
+  if [[ -n "\${WRAPPER_REPLACE_OPERATOR_MANIFEST:-}" ]]; then
+    printf '%s\\n' 'replacement after manifest validation' >"$WRAPPER_REPLACE_OPERATOR_MANIFEST"
+  fi
+  if [[ -n "\${WRAPPER_REPLACE_OPERATOR_SCRIPT:-}" ]]; then
+    printf '%s\\n' 'replacement after script validation' >"$WRAPPER_REPLACE_OPERATOR_SCRIPT"
+  fi
+  manifest_hash="$(/usr/bin/sha256sum -- "$manifest_arg")"
+  script_hash="$(/usr/bin/sha256sum -- "$script_arg")"
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$manifest_arg" "\${manifest_hash%% *}" \\
+    "$(stat -c '%a' -- "$manifest_arg")" "$(stat -c '%a' -- "\${manifest_arg%/*}")" \\
+    "$(stat -c '%u' -- "$manifest_arg")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$script_arg" "\${script_hash%% *}" \\
+    "$(stat -c '%a' -- "$script_arg")" "$(stat -c '%a' -- "\${script_arg%/*}")" \\
+    "$(stat -c '%u' -- "$script_arg")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+fi
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
     printf '%s\\n' 'qa child started' >&3
@@ -393,6 +456,8 @@ exit "\${WRAPPER_PROBE_STATUS:-\${WRAPPER_ACCEPTANCE_STATUS:-0}}"
     chmod(join(bin, "df"), 0o755),
     chmod(join(bin, "curl"), 0o755),
     chmod(join(bin, "sha256sum"), 0o755),
+    chmod(join(bin, "cat"), 0o755),
+    chmod(join(bin, "chmod"), 0o755),
     chmod(join(bin, "node"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
@@ -779,8 +844,10 @@ test("relative input names with leading dashes, spaces, and glob characters reso
   assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}\n`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
-  assert.ok(calls.includes(`${manifest}:/run/release-record.json:ro`));
-  assert.ok(calls.includes(`${script}:/opt/browser-acceptance/approved-qa.mjs:ro`));
+  assert.ok(calls.includes("release-record.json:/run/release-record.json:ro"));
+  assert.ok(calls.includes("approved-qa.mjs:/opt/browser-acceptance/approved-qa.mjs:ro"));
+  assert.equal(calls.includes(manifest), false);
+  assert.equal(calls.includes(script), false);
 });
 
 test("served manifest digest or endpoint disagreement is rejected before Docker startup", async (t) => {
@@ -2023,6 +2090,184 @@ test("acceptance preflight requires the reviewed QA pin before any Docker comman
   assert.equal(missing.stdout, '{"status":"error","code":"arguments-invalid"}\n');
 });
 
+test("manifest validation keeps its error precedence over a missing QA script", async (t) => {
+  const paths = await setup(t);
+  const invalidManifest = join(paths.directory, "invalid-manifest.json");
+  const missingScript = join(paths.directory, "missing-qa.mjs");
+  await writeFile(invalidManifest, JSON.stringify({
+    sourceCommit,
+    archiveSha256: digest,
+    contentDigest: digest,
+    url: `https://attacker.example/client/?v=${sourceCommit}`,
+  }));
+
+  const result = invoke(paths, ["acceptance-preflight", "--manifest", invalidManifest, "--script", missingScript]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
+test("snapshot copy failures report runtime-unavailable and remove the partial snapshot", async (t) => {
+  for (const failedInput of ["manifest", "script"]) {
+    const paths = await setup(t);
+    const script = await preflightScript(paths);
+    const source = failedInput === "manifest" ? paths.manifest : script;
+    const outputLog = join(paths.directory, "copy-output-path.log");
+    const result = invokePreflight(paths, script, {
+      WRAPPER_FAIL_COPY_SOURCE: source,
+      WRAPPER_COPY_OUTPUT_LOG: outputLog,
+    });
+
+    assert.equal(result.status, 1, failedInput);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-unavailable"}\n', failedInput);
+    assert.equal(result.stderr, "", failedInput);
+    await assert.rejects(readFile(paths.log), failedInput);
+    const snapshotPath = (await readFile(outputLog, "utf8")).trim();
+    assert.match(snapshotPath, /^\/tmp\/teagram-browser-acceptance\.[^/]+\/(release-record\.json|approved-qa\.mjs)$/u);
+    await assert.rejects(access(snapshotPath));
+  }
+});
+
+test("snapshot permission failures report runtime-unavailable", async (t) => {
+  for (const failedSnapshot of ["release-record.json", "approved-qa.mjs"]) {
+    const paths = await setup(t);
+    const script = await preflightScript(paths);
+    const targetLog = join(paths.directory, "chmod-target.log");
+    const result = invokePreflight(paths, script, {
+      WRAPPER_FAIL_SNAPSHOT_CHMOD: failedSnapshot,
+      WRAPPER_CHMOD_TARGET_LOG: targetLog,
+    });
+
+    assert.equal(result.status, 1, failedSnapshot);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-unavailable"}\n', failedSnapshot);
+    assert.equal(result.stderr, "", failedSnapshot);
+    await assert.rejects(readFile(paths.log), failedSnapshot);
+    const snapshotPath = (await readFile(targetLog, "utf8")).trim();
+    assert.match(snapshotPath, new RegExp(`/${failedSnapshot}$`, "u"));
+    await assert.rejects(access(snapshotPath));
+  }
+});
+
+test("unreadable inputs retain their policy errors before snapshot copying", async (t) => {
+  if (process.getuid() === 0) {
+    t.skip("unreadable-input fixture requires a non-root runner");
+    return;
+  }
+
+  const unreadableManifestPaths = await setup(t);
+  await chmod(unreadableManifestPaths.manifest, 0o000);
+  const manifestCatLog = join(unreadableManifestPaths.directory, "input-cat.log");
+  const manifestResult = invoke(unreadableManifestPaths, ["readiness", "--manifest", unreadableManifestPaths.manifest], {
+    WRAPPER_INPUT_CAT_LOG: manifestCatLog,
+  });
+  assert.equal(manifestResult.status, 1);
+  assert.equal(manifestResult.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+  await assert.rejects(readFile(manifestCatLog));
+  await assert.rejects(readFile(unreadableManifestPaths.log));
+
+  const unreadableScriptPaths = await setup(t);
+  const script = await preflightScript(unreadableScriptPaths);
+  await chmod(script, 0o000);
+  const scriptCatLog = join(unreadableScriptPaths.directory, "input-cat.log");
+  const scriptResult = invokePreflight(unreadableScriptPaths, script, {
+    WRAPPER_INPUT_CAT_LOG: scriptCatLog,
+  });
+  assert.equal(scriptResult.status, 1);
+  assert.equal(scriptResult.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  assert.deepEqual((await readFile(scriptCatLog, "utf8")).trim().split("\n"), [unreadableScriptPaths.manifest]);
+  await assert.rejects(readFile(unreadableScriptPaths.log));
+});
+
+test("acceptance preflight keeps the pinned script after its operator path is replaced", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  const approvedScript = join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs");
+  await copyFile(approvedScript, script);
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+    WRAPPER_REPLACE_OPERATOR_SCRIPT: script,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [, scriptSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  assert.notEqual(scriptSnapshot[0], script);
+  assert.equal(scriptSnapshot[1], approvedQaDigest);
+  assert.equal(scriptSnapshot[2], "444");
+  assert.equal(scriptSnapshot[3], "700");
+  await assert.rejects(access(scriptSnapshot[0]));
+});
+
+test("acceptance preflight keeps the validated manifest after its operator path is replaced", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const originalManifestHash = createHash("sha256").update(await readFile(paths.manifest)).digest("hex");
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+    WRAPPER_REPLACE_OPERATOR_MANIFEST: paths.manifest,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [manifestSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  assert.notEqual(manifestSnapshot[0], paths.manifest);
+  assert.equal(manifestSnapshot[1], originalManifestHash);
+  assert.equal(manifestSnapshot[2], "444");
+  assert.equal(manifestSnapshot[3], "700");
+  await assert.rejects(access(manifestSnapshot[0]));
+});
+
+test("snapshot read permissions cover browser UID 1000 when the runner has another UID", async (t) => {
+  const runnerUid = process.getuid();
+  if (runnerUid === 1000) {
+    t.skip("runner UID matches the browser UID");
+    return;
+  }
+
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [manifestSnapshot, scriptSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  for (const snapshot of [manifestSnapshot, scriptSnapshot]) {
+    assert.equal(snapshot[2], "444");
+    assert.equal(snapshot[3], "700");
+    assert.equal(Number(snapshot[4]), runnerUid);
+    assert.notEqual(Number(snapshot[4]), 1000);
+  }
+});
+
+test("a script replaced before its snapshot copy fails the reviewed QA pin", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_REPLACE_BEFORE_COPY_PATH: script,
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
 test("the reviewed QA v3 artifact matches the pinned digest", async () => {
   const script = await readFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"));
   const pinned = (await readFile(runScript, "utf8")).match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)[1];
@@ -2087,7 +2332,8 @@ test("each probe readiness failure maps to its fixed error without a QA run", as
       ? '{"status":"error","code":"database-unavailable","database_failure_category":"unknown"}\n'
       : `{"status":"error","code":"${code}"}\n`;
     assert.equal(result.stdout, expected, code);
-    assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs/u, code);
+    assert.doesNotMatch(await readFile(paths.log, "utf8"),
+      /docker exec browser node \/opt\/browser-acceptance\/approved-qa\.mjs --mode preflight/u, code);
   }
 });
 
