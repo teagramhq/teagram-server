@@ -106,7 +106,7 @@ It runs the artifact boundary tests and focused Go fixture cases, then checks Go
 
 ## PR real-client browser flow
 
-The `Real-client browser flow / real-client-browser-flow` check runs for pull requests in both repositories on `ubuntu-26.04`. It builds the production web artifact, starts this disposable fixture, and selects all seven scenarios. Its summary names the full server and web revisions, PR head, merge revision tested, cleanup result, and complete job duration. The companion checkout is an immutable full SHA reviewed in the PR.
+The `Real-client browser flow / real-client-browser-flow` check runs for pull requests in both repositories on `ubuntu-26.04`. It builds the production web artifact, starts this disposable fixture, and selects every scenario declared by the pinned web contract that this runner supports. A required web scenario without runner support fails before fixture startup. Its summary names the full server and web revisions, PR head, merge revision tested, selected scenarios, cleanup result, and complete job duration. The companion checkout is an immutable full SHA reviewed in the PR.
 
 The selected-suite command is the same one used by the web lane and local runs:
 
@@ -126,4 +126,4 @@ On a browser assertion failure, the workflow uploads `real-client-playwright-tra
 
 The orchestration sends `stop` after the browser runner exits. On failure or cancellation it terminates the foreground fixture and waits for its owned cleanup. A successful cleanup prints `cleanup=verified` after removing only the run's containers, networks, image, temporary credentials, build directory, and detached worktree. For a local run, wait for that line before removing the caller-owned artifact, key, and readiness file as documented above.
 
-When a user-facing feature needs real-client coverage, add a named scenario to the web repository's `scripts/real-client/contract.mjs`, implement its UI flow and assertions in `scripts/real-client/browser.cjs`, then add it to `SCENARIOS` in this repository's `test/e2e/real_server_fixture/run_real_client_browser_flow.mjs`. The check rejects empty, skipped, duplicate, or failed required scenarios.
+When a user-facing feature needs real-client coverage, add a named scenario to the web repository's `scripts/real-client/contract.mjs`, implement its UI flow and assertions in `scripts/real-client/browser.cjs`, then add it to `REAL_CLIENT_SCENARIOS` in this repository's `test/e2e/real_server_fixture/real_client_scenarios.mjs`. The check rejects empty, skipped, duplicate, or failed required scenarios.
