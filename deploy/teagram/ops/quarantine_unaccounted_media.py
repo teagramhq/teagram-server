@@ -386,21 +386,26 @@ def make_snapshot(
     raw_objects, encrypted_objects = parse_listing(listing_path, prefix, now)
     references, reference_sha256 = parse_references(reference_path)
     journal_keys, _journal_reference_sha = parse_journal(journal_path)
+    candidate_keys = set(contract.candidates)
     if set(encrypted_objects) != set(references):
         fail("encrypted object inventory differs from database references")
     if contract.encrypted_unaccounted_count != 0:
         fail("encrypted inventory contains unaccounted objects")
 
-    candidate_keys = set(contract.candidates)
     if candidate_keys.intersection(references):
+        if mode == "after":
+            fail("a quarantined object became referenced; restore copies from the quarantine manifest")
         fail("an inventory object became referenced by the database")
     if candidate_keys.intersection(journal_keys):
         fail("an inventory object is present in the migration journal")
     actual_unaccounted = set(raw_objects).difference(references)
     if mode == "before" and actual_unaccounted != candidate_keys:
         fail("live unaccounted object set differs from the latest inventory")
-    if mode == "after" and actual_unaccounted:
-        fail("post-quarantine inventory still has unaccounted objects")
+    if mode == "after":
+        if candidate_keys.intersection(raw_objects):
+            fail("a quarantined candidate remains in RustFS; restore copies from the quarantine manifest")
+        if actual_unaccounted:
+            fail("post-quarantine inventory still has unaccounted objects")
 
     candidates: dict[str, Candidate] = {}
     if mode == "before":
@@ -420,8 +425,6 @@ def make_snapshot(
             )
         if sum(candidate.size for candidate in candidates.values()) != contract.candidate_physical_bytes:
             fail("live unaccounted byte total differs from the latest inventory")
-    elif candidate_keys.intersection(raw_objects):
-        fail("post-quarantine inventory still contains a quarantined object")
     return Snapshot(
         contract=contract,
         raw_objects=raw_objects,
@@ -573,15 +576,8 @@ def apply_quarantine(
         key: (item.kind, item.object_id, item.size, item.modified)
         for key, item in second.candidates.items()
     }
-    first_encrypted_identity = {
-        key: (item.size, item.modified) for key, item in first.encrypted_objects.items()
-    }
-    second_encrypted_identity = {
-        key: (item.size, item.modified) for key, item in second.encrypted_objects.items()
-    }
-    if first.reference_sha256 != second.reference_sha256 or first_identity != second_identity or \
-       first_encrypted_identity != second_encrypted_identity:
-        fail("media inventory changed during quarantine; bucket objects were left untouched")
+    if first_identity != second_identity:
+        fail("quarantine candidates changed during copy; bucket objects were left untouched")
     records = manifest["objects"]
     assert isinstance(records, list)
     for candidate, record in zip(
@@ -604,12 +600,6 @@ def apply_quarantine(
 
     final = snapshot_provider("after")
     validate_envelopes(len(final.references))
-    final_encrypted_identity = {
-        key: (item.size, item.modified) for key, item in final.encrypted_objects.items()
-    }
-    if first.reference_sha256 != final.reference_sha256 or \
-       first_encrypted_identity != final_encrypted_identity:
-        fail("encrypted reference inventory changed during quarantine; restore copies from the quarantine manifest")
     manifest["status"] = "complete"
     manifest["completed_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     atomic_manifest(manifest_path, manifest)

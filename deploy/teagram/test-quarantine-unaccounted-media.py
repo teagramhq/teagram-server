@@ -183,15 +183,16 @@ class QuarantineFixtures(unittest.TestCase):
                 }) + "\n")
         listing_path.chmod(0o600)
 
-    def snapshot_provider(self, store: FakeStorage, extra_refs: list[MEDIA.Reference] | None = None):
+    def snapshot_provider(self, store: FakeStorage, current_references: list[MEDIA.Reference] | None = None):
         call = 0
+        current_references = self.references if current_references is None else current_references
 
         def provide(mode: str) -> MEDIA.Snapshot:
             nonlocal call
             call += 1
             listing_path = self.root / f"listing-{call}.jsonl"
             refs_path = self.root / f"refs-{call}.tsv"
-            refs = self.references if extra_refs is None else extra_refs
+            refs = current_references
             self.write_listing(store.objects, listing_path, refs)
             refs_path.write_text("".join(
                 f"{ref.kind}\t{ref.object_id}\t{ref.key}\t{ref.logical_bytes}\n"
@@ -201,7 +202,7 @@ class QuarantineFixtures(unittest.TestCase):
             return MEDIA.make_snapshot(
                 self.inventory_path,
                 self.inventory_sha(),
-                len(refs),
+                len(self.references),
                 listing_path,
                 refs_path,
                 self.journal_path,
@@ -320,6 +321,66 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(envelope_counts, [2, 2, 2])
         self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
 
+    def test_reference_growth_during_copy_does_not_abort_quarantine(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        current_references = [REFERENCE]
+        base_provider = self.snapshot_provider(store, current_references)
+        snapshot_calls = 0
+        envelope_counts: list[int] = []
+
+        def provider(mode: str) -> MEDIA.Snapshot:
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 2:
+                current_references.append(POST_MIGRATION_REFERENCE)
+            return base_provider(mode)
+
+        final, _summary = MEDIA.apply_quarantine(
+            provider,
+            store,
+            directory,
+            self.run_id,
+            "2026-12-07",
+            envelope_counts.append,
+        )
+
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(len(final.references), 2)
+        self.assertEqual(envelope_counts, [1, 2, 2])
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+
+    def test_reference_growth_during_final_snapshot_completes_quarantine(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        current_references = [REFERENCE]
+        base_provider = self.snapshot_provider(store, current_references)
+        snapshot_calls = 0
+        envelope_counts: list[int] = []
+
+        def provider(mode: str) -> MEDIA.Snapshot:
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 3:
+                current_references.append(POST_MIGRATION_REFERENCE)
+            return base_provider(mode)
+
+        final, _summary = MEDIA.apply_quarantine(
+            provider,
+            store,
+            directory,
+            self.run_id,
+            "2026-12-07",
+            envelope_counts.append,
+        )
+
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(len(final.references), 2)
+        self.assertEqual(envelope_counts, [1, 1, 2])
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+
     def test_refuses_when_candidate_became_referenced(self) -> None:
         candidate = MEDIA.Reference("file", "2", "02/2", len(CANDIDATE_BYTES["02/2"]))
         refs = [candidate]
@@ -338,6 +399,16 @@ class QuarantineFixtures(unittest.TestCase):
         with self.assertRaisesRegex(MEDIA.QuarantineError, "differs from the latest inventory"):
             self.snapshot_provider(store)("before")
         self.assertEqual(store.removed, [])
+
+    def test_after_snapshot_recommends_restore_only_for_remaining_candidates(self) -> None:
+        candidate_store = FakeStorage(dict(CANDIDATE_BYTES), self.qbase / "unused")
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "restore copies from the quarantine manifest"):
+            self.snapshot_provider(candidate_store)("after")
+
+        unexpected_store = FakeStorage({"06/6": b"unexpected"}, self.qbase / "unused")
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "post-quarantine inventory still has unaccounted") as error:
+            self.snapshot_provider(unexpected_store)("after")
+        self.assertNotIn("restore copies", str(error.exception))
 
     def test_copy_verification_mismatch_leaves_bucket_untouched(self) -> None:
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
