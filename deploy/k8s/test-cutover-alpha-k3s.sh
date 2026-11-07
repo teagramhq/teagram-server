@@ -325,9 +325,12 @@ for index, record in enumerate(records, 1):
 (root / "mode.json").chmod(0o644)
 PY
 # Make the mounted PVC writable only for this root-only fixture seeding step.
-# Do not preserve workstation archive metadata when extracting on the PVC.
+# Exclude directory entries so tar cannot reset the PVC or journal permissions.
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- chmod 0700 /blob-mode
-tar -cf - -C "$tmp_dir/blob-mode" . |
+(
+  cd "$tmp_dir/blob-mode"
+  tar -cf - mode.json journal/*.json
+) |
   kubectl exec --namespace "$SOURCE_NAMESPACE" --stdin pod/cutover-blob-mode-seed -c seed -- \
     tar -xf - -C /blob-mode
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- \
