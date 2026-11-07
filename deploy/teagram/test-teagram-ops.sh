@@ -42,6 +42,7 @@ export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_START_SERVER_SCRIPT="$tmp/start-server.sh"
 export MOCK_ATTEST_SCRIPT="$ops_dir/attest-blob-mode-reports.sh"
+export MOCK_QUARANTINE_SCRIPT="$tmp/quarantine-unaccounted-media.sh"
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_SHOW_LOG="$tmp/show.log"
@@ -109,6 +110,9 @@ case "$1" in
         ;;
       "$OPS_SHA:deploy/teagram/ops/attest-blob-mode-reports.sh")
         sed "s|/opt/teagram|$MOCK_REPO|g" "$MOCK_ATTEST_SCRIPT"
+        ;;
+      "$OPS_SHA:deploy/teagram/ops/quarantine-unaccounted-media.sh")
+        cat "$MOCK_QUARANTINE_SCRIPT"
         ;;
       "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
         cat <<'PY'
@@ -213,6 +217,14 @@ printf ' <%s>' "$@"
 printf '\n'
 START_SERVER
 
+cat > "$MOCK_QUARANTINE_SCRIPT" <<'QUARANTINE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'quarantine-operation args:'
+printf ' <%s>' "$@"
+printf '\n'
+QUARANTINE
+
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
   -e "s|0:700|$MOCK_OWNER_UID:700|g" \
@@ -251,7 +263,7 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media'* ]]
   [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
     "$help_output" == *'verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
@@ -259,6 +271,7 @@ for help in help -h --help; do
   [[ "$help_output" == *'encrypt-media backs up and encrypts referenced media'* ]]
   [[ "$help_output" == *'cleanup-media --acceptance-passed removes plaintext media'* ]]
   [[ "$help_output" == *'attest-blob-mode-reports preserves missing reports after a live S3 census'* ]]
+  [[ "$help_output" == *'quarantine-unaccounted-media --check previews, --apply quarantines, --restore <run-id> restores'* ]]
 done
 
 active_operation_count=0
@@ -295,6 +308,8 @@ export MOCK_ROOT_MODE=true
 attestation=$(run_command "run $OPS_SHA attest-blob-mode-reports")
 unset MOCK_ROOT_MODE
 [[ "$attestation" == 'attestation-operation fixture' ]]
+quarantine_check=$(run_command "run $OPS_SHA quarantine-unaccounted-media --check")
+[[ "$quarantine_check" == 'quarantine-operation args: <--check>' ]]
 grep -Fxq "$OPS_SHA:internal/store/queries/uploads.sql" "$MOCK_SHOW_LOG"
 
 sentinel="$tmp/arbitrary-command-ran"
@@ -314,6 +329,7 @@ expect_status 66 "run $OLD_MAIN_SHA encrypt-media"
 expect_status 66 "run $OLD_MAIN_SHA cleanup-media"
 expect_status 66 "run $OLD_MAIN_SHA backup-media-key"
 expect_status 66 "run $OLD_MAIN_SHA attest-blob-mode-reports"
+expect_status 66 "run $OLD_MAIN_SHA quarantine-unaccounted-media"
 expect_status 66 "run $OLD_MAIN_SHA bot-api-qa-bot"
 [[ ! -e "$MOCK_RETIRED_SCRIPT_MARKER" ]]
 for bad_name in 'nested/name' . .. 'Uppercase'; do
@@ -390,7 +406,7 @@ expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < <(sort "$MOCK_RUN_TEMP_LOG")
 mapfile -t removed_temps < <(sort "$MOCK_RM_LOG")
-expected_runner_temps=$((10 + active_operation_count))
+expected_runner_temps=$((11 + active_operation_count))
 [[ "${#runner_temps[@]}" == "$expected_runner_temps" && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}

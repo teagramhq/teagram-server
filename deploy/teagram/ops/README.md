@@ -3,15 +3,15 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the eleven current operations: `target-failure-report`, `rollout-evidence`,
+the twelve current operations: `target-failure-report`, `rollout-evidence`,
 `invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
 `encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
-`bot-api-qa`, and `bot-api-qa-bot`. A script's presence in an older main commit does not authorize
-a retired operation. The allowlist lives in
+`bot-api-qa`, `bot-api-qa-bot`, and `quarantine-unaccounted-media`. A script's
+presence in an older main commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
@@ -257,6 +257,29 @@ missing reports in that journal prefix. It does not change `mode.json` or the
 journal and does not restart or recreate services. Output includes only the
 head ID, counts, paths, and hashes; credentials and object contents are not
 printed.
+
+## Quarantining unaccounted media
+
+`quarantine-unaccounted-media` handles only the exact unaccounted plaintext
+keys recorded in the latest authority-bound inventory. It verifies the live
+encrypted authority, running service stack, current database references,
+stopped-writer migration journal, and full RustFS listing. `--check` performs
+the read-only preflight. `--apply` copies each candidate into a root-owned
+0700 directory under `/var/lib/teagram-plaintext-quarantine`, verifies the
+0600 copy by size and SHA-256, rechecks the candidate set and references, and
+then removes those exact keys. The private manifest records full keys,
+digests, and a deletion date 30 days out; operator output contains only counts,
+bytes, category/age buckets, and the quarantine path. The final full listing
+must show zero unaccounted plaintext and zero referenced objects without a
+valid envelope, with encrypted authority unchanged and `teagramd` still
+running. `--restore <run-id>` restores verified copies from an earlier run.
+The operation does not restart services.
+
+```sh
+ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --check
+ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --apply
+ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --restore <run-id>
+```
 
 ## Encrypting and cleaning up media
 
