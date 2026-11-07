@@ -338,6 +338,135 @@ func TestCountSeedMarkersForSpace(t *testing.T) {
 	}
 }
 
+func TestSendTextKeepsSeedMarkerOutOfMessageText(t *testing.T) {
+	api := &fakeSeedMessageInvoker{}
+	client := tg.NewClient(api)
+	const (
+		marker = "[[teagram-demo:welcome:weekly-wipe]]"
+		body   = "This fictional demo is refreshed by a weekly data wipe."
+	)
+
+	if _, err := sendText(context.Background(), client, &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, marker, body, 0); err != nil {
+		t.Fatalf("send seeded text: %v", err)
+	}
+	if api.request == nil {
+		t.Fatal("sendText did not issue a message request")
+	}
+	if api.request.Message != body {
+		t.Fatalf("sent message = %q, want human-readable body %q", api.request.Message, body)
+	}
+	if strings.Contains(api.request.Message, "[[teagram-demo:") {
+		t.Fatalf("sent message contains an internal marker: %q", api.request.Message)
+	}
+}
+
+func TestSeededContentTextsContainNoInternalMarker(t *testing.T) {
+	for _, spec := range publicSpaces {
+		for _, seeded := range seededMessagesForSpace(spec) {
+			if strings.Contains(seeded.text, "[[teagram-demo:") {
+				t.Errorf("seeded %s message %s contains an internal marker: %q", spec.slug, seeded.marker, seeded.text)
+			}
+		}
+	}
+	seeded := reactionSeedMessage()
+	if strings.Contains(seeded.text, "[[teagram-demo:") {
+		t.Errorf("seeded reaction example contains an internal marker: %q", seeded.text)
+	}
+}
+
+func TestHistoryMarkersRecognizeNewAndLegacySeededMessages(t *testing.T) {
+	for _, spec := range publicSpaces {
+		seededMessages := seededMessagesForSpace(spec)
+		for _, test := range []struct {
+			name   string
+			legacy bool
+		}{
+			{name: "marker-free"},
+			{name: "legacy marker", legacy: true},
+		} {
+			t.Run(spec.slug+"/"+test.name, func(t *testing.T) {
+				messages := make([]tg.MessageClass, 0, len(seededMessages))
+				for index, seeded := range seededMessages {
+					text := seeded.text
+					if test.legacy {
+						text = seeded.marker + " " + text
+					}
+					messages = append(messages, &tg.Message{ID: index + 1, Message: text})
+				}
+				api := &fakeSeedMessageInvoker{history: messages}
+				markers, err := historyMarkers(context.Background(), tg.NewClient(api), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, seededMessages)
+				if err != nil {
+					t.Fatalf("read seeded history: %v", err)
+				}
+				if got, want := len(markers), len(seededMessages); got != want {
+					t.Fatalf("seeded marker count = %d, want %d", got, want)
+				}
+				if got, want := countSeedMarkers(markers, spec), expectedSeedMarkerCount(spec); got != want {
+					t.Fatalf("verified seeded content count = %d, want %d", got, want)
+				}
+				for index, seeded := range seededMessages {
+					if id, ok := markers[seeded.marker]; !ok || id != int64(index+1) {
+						t.Errorf("seeded marker %q resolves to (%d, %t), want (%d, true)", seeded.marker, id, ok, index+1)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryMarkersRecognizeNewAndLegacyReactionExample(t *testing.T) {
+	seeded := reactionSeedMessage()
+	for _, test := range []struct {
+		name   string
+		legacy bool
+	}{
+		{name: "marker-free"},
+		{name: "legacy marker", legacy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			text := seeded.text
+			if test.legacy {
+				text = seeded.marker + " " + text
+			}
+			api := &fakeSeedMessageInvoker{history: []tg.MessageClass{&tg.Message{ID: 13, Message: text}}}
+			markers, err := historyMarkers(context.Background(), tg.NewClient(api), &tg.InputPeerUser{UserID: 1, AccessHash: 2}, []seedMessage{seeded})
+			if err != nil {
+				t.Fatalf("read reaction message history: %v", err)
+			}
+			if got := markers[seeded.marker]; got != 13 {
+				t.Fatalf("reaction marker resolves to message %d, want 13", got)
+			}
+		})
+	}
+}
+
+type fakeSeedMessageInvoker struct {
+	request *tg.MessagesSendMessageRequest
+	history []tg.MessageClass
+}
+
+func (api *fakeSeedMessageInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch request := input.(type) {
+	case *tg.MessagesSendMessageRequest:
+		api.request = request
+		response, ok := output.(*tg.UpdatesBox)
+		if !ok {
+			return errors.New("seed test received an unexpected send response type")
+		}
+		response.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: 42, RandomID: request.RandomID}}}
+		return nil
+	case *tg.MessagesGetHistoryRequest:
+		response, ok := output.(*tg.MessagesMessagesBox)
+		if !ok {
+			return errors.New("seed test received an unexpected history response type")
+		}
+		response.Messages = &tg.MessagesMessages{Messages: api.history}
+		return nil
+	default:
+		return errors.New("seed test invoked an unexpected request")
+	}
+}
+
 func TestCheckModeNeedsNoConfigAndRejectsNonInternalEndpoints(t *testing.T) {
 	if err := run([]string{"--check"}); err != nil {
 		t.Fatalf("check without mounted runtime config: %v", err)
