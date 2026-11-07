@@ -266,7 +266,7 @@ function createAcceptancePage({
         return locator(childSelector);
       },
       getByText(text, options = {}) {
-        if (isChatsPage && text === "Your chats will appear here" && options.exact === true) {
+        if (isChatsPage && text === "Your chats will be here" && options.exact === true) {
           return locator("empty-chat-state");
         }
         return locator("unknown");
