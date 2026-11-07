@@ -214,6 +214,8 @@ type Conn struct {
 	frameReceivedAt         time.Time
 	concurrentRPCMu         sync.Mutex
 	concurrentRPCs          map[int64]chan struct{}
+	concurrentRPCActive     int
+	concurrentRPCQueue      []concurrentRPCWork
 	concurrentRPCError      error
 
 	// dialogFilterRecovery is connection-local coverage state for content-free

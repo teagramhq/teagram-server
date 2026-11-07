@@ -7,7 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -220,13 +220,28 @@ type rpcAdmission struct {
 	ctx     context.Context
 	release func()
 	cancel  context.CancelFunc
+	refs    atomic.Int32
+}
+
+func (a *rpcAdmission) retain() bool {
+	for refs := a.refs.Load(); refs > 0; refs = a.refs.Load() {
+		if a.refs.CompareAndSwap(refs, refs+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *rpcAdmission) finish() {
+	if refs := a.refs.Add(-1); refs != 0 {
+		return
+	}
 	if a.cancel != nil {
 		a.cancel()
 	}
-	a.release()
+	if a.release != nil {
+		a.release()
+	}
 }
 
 func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
@@ -239,7 +254,9 @@ func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
 	if s.rpcDeadline > 0 {
 		rpcCtx, cancel = context.WithTimeout(ctx, s.rpcDeadline)
 	}
-	return &rpcAdmission{ctx: rpcCtx, release: release, cancel: cancel}, true
+	admission := &rpcAdmission{ctx: rpcCtx, release: release, cancel: cancel}
+	admission.refs.Store(1)
+	return admission, true
 }
 
 // rpcHandle decrypts an encrypted MTProto frame on an established session and
@@ -327,15 +344,8 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	if handler == nil {
 		handler = s.handler
 	}
-	if classifier, ok := handler.(ConcurrentRPCClassifier); ok && classifier.CanRunConcurrently(req) {
-		if c.startConcurrentRPC(req.MsgID) {
-			req.Buf = &bin.Buffer{Buf: slices.Clone(req.Buf.Buf)}
-			go s.runConcurrentRPC(c, req, handler)
-			return nil
-		}
-		if err := c.waitConcurrentRPCs(); err != nil {
-			return err
-		}
+	if scheduled, err := s.scheduleConcurrentRPC(c, req, handler); scheduled {
+		return err
 	}
 	return s.handleWithHandler(c, req, handler)
 }
@@ -489,7 +499,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 		}
 		for i := range container.Messages {
 			m := container.Messages[i]
-			if err := s.handleWithHandler(c, &Request{
+			child := &Request{
 				AuthKeyID:             req.AuthKeyID,
 				UserID:                req.UserID,
 				Provisional:           req.Provisional,
@@ -505,7 +515,19 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 				Ctx:                   req.Ctx,
 				admission:             admission,
 				ackQueued:             true,
-			}, handler); err != nil {
+			}
+			if c != nil && concurrentRPCBarrier(child) && c.concurrentRPCsPending() {
+				if err := c.waitConcurrentRPCs(); err != nil {
+					return err
+				}
+			}
+			if scheduled, err := s.scheduleConcurrentRPC(c, child, handler); scheduled {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.handleWithHandler(c, child, handler); err != nil {
 				return err
 			}
 		}
