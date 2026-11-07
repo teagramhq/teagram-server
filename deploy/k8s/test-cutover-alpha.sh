@@ -20,7 +20,9 @@ for required in \
   'importer pod' \
   '/var/lib/teagram-k3s-cutover' \
   'encrypt and checksum-copy its objects to RustFS' \
-  'all five tailnet-only Serve handlers' \
+  'the five tailnet-only HTTPS handlers' \
+  'the old MTProto and Bot API TCP routes' \
+  'enable PROXY protocol on the k3s Bot API relay' \
   'planned downtime from the write fence until all edges switch' \
   'Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081' \
   'verify every k8s cloudflared pod has stopped before restoring routes' \
@@ -89,7 +91,7 @@ if ! grep --fixed-strings --quiet 'test-cutover-alpha-k3s.sh' .github/workflows/
   exit 1
 fi
 
-cutover_image='ghcr.io/teagramhq/teagramd@sha256:e307d5d93ab000d61dc77251a599b00e031e6dac7cdf026ef8d2d621734e7c3f'
+cutover_image='ghcr.io/teagramhq/teagramd@sha256:b378de8308e246f3c1ac80b3fed964d195a096f16dd25d273e340c1f75ab9a01'
 cutover_digest=${cutover_image#*@}
 if ! grep --fixed-strings --quiet "digest: $cutover_digest" deploy/k8s/prod-cutover/kustomization.yaml; then
   printf 'alpha cutover does not pin the CI-verified blob-migration image\n' >&2
@@ -160,7 +162,8 @@ routes = {
     "/.well-known/teagramd/client": "http://127.0.0.1:2444/.well-known/teagramd/client",
     "/.well-known/telegramd/client": "http://127.0.0.1:2444/.well-known/telegramd/client",
 }
-base = {"TCP": {"443": {"HTTPS": True}, "2443": {"TCPForward": "127.0.0.1:2443"}},
+base = {"TCP": {"443": {"HTTPS": True}, "2443": {"TCPForward": "127.0.0.1:2443"},
+                "2447": {"TCPForward": "127.0.0.1:2447", "ProxyProtocol": 1}},
         "Web": {"alpha.example.ts.net:443": {"Handlers": {k: {"Proxy": v} for k, v in routes.items()}}}}
 def write(name, value):
     (root / name).write_text(json.dumps(value))
@@ -170,11 +173,15 @@ write("serve-funnel.json", {**base, "AllowFunnel": {"alpha.example.ts.net:443": 
 write("serve-invalid-funnel.json", {**base, "AllowFunnel": None})
 write("serve-bad-https.json", {**base, "TCP": {**base["TCP"], "443": {"HTTPS": False}}})
 write("serve-extra-port.json", {**base, "TCP": {**base["TCP"], "444": {"TCPForward": "127.0.0.1:1"}}})
+write("serve-missing-bot-api.json", {**base, "TCP": {k: v for k, v in base["TCP"].items() if k != "2447"}})
+write("serve-bad-bot-api-proxy-protocol.json", {**base, "TCP": {**base["TCP"], "2447": {"TCPForward": "127.0.0.1:2447"}}})
 PY
-serve_args=(http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 127.0.0.1:2443)
+serve_args=(http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
+  127.0.0.1:2443 127.0.0.1:2447)
 check_serve_status "$fixture_dir/serve-valid.json" "${serve_args[@]}"
 check_serve_status "$fixture_dir/serve-funnel-off.json" "${serve_args[@]}"
-for invalid in serve-funnel serve-invalid-funnel serve-bad-https serve-extra-port; do
+for invalid in serve-funnel serve-invalid-funnel serve-bad-https serve-extra-port \
+  serve-missing-bot-api serve-bad-bot-api-proxy-protocol; do
   if check_serve_status "$fixture_dir/$invalid.json" "${serve_args[@]}" 2>/dev/null; then
     printf 'cutover accepted unsafe Serve state: %s\n' "$invalid" >&2
     exit 1

@@ -13,8 +13,6 @@ spec:
         app.kubernetes.io/name: teagramd-identity-bootstrap
     spec:
       automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: ghcr-pull
       restartPolicy: Never
       securityContext:
         fsGroup: 65532

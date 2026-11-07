@@ -15,8 +15,6 @@ spec:
         app.kubernetes.io/name: linkselector
     spec:
       automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: ghcr-pull
       securityContext:
         seccompProfile:
           type: RuntimeDefault

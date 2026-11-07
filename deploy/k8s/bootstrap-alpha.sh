@@ -48,7 +48,7 @@ Would install /etc/sysctl.d/90-teagram-k3s.conf in the LXC and enable IP forward
 Would install pinned k3s v1.37.1+k3s1 with Traefik, ServiceLB, and metrics-server disabled, then enable it and wait for a Ready node.
 Would install the agents' forced-command SSH menu and the existing Multica public key, restrict root SSH to that command, disable password login and forwarding, and restart sshd only if its files change.
 Would create the teagram namespace with enforced Pod Security baseline, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
-Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, cloudflared-token, and ghcr-pull from the live teagram LXC (values are not displayed).
+Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, and cloudflared-token from the live teagram LXC (values are not displayed).
 Would configure Tailscale Serve TCP routes on alpha ports 6443 and 2222 to the loopback proxies; no public listener is configured.
 Would write /root/teagram-k3s-deploy.kubeconfig with the namespace-restricted deployer token, plus /root/teagram-k3s-cutover.kubeconfig with the k3s admin client certificate for root-only cutover, rollback, and reset. Both files use mode 0600; the deployer Role remains restricted.
 Would verify the k3s node, disabled components, namespace boundary, Serve routes, and both kubeconfig permissions.
@@ -391,60 +391,6 @@ print("\n".join(sorted(names, key=lambda name: int(name.split(".", 1)[0]))))
 ')
 [[ -n $MEDIA_KEY_NAMES ]] || fail 'no live media key files were found'
 
-registry_config=$(incus exec "$SOURCE_INSTANCE" -- cat /root/.docker/config.json 2>/dev/null) ||
-  fail 'the live teagram LXC has no readable Docker registry configuration'
-REGISTRY_HELPER=$(printf '%s' "$registry_config" | python3 -c '
-import json
-import sys
-
-config = json.load(sys.stdin)
-auths = config.get("auths", {})
-entry = next((value for name, value in auths.items()
-              if name.removeprefix("https://").rstrip("/").lower() == "ghcr.io"), {})
-if entry.get("auth") or entry.get("identitytoken") or entry.get("registrytoken"):
-    raise SystemExit(0)
-helper = config.get("credHelpers", {}).get("ghcr.io") or config.get("credsStore", "")
-if not helper or not all(char.isalnum() or char in "._-" for char in helper):
-    print("k3s bootstrap: teagram has no usable GHCR read credential", file=sys.stderr)
-    raise SystemExit(1)
-sys.stdout.write(helper)
-')
-if [[ -n $REGISTRY_HELPER ]]; then
-  REGISTRY_AUTH=$(printf 'ghcr.io\n' | incus exec --mode=non-interactive \
-    "$SOURCE_INSTANCE" -- "docker-credential-$REGISTRY_HELPER" get 2>/dev/null) ||
-    fail 'the live teagram LXC could not read its GHCR credential helper'
-else
-  REGISTRY_AUTH=$registry_config
-fi
-GHCR_SECRET_JSON=$(printf '%s' "$REGISTRY_AUTH" | python3 -c '
-import base64
-import json
-import sys
-
-source = json.load(sys.stdin)
-if {"Username", "Secret"}.issubset(source):
-    auth = base64.b64encode((source["Username"] + ":" + source["Secret"]).encode()).decode()
-    entry = {"auth": auth}
-else:
-    auths = source.get("auths", {})
-    entry = next((value for name, value in auths.items()
-                  if name.removeprefix("https://").rstrip("/").lower() == "ghcr.io"), {})
-    entry = {key: entry[key] for key in ("auth", "identitytoken", "registrytoken")
-             if entry.get(key)}
-if not entry:
-    print("k3s bootstrap: GHCR credential is unavailable", file=sys.stderr)
-    raise SystemExit(1)
-docker_config = json.dumps({"auths": {"ghcr.io": entry}}, separators=(",", ":")).encode()
-secret = {
-    "apiVersion": "v1",
-    "kind": "Secret",
-    "metadata": {"name": "ghcr-pull", "namespace": "teagram"},
-    "type": "kubernetes.io/dockerconfigjson",
-    "data": {".dockerconfigjson": base64.b64encode(docker_config).decode()},
-}
-json.dump(secret, sys.stdout, separators=(",", ":"))
-')
-
 existing_instance=false
 if incus info "$INSTANCE" >/dev/null 2>&1; then
   existing_instance=true
@@ -633,7 +579,6 @@ apply_env_resource secret teagramd-blob-credentials \
   "TG_BLOB_S3_ACCESS_KEY_ID=$TG_BLOB_S3_ACCESS_KEY_ID" \
   "TG_BLOB_S3_SECRET_ACCESS_KEY=$TG_BLOB_S3_SECRET_ACCESS_KEY"
 apply_env_resource secret cloudflared-token "token=$CLOUDFLARED_TOKEN"
-printf '%s' "$GHCR_SECRET_JSON" | apply_manifest secret/ghcr-pull
 incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:"$MEDIA_KEYS_PATH/." - |
   python3 -c '
 import base64
