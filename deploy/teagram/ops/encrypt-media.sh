@@ -104,13 +104,13 @@ encrypt_exit() {
   fi
   if [[ -n "$DUMP_TMP" && -f "$DUMP_TMP" && ! -L "$DUMP_TMP" ]]; then
     case "$DUMP_TMP" in
-      /root/teagram-media-encryption/.pgdump-pre-migration.*) rm -f -- "$DUMP_TMP" || status=1 ;;
+      "$EVIDENCE_ROOT"/.pgdump-pre-migration.????????) rm -f -- "$DUMP_TMP" || status=1 ;;
       *) printf '%s\n' 'refusing to remove an unexpected dump staging path' >&2; status=1 ;;
     esac
   fi
   if [[ -n "$MANIFEST_TMP" && -f "$MANIFEST_TMP" && ! -L "$MANIFEST_TMP" ]]; then
     case "$MANIFEST_TMP" in
-      /root/teagram-media-encryption/.pgdump-manifest.????????) rm -f -- "$MANIFEST_TMP" || status=1 ;;
+      "$EVIDENCE_ROOT"/.pgdump-manifest.????????) rm -f -- "$MANIFEST_TMP" || status=1 ;;
       *) printf '%s\n' 'refusing to remove an unexpected manifest staging path' >&2; status=1 ;;
     esac
   fi
@@ -233,19 +233,12 @@ for _ in {1..60}; do
   sleep 1
 done
 [[ "$ready" == 1 ]] || ops_fail 'isolated PostgreSQL restore did not become ready'
-if docker exec -i "$RESTORE_CONTAINER" pg_restore --list - < "$DUMP_TMP" \
-  > "$OPS_TEMP_DIR/pgrestore-list.txt" 2> "$restore_stderr"; then
-  :
-else
-  chmod 600 -- "$restore_stderr" || true
+if ! run_pg_restore_archive_list "$RESTORE_CONTAINER" "$DUMP_TMP" \
+  "$OPS_TEMP_DIR/pgrestore-list.txt" "$restore_stderr"; then
   ops_fail "pg_restore archive validation failed; private diagnostic retained at $restore_stderr"
 fi
 [[ -s "$OPS_TEMP_DIR/pgrestore-list.txt" ]] || ops_fail 'pg_restore archive has no table of contents'
-if docker exec -i "$RESTORE_CONTAINER" pg_restore --exit-on-error --no-owner --no-privileges \
-  -U postgres -d teagram - < "$DUMP_TMP" >/dev/null 2>> "$restore_stderr"; then
-  :
-else
-  chmod 600 -- "$restore_stderr" || true
+if ! run_pg_restore_database "$RESTORE_CONTAINER" "$DUMP_TMP" "$restore_stderr"; then
   ops_fail "isolated database restore failed; private diagnostic retained at $restore_stderr"
 fi
 table_count=$(docker exec "$RESTORE_CONTAINER" psql -X -Atq -U postgres -d teagram \

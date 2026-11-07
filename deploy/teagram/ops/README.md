@@ -245,11 +245,16 @@ code is live:
 ssh teagram run <deployed-main-sha> encrypt-media
 ```
 
-The private evidence directory `/root/teagram-media-encryption` stores the
-verified database dump and manifest, migration JSON results, and smoke output.
-The command reports reference counts, the backup path, and the recorded media
-key backup path without printing key material. If interrupted before encrypted
-authority is published, the operation restarts the existing server under the
+The private evidence directory
+`/var/lib/teagram-blob-mode-reports/teagram-media-encryption` stores the
+verified database dump and manifest, migration JSON results, smoke output, and
+raw diagnostics. It is root-owned mode 0700 and follows
+`TEAGRAM_BLOB_MODE_REPORT_ROOT` when the report root is configured. On
+`pg_restore` failure, the operator output includes only its phase and
+sanitized error kind; raw stderr stays mode 0600 in this directory. The command
+reports reference counts, the backup path, and the recorded media key backup
+path without printing key material. If interrupted before encrypted authority
+is published, the operation restarts the existing server under the
 still-authoritative S3 mode. After publication, the plaintext source objects
 remain intact and a repeated invocation verifies/resumes encrypted copies;
 keep encrypted authority and use that forward-recovery path rather than
@@ -277,8 +282,8 @@ The encrypted copies and encrypted authority remain in place after cleanup.
 If cleanup stops partway through, retain encrypted authority and rerun it only
 after the acceptance checks still pass; cleanup revalidates the encrypted
 copies before removing any remaining source. The verified pre-migration dump
-remains in `/root` as recovery evidence; the media key backup is at
-`/etc/teagramd/media-key-backups/1.key`.
+remains in the private evidence directory as recovery evidence; the media key
+backup is at `/etc/teagramd/media-key-backups/1.key`.
 
 The transition's threat boundary is the reviewed `main` SHA, the single
 verified Compose stack, the root-owned media key and database backup, the

@@ -113,7 +113,7 @@ case "$1" in
         sed -e "s|/opt/teagram|$FIXTURE_REPO|g" \
           -e "s|/root|$FIXTURE_EVIDENCE|g" \
           -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
-          -e "s|/etc/teagramd/media-key-backups|$FIXTURE_EVIDENCE/media-key-backups|g" \
+          -e "s|/etc/teagramd/media-key-backups|$FIXTURE_KEY_BACKUP_PARENT/media-key-backups|g" \
           -e "s|/tmp/teagram-deploy.lock|$FIXTURE_TMP/deploy.lock|g" "$FIXTURE_COMMON"
         ;;
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
@@ -262,11 +262,19 @@ case "$1" in
       [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
       printf 'fixture archive\n'
     elif [[ "$2" == -i && "$3" == teagram-media-restore-* && "$4" == pg_restore ]]; then
-      if [[ "$*" == *' --list '* ]]; then
+      if [[ "$*" == *' pg_restore --list'* ]]; then
         printf 'restore:pg_restore-list\n' >> "$FIXTURE_EVENTS"
+        if [[ "$FIXTURE_SCENARIO" == pgrestore-list-failure ]]; then
+          printf '%s\n' 'pg_restore: error: could not find header for archive: fixture-private-value' >&2
+          exit 42
+        fi
         printf 'TABLE public fixture\n'
       else
         printf 'restore:pg_restore\n' >> "$FIXTURE_EVENTS"
+        if [[ "$FIXTURE_SCENARIO" == pgrestore-database-failure ]]; then
+          printf '%s\n' 'pg_restore: error: could not execute query: ERROR: relation "private_fixture_table" already exists; fixture-private-value' >&2
+          exit 42
+        fi
       fi
     elif [[ "$2" == teagram-media-restore-* && "$3" == pg_isready ]]; then
       exit 0
@@ -385,6 +393,7 @@ setup_case() {
   FIXTURE_EVIDENCE=$case_dir/root
   FIXTURE_OPERATION_EVIDENCE=$FIXTURE_EVIDENCE/teagram-media-encryption
   FIXTURE_KEY_DIR=$case_dir/keys
+  FIXTURE_KEY_BACKUP_PARENT=$case_dir/key-backup-parent
   FIXTURE_POSTGRES_STATE=$case_dir/postgres-state
   FIXTURE_SERVER_STATE=$case_dir/server-state
   FIXTURE_RUSTFS_STATE=$case_dir/rustfs-state
@@ -398,22 +407,23 @@ setup_case() {
   FIXTURE_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   TEAGRAM_BLOB_MODE_REPORT_ROOT=$FIXTURE_EVIDENCE
   export TEAGRAM_BLOB_MODE_REPORT_ROOT
-  export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_POSTGRES_STATE \
+  export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_KEY_BACKUP_PARENT FIXTURE_POSTGRES_STATE \
     FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
     FIXTURE_CLEANUP_CALLS FIXTURE_ENCRYPT_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
     FIXTURE_COMPOSE_FILES
 
-  mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE/media-key-backups" "$FIXTURE_KEY_DIR"
+  mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE" \
+    "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups" "$FIXTURE_KEY_DIR"
   mkdir -m 700 "$FIXTURE_OPERATION_EVIDENCE"
-  chmod 700 "$FIXTURE_EVIDENCE" "$FIXTURE_EVIDENCE/media-key-backups" "$FIXTURE_KEY_DIR"
+  chmod 700 "$FIXTURE_EVIDENCE" "$FIXTURE_KEY_BACKUP_PARENT" "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups" "$FIXTURE_KEY_DIR"
   printf 'fixture env\n' > "$FIXTURE_REPO/.env"
   printf 'fixture parked env\n' > "$FIXTURE_REPO/.env.rustfs-parked"
   printf 'fixture compose\n' > "$FIXTURE_REPO/docker-compose.yml"
   printf 'fixture override\n' > "$FIXTURE_REPO/docker-compose.override.yml"
   chmod 600 "$FIXTURE_REPO/.env" "$FIXTURE_REPO/.env.rustfs-parked"
   printf '%064d\n' 0 > "$FIXTURE_KEY_DIR/1.key"
-  cp "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_EVIDENCE/media-key-backups/1.key"
-  chmod 600 "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_EVIDENCE/media-key-backups/1.key"
+  cp "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
+  chmod 600 "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
   printf 'running\n' > "$FIXTURE_POSTGRES_STATE"
   printf 'running\n' > "$FIXTURE_SERVER_STATE"
   printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
@@ -423,7 +433,7 @@ setup_case() {
     printf 'fixture plaintext source\n' > "$FIXTURE_PLAINTEXT_OBJECT"
   fi
   if [[ "$scenario" == key-backup-mismatch ]]; then
-    printf 'different fixture backup\n' > "$FIXTURE_EVIDENCE/media-key-backups/1.key"
+    printf 'different fixture backup\n' > "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
   fi
   : > "$FIXTURE_EVENTS"
 
@@ -499,11 +509,11 @@ assert_hash_mismatch() {
 }
 
 setup_case key-backup-create s3-accepted
-rm "$FIXTURE_EVIDENCE/media-key-backups/1.key"
-rmdir "$FIXTURE_EVIDENCE/media-key-backups"
-chmod 755 "$FIXTURE_EVIDENCE"
+rm "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
+rmdir "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups"
+chmod 755 "$FIXTURE_KEY_BACKUP_PARENT"
 sed -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
-  -e "s|/etc/teagramd|$FIXTURE_EVIDENCE|g" \
+  -e "s|/etc/teagramd|$FIXTURE_KEY_BACKUP_PARENT|g" \
   "$SCRIPT_DIR/ops/backup-media-key.sh" > "$TMP/backup-media-key.sh"
 run_backup() {
   local status=0 result
@@ -511,49 +521,49 @@ run_backup() {
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$result"
 }
-chmod 777 "$FIXTURE_EVIDENCE"
+chmod 777 "$FIXTURE_KEY_BACKUP_PARENT"
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'backup parent is writable by others'* ]]
-[[ ! -e "$FIXTURE_EVIDENCE/media-key-backups/1.key" ]]
-chmod 755 "$FIXTURE_EVIDENCE"
+[[ ! -e "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key" ]]
+chmod 755 "$FIXTURE_KEY_BACKUP_PARENT"
 export FIXTURE_SYNC_FAIL=1
 output=$(run_backup)
 unset FIXTURE_SYNC_FAIL
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'cannot sync backup'* ]]
-[[ ! -e "$FIXTURE_EVIDENCE/media-key-backups/1.key" ]]
-rmdir "$FIXTURE_EVIDENCE/media-key-backups"
+[[ ! -e "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key" ]]
+rmdir "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups"
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 0 && "$output" == *media_key_backup=verified* ]]
-cmp -s "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_EVIDENCE/media-key-backups/1.key"
-[[ "$(stat -c %a "$FIXTURE_EVIDENCE/media-key-backups/1.key")" == 600 ]]
-[[ "$(stat -c %a "$FIXTURE_EVIDENCE/media-key-backups")" == 700 ]]
+cmp -s "$FIXTURE_KEY_DIR/1.key" "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
+[[ "$(stat -c %a "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key")" == 600 ]]
+[[ "$(stat -c %a "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups")" == 700 ]]
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'refusing to overwrite'* ]]
-printf 'different fixture backup\n' > "$FIXTURE_EVIDENCE/media-key-backups/1.key"
+printf 'different fixture backup\n' > "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'refusing to overwrite'* ]]
-[[ "$(cat "$FIXTURE_EVIDENCE/media-key-backups/1.key")" == 'different fixture backup' ]]
+[[ "$(cat "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key")" == 'different fixture backup' ]]
 rm "$FIXTURE_KEY_DIR/1.key"
 output=$(run_backup)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *"$FIXTURE_KEY_DIR/1.key"* && "$output" == *'65532:600:65532'* ]]
 printf '%s\n' 'PASS backup creates a matching private copy and refuses missing keys or existing backups'
 
 setup_case key-backup-missing s3-accepted
-rm "$FIXTURE_EVIDENCE/media-key-backups/1.key"
+rm "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups/1.key"
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key metadata does not match reviewed preflight'* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
 printf '%s\n' 'PASS missing media-key backup stops preflight before teagramd'
 
 setup_case key-backup-unsafe s3-accepted
-chmod 755 "$FIXTURE_EVIDENCE/media-key-backups"
+chmod 755 "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups"
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key backup directory is unsafe'* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
 printf '%s\n' 'PASS unsafe media-key backup directory stops preflight before teagramd'
 
 setup_case key-backup-parent-writable s3-accepted
-chmod 777 "$FIXTURE_EVIDENCE"
+chmod 777 "$FIXTURE_KEY_BACKUP_PARENT"
 output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 && "$output" == *'media key backup parent is unsafe'* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
@@ -566,6 +576,30 @@ output=$(run_encrypt)
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
 [[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nstart:server' ]]
 printf '%s\n' 'PASS failed pre-migration backup restores teagramd without starting migration'
+
+setup_case pgrestore-list-failure s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'pg_restore failure phase=archive-list kind=invalid-archive'* ]]
+[[ "$output" == *'pg_restore archive validation failed; private diagnostic retained at'* ]]
+[[ "$output" != *'fixture-private-value'* ]]
+diagnostic_path=${output##*private diagnostic retained at }
+[[ "$diagnostic_path" == "$FIXTURE_OPERATION_EVIDENCE"/pgrestore-pre-migration-*.stderr ]]
+[[ "$(stat -c '%a' "$diagnostic_path")" == 600 ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nstart:server' ]]
+printf '%s\n' 'PASS archive-list failures report a sanitized kind and keep stderr private under the report root'
+
+setup_case pgrestore-database-failure s3-accepted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'pg_restore failure phase=database-restore kind=restore-query-error'* ]]
+[[ "$output" == *'isolated database restore failed; private diagnostic retained at'* ]]
+[[ "$output" != *'private_fixture_table'* && "$output" != *'fixture-private-value'* ]]
+diagnostic_path=${output##*private diagnostic retained at }
+[[ "$diagnostic_path" == "$FIXTURE_OPERATION_EVIDENCE"/pgrestore-pre-migration-*.stderr ]]
+[[ "$(stat -c '%a' "$diagnostic_path")" == 600 ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nstart:server' ]]
+printf '%s\n' 'PASS restore failures report a sanitized kind without exposing query details'
 
 setup_case interrupted-migration encrypted
 output=$(run_encrypt)
