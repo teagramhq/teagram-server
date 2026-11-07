@@ -77,6 +77,8 @@ var conversationLines = []string{
 
 const seedReactionEmoji = "❤"
 
+const welcomeText = "This fictional demo is refreshed by a weekly data wipe. Explore public notes and groups, then come back after the next reset."
+
 func seedDemo(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, inventory map[string]string) error {
 	for _, account := range seedAccounts {
 		if err := withSeedAccount(ctx, cfg, options, account, ownerPassword, inventory, func(runCtx context.Context, api *tg.Client) error {
@@ -455,13 +457,42 @@ func broadcastMarkers(spec spaceSpec) []string {
 }
 
 func seedWelcome(ctx context.Context, api *tg.Client, remote remoteSpace) error {
-	markers, err := historyMarkers(ctx, api, remote.peer())
+	messages, err := historyMessages(ctx, api, remote.peer())
 	if err != nil {
 		return err
 	}
 	marker := welcomeMarker()
-	if _, ok := markers[marker]; !ok {
-		if _, err := sendText(ctx, api, remote.peer(), marker, "This fictional demo is refreshed by a weekly data wipe. Explore public notes and groups, then come back after the next reset.", 0); err != nil {
+	var cleanFound bool
+	var legacyID int
+	for _, candidate := range messages {
+		message, ok := candidate.(*tg.Message)
+		if !ok {
+			continue
+		}
+		switch message.Message {
+		case welcomeText:
+			if cleanFound {
+				return errors.New("duplicate welcome notes")
+			}
+			cleanFound = true
+		case marker + " " + welcomeText:
+			if legacyID != 0 {
+				return errors.New("duplicate legacy welcome notes")
+			}
+			legacyID = message.ID
+		}
+	}
+	if legacyID != 0 {
+		_, err := api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: remote.channelID, AccessHash: remote.accessHash},
+			ID:      []int{legacyID},
+		})
+		if err != nil {
+			return fmt.Errorf("delete legacy welcome note: %w", err)
+		}
+	}
+	if !cleanFound {
+		if _, err := sendText(ctx, api, remote.peer(), marker, welcomeText, 0); err != nil {
 			return fmt.Errorf("post weekly-wipe welcome note: %w", err)
 		}
 	}
@@ -759,7 +790,7 @@ func verifySearchResult(ctx context.Context, api *tg.Client, spec spaceSpec) err
 	return fmt.Errorf("fresh-account search did not find public space %s", spec.username)
 }
 
-func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (map[string]int64, error) {
+func historyMessages(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) ([]tg.MessageClass, error) {
 	history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 100})
 	if err != nil {
 		return nil, fmt.Errorf("read seeded message history: %w", err)
@@ -775,6 +806,14 @@ func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass)
 	default:
 		return nil, fmt.Errorf("unexpected message history response %T", history)
 	}
+	return messages, nil
+}
+
+func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (map[string]int64, error) {
+	messages, err := historyMessages(ctx, api, peer)
+	if err != nil {
+		return nil, err
+	}
 	markers := make(map[string]int64, len(messages))
 	for _, candidate := range messages {
 		message, ok := candidate.(*tg.Message)
@@ -782,6 +821,9 @@ func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass)
 			continue
 		}
 		marker := markerFromText(message.Message)
+		if message.Message == welcomeText {
+			marker = welcomeMarker()
+		}
 		if marker != "" {
 			if previous, exists := markers[marker]; exists && previous != int64(message.ID) {
 				return nil, fmt.Errorf("duplicate seeded message marker %s", marker)
@@ -827,10 +869,16 @@ func markerFromText(value string) string {
 }
 
 func sendText(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker, body string, replyTo int64) (int64, error) {
+	text := marker + " " + body
+	randomKey := marker
+	if marker == welcomeMarker() {
+		text = body
+		randomKey += ":clean"
+	}
 	request := &tg.MessagesSendMessageRequest{
 		Peer:      peer,
-		Message:   marker + " " + body,
-		RandomID:  randomID(marker),
+		Message:   text,
+		RandomID:  randomID(randomKey),
 		NoWebpage: true,
 	}
 	if replyTo > 0 {
