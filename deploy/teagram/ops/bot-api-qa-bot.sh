@@ -59,7 +59,7 @@ if [[ "$MODE" == create || "$MODE" == rotate ]]; then
 fi
 
 lookup_bot() {
-  docker exec "$SERVICE" teagramd bot lookup "$BOT_USERNAME"
+  docker exec -u 0 "$SERVICE" teagramd bot lookup "$BOT_USERNAME"
 }
 
 read_status() {
@@ -157,7 +157,7 @@ case "$MODE" in
       printf 'state=revoked bot_id=%s username=%s action=revoke\n' "$BOT_ID" "$BOT_USERNAME"
       exit 0
     fi
-    if ! docker exec "$SERVICE" teagramd bot revoke "$BOT_ID" >/dev/null; then
+    if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$BOT_ID" >/dev/null; then
       fail 'cannot revoke the QA bot token'
       exit 1
     fi
@@ -169,12 +169,12 @@ esac
 ACTION=$MODE
 EXPECTED_ID=$BOT_ID
 if [[ "$MODE" == create ]]; then
-  token=$(docker exec "$SERVICE" teagramd bot create "$BOT_USERNAME" "$BOT_FIRST_NAME") || {
+  token=$(docker exec -u 0 "$SERVICE" teagramd bot create "$BOT_USERNAME" "$BOT_FIRST_NAME") || {
     fail 'cannot create the QA bot'
     exit 1
   }
 else
-  token=$(docker exec "$SERVICE" teagramd bot rotate "$BOT_ID") || {
+  token=$(docker exec -u 0 "$SERVICE" teagramd bot rotate "$BOT_ID") || {
     fail 'cannot rotate the QA bot token'
     exit 1
   }
@@ -196,7 +196,7 @@ fi
 encrypted=
 if ! encrypted=$(printf '%s\n' "$token" | docker exec -i "$SERVICE" teagramd bot encrypt "$AGE_RECIPIENT"); then
   unset token
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "encryption failed and token revocation also failed for bot id $TOKEN_ID"
     exit 1
   fi
@@ -206,7 +206,7 @@ fi
 unset token
 if [[ "$encrypted" != *'-----BEGIN AGE ENCRYPTED FILE-----'* || "$encrypted" != *'-----END AGE ENCRYPTED FILE-----'* ]]; then
   unset encrypted
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "encrypted output was invalid and token revocation also failed for bot id $TOKEN_ID"
     exit 1
   fi
@@ -216,7 +216,7 @@ fi
 
 status_json=$(lookup_bot) || {
   unset encrypted
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "cannot verify the new token and revocation failed for bot id $TOKEN_ID"
     exit 1
   fi
@@ -225,7 +225,7 @@ status_json=$(lookup_bot) || {
 }
 read_status "$status_json" || {
   unset encrypted
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "cannot verify the new token and revocation failed for bot id $TOKEN_ID"
     exit 1
   fi
@@ -234,7 +234,7 @@ read_status "$status_json" || {
 }
 if [[ "$BOT_STATE" != found || "$BOT_ID" != "$TOKEN_ID" || "$BOT_ACTIVE" != true ]]; then
   unset encrypted
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "new token did not match the QA bot and revocation failed for bot id $TOKEN_ID"
     exit 1
   fi
@@ -244,7 +244,7 @@ fi
 
 if ! { printf 'action=%s bot_id=%s username=%s\n' "$ACTION" "$TOKEN_ID" "$BOT_USERNAME" && printf '%s\n' "$encrypted"; }; then
   unset encrypted
-  if ! docker exec "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
+  if ! docker exec -u 0 "$SERVICE" teagramd bot revoke "$TOKEN_ID" >/dev/null 2>&1; then
     fail "ciphertext output failed and token revocation also failed for bot id $TOKEN_ID"
     exit 1
   fi

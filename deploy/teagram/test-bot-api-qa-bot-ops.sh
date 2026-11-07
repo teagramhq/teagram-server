@@ -126,32 +126,41 @@ record_event() {
   esac
 }
 case "$*" in
+  'exec teagram-teagramd-1 teagramd bot lookup '*| \
+  'exec teagram-teagramd-1 teagramd bot create '*| \
+  'exec teagram-teagramd-1 teagramd bot rotate '*| \
+  'exec teagram-teagramd-1 teagramd bot revoke '*)
+    printf 'docker bot management command lacked -u 0: %s\n' "$*" >&2
+    exit 97
+    ;;
+esac
+case "$*" in
   'inspect --format {{index .Config.Labels "org.opencontainers.image.revision"}} teagram-teagramd-1')
     printf '%s\n' "$OPS_SHA"
     ;;
   'exec teagram-teagramd-1 teagramd bot encrypt --check-recipient '*)
     "$MOCK_TMP/teagramd" bot encrypt --check-recipient "${@:7}"
     ;;
-  'exec teagram-teagramd-1 teagramd bot lookup teagram_qa_test_bot')
+  'exec -u 0 teagram-teagramd-1 teagramd bot lookup teagram_qa_test_bot')
     record_event lookup
     if [[ ${MOCK_RUN_LABEL:-} == B ]]; then
       : > "$MOCK_TMP/lookup-b-entered"
     fi
     cat "$MOCK_REPO/.bot-status"
     ;;
-  'exec teagram-teagramd-1 teagramd bot create teagram_qa_test_bot Teagram QA Test')
+  'exec -u 0 teagram-teagramd-1 teagramd bot create teagram_qa_test_bot Teagram QA Test')
     printf '{"state":"found","owner":"user","id":%s,"kind":"bot","first_name":"Teagram QA Test","token_active":true}\n' "$MOCK_BOT_ID" > "$MOCK_REPO/.bot-status"
     printf '%s\n' "$MOCK_CANARY_TOKEN"
     ;;
-  'exec teagram-teagramd-1 teagramd bot rotate '*)
-    id=${*:6:1}
+  'exec -u 0 teagram-teagramd-1 teagramd bot rotate '*)
+    id=${*:8:1}
     [[ "$id" == "$MOCK_BOT_ID" ]] || exit 98
     record_event rotate
     printf '{"state":"found","owner":"user","id":%s,"kind":"bot","first_name":"Teagram QA Test","token_active":true}\n' "$MOCK_BOT_ID" > "$MOCK_REPO/.bot-status"
     printf '%s\n' "${MOCK_ROTATE_TOKEN:-$MOCK_CANARY_TOKEN}"
     ;;
-  'exec teagram-teagramd-1 teagramd bot revoke '*)
-    id=${*:6:1}
+  'exec -u 0 teagram-teagramd-1 teagramd bot revoke '*)
+    id=${*:8:1}
     [[ "$id" == "$MOCK_BOT_ID" ]] || exit 98
     record_event revoke
     printf '{"state":"found","owner":"user","id":%s,"kind":"bot","first_name":"Teagram QA Test","token_active":false}\n' "$MOCK_BOT_ID" > "$MOCK_REPO/.bot-status"
