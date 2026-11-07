@@ -149,7 +149,6 @@ start_existing_container() {
   }
   if [[ "$container_state" != running ]]; then
     docker start "$name" >/dev/null || fail "could not start the existing $expected_service container"
-    if [[ "$name" == "$SERVER_CONTAINER" ]]; then SERVER_STARTED=1; fi
   fi
   inspect_container "$name"
   [[ "$container_project" == teagram && "$container_service" == "$expected_service" &&
@@ -159,7 +158,6 @@ start_existing_container() {
   [[ "$container_state" == running ]] || fail "$expected_service did not enter the running state"
 }
 
-SERVER_STARTED=0
 start_existing_container "$POSTGRES_CONTAINER" "$EXPECTED_POSTGRES_SERVICE"
 
 sleep 5
@@ -176,9 +174,7 @@ done
 [[ "$postgres_ready" == 1 ]] || fail 'Postgres did not become ready within 60 seconds'
 
 start_existing_container "$SERVER_CONTAINER" "$EXPECTED_SERVER_SERVICE"
-if [[ "$SERVER_STARTED" == 1 ]]; then
-  restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || \
-    fail 'Bot API relays did not recover after teagramd startup'
-fi
+restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || \
+  fail 'Bot API relays did not recover after start-server'
 
 printf 'postgres=ready teagramd=running compose_selection=verified\n'

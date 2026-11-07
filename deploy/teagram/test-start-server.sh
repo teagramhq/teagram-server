@@ -351,7 +351,14 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Bot API inner relay did not become healthy after recreation'* ]]
 [[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner' ]]
-printf '%s\n' 'PASS reports a Bot API relay recovery failure after starting teagramd'
+[[ "$(cat "$MOCK_TEAGRAMD_STATE_FILE")" == running ]]
+unset MOCK_START_FAIL_SERVICE
+: > "$MOCK_EVENTS"
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'postgres=ready teagramd=running compose_selection=verified'* ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'sleep:5\nreadiness:postgres\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
+printf '%s\n' 'PASS retries failed Bot API relay recovery while teagramd remains running'
 
 setup_case bad-arguments
 output=$(run_operation unexpected)
