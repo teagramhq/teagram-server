@@ -138,6 +138,10 @@ if [[ "$MODE" == restore ]]; then
   HELPER_ARGS[${#HELPER_ARGS[@]}-1]="$QUARANTINE_DIR"
 fi
 
+AUTHORITY_SHA_BEFORE_APPLY=$(sha256_file_contents "$AUTHORITY_DIR/mode.json") || \
+  ops_fail 'cannot recheck encrypted authority before media quarantine'
+[[ "$AUTHORITY_SHA_BEFORE_APPLY" == "$AUTHORITY_SHA_BEFORE" ]] || ops_fail 'encrypted authority changed before media quarantine'
+
 if ! python3 "$OPS_TEMP_DIR/quarantine-media.py" "${HELPER_ARGS[@]}" \
   > "$OPS_TEMP_DIR/result.out"; then
   ops_fail 'quarantine operation failed; private diagnostics were retained'

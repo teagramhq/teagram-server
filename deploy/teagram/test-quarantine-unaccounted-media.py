@@ -7,7 +7,9 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,15 +48,19 @@ class FakeStorage:
         self.objects = objects
         self.quarantine_dir = quarantine_dir
         self.mismatch_key = mismatch_key
+        self.copied: list[str] = []
+        self.restored: list[str] = []
         self.removed: list[str] = []
 
     def copy_from(self, key: str, destination: pathlib.Path) -> None:
+        self.copied.append(key)
         content = self.objects[key]
         if key == self.mismatch_key:
             content += b"corrupt"
         destination.write_bytes(content)
 
     def copy_to(self, source: pathlib.Path, key: str) -> None:
+        self.restored.append(key)
         self.objects[key] = source.read_bytes()
 
     def hash_remote(self, key: str) -> str:
@@ -201,7 +207,7 @@ class QuarantineFixtures(unittest.TestCase):
         store = FakeStorage(objects, self.qbase / f"MAIN-3441-{self.run_id}")
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         final, summary = MEDIA.apply_quarantine(
-            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07"
+            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
         )
         self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
         self.assertEqual(final.candidates, {})
@@ -239,9 +245,66 @@ class QuarantineFixtures(unittest.TestCase):
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         store = FakeStorage(dict(CANDIDATE_BYTES), directory, mismatch_key="02/2")
         with self.assertRaisesRegex(MEDIA.QuarantineError, "bucket objects were left untouched"):
-            MEDIA.apply_quarantine(self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07")
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
+            )
         self.assertEqual(store.removed, [])
         self.assertEqual(set(store.objects), set(CANDIDATE_BYTES))
+
+    def test_envelope_check_failure_prevents_quarantine_copies_and_removal(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+
+        def reject_envelopes(_referenced_count: int) -> None:
+            raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", reject_envelopes
+            )
+        self.assertEqual(store.copied, [])
+        self.assertEqual(store.removed, [])
+
+    def test_envelope_check_failure_before_deletion_leaves_bucket_untouched(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        calls = 0
+
+        def reject_before_delete(_referenced_count: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", reject_before_delete
+            )
+        self.assertEqual(calls, 2)
+        self.assertEqual(set(store.copied), set(CANDIDATE_BYTES))
+        self.assertEqual(store.removed, [])
+        self.assertEqual(set(store.objects), set(CANDIDATE_BYTES))
+
+    def test_envelope_check_failure_after_removal_leaves_manifest_recoverable(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        calls = 0
+
+        def reject_after_removal(_referenced_count: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", reject_after_removal
+            )
+        self.assertEqual(calls, 3)
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "deleting")
+        self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
 
     def test_refuses_inventory_change_after_copy_before_deletion(self) -> None:
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
@@ -257,7 +320,7 @@ class QuarantineFixtures(unittest.TestCase):
             return base_provider(mode)
 
         with self.assertRaisesRegex(MEDIA.QuarantineError, "differs from the latest inventory"):
-            MEDIA.apply_quarantine(changing_provider, store, directory, self.run_id, "2026-12-07")
+            MEDIA.apply_quarantine(changing_provider, store, directory, self.run_id, "2026-12-07", lambda _: None)
         self.assertEqual(store.removed, [])
         self.assertEqual(set(store.objects), set(CANDIDATE_BYTES) | {"06/6"})
 
@@ -275,7 +338,7 @@ class QuarantineFixtures(unittest.TestCase):
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         store = FakeStorage(dict(CANDIDATE_BYTES), directory)
         MEDIA.apply_quarantine(
-            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07"
+            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
         )
 
         def listing_provider() -> tuple[dict[str, MEDIA.ObjectMeta], dict[str, MEDIA.ObjectMeta]]:
@@ -286,7 +349,7 @@ class QuarantineFixtures(unittest.TestCase):
             return raw, {}
 
         restored, already = MEDIA.restore_quarantine(
-            listing_provider, store, directory, directory / "manifest.json", self.run_id
+            listing_provider, store, directory, directory / "manifest.json", self.run_id, 1, lambda _: None
         )
         self.assertEqual((restored, already), (len(CANDIDATE_BYTES), 0))
         self.assertEqual(store.objects, CANDIDATE_BYTES)
@@ -300,9 +363,68 @@ class QuarantineFixtures(unittest.TestCase):
         store = FakeStorage(dict(CANDIDATE_BYTES), directory)
         with self.assertRaisesRegex(MEDIA.QuarantineError, "copies are incomplete"):
             MEDIA.restore_quarantine(
-                lambda: ({}, {}), store, directory, directory / "manifest.json", self.run_id
+                lambda: ({}, {}),
+                store,
+                directory,
+                directory / "manifest.json",
+                self.run_id,
+                1,
+                lambda _: None,
             )
         self.assertEqual(store.removed, [])
+
+    def test_restore_envelope_check_failure_prevents_copy_to(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        MEDIA.apply_quarantine(
+            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
+        )
+        removed_before_restore = list(store.removed)
+
+        def reject_envelopes(_referenced_count: int) -> None:
+            raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
+            MEDIA.restore_quarantine(
+                lambda: ({}, {}), store, directory, directory / "manifest.json", self.run_id, 1, reject_envelopes
+            )
+        self.assertEqual(store.restored, [])
+        self.assertEqual(store.removed, removed_before_restore)
+
+    def test_restore_envelope_check_runs_after_restore(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        MEDIA.apply_quarantine(
+            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
+        )
+        calls = 0
+
+        def reject_after_restore(_referenced_count: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
+            MEDIA.restore_quarantine(
+                lambda: (
+                    {
+                        key: MEDIA.ObjectMeta(len(content), MODIFIED, "over-30d")
+                        for key, content in store.objects.items()
+                    },
+                    {},
+                ),
+                store,
+                directory,
+                directory / "manifest.json",
+                self.run_id,
+                1,
+                reject_after_restore,
+            )
+        self.assertEqual(calls, 2)
+        self.assertEqual(set(store.restored), set(CANDIDATE_BYTES))
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["restore_status"], "restoring")
 
     def test_fresh_envelope_inventory_accepts_all_valid_references(self) -> None:
         path = self.write_envelope_inventory({
@@ -333,6 +455,50 @@ class QuarantineFixtures(unittest.TestCase):
         })
         with self.assertRaisesRegex(MEDIA.QuarantineError, "found invalid or missing references"):
             MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+
+    def test_rustfs_alias_failure_keeps_stderr_and_stops_command(self) -> None:
+        config_dir = self.root / "mc-config"
+        mount_dir = self.root / "mount"
+        bin_dir = self.root / "bin"
+        secret_path = self.root / "blob-secret"
+        config_dir.mkdir()
+        mount_dir.mkdir()
+        bin_dir.mkdir()
+        secret_path.write_text("fixture-secret")
+        fake_mc = bin_dir / "mc"
+        fake_mc.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = alias ]; then\n"
+            "  printf 'fixture alias stdout\\n'\n"
+            "  printf 'fixture alias rejected\\n' >&2\n"
+            "  exit 23\n"
+            "fi\n"
+            "printf 'later command ran\\n' >&2\n"
+        )
+        fake_mc.chmod(0o755)
+        storage = MEDIA.LiveMCStorage(
+            ["docker", "compose"], config_dir, mount_dir, "teagramd/", self.root, self.run_id
+        )
+        command = storage._command(["ls", "local/teagram/teagramd/"])
+        script = command[command.index("-ec") + 1].replace(
+            "/run/secrets/teagramd-blob-secret-key", str(secret_path)
+        )
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["TG_BLOB_S3_ACCESS_KEY_ID"] = "fixture-access-key"
+        result = subprocess.run(
+            ["/bin/sh", "-ec", script, "mc", "ls", "local/teagram/teagramd/"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("fixture alias rejected", result.stderr)
+        self.assertNotIn("later command ran", result.stderr)
 
 
 if __name__ == "__main__":

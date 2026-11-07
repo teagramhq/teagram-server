@@ -522,8 +522,10 @@ def apply_quarantine(
     quarantine_dir: pathlib.Path,
     run_id: str,
     delete_after: str,
+    validate_envelopes: Callable[[int], None],
 ) -> tuple[Snapshot, str]:
     first = snapshot_provider("before")
+    validate_envelopes(len(first.references))
     ensure_private_directory(quarantine_dir)
     set_mount = getattr(storage, "set_mount", None)
     if callable(set_mount):
@@ -579,6 +581,7 @@ def apply_quarantine(
         if storage.hash_remote(candidate.key) != record["sha256"]:
             fail("RustFS object changed after quarantine copy; bucket objects were left untouched")
 
+    validate_envelopes(len(second.references))
     manifest["status"] = "deleting"
     manifest["delete_started_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     atomic_manifest(manifest_path, manifest)
@@ -591,6 +594,7 @@ def apply_quarantine(
         atomic_manifest(manifest_path, manifest)
 
     final = snapshot_provider("after")
+    validate_envelopes(len(final.references))
     final_encrypted_identity = {
         key: (item.size, item.modified) for key, item in final.encrypted_objects.items()
     }
@@ -636,6 +640,8 @@ def restore_quarantine(
     quarantine_dir: pathlib.Path,
     manifest_path: pathlib.Path,
     run_id: str,
+    referenced_count: int,
+    validate_envelopes: Callable[[int], None],
 ) -> tuple[int, int]:
     private_directory(quarantine_dir)
     manifest = load_manifest(manifest_path, run_id)
@@ -659,6 +665,7 @@ def restore_quarantine(
             fail("existing RustFS object differs from the quarantine copy")
         already_present += 1
 
+    validate_envelopes(referenced_count)
     manifest["restore_status"] = "restoring"
     atomic_manifest(manifest_path, manifest)
     for record, local_path in pending:
@@ -676,6 +683,7 @@ def restore_quarantine(
         remote = raw_after.get(key)
         if remote is None or remote.size != record["size"] or storage.hash_remote(key) != record["sha256"]:
             fail("restored quarantine inventory did not verify")
+    validate_envelopes(referenced_count)
     manifest["restore_status"] = "complete"
     manifest["restored_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     atomic_manifest(manifest_path, manifest)
@@ -740,7 +748,7 @@ class LiveMCStorage:
         script = (
             "umask 077; "
             "mc alias set local http://rustfs:9000 \"$TG_BLOB_S3_ACCESS_KEY_ID\" "
-            "\"$(cat /run/secrets/teagramd-blob-secret-key)\" >/dev/null 2>&1; "
+            "\"$(cat /run/secrets/teagramd-blob-secret-key)\" >/dev/null || exit 1; "
             "exec mc \"$@\""
         )
         return self.compose + [
@@ -882,7 +890,6 @@ class LiveSnapshotProvider:
             self.prefix,
             mode,
         )
-        self.storage.validate_envelopes(self.work_dir, len(snapshot.references))
         return snapshot
 
 
@@ -936,7 +943,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.evidence_dir,
                 args.diagnostic_id or args.run_id,
             )
-            storage.validate_envelopes(args.work_dir, args.referenced_count)
             manifest_path = quarantine_dir / "manifest.json"
             private_file(manifest_path)
             listing_path = args.work_dir / "restore-listing.jsonl"
@@ -948,8 +954,16 @@ def main(argv: list[str] | None = None) -> int:
                 storage.list_jsonl(listing_path)
                 return parse_listing(listing_path, args.prefix, dt.datetime.now(dt.timezone.utc))
 
-            restored, already = restore_quarantine(listing_provider, storage, quarantine_dir, manifest_path, args.run_id)
-            storage.validate_envelopes(args.work_dir, args.referenced_count)
+            validate_restore_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
+            restored, already = restore_quarantine(
+                listing_provider,
+                storage,
+                quarantine_dir,
+                manifest_path,
+                args.run_id,
+                args.referenced_count,
+                validate_restore_envelopes,
+            )
             print(f"restore=pass objects={restored + already} restored={restored} already_present={already} envelope_validation=pass quarantine_path={quarantine_dir}")
             return 0
 
@@ -977,13 +991,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.mode == "check":
             snapshot = provider("before")
+            storage.validate_envelopes(args.work_dir, len(snapshot.references))
             print(f"preflight=pass {summarize(snapshot)} envelope_validation=pass authority=encrypted service=running")
             return 0
 
         if args.delete_after is None:
             fail("quarantine retention date is missing")
         quarantine_dir = args.quarantine_base / f"MAIN-3441-{args.run_id}"
-        final, summary = apply_quarantine(provider, storage, quarantine_dir, args.run_id, args.delete_after)
+        validate_apply_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
+        final, summary = apply_quarantine(
+            provider,
+            storage,
+            quarantine_dir,
+            args.run_id,
+            args.delete_after,
+            validate_apply_envelopes,
+        )
         print(
             f"quarantine=pass {summary} quarantine_path={quarantine_dir} delete_after_utc={args.delete_after} "
             f"post_inventory=pass unaccounted=0 referenced_without_valid_envelope=0 authority=encrypted service=running"
