@@ -42,6 +42,8 @@ type env struct {
 	elapsed                     time.Duration
 	maxConcurrentRequestLatency time.Duration
 	concurrentRequestSamples    int
+	maxReceiveToDispatchWait    time.Duration
+	receiveToDispatchSamples    int
 }
 
 // scenario is one client-facing RPC as a client sends it. prepare runs before
@@ -195,6 +197,8 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		e.elapsed = 0
 		e.maxConcurrentRequestLatency = 0
 		e.concurrentRequestSamples = 0
+		e.maxReceiveToDispatchWait = 0
+		e.receiveToDispatchSamples = 0
 		start := time.Now()
 		var callErr error
 		if shouldProfileGetDialogsSample(sc.name, i) {
@@ -249,6 +253,11 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			r.MaxConcurrentRequestLatencyMs = max(
 				r.MaxConcurrentRequestLatencyMs,
 				float64(e.maxConcurrentRequestLatency.Nanoseconds())/float64(time.Millisecond),
+			)
+			r.ReceiveToDispatchSamples += e.receiveToDispatchSamples
+			r.MaxReceiveToDispatchWaitMs = max(
+				r.MaxReceiveToDispatchWaitMs,
+				float64(e.maxReceiveToDispatchWait.Nanoseconds())/float64(time.Millisecond),
 			)
 		}
 	}

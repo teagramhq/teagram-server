@@ -24,6 +24,7 @@ const (
 	Large                            = "100x"
 	dispatchWaitScenario             = "messages.getSearchCounters dispatch wait"
 	concurrentRequestLatencyBudgetMs = 50.0
+	receiveToDispatchWaitBudgetMs    = 50.0
 )
 
 // Kind selects a scenario's latency budget.
@@ -106,6 +107,10 @@ type Result struct {
 	// latency while messages.getSearchCounters has an active database query.
 	MaxConcurrentRequestLatencyMs float64 `json:"max_concurrent_request_latency_ms"`
 	ConcurrentRequestSamples      int     `json:"concurrent_request_samples"`
+	// MaxReceiveToDispatchWaitMs is the longest server-side delay from a frame's
+	// receipt to its RPC handler dispatch while the counters probe is active.
+	MaxReceiveToDispatchWaitMs float64 `json:"max_receive_to_dispatch_wait_ms"`
+	ReceiveToDispatchSamples   int     `json:"receive_to_dispatch_samples"`
 	// Queries is the median statement count per call, including the delivery
 	// work the call triggered after its reply.
 	Queries int `json:"queries"`
@@ -145,7 +150,10 @@ const (
 	// CheckConcurrentRequestLatency is the hard help.getConfig latency ceiling
 	// while messages.getSearchCounters is active.
 	CheckConcurrentRequestLatency = "concurrent_request_latency"
-	CheckError                    = "error"
+	// CheckReceiveToDispatchWait is the hard server-side receive-to-dispatch
+	// wait ceiling while the search counters probe is active.
+	CheckReceiveToDispatchWait = "receive_to_dispatch_wait"
+	CheckError                 = "error"
 	// CheckUnexplained fails a statement whose plan could not be read.
 	CheckUnexplained = "unexplained"
 	checkMissing     = "missing"
@@ -370,6 +378,12 @@ func Evaluate(in Input) Verdict {
 		}
 		s, l := row.Small, row.Large
 		if name == dispatchWaitScenario {
+			if l.ReceiveToDispatchSamples == 0 {
+				fail(checkMissing, "no server receive-to-dispatch wait samples at %s", Large)
+			} else if l.MaxReceiveToDispatchWaitMs > receiveToDispatchWaitBudgetMs {
+				fail(CheckReceiveToDispatchWait, "max server receive-to-dispatch wait %.1f ms at %s, budget %.0f ms",
+					l.MaxReceiveToDispatchWaitMs, Large, receiveToDispatchWaitBudgetMs)
+			}
 			if l.ConcurrentRequestSamples == 0 {
 				fail(checkMissing, "no help.getConfig latency samples while counters were active at %s", Large)
 			} else if l.MaxConcurrentRequestLatencyMs > concurrentRequestLatencyBudgetMs {
@@ -563,9 +577,13 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 		agg.AllocBytes = int64(median(rs, func(r Result) float64 { return float64(r.AllocBytes) }))
 		agg.MaxConcurrentRequestLatencyMs = 0
 		agg.ConcurrentRequestSamples = 0
+		agg.MaxReceiveToDispatchWaitMs = 0
+		agg.ReceiveToDispatchSamples = 0
 		for _, r := range rs {
 			agg.MaxConcurrentRequestLatencyMs = max(agg.MaxConcurrentRequestLatencyMs, r.MaxConcurrentRequestLatencyMs)
 			agg.ConcurrentRequestSamples += r.ConcurrentRequestSamples
+			agg.MaxReceiveToDispatchWaitMs = max(agg.MaxReceiveToDispatchWaitMs, r.MaxReceiveToDispatchWaitMs)
+			agg.ReceiveToDispatchSamples += r.ReceiveToDispatchSamples
 			agg.ScaleIndependent = agg.ScaleIndependent || r.ScaleIndependent
 		}
 		agg.SeqScans, agg.Unexplained, agg.Error = nil, nil, ""
@@ -710,6 +728,8 @@ func Markdown(v Verdict) string {
 		if row.Name == dispatchWaitScenario && row.Large != nil {
 			notes = append(notes, fmt.Sprintf("- `%s`: head maximum help.getConfig latency while counters ran %.1f ms across %d samples; limit %.0f ms",
 				row.Name, row.Large.MaxConcurrentRequestLatencyMs, row.Large.ConcurrentRequestSamples, concurrentRequestLatencyBudgetMs))
+			notes = append(notes, fmt.Sprintf("- `%s`: head maximum server receive-to-dispatch wait %.1f ms across %d RPCs; limit %.0f ms",
+				row.Name, row.Large.MaxReceiveToDispatchWaitMs, row.Large.ReceiveToDispatchSamples, receiveToDispatchWaitBudgetMs))
 		}
 	}
 	if len(notes) > 0 {

@@ -237,7 +237,7 @@ func scenarios() []scenario {
 		{
 			name: "messages.getSearchCounters dispatch wait", kind: perfreport.Read,
 			scaleIndependent: true, samples: readSamples,
-			note:  "pre-change maximum was 929 ms at 100x on 976b99f (MAIN-3385); reports the head maximum for messages.getSearchCounters and a following help.getConfig on the same connection; 50 ms limit",
+			note:  "pre-change maximum was 929 ms at 100x on 976b99f (MAIN-3385); reports server receive-to-dispatch wait for both RPCs and client help.getConfig latency while counters run; 50 ms limits",
 			setup: searchCountersDispatchWait,
 		},
 	}
