@@ -183,7 +183,12 @@ class QuarantineFixtures(unittest.TestCase):
                 }) + "\n")
         listing_path.chmod(0o600)
 
-    def snapshot_provider(self, store: FakeStorage, current_references: list[MEDIA.Reference] | None = None):
+    def snapshot_provider(
+        self,
+        store: FakeStorage,
+        current_references: list[MEDIA.Reference] | None = None,
+        listing_references_by_call: dict[int, list[MEDIA.Reference]] | None = None,
+    ):
         call = 0
         current_references = self.references if current_references is None else current_references
 
@@ -193,7 +198,8 @@ class QuarantineFixtures(unittest.TestCase):
             listing_path = self.root / f"listing-{call}.jsonl"
             refs_path = self.root / f"refs-{call}.tsv"
             refs = current_references
-            self.write_listing(store.objects, listing_path, refs)
+            listed_refs = refs if listing_references_by_call is None else listing_references_by_call.get(call, refs)
+            self.write_listing(store.objects, listing_path, listed_refs)
             refs_path.write_text("".join(
                 f"{ref.kind}\t{ref.object_id}\t{ref.key}\t{ref.logical_bytes}\n"
                 for ref in sorted(refs, key=lambda item: item.key)
@@ -381,6 +387,33 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(envelope_counts, [1, 1, 2])
         self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
 
+    def test_after_snapshot_tolerates_encrypted_listing_ahead_of_reference_read(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        current_references = [REFERENCE]
+        base_provider = self.snapshot_provider(
+            store,
+            current_references,
+            listing_references_by_call={3: [REFERENCE, POST_MIGRATION_REFERENCE]},
+        )
+        final_inventory = MEDIA.EnvelopeInventory(0, 0, 0, 1, 0)
+
+        final, _summary = MEDIA.apply_quarantine(
+            base_provider,
+            store,
+            directory,
+            self.run_id,
+            "2026-12-07",
+            lambda _count: None,
+            lambda _count: final_inventory,
+        )
+
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(len(final.references), 1)
+        self.assertEqual(set(final.encrypted_objects), {REFERENCE.key, POST_MIGRATION_REFERENCE.key})
+        self.assertEqual(manifest["post_delete_envelope_inventory"]["status"], "recheck_required")
+
     def test_refuses_when_candidate_became_referenced(self) -> None:
         candidate = MEDIA.Reference("file", "2", "02/2", len(CANDIDATE_BYTES["02/2"]))
         refs = [candidate]
@@ -454,25 +487,38 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(store.removed, [])
         self.assertEqual(set(store.objects), set(CANDIDATE_BYTES))
 
-    def test_envelope_check_failure_after_removal_leaves_manifest_recoverable(self) -> None:
+    def test_post_delete_envelope_findings_are_recorded_without_blocking_completion(self) -> None:
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         store = FakeStorage(dict(CANDIDATE_BYTES), directory)
         calls = 0
 
-        def reject_after_removal(_referenced_count: int) -> None:
+        def validate_before_deletion(_referenced_count: int) -> None:
             nonlocal calls
             calls += 1
-            if calls == 3:
-                raise MEDIA.QuarantineError("fresh envelope inventory found invalid references")
 
-        with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
-            MEDIA.apply_quarantine(
-                self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", reject_after_removal
-            )
-        self.assertEqual(calls, 3)
+        final_inventory = MEDIA.EnvelopeInventory(0, 0, 0, 1, 0)
+        MEDIA.apply_quarantine(
+            self.snapshot_provider(store),
+            store,
+            directory,
+            self.run_id,
+            "2026-12-07",
+            validate_before_deletion,
+            lambda _referenced_count: final_inventory,
+        )
+        self.assertEqual(calls, 2)
         self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
         manifest = json.loads((directory / "manifest.json").read_text())
-        self.assertEqual(manifest["status"], "deleting")
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(manifest["post_delete_envelope_inventory"], {
+            "status": "recheck_required",
+            "referenced_count": 0,
+            "valid_envelope": 0,
+            "no_valid_envelope": 0,
+            "missing": 0,
+            "unaccounted": 1,
+            "unversioned_envelope_references": 0,
+        })
         self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
 
     def test_refuses_inventory_change_after_copy_before_deletion(self) -> None:
@@ -670,7 +716,7 @@ class QuarantineFixtures(unittest.TestCase):
             "missing": 0,
             "unaccounted": 0,
         })
-        MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+        MEDIA.validate_fresh_envelope_inventory(path)
 
     def test_fresh_envelope_inventory_rejects_preexisting_corruption(self) -> None:
         path = self.write_envelope_inventory({
@@ -680,18 +726,17 @@ class QuarantineFixtures(unittest.TestCase):
             "unaccounted": 0,
         })
         with self.assertRaisesRegex(MEDIA.QuarantineError, "found invalid or missing references") as error:
-            MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+            MEDIA.validate_fresh_envelope_inventory(path)
         self.assertNotIn("01/1", str(error.exception))
 
-    def test_fresh_envelope_inventory_rejects_reference_count_drift(self) -> None:
+    def test_fresh_envelope_inventory_accepts_live_reference_growth(self) -> None:
         path = self.write_envelope_inventory({
             "valid_envelope": 2,
             "no_valid_envelope": 0,
             "missing": 0,
             "unaccounted": 0,
         })
-        with self.assertRaisesRegex(MEDIA.QuarantineError, "found invalid or missing references"):
-            MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+        MEDIA.validate_fresh_envelope_inventory(path)
 
     def test_rustfs_alias_failure_keeps_stderr_and_stops_command(self) -> None:
         config_dir = self.root / "mc-config"

@@ -96,6 +96,31 @@ class Snapshot:
     candidates: dict[str, Candidate]
 
 
+@dataclass(frozen=True)
+class EnvelopeInventory:
+    valid_envelope_count: int
+    no_valid_envelope_count: int
+    missing_count: int
+    unaccounted_count: int
+    unversioned_reference_count: int
+
+    @property
+    def valid(self) -> bool:
+        return self.no_valid_envelope_count == 0 and self.missing_count == 0 and \
+            self.unaccounted_count == 0 and self.unversioned_reference_count == 0
+
+    def manifest_record(self) -> dict[str, object]:
+        return {
+            "status": "pass" if self.valid else "recheck_required",
+            "referenced_count": self.valid_envelope_count + self.no_valid_envelope_count + self.missing_count,
+            "valid_envelope": self.valid_envelope_count,
+            "no_valid_envelope": self.no_valid_envelope_count,
+            "missing": self.missing_count,
+            "unaccounted": self.unaccounted_count,
+            "unversioned_envelope_references": self.unversioned_reference_count,
+        }
+
+
 class Storage(Protocol):
     def copy_from(self, key: str, destination: pathlib.Path) -> None: ...
 
@@ -147,9 +172,13 @@ def read_json(path: pathlib.Path) -> object:
         fail("private operation JSON is invalid")
 
 
-def validate_fresh_envelope_inventory(path: pathlib.Path, referenced_count: int) -> None:
-    if not isinstance(referenced_count, int) or isinstance(referenced_count, bool) or referenced_count < 0:
-        fail("current database reference count is invalid")
+def validate_fresh_envelope_inventory(path: pathlib.Path) -> None:
+    inventory = read_fresh_envelope_inventory(path)
+    if not inventory.valid:
+        fail("fresh encrypted envelope inventory found invalid or missing references")
+
+
+def read_fresh_envelope_inventory(path: pathlib.Path) -> EnvelopeInventory:
     root = read_json(path)
     if not isinstance(root, dict):
         fail("fresh encrypted envelope inventory is invalid")
@@ -171,8 +200,7 @@ def validate_fresh_envelope_inventory(path: pathlib.Path, referenced_count: int)
     unversioned = root.get("unversioned_envelope_references")
     if not isinstance(unversioned, int) or isinstance(unversioned, bool) or unversioned < 0:
         fail("fresh encrypted envelope inventory counts are invalid")
-    if valid != referenced_count or invalid != 0 or missing != 0 or unaccounted != 0 or unversioned != 0:
-        fail("fresh encrypted envelope inventory found invalid or missing references")
+    return EnvelopeInventory(valid, invalid, missing, unaccounted, unversioned)
 
 
 def load_contract(inventory_path: pathlib.Path, expected_sha256: str, referenced_count: int) -> InventoryContract:
@@ -387,7 +415,7 @@ def make_snapshot(
     references, reference_sha256 = parse_references(reference_path)
     journal_keys, _journal_reference_sha = parse_journal(journal_path)
     candidate_keys = set(contract.candidates)
-    if set(encrypted_objects) != set(references):
+    if mode == "before" and set(encrypted_objects) != set(references):
         fail("encrypted object inventory differs from database references")
     if contract.encrypted_unaccounted_count != 0:
         fail("encrypted inventory contains unaccounted objects")
@@ -535,6 +563,7 @@ def apply_quarantine(
     run_id: str,
     delete_after: str,
     validate_envelopes: Callable[[int], None],
+    record_post_delete_envelopes: Callable[[int], EnvelopeInventory] | None = None,
 ) -> tuple[Snapshot, str]:
     first = snapshot_provider("before")
     validate_envelopes(len(first.references))
@@ -599,7 +628,13 @@ def apply_quarantine(
         atomic_manifest(manifest_path, manifest)
 
     final = snapshot_provider("after")
-    validate_envelopes(len(final.references))
+    final_reference_count = len(final.references)
+    if record_post_delete_envelopes is None:
+        validate_envelopes(final_reference_count)
+        final_envelope_inventory = EnvelopeInventory(final_reference_count, 0, 0, 0, 0)
+    else:
+        final_envelope_inventory = record_post_delete_envelopes(final_reference_count)
+    manifest["post_delete_envelope_inventory"] = final_envelope_inventory.manifest_record()
     manifest["status"] = "complete"
     manifest["completed_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     atomic_manifest(manifest_path, manifest)
@@ -715,7 +750,7 @@ class LiveMCStorage:
     def set_mount(self, path: pathlib.Path) -> None:
         self.mount_dir = path
 
-    def validate_envelopes(self, work_dir: pathlib.Path, referenced_count: int) -> None:
+    def fresh_envelope_inventory(self, work_dir: pathlib.Path) -> EnvelopeInventory:
         self.envelope_inventory_calls += 1
         report_path = work_dir / f"envelope-inventory-{self.envelope_inventory_calls:02d}.json"
         error_path = self._error_path("envelope-inventory")
@@ -734,7 +769,12 @@ class LiveMCStorage:
             os.chmod(report_path, 0o600)
         except OSError:
             fail("cannot protect the fresh encrypted envelope inventory")
-        validate_fresh_envelope_inventory(report_path, referenced_count)
+        return read_fresh_envelope_inventory(report_path)
+
+    def validate_envelopes(self, work_dir: pathlib.Path) -> None:
+        inventory = self.fresh_envelope_inventory(work_dir)
+        if not inventory.valid:
+            fail("fresh encrypted envelope inventory found invalid or missing references")
 
     def remote_key(self, key: str) -> str:
         return f"{self.remote_root}{key}"
@@ -971,7 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
                 query_path = args.work_dir / f"restore-references-{reference_queries:02d}.tsv"
                 return storage.query_current_reference_count(query_path)
 
-            validate_restore_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
+            validate_restore_envelopes = lambda _count: storage.validate_envelopes(args.work_dir)
             restored, already = restore_quarantine(
                 listing_provider,
                 storage,
@@ -1008,14 +1048,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.mode == "check":
             snapshot = provider("before")
-            storage.validate_envelopes(args.work_dir, len(snapshot.references))
+            storage.validate_envelopes(args.work_dir)
             print(f"preflight=pass {summarize(snapshot)} envelope_validation=pass authority=encrypted service=running")
             return 0
 
         if args.delete_after is None:
             fail("quarantine retention date is missing")
         quarantine_dir = args.quarantine_base / f"MAIN-3441-{args.run_id}"
-        validate_apply_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
+        validate_apply_envelopes = lambda _count: storage.validate_envelopes(args.work_dir)
         final, summary = apply_quarantine(
             provider,
             storage,
@@ -1023,10 +1063,26 @@ def main(argv: list[str] | None = None) -> int:
             args.run_id,
             args.delete_after,
             validate_apply_envelopes,
+            lambda _count: storage.fresh_envelope_inventory(args.work_dir),
         )
+        completed_manifest = load_manifest(quarantine_dir / "manifest.json", args.run_id)
+        post_inventory = completed_manifest.get("post_delete_envelope_inventory")
+        if not isinstance(post_inventory, dict):
+            fail("post-delete envelope inventory result is unavailable")
+        if post_inventory.get("status") == "pass":
+            post_summary = "post_inventory=pass unaccounted=0 referenced_without_valid_envelope=0"
+        elif post_inventory.get("status") == "recheck_required":
+            referenced_without_valid = int(post_inventory["no_valid_envelope"]) + int(post_inventory["missing"])
+            post_summary = (
+                f"post_inventory=recheck_required unaccounted={post_inventory['unaccounted']} "
+                f"referenced_without_valid_envelope={referenced_without_valid} "
+                f"unversioned={post_inventory['unversioned_envelope_references']} rerun=--check"
+            )
+        else:
+            fail("post-delete envelope inventory result is invalid")
         print(
             f"quarantine=pass {summary} quarantine_path={quarantine_dir} delete_after_utc={args.delete_after} "
-            f"post_inventory=pass unaccounted=0 referenced_without_valid_envelope=0 authority=encrypted service=running"
+            f"{post_summary} authority=encrypted service=running"
         )
         return 0
     except QuarantineError as error:

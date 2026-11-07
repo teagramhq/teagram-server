@@ -77,6 +77,59 @@ func TestScanClassifiesReferencedAndUnaccountedObjects(t *testing.T) {
 	}
 }
 
+func TestScanRefreshesReferencesAfterTreeWalk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x62}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("create key ring: %v", err)
+	}
+	sealed, err := blob.NewEncrypted(backend, ring, blob.MinChunkSize)
+	if err != nil {
+		t.Fatalf("create encrypted store: %v", err)
+	}
+	for key, value := range map[string]string{blob.Key(1): "first"} {
+		if _, err := sealed.Put(ctx, key, bytes.NewReader([]byte(value))); err != nil {
+			t.Fatalf("put envelope %q: %v", key, err)
+		}
+	}
+	tracked := &scanTrackingStore{
+		Store: backend,
+		beforeWalk: func() error {
+			_, err := sealed.Put(ctx, blob.Key(2), bytes.NewReader([]byte("uploaded during scan")))
+			return err
+		},
+	}
+	initial := []blobinventory.Reference{{Key: blob.Key(1), Kind: "file", ID: "1", LogicalBytes: 5}}
+	refreshed := []blobinventory.Reference{
+		initial[0],
+		{Key: blob.Key(2), Kind: "file", ID: "2", LogicalBytes: int64(len("uploaded during scan"))},
+	}
+
+	report, err := blobinventory.ScanWithReferenceRefresh(ctx, tracked, ring, initial, func(context.Context) ([]blobinventory.Reference, error) {
+		if tracked.walks != 1 {
+			t.Fatalf("reference refresh ran after %d tree walks, want one completed walk", tracked.walks)
+		}
+		return refreshed, nil
+	})
+	if err != nil {
+		t.Fatalf("scan with refreshed references: %v", err)
+	}
+	if tracked.walks != 1 {
+		t.Fatalf("backend walks = %d, want one walk and an in-memory replay", tracked.walks)
+	}
+	if report.Classes.ValidEnvelope.Count != 2 || report.Classes.NoValidEnvelope.Count != 0 || report.Classes.Missing.Count != 0 || report.Classes.Unaccounted.Count != 0 {
+		t.Fatalf("classes = %+v, want both uploaded envelopes referenced", report.Classes)
+	}
+	if len(report.KeyVersions) != 1 || report.KeyVersions[0].ReferencedObjects != 2 {
+		t.Fatalf("key versions = %+v, want both envelopes referenced", report.KeyVersions)
+	}
+}
+
 func TestScanReportsMissingReferencesAndOnlyRetiresUnreferencedVersions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -293,6 +346,31 @@ func TestScanFailsWhenEnvelopeKeyRingIsUnavailable(t *testing.T) {
 
 type scanFailureStore struct {
 	listErr error
+}
+
+type scanTrackingStore struct {
+	blob.Store
+
+	beforeWalk func() error
+	walks      int
+}
+
+func (s *scanTrackingStore) Walk(ctx context.Context, yield func(blob.Entry) error) error {
+	tree, ok := s.Store.(blobinventory.Tree)
+	if !ok {
+		return errors.New("test store does not support full-tree walks")
+	}
+	if s.beforeWalk != nil {
+		if err := s.beforeWalk(); err != nil {
+			return err
+		}
+		s.beforeWalk = nil
+	}
+	err := tree.Walk(ctx, yield)
+	if err == nil {
+		s.walks++
+	}
+	return err
 }
 
 func (s scanFailureStore) Put(context.Context, string, io.Reader) (int64, error) {
