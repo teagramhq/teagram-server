@@ -78,7 +78,6 @@ class Reference:
 class InventoryContract:
     candidates: dict[str, tuple[str, str]]
     candidate_physical_bytes: int
-    referenced_count: int
     valid_envelope_count: int
     no_valid_envelope_count: int
     missing_count: int
@@ -245,7 +244,6 @@ def load_contract(inventory_path: pathlib.Path, expected_sha256: str, referenced
     return InventoryContract(
         candidates=candidates,
         candidate_physical_bytes=physical_bytes,
-        referenced_count=referenced_count,
         valid_envelope_count=valid_envelope_count,
         no_valid_envelope_count=no_valid_envelope_count,
         missing_count=missing_count,
@@ -387,11 +385,7 @@ def make_snapshot(
     contract = load_contract(inventory_path, inventory_sha256, referenced_count)
     raw_objects, encrypted_objects = parse_listing(listing_path, prefix, now)
     references, reference_sha256 = parse_references(reference_path)
-    journal_keys, journal_reference_sha = parse_journal(journal_path)
-    if reference_sha256 != journal_reference_sha:
-        fail("database references differ from the migration journal")
-    if len(references) != contract.referenced_count:
-        fail("database reference count differs from encrypted authority")
+    journal_keys, _journal_reference_sha = parse_journal(journal_path)
     if set(encrypted_objects) != set(references):
         fail("encrypted object inventory differs from database references")
     if contract.encrypted_unaccounted_count != 0:
@@ -655,7 +649,7 @@ def restore_quarantine(
     quarantine_dir: pathlib.Path,
     manifest_path: pathlib.Path,
     run_id: str,
-    referenced_count: int,
+    reference_count_provider: Callable[[], int],
     validate_envelopes: Callable[[int], None],
 ) -> tuple[int, int]:
     private_directory(quarantine_dir)
@@ -680,7 +674,7 @@ def restore_quarantine(
             fail("existing RustFS object differs from the quarantine copy")
         already_present += 1
 
-    validate_envelopes(referenced_count)
+    validate_envelopes(reference_count_provider())
     manifest["restore_status"] = "restoring"
     atomic_manifest(manifest_path, manifest)
     for record, local_path in pending:
@@ -698,7 +692,7 @@ def restore_quarantine(
         remote = raw_after.get(key)
         if remote is None or remote.size != record["size"] or storage.hash_remote(key) != record["sha256"]:
             fail("restored quarantine inventory did not verify")
-    validate_envelopes(referenced_count)
+    validate_envelopes(reference_count_provider())
     manifest["restore_status"] = "complete"
     manifest["restored_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     atomic_manifest(manifest_path, manifest)
@@ -866,26 +860,7 @@ class LiveSnapshotProvider:
         self.storage.list_jsonl(listing_path)
         query_path = self.work_dir / f"references-{self.calls:02d}.tsv"
         error_path = self.storage.evidence_dir / f"media-quarantine-{self.storage.run_id}-{self.calls:04d}-postgres.stderr"
-        command = [
-            "docker", "exec", "-i", "-u", "postgres", POSTGRES_CONTAINER,
-            "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
-            "-U", "postgres", "-d", "teagram",
-        ]
-        try:
-            descriptor = os.open(error_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as errors, query_path.open("xb") as output:
-                result = subprocess.run(
-                    command,
-                    input=REFERENCE_INVENTORY_SQL.encode("utf-8"),
-                    stdout=output,
-                    stderr=errors,
-                    check=False,
-                )
-        except OSError:
-            fail("cannot query current media references")
-        if result.returncode != 0:
-            fail("current media reference inventory failed; private diagnostics were retained")
-        os.chmod(query_path, 0o600)
+        write_live_reference_inventory(query_path, error_path)
         snapshot = make_snapshot(
             self.inventory,
             self.inventory_sha,
@@ -897,6 +872,41 @@ class LiveSnapshotProvider:
             mode,
         )
         return snapshot
+
+
+def write_live_reference_inventory(query_path: pathlib.Path, error_path: pathlib.Path) -> None:
+    command = [
+        "docker", "exec", "-i", "-u", "postgres", POSTGRES_CONTAINER,
+        "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
+        "-U", "postgres", "-d", "teagram",
+    ]
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(error_path, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as errors, query_path.open("xb") as output:
+            result = subprocess.run(
+                command,
+                input=REFERENCE_INVENTORY_SQL.encode("utf-8"),
+                stdout=output,
+                stderr=errors,
+                check=False,
+            )
+    except OSError:
+        fail("cannot query current media references")
+    if result.returncode != 0:
+        fail("current media reference inventory failed; private diagnostics were retained")
+    try:
+        os.chmod(query_path, 0o600)
+    except OSError:
+        fail("cannot protect current database references")
+
+
+def query_live_reference_count(query_path: pathlib.Path, error_path: pathlib.Path) -> int:
+    write_live_reference_inventory(query_path, error_path)
+    references, _reference_sha256 = parse_references(query_path)
+    return len(references)
 
 
 def validate_restore_run_id(run_id: str) -> None:
@@ -937,8 +947,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.mode == "restore":
             validate_restore_run_id(args.run_id)
-            if args.referenced_count is None:
-                fail("restore reference count is unavailable")
             quarantine_dir = args.quarantine_base / f"MAIN-3441-{args.run_id}"
             private_directory(quarantine_dir)
             storage = LiveMCStorage(
@@ -952,6 +960,7 @@ def main(argv: list[str] | None = None) -> int:
             manifest_path = quarantine_dir / "manifest.json"
             private_file(manifest_path)
             listing_path = args.work_dir / "restore-listing.jsonl"
+            reference_queries = 0
 
             def listing_provider() -> tuple[dict[str, ObjectMeta], dict[str, ObjectMeta]]:
                 if listing_path.exists():
@@ -960,6 +969,13 @@ def main(argv: list[str] | None = None) -> int:
                 storage.list_jsonl(listing_path)
                 return parse_listing(listing_path, args.prefix, dt.datetime.now(dt.timezone.utc))
 
+            def current_reference_count() -> int:
+                nonlocal reference_queries
+                reference_queries += 1
+                query_path = args.work_dir / f"restore-references-{reference_queries:02d}.tsv"
+                error_path = storage._error_path("postgres")
+                return query_live_reference_count(query_path, error_path)
+
             validate_restore_envelopes = lambda count: storage.validate_envelopes(args.work_dir, count)
             restored, already = restore_quarantine(
                 listing_provider,
@@ -967,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
                 quarantine_dir,
                 manifest_path,
                 args.run_id,
-                args.referenced_count,
+                current_reference_count,
                 validate_restore_envelopes,
             )
             print(f"restore=pass objects={restored + already} restored={restored} already_present={already} envelope_validation=pass quarantine_path={quarantine_dir}")

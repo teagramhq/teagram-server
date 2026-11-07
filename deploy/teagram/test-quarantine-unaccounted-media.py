@@ -27,6 +27,8 @@ SPEC.loader.exec_module(MEDIA)
 PREFIX = "teagramd/"
 NOW = dt.datetime(2026, 11, 7, tzinfo=dt.timezone.utc)
 REFERENCE = MEDIA.Reference("file", "1", "01/1", 5)
+POST_MIGRATION_KEY = "parts/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+POST_MIGRATION_REFERENCE = MEDIA.Reference("part", POST_MIGRATION_KEY, POST_MIGRATION_KEY, 7)
 REFERENCE_BYTES = b"referenced"
 CANDIDATE_BYTES = {
     "02/2": b"plain-file",
@@ -35,6 +37,10 @@ CANDIDATE_BYTES = {
 MODIFIED = "2026-09-01T00:00:00Z"
 # PostgreSQL COPY text output uses tabs between columns and escapes tabs inside a field.
 POSTGRES_COPY_OUTPUT = b"file\t1\t01/1\t5\n"
+POSTGRES_COPY_OUTPUT_WITH_NEW_UPLOAD = (
+    b"file\t1\t01/1\t5\n"
+    b"part\tparts/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tparts/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t7\n"
+)
 POSTGRES_ESCAPED_SINGLE_COLUMN_COPY_OUTPUT = b"file\\t1\\t01/1\\t5\n"
 
 
@@ -268,6 +274,52 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(snapshot.reference_sha256, journal_sha)
         self.assertEqual((self.root / "references-01.tsv").read_bytes(), POSTGRES_COPY_OUTPUT)
 
+    def test_apply_allows_live_references_added_after_migration(self) -> None:
+        fixture = self
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        live_references = [REFERENCE, POST_MIGRATION_REFERENCE]
+        envelope_counts: list[int] = []
+
+        class LiveListing:
+            evidence_dir = fixture.root
+            run_id = fixture.run_id
+
+            def list_jsonl(_self, destination: pathlib.Path) -> None:
+                fixture.write_listing(store.objects, destination, live_references)
+
+        def fake_psql(command, *, input, stdout, stderr, check):
+            self.assertIn("psql", command)
+            self.assertIn("SELECT kind, object_id, key, logical_bytes", input.decode("utf-8"))
+            self.assertFalse(check)
+            stdout.write(POSTGRES_COPY_OUTPUT_WITH_NEW_UPLOAD)
+            return subprocess.CompletedProcess(command, 0)
+
+        provider = MEDIA.LiveSnapshotProvider(
+            LiveListing(),
+            self.inventory_path,
+            self.inventory_sha(),
+            len(self.references),
+            self.journal_path,
+            PREFIX,
+            self.root,
+        )
+        with mock.patch.object(MEDIA.subprocess, "run", side_effect=fake_psql):
+            final, _summary = MEDIA.apply_quarantine(
+                provider,
+                store,
+                directory,
+                self.run_id,
+                "2026-12-07",
+                envelope_counts.append,
+            )
+
+        _journal_keys, journal_sha = MEDIA.parse_journal(self.journal_path)
+        self.assertEqual(len(final.references), 2)
+        self.assertNotEqual(final.reference_sha256, journal_sha)
+        self.assertEqual(envelope_counts, [2, 2, 2])
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+
     def test_refuses_when_candidate_became_referenced(self) -> None:
         candidate = MEDIA.Reference("file", "2", "02/2", len(CANDIDATE_BYTES["02/2"]))
         refs = [candidate]
@@ -395,7 +447,13 @@ class QuarantineFixtures(unittest.TestCase):
             return raw, {}
 
         restored, already = MEDIA.restore_quarantine(
-            listing_provider, store, directory, directory / "manifest.json", self.run_id, 1, lambda _: None
+            listing_provider,
+            store,
+            directory,
+            directory / "manifest.json",
+            self.run_id,
+            lambda: 1,
+            lambda _: None,
         )
         self.assertEqual((restored, already), (len(CANDIDATE_BYTES), 0))
         self.assertEqual(store.objects, CANDIDATE_BYTES)
@@ -414,7 +472,7 @@ class QuarantineFixtures(unittest.TestCase):
                 directory,
                 directory / "manifest.json",
                 self.run_id,
-                1,
+                lambda: 1,
                 lambda _: None,
             )
         self.assertEqual(store.removed, [])
@@ -432,7 +490,13 @@ class QuarantineFixtures(unittest.TestCase):
 
         with self.assertRaisesRegex(MEDIA.QuarantineError, "invalid references"):
             MEDIA.restore_quarantine(
-                lambda: ({}, {}), store, directory, directory / "manifest.json", self.run_id, 1, reject_envelopes
+                lambda: ({}, {}),
+                store,
+                directory,
+                directory / "manifest.json",
+                self.run_id,
+                lambda: 1,
+                reject_envelopes,
             )
         self.assertEqual(store.restored, [])
         self.assertEqual(store.removed, removed_before_restore)
@@ -464,13 +528,61 @@ class QuarantineFixtures(unittest.TestCase):
                 directory,
                 directory / "manifest.json",
                 self.run_id,
-                1,
+                lambda: 1,
                 reject_after_restore,
             )
         self.assertEqual(calls, 2)
         self.assertEqual(set(store.restored), set(CANDIDATE_BYTES))
         manifest = json.loads((directory / "manifest.json").read_text())
         self.assertEqual(manifest["restore_status"], "restoring")
+
+    def test_restore_uses_live_reference_count_after_migration_growth(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        MEDIA.apply_quarantine(
+            self.snapshot_provider(store), store, directory, self.run_id, "2026-12-07", lambda _: None
+        )
+
+        query_calls = 0
+        envelope_counts: list[int] = []
+
+        def fake_psql(command, *, input, stdout, stderr, check):
+            self.assertIn("psql", command)
+            self.assertIn("SELECT kind, object_id, key, logical_bytes", input.decode("utf-8"))
+            self.assertFalse(check)
+            stdout.write(POSTGRES_COPY_OUTPUT_WITH_NEW_UPLOAD)
+            return subprocess.CompletedProcess(command, 0)
+
+        def current_reference_count() -> int:
+            nonlocal query_calls
+            query_calls += 1
+            return MEDIA.query_live_reference_count(
+                self.root / f"restore-references-{query_calls:02d}.tsv",
+                self.root / f"restore-references-{query_calls:02d}.stderr",
+            )
+
+        def listing_provider() -> tuple[dict[str, MEDIA.ObjectMeta], dict[str, MEDIA.ObjectMeta]]:
+            raw = {
+                key: MEDIA.ObjectMeta(len(content), MODIFIED, "over-30d")
+                for key, content in store.objects.items()
+            }
+            return raw, {}
+
+        with mock.patch.object(MEDIA.subprocess, "run", side_effect=fake_psql):
+            restored, already = MEDIA.restore_quarantine(
+                listing_provider,
+                store,
+                directory,
+                directory / "manifest.json",
+                self.run_id,
+                current_reference_count,
+                envelope_counts.append,
+            )
+
+        self.assertEqual((restored, already), (len(CANDIDATE_BYTES), 0))
+        self.assertEqual(query_calls, 2)
+        self.assertEqual(envelope_counts, [2, 2])
+        self.assertEqual(store.objects, CANDIDATE_BYTES)
 
     def test_fresh_envelope_inventory_accepts_all_valid_references(self) -> None:
         path = self.write_envelope_inventory({
