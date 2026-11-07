@@ -1605,7 +1605,7 @@ export async function performAcceptance(prepared, credentials) {
 
     const visibleChatLists = page.locator("#chatlist-container .chatlist").filter({visible: true});
     const chatList = visibleChatLists.first();
-    const emptyChatState = chatsPage.getByText("Your chats will appear here", {exact: true}).first();
+    const emptyChatState = chatsPage.getByText("Your chats will be here", {exact: true}).first();
     state.chatList = "missing";
     if (await visibleChatLists.count() === 0 && await visible(emptyChatState)) {
       state.chatListRows = 0;
