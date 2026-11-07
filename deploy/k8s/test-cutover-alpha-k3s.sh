@@ -9,7 +9,7 @@ cd "$repo_root"
 
 readonly SOURCE_NAMESPACE=teagram
 readonly TARGET_NAMESPACE=teagram-cutover
-readonly CUTOVER_IMAGE=ghcr.io/teagramhq/teagramd@sha256:e307d5d93ab000d61dc77251a599b00e031e6dac7cdf026ef8d2d621734e7c3f
+readonly CUTOVER_IMAGE=ghcr.io/teagramhq/teagramd:ci
 tmp_dir=$(mktemp -d "$RUNNER_TEMP/teagram-cutover.XXXXXX")
 port_forward_pid=''
 linkselector_forward_pid=''
@@ -101,7 +101,7 @@ copy_configmap() {
 create_target_namespace() {
   kubectl create namespace "$TARGET_NAMESPACE" >/dev/null
   kubectl label namespace "$TARGET_NAMESPACE" cutover-test=true >/dev/null
-  for secret in ghcr-pull postgres-credentials rustfs-credentials \
+  for secret in postgres-credentials rustfs-credentials \
     teagramd-blob-credentials teagramd-media-keys; do
     copy_secret "$secret"
   done
@@ -113,11 +113,21 @@ create_target_namespace() {
     --from-file=token="$tmp_dir/cloudflared-token" >/dev/null
 }
 
+assert_no_pull_secret() {
+  local namespace=$1 secret
+  secret=$(kubectl get secret ghcr-pull --namespace "$namespace" \
+    --ignore-not-found --output name)
+  [[ -z $secret ]] || {
+    printf 'namespace %s unexpectedly contains a GHCR pull Secret\n' "$namespace" >&2
+    return 1
+  }
+}
+
 start_port_forward() {
   local namespace=$1 attempt
   local -a ports=(12443:2443)
   # The source smoke needs only MTProto; the target also checks web and admin.
-  [[ $namespace == "$TARGET_NAMESPACE" ]] && ports+=(12444:2444 12445:2445)
+  [[ $namespace == "$TARGET_NAMESPACE" ]] && ports+=(12444:2444 12445:2445 12447:2447)
   kubectl port-forward --address 127.0.0.1 --namespace "$namespace" \
     service/teagramd "${ports[@]}" > "$tmp_dir/port-forward-$namespace.log" 2>&1 &
   port_forward_pid=$!
@@ -164,6 +174,32 @@ smoke_restored_account() {
     --password-file /password
 }
 
+smoke_bot_api() {
+  python3 - 127.0.0.1 12447 <<'PY'
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+request = (
+    b"PROXY TCP4 100.64.1.2 100.64.0.1 1234 2447\r\n"
+    b"GET /bot0:cutover-smoke-invalid/getMe HTTP/1.1\r\n"
+    b"Host: teagram.invalid\r\n"
+    b"Connection: close\r\n\r\n"
+)
+with socket.create_connection((host, port), timeout=5) as connection:
+    connection.settimeout(5)
+    connection.sendall(request)
+    response = bytearray()
+    while len(response) < 65536:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        response.extend(chunk)
+if not response.startswith(b"HTTP/1.1 401 ") or b'"description":"Unauthorized"' not in response:
+    raise SystemExit("unexpected Bot API response")
+PY
+}
+
 printf 'cutover_smoke\n' > "$tmp_dir/username"
 openssl rand -hex 24 > "$tmp_dir/password"
 chmod 0600 "$tmp_dir/username" "$tmp_dir/password"
@@ -180,8 +216,10 @@ kubectl wait --for=condition=complete job/cutover-account-seed \
 printf 'source account seeded\n'
 bash deploy/k8s/test-cutover-dump-upload.sh "$SOURCE_NAMESPACE" postgres-0
 
+assert_no_pull_secret "$SOURCE_NAMESPACE"
 kubectl label namespace "$SOURCE_NAMESPACE" cutover-test=true --overwrite >/dev/null
 create_target_namespace
+assert_no_pull_secret "$TARGET_NAMESPACE"
 
 kubectl apply --filename deploy/k8s/test-cutover-blob-seed.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-blob-seed \
@@ -213,7 +251,9 @@ path.write_text(json.dumps({
         "/.well-known/teagramd/client": {"Proxy": "http://127.0.0.1:2444/.well-known/teagramd/client"},
         "/.well-known/telegramd/client": {"Proxy": "http://127.0.0.1:2444/.well-known/telegramd/client"},
     }}},
-    "TCP": {"443": {"HTTPS": True}, "2443": {"TCPForward": "127.0.0.1:2443"}},
+    "TCP": {"443": {"HTTPS": True},
+            "2443": {"TCPForward": "127.0.0.1:2443"},
+            "2447": {"TCPForward": "127.0.0.1:2447", "ProxyProtocol": 1}},
 }))
 PY
 
@@ -520,6 +560,7 @@ assert handlers["/.well-known/teagramd/client"]["Proxy"] == \
 assert handlers["/.well-known/telegramd/client"]["Proxy"] == \
     "http://127.0.0.2:18444/.well-known/telegramd/client"
 assert serve["TCP"]["2443"]["TCPForward"] == "127.0.0.2:2443"
+assert serve["TCP"]["2447"] == {"TCPForward": "127.0.0.2:2447", "ProxyProtocol": 1}
 assert not any(serve.get("AllowFunnel", {}).values())
 assert serve["TCP"]["443"] == {"HTTPS": True}
 PY
@@ -545,6 +586,10 @@ start_port_forward "$TARGET_NAMESPACE"
 start_linkselector_forward "$TARGET_NAMESPACE"
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12881/+k3s-smoke |
   grep --fixed-strings 'Open this in Teagram' >/dev/null
+curl --fail --silent --show-error --max-time 10 http://127.0.0.1:12881/ \
+  --output "$tmp_dir/web-through-linkselector.html"
+grep --fixed-strings --quiet 'id="page-chats"' "$tmp_dir/web-through-linkselector.html"
+smoke_bot_api
 printf 'restored-account sign-in on target\n'
 smoke_restored_account
 printf 'target listener and restored-account smoke passed\n'
@@ -601,8 +646,9 @@ PY
 admin_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --max-time 10 http://127.0.0.1:12445/admin/metrics)
 [[ $admin_status == 401 ]] || { printf 'admin auth returned HTTP %s after the normal production apply\n' "$admin_status" >&2; exit 1; }
+smoke_bot_api
 smoke_restored_account
-printf 'normal production apply preserved discovery, WebSocket, admin authentication, and restored-account sign-in\n'
+printf 'normal production apply preserved discovery, WebSocket, admin authentication, Bot API, and restored-account sign-in\n'
 stop_port_forward
 kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
 
@@ -708,6 +754,7 @@ assert handlers == {
         "Proxy": "http://127.0.0.1:2444/.well-known/telegramd/client"},
 }
 assert serve["TCP"]["2443"]["TCPForward"] == "127.0.0.1:2443"
+assert serve["TCP"]["2447"] == {"TCPForward": "127.0.0.1:2447", "ProxyProtocol": 1}
 PY
 kubectl rollout status statefulset/teagramd --namespace "$SOURCE_NAMESPACE" --timeout=300s >/dev/null
 kubectl rollout status deployment/cloudflared --namespace "$SOURCE_NAMESPACE" --timeout=300s >/dev/null

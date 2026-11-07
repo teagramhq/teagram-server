@@ -121,7 +121,7 @@ docker_command() {
 }
 
 tailscale_command() {
-  local subcommand=$1 arg path='' target='' tcp_port=''
+  local subcommand=$1 arg path='' target='' tcp_port='' proxy_protocol=''
   shift
   if [[ $subcommand == serve && ${1:-} == status && ${2:-} == --json ]]; then
     cat "$STATE_DIR/serve.json"
@@ -137,18 +137,22 @@ tailscale_command() {
     case "$arg" in
       --set-path=*) path=${arg#*=} ;;
       --tcp=*) tcp_port=${arg#*=} ;;
+      --proxy-protocol=*) proxy_protocol=${arg#*=} ;;
       http://*|tcp://*) target=$arg ;;
     esac
   done
   if [[ -n $tcp_port ]]; then
-    python3 - "$STATE_DIR/serve.json" "$tcp_port" "$target" <<'PY'
+    python3 - "$STATE_DIR/serve.json" "$tcp_port" "$target" "$proxy_protocol" <<'PY'
 import json
 import pathlib
 import sys
 
-path, port, target = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path, port, target, proxy_protocol = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 state = json.loads(path.read_text())
-state.setdefault("TCP", {})[port] = {"TCPForward": target.removeprefix("tcp://")}
+handler = {"TCPForward": target.removeprefix("tcp://")}
+if proxy_protocol:
+    handler["ProxyProtocol"] = int(proxy_protocol)
+state.setdefault("TCP", {})[port] = handler
 path.write_text(json.dumps(state))
 PY
   elif [[ -n $path && -n $target ]]; then

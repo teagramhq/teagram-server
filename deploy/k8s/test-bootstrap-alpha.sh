@@ -37,7 +37,6 @@ blob_secret_key="$(printf 'c3%.0s' {1..32})"
 media_key='tgtest-media-key-body-1'
 admin_cert='tgtest-k3s-admin-client-cert'
 admin_key='tgtest-k3s-admin-client-key'
-ghcr_auth=$(printf 'tgtest:ghcr-read' | base64 -w0)
 deployer_token='tgtest-deployer-token-7f3a9c'
 dsn="postgres://postgres:${pg_password}@postgres:5432/teagram?sslmode=disable"
 host_tmp="$work/host-tmp"
@@ -47,17 +46,15 @@ export MOCK_HOST_TMP="$host_tmp"
 export MOCK_SECRET_VALUES
 MOCK_SECRET_VALUES=$(printf '%s\n' "$pg_password" "$dsn" "$tunnel_token" \
   "$rustfs_access_key" "$rustfs_secret_key" "$blob_access_key_id" "$blob_secret_key" \
-  "$media_key" "$ghcr_auth" "$deployer_token" "$admin_cert" "$admin_key" \
+  "$media_key" "$deployer_token" "$admin_cert" "$admin_key" \
   "$(printf '%s' "$admin_cert" | base64 -w0)" "$(printf '%s' "$admin_key" | base64 -w0)")
 
 src="$work/src"
 containers="$src/containers"
-mkdir -p "$src/root/.ssh" "$src/root/.docker" "$containers"
+mkdir -p "$src/root/.ssh" "$containers"
 printf '%s\n' \
   'command="/usr/local/sbin/teagram-ops",restrict ssh-ed25519 AAAATESTOPSKEY multica-daemon@delta' \
   'ssh-ed25519 AAAATESTOTHERKEY ops@other' > "$src/root/.ssh/authorized_keys"
-printf '%s\n' "{\"auths\":{\"ghcr.io\":{\"auth\":\"$ghcr_auth\"}}}" > "$src/root/.docker/config.json"
-
 for name in teagram-postgres-1 teagram-teagramd-1 teagram-rustfs-1 \
   teagram-link-edge-selector-1 teagram-web-cloudflared; do
   mkdir -p "$containers/$name"
@@ -164,7 +161,6 @@ required_data = {
     "secret/rustfs-credentials": {"RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY"},
     "secret/teagramd-blob-credentials": {"TG_BLOB_S3_ACCESS_KEY_ID", "TG_BLOB_S3_SECRET_ACCESS_KEY"},
     "secret/cloudflared-token": {"token"},
-    "secret/ghcr-pull": {".dockerconfigjson"},
     "secret/teagramd-media-keys": {"1.key", "2.key"},
 }
 missing_resources = required_data.keys() - state["objects"].keys()
@@ -172,6 +168,8 @@ if missing_resources:
     raise SystemExit(f"bootstrap did not apply expected resources: {sorted(missing_resources)}")
 if "secret/teagram-deployer-token" not in state["objects"]:
     raise SystemExit("bootstrap did not apply the deployer token Secret")
+if "secret/ghcr-pull" in state["objects"]:
+    raise SystemExit("bootstrap must not create a GHCR pull Secret for public images")
 for resource, expected_keys in required_data.items():
     actual_keys = set(state.get("resource_data", {}).get(resource, {}))
     if actual_keys != expected_keys:
@@ -197,7 +195,7 @@ cmp -s "$work/cutover-kubeconfig.before" "$cutover_kubeconfig_path" ||
 
 # No fixture secret may appear in what the script prints, on either run.
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
-  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token" \
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$deployer_token" \
   "$admin_cert" "$admin_key" "$(printf '%s' "$admin_cert" | base64 -w0)" \
   "$(printf '%s' "$admin_key" | base64 -w0)"; do
   if grep -Fq -- "$secret" "$work/run1.out" "$work/run2.out"; then
@@ -247,7 +245,7 @@ if [[ $(grep -Fc 'kubectl-apply-attempt' "$work/create-failure-actions") -ne 4 ]
   fail 'kubectl apply did not stop at the failed create'
 fi
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
-  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token"; do
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$deployer_token"; do
   if grep -Fq -- "$secret" "$work/create-failure.out"; then
     fail 'the script printed a secret value on a create failure'
   fi

@@ -1722,7 +1722,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-      packages: read
 
     env:
       K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
@@ -1794,11 +1793,8 @@ jobs:
             ghcr.io/teagramhq/teagramd-mc-init:ci
 
       - name: Start the pinned k3s server with production disable flags
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           mkdir -p "$RUNNER_TEMP/k8s-agent-images"
           cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"
           docker run --detach --privileged --name teagram-k3s \
@@ -1858,14 +1854,6 @@ jobs:
             exit 1
           fi
           kubectl create namespace teagram
-          auth=$(printf '%s:%s' "$GITHUB_ACTOR" "$GITHUB_TOKEN" | base64 --wrap=0)
-          jq --null-input --arg auth "$auth" '{auths:{"ghcr.io":{auth:$auth}}}' \
-            > "$RUNNER_TEMP/ghcr-config.json"
-          kubectl create secret generic ghcr-pull --namespace teagram \
-            --type=kubernetes.io/dockerconfigjson \
-            --from-file=.dockerconfigjson="$RUNNER_TEMP/ghcr-config.json"
-          rm -f "$RUNNER_TEMP/ghcr-config.json"
-
           printf '%s' "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-password"
           printf 'postgres://postgres:%s@postgres:5432/teagram?sslmode=disable' \
             "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-dsn"

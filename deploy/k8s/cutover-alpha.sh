@@ -29,6 +29,7 @@ readonly LINKSELECTOR_PORT=18081
 readonly WEBSOCKET_PORT=18444
 readonly ADMIN_PORT=18445
 readonly MTPROTO_PORT=2443
+readonly BOT_API_PORT=2447
 readonly POSTGRES_DUMP_DIR=/var/lib/postgresql/cutover-backups
 readonly CLOUDFLARE_BEFORE=http://selector:8081
 readonly CLOUDFLARE_AFTER=http://linkselector:8081
@@ -60,8 +61,8 @@ EOF
 
 dry_run() {
   cat <<'EOF'
-Would verify alpha, the root-only cutover kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only Serve handlers, required namespace resources, and an unused production namespace.
-Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, and the state PVCs.
+Would verify alpha, the root-only cutover kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
+Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, the web Service, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
 Would keep private phase, Serve route, and recovery evidence under /var/lib/teagram-k3s-cutover.
@@ -71,11 +72,11 @@ Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private 
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
 Would stream server_key.pem, enc_key.hex, and local blobs from the old container into the new PVCs without a host-side plaintext copy; key hashes are compared silently.
 Would verify the old blob tree and its encrypted envelopes fit their PVCs and the target disk can hold both copies, encrypt and checksum-copy its objects to RustFS with the migrated media key, and keep a read-only source copy for recovery.
-Would start teagramd, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, MTProto TCP, teagramd WebSocket, and admin Services, then verify them from both LXCs.
-Would save all five tailnet-only Serve handlers and the advertised MTProto TCP route on port 2443, route / to linkselector and /apiws, /admin, and both discovery paths to the corresponding k3s Services, and verify Funnel remains off.
+Would start teagramd, teagram-web, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, MTProto TCP, WebSocket, admin, and Bot API Services, then verify them from both LXCs.
+Would save the five tailnet-only HTTPS handlers, the advertised MTProto TCP route on port 2443, and the Bot API TCP route on port 2447; route / to linkselector, preserve the WebSocket, admin, and discovery paths, and enable PROXY protocol on the k3s Bot API relay. Funnel remains off.
 Would keep k8s cloudflared at zero until the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081; then start and verify the k3s connector.
 Would keep all old Compose services stopped after cutover without modifying their volumes; retain the database dump and recovery evidence for at least seven days.
-Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five Serve handlers and Cloudflare to the old targets, restart the stopped Compose services, then stop both port-forwards. k3s writes since the switch are not carried back.
+Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five HTTPS handlers, both TCP routes including the old Bot API route, and Cloudflare to the old targets, restart the stopped Compose services, then stop both port-forwards. k3s writes since the switch are not carried back.
 After the first live Serve route, a failure requires explicit rollback after the first live Serve route; automatic recovery will not switch clients back to Compose and discard k3s writes.
 EOF
   printf 'Rollback command after review: sudo bash %q --rollback\n' "$SCRIPT_PATH"
@@ -330,7 +331,7 @@ serve_status_file() {
 
 check_serve_status() {
   local status_file=$1 expected_root=$2 websocket_base=$3 admin_base=$4 expected_tcp=$5
-  local allow_old_routes=${6:-false}
+  local expected_bot_api_tcp=$6 allow_old_routes=${7:-false}
   python3 -c '
 import json
 import pathlib
@@ -341,7 +342,8 @@ expected_root = sys.argv[2]
 websocket_base = sys.argv[3]
 admin_base = sys.argv[4]
 expected_tcp = sys.argv[5]
-allow_old_routes = sys.argv[6] == "true"
+expected_bot_api_tcp = sys.argv[6]
+allow_old_routes = sys.argv[7] == "true"
 expected = {
     "/": expected_root,
     "/apiws": websocket_base + "/apiws",
@@ -371,24 +373,30 @@ for path, target in expected.items():
     if not isinstance(handler, dict) or handler.get("Proxy") not in allowed:
         raise SystemExit("k3s cutover: Tailscale Serve handler target changed: " + path)
 tcp = status.get("TCP")
-if not isinstance(tcp, dict) or set(tcp) != {"443", "2443"}:
-    raise SystemExit("k3s cutover: the advertised MTProto TCP listener is missing or changed")
+if not isinstance(tcp, dict) or set(tcp) != {"443", "2443", "2447"}:
+    raise SystemExit("k3s cutover: an advertised MTProto or Bot API TCP listener is missing or changed")
 if tcp["443"] != {"HTTPS": True}:
     raise SystemExit("k3s cutover: the HTTPS listener is missing or changed")
 tcp_handler = tcp["2443"]
 allowed_tcp = {expected_tcp, "127.0.0.1:2443"} if allow_old_routes else {expected_tcp}
 if not isinstance(tcp_handler, dict) or tcp_handler.get("TCPForward") not in allowed_tcp:
     raise SystemExit("k3s cutover: the advertised MTProto TCP target changed")
+bot_api_handler = tcp["2447"]
+allowed_bot_api_tcp = {expected_bot_api_tcp, "127.0.0.1:2447"} if allow_old_routes else {expected_bot_api_tcp}
+if (not isinstance(bot_api_handler, dict) or
+        bot_api_handler.get("TCPForward") not in allowed_bot_api_tcp or
+        bot_api_handler.get("ProxyProtocol") != 1):
+    raise SystemExit("k3s cutover: the Bot API TCP target or PROXY protocol changed")
 funnel = status.get("AllowFunnel", {})
 if not isinstance(funnel, dict):
     raise SystemExit("k3s cutover: Tailscale Funnel state is missing or invalid")
 if any(value is not False for value in funnel.values()):
     raise SystemExit("k3s cutover: Tailscale Funnel is enabled or its state is unknown")
-' "$status_file" "$expected_root" "$websocket_base" "$admin_base" "$expected_tcp" "$allow_old_routes"
+' "$status_file" "$expected_root" "$websocket_base" "$admin_base" "$expected_tcp" "$expected_bot_api_tcp" "$allow_old_routes"
 }
 
 set_serve_routes() {
-  local root=$1 websocket_base=$2 admin_base=$3 tcp_target=$4 skip_root=${5:-false}
+  local root=$1 websocket_base=$2 admin_base=$3 tcp_target=$4 bot_api_tcp_target=$5 skip_root=${6:-false}
   if [[ $skip_root != true ]]; then
     incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ "$root" >/dev/null
   fi
@@ -402,6 +410,8 @@ set_serve_routes() {
     --set-path=/.well-known/telegramd/client "$websocket_base/.well-known/telegramd/client" >/dev/null
   incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --tcp="$MTPROTO_PORT" \
     "tcp://$tcp_target" >/dev/null
+  incus exec "$SOURCE_INSTANCE" -- tailscale serve --yes --bg --tcp="$BOT_API_PORT" \
+    --proxy-protocol=1 "tcp://$bot_api_tcp_target" >/dev/null
 }
 
 wait_for_no_pods() {
@@ -583,7 +593,8 @@ handle_exit() {
         serve-switch-started)
           current_serve=$(mktemp)
           if serve_status_file "$current_serve" && check_serve_status "$current_serve" http://127.0.0.1:8081 \
-            http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"; then
+            http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" \
+            "127.0.0.1:$BOT_API_PORT"; then
             recover_before_edge_switch ready-for-edge
           else
             recover_after_serve_switch
@@ -609,7 +620,7 @@ recover_after_serve_switch() {
 trap handle_exit EXIT
 
 rollback() {
-  local current_serve target_root target_websocket target_admin target_tcp target_ip serve_after
+  local current_serve target_root target_websocket target_admin target_tcp target_bot_api_tcp target_ip serve_after
   local current_phase cleanup_failed=false
   current_phase=$(<"$PHASE_FILE")
   case "$current_phase" in
@@ -620,35 +631,39 @@ rollback() {
   current_serve=$(mktemp)
   serve_status_file "$current_serve"
   if ! check_serve_status "$current_serve" http://127.0.0.1:8081 \
-    http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"; then
+    http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" \
+    "127.0.0.1:$BOT_API_PORT"; then
     [[ -f $EVIDENCE_DIR/serve-target && ! -L $EVIDENCE_DIR/serve-target ]] ||
       fail 'Tailscale Serve is not on the old routes, and no verified cutover routes were recorded'
     mapfile -t target_routes < "$EVIDENCE_DIR/serve-target"
-    [[ ${#target_routes[@]} -eq 4 ]] || fail 'recorded Tailscale Serve cutover routes are incomplete'
+    [[ ${#target_routes[@]} -eq 5 ]] || fail 'recorded Tailscale Serve cutover routes are incomplete'
     target_root=${target_routes[0]}
     target_websocket=${target_routes[1]}
     target_admin=${target_routes[2]}
     target_tcp=${target_routes[3]}
+    target_bot_api_tcp=${target_routes[4]}
     [[ $target_root =~ ^http://(([0-9]{1,3}\.){3}[0-9]{1,3}):$LINKSELECTOR_PORT$ ]] ||
       fail 'recorded Tailscale Serve cutover root is invalid'
     target_ip=${BASH_REMATCH[1]}
     [[ $target_websocket == "http://$target_ip:$WEBSOCKET_PORT" &&
       $target_admin == "http://$target_ip:$ADMIN_PORT" &&
-      $target_tcp == "$target_ip:$MTPROTO_PORT" ]] ||
+      $target_tcp == "$target_ip:$MTPROTO_PORT" &&
+      $target_bot_api_tcp == "$target_ip:$BOT_API_PORT" ]] ||
       fail 'recorded Tailscale Serve cutover service addresses are invalid'
     check_serve_status "$current_serve" "$target_root" "$target_websocket" "$target_admin" \
-      "$target_tcp" true || fail 'Tailscale Serve contains an unrecognized route; refusing to overwrite it during rollback'
+      "$target_tcp" "$target_bot_api_tcp" true ||
+      fail 'Tailscale Serve contains an unrecognized route; refusing to overwrite it during rollback'
   fi
   rm -f -- "$current_serve"
 
   stop_k8s_connector
   stop_k8s_application
   set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
-    "127.0.0.1:$MTPROTO_PORT"
+    "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
   serve_after=$(mktemp)
   serve_status_file "$serve_after"
   check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 \
-    http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"
+    http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
   rm -f -- "$serve_after"
 
   printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
@@ -669,7 +684,7 @@ rollback() {
     cleanup_failed=true
   fi
   [[ $cleanup_failed == false ]] || fail 'Serve routes and Compose services were restored; manual cleanup is required'
-  printf 'Rollback complete: all five Serve handlers, the old MTProto TCP route, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
+  printf 'Rollback complete: all five HTTPS handlers, the old MTProto and Bot API TCP routes, the old connector, and stopped Compose services are restored. k3s writes since the switch are not carried back.\n'
 }
 
 if [[ $ACTION == --rollback ]]; then
@@ -688,9 +703,9 @@ fi
 [[ ! -e $PHASE_FILE ]] || fail 'a prior cutover phase exists; inspect the evidence, use --rollback if needed, then follow "Retry after a pre-switch failure" in deploy/k8s/README.md before another run'
 for resource in \
   statefulset/postgres statefulset/teagramd statefulset/rustfs \
-  deployment/cloudflared deployment/linkselector deployment/linklanding \
+  deployment/cloudflared deployment/linkselector deployment/linklanding deployment/teagram-web \
   service/postgres service/postgres-headless service/rustfs service/rustfs-headless \
-  service/teagramd service/teagramd-headless service/linkselector service/linklanding \
+  service/teagramd service/teagramd-headless service/linkselector service/linklanding service/web service/teagram-web \
   service/cloudflared-metrics pod/cutover-volume-importer; do
   if kubectl_resource_exists "$resource"; then
     fail "target production workload already exists: $resource"
@@ -716,7 +731,7 @@ if kubectl_resource_exists "namespace/$NAMESPACE"; then :; else
   [[ $lookup_status == 1 ]] && fail 'the bootstrap teagram namespace is missing'
   fail 'could not determine whether the bootstrap teagram namespace exists'
 fi
-for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys cloudflared-token ghcr-pull; do
+for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys cloudflared-token; do
   if kubectl_resource_exists "secret/$secret"; then :; else
     lookup_status=$?
     [[ $lookup_status == 1 ]] && fail "required namespace Secret is missing: $secret"
@@ -756,7 +771,7 @@ check_source_key /var/lib/teagramd/enc_key.hex
 SERVE_BEFORE=$(mktemp)
 serve_status_file "$SERVE_BEFORE"
 check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081 http://127.0.0.1:2444 \
-  http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT"
+  http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
 
 record_phase prepared
 ensure_private_dir "$EVIDENCE_DIR"
@@ -795,6 +810,7 @@ kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=6
 kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
 kubectl rollout status deployment/linklanding --namespace "$NAMESPACE" --timeout=300s >/dev/null
 kubectl rollout status deployment/linkselector --namespace "$NAMESPACE" --timeout=300s >/dev/null
+kubectl rollout status deployment/teagram-web --namespace "$NAMESPACE" --timeout=300s >/dev/null
 kubectl wait --for=condition=complete jobs \
   --selector=app.kubernetes.io/name=rustfs-init --namespace "$NAMESPACE" --timeout=600s >/dev/null
 [[ $(kubectl get deployment cloudflared --namespace "$NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]] ||
@@ -1039,8 +1055,8 @@ EOF
 install_port_forward_unit "$LINKSELECTOR_PORT_FORWARD_UNIT" \
   'Loopback-to-k3s linkselector port-forward' service/linkselector "$LINKSELECTOR_PORT:8081"
 install_port_forward_unit "$TEAGRAMD_PORT_FORWARD_UNIT" \
-  'Tailnet-only teagramd MTProto, WebSocket, and admin port-forward' service/teagramd \
-  "$MTPROTO_PORT:$MTPROTO_PORT $WEBSOCKET_PORT:2444 $ADMIN_PORT:2445"
+  'Tailnet-only teagramd MTProto, WebSocket, admin, and Bot API port-forward' service/teagramd \
+  "$MTPROTO_PORT:$MTPROTO_PORT $WEBSOCKET_PORT:2444 $ADMIN_PORT:2445 $BOT_API_PORT:$BOT_API_PORT"
 wait_for_forward() {
   local port=$1 attempt
   for ((attempt = 1; attempt <= 30; attempt++)); do
@@ -1075,13 +1091,20 @@ wait_for_http_forward() {
 }
 wait_for_http_forward "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --fail ||
   fail 'selector port-forward readiness timed out'
+wait_for_http_forward "http://$linkselector_ip:$LINKSELECTOR_PORT/" --fail ||
+  fail 'web app is not reachable through the k3s selector'
 wait_for_http_forward "http://$linkselector_ip:$WEBSOCKET_PORT/apiws" ||
   fail 'WebSocket port-forward readiness timed out'
 wait_for_http_forward "http://$linkselector_ip:$ADMIN_PORT/admin" ||
   fail 'admin port-forward readiness timed out'
 wait_for_forward "$MTPROTO_PORT" || fail 'MTProto port-forward readiness timed out'
+wait_for_forward "$BOT_API_PORT" || fail 'Bot API port-forward readiness timed out'
 incus exec "$TARGET_INSTANCE" -- curl --fail --silent --show-error --max-time 10 \
   "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" --output /dev/null
+web_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --output /dev/null \
+  --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$LINKSELECTOR_PORT/") ||
+  fail 'the new web Service is not reachable through the k3s selector'
+[[ $web_status == 200 ]] || fail "the web app returned unexpected HTTP status $web_status"
 incus exec "$SOURCE_INSTANCE" -- busybox wget -q -O - \
   "http://$linkselector_ip:$LINKSELECTOR_PORT/+k3s-smoke" |
   grep --fixed-strings --quiet 'Open this in Teagram' || fail 'old LXC cannot reach the new selector privately'
@@ -1096,10 +1119,33 @@ admin_status=$(incus exec "$TARGET_INSTANCE" -- curl --silent --show-error --out
   --write-out '%{http_code}' --max-time 10 "http://$linkselector_ip:$ADMIN_PORT/admin") ||
   fail 'the new admin Service is not reachable from teagram-k3s'
 [[ $admin_status =~ ^(200|301|302|303|307|308|401|403)$ ]] || fail "the new admin Service returned unexpected HTTP status $admin_status"
+python3 - "$linkselector_ip" "$BOT_API_PORT" <<'PY' || fail 'the Bot API request through the k3s relay did not receive an HTTP response'
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+request = (
+    b"PROXY TCP4 100.64.1.2 100.64.0.1 1234 2447\r\n"
+    b"GET /bot0:cutover-smoke-invalid/getMe HTTP/1.1\r\n"
+    b"Host: teagram.invalid\r\n"
+    b"Connection: close\r\n\r\n"
+)
+with socket.create_connection((host, port), timeout=5) as connection:
+    connection.settimeout(5)
+    connection.sendall(request)
+    response = bytearray()
+    while len(response) < 65536:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        response.extend(chunk)
+if not response.startswith(b"HTTP/1.1 401 ") or b'"description":"Unauthorized"' not in response:
+    raise SystemExit("unexpected Bot API response")
+PY
 record_phase ready-for-edge
-printf '%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
+printf '%s\n%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
-  "$linkselector_ip:$MTPROTO_PORT" > "$EVIDENCE_DIR/serve-target"
+  "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
 record_phase serve-switch-started
@@ -1108,12 +1154,12 @@ incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
 record_phase serve-switched
 set_serve_routes "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
-  "$linkselector_ip:$MTPROTO_PORT" true
+  "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" true
 SERVE_AFTER=$(mktemp)
 serve_status_file "$SERVE_AFTER"
 check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
-  "$linkselector_ip:$MTPROTO_PORT"
+  "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT"
 install_private_file 0600 "$SERVE_AFTER" "$EVIDENCE_DIR/serve-after.json"
 rm -f -- "$SERVE_AFTER"
 
