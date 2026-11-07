@@ -491,3 +491,33 @@ func TestBotTokenLifecycleStoresOnlyHashAndNormalizesFailures(t *testing.T) {
 		t.Fatalf("revoked token hash = %x, want NULL", storedHash)
 	}
 }
+
+func TestBotTokenActiveTracksRevocation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	bot, _, err := st.CreateBot(ctx, "token_state_test_bot", "Token state")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	active, err := st.BotTokenActive(ctx, bot.ID)
+	if err != nil || !active {
+		t.Fatalf("active bot token = (%t, %v), want (true, nil)", active, err)
+	}
+	if err := st.RevokeBotToken(ctx, bot.ID); err != nil {
+		t.Fatalf("revoke bot token: %v", err)
+	}
+	active, err = st.BotTokenActive(ctx, bot.ID)
+	if err != nil || active {
+		t.Fatalf("revoked bot token = (%t, %v), want (false, nil)", active, err)
+	}
+}

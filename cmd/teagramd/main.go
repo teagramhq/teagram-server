@@ -3,9 +3,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +28,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"filippo.io/age"
+	"filippo.io/age/armor"
 	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/gotd/td/exchange"
 
@@ -655,18 +660,24 @@ func runBotCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) (e
 }
 
 func runBotCommandWithEUID(args []string, log *slog.Logger, stdout, stderr io.Writer, euid int) (err error) {
+	return runBotCommandWithIO(args, log, os.Stdin, stdout, stderr, euid)
+}
+
+func runBotCommandWithIO(args []string, log *slog.Logger, stdin io.Reader, stdout, stderr io.Writer, euid int) (err error) {
 	if len(args) == 0 {
 		return botUsageError()
 	}
+	if args[0] == "encrypt" {
+		return runBotEncryptCommand(args[1:], stdin, stdout)
+	}
 	switch args[0] {
-	case "create", "rotate", "revoke":
+	case "create", "rotate", "revoke", "lookup":
 		if euid != 0 {
 			return fmt.Errorf("bot %s requires root", args[0])
 		}
 	default:
 		return botUsageError()
 	}
-
 	var (
 		username  string
 		firstName string
@@ -686,6 +697,11 @@ func runBotCommandWithEUID(args []string, log *slog.Logger, stdout, stderr io.Wr
 		if err != nil || botID <= 0 {
 			return errors.New("invalid bot id")
 		}
+	case "lookup":
+		if len(args) != 2 {
+			return botUsageError()
+		}
+		username = args[1]
 	default:
 		return botUsageError()
 	}
@@ -739,13 +755,131 @@ func runBotCommandWithEUID(args []string, log *slog.Logger, stdout, stderr io.Wr
 			return fmt.Errorf("write bot token revocation: %w", err)
 		}
 		return nil
+	case "lookup":
+		resolution, found, err := st.UsernameByHandle(ctx, username)
+		if err != nil {
+			return fmt.Errorf("lookup bot username: %w", err)
+		}
+		if !found {
+			return json.NewEncoder(stdout).Encode(map[string]string{"state": "missing"})
+		}
+		if resolution.Kind == store.UsernameKindChannel {
+			return json.NewEncoder(stdout).Encode(map[string]any{
+				"state": "found", "owner": "channel", "id": resolution.Channel.ID,
+			})
+		}
+		active := false
+		if resolution.User.Kind == store.UserKindBot {
+			active, err = st.BotTokenActive(ctx, resolution.User.ID)
+			if err != nil {
+				return err
+			}
+		}
+		return json.NewEncoder(stdout).Encode(map[string]any{
+			"state": "found", "owner": "user", "id": resolution.User.ID,
+			"kind": resolution.User.Kind, "first_name": resolution.User.FirstName,
+			"token_active": active,
+		})
 	default:
 		return botUsageError()
 	}
 }
 
+func runBotEncryptCommand(args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) >= 2 {
+		if args[0] == "--check-recipient" {
+			if len(args) != 2 {
+				return botUsageError()
+			}
+			_, err := age.ParseX25519Recipient(args[1])
+			if err != nil {
+				return errors.New("invalid age recipient")
+			}
+			return nil
+		}
+	}
+	if len(args) != 1 {
+		return botUsageError()
+	}
+	recipient, err := age.ParseX25519Recipient(args[0])
+	if err != nil {
+		return errors.New("invalid age recipient")
+	}
+	token, err := readBotToken(stdin)
+	if err != nil {
+		return err
+	}
+	defer clear(token)
+
+	var ciphertext bytes.Buffer
+	armored := armor.NewWriter(&ciphertext)
+	encrypted, err := age.Encrypt(armored, recipient)
+	if err != nil {
+		return errors.New("cannot encrypt bot token")
+	}
+	if _, err := encrypted.Write(token); err != nil {
+		return errors.New("cannot encrypt bot token")
+	}
+	if err := encrypted.Close(); err != nil {
+		return errors.New("cannot encrypt bot token")
+	}
+	if err := armored.Close(); err != nil {
+		return errors.New("cannot encrypt bot token")
+	}
+	if _, err := stdout.Write(ciphertext.Bytes()); err != nil {
+		return errors.New("cannot write encrypted bot token")
+	}
+	return nil
+}
+
+func readBotToken(stdin io.Reader) ([]byte, error) {
+	token, err := io.ReadAll(io.LimitReader(stdin, 66))
+	if err != nil {
+		return nil, errors.New("cannot read bot token")
+	}
+	if len(token) > 64 {
+		clear(token)
+		return nil, errors.New("invalid bot token input")
+	}
+	if len(token) > 0 && token[len(token)-1] == '\n' {
+		token = token[:len(token)-1]
+	}
+	if len(token) == 0 || bytes.ContainsAny(token, "\r\n") {
+		clear(token)
+		return nil, errors.New("invalid bot token input")
+	}
+	separator := bytes.IndexByte(token, ':')
+	if separator <= 0 || separator == len(token)-1 || bytes.IndexByte(token[separator+1:], ':') >= 0 {
+		clear(token)
+		return nil, errors.New("invalid bot token input")
+	}
+	idText := token[:separator]
+	if idText[0] == '0' {
+		clear(token)
+		return nil, errors.New("invalid bot token input")
+	}
+	for _, b := range idText {
+		if b < '0' || b > '9' {
+			clear(token)
+			return nil, errors.New("invalid bot token input")
+		}
+	}
+	id, parseErr := strconv.ParseInt(string(idText), 10, 64)
+	secret := token[separator+1:]
+	decoded := make([]byte, base64.RawURLEncoding.DecodedLen(len(secret)))
+	decodedLen, decodeErr := base64.RawURLEncoding.Strict().Decode(decoded, secret)
+	decoded = decoded[:decodedLen]
+	if parseErr != nil || id <= 0 || len(secret) != 43 || decodeErr != nil || len(decoded) != 32 {
+		clear(decoded)
+		clear(token)
+		return nil, errors.New("invalid bot token input")
+	}
+	clear(decoded)
+	return token, nil
+}
+
 func botUsageError() error {
-	return errors.New("usage: teagramd bot create <username> <first_name> | teagramd bot rotate <bot_id> | teagramd bot revoke <bot_id>")
+	return errors.New("usage: teagramd bot create <username> <first_name> | teagramd bot rotate <bot_id> | teagramd bot revoke <bot_id> | teagramd bot lookup <username> | teagramd bot encrypt <age_recipient> (token on stdin)")
 }
 
 func parseInviteIssueArgs(args []string) (string, time.Duration, error) {

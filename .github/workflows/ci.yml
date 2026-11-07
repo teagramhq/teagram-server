@@ -1132,7 +1132,7 @@ jobs:
           bash -n deploy/teagram/ops/apply-user-invite-quota.sh
           bash -n deploy/teagram/test-apply-user-invite-quota.sh
           bash -n deploy/teagram/ops/start-server.sh
-          bash -n deploy/teagram/ops/bot-api-qa.sh deploy/teagram/test-bot-api-qa.sh deploy/teagram/test-bot-api-qa-ops.sh deploy/teagram/test-bot-api-relays.sh
+          bash -n deploy/teagram/ops/bot-api-qa.sh deploy/teagram/test-bot-api-qa.sh deploy/teagram/test-bot-api-qa-ops.sh deploy/teagram/ops/bot-api-qa-bot.sh deploy/teagram/test-bot-api-qa-bot-ops.sh deploy/teagram/test-bot-api-relays.sh
           bash -n deploy/teagram/ops/encrypt-media.sh
           bash -n deploy/teagram/ops/cleanup-media.sh
           bash -n deploy/teagram/ops/backup-media-key.sh
@@ -1206,6 +1206,8 @@ jobs:
             deploy/teagram/ops/bot-api-qa.sh \
             deploy/teagram/test-bot-api-qa.sh \
             deploy/teagram/test-bot-api-qa-ops.sh \
+            deploy/teagram/ops/bot-api-qa-bot.sh \
+            deploy/teagram/test-bot-api-qa-bot-ops.sh \
             deploy/teagram/test-bot-api-relays.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
@@ -1283,6 +1285,7 @@ jobs:
         run: |
           bash deploy/teagram/test-bot-api-qa.sh
           bash deploy/teagram/test-bot-api-qa-ops.sh
+          bash deploy/teagram/test-bot-api-qa-bot-ops.sh
           bash deploy/teagram/test-bot-api-relays.sh
 
       - name: Check media encryption and cleanup operations

@@ -3,14 +3,14 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the ten current operations: `target-failure-report`, `rollout-evidence`,
+the eleven current operations: `target-failure-report`, `rollout-evidence`,
 `invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
 `encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
-and `bot-api-qa`. A script's presence in an older main commit does not authorize
+`bot-api-qa`, and `bot-api-qa-bot`. A script's presence in an older main commit does not authorize
 a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
@@ -48,6 +48,34 @@ deployment. The rollout runner recreates them after a server restart so the
 inner relay joins the current network namespace. Production acceptance
 additionally needs `getMe` and the cross-peer revoked-token isolation test.
 
+## Bot API QA test bot
+
+`bot-api-qa-bot` manages only the fixed `teagram_qa_test_bot` account. Its
+`create` is idempotent and returns `state=exists` without issuing a token when
+the bot already exists. `rotate` issues a new token, `revoke` is an idempotent
+no-op after revocation, and `status` prints only the bot id, username and token
+state. Every mode checks that the pinned username still belongs to the expected
+bot account and refuses a channel, human account or mismatched bot.
+
+The Linux QA host keeps its age identity at `~/.config/age/keys.txt` with mode
+0600 and stores the encrypted bot token at
+`~/.config/teagram/qa-bot-api-token.age` with mode 0600. The operation pins the
+public age recipient. For `create` on an absent bot or `rotate`, stdout contains
+one metadata line followed by the age armor; pipe only the armor to that QA
+secret path. The plaintext token is captured only in memory, passed to
+`teagramd bot encrypt` through stdin, and encrypted before the operation prints
+anything. If encryption or output verification fails, the just-issued token is
+revoked. Never put the command's output in CI logs, a comment, or a file outside
+the encrypted QA path.
+
+`probe` makes 24 bounded `getMe` requests to the host's own tailnet IPv4 address
+using a fabricated invalid token for the QA bot id. It prints only HTTP status
+codes and succeeds only if one request reaches 429. The request URL travels to
+curl through `--config -`; it is not placed in the process arguments. This
+checks the host peer's auth bucket without rotating the active QA token. The QA
+host performs the real-token `getMe` check from the encrypted file. Revoke the
+QA bot after MAIN-3411 passes unless this issue records a standing test need.
+
 ## Threat model
 
 Assets at risk include the host filesystem and root-owned evidence,
@@ -62,7 +90,7 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the ten
+therefore become host-root execution. The dispatcher limits `run` to the eleven
 current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs
