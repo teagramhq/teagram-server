@@ -190,6 +190,26 @@ test("an RPC failure reports only its mapped outcome and never its raw message",
   assert.equal(JSON.stringify(result).includes("PASSWORD_HASH_INVALID"), false);
 });
 
+test("auth failure recording preserves the bounded categories for known RPC errors", async () => {
+  const cases = [
+    [{ error_code: 400, error_message: "PASSWORD_HASH_INVALID" }, "credential-rejected"],
+    [{ error_code: 420, error_message: "FLOOD_WAIT_123456" }, "flood"],
+    [{ error_code: 401, error_message: "AUTH_KEY_UNREGISTERED" }, "auth-key-unregistered"],
+  ];
+
+  for (const [error, expectedCategory] of cases) {
+    const progress = createProgress();
+    advanceTo(progress, "password-check");
+    assert.equal(progress.recordAuthFailure("auth.checkPassword", error), true);
+    const result = await progress.finish();
+
+    assert.equal(result.authMethod, "auth.checkPassword");
+    assert.equal(result.outcome, expectedCategory);
+    assert.equal(result.errorCategory, expectedCategory);
+    assert.equal(JSON.stringify(result).includes(error.error_message), false);
+  }
+});
+
 test("unknown auth RPC errors identify the failing method without exposing raw text", async () => {
   const sentinel = "PRIVATE_AUTH_ERROR_SENTINEL";
   const results = [];

@@ -380,6 +380,7 @@ function validateV3Result(value, sourceCommit) {
       typeof value.wssEndpointMatched !== "boolean" ||
       (hasAuthFailureDetails && (!AUTH_METHODS.has(value.authMethod) ||
         !AUTH_ERROR_CATEGORIES.has(value.errorCategory))) ||
+      (hasAuthFailureDetails && (value.ok || value.phase === "signed-in")) ||
       (value.ok && (value.phase !== "signed-in" || value.outcome !== "ok" || value.logout !== "ok" ||
         value.wssConnections < 1 || value.wssConnections > WSS_CONNECTION_CEILING ||
         value.submission !== "password" || value.chatList !== "rendered" ||

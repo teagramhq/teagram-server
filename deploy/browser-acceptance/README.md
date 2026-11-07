@@ -284,8 +284,9 @@ The result is one JSON line with `schemaVersion`, `ok`, `phase`, `outcome`,
 also reports `authMethod` (`auth.sendCode`, `auth.signIn`,
 `account.getPassword`, `auth.checkPassword`, or `unknown`) and `errorCategory`
 (`credential-rejected`, `auth-key-unregistered`, `flood`, `internal`, `timeout`,
-`closed`, or `unknown`). An unrecognized method or error maps to `unknown`; raw
-error text and credential material are never included.
+`closed`, or `unknown`). The observer maps an unrecognized method or error to
+`unknown`; the validator and wrapper reject any other value. Raw error text and
+credential material are never included.
 Version 2 binds the compiled host and mounted source revision, and clamps the
 WSS count at seven to represent six observed openings or an overflow. A
 successful sign-in allows four initial account-slot sockets, one replacement
@@ -393,10 +394,11 @@ is attributed to the fixed `account.getPassword` method because the worker
 performs that RPC for the password card. Raw errors and call arguments are not
 copied into events, results, logs, or evidence.
 
-The result validator and host wrapper accept only the bounded result schema and
-its enumerated fields; unknown methods and error categories become `unknown`.
-The QA script is pinned by digest, and the wrapper rejects extra keys and
-unrecognized values. The page can still fabricate an otherwise valid event,
+The observer maps unrecognized methods and error categories to `unknown`. The
+result validator and host wrapper accept only the bounded result schema and
+reject method or category values outside their enumerated sets. The QA script
+is pinned by digest, and the wrapper rejects extra keys and unrecognized
+values. The page can still fabricate an otherwise valid event,
 so this result localizes a browser failure but does not prove that an RPC
 reached the server or provide an authorization decision. This model assumes the
 host probe, Node process, and pinned runner are intact; compromise of those

@@ -877,6 +877,68 @@ test("acceptance emits only the exact sanitized v3 result after all preflight gu
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
 });
 
+test("acceptance rejects malformed auth details and any auth details on signed-in results", async () => {
+  const failedResult = {
+    schemaVersion: 3,
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    targetHost,
+    sourceCommit,
+    wssConnections: 1,
+    qaFailureCode: "authentication-failed-once",
+    submission: "password",
+    chatList: "not-reached",
+    chatListRows: 0,
+    wssEndpointMatched: false,
+    authMethod: "auth.checkPassword",
+    errorCategory: "credential-rejected",
+  };
+  const signedInFailure = {
+    ...failedResult,
+    phase: "signed-in",
+    outcome: "other",
+    logout: "ok",
+    chatList: "rendered",
+  };
+  const signedInSuccess = {
+    ...signedInFailure,
+    ok: true,
+    outcome: "ok",
+    qaFailureCode: "none",
+  };
+  const methodOnly = {...failedResult};
+  delete methodOnly.errorCategory;
+  const categoryOnly = {...failedResult};
+  delete categoryOnly.authMethod;
+  const invalidResults = [
+    methodOnly,
+    categoryOnly,
+    {...failedResult, errorCategory: "PASSWORD_HASH_INVALID"},
+    signedInFailure,
+    signedInSuccess,
+  ];
+
+  for (const candidate of invalidResults) {
+    const fixture = createDependencies(undefined, true);
+    fixture.dependencies.performAcceptance = async (prepared) => {
+      prepared.progressState.submission = "password";
+      prepared.progressState.chatList = candidate.phase === "signed-in" ? "rendered" : "not-reached";
+      return candidate;
+    };
+
+    const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+    const output = JSON.parse(result.output);
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(output.qaFailureCode, "unexpected-failure");
+    assert.notEqual(output.phase, candidate.phase);
+    assert.notEqual(output.authMethod, candidate.authMethod);
+    assert.notEqual(output.errorCategory, candidate.errorCategory);
+  }
+});
+
 test("username-field-missing reports no submission without making an auth call", async () => {
   const fixture = createDependencies(undefined, true);
   const browser = createAcceptancePage({usernameVisible: false});

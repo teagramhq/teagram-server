@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="667674be0a3f009a18fc31d812d079ff8b4df00422c864303ef15e18cb0b6560"
+readonly APPROVED_QA_SCRIPT_SHA256="326cd222ddb16762aa4eec9cb1970bcd7d980f04187a6694254d2f538ddb8a99"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -452,7 +452,8 @@ normalize_acceptance_result() {
         (.chatListRows | type == "number" and floor == . and . >= 0 and . <= 10) and
         (if has("authMethod") then
           (.authMethod as $method | ["account.getPassword", "auth.checkPassword", "auth.sendCode", "auth.signIn", "unknown"] | index($method) != null) and
-          (.errorCategory as $category | ["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "unknown"] | index($category) != null)
+          (.errorCategory as $category | ["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "unknown"] | index($category) != null) and
+          (.ok == false and .phase != "signed-in")
         else true end) and
         (.qaFailureCode as $failure | [
           "arguments-invalid", "asset-server-error", "authentication-failed-once", "authentication-repeated",
