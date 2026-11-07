@@ -65,14 +65,14 @@ func TestEvaluateBlocksSearchCountersDispatchWaitAboveBudget(t *testing.T) {
 	name := "messages.getSearchCounters dispatch wait"
 	rs := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
 	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
-	rs[0].ReceiveToDispatchSamples, rs[1].ReceiveToDispatchSamples = 40, 40
-	rs[1].MaxReceiveToDispatchWaitMs = 50.1
+	rs[0].ConcurrentRequestSamples, rs[1].ConcurrentRequestSamples = 40, 40
+	rs[1].MaxConcurrentRequestLatencyMs = 50.1
 	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
-	if got := reasons(v.Failures); !strings.Contains(got, "max receive-to-dispatch wait 50.1 ms at 100x, budget 50 ms") {
-		t.Fatalf("failures = %q, want the dispatch wait budget to block", got)
+	if got := reasons(v.Failures); !strings.Contains(got, "max help.getConfig latency while counters ran 50.1 ms at 100x, budget 50 ms") {
+		t.Fatalf("failures = %q, want the concurrent request latency budget to block", got)
 	}
-	if !strings.Contains(perfreport.Markdown(v), "head maximum receive-to-dispatch wait 50.1 ms across 40 samples; limit 50 ms") {
-		t.Fatalf("markdown does not report the dispatch wait measurement: %s", perfreport.Markdown(v))
+	if !strings.Contains(perfreport.Markdown(v), "head maximum help.getConfig latency while counters ran 50.1 ms across 40 samples; limit 50 ms") {
+		t.Fatalf("markdown does not report the concurrent request latency: %s", perfreport.Markdown(v))
 	}
 }
 
@@ -81,8 +81,8 @@ func TestEvaluateRequiresSearchCountersDispatchWaitSamples(t *testing.T) {
 	rs := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
 	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
 	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
-	if got := reasons(v.Failures); !strings.Contains(got, "no receive-to-dispatch wait samples at 100x") {
-		t.Fatalf("failures = %q, want missing dispatch wait samples to block", got)
+	if got := reasons(v.Failures); !strings.Contains(got, "no help.getConfig latency samples while counters were active at 100x") {
+		t.Fatalf("failures = %q, want missing concurrent request samples to block", got)
 	}
 }
 
@@ -90,8 +90,8 @@ func TestEvaluateSkipsScaleChecksForScaleIndependentScenario(t *testing.T) {
 	name := "messages.getSearchCounters dispatch wait"
 	rs := pair(name, perfreport.Read, result(5, 7, 4, 100), result(10, 12, 4, 10_000))
 	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
-	rs[1].ReceiveToDispatchSamples = 40
-	rs[1].MaxReceiveToDispatchWaitMs = 40
+	rs[1].ConcurrentRequestSamples = 40
+	rs[1].MaxConcurrentRequestLatencyMs = 40
 	if v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}); len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
 		t.Fatalf("scale-independent scenario failed: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
 	}
@@ -101,15 +101,15 @@ func TestAggregateKeepsMaximumDispatchWaitAndAddsSamples(t *testing.T) {
 	name := "messages.getSearchCounters dispatch wait"
 	rs1 := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
 	rs2 := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
-	rs1[1].ReceiveToDispatchSamples, rs1[1].MaxReceiveToDispatchWaitMs = 20, 35
-	rs2[1].ReceiveToDispatchSamples, rs2[1].MaxReceiveToDispatchWaitMs = 20, 48
+	rs1[1].ConcurrentRequestSamples, rs1[1].MaxConcurrentRequestLatencyMs = 20, 35
+	rs2[1].ConcurrentRequestSamples, rs2[1].MaxConcurrentRequestLatencyMs = 20, 48
 	agg := perfreport.Aggregate([]perfreport.Report{report(rs1...), report(rs2...)})
 	for _, r := range agg.Results {
 		if r.Fixture != perfreport.Large {
 			continue
 		}
-		if r.ReceiveToDispatchSamples != 40 || r.MaxReceiveToDispatchWaitMs != 48 {
-			t.Fatalf("aggregated dispatch wait = %d samples, %.1f ms; want 40, 48 ms", r.ReceiveToDispatchSamples, r.MaxReceiveToDispatchWaitMs)
+		if r.ConcurrentRequestSamples != 40 || r.MaxConcurrentRequestLatencyMs != 48 {
+			t.Fatalf("aggregated dispatch wait = %d samples, %.1f ms; want 40, 48 ms", r.ConcurrentRequestSamples, r.MaxConcurrentRequestLatencyMs)
 		}
 		return
 	}

@@ -65,7 +65,7 @@ func (h *handlers) handleUnknown(c *mtproto.Conn, req *mtproto.Request) error {
 	case mtproto.UnimplementedAnswer:
 	}
 
-	id, err := req.Buf.PeekID()
+	id, err := req.BodyBuffer().PeekID()
 	if err != nil {
 		if isClose {
 			if suppressed, ok := c.LogUnimplementedClose(); ok {
@@ -151,7 +151,7 @@ func (h *handlers) handleUnknownGated(c *mtproto.Conn, req *mtproto.Request) err
 			// line that must say what was called rather than being lost
 			// behind the sampler. It consumes the pending count, so the
 			// drop's flush finds nothing left to write.
-			id, _ := req.Buf.PeekID() //nolint:errcheck // dispatcher already validated the id
+			id, _ := req.BodyBuffer().PeekID() //nolint:errcheck // dispatcher already validated the id
 			method := methodName(id)
 			// The line names the error the caller received. On a close the
 			// caller receives no RPC answer at all — the connection ends —
@@ -167,7 +167,7 @@ func (h *handlers) handleUnknownGated(c *mtproto.Conn, req *mtproto.Request) err
 			}
 			return errMethodNotImplBurst
 		}
-		id, _ := req.Buf.PeekID() //nolint:errcheck // dispatcher already validated the id
+		id, _ := req.BodyBuffer().PeekID() //nolint:errcheck // dispatcher already validated the id
 		method := methodName(id)
 		if suppressed, ok := c.LogUnimplemented(method); ok {
 			h.log.Warn("method not implemented",

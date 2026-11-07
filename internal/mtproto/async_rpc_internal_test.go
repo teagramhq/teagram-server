@@ -3,7 +3,11 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -12,30 +16,61 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 )
 
+const (
+	asyncRPCWorkerLimit = 2
+	asyncRPCQueueLimit  = 16
+)
+
 type asyncRPCFrameConn struct {
-	frames    [][]byte
-	index     int
-	eof       chan struct{}
-	closed    chan struct{}
-	once      sync.Once
-	closeOnce sync.Once
+	frames     [][]byte
+	index      int
+	eof        chan struct{}
+	closed     chan struct{}
+	once       sync.Once
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	sent       [][]byte
+	sentNotify chan struct{}
+	recvNotify chan int
 }
 
 func (c *asyncRPCFrameConn) Recv(_ context.Context, b *bin.Buffer) error {
 	if c.index == len(c.frames) {
-		<-c.eof
-		return io.EOF
+		select {
+		case <-c.eof:
+			return io.EOF
+		case <-c.closed:
+			return net.ErrClosed
+		}
 	}
 	b.ResetTo(slices.Clone(c.frames[c.index]))
 	c.index++
+	if c.recvNotify != nil {
+		select {
+		case c.recvNotify <- c.index:
+		default:
+		}
+	}
 	return nil
 }
 
-func (*asyncRPCFrameConn) Send(context.Context, *bin.Buffer) error { return nil }
+func (c *asyncRPCFrameConn) Send(_ context.Context, b *bin.Buffer) error {
+	c.mu.Lock()
+	c.sent = append(c.sent, slices.Clone(b.Buf))
+	c.mu.Unlock()
+	if c.sentNotify != nil {
+		select {
+		case c.sentNotify <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
 
 func (c *asyncRPCFrameConn) Close() error {
 	if c.closed != nil {
@@ -56,13 +91,12 @@ type asyncRPCOrderHandler struct {
 	mutations    []int64
 }
 
-func (h *asyncRPCOrderHandler) CanRunConcurrently(req *Request) bool {
-	id, err := req.Buf.PeekID()
-	return err == nil && id == tg.MessagesGetSearchCountersRequestTypeID
+func (h *asyncRPCOrderHandler) CanRunConcurrently(id uint32) bool {
+	return id == tg.MessagesGetSearchCountersRequestTypeID
 }
 
 func (h *asyncRPCOrderHandler) OnMessage(c *Conn, req *Request) error {
-	id, err := req.Buf.PeekID()
+	id, err := asyncRPCRequestBody(req).PeekID()
 	if err != nil {
 		return err
 	}
@@ -99,13 +133,12 @@ func (h *asyncRPCBatchHandler) failCounter() {
 	h.failOnce.Do(func() { close(h.failRelease) })
 }
 
-func (h *asyncRPCBatchHandler) CanRunConcurrently(req *Request) bool {
-	id, err := req.Buf.PeekID()
-	return err == nil && id == tg.MessagesGetSearchCountersRequestTypeID
+func (h *asyncRPCBatchHandler) CanRunConcurrently(id uint32) bool {
+	return id == tg.MessagesGetSearchCountersRequestTypeID
 }
 
 func (h *asyncRPCBatchHandler) OnMessage(c *Conn, req *Request) error {
-	id, err := req.Buf.PeekID()
+	id, err := asyncRPCRequestBody(req).PeekID()
 	if err != nil {
 		return err
 	}
@@ -131,18 +164,88 @@ func asyncRPCBatchServer(t *testing.T, key crypto.AuthKey, handler Handler, fram
 	if err := keys.Save(context.Background(), key); err != nil {
 		t.Fatalf("save test auth key: %v", err)
 	}
-	dispatcher := ConcurrentRPCs(UnpackInvokeWithAfterMsg(handler, nil), tg.MessagesGetSearchCountersRequestTypeID)
+	dispatcher := UnpackInvokeWithAfterMsg(handler, nil)
 	server := New(exchange.PrivateKey{}, 2, keys, dispatcher, nil)
-	return server, &asyncRPCFrameConn{eof: make(chan struct{}), closed: make(chan struct{}), frames: frames}
+	return server, &asyncRPCFrameConn{
+		eof: make(chan struct{}), closed: make(chan struct{}), frames: frames,
+		sentNotify: make(chan struct{}, 64), recvNotify: make(chan int, len(frames)+1),
+	}
 }
 
 func asyncRPCBatchHandlerForTest() *asyncRPCBatchHandler {
 	return &asyncRPCBatchHandler{
-		counters:  make(chan int64, 8),
+		counters:  make(chan int64, 32),
 		configs:   make(chan int64, 8),
 		mutations: make(chan int64, 8),
 		release:   make(chan struct{}),
 	}
+}
+
+type asyncRPCReply struct {
+	key     [8]byte
+	session int64
+	body    []byte
+}
+
+func (c *asyncRPCFrameConn) repliesForKey(t *testing.T, key crypto.AuthKey) []asyncRPCReply {
+	t.Helper()
+	c.mu.Lock()
+	frames := make([][]byte, len(c.sent))
+	for i := range c.sent {
+		frames[i] = slices.Clone(c.sent[i])
+	}
+	c.mu.Unlock()
+	cipher := crypto.NewClientCipher(crypto.DefaultRand())
+	replies := make([]asyncRPCReply, 0, len(frames))
+	for _, frame := range frames {
+		message := &crypto.EncryptedMessage{}
+		if err := message.DecodeWithoutCopy(&bin.Buffer{Buf: frame}); err != nil {
+			t.Fatalf("decode server frame: %v", err)
+		}
+		decrypted, err := cipher.Decrypt(key, message)
+		if err != nil {
+			continue
+		}
+		replies = append(replies, asyncRPCReply{key: key.ID, session: decrypted.SessionID, body: slices.Clone(decrypted.Data())})
+	}
+	return replies
+}
+
+func asyncRPCResult(t *testing.T, replies []asyncRPCReply, msgID int64) (asyncRPCReply, []byte, bool) {
+	t.Helper()
+	for _, reply := range replies {
+		var result proto.Result
+		if err := result.Decode(&bin.Buffer{Buf: reply.body}); err != nil || result.RequestMessageID != msgID {
+			continue
+		}
+		return reply, slices.Clone(result.Result), true
+	}
+	return asyncRPCReply{}, nil, false
+}
+
+func asyncRPCReceivedAt(req *Request) (time.Time, bool) {
+	field := reflect.ValueOf(req).Elem().FieldByName("ReceivedAt")
+	if !field.IsValid() || !field.CanInterface() {
+		return time.Time{}, false
+	}
+	value, ok := reflect.TypeAssert[time.Time](field)
+	return value, ok
+}
+
+func asyncRPCBodyField(req *Request) *bin.Buffer {
+	field := reflect.ValueOf(req).Elem().FieldByName("Body")
+	if !field.IsValid() || !field.CanInterface() {
+		return nil
+	}
+	body, _ := reflect.TypeAssert[*bin.Buffer](field)
+	return body
+}
+
+func asyncRPCRequestBody(req *Request) *bin.Buffer {
+	if body := asyncRPCBodyField(req); body != nil {
+		return body
+	}
+	return req.Buf
 }
 
 func asyncRPCGZIP(t *testing.T, message bin.Encoder) *proto.GZIP {
@@ -183,7 +286,7 @@ func TestConcurrentRPCDoesNotDelayCheapRequestOrReorderMutations(t *testing.T) {
 	if err := keys.Save(context.Background(), key); err != nil {
 		t.Fatalf("save test auth key: %v", err)
 	}
-	dispatcher := ConcurrentRPCs(UnpackInvokeWithAfterMsg(handler, nil), tg.MessagesGetSearchCountersRequestTypeID)
+	dispatcher := UnpackInvokeWithAfterMsg(handler, nil)
 	server := New(exchange.PrivateKey{}, 2, keys, dispatcher, nil)
 	conn := &asyncRPCFrameConn{eof: make(chan struct{}), frames: [][]byte{
 		shutdownClientFrame(t, key, 42, 1<<32, &tg.InvokeWithLayerRequest{Layer: 228,
@@ -246,7 +349,7 @@ func TestConcurrentRPCWaitsForInvokeAfterMsgDependency(t *testing.T) {
 	if err := keys.Save(context.Background(), key); err != nil {
 		t.Fatalf("save test auth key: %v", err)
 	}
-	dispatcher := ConcurrentRPCs(UnpackInvokeWithAfterMsg(handler, nil), tg.MessagesGetSearchCountersRequestTypeID)
+	dispatcher := UnpackInvokeWithAfterMsg(handler, nil)
 	server := New(exchange.PrivateKey{}, 2, keys, dispatcher, nil)
 	conn := &asyncRPCFrameConn{eof: make(chan struct{}), frames: [][]byte{
 		shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}),
@@ -546,6 +649,9 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 		shutdownClientFrame(t, key, 42, 7<<32, &tg.HelpGetConfigRequest{}),
 	}
 	server, conn := asyncRPCBatchServer(t, key, handler, frames...)
+	sink := &serverErrorLogSink{}
+	logUpdates := sink.watch()
+	server.log = slog.New(sink)
 	server.shutdown.drainTimeout = 3 * time.Second
 	served := make(chan error, 1)
 	go func() { served <- server.ServeConn(context.Background(), conn) }()
@@ -585,12 +691,6 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 		}
 	}
 
-	server.shutdown.beginDrain()
-	drained := make(chan struct{})
-	go func() {
-		server.shutdown.waitForRPCs()
-		close(drained)
-	}()
 	handler.failCounter()
 	select {
 	case <-conn.closed:
@@ -600,14 +700,491 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 	handler.releaseCounters()
 	conn.end()
 	select {
-	case <-drained:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("shutdown drain retained admissions for discarded container counters")
-	}
-	select {
 	case <-served:
 		serveDone = true
 	case <-time.After(2 * time.Second):
 		t.Fatal("serve loop did not finish after counter failure")
 	}
+	logDeadline := time.NewTimer(time.Second)
+	defer logDeadline.Stop()
+	for {
+		loggedDiscardCount := false
+		for _, record := range sink.snapshot() {
+			if record.message == "concurrent RPC failed" && fmt.Sprint(record.attrs["discarded_queued_rpcs"]) == "2" {
+				loggedDiscardCount = true
+				break
+			}
+		}
+		if loggedDiscardCount {
+			break
+		}
+		select {
+		case <-logUpdates:
+		case <-logDeadline.C:
+			t.Fatalf("counter failure logs did not report two discarded queued requests: %+v", sink.snapshot())
+		}
+	}
+	server.shutdown.beginDrain()
+	drained := make(chan struct{})
+	go func() {
+		server.shutdown.waitForRPCs()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdown drain retained admissions for discarded container counters")
+	}
+}
+
+type asyncRPCFixedClassifier struct {
+	typeID uint32
+}
+
+func (h asyncRPCFixedClassifier) CanRunConcurrently(typeID uint32) bool {
+	return typeID == h.typeID
+}
+
+func (asyncRPCFixedClassifier) OnMessage(*Conn, *Request) error { return nil }
+
+func TestRPCTraceWrapPreservesConcurrentClassifier(t *testing.T) {
+	const typeID = tg.MessagesGetSearchCountersRequestTypeID
+	tracer := NewRPCTracerWithExporter(NewMemoryRPCSpanExporter(1))
+	defer func() {
+		if err := tracer.Close(); err != nil {
+			t.Errorf("close RPC tracer: %v", err)
+		}
+	}()
+
+	wrapped := tracer.Wrap(asyncRPCFixedClassifier{typeID: typeID})
+	classifier, ok := wrapped.(interface{ CanRunConcurrently(uint32) bool })
+	if !ok || !classifier.CanRunConcurrently(typeID) {
+		t.Fatal("RPCTracer.Wrap dropped the next handler's concurrent classifier")
+	}
+
+	unpacked := UnpackInvokeWithAfterMsg(asyncRPCFixedClassifier{typeID: typeID}, nil)
+	classifier, ok = unpacked.(interface{ CanRunConcurrently(uint32) bool })
+	if !ok || !classifier.CanRunConcurrently(typeID) {
+		t.Fatal("UnpackInvokeWithAfterMsg dropped the next handler's concurrent classifier")
+	}
+}
+
+func TestRPCDependencyOutcomeDoesNotWaitForSocketWriteLock(t *testing.T) {
+	conn := &Conn{sessionID: 42}
+	conn.recoveryBinding.Store(&recoveryBinding{Session: 42})
+	conn.rpcOutcomes[0] = rpcOutcome{msgID: 1 << 32, session: 42, success: true}
+	conn.rpcOutcomeNext = 1
+	conn.rpcOutcomeSize = 1
+	conn.writeMu.Lock()
+	result := make(chan struct {
+		found   bool
+		success bool
+	}, 1)
+	go func() {
+		found, success := conn.RPCDependencyOutcome(42, 1<<32, 2<<32)
+		result <- struct {
+			found   bool
+			success bool
+		}{found: found, success: success}
+	}()
+	select {
+	case got := <-result:
+		conn.writeMu.Unlock()
+		if !got.found || !got.success {
+			t.Fatalf("dependency outcome = (%v, %v), want (true, true)", got.found, got.success)
+		}
+	case <-time.After(50 * time.Millisecond):
+		conn.writeMu.Unlock()
+		<-result
+		t.Fatal("dependency outcome waited for the socket write lock")
+	}
+}
+
+func TestConcurrentRPCContainerKeepsFrameReceiveTimestamp(t *testing.T) {
+	type stamp struct {
+		value time.Time
+		found bool
+	}
+	seen := make(chan stamp, 1)
+	handler := HandlerFunc(func(_ *Conn, req *Request) error {
+		value, found := asyncRPCReceivedAt(req)
+		seen <- stamp{value: value, found: found}
+		return nil
+	})
+	key := shutdownTestAuthKey()
+	server, conn := asyncRPCBatchServer(t, key, handler, asyncRPCContainerFrame(t, key, 42, 1<<32, 2<<32, &tg.HelpGetConfigRequest{}))
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+	defer conn.end()
+	select {
+	case got := <-seen:
+		if !got.found || got.value.IsZero() {
+			t.Fatalf("container request receive timestamp = (%v, %v), want a non-zero timestamp", got.value, got.found)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("container request did not reach its handler")
+	}
+	conn.end()
+	select {
+	case err := <-served:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ServeConn = %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve loop did not finish after container request")
+	}
+}
+
+func TestGZIPHandlerKeepsPackedBufferAndExposesDecodedBody(t *testing.T) {
+	seen := make(chan gzipObserved, 1)
+	handler := &gzipRequestHandler{seen: seen}
+	key := shutdownTestAuthKey()
+	server, conn := asyncRPCBatchServer(t, key, handler, shutdownClientFrame(t, key, 42, 1<<32,
+		asyncRPCGZIP(t, &tg.HelpGetConfigRequest{})))
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+	defer conn.end()
+	select {
+	case got := <-seen:
+		if got.packedID != proto.GZIPTypeID || got.bodyID != tg.HelpGetConfigRequestTypeID {
+			t.Fatalf("packed/decompressed constructor IDs = %x/%x, want gzip/help.getConfig", got.packedID, got.bodyID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gzip request did not reach its handler")
+	}
+	conn.end()
+	select {
+	case err := <-served:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ServeConn = %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve loop did not finish after gzip request")
+	}
+}
+
+type gzipObserved struct {
+	packedID uint32
+	bodyID   uint32
+}
+
+type gzipRequestHandler struct {
+	seen chan<- gzipObserved
+}
+
+func (*gzipRequestHandler) CanRunConcurrently(typeID uint32) bool {
+	return typeID == tg.HelpGetConfigRequestTypeID
+}
+
+func (h *gzipRequestHandler) OnMessage(c *Conn, req *Request) error {
+	packedID, err := req.Buf.PeekID()
+	if err != nil {
+		return err
+	}
+	body := asyncRPCBodyField(req)
+	if body == nil {
+		h.seen <- gzipObserved{packedID: packedID}
+		return nil
+	}
+	bodyID, err := body.PeekID()
+	if err != nil {
+		return err
+	}
+	h.seen <- gzipObserved{packedID: packedID, bodyID: bodyID}
+	return c.SendResult(req, &tg.BoolTrue{})
+}
+
+type asyncRPCPeerDisconnectHandler struct {
+	started  chan int64
+	canceled chan int64
+}
+
+func (*asyncRPCPeerDisconnectHandler) CanRunConcurrently(typeID uint32) bool {
+	return typeID == tg.MessagesGetSearchCountersRequestTypeID
+}
+
+func (h *asyncRPCPeerDisconnectHandler) OnMessage(_ *Conn, req *Request) error {
+	h.started <- req.MsgID
+	<-req.Ctx.Done()
+	h.canceled <- req.MsgID
+	return req.Ctx.Err()
+}
+
+func TestConcurrentRPCDoesNotRunQueuedCounterAfterPeerDisconnect(t *testing.T) {
+	key := shutdownTestAuthKey()
+	handler := &asyncRPCPeerDisconnectHandler{
+		started: make(chan int64, 8), canceled: make(chan int64, 8),
+	}
+	container := asyncRPCContainerFrame(t, key, 42, 2<<32, 4<<32,
+		&tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}},
+		&tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}},
+	)
+	server, conn := asyncRPCBatchServer(t, key, handler,
+		shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}),
+		container,
+	)
+	server.shutdown.drainTimeout = 2 * time.Second
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+	started := make(map[int64]bool)
+	for len(started) < asyncRPCWorkerLimit {
+		select {
+		case msgID := <-handler.started:
+			started[msgID] = true
+		case <-time.After(time.Second):
+			t.Fatalf("only %d counter handlers started before disconnect, want %d", len(started), asyncRPCWorkerLimit)
+		}
+	}
+	for received := 0; received < 2; {
+		select {
+		case index := <-conn.recvNotify:
+			if index > received {
+				received = index
+			}
+		case <-time.After(time.Second):
+			t.Fatal("serve loop did not read the frame containing queued container work")
+		}
+	}
+	conn.end()
+	for range asyncRPCWorkerLimit {
+		select {
+		case <-handler.canceled:
+		case <-time.After(time.Second):
+			t.Fatal("peer disconnect did not cancel active counter work")
+		}
+	}
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not drain after peer disconnect")
+	}
+	server.shutdown.beginDrain()
+	drained := make(chan struct{})
+	go func() {
+		server.shutdown.waitForRPCs()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdown retained admission references after peer disconnect")
+	}
+	select {
+	case msgID := <-handler.started:
+		t.Fatalf("queued counter %d ran after peer disconnect", msgID)
+	default:
+	}
+}
+
+func TestConcurrentRPCNineteenthCounterGetsInternalAndLogsOverload(t *testing.T) {
+	key := shutdownTestAuthKey()
+	handler := asyncRPCBatchHandlerForTest()
+	sink := &serverErrorLogSink{}
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save test auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, UnpackInvokeWithAfterMsg(handler, nil), slog.New(sink))
+	frames := make([][]byte, asyncRPCWorkerLimit+asyncRPCQueueLimit+1)
+	for i := range frames {
+		frames[i] = shutdownClientFrame(t, key, 42, int64(i+1)<<32,
+			&tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}})
+	}
+	conn := &asyncRPCFrameConn{
+		frames: frames, eof: make(chan struct{}), closed: make(chan struct{}),
+		sentNotify: make(chan struct{}, 64), recvNotify: make(chan int, len(frames)+1),
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+	started := make([]int64, 0, asyncRPCWorkerLimit)
+	for len(started) < asyncRPCWorkerLimit {
+		select {
+		case msgID := <-handler.counters:
+			started = append(started, msgID)
+		case <-time.After(time.Second):
+			t.Fatal("the two available counter workers did not start")
+		}
+	}
+	var overload *mt.RPCError
+	deadline := time.After(time.Second)
+	for {
+		replies := conn.repliesForKey(t, key)
+		if _, payload, found := asyncRPCResult(t, replies, int64(len(frames))<<32); found {
+			overload = &mt.RPCError{}
+			if err := overload.Decode(&bin.Buffer{Buf: payload}); err != nil {
+				t.Fatalf("decode overflow RPC error: %v", err)
+			}
+			break
+		}
+		select {
+		case <-conn.sentNotify:
+		case <-deadline:
+			t.Fatal("nineteenth counter did not receive an RPC error")
+		}
+	}
+	if overload.ErrorCode != 500 || overload.ErrorMessage != "INTERNAL" {
+		t.Fatalf("nineteenth counter error = %d %q, want 500 INTERNAL", overload.ErrorCode, overload.ErrorMessage)
+	}
+	handler.releaseCounters()
+	seen := make(map[int64]bool, asyncRPCWorkerLimit+asyncRPCQueueLimit)
+	for _, msgID := range started {
+		seen[msgID] = true
+	}
+	for len(seen) < asyncRPCWorkerLimit+asyncRPCQueueLimit {
+		select {
+		case msgID := <-handler.counters:
+			seen[msgID] = true
+		case <-time.After(time.Second):
+			t.Fatalf("only %d of 18 accepted counters reached the handler", len(seen))
+		}
+	}
+	conn.end()
+	select {
+	case err := <-served:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ServeConn = %v, want EOF", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not finish after accepted counters completed")
+	}
+	logged := false
+	for _, record := range sink.snapshot() {
+		if record.message == "concurrent RPC queue full" {
+			logged = true
+			if record.attrs["method"] != "messages.getSearchCounters" || record.attrs["auth_key_id"] == nil {
+				t.Fatalf("overload log attributes = %v, want method and auth key ID", record.attrs)
+			}
+		}
+	}
+	if !logged {
+		t.Fatal("counter overload was not logged")
+	}
+}
+
+func TestConcurrentRPCWaitsForSessionAndKeyRebinding(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  bool
+	}{
+		{name: "session"},
+		{name: "auth key", key: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key1 := shutdownTestAuthKey()
+			var rawKey crypto.Key
+			for i := range rawKey {
+				rawKey[i] = byte(i + 1)
+			}
+			key2 := rawKey.WithID()
+			secondFrameKey, secondSession := key1, int64(43)
+			if test.key {
+				secondFrameKey, secondSession = key2, 42
+			}
+			handler := asyncRPCBatchHandlerForTest()
+			keys := NewMemoryAuthKeyStore()
+			if err := keys.Save(context.Background(), key1); err != nil {
+				t.Fatalf("save first auth key: %v", err)
+			}
+			if test.key {
+				if err := keys.Save(context.Background(), key2); err != nil {
+					t.Fatalf("save second auth key: %v", err)
+				}
+			}
+			server := New(exchange.PrivateKey{}, 2, keys, UnpackInvokeWithAfterMsg(handler, nil), nil)
+			conn := &asyncRPCFrameConn{
+				frames: [][]byte{
+					shutdownClientFrame(t, key1, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}),
+					shutdownClientFrame(t, secondFrameKey, secondSession, 2<<32, &tg.HelpGetConfigRequest{}),
+				},
+				eof: make(chan struct{}), closed: make(chan struct{}),
+				sentNotify: make(chan struct{}, 64), recvNotify: make(chan int, 3),
+			}
+			served := make(chan error, 1)
+			go func() { served <- server.ServeConn(context.Background(), conn) }()
+			select {
+			case <-handler.counters:
+			case <-time.After(time.Second):
+				t.Fatal("search counters handler did not start")
+			}
+			for received := 0; received < 2; {
+				select {
+				case index := <-conn.recvNotify:
+					if index > received {
+						received = index
+					}
+				case <-time.After(time.Second):
+					t.Fatal("serve loop did not read the rebinding frame while counters were active")
+				}
+			}
+			select {
+			case msgID := <-handler.configs:
+				t.Fatalf("request %d crossed an active counters call before the binding barrier", msgID)
+			case <-time.After(50 * time.Millisecond):
+			}
+			handler.releaseCounters()
+			select {
+			case msgID := <-handler.configs:
+				if msgID != 2<<32 {
+					t.Fatalf("post-barrier help.getConfig id = %d, want %d", msgID, 2<<32)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("request after the binding barrier did not run")
+			}
+			conn.end()
+			select {
+			case err := <-served:
+				if !errors.Is(err, io.EOF) {
+					t.Fatalf("ServeConn = %v, want EOF", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("serve loop did not finish after rebinding")
+			}
+			replies := conn.repliesForKey(t, key1)
+			counterReply, payload, found := asyncRPCResult(t, replies, 1<<32)
+			if !found {
+				t.Fatal("counter result was not encrypted under the original auth key")
+			}
+			if counterReply.session != 42 {
+				t.Fatalf("counter result session = %d, want original session 42", counterReply.session)
+			}
+			if test.key && counterReply.key != key1.ID {
+				t.Fatalf("counter result key = %x, want original key %x", counterReply.key, key1.ID)
+			}
+			var result tg.BoolTrue
+			if err := result.Decode(&bin.Buffer{Buf: payload}); err != nil {
+				t.Fatalf("decode counter result: %v", err)
+			}
+		})
+	}
+}
+
+func TestConcurrentRPCDisconnectLikeHandlerErrorClosesConnection(t *testing.T) {
+	handler := HandlerFunc(func(_ *Conn, _ *Request) error { return io.EOF })
+	classifier := asyncRPCDisconnectClassifier{Handler: handler}
+	key := shutdownTestAuthKey()
+	server, conn := asyncRPCBatchServer(t, key, classifier,
+		shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}))
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		conn.end()
+		<-served
+		t.Fatal("disconnect-shaped handler error left the connection open")
+	}
+	select {
+	case err := <-served:
+		if err == nil {
+			t.Fatal("ServeConn succeeded after the handler returned io.EOF")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve loop did not exit after the connection closed")
+	}
+}
+
+type asyncRPCDisconnectClassifier struct{ Handler }
+
+func (asyncRPCDisconnectClassifier) CanRunConcurrently(typeID uint32) bool {
+	return typeID == tg.MessagesGetSearchCountersRequestTypeID
 }

@@ -1,9 +1,10 @@
 package mtproto
 
 import (
-	"context"
 	"errors"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/proto"
@@ -15,100 +16,116 @@ const (
 )
 
 type concurrentRPCWork struct {
-	msgID     int64
-	run       func()
-	admission *rpcAdmission
+	msgID   int64
+	run     func()
+	release func()
 }
 
-func (c *Conn) startConcurrentRPC(msgID int64, run func(), admission *rpcAdmission) (bool, bool) {
-	c.concurrentRPCMu.Lock()
-	if _, exists := c.concurrentRPCs[msgID]; exists {
-		c.concurrentRPCMu.Unlock()
+// concurrentRPCSet owns the in-flight and queued work for one connection.
+// Entries remain present exactly while their work is running or queued.
+type concurrentRPCSet struct {
+	mu      sync.Mutex
+	entries map[int64]chan struct{}
+	active  int
+	queue   []concurrentRPCWork
+	err     error
+}
+
+func (s *concurrentRPCSet) start(msgID int64, work concurrentRPCWork) (started, duplicate bool) {
+	s.mu.Lock()
+	if _, exists := s.entries[msgID]; exists {
+		s.mu.Unlock()
 		return true, true
 	}
-	if len(c.concurrentRPCs) >= maxConcurrentRPCsPerConn+maxQueuedConcurrentRPCsPerConn {
-		c.concurrentRPCMu.Unlock()
+	if len(s.entries) >= maxConcurrentRPCsPerConn+maxQueuedConcurrentRPCsPerConn {
+		s.mu.Unlock()
 		return false, false
 	}
-	if c.concurrentRPCs == nil {
-		c.concurrentRPCs = make(map[int64]chan struct{})
+	if s.entries == nil {
+		s.entries = make(map[int64]chan struct{})
 	}
-	c.concurrentRPCs[msgID] = make(chan struct{})
-	if c.concurrentRPCActive < maxConcurrentRPCsPerConn {
-		c.concurrentRPCActive++
-		c.concurrentRPCMu.Unlock()
-		go run()
+	s.entries[msgID] = make(chan struct{})
+	if s.active < maxConcurrentRPCsPerConn {
+		s.active++
+		s.mu.Unlock()
+		go work.run()
 		return true, false
 	}
-	c.concurrentRPCQueue = append(c.concurrentRPCQueue, concurrentRPCWork{msgID: msgID, run: run, admission: admission})
-	c.concurrentRPCMu.Unlock()
+	s.queue = append(s.queue, work)
+	s.mu.Unlock()
 	return true, false
 }
 
-func (c *Conn) finishConcurrentRPC(msgID int64, err error) {
-	c.concurrentRPCMu.Lock()
-	if err != nil && c.concurrentRPCError == nil {
-		c.concurrentRPCError = err
+// finish removes one completed entry and returns the number of queued entries
+// discarded after an error. Retained admissions are released outside the set
+// lock so shutdown accounting cannot run arbitrary cleanup under it.
+func (s *concurrentRPCSet) finish(msgID int64, err error) int {
+	s.mu.Lock()
+	if err != nil && s.err == nil {
+		s.err = err
 	}
-	if done, ok := c.concurrentRPCs[msgID]; ok {
-		delete(c.concurrentRPCs, msgID)
+	if done, ok := s.entries[msgID]; ok {
+		delete(s.entries, msgID)
 		close(done)
 	}
-	c.concurrentRPCActive--
+	s.active--
 	var next func()
-	var discarded []*rpcAdmission
+	var discarded []func()
+	discardedCount := 0
 	if err != nil {
-		for _, work := range c.concurrentRPCQueue {
-			if done, ok := c.concurrentRPCs[work.msgID]; ok {
-				delete(c.concurrentRPCs, work.msgID)
+		for _, work := range s.queue {
+			discardedCount++
+			if done, ok := s.entries[work.msgID]; ok {
+				delete(s.entries, work.msgID)
 				close(done)
 			}
-			if work.admission != nil {
-				discarded = append(discarded, work.admission)
+			if work.release != nil {
+				discarded = append(discarded, work.release)
 			}
 		}
-		c.concurrentRPCQueue = nil
-	} else if len(c.concurrentRPCQueue) > 0 {
-		work := c.concurrentRPCQueue[0]
-		c.concurrentRPCQueue[0] = concurrentRPCWork{}
-		c.concurrentRPCQueue = c.concurrentRPCQueue[1:]
-		c.concurrentRPCActive++
+		s.queue = nil
+	} else if len(s.queue) > 0 {
+		work := s.queue[0]
+		s.queue[0] = concurrentRPCWork{}
+		s.queue = s.queue[1:]
+		s.active++
 		next = work.run
 	}
-	c.concurrentRPCMu.Unlock()
-	for _, admission := range discarded {
-		admission.finish()
+	s.mu.Unlock()
+	for _, release := range discarded {
+		release()
 	}
 	if next != nil {
 		go next()
 	}
+	return discardedCount
 }
 
-func (c *Conn) concurrentRPCsPending() bool {
-	c.concurrentRPCMu.Lock()
-	defer c.concurrentRPCMu.Unlock()
-	return len(c.concurrentRPCs) != 0
+func (s *concurrentRPCSet) pending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries) != 0
 }
 
-func (c *Conn) concurrentRPCFailure() error {
-	c.concurrentRPCMu.Lock()
-	defer c.concurrentRPCMu.Unlock()
-	return c.concurrentRPCError
+func (s *concurrentRPCSet) failure() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
-func (c *Conn) waitConcurrentRPCs() error {
+func (s *concurrentRPCSet) wait() error {
 	for {
-		c.concurrentRPCMu.Lock()
-		if len(c.concurrentRPCs) == 0 {
-			err := c.concurrentRPCError
-			c.concurrentRPCMu.Unlock()
+		s.mu.Lock()
+		if len(s.entries) == 0 {
+			err := s.err
+			s.mu.Unlock()
 			return err
 		}
-		done := make([]chan struct{}, 0, len(c.concurrentRPCs))
-		for _, ch := range c.concurrentRPCs {
+		done := make([]chan struct{}, 0, len(s.entries))
+		for _, ch := range s.entries {
 			done = append(done, ch)
 		}
-		c.concurrentRPCMu.Unlock()
+		s.mu.Unlock()
 		for _, ch := range done {
 			<-ch
 		}
@@ -116,10 +133,14 @@ func (c *Conn) waitConcurrentRPCs() error {
 }
 
 func concurrentRPCBarrier(req *Request) bool {
-	if req == nil || req.Buf == nil {
+	if req == nil {
 		return false
 	}
-	id, err := req.Buf.PeekID()
+	body := req.BodyBuffer()
+	if body == nil {
+		return false
+	}
+	id, err := body.PeekID()
 	if err != nil {
 		return false
 	}
@@ -129,7 +150,7 @@ func concurrentRPCBarrier(req *Request) bool {
 	if !isInvokeWrapper(id) {
 		return false
 	}
-	_, transparent := concurrentRPCMethodID(req.Buf)
+	_, transparent := concurrentRPCMethodID(body)
 	return !transparent
 }
 
@@ -137,45 +158,64 @@ func concurrentRPCRequestView(req *Request) (*Request, bool) {
 	if req == nil || req.Buf == nil {
 		return nil, false
 	}
-	id, err := req.Buf.PeekID()
+	body := req.BodyBuffer()
+	if body == nil {
+		return nil, false
+	}
+	id, err := body.PeekID()
 	if err != nil {
 		return nil, false
 	}
 	if id != proto.GZIPTypeID {
 		return req, true
 	}
-	if req.gzipBody != nil {
-		view := *req
-		view.Buf = req.gzipBody
-		return &view, true
+	if req.gzipBody == nil {
+		var content proto.GZIP
+		compressed := &bin.Buffer{Buf: body.Buf}
+		if err := content.Decode(compressed); err != nil {
+			return nil, false
+		}
+		req.gzipBody = &bin.Buffer{Buf: content.Data}
 	}
-	var content proto.GZIP
-	compressed := &bin.Buffer{Buf: slices.Clone(req.Buf.Buf)}
-	if err := content.Decode(compressed); err != nil {
-		return nil, false
-	}
-	req.gzipBody = &bin.Buffer{Buf: content.Data}
 	view := *req
-	view.Buf = req.gzipBody
+	view.Body = req.gzipBody
 	return &view, true
 }
 
-func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler) {
+func concurrentRPCMethodName(req *Request) string {
+	if req != nil && req.rpcTypeIDSet {
+		if method := compiledMethodName(req.rpcTypeID); method != "" {
+			return method
+		}
+	}
+	return requestRPCMethod(req)
+}
+
+func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler, release func()) {
 	err := s.handleWithHandler(c, req, handler)
-	if errors.Is(err, context.Canceled) || errors.Is(err, errServerDraining) ||
-		errors.Is(err, errPeerDisconnected) || isDisconnect(err) {
+	if req.contextCanceled || errors.Is(err, errServerDraining) || errors.Is(err, errPeerDisconnected) {
 		err = nil
 	}
 	if err != nil {
-		s.logConnectionFailure(err)
 		if closeErr := c.closeServer(); closeErr != nil && !isDisconnect(closeErr) {
 			s.log.Info("close connection after concurrent RPC failure", "err", closeErr)
 		}
 	}
-	if req.admission != nil {
-		req.admission.finish()
+	if release != nil {
+		release()
 	}
-	c.finishConcurrentRPC(req.MsgID, err)
+	discarded := c.concurrentRPCs.finish(req.MsgID, err)
+	if err != nil {
+		if dropped, ok := s.concurrentRPCFailureLog.allow(time.Now(), preAuthLogInterval); ok {
+			s.log.Info("concurrent RPC failed",
+				"method", concurrentRPCMethodName(req),
+				"auth_key_id", requestAuthKeyID(req),
+				"discarded_queued_rpcs", discarded,
+				"error", safeRPCErrorName(err),
+				"suppressed", dropped)
+		}
+		s.logConnectionFailure(err)
+	}
 }
 
 func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (bool, error) {
@@ -183,35 +223,59 @@ func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (
 		return false, nil
 	}
 	view, valid := concurrentRPCRequestView(req)
-	if valid && concurrentRPCBarrier(view) && c.concurrentRPCsPending() {
-		if err := c.waitConcurrentRPCs(); err != nil {
+	if valid && concurrentRPCBarrier(view) && c.concurrentRPCs.pending() {
+		if err := c.concurrentRPCs.wait(); err != nil {
 			return true, err
 		}
 	}
 	if !valid {
 		return false, nil
 	}
-	classifier, ok := handler.(ConcurrentRPCClassifier)
-	if !ok || !classifier.CanRunConcurrently(view) {
+	typeID, eligible := concurrentRPCMethodID(view.BodyBuffer())
+	if !eligible {
 		return false, nil
 	}
-	if req.admission != nil && !req.admission.retain() {
-		return true, errPeerDisconnected
+	classifier, ok := handler.(ConcurrentRPCClassifier)
+	if !ok || !classifier.CanRunConcurrently(typeID) {
+		return false, nil
 	}
-	req.Buf = &bin.Buffer{Buf: slices.Clone(req.Buf.Buf)}
-	run := func() {
-		s.runConcurrentRPC(c, req, handler)
+	req.rpcTypeID = typeID
+	req.rpcTypeIDSet = true
+	var release func()
+	if req.admission != nil {
+		release = req.admission.retain()
+		if release == nil {
+			return true, errPeerDisconnected
+		}
 	}
-	started, duplicate := c.startConcurrentRPC(req.MsgID, run, req.admission)
+	packed := req.Buf
+	req.Buf = &bin.Buffer{Buf: slices.Clone(packed.Buf)}
+	if req.Body == packed {
+		req.Body = req.Buf
+	} else if req.Body != nil && req.Body != req.gzipBody {
+		req.Body = &bin.Buffer{Buf: slices.Clone(req.Body.Buf)}
+	}
+	work := concurrentRPCWork{
+		msgID:   req.MsgID,
+		release: release,
+		run:     func() { s.runConcurrentRPC(c, req, handler, release) },
+	}
+	started, duplicate := c.concurrentRPCs.start(req.MsgID, work)
 	if duplicate {
-		if req.admission != nil {
-			req.admission.finish()
+		if release != nil {
+			release()
 		}
 		return true, nil
 	}
 	if !started {
-		if req.admission != nil {
-			req.admission.finish()
+		if release != nil {
+			release()
+		}
+		if dropped, allow := s.concurrentRPCOverloadLog.allow(time.Now(), preAuthLogInterval); allow {
+			s.log.Info("concurrent RPC queue full",
+				"method", concurrentRPCMethodName(req),
+				"auth_key_id", requestAuthKeyID(req),
+				"suppressed", dropped)
 		}
 		return true, s.handleWithHandler(c, req, HandlerFunc(func(c *Conn, req *Request) error {
 			return c.SendErr(req, errInternalRPC)

@@ -208,11 +208,13 @@ type Server struct {
 	// Keep each server-side failure class sampled independently. The category
 	// names are fixed; raw storage, exchange, and request errors may carry secrets
 	// or attacker-controlled data and never reach these log records.
-	keyPersistenceErrorLog  logSampler
-	exchangeErrorLog        logSampler
-	requestHandlingErrorLog logSampler
-	idleTimeoutErrorLog     logSampler
-	webSocketServeErrorLog  logSampler
+	keyPersistenceErrorLog   logSampler
+	exchangeErrorLog         logSampler
+	requestHandlingErrorLog  logSampler
+	idleTimeoutErrorLog      logSampler
+	webSocketServeErrorLog   logSampler
+	concurrentRPCOverloadLog logSampler
+	concurrentRPCFailureLog  logSampler
 	// Keep the two server-generated -404 paths independently sampled across all
 	// connections handled by this server.
 	lookupMissLog         logSampler
@@ -1335,7 +1337,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 	}()
 	defer func() {
-		if err := conn.waitConcurrentRPCs(); err != nil {
+		if err := conn.concurrentRPCs.wait(); err != nil {
 			if rErr == nil {
 				rErr = err
 			} else {
@@ -1627,7 +1629,8 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 
 		if conn.AuthKeyID() != key.IntID() {
-			if err := conn.waitConcurrentRPCs(); err != nil {
+			failureStage = "wait_concurrent_rpcs_for_auth_key_change"
+			if err := conn.concurrentRPCs.wait(); err != nil {
 				return err
 			}
 		}

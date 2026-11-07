@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -223,17 +224,22 @@ type rpcAdmission struct {
 	refs    atomic.Int32
 }
 
-func (a *rpcAdmission) retain() bool {
+func (a *rpcAdmission) retain() func() {
 	for refs := a.refs.Load(); refs > 0; refs = a.refs.Load() {
 		if a.refs.CompareAndSwap(refs, refs+1) {
-			return true
+			var once sync.Once
+			return func() { once.Do(a.finish) }
 		}
 	}
-	return false
+	return nil
 }
 
 func (a *rpcAdmission) finish() {
-	if refs := a.refs.Add(-1); refs != 0 {
+	refs := a.refs.Add(-1)
+	if refs < 0 {
+		panic("rpc admission reference count underflow")
+	}
+	if refs != 0 {
 		return
 	}
 	if a.cancel != nil {
@@ -283,11 +289,11 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecrypt, fmt.Errorf("decrypt message: %w", err))
 	}
-	if err := c.concurrentRPCFailure(); err != nil {
+	if err := c.concurrentRPCs.failure(); err != nil {
 		return err
 	}
 	if c.sessionID != msg.SessionID {
-		if err := c.waitConcurrentRPCs(); err != nil {
+		if err := c.concurrentRPCs.wait(); err != nil {
 			return err
 		}
 	}
@@ -376,7 +382,11 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	if c != nil && c.peerLost.Load() {
 		return errPeerDisconnected
 	}
-	in := req.Buf
+	in := req.BodyBuffer()
+	if in == nil {
+		return markRequestFailureCause(requestFailureDecode, errors.New("missing request body"))
+	}
+	req.Body = in
 	id, err := in.PeekID()
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
@@ -470,13 +480,13 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 
 	case proto.GZIPTypeID:
 		if req.gzipBody != nil {
-			req.Buf = req.gzipBody
+			req.Body = req.gzipBody
 		} else {
 			var content proto.GZIP
 			if err := content.Decode(in); err != nil {
 				return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
 			}
-			req.Buf = &bin.Buffer{Buf: content.Data}
+			req.Body = &bin.Buffer{Buf: content.Data}
 		}
 
 	case proto.MessageContainerTypeID:
@@ -509,6 +519,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 				AuthorizationMetadata: req.AuthorizationMetadata,
 				SessionID:             req.SessionID,
 				MsgID:                 m.ID,
+				ReceivedAt:            req.ReceivedAt,
 				seqNo:                 m.SeqNo,
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
@@ -555,15 +566,13 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 			cancel()
 			return errPeerDisconnected
 		}
-		defer func() {
-			c.finishActiveRPC(active)
-			cancel()
-		}()
-	} else {
-		defer cancel()
+		defer c.finishActiveRPC(active)
 	}
+	defer cancel()
 	req.Ctx = requestCtx
 	req.CompletionCtx = admission.ctx
+	req.contextCanceled = false
+	defer func() { req.contextCanceled = requestCtx.Err() != nil }()
 
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
 		return s.dispatchRPC(c, req, handler)

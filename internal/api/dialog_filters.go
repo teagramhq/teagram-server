@@ -68,7 +68,7 @@ func (h *handlers) registerDialogFilterMutation(d *mtproto.Dispatcher, id uint32
 
 func (h *handlers) handleGetDialogFilters(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, func(), error) {
 	var request tg.MessagesGetDialogFiltersRequest
-	if err := request.Decode(req.Buf); err != nil {
+	if err := request.Decode(req.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if req.UserID == 0 || req.Provisional {

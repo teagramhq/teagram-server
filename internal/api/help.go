@@ -42,7 +42,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetCountriesListRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		if call.Hash == int(helpCountriesListHash) {
@@ -59,7 +59,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetTermsOfServiceUpdateRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		return c.SendResult(req, &tg.HelpTermsOfServiceUpdateEmpty{
@@ -72,7 +72,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetPromoDataRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		return c.SendResult(req, &tg.HelpPromoDataEmpty{

@@ -584,6 +584,11 @@ type rpcTraceHandler struct {
 	tracer *RPCTracer
 }
 
+func (h *rpcTraceHandler) CanRunConcurrently(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCClassifier)
+	return ok && classifier.CanRunConcurrently(typeID)
+}
+
 func (h *rpcTraceHandler) OnMessage(c *Conn, req *Request) (err error) {
 	handle, restore := h.tracer.traceRequest(req)
 	defer restore()

@@ -39,10 +39,9 @@ type env struct {
 	logSQL func(scenario string, captured []capturedQuery)
 	// elapsed, when a call sets it, replaces the call's wall time as its
 	// latency.
-	elapsed                       time.Duration
-	maxReceiveToDispatchWait      time.Duration
-	receiveToDispatchSamples      int
-	receiveToDispatchMissingStamp bool
+	elapsed                     time.Duration
+	maxConcurrentRequestLatency time.Duration
+	concurrentRequestSamples    int
 }
 
 // scenario is one client-facing RPC as a client sends it. prepare runs before
@@ -194,9 +193,8 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		tracer.reset(capture, sc.name == "contacts.getContacts")
 		allocBefore := heapAllocs()
 		e.elapsed = 0
-		e.maxReceiveToDispatchWait = 0
-		e.receiveToDispatchSamples = 0
-		e.receiveToDispatchMissingStamp = false
+		e.maxConcurrentRequestLatency = 0
+		e.concurrentRequestSamples = 0
 		start := time.Now()
 		var callErr error
 		if shouldProfileGetDialogsSample(sc.name, i) {
@@ -247,10 +245,10 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			nonSQLTimes = append(nonSQLTimes, totalMS-float64(sqlElapsed.Microseconds())/1000)
 			queries = append(queries, int64(n))
 			allocs = append(allocs, int64(allocated)) // #nosec G115 -- one RPC allocates far below MaxInt64
-			r.ReceiveToDispatchSamples += e.receiveToDispatchSamples
-			r.MaxReceiveToDispatchWaitMs = max(
-				r.MaxReceiveToDispatchWaitMs,
-				float64(e.maxReceiveToDispatchWait.Nanoseconds())/float64(time.Millisecond),
+			r.ConcurrentRequestSamples += e.concurrentRequestSamples
+			r.MaxConcurrentRequestLatencyMs = max(
+				r.MaxConcurrentRequestLatencyMs,
+				float64(e.maxConcurrentRequestLatency.Nanoseconds())/float64(time.Millisecond),
 			)
 		}
 	}
