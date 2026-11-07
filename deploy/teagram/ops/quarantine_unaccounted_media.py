@@ -23,6 +23,8 @@ PROGRESS_SCHEMA = "teagram.blob-encryption-progress/v1"
 MANIFEST_SCHEMA = "teagram.media-quarantine/v1"
 POSTGRES_CONTAINER = "teagram-postgres-1"
 MC_SERVICE = "rustfs-init"
+ENVELOPE_INVENTORY_SERVICE = "blob-key-rotate"
+ENVELOPE_INVENTORY_BINARY = "/usr/local/bin/blob-inventory"
 S3_ALIAS = "local"
 S3_BUCKET = "teagram"
 
@@ -129,6 +131,34 @@ def read_json(path: pathlib.Path) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         fail("private operation JSON is invalid")
+
+
+def validate_fresh_envelope_inventory(path: pathlib.Path, referenced_count: int) -> None:
+    if not isinstance(referenced_count, int) or isinstance(referenced_count, bool) or referenced_count < 0:
+        fail("current database reference count is invalid")
+    root = read_json(path)
+    if not isinstance(root, dict):
+        fail("fresh encrypted envelope inventory is invalid")
+    classes = root.get("classes")
+    if not isinstance(classes, dict):
+        fail("fresh encrypted envelope inventory is incomplete")
+
+    def class_count(name: str) -> int:
+        value = classes.get(name)
+        count = value.get("count") if isinstance(value, dict) else None
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            fail("fresh encrypted envelope inventory counts are invalid")
+        return count
+
+    valid = class_count("valid_envelope")
+    invalid = class_count("no_valid_envelope")
+    missing = class_count("missing")
+    unaccounted = class_count("unaccounted")
+    unversioned = root.get("unversioned_envelope_references")
+    if not isinstance(unversioned, int) or isinstance(unversioned, bool) or unversioned < 0:
+        fail("fresh encrypted envelope inventory counts are invalid")
+    if valid != referenced_count or invalid != 0 or missing != 0 or unaccounted != 0 or unversioned != 0:
+        fail("fresh encrypted envelope inventory found invalid or missing references")
 
 
 def load_contract(inventory_path: pathlib.Path, expected_sha256: str, referenced_count: int) -> InventoryContract:
@@ -672,10 +702,32 @@ class LiveMCStorage:
         self.evidence_dir = evidence_dir
         self.run_id = run_id
         self.calls = 0
+        self.envelope_inventory_calls = 0
         self.remote_root = f"{S3_ALIAS}/{S3_BUCKET}/{prefix}"
 
     def set_mount(self, path: pathlib.Path) -> None:
         self.mount_dir = path
+
+    def validate_envelopes(self, work_dir: pathlib.Path, referenced_count: int) -> None:
+        self.envelope_inventory_calls += 1
+        report_path = work_dir / f"envelope-inventory-{self.envelope_inventory_calls:02d}.json"
+        error_path = self._error_path("envelope-inventory")
+        command = self.compose + [
+            "--profile", "migration", "run", "--rm", "--no-deps", "-T",
+            "--entrypoint", ENVELOPE_INVENTORY_BINARY, ENVELOPE_INVENTORY_SERVICE,
+        ]
+        try:
+            with report_path.open("xb") as output, error_path.open("wb") as errors:
+                result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=output, stderr=errors, check=False)
+        except OSError:
+            fail("cannot run the fresh encrypted envelope inventory")
+        if result.returncode != 0:
+            fail("fresh encrypted envelope inventory failed; private diagnostics were retained")
+        try:
+            os.chmod(report_path, 0o600)
+        except OSError:
+            fail("cannot protect the fresh encrypted envelope inventory")
+        validate_fresh_envelope_inventory(report_path, referenced_count)
 
     def remote_key(self, key: str) -> str:
         return f"{self.remote_root}{key}"
@@ -820,7 +872,7 @@ class LiveSnapshotProvider:
         if result.returncode != 0:
             fail("current media reference inventory failed; private diagnostics were retained")
         os.chmod(query_path, 0o600)
-        return make_snapshot(
+        snapshot = make_snapshot(
             self.inventory,
             self.inventory_sha,
             self.referenced_count,
@@ -830,6 +882,8 @@ class LiveSnapshotProvider:
             self.prefix,
             mode,
         )
+        self.storage.validate_envelopes(self.work_dir, len(snapshot.references))
+        return snapshot
 
 
 def validate_restore_run_id(run_id: str) -> None:
@@ -870,6 +924,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.mode == "restore":
             validate_restore_run_id(args.run_id)
+            if args.referenced_count is None:
+                fail("restore reference count is unavailable")
             quarantine_dir = args.quarantine_base / f"MAIN-3441-{args.run_id}"
             private_directory(quarantine_dir)
             storage = LiveMCStorage(
@@ -880,6 +936,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.evidence_dir,
                 args.diagnostic_id or args.run_id,
             )
+            storage.validate_envelopes(args.work_dir, args.referenced_count)
             manifest_path = quarantine_dir / "manifest.json"
             private_file(manifest_path)
             listing_path = args.work_dir / "restore-listing.jsonl"
@@ -892,7 +949,8 @@ def main(argv: list[str] | None = None) -> int:
                 return parse_listing(listing_path, args.prefix, dt.datetime.now(dt.timezone.utc))
 
             restored, already = restore_quarantine(listing_provider, storage, quarantine_dir, manifest_path, args.run_id)
-            print(f"restore=pass objects={restored + already} restored={restored} already_present={already} quarantine_path={quarantine_dir}")
+            storage.validate_envelopes(args.work_dir, args.referenced_count)
+            print(f"restore=pass objects={restored + already} restored={restored} already_present={already} envelope_validation=pass quarantine_path={quarantine_dir}")
             return 0
 
         if args.inventory is None or args.inventory_sha256 is None or args.referenced_count is None or args.journal is None:
@@ -919,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.mode == "check":
             snapshot = provider("before")
-            print(f"preflight=pass {summarize(snapshot)} authority=encrypted service=running")
+            print(f"preflight=pass {summarize(snapshot)} envelope_validation=pass authority=encrypted service=running")
             return 0
 
         if args.delete_after is None:

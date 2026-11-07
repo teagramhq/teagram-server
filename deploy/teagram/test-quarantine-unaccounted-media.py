@@ -139,6 +139,15 @@ class QuarantineFixtures(unittest.TestCase):
     def inventory_sha(self) -> str:
         return hashlib.sha256(self.inventory_path.read_bytes()).hexdigest()
 
+    def write_envelope_inventory(self, counts: dict[str, int]) -> pathlib.Path:
+        path = self.root / "fresh-envelopes.json"
+        path.write_text(json.dumps({
+            "classes": {name: {"count": count} for name, count in counts.items()},
+            "unversioned_envelope_references": 0,
+        }))
+        path.chmod(0o600)
+        return path
+
     def write_listing(
         self,
         objects: dict[str, bytes],
@@ -294,6 +303,36 @@ class QuarantineFixtures(unittest.TestCase):
                 lambda: ({}, {}), store, directory, directory / "manifest.json", self.run_id
             )
         self.assertEqual(store.removed, [])
+
+    def test_fresh_envelope_inventory_accepts_all_valid_references(self) -> None:
+        path = self.write_envelope_inventory({
+            "valid_envelope": 1,
+            "no_valid_envelope": 0,
+            "missing": 0,
+            "unaccounted": 0,
+        })
+        MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+
+    def test_fresh_envelope_inventory_rejects_preexisting_corruption(self) -> None:
+        path = self.write_envelope_inventory({
+            "valid_envelope": 0,
+            "no_valid_envelope": 1,
+            "missing": 0,
+            "unaccounted": 0,
+        })
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "found invalid or missing references") as error:
+            MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
+        self.assertNotIn("01/1", str(error.exception))
+
+    def test_fresh_envelope_inventory_rejects_reference_count_drift(self) -> None:
+        path = self.write_envelope_inventory({
+            "valid_envelope": 2,
+            "no_valid_envelope": 0,
+            "missing": 0,
+            "unaccounted": 0,
+        })
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "found invalid or missing references"):
+            MEDIA.validate_fresh_envelope_inventory(path, referenced_count=1)
 
 
 if __name__ == "__main__":

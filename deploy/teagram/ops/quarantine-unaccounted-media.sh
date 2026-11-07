@@ -119,13 +119,13 @@ HELPER_ARGS=(
   --quarantine-base "$QUARANTINE_BASE"
   --run-id "$TARGET_RUN_ID"
   --diagnostic-id "$RUN_ID"
+  --referenced-count "$INVENTORY_REFERENCED"
   --mount-dir "$OPS_TEMP_DIR/mc-files"
 )
 if [[ "$MODE" != restore ]]; then
   HELPER_ARGS+=(
     --inventory "$INVENTORY_REPORT_PATH"
     --inventory-sha256 "$INVENTORY_SHA"
-    --referenced-count "$INVENTORY_REFERENCED"
     --journal "$REPORT_ROOT/${PROGRESS_PATH##*/}"
   )
 fi
