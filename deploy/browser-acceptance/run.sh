@@ -290,13 +290,13 @@ prepare() {
   root="$(resolve_regular_input "$MANIFEST_PATH")" || fail manifest-invalid
   MANIFEST_PATH="$SNAPSHOT_DIR/release-record.json"
   cat -- "$root" >"$MANIFEST_PATH" || fail manifest-invalid
-  chmod 0400 -- "$MANIFEST_PATH" || fail manifest-invalid
+  chmod 0444 -- "$MANIFEST_PATH" || fail manifest-invalid
 
   if [[ -n "$QA_SCRIPT_PATH" ]]; then
     root="$(resolve_regular_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
     QA_SCRIPT_PATH="$SNAPSHOT_DIR/approved-qa.mjs"
     cat -- "$root" >"$QA_SCRIPT_PATH" || fail qa-script-unapproved
-    chmod 0400 -- "$QA_SCRIPT_PATH" || fail qa-script-unapproved
+    chmod 0444 -- "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
 
   validate_manifest "$MANIFEST_PATH" || fail manifest-invalid

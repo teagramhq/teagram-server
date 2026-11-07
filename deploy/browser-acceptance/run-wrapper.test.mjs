@@ -376,10 +376,12 @@ if [[ -n "\${WRAPPER_SNAPSHOT_PROBE_RESULT:-}" ]]; then
   fi
   manifest_hash="$(/usr/bin/sha256sum -- "$manifest_arg")"
   script_hash="$(/usr/bin/sha256sum -- "$script_arg")"
-  printf '%s\\t%s\\t%s\\t%s\\n' "$manifest_arg" "\${manifest_hash%% *}" \\
-    "$(stat -c '%a' -- "$manifest_arg")" "$(stat -c '%a' -- "\${manifest_arg%/*}")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
-  printf '%s\\t%s\\t%s\\t%s\\n' "$script_arg" "\${script_hash%% *}" \\
-    "$(stat -c '%a' -- "$script_arg")" "$(stat -c '%a' -- "\${script_arg%/*}")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$manifest_arg" "\${manifest_hash%% *}" \\
+    "$(stat -c '%a' -- "$manifest_arg")" "$(stat -c '%a' -- "\${manifest_arg%/*}")" \\
+    "$(stat -c '%u' -- "$manifest_arg")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$script_arg" "\${script_hash%% *}" \\
+    "$(stat -c '%a' -- "$script_arg")" "$(stat -c '%a' -- "\${script_arg%/*}")" \\
+    "$(stat -c '%u' -- "$script_arg")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
 fi
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
@@ -2080,7 +2082,7 @@ test("acceptance preflight keeps the pinned script after its operator path is re
     .map((line) => line.split("\t"));
   assert.notEqual(scriptSnapshot[0], script);
   assert.equal(scriptSnapshot[1], approvedQaDigest);
-  assert.equal(scriptSnapshot[2], "400");
+  assert.equal(scriptSnapshot[2], "444");
   assert.equal(scriptSnapshot[3], "700");
   await assert.rejects(access(scriptSnapshot[0]));
 });
@@ -2103,9 +2105,37 @@ test("acceptance preflight keeps the validated manifest after its operator path 
     .map((line) => line.split("\t"));
   assert.notEqual(manifestSnapshot[0], paths.manifest);
   assert.equal(manifestSnapshot[1], originalManifestHash);
-  assert.equal(manifestSnapshot[2], "400");
+  assert.equal(manifestSnapshot[2], "444");
   assert.equal(manifestSnapshot[3], "700");
   await assert.rejects(access(manifestSnapshot[0]));
+});
+
+test("snapshot read permissions cover browser UID 1000 when the runner has another UID", async (t) => {
+  const runnerUid = process.getuid();
+  if (runnerUid === 1000) {
+    t.skip("runner UID matches the browser UID");
+    return;
+  }
+
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [manifestSnapshot, scriptSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  for (const snapshot of [manifestSnapshot, scriptSnapshot]) {
+    assert.equal(snapshot[2], "444");
+    assert.equal(snapshot[3], "700");
+    assert.equal(Number(snapshot[4]), runnerUid);
+    assert.notEqual(Number(snapshot[4]), 1000);
+  }
 });
 
 test("a script replaced before its snapshot copy fails the reviewed QA pin", async (t) => {
