@@ -180,6 +180,7 @@ smoke_restored_account() {
 
 smoke_upload_preserved_media() {
   timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
+    --user 0:0 \
     --volume "$tmp_dir/media:/media" \
     --volume "$tmp_dir/username:/username:ro" \
     --volume "$tmp_dir/password:/password:ro" \
@@ -196,6 +197,7 @@ smoke_upload_preserved_media() {
 
 smoke_download_preserved_media() {
   timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
+    --user 0:0 \
     --volume "$tmp_dir/media:/media" \
     --volume "$tmp_dir/username:/username:ro" \
     --volume "$tmp_dir/password:/password:ro" \
