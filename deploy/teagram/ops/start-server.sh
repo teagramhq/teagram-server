@@ -75,11 +75,12 @@ inspect_container "$SERVER_CONTAINER"
 checkout_sha=$(git -C "$REPO" rev-parse --verify 'HEAD^{commit}') || fail 'cannot read live checkout SHA'
 server_sha=$(docker inspect --format "$CONTAINER_REVISION_FORMAT" "$SERVER_CONTAINER") || \
   fail 'cannot inspect teagramd image revision'
-[[ "$checkout_sha" == "$OPS_SHA" && "$server_sha" == "$checkout_sha" ]] || {
-  fail 'live checkout, teagramd image, and reviewed source revisions do not match'
-}
-git -C "$REPO" diff --quiet "$OPS_SHA" -- docker-compose.yml docker-compose.override.yml || \
-  fail 'live Compose files differ from reviewed source'
+if [[ "$checkout_sha" != "$OPS_SHA" || "$server_sha" != "$checkout_sha" ]]; then
+  printf -v revision_values 'checkout=%q server=%q OPS_SHA=%q' "$checkout_sha" "$server_sha" "$OPS_SHA"
+  fail "live checkout, teagramd image, and reviewed source revisions do not match: $revision_values"
+fi
+git -C "$REPO" diff --quiet "$OPS_SHA" -- docker-compose.yml || \
+  fail 'tracked docker-compose.yml differs from reviewed source'
 LIVE_COMPOSE_FILES=$container_compose_files
 [[ "$LIVE_COMPOSE_FILES" == "$EXPECTED_COMPOSE_FILES" ]] || {
   fail 'live Compose selection is not the reviewed teagram S3 stack'

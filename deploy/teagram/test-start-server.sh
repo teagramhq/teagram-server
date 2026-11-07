@@ -58,7 +58,7 @@ if [[ "$3" == rev-parse && "$4" == --verify && "$5" == 'HEAD^{commit}' ]]; then
   exit
 fi
 if [[ "$3" == diff && "$4" == --quiet && "$5" == "$FIXTURE_SHA" && "$6" == -- &&
-      "$7" == docker-compose.yml && "$8" == docker-compose.override.yml ]]; then
+      "$7" == docker-compose.yml && "$#" == 7 ]]; then
   [[ "${MOCK_COMPOSE_DRIFT:-0}" != 1 ]]
   exit
 fi
@@ -289,9 +289,28 @@ MOCK_SERVER_IMAGE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export MOCK_SERVER_IMAGE_REVISION
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'live checkout, teagramd image, and reviewed source revisions do not match'* ]]
+[[ "$output" == *"checkout=$FIXTURE_SHA server=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb OPS_SHA=$FIXTURE_SHA"* ]]
 assert_no_event '^start:'
 printf '%s\n' 'PASS refuses to recreate relays from a checkout that differs from the running image'
+
+setup_case checkout-mismatch
+MOCK_CHECKOUT_SHA=cccccccccccccccccccccccccccccccccccccccc
+MOCK_SERVER_IMAGE_REVISION=$MOCK_CHECKOUT_SHA
+export MOCK_CHECKOUT_SHA MOCK_SERVER_IMAGE_REVISION
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *"checkout=$MOCK_CHECKOUT_SHA server=$MOCK_CHECKOUT_SHA OPS_SHA=$FIXTURE_SHA"* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects a checkout that differs from the reviewed source SHA'
+
+setup_case compose-drift
+MOCK_COMPOSE_DRIFT=1
+export MOCK_COMPOSE_DRIFT
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'tracked docker-compose.yml differs from reviewed source'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS rejects drift in the tracked Compose file before starting services'
 
 setup_case paused-teagramd
 printf 'paused\n' > "$MOCK_TEAGRAMD_STATE_FILE"
