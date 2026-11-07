@@ -670,6 +670,7 @@ sys.stdout.write(value)
 
 source_compose_networks() {
   local container=$1
+  # shellcheck disable=SC2016 # Docker expands this Go template remotely.
   incus exec "$SOURCE_INSTANCE" -- docker inspect \
     --format '{{range $name, $network := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$container"
 }
@@ -709,6 +710,7 @@ EOF
 }
 
 discover_target_lxc_ip() {
+  # shellcheck disable=SC2016 # This command is interpreted by the target LXC's shell.
   target_lxc_ip=$(incus exec "$TARGET_INSTANCE" -- sh -ec \
     'ip -o -4 addr show dev eth0 scope global | awk "NR == 1 {split(\$4, a, \"/\"); print a[1]}"')
   [[ $target_lxc_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
@@ -760,6 +762,7 @@ setup_mc_client() {
     MC_CLIENT_POD_CREATED=true
     kubectl wait --for=condition=Ready pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" --timeout=180s >/dev/null ||
       fail 'the disposable S3 client pod is unavailable'
+    # shellcheck disable=SC2016 # The client pod's shell expands these variables.
     kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec \
       'mkdir -p "$MC_CONFIG_DIR"; mc alias set source http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1; mc alias set target "$1" "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1' \
       -- "$target_endpoint" || fail 'could not configure the disposable S3 client'
@@ -889,6 +892,7 @@ s3_object_hashes() {
   mapfile -t keys < <(awk -F '\t' 'NF == 2 { print $1 }' "$listing_file")
   ((${#keys[@]} == 0)) && return 0
   if [[ $TEST_MODE == true ]]; then
+    # shellcheck disable=SC2016 # The disposable client's shell expands the variables.
     printf '%s\n' "${keys[@]}" | kubectl exec --stdin --namespace "$SOURCE_INSTANCE" \
       pod/cutover-s3-client -- /bin/sh -ec '
         set -o pipefail
@@ -900,6 +904,7 @@ s3_object_hashes() {
         done
       ' -- "$alias" 2>/dev/null || fail "could not checksum the $alias S3 objects"
   else
+    # shellcheck disable=SC2016 # The helper container's shell expands the variables.
     printf '%s\n' "${keys[@]}" | incus exec "$SOURCE_INSTANCE" -- docker exec --interactive \
       "$MC_HELPER_CONTAINER" /bin/sh -ec '
         set -o pipefail
@@ -1603,7 +1608,6 @@ import tarfile
 from pathlib import PurePosixPath
 
 total = 0
-objects = 0
 try:
     with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
         for member in archive:
@@ -1615,15 +1619,14 @@ try:
             if not member.isfile() or member.size < 0:
                 raise ValueError("non-regular entry")
             total += member.size
-            objects += 1
     while sys.stdin.buffer.read(1024 * 1024):
         pass
 except (tarfile.TarError, OSError, ValueError):
     raise SystemExit("k3s cutover: legacy blob tree contains an unsupported entry")
-print(f"{total}\t{objects}")
+print(total)
 ') || fail 'could not inspect the source blob volume safely after the write fence'
-[[ $blob_sizes =~ ^[0-9]+$'\t'[0-9]+$ ]] || fail 'source blob size is unavailable'
-IFS=$'\t' read -r blob_bytes blob_objects <<< "$blob_sizes"
+[[ $blob_sizes =~ ^[0-9]+$ ]] || fail 'source blob size is unavailable'
+blob_bytes=$blob_sizes
 (( blob_bytes <= MAX_LEGACY_BLOB_BYTES )) || fail 'source blob volume exceeds the 20 GiB retained PVC'
 record_source_s3_size
 

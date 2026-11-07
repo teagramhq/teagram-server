@@ -324,8 +324,9 @@ for index, record in enumerate(records, 1):
 (root / "mode.json").write_bytes(latest)
 (root / "mode.json").chmod(0o644)
 PY
-# Do not preserve the workstation-owned archive metadata on the PVC: tar would
-# change /blob-mode to that UID/mode before it creates the journal directory.
+# Make the mounted PVC writable only for this root-only fixture seeding step.
+# Do not preserve workstation archive metadata when extracting on the PVC.
+kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- chmod 0700 /blob-mode
 tar -cf - -C "$tmp_dir/blob-mode" . |
   kubectl exec --namespace "$SOURCE_NAMESPACE" --stdin pod/cutover-blob-mode-seed -c seed -- \
     tar -xf - -C /blob-mode
