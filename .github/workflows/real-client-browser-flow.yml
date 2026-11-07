@@ -22,9 +22,11 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
+      REAL_CLIENT_WEB_REVISION: 761383533bfbf017a8410355177c60b3484cdbcb
+      REAL_CLIENT_GUEST_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
+      REAL_CLIENT_GUEST_WEB_ROOT: ${{ github.workspace }}/guest-web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
       REAL_CLIENT_TESTED_REVISION: ${{ github.sha }}
 
@@ -92,6 +94,15 @@ jobs:
           path: web-source
           persist-credentials: false
 
+      # Guest signup controls are runner-specific and remain on their known compatible web pin.
+      - name: Check out guest signup runner
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: teagramhq/teagram-web
+          ref: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
+          path: guest-web-source
+          persist-credentials: false
+
       - name: Set up pnpm
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
         with:
@@ -111,16 +122,25 @@ jobs:
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
       - name: Test real-client worker source observation
-        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/patch_real_client_guest_signup.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs
+
+      - name: Test the pinned guest signup runner patch
+        env:
+          REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
+        run: node --test test/e2e/real_server_fixture/patch_real_client_guest_signup.test.mjs
 
       # Keep the web app revision fixed; overlay runner-side evidence checks.
       - name: Patch pinned real-client runner evidence
         run: |
           node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
-          node test/e2e/real_server_fixture/patch_real_client_guest_signup.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+          node test/e2e/real_server_fixture/patch_real_client_guest_signup.mjs --web-root "$REAL_CLIENT_GUEST_WEB_ROOT" --web-revision "$REAL_CLIENT_GUEST_WEB_REVISION"
 
       - name: Install pinned web dependencies
         working-directory: web-source
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned guest signup runner dependencies
+        working-directory: guest-web-source
         run: pnpm install --frozen-lockfile
 
       # The QA stack serves this exact artifact, including its embedded target.
@@ -348,6 +368,8 @@ jobs:
         id: guest-signup-flow
         env:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_WEB_REVISION: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
+          REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Upload guest-signup Playwright failure trace
@@ -373,6 +395,8 @@ jobs:
         env:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
           REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
+          REAL_CLIENT_WEB_REVISION: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
+          REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Upload gate-off challenge Playwright failure trace
@@ -399,6 +423,8 @@ jobs:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
           REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'
           REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS: '1'
+          REAL_CLIENT_WEB_REVISION: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
+          REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Upload gate-off guest-signup Playwright failure trace

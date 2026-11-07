@@ -169,14 +169,25 @@ export function patchRealClientObserver(webRoot) {
     'async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {',
     `${directMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
     'direct message settle helper');
-  browser = replaceOnce(browser,
-    '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);',
-    '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForDirectMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);',
-    'direct message settle assertion');
-  browser = replaceOnce(browser,
-    'waitForGroupMessageCount, waitForPollMessage',
-    'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
-    'direct message settle helper export');
+  const legacyDirectMessageAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
+  const currentDirectMessageAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
+  const settledDirectMessageAssertion = '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForDirectMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);';
+  if(browser.includes(legacyDirectMessageAssertion)) {
+    browser = replaceOnce(browser, legacyDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
+  } else {
+    browser = replaceOnce(browser, currentDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
+  }
+  const legacyDirectMessageExport = 'waitForGroupMessageCount, waitForPollMessage';
+  const currentDirectMessageExport = 'waitForGroupMessageCount, waitForSingleSentMessage,';
+  if(browser.includes(legacyDirectMessageExport)) {
+    browser = replaceOnce(browser, legacyDirectMessageExport,
+      'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
+      'direct message settle helper export');
+  } else {
+    browser = replaceOnce(browser, currentDirectMessageExport,
+      'waitForGroupMessageCount, waitForDirectMessageCount, waitForSingleSentMessage,',
+      'direct message settle helper export');
+  }
 
   const originalWorkerMethods = `const WORKER_CDP_METHODS = Object.freeze([
   'Network.enable',

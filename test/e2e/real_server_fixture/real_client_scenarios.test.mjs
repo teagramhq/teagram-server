@@ -8,11 +8,11 @@ try {
   if(error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
 }
 
-test('selects the scenarios supported by the pinned web contract', () => {
-  assert.deepEqual(selectRealClientScenarios({
+test('fails when the pinned web contract omits the custom emoji scenario', () => {
+  assert.throws(() => selectRealClientScenarios({
     required: ['sign-in', 'first-message', 'message', 'group'],
     optional: ['channel', 'poll']
-  }), ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
+  }), /web contract omits required scenarios: custom-emoji/);
 });
 
 test('includes custom emoji when the pinned web contract requires it', () => {
