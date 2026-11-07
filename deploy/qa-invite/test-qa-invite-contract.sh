@@ -7,6 +7,7 @@ REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 COMPOSE=$SCRIPT_DIR/compose.yaml
 WORKFLOW=$REPO_ROOT/.github/workflows/deploy-qa-invite.yml
 BROWSER_WORKFLOW=$REPO_ROOT/.github/workflows/real-client-browser-flow.yml
+CI_WORKFLOW=$REPO_ROOT/.github/workflows/ci.yml
 FORCED_COMMAND=$REPO_ROOT/deploy/teagram-demo/forced-command.sh
 WRITER=$SCRIPT_DIR/qa-account-writer.sh
 REMOTE=$SCRIPT_DIR/remote.sh
@@ -27,7 +28,7 @@ fail() {
   exit 1
 }
 
-for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
+for path in "$COMPOSE" "$WORKFLOW" "$BROWSER_WORKFLOW" "$CI_WORKFLOW" "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$NGINX" "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" "$LIVE_SNAPSHOT"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular file: $path"
 done
 
@@ -35,6 +36,20 @@ bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBAC
 node --check "$QA_BROWSER_RUNNER" || fail 'QA browser runner syntax failed'
 grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
 grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
+grep -Fq 'id: sticker-bundle-cache' "$BROWSER_WORKFLOW" || fail 'QA browser job does not restore the validated sticker bundle'
+grep -Fq 'node22-python3.12.15-${{' "$BROWSER_WORKFLOW" || fail 'QA sticker bundle cache key does not match the generated toolchain'
+grep -Fq 'tools/stickerbundle/package-lock.json' "$BROWSER_WORKFLOW" || fail 'QA sticker bundle cache key omits its Node lockfile'
+LICENSE_STICKER_CACHE_KEY=$(sed -n 's/^[[:space:]]*key: \(sticker-bundle-.*\)$/\1/p' "$CI_WORKFLOW")
+BROWSER_STICKER_CACHE_KEY=$(sed -n 's/^[[:space:]]*key: \(sticker-bundle-.*\)$/\1/p' "$BROWSER_WORKFLOW")
+[[ -n "$LICENSE_STICKER_CACHE_KEY" && "$LICENSE_STICKER_CACHE_KEY" == "$BROWSER_STICKER_CACHE_KEY" ]] || fail 'QA browser job does not reuse the license-checked sticker bundle cache key'
+LICENSE_STICKER_CACHE_PATH=$(awk '/id: sticker-bundle-cache/{restore=1} restore && /^[[:space:]]*path:/{sub(/^[[:space:]]*path:[[:space:]]*/, ""); print; exit}' "$CI_WORKFLOW")
+BROWSER_STICKER_CACHE_PATH=$(awk '/id: sticker-bundle-cache/{restore=1} restore && /^[[:space:]]*path:/{sub(/^[[:space:]]*path:[[:space:]]*/, ""); print; exit}' "$BROWSER_WORKFLOW")
+[[ -n "$LICENSE_STICKER_CACHE_PATH" && "$LICENSE_STICKER_CACHE_PATH" == "$BROWSER_STICKER_CACHE_PATH" ]] || fail 'QA browser job does not reuse the license-checked sticker bundle cache path'
+grep -Fq 'tools/stickerbundle/generate.sh --output "$RUNNER_TEMP/sticker-bundle"' "$BROWSER_WORKFLOW" || fail 'QA browser job does not generate the sticker bundle on a cache miss'
+grep -Fq 'STICKER_BUNDLE_DIR: ${{ runner.temp }}/sticker-bundle' "$BROWSER_WORKFLOW" || fail 'QA browser flow does not use the cached sticker bundle path'
+grep -Fq -- '--build-context sticker-bundle="$(dirname "$STICKER_BUNDLE_DIR")"' "$QA_BROWSER_FLOW" || fail 'QA server image does not use the validated sticker bundle'
+grep -Fq -- '--build-arg STICKER_BUNDLE_SOURCE=sticker-bundle' "$QA_BROWSER_FLOW" || fail 'QA server image build does not select the validated sticker bundle'
+grep -Fq 'cat "$IMAGE_BUILD_LOG" >&2' "$QA_BROWSER_FLOW" || fail 'QA server image build failure hides its diagnostic'
 grep -Fq "certutil -d \"sql:\$TEST_HOME/.pki/nssdb\" -A -t 'C,,'" "$QA_BROWSER_FLOW" || fail 'QA browser smoke does not trust the test CA in Chromium'
 ! grep -Eq 'ignoreHTTPSErrors|ignore-certificate-errors|--insecure' "$QA_BROWSER_FLOW" "$QA_BROWSER_RUNNER" || fail 'QA browser smoke bypasses TLS verification'
 grep -Fq 'attempt <= 3' "$QA_BROWSER_RUNNER" || fail 'QA Web browser smoke does not repeat sign-in three times'
