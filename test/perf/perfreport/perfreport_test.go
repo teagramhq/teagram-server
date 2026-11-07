@@ -61,6 +61,61 @@ func TestEvaluatePassesInvariantScenarioWithinBudget(t *testing.T) {
 	}
 }
 
+func TestEvaluateBlocksSearchCountersDispatchWaitAboveBudget(t *testing.T) {
+	name := "messages.getSearchCounters dispatch wait"
+	rs := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
+	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
+	rs[0].ReceiveToDispatchSamples, rs[1].ReceiveToDispatchSamples = 40, 40
+	rs[1].MaxReceiveToDispatchWaitMs = 50.1
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
+	if got := reasons(v.Failures); !strings.Contains(got, "max receive-to-dispatch wait 50.1 ms at 100x, budget 50 ms") {
+		t.Fatalf("failures = %q, want the dispatch wait budget to block", got)
+	}
+	if !strings.Contains(perfreport.Markdown(v), "head maximum receive-to-dispatch wait 50.1 ms across 40 samples; limit 50 ms") {
+		t.Fatalf("markdown does not report the dispatch wait measurement: %s", perfreport.Markdown(v))
+	}
+}
+
+func TestEvaluateRequiresSearchCountersDispatchWaitSamples(t *testing.T) {
+	name := "messages.getSearchCounters dispatch wait"
+	rs := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
+	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
+	if got := reasons(v.Failures); !strings.Contains(got, "no receive-to-dispatch wait samples at 100x") {
+		t.Fatalf("failures = %q, want missing dispatch wait samples to block", got)
+	}
+}
+
+func TestEvaluateSkipsScaleChecksForScaleIndependentScenario(t *testing.T) {
+	name := "messages.getSearchCounters dispatch wait"
+	rs := pair(name, perfreport.Read, result(5, 7, 4, 100), result(10, 12, 4, 10_000))
+	rs[0].ScaleIndependent, rs[1].ScaleIndependent = true, true
+	rs[1].ReceiveToDispatchSamples = 40
+	rs[1].MaxReceiveToDispatchWaitMs = 40
+	if v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}); len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
+		t.Fatalf("scale-independent scenario failed: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
+	}
+}
+
+func TestAggregateKeepsMaximumDispatchWaitAndAddsSamples(t *testing.T) {
+	name := "messages.getSearchCounters dispatch wait"
+	rs1 := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
+	rs2 := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
+	rs1[1].ReceiveToDispatchSamples, rs1[1].MaxReceiveToDispatchWaitMs = 20, 35
+	rs2[1].ReceiveToDispatchSamples, rs2[1].MaxReceiveToDispatchWaitMs = 20, 48
+	agg := perfreport.Aggregate([]perfreport.Report{report(rs1...), report(rs2...)})
+	for _, r := range agg.Results {
+		if r.Fixture != perfreport.Large {
+			continue
+		}
+		if r.ReceiveToDispatchSamples != 40 || r.MaxReceiveToDispatchWaitMs != 48 {
+			t.Fatalf("aggregated dispatch wait = %d samples, %.1f ms; want 40, 48 ms", r.ReceiveToDispatchSamples, r.MaxReceiveToDispatchWaitMs)
+		}
+		return
+	}
+	t.Fatal("aggregate has no 100x result")
+}
+
 func TestEvaluateBlocksQueryCountThatGrowsWithData(t *testing.T) {
 	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("messages.getDialogs", perfreport.Read,
 		result(2, 3, 5, 120), result(2, 3, 104, 120))...)})
@@ -386,6 +441,7 @@ func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
 	for _, raw := range []string{
 		`[{"scenario":"x","check":"regression","issue":"MAIN-1"}]`,
 		`[{"scenario":"x","check":"slower","issue":"MAIN-1"}]`,
+		`[{"scenario":"x","check":"dispatch_wait","issue":"MAIN-1"}]`,
 		`[{"scenario":"x","check":"timing"}]`,
 	} {
 		if _, err := perfreport.ParseWaivers([]byte(raw)); err == nil {

@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
@@ -51,6 +54,9 @@ type Request struct {
 	SessionID int64
 	// MsgID is the message ID of the request, used as the RPC result target.
 	MsgID int64
+	// ReceivedAt is when the connection reader received this frame. A zero
+	// value means the transport did not record a receive timestamp.
+	ReceivedAt time.Time
 	// seqNo is the request's msg_seqno, echoed by a bad_msg_notification. An
 	// odd one marks a content message owed an acknowledgement.
 	seqNo int
@@ -93,6 +99,78 @@ type HandlerFunc func(c *Conn, req *Request) error
 // OnMessage implements Handler.
 func (h HandlerFunc) OnMessage(c *Conn, req *Request) error {
 	return h(c, req)
+}
+
+// ConcurrentRPCClassifier opts explicitly selected RPCs into concurrent
+// dispatch with later requests on the same connection. Only requests whose
+// result does not depend on per-connection request order are eligible.
+type ConcurrentRPCClassifier interface {
+	CanRunConcurrently(req *Request) bool
+}
+
+type concurrentRPCHandler struct {
+	next    Handler
+	typeIDs map[uint32]struct{}
+}
+
+func (h *concurrentRPCHandler) OnMessage(c *Conn, req *Request) error {
+	return h.next.OnMessage(c, req)
+}
+
+func (h *concurrentRPCHandler) CanRunConcurrently(req *Request) bool {
+	id, ok := concurrentRPCMethodID(req.Buf)
+	if !ok {
+		return false
+	}
+	_, ok = h.typeIDs[id]
+	return ok
+}
+
+// ConcurrentRPCs marks the listed RPC constructors as safe to run while later
+// requests on the same connection are dispatched. InvokeWithLayer and
+// InvokeWithoutUpdates envelopes are transparent; stateful wrappers,
+// dependencies, and containers remain serial.
+func ConcurrentRPCs(next Handler, typeIDs ...uint32) Handler {
+	if next == nil || len(typeIDs) == 0 {
+		return next
+	}
+	registered := make(map[uint32]struct{}, len(typeIDs))
+	for _, id := range typeIDs {
+		registered[id] = struct{}{}
+	}
+	return &concurrentRPCHandler{next: next, typeIDs: registered}
+}
+
+// concurrentRPCMethodID returns a direct method ID through the two stateless
+// envelopes used around ordinary client requests. Other wrappers retain their
+// sequencing semantics and cannot opt a request into concurrent dispatch.
+func concurrentRPCMethodID(body *bin.Buffer) (uint32, bool) {
+	if body == nil {
+		return 0, false
+	}
+	b := &bin.Buffer{Buf: slices.Clone(body.Copy())}
+	id, err := b.PeekID()
+	if err != nil {
+		return 0, false
+	}
+	for id == tg.InvokeWithLayerRequestTypeID || id == tg.InvokeWithoutUpdatesRequestTypeID {
+		obj := &peekIDObject{}
+		var wrapper bin.Decoder
+		switch id {
+		case tg.InvokeWithLayerRequestTypeID:
+			wrapper = &tg.InvokeWithLayerRequest{Query: obj}
+		case tg.InvokeWithoutUpdatesRequestTypeID:
+			wrapper = &tg.InvokeWithoutUpdatesRequest{Query: obj}
+		}
+		if err := wrapper.Decode(b); err != nil {
+			return 0, false
+		}
+		id = obj.TypeID
+	}
+	if id == proto.MessageContainerTypeID || id == proto.GZIPTypeID || isInvokeWrapper(id) {
+		return 0, false
+	}
+	return id, true
 }
 
 // Dispatcher routes requests to handlers keyed by TL constructor ID.

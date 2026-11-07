@@ -15,8 +15,9 @@ const (
 )
 
 type peerFrameResult struct {
-	frame *bin.Buffer
-	err   error
+	frame      *bin.Buffer
+	receivedAt time.Time
+	err        error
 }
 
 // peerFrameReader owns all receives after RPC admission. Its queue and byte
@@ -69,6 +70,7 @@ func (r *peerFrameReader) run() {
 			go func() {
 				frame := new(bin.Buffer)
 				err := r.transport.Recv(context.Background(), frame)
+				receivedAt := time.Now()
 				if err == nil {
 					r.conn.queueReadAheadAcks(frame.Buf)
 				} else {
@@ -79,7 +81,7 @@ func (r *peerFrameReader) run() {
 						}
 					}
 				}
-				result <- peerFrameResult{frame: frame, err: err}
+				result <- peerFrameResult{frame: frame, receivedAt: receivedAt, err: err}
 			}()
 		}
 		var output chan peerFrameResult
@@ -111,16 +113,16 @@ func (r *peerFrameReader) run() {
 	}
 }
 
-func (r *peerFrameReader) next(drainCtx context.Context, readDeadline time.Time, idleDeadline bool) (*bin.Buffer, error) {
+func (r *peerFrameReader) next(drainCtx context.Context, readDeadline time.Time, idleDeadline bool) (*bin.Buffer, time.Time, error) {
 	if err := drainCtx.Err(); err != nil {
-		return nil, errServerDraining
+		return nil, time.Time{}, errServerDraining
 	}
 	r.start()
 	if !r.enabled {
 		select {
 		case r.demand <- struct{}{}:
 		case <-drainCtx.Done():
-			return nil, errServerDraining
+			return nil, time.Time{}, errServerDraining
 		}
 	}
 	timeout := r.server.readTimeout
@@ -134,19 +136,19 @@ func (r *peerFrameReader) next(drainCtx context.Context, readDeadline time.Time,
 	defer timer.Stop()
 	select {
 	case result := <-r.frames:
-		return result.frame, result.err
+		return result.frame, result.receivedAt, result.err
 	case <-drainCtx.Done():
 		r.server.preserveDrainReadDeadline(r.transport)
-		return nil, errServerDraining
+		return nil, time.Time{}, errServerDraining
 	case <-timer.C:
 		if err := r.conn.closeServer(); err != nil && !isDisconnect(err) {
 			r.server.log.Info("close connection at read deadline", "err", err)
 		}
 		r.join()
 		if idleDeadline {
-			return nil, fmt.Errorf("%w: %w", errIdleReadTimeout, context.DeadlineExceeded)
+			return nil, time.Time{}, fmt.Errorf("%w: %w", errIdleReadTimeout, context.DeadlineExceeded)
 		}
-		return nil, context.DeadlineExceeded
+		return nil, time.Time{}, context.DeadlineExceeded
 	}
 }
 

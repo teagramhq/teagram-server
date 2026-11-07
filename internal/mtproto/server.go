@@ -1335,6 +1335,13 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 	}()
 	defer func() {
+		if err := conn.waitConcurrentRPCs(); err != nil {
+			if rErr == nil {
+				rErr = err
+			} else {
+				rErr = errors.Join(rErr, err)
+			}
+		}
 		conn.stopAcks()
 		if err := conn.closeServer(); err != nil && rErr == nil && !isDisconnect(err) {
 			failureStage = "connection_cleanup"
@@ -1420,11 +1427,16 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	var pendingLoginDeadline time.Time
 	readFrame := func(readDeadline time.Time, idleDeadline bool) error {
 		if peerReader == nil {
-			return s.readOrDrainWithTimeout(readCtx, tconn, b, readDeadline, s.readTimeout, idleDeadline)
+			if err := s.readOrDrainWithTimeout(readCtx, tconn, b, readDeadline, s.readTimeout, idleDeadline); err != nil {
+				return err
+			}
+			conn.frameReceivedAt = time.Now()
+			return nil
 		}
-		frame, err := peerReader.next(s.shutdown.drainCtx, readDeadline, idleDeadline)
+		frame, receivedAt, err := peerReader.next(s.shutdown.drainCtx, readDeadline, idleDeadline)
 		if frame != nil {
 			b.ResetTo(frame.Buf)
+			conn.frameReceivedAt = receivedAt
 		}
 		return err
 	}
@@ -1614,6 +1626,11 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			return nil
 		}
 
+		if conn.AuthKeyID() != key.IntID() {
+			if err := conn.waitConcurrentRPCs(); err != nil {
+				return err
+			}
+		}
 		conn.setKey(key)
 		conn.observeAuthorizationOwner(userID)
 		// Stop delivering updates under the old identity before dispatching a

@@ -39,21 +39,25 @@ type env struct {
 	logSQL func(scenario string, captured []capturedQuery)
 	// elapsed, when a call sets it, replaces the call's wall time as its
 	// latency.
-	elapsed time.Duration
+	elapsed                       time.Duration
+	maxReceiveToDispatchWait      time.Duration
+	receiveToDispatchSamples      int
+	receiveToDispatchMissingStamp bool
 }
 
 // scenario is one client-facing RPC as a client sends it. prepare runs before
 // every sample, outside the measured window and before the server goes quiet;
 // cleanup runs after it, likewise unmeasured.
 type scenario struct {
-	name    string
-	kind    perfreport.Kind
-	fullSet bool
-	samples int
-	note    string
-	setup   func(ctx context.Context, e *env) (call func(ctx context.Context) error, note string, err error)
-	prepare func(ctx context.Context, e *env) error
-	cleanup func(ctx context.Context, e *env) error
+	name             string
+	kind             perfreport.Kind
+	fullSet          bool
+	scaleIndependent bool
+	samples          int
+	note             string
+	setup            func(ctx context.Context, e *env) (call func(ctx context.Context) error, note string, err error)
+	prepare          func(ctx context.Context, e *env) error
+	cleanup          func(ctx context.Context, e *env) error
 }
 
 // warmup samples fill the plan cache and the buffer pool before measuring.
@@ -155,7 +159,10 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 
 func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc scenario) perfreport.Result {
 	t.Helper()
-	r := perfreport.Result{Name: sc.name, Kind: sc.kind, FullSet: sc.fullSet, Note: sc.note}
+	r := perfreport.Result{
+		Name: sc.name, Kind: sc.kind, FullSet: sc.fullSet,
+		ScaleIndependent: sc.scaleIndependent, Note: sc.note,
+	}
 	fail := func(err error) perfreport.Result {
 		r.Error = err.Error()
 		return r
@@ -183,9 +190,13 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			return fail(err)
 		}
 		measured := i >= warmup
-		tracer.reset(i == warmup, sc.name == "contacts.getContacts")
+		capture := i == warmup && (sc.name == "contacts.getContacts" || sc.name == "messages.getSearchCounters dispatch wait")
+		tracer.reset(capture, sc.name == "contacts.getContacts")
 		allocBefore := heapAllocs()
 		e.elapsed = 0
+		e.maxReceiveToDispatchWait = 0
+		e.receiveToDispatchSamples = 0
+		e.receiveToDispatchMissingStamp = false
 		start := time.Now()
 		var callErr error
 		if shouldProfileGetDialogsSample(sc.name, i) {
@@ -236,6 +247,11 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			nonSQLTimes = append(nonSQLTimes, totalMS-float64(sqlElapsed.Microseconds())/1000)
 			queries = append(queries, int64(n))
 			allocs = append(allocs, int64(allocated)) // #nosec G115 -- one RPC allocates far below MaxInt64
+			r.ReceiveToDispatchSamples += e.receiveToDispatchSamples
+			r.MaxReceiveToDispatchWaitMs = max(
+				r.MaxReceiveToDispatchWaitMs,
+				float64(e.maxReceiveToDispatchWait.Nanoseconds())/float64(time.Millisecond),
+			)
 		}
 	}
 	slices.Sort(latencies)

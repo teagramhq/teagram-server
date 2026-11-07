@@ -36,7 +36,7 @@ func TestPeerFrameReaderClassifiesIdleReadTimeout(t *testing.T) {
 	conn := &Conn{transport: transport}
 	reader := &peerFrameReader{server: server, transport: transport, conn: conn}
 
-	_, err := reader.next(context.Background(), time.Time{}, true)
+	_, _, err := reader.next(context.Background(), time.Time{}, true)
 	if !errors.Is(err, errIdleReadTimeout) {
 		t.Fatalf("peer read error = %v, want idle-timeout classification", err)
 	}

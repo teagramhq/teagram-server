@@ -18,14 +18,15 @@ import (
 // quiet points are exactly the work one RPC caused, including what it
 // triggered after its reply (update fan-out, delivery reads).
 type queryTracer struct {
-	mu          sync.Mutex
-	inFlight    int
-	last        time.Time
-	queries     int
-	captured    []*capturedQuery
-	timings     []queryTimingSpan
-	capture     bool
-	timeQueries bool
+	mu                sync.Mutex
+	inFlight          int
+	last              time.Time
+	queries           int
+	captured          []*capturedQuery
+	timings           []queryTimingSpan
+	capture           bool
+	timeQueries       bool
+	queryStartWaiters map[string][]chan struct{}
 }
 
 type capturedQuery struct {
@@ -100,6 +101,11 @@ func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 	q.inFlight++
 	q.last = startedAt
 	q.queries++
+	name := queryName(data.SQL)
+	for _, waiter := range q.queryStartWaiters[name] {
+		close(waiter)
+	}
+	delete(q.queryStartWaiters, name)
 	timeQueries := q.timeQueries
 	var window *queryTimingWindow
 	if timeQueries {
@@ -124,6 +130,17 @@ func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 		})
 	}
 	return ctx
+}
+
+func (q *queryTracer) watchQueryStart(name string) <-chan struct{} {
+	started := make(chan struct{})
+	q.mu.Lock()
+	if q.queryStartWaiters == nil {
+		q.queryStartWaiters = make(map[string][]chan struct{})
+	}
+	q.queryStartWaiters[name] = append(q.queryStartWaiters[name], started)
+	q.mu.Unlock()
+	return started
 }
 
 func (q *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {

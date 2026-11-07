@@ -701,10 +701,13 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.PaymentsGetPremiumGiftCodeOptionsRequestTypeID, h.handleGetPremiumGiftCodeOptions)
 	register(d, tg.CommunitiesGetJoinedCommunitiesRequestTypeID, h.handleGetJoinedCommunities)
 	d.Fallback(mtproto.HandlerFunc(h.handleUnknownGated))
+	var handler mtproto.Handler
 	if h.turnstileVerifier != nil {
-		return mtproto.UnpackInvokeWithAfterMsgAndReCaptcha(d, h.handleInvokeAfterMsgRefusal)
+		handler = mtproto.UnpackInvokeWithAfterMsgAndReCaptcha(d, h.handleInvokeAfterMsgRefusal)
+	} else {
+		handler = mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
 	}
-	return mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
+	return mtproto.ConcurrentRPCs(handler, tg.MessagesGetSearchCountersRequestTypeID)
 }
 
 func registerLangpackMethods(d *mtproto.Dispatcher, h *handlers) {

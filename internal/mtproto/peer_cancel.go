@@ -69,20 +69,26 @@ func (c *Conn) beginActiveRPC(active *activePeerRPC) bool {
 	if c.peerLost.Load() || c.closeSource.Load() != closeSourceUnknown {
 		return false
 	}
-	if c.activeRPC != nil {
-		panic("overlapping MTProto RPCs on one connection")
+	if c.activeRPCs == nil {
+		c.activeRPCs = make(map[*activePeerRPC]struct{})
 	}
-	c.activeRPC = active
+	c.activeRPCs[active] = struct{}{}
 	return true
 }
 
 func (c *Conn) finishActiveRPC(active *activePeerRPC) {
 	active.finish()
 	c.activeRPCMu.Lock()
-	if c.activeRPC == active {
-		c.activeRPC = nil
-	}
+	delete(c.activeRPCs, active)
 	c.activeRPCMu.Unlock()
+}
+
+func (c *Conn) activeRPCSnapshotLocked() []*activePeerRPC {
+	active := make([]*activePeerRPC, 0, len(c.activeRPCs))
+	for rpc := range c.activeRPCs {
+		active = append(active, rpc)
+	}
+	return active
 }
 
 func (c *Conn) beginWriteDeadline(deadline time.Time) uint64 {
@@ -143,17 +149,28 @@ func (c *Conn) observePeerDisconnect() {
 	}
 	c.closeSource.Store(closeSourcePeer)
 	c.peerLost.Store(true)
-	active := c.activeRPC
+	active := c.activeRPCSnapshotLocked()
 	c.activeRPCMu.Unlock()
 
-	if active == nil || c.peerCancels == nil {
+	if len(active) == 0 || c.peerCancels == nil {
 		return
 	}
-	reservation, denial := c.peerCancels.reserve(active.userID)
+	userID := int64(0)
+	for _, rpc := range active {
+		if rpc.userID != 0 {
+			userID = rpc.userID
+			break
+		}
+	}
+	reservation, denial := c.peerCancels.reserve(userID)
 	if denial != peerCancelAllowed {
 		return
 	}
-	if active.cancelByPeer() {
+	canceled := false
+	for _, rpc := range active {
+		canceled = rpc.cancelByPeer() || canceled
+	}
+	if canceled {
 		reservation.commit()
 	} else {
 		reservation.release()
@@ -174,10 +191,12 @@ func (c *Conn) markServerCloseState(cancelActive bool) {
 	// An explicit server close cancels active work even when a peer
 	// observation was recorded first but peer cancellation was denied. Keep
 	// that first observation for provenance; cancellation ownership is separate.
-	active := c.activeRPC
+	active := c.activeRPCSnapshotLocked()
 	c.activeRPCMu.Unlock()
-	if cancelActive && active != nil {
-		active.cancelByServer()
+	if cancelActive {
+		for _, rpc := range active {
+			rpc.cancelByServer()
+		}
 	}
 }
 
@@ -186,14 +205,14 @@ func (c *Conn) markServerCloseState(cancelActive bool) {
 // a peer denial must not be upgraded into an unbudgeted server cancellation.
 func (c *Conn) markServerCloseUnlessPeer() {
 	c.activeRPCMu.Lock()
-	var active *activePeerRPC
+	var active []*activePeerRPC
 	if c.closeSource.Load() == closeSourceUnknown {
 		c.closeSource.Store(closeSourceServer)
-		active = c.activeRPC
+		active = c.activeRPCSnapshotLocked()
 	}
 	c.activeRPCMu.Unlock()
-	if active != nil {
-		active.cancelByServer()
+	for _, rpc := range active {
+		rpc.cancelByServer()
 	}
 }
 
