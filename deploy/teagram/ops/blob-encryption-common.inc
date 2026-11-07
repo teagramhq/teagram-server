@@ -20,6 +20,7 @@ declare -a SERVER_CONTAINERS=()
 COMPOSE_ENV_FILES=()
 REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
 readonly EVIDENCE_ROOT="$REPORT_ROOT/teagram-media-encryption"
+readonly LEGACY_EVIDENCE_ROOT=/root/teagram-media-encryption
 export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 SERVER_STOPPED=0
 RUSTFS_STOPPED=0
@@ -511,16 +512,29 @@ start_server_and_smoke() {
 }
 
 latest_backup_manifest() {
+  local evidence_root=$EVIDENCE_ROOT
+  local dump_parent dump_name
   local -a manifests=()
   shopt -s nullglob
   manifests=("$EVIDENCE_ROOT"/pgdump-pre-migration-*.manifest)
+  if [[ "${#manifests[@]}" == 0 && ( -e "$LEGACY_EVIDENCE_ROOT" || -L "$LEGACY_EVIDENCE_ROOT" ) ]]; then
+    private_dir /root || ops_fail 'legacy evidence parent is not root-owned mode 0700'
+    private_dir "$LEGACY_EVIDENCE_ROOT" || ops_fail 'legacy evidence directory is not root-owned mode 0700'
+    manifests=("$LEGACY_EVIDENCE_ROOT"/pgdump-pre-migration-*.manifest)
+    evidence_root=$LEGACY_EVIDENCE_ROOT
+  fi
   shopt -u nullglob
   [[ "${#manifests[@]}" -gt 0 ]] || ops_fail 'verified pre-migration database dump is unavailable'
   BACKUP_MANIFEST=${manifests[-1]}
+  BACKUP_EVIDENCE_ROOT=$evidence_root
   private_file "$BACKUP_MANIFEST" || ops_fail 'database backup manifest is unsafe'
   jq -e '.result == "isolated-restore-pass" and (.dump_path | type == "string") and (.dump_sha256 | test("^[0-9a-f]{64}$"))' \
     "$BACKUP_MANIFEST" >/dev/null || ops_fail 'database backup manifest is invalid'
   BACKUP_DUMP=$(jq -er '.dump_path' "$BACKUP_MANIFEST") || ops_fail 'database dump path is invalid'
+  dump_parent=${BACKUP_DUMP%/*}
+  dump_name=${BACKUP_DUMP##*/}
+  [[ "$dump_parent" == "$BACKUP_EVIDENCE_ROOT" && "$dump_name" == pgdump-pre-migration-*.dump ]] || \
+    ops_fail 'verified database dump path is outside the evidence directory'
   private_file "$BACKUP_DUMP" || ops_fail 'verified database dump is missing or unsafe'
   local expected actual
   expected=$(jq -er '.dump_sha256' "$BACKUP_MANIFEST") || ops_fail 'database dump digest is unavailable'

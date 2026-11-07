@@ -112,6 +112,7 @@ case "$1" in
       "$FIXTURE_SHA:deploy/teagram/ops/blob-encryption-common.inc")
         sed -e "s|/opt/teagram|$FIXTURE_REPO|g" \
           -e "s|/root|$FIXTURE_EVIDENCE|g" \
+          -e "s|$FIXTURE_EVIDENCE/teagram-media-encryption|$FIXTURE_LEGACY_EVIDENCE|g" \
           -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
           -e "s|/etc/teagramd/media-key-backups|$FIXTURE_KEY_BACKUP_PARENT/media-key-backups|g" \
           -e "s|/tmp/teagram-deploy.lock|$FIXTURE_TMP/deploy.lock|g" "$FIXTURE_COMMON"
@@ -334,7 +335,7 @@ case "$1" in
       elif [[ "$FIXTURE_SCENARIO" == encrypt-success ]]; then
         publish_encrypted_authority
         printf '{"mode":"encrypt","authority":"encrypted","writes":"stopped","objects":1,"bytes":7,"unaccounted":[]}\n'
-      elif [[ "$FIXTURE_SCENARIO" == cleanup-success || \
+      elif [[ "$FIXTURE_SCENARIO" == cleanup-success || "$FIXTURE_SCENARIO" == legacy-cleanup-success || \
         "$FIXTURE_SCENARIO" == cleanup-recheck-removes || \
         "$FIXTURE_SCENARIO" == cleanup-post-unaccounted ]] && \
         [[ " $* " == *' --cleanup '* ]]; then
@@ -392,6 +393,7 @@ setup_case() {
   FIXTURE_REPO=$case_dir/repo
   FIXTURE_EVIDENCE=$case_dir/root
   FIXTURE_OPERATION_EVIDENCE=$FIXTURE_EVIDENCE/teagram-media-encryption
+  FIXTURE_LEGACY_EVIDENCE=$FIXTURE_EVIDENCE/legacy-teagram-media-encryption
   FIXTURE_KEY_DIR=$case_dir/keys
   FIXTURE_KEY_BACKUP_PARENT=$case_dir/key-backup-parent
   FIXTURE_POSTGRES_STATE=$case_dir/postgres-state
@@ -407,14 +409,14 @@ setup_case() {
   FIXTURE_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   TEAGRAM_BLOB_MODE_REPORT_ROOT=$FIXTURE_EVIDENCE
   export TEAGRAM_BLOB_MODE_REPORT_ROOT
-  export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_KEY_BACKUP_PARENT FIXTURE_POSTGRES_STATE \
+  export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_LEGACY_EVIDENCE FIXTURE_KEY_DIR FIXTURE_KEY_BACKUP_PARENT FIXTURE_POSTGRES_STATE \
     FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
     FIXTURE_CLEANUP_CALLS FIXTURE_ENCRYPT_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
     FIXTURE_COMPOSE_FILES
 
   mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE" \
     "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups" "$FIXTURE_KEY_DIR"
-  mkdir -m 700 "$FIXTURE_OPERATION_EVIDENCE"
+  mkdir -m 700 "$FIXTURE_OPERATION_EVIDENCE" "$FIXTURE_LEGACY_EVIDENCE"
   chmod 700 "$FIXTURE_EVIDENCE" "$FIXTURE_KEY_BACKUP_PARENT" "$FIXTURE_KEY_BACKUP_PARENT/media-key-backups" "$FIXTURE_KEY_DIR"
   printf 'fixture env\n' > "$FIXTURE_REPO/.env"
   printf 'fixture parked env\n' > "$FIXTURE_REPO/.env.rustfs-parked"
@@ -428,7 +430,7 @@ setup_case() {
   printf 'running\n' > "$FIXTURE_SERVER_STATE"
   printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
   printf '%s\n' "$authority" > "$FIXTURE_AUTHORITY_FILE"
-  if [[ "$scenario" == cleanup-success || "$scenario" == cleanup-recheck-removes || \
+  if [[ "$scenario" == cleanup-success || "$scenario" == legacy-cleanup-success || "$scenario" == cleanup-recheck-removes || \
     "$scenario" == cleanup-post-unaccounted ]]; then
     printf 'fixture plaintext source\n' > "$FIXTURE_PLAINTEXT_OBJECT"
   fi
@@ -452,24 +454,37 @@ setup_case() {
   if [[ "$authority" == encrypted ]]; then
     setup_encrypted_authority
   fi
+  if [[ "$scenario" == legacy-evidence-unsafe ]]; then
+    chmod 755 "$FIXTURE_LEGACY_EVIDENCE"
+  fi
+  if [[ "$scenario" == legacy-evidence-path-escape ]]; then
+    printf 'fixture database archive outside evidence root\n' > "$case_dir/outside.dump"
+    chmod 600 "$case_dir/outside.dump"
+    jq --arg dump "$case_dir/outside.dump" '.dump_path=$dump' \
+      "$FIXTURE_LEGACY_EVIDENCE/pgdump-pre-migration-fixture.manifest" > "$case_dir/manifest.tmp"
+    chmod 600 "$case_dir/manifest.tmp"
+    mv "$case_dir/manifest.tmp" "$FIXTURE_LEGACY_EVIDENCE/pgdump-pre-migration-fixture.manifest"
+  fi
 }
 
 setup_encrypted_authority() {
-  local transition_id=11111111-1111-4111-8111-111111111111 inventory dump_sha inventory_sha
+  local transition_id=11111111-1111-4111-8111-111111111111 inventory dump_sha inventory_sha backup_evidence
+  backup_evidence=$FIXTURE_OPERATION_EVIDENCE
+  [[ "$FIXTURE_SCENARIO" != legacy-* ]] || backup_evidence=$FIXTURE_LEGACY_EVIDENCE
   inventory="$FIXTURE_EVIDENCE/teagramd-blob-encryption-inventory-$transition_id.json"
   jq -cn '{schema:"teagram.blob-encryption-inventory/v1",
     encrypted:{classes:{valid_envelope:{count:1},no_valid_envelope:{count:0},missing:{count:0},unaccounted:{count:0,ids:[]}}},
     plaintext:{classes:{no_valid_envelope:{count:1},missing:{count:0},unaccounted:{count:0,ids:[]}}}}' > "$inventory"
   chmod 600 "$inventory"
-  dump="$FIXTURE_OPERATION_EVIDENCE/pgdump-pre-migration-fixture.dump"
+  dump="$backup_evidence/pgdump-pre-migration-fixture.dump"
   printf 'fixture database archive\n' > "$dump"
   chmod 600 "$dump"
   dump_sha=$(sha256sum "$dump")
   dump_sha=${dump_sha%% *}
   jq -cn --arg dump "$dump" --arg sha "$dump_sha" \
     '{result:"isolated-restore-pass",dump_path:$dump,dump_sha256:$sha}' \
-    > "$FIXTURE_OPERATION_EVIDENCE/pgdump-pre-migration-fixture.manifest"
-  chmod 600 "$FIXTURE_OPERATION_EVIDENCE/pgdump-pre-migration-fixture.manifest"
+    > "$backup_evidence/pgdump-pre-migration-fixture.manifest"
+  chmod 600 "$backup_evidence/pgdump-pre-migration-fixture.manifest"
   printf '{"type":"header","schema":"teagram.blob-encryption-progress/v1","writes":"stopped"}\n' \
     > "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"
   chmod 600 "$FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"
@@ -691,6 +706,34 @@ output=$(run_encrypt)
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
 [[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
 printf '%s\n' 'PASS already-encrypted migration resumes with verified readback and smoke'
+
+setup_case legacy-already-encrypted-success encrypted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *"dump_path=$FIXTURE_LEGACY_EVIDENCE/pgdump-pre-migration-fixture.dump"* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+printf '%s\n' 'PASS already-encrypted migration resumes from validated legacy backup evidence'
+
+setup_case legacy-cleanup-success encrypted
+output=$(run_cleanup --acceptance-passed)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'cleanup=pass authority=encrypted'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+printf '%s\n' 'PASS encrypted cleanup uses validated legacy backup evidence'
+
+setup_case legacy-evidence-unsafe encrypted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'legacy evidence directory is not root-owned mode 0700'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS legacy backup evidence is rejected when its directory permissions are unsafe'
+
+setup_case legacy-evidence-path-escape encrypted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'verified database dump path is outside the evidence directory'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
+printf '%s\n' 'PASS legacy backup manifests cannot redirect dumps outside their evidence directory'
 
 for scenario in ancestry-origin-failure ancestry-live-failure ancestry-minimum-failure; do
   setup_case "$scenario" s3-accepted
