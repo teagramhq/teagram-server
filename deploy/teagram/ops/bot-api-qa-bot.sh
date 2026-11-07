@@ -9,6 +9,8 @@ readonly BOT_USERNAME=teagram_qa_test_bot
 readonly BOT_FIRST_NAME='Teagram QA Test'
 readonly AGE_RECIPIENT=age1p5s5le72wnxu465pe2xz5a3qv8mdykwp5leezpjk0zm6p0m3e5hs36fydn
 readonly PROBE_REQUESTS=24
+readonly LOCK_PATH=/tmp/teagram-deploy.lock
+readonly EXPECTED_ROOT_UID=0
 
 fail() {
   printf 'Bot API QA bot operation rejected: %s\n' "$1" >&2
@@ -31,6 +33,17 @@ esac
 
 [[ ${EUID:-$(id -u)} == 0 ]] || { fail 'operation requires root'; exit 1; }
 [[ ${OPS_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { fail 'reviewed source SHA is invalid'; exit 1; }
+if [[ ! -e "$LOCK_PATH" && ! -L "$LOCK_PATH" ]]; then
+  ( set -o noclobber; : > "$LOCK_PATH" ) || {
+    [[ -e "$LOCK_PATH" || -L "$LOCK_PATH" ]] || { fail 'cannot create deployment lock'; exit 1; }
+  }
+fi
+[[ -f "$LOCK_PATH" && ! -L "$LOCK_PATH" && "$(stat -c %u -- "$LOCK_PATH")" == "$EXPECTED_ROOT_UID" ]] || {
+  fail 'deployment lock is unsafe'
+  exit 1
+}
+exec 9>>"$LOCK_PATH" || { fail 'cannot open deployment lock'; exit 1; }
+flock -x 9 || { fail 'cannot acquire deployment lock'; exit 1; }
 live_sha=$(git -C "$REPO" rev-parse HEAD) || { fail 'cannot inspect the live checkout'; exit 1; }
 [[ "$live_sha" == "$OPS_SHA" ]] || { fail 'live checkout differs from reviewed source'; exit 1; }
 image_sha=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SERVICE") || {

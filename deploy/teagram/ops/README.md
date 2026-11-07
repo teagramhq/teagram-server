@@ -56,6 +56,9 @@ the bot already exists. `rotate` issues a new token, `revoke` is an idempotent
 no-op after revocation, and `status` prints only the bot id, username and token
 state. Every mode checks that the pinned username still belongs to the expected
 bot account and refuses a channel, human account or mismatched bot.
+Every mode holds the host's shared `/tmp/teagram-deploy.lock` across lookup,
+mutation, verification and cleanup so bot operations cannot race each other or
+a server rollout.
 
 The Linux QA host keeps its age identity at `~/.config/age/keys.txt` with mode
 0600 and stores the encrypted bot token at
