@@ -101,11 +101,15 @@ git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-inert-surfac
   > "$TEMP_DIR/rustfs-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-69 transition query'
 git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql" \
   > "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-70 transition query'
+git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot-api-qa.sh" \
+  > "$TEMP_DIR/bot-api-qa.sh" || fail 'cannot stage the reviewed Bot API relay recovery helper'
 chmod 600 "$TEMP_DIR/blob-transition-runner.py" "$TEMP_DIR/blob-mode-state.py" \
   "$TEMP_DIR/qualify-rustfs-transition.py" "$TEMP_DIR/rustfs-inert-surfaces.sql" \
-  "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" || {
-  fail 'cannot protect the staged blob authority validators'
+  "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" "$TEMP_DIR/bot-api-qa.sh" || {
+  fail 'cannot protect the staged runtime helpers'
 }
+# shellcheck disable=SC1091
+source "$TEMP_DIR/bot-api-qa.sh"
 
 export TEAGRAM_BLOB_MODE_REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
 authority_json=$(cd "$REPO" && python3 "$TEMP_DIR/blob-transition-runner.py" deployment-env \
@@ -130,6 +134,9 @@ esac
 for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
   [[ -f "$env_file" && ! -L "$env_file" ]] || fail 'verified Compose environment file is unavailable'
 done
+COMPOSE=(docker compose --project-directory "$REPO" --project-name teagram \
+  --file "$REPO/docker-compose.yml" --file "$REPO/docker-compose.override.yml" \
+  --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}")
 
 start_existing_container() {
   local name=$1 expected_service=$2
@@ -142,6 +149,7 @@ start_existing_container() {
   }
   if [[ "$container_state" != running ]]; then
     docker start "$name" >/dev/null || fail "could not start the existing $expected_service container"
+    if [[ "$name" == "$SERVER_CONTAINER" ]]; then SERVER_STARTED=1; fi
   fi
   inspect_container "$name"
   [[ "$container_project" == teagram && "$container_service" == "$expected_service" &&
@@ -151,6 +159,7 @@ start_existing_container() {
   [[ "$container_state" == running ]] || fail "$expected_service did not enter the running state"
 }
 
+SERVER_STARTED=0
 start_existing_container "$POSTGRES_CONTAINER" "$EXPECTED_POSTGRES_SERVICE"
 
 sleep 5
@@ -167,5 +176,9 @@ done
 [[ "$postgres_ready" == 1 ]] || fail 'Postgres did not become ready within 60 seconds'
 
 start_existing_container "$SERVER_CONTAINER" "$EXPECTED_SERVER_SERVICE"
+if [[ "$SERVER_STARTED" == 1 ]]; then
+  restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || \
+    fail 'Bot API relays did not recover after teagramd startup'
+fi
 
 printf 'postgres=ready teagramd=running compose_selection=verified\n'

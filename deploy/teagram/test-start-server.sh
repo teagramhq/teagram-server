@@ -19,7 +19,11 @@ trap cleanup EXIT
 
 mkdir -p "$TMP/bin"
 FIXTURE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-export FIXTURE_SHA
+FIXTURE_BOT_API_QA=$SCRIPT_DIR/ops/bot-api-qa.sh
+FIXTURE_SERVER_ID=1111111111111111111111111111111111111111111111111111111111111111
+FIXTURE_INNER_ID=2222222222222222222222222222222222222222222222222222222222222222
+FIXTURE_INGRESS_ID=3333333333333333333333333333333333333333333333333333333333333333
+export FIXTURE_SHA FIXTURE_BOT_API_QA FIXTURE_SERVER_ID FIXTURE_INNER_ID FIXTURE_INGRESS_ID
 
 cat > "$TMP/bin/id" <<'ID'
 #!/usr/bin/env bash
@@ -56,6 +60,7 @@ case "$4" in
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql")
     printf '# fixture helper\n'
     ;;
+  "$FIXTURE_SHA:deploy/teagram/ops/bot-api-qa.sh") cat "$FIXTURE_BOT_API_QA" ;;
   *) echo "unexpected fixture git show: $4" >&2; exit 99 ;;
 esac
 GIT
@@ -88,6 +93,26 @@ if [[ "$1" == inspect ]]; then
   [[ "$2" == --format && "$#" == 4 ]] || { echo "unexpected inspect: $*" >&2; exit 99; }
   format=$3
   container=$4
+  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
+    printf '%s\n' "${MOCK_TELEGRAMD_ENV_JSON:-[]}"
+    exit
+  fi
+  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
+    printf '%s\n' "$FIXTURE_SERVER_ID"
+    exit
+  fi
+  if [[ "$container" == "$FIXTURE_INNER_ID" && "$format" == '{{.State.Health.Status}}' ]]; then
+    printf 'healthy\n'
+    exit
+  fi
+  if [[ "$container" == "$FIXTURE_INNER_ID" && "$format" == '{{.HostConfig.NetworkMode}}' ]]; then
+    printf 'container:%s\n' "$FIXTURE_SERVER_ID"
+    exit
+  fi
+  if [[ "$container" == "$FIXTURE_INGRESS_ID" && "$format" == '{{.State.Health.Status}}' ]]; then
+    printf 'healthy\n'
+    exit
+  fi
   case "$container" in
     teagram-postgres-1) service=postgres; state_file=$MOCK_POSTGRES_STATE_FILE; project=${MOCK_POSTGRES_PROJECT:-teagram}; files=${MOCK_POSTGRES_FILES:-$MOCK_COMPOSE_FILES} ;;
     teagram-teagramd-1) service=teagramd; state_file=$MOCK_TEAGRAMD_STATE_FILE; project=${MOCK_TEAGRAMD_PROJECT:-teagram}; files=${MOCK_TEAGRAMD_FILES:-$MOCK_COMPOSE_FILES} ;;
@@ -100,7 +125,18 @@ if [[ "$1" == inspect ]]; then
     *) echo "unexpected fixture inspect format: $format" >&2; exit 99 ;;
   esac
 elif [[ "$1" == compose ]]; then
-  if [[ "$*" == *' start teagramd' ]]; then
+  if [[ "$*" == *' ps --all -q bot-api-inner' || "$*" == *' ps --all -q bot-api-ingress' ]]; then
+    :
+  elif [[ "$*" == *' ps -q bot-api-inner' ]]; then
+    printf '%s\n' "$FIXTURE_INNER_ID"
+  elif [[ "$*" == *' ps -q bot-api-ingress' ]]; then
+    printf '%s\n' "$FIXTURE_INGRESS_ID"
+  elif [[ "$*" == *' up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner' ]]; then
+    printf 'restore:bot-api-inner\n' >> "$MOCK_EVENTS"
+    [[ "${MOCK_START_FAIL_SERVICE:-}" != bot-api-inner ]] || exit 44
+  elif [[ "$*" == *' up -d --no-deps --wait --wait-timeout 60 bot-api-ingress' ]]; then
+    printf 'restore:bot-api-ingress\n' >> "$MOCK_EVENTS"
+  elif [[ "$*" == *' start teagramd' ]]; then
     printf 'start:migrate\n' >> "$MOCK_EVENTS"
     printf 'running\n' > "$MOCK_MIGRATE_STATE_FILE"
     printf 'start:teagramd\n' >> "$MOCK_EVENTS"
@@ -164,7 +200,7 @@ setup_case() {
   MOCK_EVENTS=$dir/events
   MOCK_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   unset MOCK_POSTGRES_PROJECT MOCK_TEAGRAMD_PROJECT MOCK_POSTGRES_FILES MOCK_TEAGRAMD_FILES
-  unset MOCK_PG_READY MOCK_START_FAIL_SERVICE
+  unset MOCK_PG_READY MOCK_START_FAIL_SERVICE MOCK_TELEGRAMD_ENV_JSON
   FIXTURE_AUTHORITY_JSON=$(jq -cn --arg repo "$FIXTURE_REPO" \
     '{outcome:"s3-accepted",env_files:[$repo + "/.env",$repo + "/.env.rustfs-parked"]}')
   mkdir -p "$FIXTURE_REPO/.state/blob-mode"
@@ -176,6 +212,10 @@ setup_case() {
   printf 'exited\n' > "$MOCK_TEAGRAMD_STATE_FILE"
   printf 'exited\n' > "$MOCK_MIGRATE_STATE_FILE"
   : > "$MOCK_EVENTS"
+  if [[ "$name" == ordered-start || "$name" == relay-recovery-fails ]]; then
+    MOCK_TELEGRAMD_ENV_JSON='["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]'
+    export MOCK_TELEGRAMD_ENV_JSON
+  fi
   sed "s|/opt/teagram|$FIXTURE_REPO|g" "$OP_SCRIPT" > "$dir/op.sh"
   chmod 755 "$dir/op.sh"
   export FIXTURE_REPO FIXTURE_AUTHORITY_JSON MOCK_POSTGRES_STATE_FILE MOCK_TEAGRAMD_STATE_FILE \
@@ -203,7 +243,7 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 0 ]]
 [[ "$output" == *'postgres=ready teagramd=running compose_selection=verified'* ]]
 [[ "$output" != *'fixture-secret-value'* && "$output" != *'fixture-parked-secret'* ]]
-[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd' ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 [[ "$(cat "$MOCK_MIGRATE_STATE_FILE")" == exited ]]
 printf '%s\n' 'PASS starts Postgres before only the existing teagramd container, without starting migration dependencies'
 
@@ -303,6 +343,15 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'could not start the existing teagramd container'* ]]
 printf '%s\n' 'PASS reports a teagramd startup failure after Postgres is ready'
+
+setup_case relay-recovery-fails
+MOCK_START_FAIL_SERVICE=bot-api-inner
+export MOCK_START_FAIL_SERVICE
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'Bot API inner relay did not become healthy after recreation'* ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner' ]]
+printf '%s\n' 'PASS reports a Bot API relay recovery failure after starting teagramd'
 
 setup_case bad-arguments
 output=$(run_operation unexpected)
