@@ -567,8 +567,16 @@ PY
 printf 'post-switch failure kept k3s live and Compose fenced\n'
 cutover_job_image=$(kubectl get job local-blob-migration --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.template.spec.containers[?(@.name=="migrate")].image}')
-[[ $cutover_job_image == "$CUTOVER_IMAGE" ]] || {
-  printf 'cutover migration image is %s, want %s\n' "$cutover_job_image" "$CUTOVER_IMAGE" >&2
+cutover_job_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' \
+  deploy/k8s/prod-cutover/kustomization.yaml)
+[[ $cutover_job_digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  printf 'cutover overlay has no valid teagramd image digest\n' >&2
+  exit 1
+}
+expected_cutover_job_image="ghcr.io/teagramhq/teagramd@$cutover_job_digest"
+[[ $cutover_job_image == "$expected_cutover_job_image" ]] || {
+  printf 'cutover migration image is %s, want pinned overlay image %s\n' \
+    "$cutover_job_image" "$expected_cutover_job_image" >&2
   exit 1
 }
 kubectl logs --namespace "$TARGET_NAMESPACE" job/local-blob-migration -c migrate |

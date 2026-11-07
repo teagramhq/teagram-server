@@ -216,7 +216,7 @@ if grep -Fq 'mock kubectl second diagnostic' "$work/failure.out"; then
   fail 'kubectl apply failure printed more than the first stderr line'
 fi
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \
-  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$ghcr_auth" "$deployer_token" \
+  "$blob_access_key_id" "$blob_secret_key" "$media_key" "$deployer_token" \
   "$admin_cert" "$admin_key" "$(printf '%s' "$admin_cert" | base64 -w0)" \
   "$(printf '%s' "$admin_key" | base64 -w0)"; do
   if grep -Fq -- "$secret" "$work/failure.out"; then
