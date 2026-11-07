@@ -917,6 +917,8 @@ output=$(run_quarantine --check-post "$post_run_id")
 [[ "$output" == *'quarantine=pass fixture'* ]]
 [[ "$(cat "$FIXTURE_HELPER_CALLS")" == *'--mode check-post'* ]]
 [[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--run-id $post_run_id"* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--mount-dir $FIXTURE_QUARANTINE_BASE/MAIN-3441-$post_run_id"* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--journal $FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"* ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
 printf '%s\n' 'PASS post-quarantine check targets the original verified run without applying'
 

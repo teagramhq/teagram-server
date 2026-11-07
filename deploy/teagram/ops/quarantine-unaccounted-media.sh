@@ -62,6 +62,8 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${OPS_SHA:0:7}"
 TARGET_RUN_ID=$RUN_ID
 if [[ "$MODE" == restore || "$MODE" == check-post ]]; then TARGET_RUN_ID=$2; fi
 QUARANTINE_DIR="$QUARANTINE_BASE/MAIN-3441-$TARGET_RUN_ID"
+MOUNT_DIR=$OPS_TEMP_DIR/mc-files
+if [[ "$MODE" == restore || "$MODE" == check-post ]]; then MOUNT_DIR=$QUARANTINE_DIR; fi
 
 exec 9>/tmp/teagram-deploy.lock || ops_fail 'cannot open the shared deployment lock'
 flock -x 9 || ops_fail 'cannot acquire the shared deployment lock'
@@ -124,7 +126,7 @@ HELPER_ARGS=(
   --run-id "$TARGET_RUN_ID"
   --diagnostic-id "$RUN_ID"
   --referenced-count "$INVENTORY_REFERENCED"
-  --mount-dir "$OPS_TEMP_DIR/mc-files"
+  --mount-dir "$MOUNT_DIR"
 )
 if [[ "$MODE" != restore ]]; then
   HELPER_ARGS+=(
@@ -138,10 +140,6 @@ if [[ "$MODE" == apply ]]; then
     ops_fail 'cannot calculate the quarantine retention date'
   HELPER_ARGS+=(--delete-after "$DELETE_AFTER")
 fi
-if [[ "$MODE" == restore || "$MODE" == check-post ]]; then
-  HELPER_ARGS[${#HELPER_ARGS[@]}-1]="$QUARANTINE_DIR"
-fi
-
 AUTHORITY_SHA_BEFORE_APPLY=$(sha256_file_contents "$AUTHORITY_DIR/mode.json") || \
   ops_fail 'cannot recheck encrypted authority before media quarantine'
 [[ "$AUTHORITY_SHA_BEFORE_APPLY" == "$AUTHORITY_SHA_BEFORE" ]] || ops_fail 'encrypted authority changed before media quarantine'
