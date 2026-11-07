@@ -13,7 +13,10 @@ export MOCK_CANARY_TOKEN="${MOCK_BOT_ID}:${MOCK_CANARY_SECRET}"
 export MOCK_ROOT_UID=$(id -u)
 
 go build -o "$tmp/teagramd" ./cmd/teagramd
-recipient=$(go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go keygen "$tmp/identity")
+key_material=$(go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go keygen)
+recipient=${key_material%%$'\n'*}
+identity=${key_material#*$'\n'}
+unset key_material
 
 python3 - "$ROOT/deploy/teagram/ops/bot-api-qa-bot.sh" "$tmp/ops/bot-api-qa-bot.sh" "$repo" "$recipient" "$MOCK_ROOT_UID" <<'PY'
 from pathlib import Path
@@ -163,7 +166,7 @@ assert_no_token() {
 expect_status 0 "run $OPS_SHA bot-api-qa-bot create"
 assert_no_token
 [[ "$(head -n 1 "$tmp/stdout")" == "action=create bot_id=$MOCK_BOT_ID username=teagram_qa_test_bot" ]]
-decrypted=$(tail -n +2 "$tmp/stdout" | go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go decrypt "$tmp/identity")
+decrypted=$(tail -n +2 "$tmp/stdout" | TEST_AGE_IDENTITY="$identity" go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go decrypt)
 [[ "$decrypted" == "$MOCK_CANARY_TOKEN" ]]
 
 expect_status 0 "run $OPS_SHA bot-api-qa-bot create"
@@ -186,8 +189,9 @@ assert_no_token
 expect_status 0 "run $OPS_SHA bot-api-qa-bot rotate"
 assert_no_token
 [[ "$(head -n 1 "$tmp/stdout")" == "action=rotate bot_id=$MOCK_BOT_ID username=teagram_qa_test_bot" ]]
-decrypted=$(tail -n +2 "$tmp/stdout" | go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go decrypt "$tmp/identity")
+decrypted=$(tail -n +2 "$tmp/stdout" | TEST_AGE_IDENTITY="$identity" go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go decrypt)
 [[ "$decrypted" == "$MOCK_CANARY_TOKEN" ]]
+unset identity
 
 expect_status 0 "run $OPS_SHA bot-api-qa-bot probe"
 assert_no_token
