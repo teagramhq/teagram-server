@@ -70,6 +70,8 @@ type Request struct {
 	CompletionCtx context.Context
 	// admission is shared by serial RPCs queued inside one message container.
 	admission *rpcAdmission
+	// gzipBody caches a safely decoded packed request for scheduling and dispatch.
+	gzipBody *bin.Buffer
 	// ackQueued is set when the enclosing container already queued the
 	// message's acknowledgement.
 	ackQueued bool

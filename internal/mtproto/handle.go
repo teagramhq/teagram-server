@@ -336,15 +336,10 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		Buf:                   b,
 		Ctx:                   ctx,
 	}
-	if concurrentRPCBarrier(req) && c.concurrentRPCsPending() {
-		if err := c.waitConcurrentRPCs(); err != nil {
-			return err
-		}
-	}
 	if handler == nil {
 		handler = s.handler
 	}
-	if scheduled, err := s.scheduleConcurrentRPC(c, req, handler); scheduled {
+	if scheduled, err := s.dispatchConcurrentRPC(c, req, handler); scheduled {
 		return err
 	}
 	return s.handleWithHandler(c, req, handler)
@@ -474,11 +469,15 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 		return nil
 
 	case proto.GZIPTypeID:
-		var content proto.GZIP
-		if err := content.Decode(in); err != nil {
-			return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
+		if req.gzipBody != nil {
+			req.Buf = req.gzipBody
+		} else {
+			var content proto.GZIP
+			if err := content.Decode(in); err != nil {
+				return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
+			}
+			req.Buf = &bin.Buffer{Buf: content.Data}
 		}
-		req.Buf = &bin.Buffer{Buf: content.Data}
 
 	case proto.MessageContainerTypeID:
 		var container proto.MessageContainer
@@ -516,12 +515,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 				admission:             admission,
 				ackQueued:             true,
 			}
-			if c != nil && concurrentRPCBarrier(child) && c.concurrentRPCsPending() {
-				if err := c.waitConcurrentRPCs(); err != nil {
-					return err
-				}
-			}
-			if scheduled, err := s.scheduleConcurrentRPC(c, child, handler); scheduled {
+			if scheduled, err := s.dispatchConcurrentRPC(c, child, handler); scheduled {
 				if err != nil {
 					return err
 				}

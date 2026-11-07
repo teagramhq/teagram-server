@@ -15,11 +15,12 @@ const (
 )
 
 type concurrentRPCWork struct {
-	msgID int64
-	run   func()
+	msgID     int64
+	run       func()
+	admission *rpcAdmission
 }
 
-func (c *Conn) startConcurrentRPC(msgID int64, run func()) (bool, bool) {
+func (c *Conn) startConcurrentRPC(msgID int64, run func(), admission *rpcAdmission) (bool, bool) {
 	c.concurrentRPCMu.Lock()
 	if _, exists := c.concurrentRPCs[msgID]; exists {
 		c.concurrentRPCMu.Unlock()
@@ -39,7 +40,7 @@ func (c *Conn) startConcurrentRPC(msgID int64, run func()) (bool, bool) {
 		go run()
 		return true, false
 	}
-	c.concurrentRPCQueue = append(c.concurrentRPCQueue, concurrentRPCWork{msgID: msgID, run: run})
+	c.concurrentRPCQueue = append(c.concurrentRPCQueue, concurrentRPCWork{msgID: msgID, run: run, admission: admission})
 	c.concurrentRPCMu.Unlock()
 	return true, false
 }
@@ -55,11 +56,15 @@ func (c *Conn) finishConcurrentRPC(msgID int64, err error) {
 	}
 	c.concurrentRPCActive--
 	var next func()
+	var discarded []*rpcAdmission
 	if err != nil {
 		for _, work := range c.concurrentRPCQueue {
 			if done, ok := c.concurrentRPCs[work.msgID]; ok {
 				delete(c.concurrentRPCs, work.msgID)
 				close(done)
+			}
+			if work.admission != nil {
+				discarded = append(discarded, work.admission)
 			}
 		}
 		c.concurrentRPCQueue = nil
@@ -71,6 +76,9 @@ func (c *Conn) finishConcurrentRPC(msgID int64, err error) {
 		next = work.run
 	}
 	c.concurrentRPCMu.Unlock()
+	for _, admission := range discarded {
+		admission.finish()
+	}
 	if next != nil {
 		go next()
 	}
@@ -125,6 +133,33 @@ func concurrentRPCBarrier(req *Request) bool {
 	return !transparent
 }
 
+func concurrentRPCRequestView(req *Request) (*Request, bool) {
+	if req == nil || req.Buf == nil {
+		return nil, false
+	}
+	id, err := req.Buf.PeekID()
+	if err != nil {
+		return nil, false
+	}
+	if id != proto.GZIPTypeID {
+		return req, true
+	}
+	if req.gzipBody != nil {
+		view := *req
+		view.Buf = req.gzipBody
+		return &view, true
+	}
+	var content proto.GZIP
+	compressed := &bin.Buffer{Buf: slices.Clone(req.Buf.Buf)}
+	if err := content.Decode(compressed); err != nil {
+		return nil, false
+	}
+	req.gzipBody = &bin.Buffer{Buf: content.Data}
+	view := *req
+	view.Buf = req.gzipBody
+	return &view, true
+}
+
 func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler) {
 	err := s.handleWithHandler(c, req, handler)
 	if errors.Is(err, context.Canceled) || errors.Is(err, errServerDraining) ||
@@ -143,9 +178,21 @@ func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler) {
 	c.finishConcurrentRPC(req.MsgID, err)
 }
 
-func (s *Server) scheduleConcurrentRPC(c *Conn, req *Request, handler Handler) (bool, error) {
+func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	view, valid := concurrentRPCRequestView(req)
+	if valid && concurrentRPCBarrier(view) && c.concurrentRPCsPending() {
+		if err := c.waitConcurrentRPCs(); err != nil {
+			return true, err
+		}
+	}
+	if !valid {
+		return false, nil
+	}
 	classifier, ok := handler.(ConcurrentRPCClassifier)
-	if !ok || !classifier.CanRunConcurrently(req) || c == nil {
+	if !ok || !classifier.CanRunConcurrently(view) {
 		return false, nil
 	}
 	if req.admission != nil && !req.admission.retain() {
@@ -155,7 +202,7 @@ func (s *Server) scheduleConcurrentRPC(c *Conn, req *Request, handler Handler) (
 	run := func() {
 		s.runConcurrentRPC(c, req, handler)
 	}
-	started, duplicate := c.startConcurrentRPC(req.MsgID, run)
+	started, duplicate := c.startConcurrentRPC(req.MsgID, run, req.admission)
 	if duplicate {
 		if req.admission != nil {
 			req.admission.finish()
