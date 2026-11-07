@@ -16,6 +16,7 @@ readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy
 RESULT_JSON=''
 RESULT_STATUS=1
 PROJECT_TOUCHED=0
+SNAPSHOT_DIR=''
 MANIFEST_PATH=''
 QA_SCRIPT_PATH=''
 PROBE_CREDENTIAL_PATH='/etc/teagram-browser-acceptance/probe.pgpass'
@@ -34,6 +35,9 @@ cleanup_and_report() {
     if ! "${COMPOSE[@]}" down --rmi local </dev/null >/dev/null 2>&1; then
       cleanup_failed=1
     fi
+  fi
+  if [[ -n "$SNAPSHOT_DIR" ]] && ! rm -rf -- "$SNAPSHOT_DIR"; then
+    cleanup_failed=1
   fi
   if (( cleanup_failed )); then
     local evidence_result qa_failure_code='' wss_output='' wss_fields=''
@@ -143,7 +147,7 @@ parse_options() {
   fi
 }
 
-resolve_readonly_input() {
+resolve_regular_input() {
   local path="$1"
   [[ -f "$path" && ! -L "$path" ]] || return 1
   case "$path" in
@@ -280,8 +284,21 @@ prepare() {
     *) fail runtime-unavailable ;;
   esac
   local root
-  root="$(resolve_readonly_input "$MANIFEST_PATH")" || fail manifest-invalid
-  MANIFEST_PATH="$root"
+  SNAPSHOT_DIR="$(mktemp -d /tmp/teagram-browser-acceptance.XXXXXXXXXX)" || fail runtime-unavailable
+  chmod 0700 -- "$SNAPSHOT_DIR" || fail runtime-unavailable
+
+  root="$(resolve_regular_input "$MANIFEST_PATH")" || fail manifest-invalid
+  MANIFEST_PATH="$SNAPSHOT_DIR/release-record.json"
+  cat -- "$root" >"$MANIFEST_PATH" || fail manifest-invalid
+  chmod 0400 -- "$MANIFEST_PATH" || fail manifest-invalid
+
+  if [[ -n "$QA_SCRIPT_PATH" ]]; then
+    root="$(resolve_regular_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
+    QA_SCRIPT_PATH="$SNAPSHOT_DIR/approved-qa.mjs"
+    cat -- "$root" >"$QA_SCRIPT_PATH" || fail qa-script-unapproved
+    chmod 0400 -- "$QA_SCRIPT_PATH" || fail qa-script-unapproved
+  fi
+
   validate_manifest "$MANIFEST_PATH" || fail manifest-invalid
   local manifest_status=0
   validate_served_manifest "$MANIFEST_PATH" || manifest_status=$?
@@ -291,8 +308,6 @@ prepare() {
     *) fail manifest-mismatch ;;
   esac
   if [[ -n "$QA_SCRIPT_PATH" ]]; then
-    root="$(resolve_readonly_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
-    QA_SCRIPT_PATH="$root"
     validate_qa_script "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
   cd "$PROJECT_DIR"

@@ -339,12 +339,48 @@ else
   exec /usr/bin/sha256sum "$@"
 fi
 `);
+  await writeFile(join(bin, "cat"), `#!/usr/bin/env bash
+set -eu
+if [[ -n "\${WRAPPER_REPLACE_BEFORE_COPY_PATH:-}" ]]; then
+  for input in "$@"; do
+    if [[ "$input" == "\$WRAPPER_REPLACE_BEFORE_COPY_PATH" ]]; then
+      printf '%s\\n' 'replacement before snapshot copy' >"$input"
+      break
+    fi
+  done
+fi
+exec /bin/cat "$@"
+`);
   await writeFile(join(bin, "node"), `#!/usr/bin/env bash
 set -eu
 if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 [[ "$1" == */host-probe.mjs ]] || exit 97
 [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
+if [[ -n "\${WRAPPER_SNAPSHOT_PROBE_RESULT:-}" ]]; then
+  original_args=("$@")
+  manifest_arg=''
+  script_arg=''
+  for ((index = 0; index < \${#original_args[@]}; index++)); do
+    case "\${original_args[$index]}" in
+      --manifest) index=$((index + 1)); manifest_arg="\${original_args[$index]}" ;;
+      --script) index=$((index + 1)); script_arg="\${original_args[$index]}" ;;
+    esac
+  done
+  [[ -n "$manifest_arg" && -n "$script_arg" ]] || exit 95
+  if [[ -n "\${WRAPPER_REPLACE_OPERATOR_MANIFEST:-}" ]]; then
+    printf '%s\\n' 'replacement after manifest validation' >"$WRAPPER_REPLACE_OPERATOR_MANIFEST"
+  fi
+  if [[ -n "\${WRAPPER_REPLACE_OPERATOR_SCRIPT:-}" ]]; then
+    printf '%s\\n' 'replacement after script validation' >"$WRAPPER_REPLACE_OPERATOR_SCRIPT"
+  fi
+  manifest_hash="$(/usr/bin/sha256sum -- "$manifest_arg")"
+  script_hash="$(/usr/bin/sha256sum -- "$script_arg")"
+  printf '%s\\t%s\\t%s\\t%s\\n' "$manifest_arg" "\${manifest_hash%% *}" \\
+    "$(stat -c '%a' -- "$manifest_arg")" "$(stat -c '%a' -- "\${manifest_arg%/*}")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+  printf '%s\\t%s\\t%s\\t%s\\n' "$script_arg" "\${script_hash%% *}" \\
+    "$(stat -c '%a' -- "$script_arg")" "$(stat -c '%a' -- "\${script_arg%/*}")" >>"$WRAPPER_SNAPSHOT_PROBE_RESULT"
+fi
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
     printf '%s\\n' 'qa child started' >&3
@@ -393,6 +429,7 @@ exit "\${WRAPPER_PROBE_STATUS:-\${WRAPPER_ACCEPTANCE_STATUS:-0}}"
     chmod(join(bin, "df"), 0o755),
     chmod(join(bin, "curl"), 0o755),
     chmod(join(bin, "sha256sum"), 0o755),
+    chmod(join(bin, "cat"), 0o755),
     chmod(join(bin, "node"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
@@ -779,8 +816,10 @@ test("relative input names with leading dashes, spaces, and glob characters reso
   assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}\n`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
-  assert.ok(calls.includes(`${manifest}:/run/release-record.json:ro`));
-  assert.ok(calls.includes(`${script}:/opt/browser-acceptance/approved-qa.mjs:ro`));
+  assert.ok(calls.includes("release-record.json:/run/release-record.json:ro"));
+  assert.ok(calls.includes("approved-qa.mjs:/opt/browser-acceptance/approved-qa.mjs:ro"));
+  assert.equal(calls.includes(manifest), false);
+  assert.equal(calls.includes(script), false);
 });
 
 test("served manifest digest or endpoint disagreement is rejected before Docker startup", async (t) => {
@@ -2023,6 +2062,67 @@ test("acceptance preflight requires the reviewed QA pin before any Docker comman
   assert.equal(missing.stdout, '{"status":"error","code":"arguments-invalid"}\n');
 });
 
+test("acceptance preflight keeps the pinned script after its operator path is replaced", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  const approvedScript = join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs");
+  await copyFile(approvedScript, script);
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+    WRAPPER_REPLACE_OPERATOR_SCRIPT: script,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [, scriptSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  assert.notEqual(scriptSnapshot[0], script);
+  assert.equal(scriptSnapshot[1], approvedQaDigest);
+  assert.equal(scriptSnapshot[2], "400");
+  assert.equal(scriptSnapshot[3], "700");
+  await assert.rejects(access(scriptSnapshot[0]));
+});
+
+test("acceptance preflight keeps the validated manifest after its operator path is replaced", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const originalManifestHash = createHash("sha256").update(await readFile(paths.manifest)).digest("hex");
+  const snapshotLog = join(paths.directory, "snapshot-hashes.log");
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_SNAPSHOT_PROBE_RESULT: snapshotLog,
+    WRAPPER_REPLACE_OPERATOR_MANIFEST: paths.manifest,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  const [manifestSnapshot] = (await readFile(snapshotLog, "utf8")).trim().split("\n")
+    .map((line) => line.split("\t"));
+  assert.notEqual(manifestSnapshot[0], paths.manifest);
+  assert.equal(manifestSnapshot[1], originalManifestHash);
+  assert.equal(manifestSnapshot[2], "400");
+  assert.equal(manifestSnapshot[3], "700");
+  await assert.rejects(access(manifestSnapshot[0]));
+});
+
+test("a script replaced before its snapshot copy fails the reviewed QA pin", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await copyFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"), script);
+  const result = invokePreflight(paths, script, {
+    WRAPPER_ACCEPT_QA_FIXTURE: "0",
+    WRAPPER_REPLACE_BEFORE_COPY_PATH: script,
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
 test("the reviewed QA v3 artifact matches the pinned digest", async () => {
   const script = await readFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"));
   const pinned = (await readFile(runScript, "utf8")).match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)[1];
@@ -2087,7 +2187,8 @@ test("each probe readiness failure maps to its fixed error without a QA run", as
       ? '{"status":"error","code":"database-unavailable","database_failure_category":"unknown"}\n'
       : `{"status":"error","code":"${code}"}\n`;
     assert.equal(result.stdout, expected, code);
-    assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs/u, code);
+    assert.doesNotMatch(await readFile(paths.log, "utf8"),
+      /docker exec browser node \/opt\/browser-acceptance\/approved-qa\.mjs --mode preflight/u, code);
   }
 });
 
