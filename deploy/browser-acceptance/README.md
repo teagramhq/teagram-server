@@ -340,6 +340,14 @@ files, SSH, or logs:
 ./deploy/browser-acceptance/run.sh acceptance --manifest "$VERIFIED_MANIFEST" --script "$APPROVED_QA_SCRIPT" < <(host-local-credential-provider)
 ```
 
+The provider writes one UTF-8 JSON object to stdin with exactly two string
+keys, `username` and `password`, for example
+`{"username":"<account-username>","password":"<account-password>"}`.
+The username must be 5–32 ASCII letters, digits, or underscores and start
+with a letter; the password must be 1–4096 characters. A trailing newline is
+accepted. The acceptance runner validates this input only after host checks
+pass.
+
 Before reading the account credential, prove readiness through the same
 entrypoint with stdin closed:
 

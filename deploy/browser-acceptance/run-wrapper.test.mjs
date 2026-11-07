@@ -10,6 +10,7 @@ import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const runScript = join(repoRoot, "deploy/browser-acceptance/run.sh");
+const credentialReaderUrl = new URL("./private-browser-acceptance-v2.mjs", import.meta.url).href;
 const sharedRuntimeLockPath = "/tmp/teagram-browser-acceptance.lock";
 const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-check.sh");
 const sourceCommit = "c".repeat(40);
@@ -376,6 +377,9 @@ if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
     [[ "$input" == credential-sentinel ]] || exit 98
   fi
   if [[ "\${WRAPPER_ACCEPTANCE_NUL:-0}" == 1 ]]; then printf '\\000' >&3; fi
+  if [[ -v WRAPPER_VALIDATE_CREDENTIALS ]]; then
+    '${process.execPath}' --input-type=module -e 'import { readCredentialsFromStdin } from "${credentialReaderUrl}"; await readCredentialsFromStdin();'
+  fi
   if [[ -v WRAPPER_ACCEPTANCE_OUTPUT ]]; then printf '%s' "$WRAPPER_ACCEPTANCE_OUTPUT" >&3;
   else printf '%s' '${acceptanceResult}' >&3; fi
 fi
@@ -890,22 +894,23 @@ test("a QA script cannot be passed to readiness", async (t) => {
   await assert.rejects(readFile(paths.curlLog));
 });
 
-test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
+test("acceptance passes a valid JSON credential through run.sh to the QA reader", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "console.log('approved fixture');\n");
 
+  const credential = {username: "fixture_account_01", password: "fixture-private-password"};
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
-    WRAPPER_REQUIRE_CLOSED_STDIN: "1",
-  }, `credential-sentinel${String.fromCharCode(10)}`);
+    WRAPPER_VALIDATE_CREDENTIALS: "1",
+  }, `${JSON.stringify(credential)}${String.fromCharCode(10)}`);
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}\n${await readFile(paths.log, "utf8")}`);
   assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}${String.fromCharCode(10)}`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
   assert.match(calls, /exec --interactive browser node \/opt\/browser-acceptance\/approved-qa\.mjs --mode acceptance/u);
   assert.match(calls, /compose .* down --rmi local/u);
-  assert.doesNotMatch(calls, /credential-sentinel/u);
+  assert.doesNotMatch(`${calls}${result.stdout}${result.stderr}`, /fixture_account_01|fixture-private-password/u);
 });
 
 test("browser wrapper removes rollout runner test evidence overrides", async (t) => {

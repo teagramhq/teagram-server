@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {Readable} from "node:stream";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
@@ -6,7 +7,12 @@ import test from "node:test";
 import {runInNewContext} from "node:vm";
 
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
-import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
+import {
+  executeMode,
+  installClientProgressObserver,
+  proveWss,
+  readCredentialsFromStdin,
+} from "./private-browser-acceptance-v2.mjs";
 import {observerSnapshot, readReleaseRecord, targetAddress} from "./qa-runtime-adapter.mjs";
 
 const targetHost = "teagram.tailaa4918.ts.net";
@@ -14,6 +20,30 @@ const sourceCommit = "a".repeat(40);
 const contentDigest = `sha256:${"b".repeat(64)}`;
 const usernameCanary = "fixture_account_01";
 const passwordCanary = "fixture-private-password";
+
+test("credential stdin accepts the documented JSON object", async () => {
+  const input = JSON.stringify({username: usernameCanary, password: passwordCanary});
+  assert.deepEqual(await readCredentialsFromStdin(Readable.from([Buffer.from(input)])), {
+    username: usernameCanary,
+    password: passwordCanary,
+  });
+});
+
+test("credential stdin rejects malformed JSON, wrong keys, and invalid usernames", async () => {
+  const invalidInputs = [
+    "{not-json",
+    JSON.stringify({username: usernameCanary, password: passwordCanary, extra: true}),
+    JSON.stringify({username: usernameCanary}),
+    JSON.stringify({username: "1invalid", password: passwordCanary}),
+  ];
+
+  for (const input of invalidInputs) {
+    await assert.rejects(
+      readCredentialsFromStdin(Readable.from([Buffer.from(input)])),
+      (error) => error.code === "credential-input-invalid",
+    );
+  }
+});
 
 function createDependencies(failAt, allowCredentialRead = false) {
   const events = [];

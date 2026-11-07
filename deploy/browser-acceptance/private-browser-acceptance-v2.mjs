@@ -1744,13 +1744,13 @@ function makeDependencies(options, adapter, playwright) {
   };
 }
 
-async function readCredentialsFromStdin() {
+export async function readCredentialsFromStdin(inputStream = process.stdin) {
   const chunks = [];
   let size = 0;
   let parsed;
   let buffer;
   try {
-    for await (const chunk of process.stdin) {
+    for await (const chunk of inputStream) {
       size += chunk.length;
       if (size > 16384) fail("credential-input-invalid");
       chunks.push(Buffer.from(chunk));
