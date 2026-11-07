@@ -38,6 +38,31 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      # Reuse the sticker bundle snapshot built and license-checked by CI.
+      # The image Dockerfile's fallback generator reaches upstream sources and
+      # is deliberately avoided in this isolated browser lane.
+      - name: Restore sticker bundle snapshot
+        id: sticker-bundle-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/sticker-bundle
+          key: sticker-bundle-${{ runner.os }}-node22-python3.12.15-${{ hashFiles('tools/stickerbundle/generate.sh', 'tools/stickerbundle/generate.py', 'tools/stickerbundle/render.mjs', 'tools/stickerbundle/sources.json', 'tools/stickerbundle/package.json', 'tools/stickerbundle/package-lock.json') }}
+
+      - uses: actions/setup-node@v7.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12.15"
+
+      - name: Generate pinned sticker bundle on cache miss
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: tools/stickerbundle/generate.sh --output "$RUNNER_TEMP/sticker-bundle"
+
       - name: Resolve the live Web publication
         id: qa-web-pin
         run: |
@@ -284,6 +309,11 @@ jobs:
             sudo apt-get install -y libnss3-tools
           fi
 
+      - name: Set up Buildx for the validated sticker bundle context
+        uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
+
       - name: Exercise the QA invite TLS edge and Web artifact
         timeout-minutes: 15
         env:
@@ -291,6 +321,7 @@ jobs:
           QA_WEB_SOURCE_DIR: ${{ github.workspace }}/qa-demo-web-source
           QA_WEB_SOURCE_SHA: ${{ steps.qa-web-pin.outputs.source_commit }}
           QA_WEB_ARTIFACT_DIGEST: ${{ steps.qa-web-pin.outputs.artifact_digest }}
+          STICKER_BUNDLE_DIR: ${{ runner.temp }}/sticker-bundle
         run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh
 
       - name: Upload Playwright failure trace

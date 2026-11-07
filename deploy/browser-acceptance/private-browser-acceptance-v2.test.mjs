@@ -716,6 +716,70 @@ test("client observer records only bounded auth and in-band logout events", asyn
   ]);
 });
 
+test("client observer attributes passwordManager.getState failures to account.getPassword", async () => {
+  const progress = createAcceptanceProgress({sourceCommit});
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssHandshake(101), true);
+  const errorSentinel = "PRIVATE_WORKER_ERROR_SENTINEL";
+  const bridgeEvents = [];
+  const browserWindow = {
+    apiManagerProxy: {
+      async invoke(_type, payload) {
+        if (payload.name === "apiManager" && payload.args?.[0] === "auth.signIn") {
+          throw {type: "SESSION_PASSWORD_NEEDED"};
+        }
+        if (payload.name === "passwordManager" && payload.method === "getState") {
+          throw {error_message: errorSentinel};
+        }
+        return null;
+      },
+    },
+  };
+  const page = {
+    async exposeFunction(name, callback) {
+      browserWindow[name] = (event) => {
+        const serializedEvent = JSON.parse(JSON.stringify(event));
+        bridgeEvents.push(serializedEvent);
+        return callback(serializedEvent);
+      };
+    },
+    async evaluate(callback, bridgeName) {
+      return runInNewContext(`(${callback.toString()})(bridgeName)`, {window: browserWindow, bridgeName});
+    },
+  };
+
+  await installClientProgressObserver(page, progress, acceptanceRpcOutcome);
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "apiManager",
+      method: "invokeApi",
+      args: ["auth.signIn", {}],
+    }),
+    (error) => error.type === "SESSION_PASSWORD_NEEDED",
+  );
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "passwordManager",
+      method: "getState",
+    }),
+    (error) => error.error_message === errorSentinel,
+  );
+
+  const result = await progress.finish();
+  assert.equal(result.phase, "password-challenge");
+  assert.equal(result.outcome, "other");
+  assert.equal(result.authMethod, "account.getPassword");
+  assert.equal(result.errorCategory, "unknown");
+  assert.deepEqual(bridgeEvents, [
+    {kind: "transport-ready"},
+    {kind: "auth-call", method: "auth.signIn"},
+    {kind: "password-challenge"},
+    {kind: "rpc-failure", method: "account.getPassword", outcome: "other"},
+  ]);
+  assert.equal(JSON.stringify(result).includes(errorSentinel), false);
+  assert.equal(JSON.stringify(bridgeEvents).includes(errorSentinel), false);
+});
+
 test("client observer blocks auth.signUp and latches the signup attempt", async () => {
   const calls = [];
   const browserWindow = {
@@ -811,6 +875,68 @@ test("acceptance emits only the exact sanitized v3 result after all preflight gu
     wssEndpointMatched: true,
   });
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
+});
+
+test("acceptance rejects malformed auth details and any auth details on signed-in results", async () => {
+  const failedResult = {
+    schemaVersion: 3,
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    targetHost,
+    sourceCommit,
+    wssConnections: 1,
+    qaFailureCode: "authentication-failed-once",
+    submission: "password",
+    chatList: "not-reached",
+    chatListRows: 0,
+    wssEndpointMatched: false,
+    authMethod: "auth.checkPassword",
+    errorCategory: "credential-rejected",
+  };
+  const signedInFailure = {
+    ...failedResult,
+    phase: "signed-in",
+    outcome: "other",
+    logout: "ok",
+    chatList: "rendered",
+  };
+  const signedInSuccess = {
+    ...signedInFailure,
+    ok: true,
+    outcome: "ok",
+    qaFailureCode: "none",
+  };
+  const methodOnly = {...failedResult};
+  delete methodOnly.errorCategory;
+  const categoryOnly = {...failedResult};
+  delete categoryOnly.authMethod;
+  const invalidResults = [
+    methodOnly,
+    categoryOnly,
+    {...failedResult, errorCategory: "PASSWORD_HASH_INVALID"},
+    signedInFailure,
+    signedInSuccess,
+  ];
+
+  for (const candidate of invalidResults) {
+    const fixture = createDependencies(undefined, true);
+    fixture.dependencies.performAcceptance = async (prepared) => {
+      prepared.progressState.submission = "password";
+      prepared.progressState.chatList = candidate.phase === "signed-in" ? "rendered" : "not-reached";
+      return candidate;
+    };
+
+    const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+    const output = JSON.parse(result.output);
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(output.qaFailureCode, "unexpected-failure");
+    assert.notEqual(output.phase, candidate.phase);
+    assert.notEqual(output.authMethod, candidate.authMethod);
+    assert.notEqual(output.errorCategory, candidate.errorCategory);
+  }
 });
 
 test("username-field-missing reports no submission without making an auth call", async () => {

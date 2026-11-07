@@ -1237,6 +1237,44 @@ test("acceptance preserves a validated failed stage with a non-zero exit", async
   assert.equal(result.stderr, "");
 });
 
+test("failed sign-in auth details reach evidence, while malformed details invalidate QA", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const authDetails = {authMethod: "auth.checkPassword", errorCategory: "credential-rejected"};
+  const validOutput = acceptanceFailureOutput(authDetails);
+  const valid = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: validOutput,
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+  const evidence = JSON.parse(valid.stdout);
+
+  assert.equal(valid.status, 1, valid.stderr);
+  assert.equal(evidence.qaResult, "valid");
+  assert.equal(evidence.authMethod, authDetails.authMethod);
+  assert.equal(evidence.errorCategory, authDetails.errorCategory);
+  assert.equal(valid.stderr, "");
+
+  for (const malformedOutput of [
+    acceptanceFailureOutput({authMethod: authDetails.authMethod}),
+    acceptanceFailureOutput({...authDetails, errorCategory: "PASSWORD_HASH_INVALID"}),
+  ]) {
+    const malformed = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: malformedOutput,
+      WRAPPER_ACCEPTANCE_STATUS: "1",
+    });
+    const malformedEvidence = JSON.parse(malformed.stdout);
+
+    assert.equal(malformed.status, 1, malformed.stderr);
+    assert.equal(malformedEvidence.qaResult, "invalid");
+    assert.equal("authMethod" in malformedEvidence, false);
+    assert.equal("errorCategory" in malformedEvidence, false);
+    assert.equal(malformed.stderr, "");
+  }
+});
+
 test("acceptance allows every WSS connection count up to the client's ceiling on success", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
@@ -1462,6 +1500,11 @@ test("inconsistent QA results cannot change the probe code or exit status", asyn
     [acceptanceOutput({ ok: false, phase: "password-check", outcome: "ok", logout: "not-attempted", wssConnections: 1 }), "1"],
     [acceptanceOutput({ ok: false, phase: "password-check", outcome: "timeout", logout: "ok", wssConnections: 1 }), "1"],
     [acceptanceOutput({ ok: false, phase: "signed-in", outcome: "ok", logout: "not-attempted", wssConnections: 1 }), "1"],
+    [acceptanceOutput({ authMethod: "auth.checkPassword", errorCategory: "credential-rejected" }), "0"],
+    [acceptanceFailureOutput({
+      phase: "signed-in", outcome: "other", logout: "ok", chatList: "rendered",
+      authMethod: "auth.checkPassword", errorCategory: "credential-rejected",
+    }), "1"],
   ];
 
   for (const [output, status] of invalidResults) {

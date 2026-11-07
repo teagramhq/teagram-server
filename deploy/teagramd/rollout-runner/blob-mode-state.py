@@ -38,6 +38,10 @@ SIMPLE_TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v3"
 STACK_MOVE_REPORT_SCHEMA = "teagram.blob-mode-stack-move-report/v1"
 ENCRYPTED_REPORT_SCHEMA = "teagram.blob-encryption-report/v1"
 ENCRYPTED_INVENTORY_SCHEMA = "teagram.blob-encryption-inventory/v1"
+REPORT_LOSS_ATTESTATION_SCHEMA = "teagram.blob-mode-report-loss-attestation/v1"
+REPORT_LOSS_ATTESTATION_PREFIX = "teagramd-blob-mode-report-loss-attestation-"
+REPORT_LOSS_ARCHIVE_MANIFEST = "teagramd-blob-mode-report-loss-archive-manifest.json"
+REPORT_LOSS_CENSUS_MANIFEST = "teagramd-blob-mode-report-loss-census-manifest.json"
 STACK_MOVE_OUTCOME = "stack-moved-local"
 STACK_MOVE_SOURCE_VOLUMES = {
     "tgblobs": "telegram-server_tgblobs",
@@ -1680,7 +1684,7 @@ def validate_report(
     except FileNotFoundError:
         if allow_missing:
             return False
-        file_stat(report_file, stat.S_IFREG, 0o600)
+        reject("report-unavailable")
     except OSError:
         reject("report-unavailable")
     file_stat(report_file, stat.S_IFREG, 0o600)
@@ -1898,6 +1902,111 @@ def validate_report(
     return True
 
 
+def private_report_bytes(path: pathlib.Path) -> bytes:
+    file_stat(path, stat.S_IFREG, 0o600)
+    try:
+        return path.read_bytes()
+    except OSError:
+        reject("report-attestation-evidence")
+
+
+def read_report_loss_attestation(report_root: pathlib.Path) -> tuple[dict[str, object], bytes] | None:
+    try:
+        report_root.lstat()
+    except FileNotFoundError:
+        return None
+    secure_dir(report_root)
+    try:
+        candidates = sorted(
+            path for path in report_root.iterdir()
+            if path.name.startswith(REPORT_LOSS_ATTESTATION_PREFIX)
+        )
+    except OSError:
+        reject("report-attestation-unavailable")
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        reject("report-attestation-ambiguous")
+    path = candidates[0]
+    match = re.fullmatch(
+        re.escape(REPORT_LOSS_ATTESTATION_PREFIX) + r"([0-9a-f]{64})\.json",
+        path.name,
+    )
+    if match is None:
+        reject("report-attestation-invalid")
+    raw = private_report_bytes(path)
+    if hashlib.sha256(raw).hexdigest() != match.group(1):
+        reject("report-attestation-digest")
+    try:
+        attestation = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_pairs)
+    except (Reject, UnicodeDecodeError, json.JSONDecodeError):
+        reject("report-attestation-invalid")
+    if not isinstance(attestation, dict):
+        reject("report-attestation-invalid")
+    expected_fields = {
+        "schema", "head_generation", "head_transition_id", "head_bytes_sha256",
+        "journal_prefix_sha256", "missing_transition_ids", "reason",
+        "archive_manifest_sha256", "census_manifest_sha256", "object_count", "byte_total",
+    }
+    if (
+        set(attestation) != expected_fields
+        or attestation.get("schema") != REPORT_LOSS_ATTESTATION_SCHEMA
+        or type(attestation.get("head_generation")) is not int
+        or attestation["head_generation"] < 1
+        or not canonical_uuid(attestation.get("head_transition_id"))
+        or not digest(attestation.get("head_bytes_sha256"))
+        or not digest(attestation.get("journal_prefix_sha256"))
+        or attestation.get("reason") != "MAIN-2610"
+        or not digest(attestation.get("archive_manifest_sha256"))
+        or not digest(attestation.get("census_manifest_sha256"))
+        or type(attestation.get("object_count")) is not int
+        or attestation["object_count"] < 0
+        or type(attestation.get("byte_total")) is not int
+        or attestation["byte_total"] < 0
+    ):
+        reject("report-attestation-invalid")
+    missing_ids = attestation.get("missing_transition_ids")
+    if (
+        not isinstance(missing_ids, list)
+        or not missing_ids
+        or not all(canonical_uuid(value) for value in missing_ids)
+        or missing_ids != sorted(set(missing_ids))
+    ):
+        reject("report-attestation-invalid")
+    for filename, field in (
+        (REPORT_LOSS_ARCHIVE_MANIFEST, "archive_manifest_sha256"),
+        (REPORT_LOSS_CENSUS_MANIFEST, "census_manifest_sha256"),
+    ):
+        manifest = private_report_bytes(report_root / filename)
+        if hashlib.sha256(manifest).hexdigest() != attestation[field]:
+            reject("report-attestation-evidence")
+    return attestation, raw
+
+
+def validate_report_loss_attestation(
+    attestation: dict[str, object],
+    records: list[dict[str, object]],
+    journal_bytes: list[bytes],
+    missing_transition_ids: set[str],
+) -> None:
+    prefix_length = attestation["head_generation"]
+    if prefix_length > len(records):
+        reject("report-attestation-journal-mismatch")
+    head_record = records[prefix_length - 1]
+    head_bytes = journal_bytes[prefix_length - 1]
+    prefix_sha256 = hashlib.sha256(b"".join(journal_bytes[:prefix_length])).hexdigest()
+    if (
+        head_record["transition_id"] != attestation["head_transition_id"]
+        or hashlib.sha256(head_bytes).hexdigest() != attestation["head_bytes_sha256"]
+        or prefix_sha256 != attestation["journal_prefix_sha256"]
+    ):
+        reject("report-attestation-journal-mismatch")
+    prefix_ids = {record["transition_id"] for record in records[:prefix_length]}
+    attested_ids = set(attestation["missing_transition_ids"])
+    if not attested_ids.issubset(prefix_ids) or not missing_transition_ids.issubset(attested_ids):
+        reject("report-attestation-coverage")
+
+
 def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[list[dict[str, object]], bytes, bytes | None]:
     records, head, mode_bytes, _missing_report_count = _read_authority(state_dir, report_root)
     return records, head, mode_bytes
@@ -1961,6 +2070,8 @@ def _read_authority(
     previous_outcome = None
     head = b""
     missing_report_count = 0
+    missing_transition_ids: set[str] = set()
+    journal_bytes: list[bytes] = []
     for generation, name in enumerate(committed, start=1):
         path = journal / name
         info = file_stat(path, stat.S_IFREG)
@@ -1976,14 +2087,31 @@ def _read_authority(
             report_root,
             valid,
             records[-1] if records else None,
-            allow_missing=allow_missing_reports,
+            allow_missing=True,
         ):
             missing_report_count += 1
-        raw = path.read_bytes()
+            missing_transition_ids.add(valid["transition_id"])
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            reject("journal-unavailable")
+        journal_bytes.append(raw)
         records.append(valid)
         head = raw
         previous_id = valid["transition_id"]
         previous_outcome = valid["outcome"]
+    attestation_result = read_report_loss_attestation(report_root)
+    if attestation_result is None:
+        if missing_report_count and not allow_missing_reports:
+            reject("report-unavailable")
+    else:
+        attestation, _attestation_bytes = attestation_result
+        validate_report_loss_attestation(
+            attestation,
+            records,
+            journal_bytes,
+            missing_transition_ids,
+        )
     mode_path = state_dir / "mode.json"
     if mode_path.is_symlink():
         reject("mode-symlink")

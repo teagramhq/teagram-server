@@ -3,14 +3,15 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|bot-api-qa> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the nine current operations: `target-failure-report`, `rollout-evidence`,
+the ten current operations: `target-failure-report`, `rollout-evidence`,
 `invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
-`encrypt-media`, `cleanup-media`, `backup-media-key`, and `bot-api-qa`. A
-script's presence in an older main commit does not authorize a retired operation. The allowlist lives in
+`encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
+and `bot-api-qa`. A script's presence in an older main commit does not authorize
+a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
@@ -61,7 +62,8 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the current operation names before fetching Git data, verifies the full SHA is on
+therefore become host-root execution. The dispatcher limits `run` to the ten
+current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs
 and emit bounded, sanitized output. `invite-web-signup-url` accepts only the
@@ -200,6 +202,26 @@ backup-media-key`. The operation copies the mounted version 1 key to
 material or digests, and refuses to overwrite an existing backup. Retain the
 backup for recovery; investigate any mismatch before proceeding. The operation
 does not restart services.
+
+## Attesting missing blob-mode reports
+
+Run `attest-blob-mode-reports` from its reviewed `main` SHA only when strict
+blob-mode verification reports missing transition reports and the deployment
+head is still S3-backed:
+
+```sh
+ssh teagram run <reviewed-main-sha> attest-blob-mode-reports
+```
+
+The one-shot operation holds the deployment lock, checks the current Compose
+and S3 authority, compares a live S3 object census with database references,
+and refuses missing or size-mismatched referenced objects. It copies the
+existing mode journal and report tree into a private archive, then writes
+hash-bound census and archive manifests plus an attestation limited to the
+missing reports in that journal prefix. It does not change `mode.json` or the
+journal and does not restart or recreate services. Output includes only the
+head ID, counts, paths, and hashes; credentials and object contents are not
+printed.
 
 ## Encrypting and cleaning up media
 

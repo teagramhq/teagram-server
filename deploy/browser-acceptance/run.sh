@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="771e19d2ee15c0644871422eeb26dfca6c47781ecf5ea6ff0d722e0287113630"
+readonly APPROVED_QA_SCRIPT_SHA256="326cd222ddb16762aa4eec9cb1970bcd7d980f04187a6694254d2f538ddb8a99"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -426,7 +426,8 @@ normalize_acceptance_result() {
     def acceptance_result:
       if type != "object" then false
       else
-        (keys | sort) == ["chatList", "chatListRows", "logout", "ok", "outcome", "phase", "qaFailureCode", "schemaVersion", "sourceCommit", "submission", "targetHost", "wssConnections", "wssEndpointMatched"] and
+        ((keys | sort) == ["chatList", "chatListRows", "logout", "ok", "outcome", "phase", "qaFailureCode", "schemaVersion", "sourceCommit", "submission", "targetHost", "wssConnections", "wssEndpointMatched"] or
+          (keys | sort) == ["authMethod", "chatList", "chatListRows", "errorCategory", "logout", "ok", "outcome", "phase", "qaFailureCode", "schemaVersion", "sourceCommit", "submission", "targetHost", "wssConnections", "wssEndpointMatched"]) and
         (.schemaVersion | type == "number" and . == 3 and floor == 3) and
         (.ok | type == "boolean") and
         ((.phase | type) == "string") and
@@ -449,6 +450,11 @@ normalize_acceptance_result() {
         (.submission as $submission | ["none", "username", "password"] | index($submission) != null) and
         (.chatList as $chat_list | ["not-reached", "missing", "rendered"] | index($chat_list) != null) and
         (.chatListRows | type == "number" and floor == . and . >= 0 and . <= 10) and
+        (if has("authMethod") then
+          (.authMethod as $method | ["account.getPassword", "auth.checkPassword", "auth.sendCode", "auth.signIn", "unknown"] | index($method) != null) and
+          (.errorCategory as $category | ["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "unknown"] | index($category) != null) and
+          (.ok == false and .phase != "signed-in")
+        else true end) and
         (.qaFailureCode as $failure | [
           "arguments-invalid", "asset-server-error", "authentication-failed-once", "authentication-repeated",
           "blocked-host-control-failed", "broken-chat-list", "browser-closed", "browser-cleanup-failed",
@@ -476,7 +482,8 @@ normalize_acceptance_result() {
       end;
     select(length == 1 and (.[0] | acceptance_result)) | .[0] |
     {qaOk: .ok, phase, outcome, logout, wssConnections: (.wssConnections | floor),
-      wssEndpointMatched, submission, chatList, chatListRows, qaFailureCode}
+      wssEndpointMatched, submission, chatList, chatListRows, qaFailureCode} +
+      (if has("authMethod") then {authMethod, errorCategory} else {} end)
   ' <<<"$output" 2>/dev/null
 }
 
@@ -743,7 +750,9 @@ run_qa_script() {
       wssConnections: $qa.wssConnections, wssEndpointMatched: $qa.wssEndpointMatched,
       submission: $qa.submission, chatList: $qa.chatList, chatListRows: $qa.chatListRows,
       qaFailureCode: $qa.qaFailureCode
-    } + (if $proof.code == "database-unavailable" then
+    } + (if $qa | has("authMethod") then
+      {authMethod: $qa.authMethod, errorCategory: $qa.errorCategory} else {} end) +
+    (if $proof.code == "database-unavailable" then
       {databaseFailureCategory: $proof.databaseFailureCategory} else {} end)
   ' 2>/dev/null)" || return 1
   printf '%s' "$normalized"
