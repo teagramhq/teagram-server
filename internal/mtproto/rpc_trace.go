@@ -589,6 +589,11 @@ func (h *rpcTraceHandler) CanRunConcurrently(typeID uint32) bool {
 	return ok && classifier.CanRunConcurrently(typeID)
 }
 
+func (h *rpcTraceHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
+}
+
 func (h *rpcTraceHandler) OnMessage(c *Conn, req *Request) (err error) {
 	handle, restore := h.tracer.traceRequest(req)
 	defer restore()

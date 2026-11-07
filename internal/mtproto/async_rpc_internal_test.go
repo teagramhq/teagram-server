@@ -91,6 +91,31 @@ type asyncRPCOrderHandler struct {
 	mutations    []int64
 }
 
+type asyncRPCRevocationHandler struct {
+	counterStarted chan struct{}
+	logoutStarted  chan struct{}
+	releaseCounter chan struct{}
+}
+
+func (*asyncRPCRevocationHandler) CanRunConcurrently(id uint32) bool {
+	return id == tg.MessagesGetSearchCountersRequestTypeID
+}
+
+func (h *asyncRPCRevocationHandler) OnMessage(c *Conn, req *Request) error {
+	id, err := asyncRPCRequestBody(req).PeekID()
+	if err != nil {
+		return err
+	}
+	switch id {
+	case tg.MessagesGetSearchCountersRequestTypeID:
+		close(h.counterStarted)
+		<-h.releaseCounter
+	case tg.AuthLogOutRequestTypeID:
+		close(h.logoutStarted)
+	}
+	return c.SendResult(req, &tg.BoolTrue{})
+}
+
 func (h *asyncRPCOrderHandler) CanRunConcurrently(id uint32) bool {
 	return id == tg.MessagesGetSearchCountersRequestTypeID
 }
@@ -335,6 +360,71 @@ func TestConcurrentRPCDoesNotDelayCheapRequestOrReorderMutations(t *testing.T) {
 	defer handler.mu.Unlock()
 	if want := []int64{3 << 32, 4 << 32}; !slices.Equal(handler.mutations, want) {
 		t.Fatalf("state-changing request order = %v, want %v", handler.mutations, want)
+	}
+}
+
+func TestConcurrentRPCWaitsBeforeAuthKeyRevocation(t *testing.T) {
+	key := shutdownTestAuthKey()
+	handler := &asyncRPCRevocationHandler{
+		counterStarted: make(chan struct{}),
+		logoutStarted:  make(chan struct{}),
+		releaseCounter: make(chan struct{}),
+	}
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save test auth key: %v", err)
+	}
+	dispatcher := ConcurrentRPCBarriers(handler, tg.AuthLogOutRequestTypeID)
+	server := New(exchange.PrivateKey{}, 2, keys, dispatcher, nil)
+	conn := &asyncRPCFrameConn{
+		frames: [][]byte{
+			shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}),
+			shutdownClientFrame(t, key, 42, 2<<32, &tg.AuthLogOutRequest{}),
+		},
+		eof:        make(chan struct{}),
+		recvNotify: make(chan int, 3),
+	}
+	defer conn.end()
+	served := make(chan error, 1)
+	go func() { served <- server.ServeConn(context.Background(), conn) }()
+
+	select {
+	case <-handler.counterStarted:
+	case <-time.After(time.Second):
+		close(handler.releaseCounter)
+		t.Fatal("search counters handler did not start")
+	}
+	for received := 0; received < 2; {
+		select {
+		case index := <-conn.recvNotify:
+			if index > received {
+				received = index
+			}
+		case <-time.After(time.Second):
+			close(handler.releaseCounter)
+			t.Fatal("serve loop did not read auth.logOut while counters were active")
+		}
+	}
+	select {
+	case <-handler.logoutStarted:
+		close(handler.releaseCounter)
+		t.Fatal("auth.logOut ran before the earlier counters RPC completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(handler.releaseCounter)
+	select {
+	case <-handler.logoutStarted:
+	case <-time.After(time.Second):
+		t.Fatal("auth.logOut did not run after the counters RPC completed")
+	}
+	conn.end()
+	select {
+	case err := <-served:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ServeConn = %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve loop did not finish after auth.logOut")
 	}
 }
 
@@ -738,17 +828,23 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 }
 
 type asyncRPCFixedClassifier struct {
-	typeID uint32
+	typeID    uint32
+	barrierID uint32
 }
 
 func (h asyncRPCFixedClassifier) CanRunConcurrently(typeID uint32) bool {
 	return typeID == h.typeID
 }
 
+func (h asyncRPCFixedClassifier) MustWaitForConcurrentRPC(typeID uint32) bool {
+	return typeID == h.barrierID
+}
+
 func (asyncRPCFixedClassifier) OnMessage(*Conn, *Request) error { return nil }
 
 func TestRPCTraceWrapPreservesConcurrentClassifier(t *testing.T) {
 	const typeID = tg.MessagesGetSearchCountersRequestTypeID
+	const barrierID = tg.AuthLogOutRequestTypeID
 	tracer := NewRPCTracerWithExporter(NewMemoryRPCSpanExporter(1))
 	defer func() {
 		if err := tracer.Close(); err != nil {
@@ -756,16 +852,24 @@ func TestRPCTraceWrapPreservesConcurrentClassifier(t *testing.T) {
 		}
 	}()
 
-	wrapped := tracer.Wrap(asyncRPCFixedClassifier{typeID: typeID})
+	wrapped := tracer.Wrap(asyncRPCFixedClassifier{typeID: typeID, barrierID: barrierID})
 	classifier, ok := wrapped.(interface{ CanRunConcurrently(uint32) bool })
 	if !ok || !classifier.CanRunConcurrently(typeID) {
 		t.Fatal("RPCTracer.Wrap dropped the next handler's concurrent classifier")
 	}
+	barrier, ok := wrapped.(ConcurrentRPCBarrierClassifier)
+	if !ok || !barrier.MustWaitForConcurrentRPC(barrierID) {
+		t.Fatal("RPCTracer.Wrap dropped the next handler's barrier classifier")
+	}
 
-	unpacked := UnpackInvokeWithAfterMsg(asyncRPCFixedClassifier{typeID: typeID}, nil)
+	unpacked := UnpackInvokeWithAfterMsg(asyncRPCFixedClassifier{typeID: typeID, barrierID: barrierID}, nil)
 	classifier, ok = unpacked.(interface{ CanRunConcurrently(uint32) bool })
 	if !ok || !classifier.CanRunConcurrently(typeID) {
 		t.Fatal("UnpackInvokeWithAfterMsg dropped the next handler's concurrent classifier")
+	}
+	barrier, ok = unpacked.(ConcurrentRPCBarrierClassifier)
+	if !ok || !barrier.MustWaitForConcurrentRPC(barrierID) {
+		t.Fatal("UnpackInvokeWithAfterMsg dropped the next handler's barrier classifier")
 	}
 }
 

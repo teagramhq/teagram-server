@@ -707,7 +707,13 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	} else {
 		handler = mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
 	}
-	return mtproto.ConcurrentRPCs(handler, tg.MessagesGetSearchCountersRequestTypeID)
+	handler = mtproto.ConcurrentRPCs(handler, tg.MessagesGetSearchCountersRequestTypeID)
+	// Do not let a session revocation overtake earlier concurrent reads on its connection.
+	return mtproto.ConcurrentRPCBarriers(handler,
+		tg.AuthLogOutRequestTypeID,
+		tg.AuthResetAuthorizationsRequestTypeID,
+		tg.AccountResetAuthorizationRequestTypeID,
+	)
 }
 
 func registerLangpackMethods(d *mtproto.Dispatcher, h *handlers) {

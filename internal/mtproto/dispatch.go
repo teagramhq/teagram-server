@@ -116,6 +116,12 @@ type ConcurrentRPCClassifier interface {
 	CanRunConcurrently(typeID uint32) bool
 }
 
+// ConcurrentRPCBarrierClassifier marks requests that must wait for concurrent
+// work already admitted on the same connection before they are dispatched.
+type ConcurrentRPCBarrierClassifier interface {
+	MustWaitForConcurrentRPC(typeID uint32) bool
+}
+
 type concurrentRPCHandler struct {
 	next    Handler
 	typeIDs map[uint32]struct{}
@@ -128,6 +134,11 @@ func (h *concurrentRPCHandler) OnMessage(c *Conn, req *Request) error {
 func (h *concurrentRPCHandler) CanRunConcurrently(typeID uint32) bool {
 	_, ok := h.typeIDs[typeID]
 	return ok
+}
+
+func (h *concurrentRPCHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
 }
 
 // ConcurrentRPCs marks the listed RPC constructors as safe to run while later
@@ -143,6 +154,42 @@ func ConcurrentRPCs(next Handler, typeIDs ...uint32) Handler {
 		registered[id] = struct{}{}
 	}
 	return &concurrentRPCHandler{next: next, typeIDs: registered}
+}
+
+type concurrentRPCBarrierHandler struct {
+	next    Handler
+	typeIDs map[uint32]struct{}
+}
+
+func (h *concurrentRPCBarrierHandler) OnMessage(c *Conn, req *Request) error {
+	return h.next.OnMessage(c, req)
+}
+
+func (h *concurrentRPCBarrierHandler) CanRunConcurrently(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCClassifier)
+	return ok && classifier.CanRunConcurrently(typeID)
+}
+
+func (h *concurrentRPCBarrierHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	if _, ok := h.typeIDs[typeID]; ok {
+		return true
+	}
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
+}
+
+// ConcurrentRPCBarriers marks the listed methods to wait for already-admitted
+// concurrent RPCs before dispatch. Concurrent classification on next is
+// forwarded so the policies can be composed around one handler.
+func ConcurrentRPCBarriers(next Handler, typeIDs ...uint32) Handler {
+	if next == nil || len(typeIDs) == 0 {
+		return next
+	}
+	registered := make(map[uint32]struct{}, len(typeIDs))
+	for _, id := range typeIDs {
+		registered[id] = struct{}{}
+	}
+	return &concurrentRPCBarrierHandler{next: next, typeIDs: registered}
 }
 
 // concurrentRPCMethodID returns a direct method ID through the two stateless
@@ -440,6 +487,11 @@ type invokeAfterMsgHandler struct {
 func (h *invokeAfterMsgHandler) CanRunConcurrently(typeID uint32) bool {
 	classifier, ok := h.next.(ConcurrentRPCClassifier)
 	return ok && classifier.CanRunConcurrently(typeID)
+}
+
+func (h *invokeAfterMsgHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
 }
 
 func (h *invokeAfterMsgHandler) OnMessage(c *Conn, req *Request) error {

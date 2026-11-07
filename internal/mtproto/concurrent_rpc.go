@@ -231,9 +231,14 @@ func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (
 	if !valid {
 		return false, nil
 	}
-	typeID, eligible := concurrentRPCMethodID(view.BodyBuffer())
-	if !eligible {
+	typeID, directMethod := concurrentRPCMethodID(view.BodyBuffer())
+	if !directMethod {
 		return false, nil
+	}
+	if barrier, ok := handler.(ConcurrentRPCBarrierClassifier); ok && barrier.MustWaitForConcurrentRPC(typeID) && c.concurrentRPCs.pending() {
+		if err := c.concurrentRPCs.wait(); err != nil {
+			return true, err
+		}
 	}
 	classifier, ok := handler.(ConcurrentRPCClassifier)
 	if !ok || !classifier.CanRunConcurrently(typeID) {
