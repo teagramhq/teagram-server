@@ -149,7 +149,7 @@ parse_options() {
 
 resolve_regular_input() {
   local path="$1"
-  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ -f "$path" && -r "$path" && ! -L "$path" ]] || return 1
   case "$path" in
     /*) ;;
     *) path="./$path" ;;
@@ -289,15 +289,8 @@ prepare() {
 
   root="$(resolve_regular_input "$MANIFEST_PATH")" || fail manifest-invalid
   MANIFEST_PATH="$SNAPSHOT_DIR/release-record.json"
-  cat -- "$root" >"$MANIFEST_PATH" || fail manifest-invalid
-  chmod 0444 -- "$MANIFEST_PATH" || fail manifest-invalid
-
-  if [[ -n "$QA_SCRIPT_PATH" ]]; then
-    root="$(resolve_regular_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
-    QA_SCRIPT_PATH="$SNAPSHOT_DIR/approved-qa.mjs"
-    cat -- "$root" >"$QA_SCRIPT_PATH" || fail qa-script-unapproved
-    chmod 0444 -- "$QA_SCRIPT_PATH" || fail qa-script-unapproved
-  fi
+  cat -- "$root" >"$MANIFEST_PATH" || fail runtime-unavailable
+  chmod 0444 -- "$MANIFEST_PATH" || fail runtime-unavailable
 
   validate_manifest "$MANIFEST_PATH" || fail manifest-invalid
   local manifest_status=0
@@ -308,6 +301,10 @@ prepare() {
     *) fail manifest-mismatch ;;
   esac
   if [[ -n "$QA_SCRIPT_PATH" ]]; then
+    root="$(resolve_regular_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
+    QA_SCRIPT_PATH="$SNAPSHOT_DIR/approved-qa.mjs"
+    cat -- "$root" >"$QA_SCRIPT_PATH" || fail runtime-unavailable
+    chmod 0444 -- "$QA_SCRIPT_PATH" || fail runtime-unavailable
     validate_qa_script "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
   cd "$PROJECT_DIR"
