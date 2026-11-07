@@ -4,6 +4,7 @@ import {appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileS
 import {createInterface} from 'node:readline';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
+import {pathToFileURL} from 'node:url';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 import {selectRealClientScenarios} from './real_client_scenarios.mjs';
 
