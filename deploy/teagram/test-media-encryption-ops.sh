@@ -263,6 +263,10 @@ case "$1" in
       [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
       printf 'fixture archive\n'
     elif [[ "$2" == -i && "$3" == teagram-media-restore-* && "$4" == pg_restore ]]; then
+      if [[ "$*" == *' -' ]]; then
+        printf '%s\n' 'pg_restore: error: could not open input file "-": No such file or directory' >&2
+        exit 1
+      fi
       if [[ "$*" == *' pg_restore --list'* ]]; then
         printf 'restore:pg_restore-list\n' >> "$FIXTURE_EVENTS"
         if [[ "$FIXTURE_SCENARIO" == pgrestore-list-failure ]]; then
