@@ -416,6 +416,13 @@ class BlobModeStateTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(info.st_mode), expected_mode)
         return info
 
+    def allow_missing_reports(self, path, kind, expected_mode=None):
+        try:
+            pathlib.Path(path).lstat()
+        except FileNotFoundError:
+            raise blob_mode.Reject("report-unavailable") from None
+        return self.allow_unowned_private_files(path, kind, expected_mode)
+
     def publish(
         self,
         state_dir: pathlib.Path,
@@ -439,6 +446,53 @@ class BlobModeStateTests(unittest.TestCase):
         )
         blob_mode.publish_transition(args)
         return proof_path
+
+    def write_loss_attestation_fixture(
+        self,
+        root: pathlib.Path,
+        state_dir: pathlib.Path,
+        report_root: pathlib.Path,
+        missing_count: int = 5,
+    ) -> tuple[list[dict[str, object]], list[str]]:
+        records, head, _mode_bytes = blob_mode.read_authority(state_dir, report_root)
+        missing = records[:missing_count]
+        for record in missing:
+            blob_mode.report_read_path(report_root, record["transition_id"]).unlink()
+
+        journal_bytes = [
+            (state_dir / "journal" / f"{generation:010d}.json").read_bytes()
+            for generation in range(1, len(records) + 1)
+        ]
+        head_sha256 = blob_mode.hashlib.sha256(head).hexdigest()
+        archive_manifest = b'{"files":[],"schema":"teagram.blob-mode-report-loss-archive/v1"}\n'
+        census_manifest = b'{"objects":[],"references":[],"schema":"teagram.blob-mode-report-loss-census/v1"}\n'
+        for name, content in (
+            ("teagramd-blob-mode-report-loss-archive-manifest.json", archive_manifest),
+            ("teagramd-blob-mode-report-loss-census-manifest.json", census_manifest),
+        ):
+            path = report_root / name
+            path.write_bytes(content)
+            path.chmod(0o600)
+
+        attestation = {
+            "schema": "teagram.blob-mode-report-loss-attestation/v1",
+            "head_generation": len(records),
+            "head_transition_id": records[-1]["transition_id"],
+            "head_bytes_sha256": head_sha256,
+            "journal_prefix_sha256": blob_mode.hashlib.sha256(b"".join(journal_bytes)).hexdigest(),
+            "missing_transition_ids": sorted(record["transition_id"] for record in missing),
+            "reason": "MAIN-2610",
+            "archive_manifest_sha256": blob_mode.hashlib.sha256(archive_manifest).hexdigest(),
+            "census_manifest_sha256": blob_mode.hashlib.sha256(census_manifest).hexdigest(),
+            "object_count": 0,
+            "byte_total": 0,
+        }
+        content = (json.dumps(attestation, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        attestation_sha256 = blob_mode.hashlib.sha256(content).hexdigest()
+        path = report_root / f"teagramd-blob-mode-report-loss-attestation-{attestation_sha256}.json"
+        path.write_bytes(content)
+        path.chmod(0o600)
+        return records, [record["transition_id"] for record in missing]
 
     def simple_s3_proof_file(
         self,
@@ -1819,7 +1873,7 @@ class BlobModeStateTests(unittest.TestCase):
 
                 self.assert_rejects(
                     lambda: blob_mode.validate_runtime(args),
-                    "state-unavailable",
+                    "report-unavailable",
                 )
                 with (
                     patch.object(blob_mode, "assert_containers_match"),
@@ -1852,7 +1906,7 @@ class BlobModeStateTests(unittest.TestCase):
                 record, missing_report_count = blob_mode.current_deployment_authority(state_dir, report_root)
                 self.assertEqual(record["outcome"], "s3-accepted")
                 self.assertEqual(missing_report_count, len(records))
-                self.assert_rejects(lambda: blob_mode.read_authority(state_dir, report_root), "state-unavailable")
+                self.assert_rejects(lambda: blob_mode.read_authority(state_dir, report_root), "report-unavailable")
                 self.assert_rejects(
                     lambda: blob_mode.publish_transition(SimpleNamespace(
                         outcome="s3-accepted",
@@ -1861,7 +1915,7 @@ class BlobModeStateTests(unittest.TestCase):
                         report_root=report_root,
                         lock_path=lock_path,
                     )),
-                    "state-unavailable",
+                    "report-unavailable",
                 )
 
     def test_deployment_authority_rejects_present_mismatched_report(self) -> None:
@@ -1894,6 +1948,119 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assert_rejects(
                     lambda: blob_mode.current_deployment_authority(state_dir, report_root),
                     "state-unavailable",
+                )
+
+    def test_strict_authority_accepts_only_attested_missing_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_missing_reports),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, report_root, lock_path, root, outcome)
+                records, missing_ids = self.write_loss_attestation_fixture(root, state_dir, report_root)
+
+                try:
+                    authority = blob_mode.current_authority(state_dir, report_root)
+                except blob_mode.Reject as error:
+                    self.fail(f"valid missing-report attestation was rejected: {error}")
+
+                self.assertEqual(authority["transition_id"], records[-1]["transition_id"])
+                deployment_authority, missing_count = blob_mode.current_deployment_authority(state_dir, report_root)
+                self.assertEqual(deployment_authority["transition_id"], records[-1]["transition_id"])
+                self.assertEqual(missing_count, len(missing_ids))
+
+    def test_attestation_rejects_changed_journal_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_missing_reports),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, report_root, lock_path, root, outcome)
+                self.write_loss_attestation_fixture(root, state_dir, report_root)
+                journal_record = state_dir / "journal" / "0000000001.json"
+                original = journal_record.read_bytes()
+                journal_record.write_bytes(json.dumps(json.loads(original), indent=2).encode() + b"\n")
+
+                self.assert_rejects(
+                    lambda: blob_mode.current_authority(state_dir, report_root),
+                    "report-attestation-journal-mismatch",
+                )
+
+    def test_attestation_does_not_cover_another_missing_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_missing_reports),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, report_root, lock_path, root, outcome)
+                records, _missing_ids = self.write_loss_attestation_fixture(root, state_dir, report_root)
+                blob_mode.report_read_path(report_root, records[-1]["transition_id"]).unlink()
+
+                self.assert_rejects(
+                    lambda: blob_mode.current_authority(state_dir, report_root),
+                    "report-attestation-coverage",
+                )
+
+    def test_attested_journal_prefix_allows_later_records_only_with_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_missing_reports),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, report_root, lock_path, root, outcome)
+                records, _missing_ids = self.write_loss_attestation_fixture(root, state_dir, report_root)
+                self.publish(state_dir, report_root, lock_path, root, "recovered-local")
+                current = blob_mode.current_authority(state_dir, report_root)
+                self.assertEqual(current["outcome"], "recovered-local")
+
+                later_record = blob_mode.read_authority(state_dir, report_root)[0][-1]
+                blob_mode.report_read_path(report_root, later_record["transition_id"]).unlink()
+                self.assertEqual(len(records), 6)
+                self.assert_rejects(
+                    lambda: blob_mode.current_authority(state_dir, report_root),
+                    "report-attestation-coverage",
+                )
+
+    def test_attested_report_that_reappears_mismatched_stays_a_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_missing_reports),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                for outcome in ("s3-accepted", "recovered-local", "s3-accepted", "recovered-local", "s3-accepted"):
+                    self.publish(state_dir, report_root, lock_path, root, outcome)
+                records, missing_ids = self.write_loss_attestation_fixture(root, state_dir, report_root)
+                report_path = blob_mode.report_read_path(report_root, missing_ids[0])
+                report_path.write_bytes(b"{}")
+                report_path.chmod(0o600)
+
+                self.assert_rejects(
+                    lambda: blob_mode.current_authority(state_dir, report_root),
+                    "report-digest",
                 )
 
     def test_simple_s3_transition_accepts_current_migrations_and_one_verified_copy(self) -> None:
