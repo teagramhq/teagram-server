@@ -556,6 +556,36 @@ def candidate_manifest_record(candidate: Candidate, filename: str, digest: str) 
     }
 
 
+def record_post_delete_inventory(
+    manifest_path: pathlib.Path,
+    manifest: dict[str, object],
+    inventory: EnvelopeInventory,
+) -> None:
+    checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    manifest["post_delete_envelope_inventory"] = inventory.manifest_record()
+    manifest["post_delete_checked_at_utc"] = checked_at
+    if inventory.valid:
+        manifest["status"] = "complete"
+        manifest["completed_at_utc"] = checked_at
+        manifest.pop("verification_pending_at_utc", None)
+    else:
+        manifest["status"] = "verification_pending"
+        manifest["verification_pending_at_utc"] = checked_at
+        manifest.pop("completed_at_utc", None)
+    atomic_manifest(manifest_path, manifest)
+
+
+def post_delete_inventory_failure(run_id: str, inventory: EnvelopeInventory) -> str:
+    referenced_without_valid = inventory.no_valid_envelope_count + inventory.missing_count
+    return (
+        "post-delete envelope inventory is incomplete "
+        f"(unaccounted={inventory.unaccounted_count} "
+        f"referenced_without_valid_envelope={referenced_without_valid} "
+        f"unversioned={inventory.unversioned_reference_count}); "
+        f"rerun --check-post {run_id}"
+    )
+
+
 def apply_quarantine(
     snapshot_provider: Callable[[str], Snapshot],
     storage: Storage,
@@ -634,18 +664,43 @@ def apply_quarantine(
         final_envelope_inventory = EnvelopeInventory(final_reference_count, 0, 0, 0, 0)
     else:
         final_envelope_inventory = record_post_delete_envelopes(final_reference_count)
-    manifest["post_delete_envelope_inventory"] = final_envelope_inventory.manifest_record()
-    manifest["status"] = "complete"
-    manifest["completed_at_utc"] = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    atomic_manifest(manifest_path, manifest)
+    record_post_delete_inventory(manifest_path, manifest, final_envelope_inventory)
+    if not final_envelope_inventory.valid:
+        fail(post_delete_inventory_failure(run_id, final_envelope_inventory))
     return final, summarize(first)
+
+
+def check_quarantine_after(
+    snapshot_provider: Callable[[str], Snapshot],
+    quarantine_dir: pathlib.Path,
+    manifest_path: pathlib.Path,
+    run_id: str,
+    envelope_inventory_provider: Callable[[int], EnvelopeInventory],
+) -> tuple[Snapshot, EnvelopeInventory]:
+    private_directory(quarantine_dir)
+    manifest = load_manifest(manifest_path, run_id)
+    records = manifest["objects"]
+    assert isinstance(records, list)
+    if not all(isinstance(record, dict) and record.get("deleted") is True for record in records):
+        fail("quarantine deletion is incomplete; restore or finish the original run")
+
+    snapshot = snapshot_provider("after")
+    manifest_keys = {str(record["key"]) for record in records if isinstance(record, dict)}
+    if manifest_keys.intersection(snapshot.raw_objects) or manifest_keys.intersection(snapshot.references):
+        fail("a quarantined object remains present or referenced; restore copies from the quarantine manifest")
+
+    inventory = envelope_inventory_provider(len(snapshot.references))
+    record_post_delete_inventory(manifest_path, manifest, inventory)
+    if not inventory.valid:
+        fail(post_delete_inventory_failure(run_id, inventory))
+    return snapshot, inventory
 
 
 def load_manifest(path: pathlib.Path, expected_run_id: str) -> dict[str, object]:
     value = read_json(path)
     if not isinstance(value, dict) or value.get("schema") != MANIFEST_SCHEMA or value.get("run_id") != expected_run_id:
         fail("quarantine manifest is invalid")
-    if value.get("status") not in ("deleting", "complete"):
+    if value.get("status") not in ("deleting", "verification_pending", "complete"):
         fail("quarantine copies are incomplete; no deletions were started")
     records = value.get("objects")
     if not isinstance(records, list) or not records:
@@ -952,7 +1007,7 @@ def validate_restore_run_id(run_id: str) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--mode", choices=("check", "apply", "restore"), required=True)
+    parser.add_argument("--mode", choices=("check", "check-post", "apply", "restore"), required=True)
     parser.add_argument("--compose-argv", type=pathlib.Path, required=True)
     parser.add_argument("--inventory", type=pathlib.Path)
     parser.add_argument("--inventory-sha256")
@@ -1046,6 +1101,25 @@ def main(argv: list[str] | None = None) -> int:
             args.prefix,
             args.work_dir,
         )
+        if args.mode == "check-post":
+            quarantine_dir = args.quarantine_base / f"MAIN-3441-{args.run_id}"
+            private_directory(quarantine_dir)
+            manifest_path = quarantine_dir / "manifest.json"
+            private_file(manifest_path)
+            storage.set_mount(quarantine_dir)
+            snapshot, _inventory = check_quarantine_after(
+                provider,
+                quarantine_dir,
+                manifest_path,
+                args.run_id,
+                lambda _count: storage.fresh_envelope_inventory(args.work_dir),
+            )
+            print(
+                f"post_check=pass {summarize(snapshot)} envelope_validation=pass "
+                f"quarantine_path={quarantine_dir} authority=encrypted service=running"
+            )
+            return 0
+
         if args.mode == "check":
             snapshot = provider("before")
             storage.validate_envelopes(args.work_dir)
@@ -1071,15 +1145,8 @@ def main(argv: list[str] | None = None) -> int:
             fail("post-delete envelope inventory result is unavailable")
         if post_inventory.get("status") == "pass":
             post_summary = "post_inventory=pass unaccounted=0 referenced_without_valid_envelope=0"
-        elif post_inventory.get("status") == "recheck_required":
-            referenced_without_valid = int(post_inventory["no_valid_envelope"]) + int(post_inventory["missing"])
-            post_summary = (
-                f"post_inventory=recheck_required unaccounted={post_inventory['unaccounted']} "
-                f"referenced_without_valid_envelope={referenced_without_valid} "
-                f"unversioned={post_inventory['unversioned_envelope_references']} rerun=--check"
-            )
         else:
-            fail("post-delete envelope inventory result is invalid")
+            fail(f"post-delete envelope inventory is incomplete; rerun --check-post {args.run_id}")
         print(
             f"quarantine=pass {summary} quarantine_path={quarantine_dir} delete_after_utc={args.delete_after} "
             f"{post_summary} authority=encrypted service=running"

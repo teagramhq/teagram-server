@@ -269,18 +269,23 @@ the read-only preflight. `--apply` copies each candidate into a root-owned
 0600 copy by size and SHA-256, rechecks the candidate set and references, and
 then removes those exact keys. A fresh `blob-inventory` run checks encrypted
 envelope headers against the current references before copying, before
-deletion, and after removal; invalid, missing, unaccounted, or count-mismatched
-references stop the operation. The private manifest records full keys,
-digests, and a deletion date 30 days out; operator output contains only counts,
-bytes, category/age buckets, and the quarantine path. The final full listing
-must show zero unaccounted plaintext and zero referenced objects without a
-valid envelope, with encrypted authority unchanged and `teagramd` still
-running. `--restore <run-id>` restores verified copies from an earlier run.
-The operation does not restart services.
+deletion, and after removal. If the post-delete inventory finds invalid,
+missing, unaccounted, or unversioned objects, the apply command reports an
+incomplete result and leaves the manifest pending. Run `--check-post <run-id>`
+to take a fresh post-quarantine snapshot and envelope inventory; the manifest
+becomes complete only after that inventory verifies there are no invalid,
+missing, unaccounted, or unversioned objects. The private manifest records
+full keys, digests, and a deletion date 30 days out; operator output contains
+only counts, bytes, category/age buckets, and the quarantine path. The final full listing must show zero
+unaccounted plaintext and zero referenced objects without a valid envelope,
+with encrypted authority unchanged and `teagramd` still running.
+`--restore <run-id>` restores verified copies from an earlier run. The operation
+does not restart services.
 
 ```sh
 ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --check
 ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --apply
+ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --check-post <run-id>
 ssh teagram run <deployed-main-sha> quarantine-unaccounted-media --restore <run-id>
 ```
 

@@ -396,7 +396,7 @@ class QuarantineFixtures(unittest.TestCase):
             current_references,
             listing_references_by_call={3: [REFERENCE, POST_MIGRATION_REFERENCE]},
         )
-        final_inventory = MEDIA.EnvelopeInventory(0, 0, 0, 1, 0)
+        final_inventory = MEDIA.EnvelopeInventory(2, 0, 0, 0, 0)
 
         final, _summary = MEDIA.apply_quarantine(
             base_provider,
@@ -412,7 +412,7 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(manifest["status"], "complete")
         self.assertEqual(len(final.references), 1)
         self.assertEqual(set(final.encrypted_objects), {REFERENCE.key, POST_MIGRATION_REFERENCE.key})
-        self.assertEqual(manifest["post_delete_envelope_inventory"]["status"], "recheck_required")
+        self.assertEqual(manifest["post_delete_envelope_inventory"]["status"], "pass")
 
     def test_refuses_when_candidate_became_referenced(self) -> None:
         candidate = MEDIA.Reference("file", "2", "02/2", len(CANDIDATE_BYTES["02/2"]))
@@ -487,7 +487,7 @@ class QuarantineFixtures(unittest.TestCase):
         self.assertEqual(store.removed, [])
         self.assertEqual(set(store.objects), set(CANDIDATE_BYTES))
 
-    def test_post_delete_envelope_findings_are_recorded_without_blocking_completion(self) -> None:
+    def test_post_delete_envelope_findings_leave_manifest_pending_and_fail(self) -> None:
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         store = FakeStorage(dict(CANDIDATE_BYTES), directory)
         calls = 0
@@ -497,19 +497,21 @@ class QuarantineFixtures(unittest.TestCase):
             calls += 1
 
         final_inventory = MEDIA.EnvelopeInventory(0, 0, 0, 1, 0)
-        MEDIA.apply_quarantine(
-            self.snapshot_provider(store),
-            store,
-            directory,
-            self.run_id,
-            "2026-12-07",
-            validate_before_deletion,
-            lambda _referenced_count: final_inventory,
-        )
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "rerun --check-post"):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store),
+                store,
+                directory,
+                self.run_id,
+                "2026-12-07",
+                validate_before_deletion,
+                lambda _referenced_count: final_inventory,
+            )
         self.assertEqual(calls, 2)
         self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
         manifest = json.loads((directory / "manifest.json").read_text())
-        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(manifest["status"], "verification_pending")
+        self.assertNotIn("completed_at_utc", manifest)
         self.assertEqual(manifest["post_delete_envelope_inventory"], {
             "status": "recheck_required",
             "referenced_count": 0,
@@ -519,6 +521,51 @@ class QuarantineFixtures(unittest.TestCase):
             "unaccounted": 1,
             "unversioned_envelope_references": 0,
         })
+        self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
+
+    def test_post_quarantine_check_retries_after_removal_until_inventory_passes(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        manifest_path = directory / "manifest.json"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+        pending_inventory = MEDIA.EnvelopeInventory(0, 0, 0, 1, 0)
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "rerun --check-post"):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store),
+                store,
+                directory,
+                self.run_id,
+                "2026-12-07",
+                lambda _count: None,
+                lambda _count: pending_inventory,
+            )
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+
+        post_provider = self.snapshot_provider(store)
+        invalid_inventory = MEDIA.EnvelopeInventory(0, 0, 1, 0, 0)
+        with self.assertRaisesRegex(MEDIA.QuarantineError, "referenced_without_valid_envelope=1"):
+            MEDIA.check_quarantine_after(
+                post_provider,
+                directory,
+                manifest_path,
+                self.run_id,
+                lambda _count: invalid_inventory,
+            )
+        manifest = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest["status"], "verification_pending")
+        self.assertNotIn("completed_at_utc", manifest)
+
+        snapshot, inventory = MEDIA.check_quarantine_after(
+            post_provider,
+            directory,
+            manifest_path,
+            self.run_id,
+            lambda _count: MEDIA.EnvelopeInventory(1, 0, 0, 0, 0),
+        )
+        self.assertEqual(snapshot.candidates, {})
+        self.assertTrue(inventory.valid)
+        manifest = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(manifest["post_delete_envelope_inventory"]["status"], "pass")
         self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
 
     def test_refuses_inventory_change_after_copy_before_deletion(self) -> None:

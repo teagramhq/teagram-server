@@ -225,7 +225,7 @@ case "$1" in
         quarantine-prefix-mismatch)
           printf '["TG_BLOB_S3_PREFIX=live-prefix/"]\n'
           ;;
-        quarantine-authority-changed-before-apply|quarantine-authority-changed-during-apply)
+        quarantine-authority-changed-before-apply|quarantine-authority-changed-during-apply|quarantine-post-check)
           if [[ "$FIXTURE_SCENARIO" == quarantine-authority-changed-before-apply ]]; then
             jq '.fixture_mutation = true' "$FIXTURE_REPO/.state/blob-mode/mode.json" > "$FIXTURE_REPO/.state/blob-mode/mode.changed"
             chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.changed"
@@ -907,6 +907,18 @@ output=$(run_quarantine --apply)
 [[ ! -e "$FIXTURE_HELPER_CALLS" ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
 printf '%s\n' 'PASS quarantine refuses a live S3 prefix mismatch before invoking apply'
+
+setup_case quarantine-post-check encrypted
+post_run_id=20261107T120000Z-1234-abcdef0
+mkdir -m 700 "$FIXTURE_QUARANTINE_BASE"
+mkdir -m 700 "$FIXTURE_QUARANTINE_BASE/MAIN-3441-$post_run_id"
+output=$(run_quarantine --check-post "$post_run_id")
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'quarantine=pass fixture'* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *'--mode check-post'* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--run-id $post_run_id"* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
+printf '%s\n' 'PASS post-quarantine check targets the original verified run without applying'
 
 setup_case quarantine-authority-changed-before-apply encrypted
 output=$(run_quarantine --apply)

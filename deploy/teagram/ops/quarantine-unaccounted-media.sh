@@ -6,9 +6,10 @@ readonly BOOTSTRAP_REPO=/opt/teagram
 readonly QUARANTINE_BASE=/var/lib/teagram-plaintext-quarantine
 [[ "$(id -u)" == 0 ]] || { printf '%s\n' 'media quarantine requires root' >&2; exit 1; }
 [[ "${OPS_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { printf '%s\n' 'reviewed source SHA is invalid' >&2; exit 1; }
-[[ "$#" == 1 && ( "$1" == --check || "$1" == --apply ) || \
-   "$#" == 2 && "$1" == --restore && "$2" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{7}$ ]] || {
-  printf '%s\n' 'usage: quarantine-unaccounted-media.sh --check | --apply | --restore <run-id>' >&2
+[[ ( "$#" == 1 && ( "$1" == --check || "$1" == --apply ) ) || \
+   ( "$#" == 2 && ( "$1" == --restore || "$1" == --check-post ) && \
+     "$2" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{7}$ ) ]] || {
+  printf '%s\n' 'usage: quarantine-unaccounted-media.sh --check | --apply | --check-post <run-id> | --restore <run-id>' >&2
   exit 64
 }
 [[ -d "$BOOTSTRAP_REPO" && ! -L "$BOOTSTRAP_REPO" ]] || { printf '%s\n' 'server checkout is unavailable' >&2; exit 1; }
@@ -55,10 +56,11 @@ source "$OPS_TEMP_DIR/common.inc"
 
 MODE=apply
 if [[ "$1" == --check ]]; then MODE=check; fi
+if [[ "$1" == --check-post ]]; then MODE=check-post; fi
 if [[ "$1" == --restore ]]; then MODE=restore; fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${OPS_SHA:0:7}"
 TARGET_RUN_ID=$RUN_ID
-if [[ "$MODE" == restore ]]; then TARGET_RUN_ID=$2; fi
+if [[ "$MODE" == restore || "$MODE" == check-post ]]; then TARGET_RUN_ID=$2; fi
 QUARANTINE_DIR="$QUARANTINE_BASE/MAIN-3441-$TARGET_RUN_ID"
 
 exec 9>/tmp/teagram-deploy.lock || ops_fail 'cannot open the shared deployment lock'
@@ -99,10 +101,12 @@ LIVE_S3_PREFIX=$(jq -r '
 if [[ -n "$LIVE_S3_PREFIX" && "$LIVE_S3_PREFIX" != */ ]]; then LIVE_S3_PREFIX="$LIVE_S3_PREFIX/"; fi
 [[ "$LIVE_S3_PREFIX" == "$S3_PREFIX" ]] || ops_fail 'running teagramd S3 prefix differs from the live Compose render'
 
-if [[ "$MODE" != check ]]; then
+if [[ "$MODE" == apply ]]; then
   if [[ ! -e "$QUARANTINE_BASE" && ! -L "$QUARANTINE_BASE" ]]; then
     mkdir -m 700 -- "$QUARANTINE_BASE" || ops_fail 'cannot create the private quarantine root'
   fi
+  private_dir "$QUARANTINE_BASE" || ops_fail 'quarantine root is not root-owned mode 0700'
+elif [[ "$MODE" == restore || "$MODE" == check-post ]]; then
   private_dir "$QUARANTINE_BASE" || ops_fail 'quarantine root is not root-owned mode 0700'
 fi
 
@@ -134,7 +138,7 @@ if [[ "$MODE" == apply ]]; then
     ops_fail 'cannot calculate the quarantine retention date'
   HELPER_ARGS+=(--delete-after "$DELETE_AFTER")
 fi
-if [[ "$MODE" == restore ]]; then
+if [[ "$MODE" == restore || "$MODE" == check-post ]]; then
   HELPER_ARGS[${#HELPER_ARGS[@]}-1]="$QUARANTINE_DIR"
 fi
 
