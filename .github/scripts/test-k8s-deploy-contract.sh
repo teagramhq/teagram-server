@@ -203,7 +203,7 @@ done
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.name' deploy/k8s/base/teagramd-statefulset.yaml)" == teagramd-runtime &&
    "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.key' deploy/k8s/base/teagramd-statefulset.yaml)" == TG_MEDIA_KEY_CURRENT ]] ||
   fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
-grep --fixed-strings --quiet 'TG_MEDIA_KEY_CURRENT=$TG_MEDIA_KEY_CURRENT' deploy/k8s/bootstrap-alpha.sh ||
+grep --fixed-strings --quiet "TG_MEDIA_KEY_CURRENT=\$TG_MEDIA_KEY_CURRENT" deploy/k8s/bootstrap-alpha.sh ||
   fail 'bootstrap must preserve the live media encryption key version in teagramd-runtime'
 if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
   fail 'the cutover must preserve encrypted S3 objects directly, without a local-blob migration Job'

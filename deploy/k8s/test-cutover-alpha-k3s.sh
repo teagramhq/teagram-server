@@ -324,9 +324,11 @@ for index, record in enumerate(records, 1):
 (root / "mode.json").write_bytes(latest)
 (root / "mode.json").chmod(0o644)
 PY
+# Do not preserve the workstation-owned archive metadata on the PVC: tar would
+# change /blob-mode to that UID/mode before it creates the journal directory.
 tar -cf - -C "$tmp_dir/blob-mode" . |
   kubectl exec --namespace "$SOURCE_NAMESPACE" --stdin pod/cutover-blob-mode-seed -c seed -- \
-    tar -xpf - -C /blob-mode
+    tar -xf - -C /blob-mode
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- \
   sh -ec 'chown -R 0:0 /blob-mode; chmod 0755 /blob-mode /blob-mode/journal; chmod 0644 /blob-mode/mode.json /blob-mode/journal/*.json'
 kubectl delete pod cutover-blob-mode-seed --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
