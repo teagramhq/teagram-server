@@ -82,9 +82,9 @@ copy_secret() {
     kubectl apply --filename - >/dev/null
 }
 
-copy_configmap() {
-  local name=$1 source_name
-  source_name=$(kubectl get configmaps --namespace "$SOURCE_NAMESPACE" --output json |
+source_configmap_name() {
+  local name=$1
+  kubectl get configmaps --namespace "$SOURCE_NAMESPACE" --output json |
     jq -er --arg name "$name" '
       [.items[].metadata.name | select(. == $name or startswith($name + "-"))]
       | if index($name) then $name
@@ -92,7 +92,12 @@ copy_configmap() {
         elif length == 0 then error("ConfigMap not found: " + $name)
         else error("multiple generated ConfigMaps found for: " + $name)
         end
-    ')
+    '
+}
+
+copy_configmap() {
+  local name=$1 source_name
+  source_name=$(source_configmap_name "$name")
   kubectl get configmap "$source_name" --namespace "$SOURCE_NAMESPACE" --output json |
     jq --arg namespace "$TARGET_NAMESPACE" --arg name "$name" '
       del(.metadata.creationTimestamp, .metadata.managedFields, .metadata.resourceVersion, .metadata.uid)
@@ -391,10 +396,10 @@ path.write_text(json.dumps({
 PY
 
 real_kubectl=$(command -v kubectl)
-test_migration_version=$(kubectl get configmap required-migration-version --namespace "$SOURCE_NAMESPACE" \
-  --output 'jsonpath={.data.migration-version}')
-test_media_key_current=$(kubectl get configmap teagramd-runtime --namespace "$SOURCE_NAMESPACE" \
-  --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
+test_migration_version=$(kubectl get configmap "$(source_configmap_name required-migration-version)" \
+  --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.data.migration-version}')
+test_media_key_current=$(kubectl get configmap "$(source_configmap_name teagramd-runtime)" \
+  --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
 test_migrations_job=$(kubectl get jobs --namespace "$SOURCE_NAMESPACE" \
   --selector=app.kubernetes.io/name=db-migrations --output json |
   jq -er 'if (.items | length) == 1 then .items[0].metadata.name else error("expected one source migration Job") end')
