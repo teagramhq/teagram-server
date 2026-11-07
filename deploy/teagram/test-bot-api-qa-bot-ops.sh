@@ -61,6 +61,7 @@ JSON
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+printf '%s\n' "$*" >> "$MOCK_TMP/git.argv"
 [[ "$1" == -C && "$2" == "$MOCK_REPO" ]] || { printf 'unexpected git args: %s\n' "$*" >&2; exit 99; }
 shift 2
 case "$1" in
@@ -85,6 +86,7 @@ LOGGER
 cat > "$tmp/bin/flock" <<'FLOCK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+printf '%s\n' "$*" >> "$MOCK_TMP/flock.argv"
 if [[ ${MOCK_RUN_LABEL:-} == B ]]; then
   : > "$MOCK_TMP/flock-b-entered"
 fi
@@ -94,6 +96,7 @@ FLOCK
 cat > "$tmp/bin/tailscale" <<'TAILSCALE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+printf '%s\n' "$*" >> "$MOCK_TMP/tailscale.argv"
 [[ "$*" == 'ip -4' ]] || exit 99
 printf '%s\n' 100.64.1.1
 TAILSCALE
@@ -191,8 +194,9 @@ expect_status() {
 assert_no_token() {
   local artifact token
   for token in "$MOCK_CANARY_TOKEN" "$MOCK_CANARY_TOKEN_B"; do
-    for artifact in "$tmp/stdout" "$tmp/stderr" "$tmp/logger.log" "$tmp/docker.argv" \
-      "$tmp/curl.argv" "$tmp/rotate-a.stdout" "$tmp/rotate-a.stderr" \
+    for artifact in "$tmp/stdout" "$tmp/stderr" "$tmp/logger.log" "$tmp/git.argv" \
+      "$tmp/tailscale.argv" "$tmp/flock.argv" "$tmp/docker.argv" "$tmp/curl.argv" \
+      "$tmp/rotate-a.stdout" "$tmp/rotate-a.stderr" \
       "$tmp/rotate-b.stdout" "$tmp/rotate-b.stderr"; do
       if [[ -f "$artifact" ]] && grep -Fq "$token" "$artifact"; then
         printf 'canary token leaked into %s\n' "$artifact" >&2
@@ -266,10 +270,17 @@ assert_no_token
 
 printf '{"state":"found","owner":"user","id":%s,"kind":"human","first_name":"Teagram QA Test","token_active":false}\n' "$MOCK_BOT_ID" > "$repo/.bot-status"
 creates_before=$(grep -c 'bot create' "$tmp/docker.argv" || true)
+rotates_before=$(grep -c 'bot rotate' "$tmp/docker.argv" || true)
 expect_status 1 "run $OPS_SHA bot-api-qa-bot create"
 assert_no_token
 if [[ "$(grep -c 'bot create' "$tmp/docker.argv" || true)" != "$creates_before" ]]; then
   printf '%s\n' 'operation attempted to create over a non-bot username' >&2
+  exit 1
+fi
+expect_status 1 "run $OPS_SHA bot-api-qa-bot rotate"
+assert_no_token
+if [[ "$(grep -c 'bot rotate' "$tmp/docker.argv" || true)" != "$rotates_before" ]]; then
+  printf '%s\n' 'operation attempted to rotate a non-bot username' >&2
   exit 1
 fi
 
