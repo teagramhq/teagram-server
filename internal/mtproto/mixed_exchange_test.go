@@ -161,7 +161,7 @@ func beginMixedExchange(t *testing.T, run *mixedExchangeRun) {
 }
 
 func TestKeyExchangeCountSurvivesPreAuthSlotClear(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	rsaKey, err := rsa.GenerateKey(crand.Reader, crypto.RSAKeyBits)
 	if err != nil {

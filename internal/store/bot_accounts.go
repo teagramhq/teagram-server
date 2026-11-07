@@ -136,6 +136,23 @@ func (s *Store) RevokeBotToken(ctx context.Context, botID int64) error {
 	return nil
 }
 
+// BotTokenActive reports whether a bot has an active token without returning
+// its stored hash.
+func (s *Store) BotTokenActive(ctx context.Context, botID int64) (bool, error) {
+	if botID <= 0 {
+		return false, ErrBotTokenNotFound
+	}
+	_, err := s.q.ActiveBotTokenHash(ctx, botID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("lookup active bot token: %w", err)
+	default:
+		return true, nil
+	}
+}
+
 // BotIDByToken returns the bot id for a valid token. Invalid, unknown, and
 // revoked tokens all return ErrBotTokenNotFound.
 func (s *Store) BotIDByToken(ctx context.Context, token string) (int64, error) {

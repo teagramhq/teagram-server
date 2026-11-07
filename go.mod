@@ -3,6 +3,7 @@ module github.com/teagramhq/teagram-server
 go 1.27.3
 
 require (
+	filippo.io/age v1.2.1
 	github.com/Oudwins/tailwind-merge-go v0.2.3
 	github.com/a-h/templ v0.3.1020
 	github.com/coder/websocket v1.8.15

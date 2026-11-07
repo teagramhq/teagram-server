@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+	"filippo.io/age/armor"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -1163,6 +1165,15 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 	}
 
 	stdout.Reset()
+	if err := runBotCommandWithEUID([]string{"lookup", "weather_bot"}, log, &stdout, &stderr, 0); err != nil {
+		t.Fatalf("lookup command: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"kind":"bot"`) || !strings.Contains(stdout.String(), `"first_name":"Weather"`) ||
+		!strings.Contains(stdout.String(), `"token_active":true`) || !strings.Contains(stdout.String(), fmt.Sprintf(`"id":%d`, botID)) {
+		t.Fatalf("lookup output = %q, want bot metadata and active token state", stdout.String())
+	}
+
+	stdout.Reset()
 	stderr.Reset()
 	if err := runBotCommandWithEUID([]string{"rotate", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr, 0); err != nil {
 		t.Fatalf("rotate command: %v", err)
@@ -1200,6 +1211,55 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 	}
 	if _, err := st.BotIDByToken(context.Background(), rotatedToken); !errors.Is(err, store.ErrBotTokenNotFound) {
 		t.Fatalf("revoked token error = %v, want not found", err)
+	}
+	stdout.Reset()
+	if err := runBotCommandWithEUID([]string{"lookup", "weather_bot"}, log, &stdout, &stderr, 0); err != nil {
+		t.Fatalf("lookup revoked bot: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"token_active":false`) {
+		t.Fatalf("lookup after revoke = %q, want inactive token state", stdout.String())
+	}
+}
+
+func TestRunBotEncryptCommandArmorsTokenWithoutExposingIt(t *testing.T) {
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("generate test age identity: %v", err)
+	}
+	token := "123456789:" + strings.Repeat("A", 43)
+	var stdout, stderr bytes.Buffer
+	err = runBotCommandWithIO(
+		[]string{"encrypt", identity.Recipient().String()},
+		slog.New(slog.DiscardHandler), strings.NewReader(token+"\n"), &stdout, &stderr, 0,
+	)
+	if err != nil {
+		t.Fatalf("encrypt bot token: %v", err)
+	}
+	if !strings.HasPrefix(stdout.String(), "-----BEGIN AGE ENCRYPTED FILE-----\n") ||
+		!strings.Contains(stdout.String(), "\n-----END AGE ENCRYPTED FILE-----\n") ||
+		strings.Contains(stdout.String(), token) || stderr.Len() != 0 {
+		t.Fatalf("encrypt output is not armored or exposes plaintext: stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	decrypted, err := age.Decrypt(armor.NewReader(bytes.NewReader(stdout.Bytes())), identity)
+	if err != nil {
+		t.Fatalf("decrypt encrypted bot token: %v", err)
+	}
+	plaintext, err := io.ReadAll(decrypted)
+	if err != nil {
+		t.Fatalf("read decrypted bot token: %v", err)
+	}
+	if string(plaintext) != token {
+		t.Fatalf("decrypted token = %q, want test token", plaintext)
+	}
+	clear(plaintext)
+
+	stdout.Reset()
+	err = runBotCommandWithIO(
+		[]string{"encrypt", identity.Recipient().String()},
+		slog.New(slog.DiscardHandler), strings.NewReader(token+"\nextra"), &stdout, &stderr, 0,
+	)
+	if err == nil || strings.Contains(err.Error(), token) || stdout.Len() != 0 {
+		t.Fatalf("malformed token result = error %v stdout %q, want sanitized refusal and empty output", err, stdout.String())
 	}
 }
 
@@ -1240,6 +1300,7 @@ func TestRunBotCommandRequiresRootBeforeConfigAndMutation(t *testing.T) {
 		{"create", "guarded_new", "Guarded"},
 		{"rotate", strconv.FormatInt(bot.ID, 10)},
 		{"revoke", strconv.FormatInt(bot.ID, 10)},
+		{"lookup", "guarded_existing"},
 	} {
 		before := botCommandStateSnapshot(t, dsn)
 		stdout.Reset()
