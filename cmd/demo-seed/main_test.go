@@ -340,18 +340,18 @@ func TestCountSeedMarkersForSpace(t *testing.T) {
 
 func TestSendTextKeepsMarkerOutOfSeededMessage(t *testing.T) {
 	api := &fakeMarkerSeedInvoker{}
-	const (
-		marker = "[[teagram-demo:maps:text-00]]"
-		body   = "Teagram Demo Field Maps note 01: the lower path stayed cool beneath the willow shade."
-	)
-	if _, err := sendText(context.Background(), tg.NewClient(api), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, marker, body, 0); err != nil {
+	seeded := seedMessage{
+		marker: "[[teagram-demo:maps:text-00]]",
+		text:   "Teagram Demo Field Maps note 01: the lower path stayed cool beneath the willow shade.",
+	}
+	if _, err := sendText(context.Background(), tg.NewClient(api), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, seeded, 0); err != nil {
 		t.Fatalf("send seeded text: %v", err)
 	}
 	if api.sent == nil {
 		t.Fatal("sendText did not issue a message request")
 	}
-	if api.sent.Message != body {
-		t.Fatalf("sent message = %q, want %q", api.sent.Message, body)
+	if api.sent.Message != seeded.text {
+		t.Fatalf("sent message = %q, want %q", api.sent.Message, seeded.text)
 	}
 }
 
@@ -412,6 +412,17 @@ func TestHistoryMarkersRecognizeMarkerFreeAndLegacyOtherSeedMessages(t *testing.
 				}
 			})
 		}
+	}
+}
+
+func TestSeededMarkerFromTextRecognizesRetiredCopy(t *testing.T) {
+	seeded := seedMessage{
+		marker:  "[[teagram-demo:maps:text-00]]",
+		text:    "The current route note.",
+		retired: []string{"The previous route note."},
+	}
+	if got := seededMarkerFromText("The previous route note.", []seedMessage{seeded}); got != seeded.marker {
+		t.Fatalf("retired copy resolved to %q, want %q", got, seeded.marker)
 	}
 }
 

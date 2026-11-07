@@ -82,11 +82,97 @@ func TestSeedBroadcastChannelIsIdempotentWithNewAndLegacyHistory(t *testing.T) {
 	}
 }
 
+func TestSeedGroupConversationIsIdempotentWithNewAndLegacyHistory(t *testing.T) {
+	for _, spec := range publicSpaces {
+		if !spec.megagroup {
+			continue
+		}
+		for _, legacy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/legacy=%t", spec.slug, legacy), func(t *testing.T) {
+				seeded := seededMessagesForSpace(spec)
+				rpc := &statefulSeedRPC{}
+				if legacy {
+					for index, message := range seeded {
+						id := index + 1
+						rpc.messages = append(rpc.messages, &tg.Message{
+							ID:      id,
+							Message: message.marker + " " + message.text,
+						})
+						rpc.nextID = id
+					}
+				}
+
+				api := tg.NewClient(rpc)
+				remote := remoteSpace{spec: spec, channelID: 71, accessHash: 93}
+				groups := []remoteSpace{remote}
+				for run := 1; run <= 2; run++ {
+					current := make(map[string]int64)
+					if legacy || run == 2 {
+						var err error
+						current, err = historyMarkers(context.Background(), api, remote.peer(), seeded...)
+						if err != nil {
+							t.Fatalf("run %d: read seeded messages: %v", run, err)
+						}
+					}
+
+					sendsBefore := rpc.sentMessages
+					for turn := range conversationLines {
+						if err := seedGroupConversationTurn(context.Background(), api, groups, current, turn); err != nil {
+							t.Fatalf("run %d turn %d: %v", run, turn, err)
+						}
+					}
+					if got, want := len(rpc.messages), expectedSeedMarkerCount(spec); got != want {
+						t.Fatalf("run %d: message count = %d, want %d", run, got, want)
+					}
+					wantNewSends := 0
+					if !legacy && run == 1 {
+						wantNewSends = len(seeded)
+					}
+					if got := rpc.sentMessages - sendsBefore; got != wantNewSends {
+						t.Fatalf("run %d: new sends = %d, want %d", run, got, wantNewSends)
+					}
+					markers, err := historyMarkers(context.Background(), api, remote.peer(), seeded...)
+					if err != nil {
+						t.Fatalf("run %d: verify seeded history: %v", run, err)
+					}
+					if got, want := countSeedMarkers(markers, spec), expectedSeedMarkerCount(spec); got != want {
+						t.Fatalf("run %d: verified content count = %d, want %d", run, got, want)
+					}
+
+					if err := pinGroupConversations(context.Background(), api, groups); err != nil {
+						t.Fatalf("run %d: pin turn 1: %v", run, err)
+					}
+					turnOne := conversationSeedMessage(spec, 1)
+					if err := messageIsPinned(context.Background(), api, remote.peer(), turnOne.marker, turnOne); err != nil {
+						t.Fatalf("run %d: verify pinned turn 1: %v", run, err)
+					}
+				}
+
+				if !legacy {
+					if got, want := len(rpc.replyParents), len(conversationLines); got != want {
+						t.Fatalf("reply parent records = %d, want %d", got, want)
+					}
+					if rpc.replyParents[0] != 0 {
+						t.Fatalf("turn 0 reply parent = %d, want no parent", rpc.replyParents[0])
+					}
+					for turn := 1; turn < len(conversationLines); turn++ {
+						if got, want := rpc.replyParents[turn], rpc.sentIDs[turn-1]; got != want {
+							t.Errorf("turn %d reply parent = %d, want previous message %d", turn, got, want)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 type statefulSeedRPC struct {
 	messages     []tg.MessageClass
 	nextID       int
 	pinnedID     int
 	sentMessages int
+	replyParents []int
+	sentIDs      []int
 }
 
 func (rpc *statefulSeedRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -100,6 +186,16 @@ func (rpc *statefulSeedRPC) Invoke(_ context.Context, input bin.Encoder, output 
 	case *tg.MessagesSendMessageRequest:
 		rpc.nextID++
 		rpc.sentMessages++
+		parentID := 0
+		if reply, ok := request.GetReplyTo(); ok {
+			messageReply, ok := reply.(*tg.InputReplyToMessage)
+			if !ok {
+				return fmt.Errorf("unexpected reply type %T", reply)
+			}
+			parentID = messageReply.ReplyToMsgID
+		}
+		rpc.replyParents = append(rpc.replyParents, parentID)
+		rpc.sentIDs = append(rpc.sentIDs, rpc.nextID)
 		rpc.messages = append(rpc.messages, &tg.Message{ID: rpc.nextID, Message: request.Message})
 		response, ok := output.(*tg.UpdatesBox)
 		if !ok {
