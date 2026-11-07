@@ -8,18 +8,21 @@ plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"
 for required in \
   'root-only cutover kubeconfig' \
   'Would server-dry-run and apply deploy/k8s/prod-cutover' \
-  'TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
+  'source Compose containers and encrypted S3 authority' \
+  'live teagramd and migration image revisions' \
   'fence writes before the final PostgreSQL snapshot' \
   'stop all running Compose services except PostgreSQL' \
   'verify no PostgreSQL client connections remain' \
   'save a mode-0600 pg_dump' \
   'sent over a temporary loopback port-forward' \
   '8 GiB PostgreSQL PVC can hold both the protected dump and restored database' \
-  'server_key.pem, enc_key.hex, and local blobs' \
+  'server_key.pem, enc_key.hex, the blob-mode authority, and the retained local blob volume' \
+  'compare the target Secret against the live encrypted-media key set without printing key values' \
   'teagramd-admin Secret' \
   'importer pod' \
   '/var/lib/teagram-k3s-cutover' \
-  'encrypt and checksum-copy its objects to RustFS' \
+  'mirror the already-encrypted source S3 objects into the new RustFS bucket without changing their bytes' \
+  'object count, total bytes, and SHA-256 of every source and target object' \
   'the five tailnet-only HTTPS handlers' \
   'the old MTProto and Bot API TCP routes' \
   'enable PROXY protocol on the k3s Bot API relay' \
@@ -91,10 +94,16 @@ if ! grep --fixed-strings --quiet 'test-cutover-alpha-k3s.sh' .github/workflows/
   exit 1
 fi
 
-cutover_image='ghcr.io/teagramhq/teagramd@sha256:b378de8308e246f3c1ac80b3fed964d195a096f16dd25d273e340c1f75ab9a01'
-cutover_digest=${cutover_image#*@}
-if ! grep --fixed-strings --quiet "digest: $cutover_digest" deploy/k8s/prod-cutover/kustomization.yaml; then
-  printf 'alpha cutover does not pin the CI-verified blob-migration image\n' >&2
+prod_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
+cutover_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
+  deploy/k8s/prod-cutover/kustomization.yaml)
+[[ $cutover_migrations_digest == null ]] && cutover_migrations_digest=''
+if [[ ! $prod_migrations_digest =~ ^sha256:[0-9a-f]{64}$ ||
+  ( -n $cutover_migrations_digest && $cutover_migrations_digest != "$prod_migrations_digest" ) ]] ||
+  ! grep --fixed-strings --quiet -- '  - ../prod' deploy/k8s/prod-cutover/kustomization.yaml ||
+  grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
+  printf 'alpha cutover does not use the shared pinned migration image and Job\n' >&2
   exit 1
 fi
 
@@ -132,21 +141,21 @@ mkdir -p "$fixture_dir/bin" "$fixture_dir/state" "$fixture_dir/teagram-cutover-r
 # variants, independently of the disposable-cluster integration test.
 eval "$(sed -n '/^check_serve_status() {/,/^set_serve_routes() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
 eval "$(sed -n '/^capture_compose_environment() {/,/^install_admin_secret() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
-fixture_source_env='TG_BLOB_DIR=/var/lib/teagramd-blobs'
+fixture_source_env=$'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\nTG_BLOB_S3_BUCKET=teagram\nTG_BLOB_S3_PREFIX=teagramd/\nTG_BLOB_S3_ACCESS_KEY_ID=0123456789abcdef0123\nTG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key\nTG_MEDIA_KEY_CURRENT=1'
 capture_compose_environment() { printf '%s\n' "$fixture_source_env"; }
 fail() { printf '%s\n' "$*" >&2; return 1; }
 validate_source_blob_backend || {
-  printf 'cutover rejected the local Compose blob source\n' >&2
+  printf 'cutover rejected the encrypted S3 Compose blob source\n' >&2
   exit 1
 }
-fixture_source_env+=$'\nTG_BLOB_S3_ENDPOINT='
+fixture_source_env=$'TG_BLOB_S3_ENDPOINT=http://other:9000\nTG_BLOB_S3_BUCKET=teagram\nTG_BLOB_S3_PREFIX=teagramd/\nTG_BLOB_S3_ACCESS_KEY_ID=0123456789abcdef0123\nTG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key\nTG_MEDIA_KEY_CURRENT=1'
 if validate_source_blob_backend 2>/dev/null; then
-  printf 'cutover accepted a configured S3 Compose blob source\n' >&2
+  printf 'cutover accepted an unrecognized S3 endpoint\n' >&2
   exit 1
 fi
-fixture_source_env='TG_BLOB_DIR=/mnt/teagram-blobs'
+fixture_source_env=$'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\nTG_BLOB_S3_BUCKET=teagram\nTG_BLOB_S3_PREFIX=teagramd/\nTG_BLOB_S3_ACCESS_KEY_ID=not-a-valid-key\nTG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key\nTG_MEDIA_KEY_CURRENT=1'
 if validate_source_blob_backend 2>/dev/null; then
-  printf 'cutover accepted a nonstandard Compose blob directory\n' >&2
+  printf 'cutover accepted an invalid source S3 access key\n' >&2
   exit 1
 fi
 python3 - "$fixture_dir" <<'PY'

@@ -23,6 +23,18 @@ copying, on failure and on rollback; an API or node failure can prevent removal,
 so operators must inspect and remove any remaining importer before granting
 additional namespace access. Its one-day sleep is not a security boundary.
 
+The encrypted S3 copy uses a temporary client with the source blob credential.
+It lists and reads the source `teagram/teagramd/` prefix and writes only to the
+new RustFS Service. The client joins the source RustFS network and the
+teagramd Compose network so it keeps access to RustFS after the source server is
+stopped and can reach the target port-forward. The runner checks source and target object counts, byte
+totals and per-object SHA-256 values before switching routes, then deletes the
+client. The target-only RustFS port-forward is bound to the k3s LXC bridge
+address and removed after the copy. The source credential can technically
+write or delete objects under its policy, so the copy command and its helper
+image are part of the trusted cutover path; source aliases are used only for
+listing and reads.
+
 The teagramd ClusterIP Service exposes MTProto, WebSocket and admin ports to
 cluster workloads. The cutover also binds port-forwards to the k3s LXC's bridge
 address so the source LXC can reach them. These listeners are reachable from

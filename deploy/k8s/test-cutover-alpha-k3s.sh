@@ -52,6 +52,10 @@ cleanup() {
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
   kubectl delete pod cutover-blob-seed --namespace "$SOURCE_NAMESPACE" \
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete pod cutover-blob-mode-seed --namespace "$SOURCE_NAMESPACE" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete pod cutover-s3-client --namespace "$SOURCE_NAMESPACE" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
   kubectl delete job cutover-account-seed --namespace "$SOURCE_NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1 || true
   rm -rf -- "$tmp_dir"
   exit "$status"
@@ -174,6 +178,39 @@ smoke_restored_account() {
     --password-file /password
 }
 
+smoke_upload_preserved_media() {
+  timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
+    --volume "$tmp_dir/media:/media" \
+    --volume "$tmp_dir/username:/username:ro" \
+    --volume "$tmp_dir/password:/password:ro" \
+    --volume "$tmp_dir/source-client.json:/client.json:ro" \
+    --entrypoint /usr/local/bin/mtproto-smoke \
+    ghcr.io/teagramhq/teagramd:ci \
+    --endpoint 127.0.0.1:12443 \
+    --discovery-file /client.json \
+    --username-file /username \
+    --password-file /password \
+    --media-upload-file /media/payload.bin \
+    --media-manifest-file /media/reference.json
+}
+
+smoke_download_preserved_media() {
+  timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
+    --volume "$tmp_dir/media:/media" \
+    --volume "$tmp_dir/username:/username:ro" \
+    --volume "$tmp_dir/password:/password:ro" \
+    --volume "$tmp_dir/client.json:/client.json:ro" \
+    --entrypoint /usr/local/bin/mtproto-smoke \
+    ghcr.io/teagramhq/teagramd:ci \
+    --endpoint 127.0.0.1:12443 \
+    --discovery-file /client.json \
+    --username-file /username \
+    --password-file /password \
+    --media-download-file /media/downloaded.bin \
+    --media-manifest-file /media/reference.json
+  cmp -- "$tmp_dir/media/payload.bin" "$tmp_dir/media/downloaded.bin"
+}
+
 smoke_bot_api() {
   python3 - 127.0.0.1 12447 <<'PY'
 import socket
@@ -225,6 +262,74 @@ kubectl apply --filename deploy/k8s/test-cutover-blob-seed.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-blob-seed \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
 kubectl delete pod cutover-blob-seed --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
+kubectl apply --filename deploy/k8s/test-cutover-blob-mode-seed.yaml >/dev/null
+kubectl wait --for=condition=Ready pod/cutover-blob-mode-seed \
+  --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
+mkdir -m 0700 "$tmp_dir/blob-mode"
+python3 - "$tmp_dir/blob-mode" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+journal = root / "journal"
+journal.mkdir(mode=0o755)
+local_backend = {"kind": "local", "dir": "/var/lib/teagramd-blobs"}
+s3_backend = {"kind": "s3", "endpoint": "http://rustfs:9000",
+              "bucket": "teagram", "prefix": "teagramd/"}
+records = [
+    {
+        "schema": "teagram.blob-mode/v1", "generation": 1,
+        "transition_id": "123e4567-e89b-12d3-a456-426614174000", "supersedes": None,
+        "outcome": "initial-local", "backend": local_backend,
+        "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": None},
+        "evidence": {"report_sha256": hashlib.sha256(b"initial-local").hexdigest()},
+        "published_at": "2026-11-07T00:00:00Z",
+    },
+    {
+        "schema": "teagram.blob-mode/v1", "generation": 2,
+        "transition_id": "123e4567-e89b-12d3-a456-426614174001",
+        "supersedes": "123e4567-e89b-12d3-a456-426614174000",
+        "outcome": "s3-accepted", "backend": s3_backend,
+        "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        "evidence": {
+            "report_sha256": hashlib.sha256(b"s3-accepted").hexdigest(),
+            "source_manifest_sha256": hashlib.sha256(b"source").hexdigest(),
+            "destination_manifest_sha256": hashlib.sha256(b"destination").hexdigest(),
+            "object_count": 0, "byte_total": 0, "copy_passes": 1,
+        },
+        "published_at": "2026-11-07T00:01:00Z",
+    },
+    {
+        "schema": "teagram.blob-mode/v1", "generation": 3,
+        "transition_id": "123e4567-e89b-12d3-a456-426614174002",
+        "supersedes": "123e4567-e89b-12d3-a456-426614174001",
+        "outcome": "encrypted", "backend": s3_backend,
+        "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        "evidence": {
+            "report_sha256": hashlib.sha256(b"encrypted").hexdigest(),
+            "encrypted_inventory_sha256": hashlib.sha256(b"encrypted-inventory").hexdigest(),
+            "object_count": 0, "byte_total": 0, "key_version": 1, "writes": "stopped",
+        },
+        "published_at": "2026-11-07T00:02:00Z",
+    },
+]
+latest = b""
+for index, record in enumerate(records, 1):
+    latest = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+    entry = journal / f"{index:010d}.json"
+    entry.write_bytes(latest)
+    entry.chmod(0o644)
+(root / "mode.json").write_bytes(latest)
+(root / "mode.json").chmod(0o644)
+PY
+tar -cf - -C "$tmp_dir/blob-mode" . |
+  kubectl exec --namespace "$SOURCE_NAMESPACE" --stdin pod/cutover-blob-mode-seed -c seed -- \
+    tar -xpf - -C /blob-mode
+kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- \
+  sh -ec 'chown -R 0:0 /blob-mode; chmod 0755 /blob-mode /blob-mode/journal; chmod 0644 /blob-mode/mode.json /blob-mode/journal/*.json'
+kubectl delete pod cutover-blob-mode-seed --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
 kubectl apply --filename deploy/k8s/test-cutover-key-reader.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-key-reader \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
@@ -234,6 +339,26 @@ source_container=$(docker create ghcr.io/teagramhq/teagramd:ci)
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
   tar -cf - -C /var/lib/teagramd server_key.pem enc_key.hex |
   docker cp - "$source_container:/var/lib/teagramd/"
+
+mkdir -m 0700 "$tmp_dir/media"
+python3 - "$tmp_dir/media/payload.bin" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(bytes((index * 73 + 19) % 256 for index in range(512 * 1024 + 137)))
+path.chmod(0o600)
+PY
+source_pod=$(kubectl get pods --namespace "$SOURCE_NAMESPACE" \
+  --selector=app.kubernetes.io/name=teagramd --output 'jsonpath={.items[0].metadata.name}')
+kubectl exec --namespace "$SOURCE_NAMESPACE" "$source_pod" -- \
+  /usr/local/bin/teagramd client-config > "$tmp_dir/source-client.json"
+chmod 0600 "$tmp_dir/source-client.json"
+start_port_forward "$SOURCE_NAMESPACE"
+smoke_upload_preserved_media
+stop_port_forward
+[[ -s $tmp_dir/media/reference.json ]]
+printf 'encrypted S3 media object written before cutover\n'
 
 mkdir -p "$tmp_dir/bin" "$tmp_dir/incus-state/units"
 ln -s "$repo_root/deploy/k8s/test-cutover-alpha-incus.sh" "$tmp_dir/bin/incus"
@@ -258,9 +383,23 @@ path.write_text(json.dumps({
 PY
 
 real_kubectl=$(command -v kubectl)
+test_migration_version=$(kubectl get configmap required-migration-version --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.data.migration-version}')
+test_media_key_current=$(kubectl get configmap teagramd-runtime --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
+test_migrations_job=$(kubectl get jobs --namespace "$SOURCE_NAMESPACE" \
+  --selector=app.kubernetes.io/name=db-migrations --output json |
+  jq -er 'if (.items | length) == 1 then .items[0].metadata.name else error("expected one source migration Job") end')
 incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state" \
   INCUS_TEST_SOURCE_CONTAINER="$source_container" \
-  REAL_KUBECTL="$real_kubectl" CUTOVER_FORWARD_DELAY_SECONDS=2)
+  REAL_KUBECTL="$real_kubectl" CUTOVER_FORWARD_DELAY_SECONDS=2 \
+  CUTOVER_TEST_PINNED_REVISION="$K8S_IMAGE_REVISION" \
+  CUTOVER_TEST_MIGRATION_VERSION="$test_migration_version" \
+  CUTOVER_TEST_MIGRATIONS_JOB_NAME="$test_migrations_job" \
+  CUTOVER_TEST_TEAGRAMD_IMAGE=ghcr.io/teagramhq/teagramd:ci \
+  CUTOVER_TEST_MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations:ci \
+  CUTOVER_TEST_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init:ci \
+  CUTOVER_TEST_TARGET_S3_ENDPOINT=http://rustfs.teagram-cutover.svc.cluster.local:9000)
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -280,12 +419,6 @@ if [[ ${CUTOVER_FAIL_RESOURCE_LOOKUP:-} == teagramd &&
   : > "$INCUS_STATE_DIR/teagramd-lookup-failure-injected"
   printf 'injected disposable-cluster teagramd lookup failure\n' >&2
   exit 42
-fi
-if [[ ${CUTOVER_DROP_BLOB:-} == true && " $* " == *' tar -xopf - -C /target/legacy-blobs '* ]]; then
-  "$REAL_KUBECTL" "$@"
-  "$REAL_KUBECTL" exec --namespace teagram-cutover pod/cutover-volume-importer -c importer -- \
-    rm /target/legacy-blobs/parts/aa/1123456789abcdef0123456789abcd
-  exit 0
 fi
 if [[ ${CUTOVER_FAIL_IMPORTER_DELETE:-} == true && " $* " == *' delete pod/cutover-volume-importer '* ]]; then
   printf 'injected importer deletion failure\n' >&2
@@ -371,14 +504,14 @@ expect_log 'Forbidden' "$tmp_dir/deployer-boundary.log"
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
 printf 'bootstrap deployer kubeconfig was denied before cutover mutation\n'
 
-if env "${incus_test_env[@]}" CUTOVER_TEST_S3_BLOB_SOURCE=true \
+if env "${incus_test_env[@]}" CUTOVER_TEST_PINNED_REVISION=0000000000000000000000000000000000000000 \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
-  > "$tmp_dir/s3-source.log" 2>&1; then
-  printf 'cutover runner accepted an S3-mode Compose source\n' >&2
+  > "$tmp_dir/revision-mismatch.log" 2>&1; then
+  printf 'cutover runner accepted a source/pin revision mismatch\n' >&2
   exit 1
 fi
-expect_log 'source teagramd must use local blobs at /var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset' \
-  "$tmp_dir/s3-source.log"
+expect_log "live teagramd revision $K8S_IMAGE_REVISION does not match pinned production revision 0000000000000000000000000000000000000000" \
+  "$tmp_dir/revision-mismatch.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get statefulset postgres --namespace "$SOURCE_NAMESPACE" \
@@ -388,7 +521,7 @@ expect_log 'source teagramd must use local blobs at /var/lib/teagramd-blobs with
 [[ -z $(kubectl get secret teagramd-admin --namespace "$TARGET_NAMESPACE" \
   --ignore-not-found --output name) ]]
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
-printf 'S3-mode source was refused before fencing or applying target resources\n'
+printf 'revision mismatch named both SHAs and failed before fencing or applying target resources\n'
 
 for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-admin; do
   if env "${incus_test_env[@]}" CUTOVER_FAIL_PREFLIGHT_RESOURCE="$resource" \
@@ -471,12 +604,13 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_DROP_BLOB=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/dropped-blob.log" 2>&1; then
-  printf 'cutover runner accepted a truncated blob tree\n' >&2
+if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_TEST_DROP_S3_OBJECT=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/dropped-s3-object.log" 2>&1; then
+  printf 'cutover runner accepted a mismatched encrypted S3 object set\n' >&2
   exit 1
 fi
-expect_log 'encrypted legacy blob migration totals do not match the fenced source tree' "$tmp_dir/dropped-blob.log"
+expect_log 'source and target S3 object counts, byte totals, or per-object SHA-256 checksums do not match' \
+  "$tmp_dir/dropped-s3-object.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
@@ -565,23 +699,24 @@ assert not any(serve.get("AllowFunnel", {}).values())
 assert serve["TCP"]["443"] == {"HTTPS": True}
 PY
 printf 'post-switch failure kept k3s live and Compose fenced\n'
-cutover_job_image=$(kubectl get job local-blob-migration --namespace "$TARGET_NAMESPACE" \
-  --output 'jsonpath={.spec.template.spec.containers[?(@.name=="migrate")].image}')
-cutover_job_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' \
-  deploy/k8s/prod-cutover/kustomization.yaml)
-[[ $cutover_job_digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
-  printf 'cutover overlay has no valid teagramd image digest\n' >&2
+cutover_job=$(kubectl get job "$test_migrations_job" --namespace "$TARGET_NAMESPACE" --output json)
+cutover_job_image=$(jq -er '.spec.template.spec.containers[] | select(.name == "migrate") | .image' \
+  <<< "$cutover_job")
+[[ $cutover_job_image == ghcr.io/teagramhq/teagram-migrations:ci ]] || {
+  printf 'cutover migration image is %s, want the verified live-revision CI image\n' \
+    "$cutover_job_image" >&2
   exit 1
 }
-expected_cutover_job_image="ghcr.io/teagramhq/teagramd@$cutover_job_digest"
-[[ $cutover_job_image == "$expected_cutover_job_image" ]] || {
-  printf 'cutover migration image is %s, want pinned overlay image %s\n' \
-    "$cutover_job_image" "$expected_cutover_job_image" >&2
-  exit 1
-}
-kubectl logs --namespace "$TARGET_NAMESPACE" job/local-blob-migration -c migrate |
-  grep --fixed-strings 'blob_copy=pass mode=encrypted objects=2 bytes=44' >/dev/null
-printf 'actual runner completed the snapshot and encrypted blob migration before the injected post-switch failure\n'
+jq --exit-status '.status.conditions | any(.type == "Complete" and .status == "True")' \
+  <<< "$cutover_job" >/dev/null
+target_migration_version=$(kubectl exec --namespace "$TARGET_NAMESPACE" postgres-0 -c postgres -- \
+  psql --username=postgres --dbname=teagram --tuples-only --no-align \
+  --command="SELECT COALESCE(MAX(version)::text, '') FROM atlas_schema_revisions.atlas_schema_revisions")
+[[ $target_migration_version == "$test_migration_version" ]]
+target_media_key_current=$(kubectl get configmap teagramd-runtime --namespace "$TARGET_NAMESPACE" \
+  --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
+[[ $target_media_key_current == "$test_media_key_current" ]]
+printf 'actual runner completed the matching migration Job and preserved the live database version\n'
 
 target_pod=$(kubectl get pods --namespace "$TARGET_NAMESPACE" \
   --selector=app.kubernetes.io/name=teagramd --output 'jsonpath={.items[0].metadata.name}')
@@ -600,7 +735,8 @@ grep --fixed-strings --quiet 'id="page-chats"' "$tmp_dir/web-through-linkselecto
 smoke_bot_api
 printf 'restored-account sign-in on target\n'
 smoke_restored_account
-printf 'target listener and restored-account smoke passed\n'
+smoke_download_preserved_media
+printf 'target listener, restored-account, and pre-cutover encrypted media download smokes passed\n'
 stop_port_forward
 
 # Apply the normal production resources after cutover. Keep the already-tested

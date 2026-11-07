@@ -66,10 +66,11 @@ The CI workflow sets its disposable overlay to the newest migration before
 rendering and applying it, so teagramd waits until that migration has run.
 
 After a migration merges and CI publishes the corresponding images, update the
-production teagramd and migration image digests, required migration version,
-and migration Job name together. The production pin check must pass before
-applying that overlay. This keeps a server image that needs a new migration
-from being deployed with an older migration image.
+production teagramd, migration and mc-init image digests, required migration
+version, migration Job name, and `prod/source-revision` together. The production
+pin check must pass before applying that overlay. The cutover also compares the
+live Compose image revision and database migration version with these pins
+before it creates the target workloads or fences source writes.
 
 The production overlay expects these namespace-scoped resources to be supplied
 by the cluster's secret and configuration management before it is applied:
@@ -175,15 +176,30 @@ sudo deploy/k8s/cutover-alpha.sh --dry-run
 sudo deploy/k8s/cutover-alpha.sh --apply
 ```
 
+Before applying workloads, the runner checks that the live teagramd revision,
+the pinned teagramd and migration image labels, the newest migration in the
+pinned migration image, the migration Job name, and the live database version
+agree. A mismatch stops the run before source writes are fenced and names the
+live and pinned revisions. Re-pin `prod/` and `source-revision` together after
+each deployment that should be eligible for cutover.
+
 The script keeps the k8s app and tunnel connector at zero replicas while it
-restores PostgreSQL, copies `server_key.pem`, `enc_key.hex`, and the local blob
-tree into the new PVCs, applies the pinned Atlas migration, then encrypts and
-checksums the copied blobs into RustFS with the current media key. It saves a
-mode-0600 custom-format database dump on the PostgreSQL PVC and keeps a
-read-only local-blob copy in `legacy-blobs`. The database dump and old Compose
-volumes are recovery points for at least seven days. A fresh smoke test dumps
-and restores a provisioned account, then completes a new SRP login with the
-same password and RSA identity; CI runs it in `test: smoke`.
+restores PostgreSQL and applies the matching Atlas migration. It copies
+`server_key.pem`, `enc_key.hex`, the blob-mode authority, and the retained local
+blob tree into the new PVCs; it also verifies the k3s media-key Secret against
+the live key set and sets `TG_MEDIA_KEY_CURRENT` to the source runtime's active
+key version. It mirrors the source RustFS `teagram/teagramd/` prefix into
+the new RustFS PVC with object bytes unchanged. The source bucket and Compose
+volumes are read-only. Before the route switch, the runner checks object count,
+total bytes, and each object's SHA-256 against the target. The source S3
+credential is used only by a temporary client, which is removed after the
+copy. A target-only port-forward is removed when the copy completes.
+
+The runner saves a mode-0600 custom-format database dump on the PostgreSQL PVC
+and keeps a read-only local-blob copy in `legacy-blobs`. The database dump and
+old Compose volumes are recovery points for at least seven days. CI uploads a
+document through the source S3-backed teagramd before cutover and downloads
+the same document through the target after cutover, comparing the bytes.
 
 Before the final snapshot, the script stops every running Compose service other
 than PostgreSQL, including `teagramd` and any active database or blob writer,
@@ -258,9 +274,10 @@ The explicit PVC command also removes the PostgreSQL and RustFS claims from the
 base production manifests. Once the commands complete, a fresh `--apply` can
 run from the same reviewed checkout.
 
-CI runs the actual cutover runner with a disposable source namespace and a
-separate target namespace in k3s. The source database, identity files, and a
-blob fixture pass through the runner's fence, snapshot, transfer, and pinned
-migration Job; CI signs into the restored account on the target, invokes the
-runner's explicit rollback, then signs into the untouched source. No production
-namespace or live cluster is used.
+CI runs the actual cutover runner with a disposable S3-backed source namespace
+and a separate target namespace in k3s. The source database, encrypted S3
+object, identity files, blob-mode authority, and retained local blob fixture
+pass through the runner's fence, snapshot, transfer, and revision-matched
+migration Job. CI downloads the pre-cutover document through target teagramd,
+invokes the runner's explicit rollback, then signs into the untouched source.
+No production namespace or live cluster is used.

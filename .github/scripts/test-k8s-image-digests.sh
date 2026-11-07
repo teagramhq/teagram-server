@@ -116,6 +116,7 @@ case "$1" in
     case "$3" in
       ghcr.io/teagramhq/teagramd@*) printf '%s\n' "$EXPECTED_SERVER_REVISION" ;;
       ghcr.io/teagramhq/teagram-migrations@*) printf '%s\n' "$EXPECTED_MIGRATION_REVISION" ;;
+      ghcr.io/teagramhq/teagramd-mc-init@*) printf '%s\n' "$EXPECTED_INIT_REVISION" ;;
       *) printf 'unexpected image revision request: %s\n' "$3" >&2; exit 2 ;;
     esac
     ;;
@@ -136,11 +137,26 @@ case "$1" in
   fetch) exit 0 ;;
   ls-tree)
     revision="$3"
-    case "$revision" in
-      "$EXPECTED_SERVER_REVISION") tree="$EXPECTED_SERVER_TREE" ;;
-      "$EXPECTED_MIGRATION_REVISION") tree="$EXPECTED_MIGRATION_TREE" ;;
-      *) printf 'unexpected source revision: %s\n' "$revision" >&2; exit 2 ;;
-    esac
+    if [[ "${USE_DISTINCT_MIGRATION_TREE:-false}" == true ]]; then
+      count_file="$GIT_LS_TREE_COUNTER_FILE"
+      count=0
+      if [[ -s "$count_file" ]]; then
+        read -r count < "$count_file"
+      fi
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$count_file"
+      if ((count == 1)); then
+        tree="$EXPECTED_SERVER_TREE"
+      else
+        tree="$EXPECTED_MIGRATION_TREE"
+      fi
+    else
+      case "$revision" in
+        "$EXPECTED_SERVER_REVISION") tree="$EXPECTED_SERVER_TREE" ;;
+        "$EXPECTED_MIGRATION_REVISION") tree="$EXPECTED_MIGRATION_TREE" ;;
+        *) printf 'unexpected source revision: %s\n' "$revision" >&2; exit 2 ;;
+      esac
+    fi
     printf '%s\n' "$tree"
     ;;
   *)
@@ -157,10 +173,11 @@ migrations_digest="$(printf '2%.0s' {1..64})"
 rustfs_init_digest="$(printf '3%.0s' {1..64})"
 landing_digest="$(printf '4%.0s' {1..64})"
 selector_digest="$(printf '5%.0s' {1..64})"
-expected_migration_revision=abcdef0123456789abcdef0123456789abcdef01
-expected_server_revision=abcdef0123456789abcdef0123456789abcdef02
+expected_migration_revision=fc6631ac12f0b5e1900e4a7bdf2cae104e7a49e2
+expected_server_revision=fc6631ac12f0b5e1900e4a7bdf2cae104e7a49e2
 export EXPECTED_MIGRATION_REVISION="$expected_migration_revision"
 export EXPECTED_SERVER_REVISION="$expected_server_revision"
+export EXPECTED_INIT_REVISION="$expected_server_revision"
 fixture_migration_path="migrations/${production_migration_version}_existing.sql"
 EXPECTED_SERVER_TREE="$(printf '100644 blob %s\t%s' \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$fixture_migration_path")"
@@ -232,6 +249,17 @@ fi
 grep --fixed-strings --quiet 'migration version' "$test_dir/drifted-migration-error" ||
   fail 'a migration version drift rejection must identify the mismatch'
 
+if PATH="$test_dir/bin:$PATH" \
+  EXPECTED_SERVER_REVISION="$expected_server_revision" \
+  EXPECTED_MIGRATION_REVISION=0123456789abcdef0123456789abcdef01234567 \
+  bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" \
+  >"$test_dir/revision-drift-output" 2>"$test_dir/revision-drift-error"; then
+  fail 'the production image pin validator must reject a migration image from another source revision'
+fi
+grep --fixed-strings --quiet "does not match production source revision $expected_server_revision" \
+  "$test_dir/revision-drift-error" ||
+  fail 'a source revision rejection must name the pinned and production revisions'
+
 placeholder_prod_manifest="$test_dir/k8s-prod-placeholder.yaml"
 zero_digest="$(printf '%064d' 0)"
 sed "s|teagramd@sha256:$teagramd_digest|teagramd@sha256:$zero_digest|" \
@@ -256,12 +284,17 @@ grep --fixed-strings --quiet 'migration Job name' "$test_dir/wrong-job-error" ||
   fail 'a migration Job suffix rejection must identify the mismatch'
 
 divergent_migration_prod_manifest="$test_dir/k8s-prod-divergent-migrations.yaml"
-divergent_migration_version=20261105000001
+divergent_migration_version="$production_migration_version"
 sed "s|migration-version: \"$production_migration_version\"|migration-version: \"$divergent_migration_version\"|" \
   "$valid_prod_manifest" > "$divergent_migration_prod_manifest"
+: > "$test_dir/git-ls-tree-count"
 if PATH="$test_dir/bin:$PATH" \
+  USE_DISTINCT_MIGRATION_TREE=true \
+  GIT_LS_TREE_COUNTER_FILE="$test_dir/git-ls-tree-count" \
   EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql\n100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tmigrations/20261104000001_required.sql' \
-  EXPECTED_MIGRATION_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql\n100644 blob cccccccccccccccccccccccccccccccccccccccc\tmigrations/20261105000001_other.sql' \
+  EXPECTED_MIGRATION_TREE="$(printf '100644 blob %s\t%s\n100644 blob %s\t%s' \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa migrations/20261102000002_existing.sql \
+    cccccccccccccccccccccccccccccccccccccccc "migrations/${production_migration_version}_other.sql")" \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$divergent_migration_prod_manifest" \
   >"$test_dir/divergent-migration-output" 2>"$test_dir/divergent-migration-error"; then
   fail 'the production migration image must contain the exact migrations required by the pinned teagramd image'
@@ -270,7 +303,10 @@ grep --fixed-strings --quiet 'lacks the exact migration migrations/2026110400000
   "$test_dir/divergent-migration-error" ||
   fail 'a divergent migration image rejection must identify the missing server migration'
 
+: > "$test_dir/git-ls-tree-count"
 if PATH="$test_dir/bin:$PATH" \
+  USE_DISTINCT_MIGRATION_TREE=true \
+  GIT_LS_TREE_COUNTER_FILE="$test_dir/git-ls-tree-count" \
   EXPECTED_SERVER_TREE=$'100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmigrations/20261102000002_existing.sql' \
   EXPECTED_MIGRATION_TREE=$'100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tmigrations/20261102000002_existing.sql' \
   bash .github/scripts/check-k8s-prod-image-pins.sh "$valid_prod_manifest" \

@@ -1886,8 +1886,8 @@ jobs:
             --from-file=RUSTFS_SECRET_KEY="$RUNNER_TEMP/rustfs-secret-key"
           rm -f "$RUNNER_TEMP/rustfs-access-key" "$RUNNER_TEMP/rustfs-secret-key"
 
-          printf '%s' teagramd-ci-access > "$RUNNER_TEMP/blob-access-key"
-          printf '%s' teagramd-ci-secret > "$RUNNER_TEMP/blob-secret-key"
+          printf '%s' 0123456789abcdef0123 > "$RUNNER_TEMP/blob-access-key"
+          printf '%s' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > "$RUNNER_TEMP/blob-secret-key"
           kubectl create secret generic teagramd-blob-credentials --namespace teagram \
             --from-file=TG_BLOB_S3_ACCESS_KEY_ID="$RUNNER_TEMP/blob-access-key" \
             --from-file=TG_BLOB_S3_SECRET_ACCESS_KEY="$RUNNER_TEMP/blob-secret-key"

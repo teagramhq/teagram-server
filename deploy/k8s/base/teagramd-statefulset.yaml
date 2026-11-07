@@ -187,7 +187,10 @@ spec:
               # The projected Secret's versioned directory has safe directory permissions.
               value: /run/teagramd/media-keys/..data
             - name: TG_MEDIA_KEY_CURRENT
-              value: "1"
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-runtime
+                  key: TG_MEDIA_KEY_CURRENT
             - name: TG_BLOB_DIR
               value: /var/lib/teagramd-blobs
             - name: TG_AUTHKEY_ENC_KEY_FILE

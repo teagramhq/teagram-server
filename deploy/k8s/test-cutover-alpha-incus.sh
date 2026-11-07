@@ -30,8 +30,40 @@ scale_container() {
   kubectl scale "$resource" --namespace "$SOURCE_NAMESPACE" --replicas="$replicas" >/dev/null
 }
 
+secret_archive() {
+  local secret_name=$1 source_key=${2:-}
+  kubectl get secret "$secret_name" --namespace "$SOURCE_NAMESPACE" --output json |
+    python3 -c '
+import base64
+import io
+import json
+import sys
+import tarfile
+
+try:
+    secret = json.load(sys.stdin)
+    data = secret.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("missing Secret data")
+    source_key = sys.argv[1]
+    if source_key:
+        entries = {"teagramd-blob-secret-key": data[source_key]}
+    else:
+        entries = data
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+        for name, encoded in entries.items():
+            content = base64.b64decode(encoded, validate=True)
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            member.mode = 0o600
+            archive.addfile(member, io.BytesIO(content))
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit("disposable cutover test could not read a fixture Secret")
+' "$source_key"
+}
+
 docker_command() {
-  local subcommand=$1 format container service path
+  local subcommand=$1 format container service path image
   shift
   local -a args=("$@")
   case "$subcommand" in
@@ -69,13 +101,19 @@ docker_command() {
             *) return 1 ;;
           esac
           ;;
+        *'org.opencontainers.image.revision'*)
+          docker inspect "${INCUS_TEST_SOURCE_CONTAINER:?}" --format "$format"
+          ;;
         *'.Config.Env'*)
           printf 'TG_ADMIN_TOKEN_HASH=%064d\n' 0
           printf 'TG_ADMIN_ORIGIN=https://links.example.test\n'
           printf 'TG_BLOB_DIR=/var/lib/teagramd-blobs\n'
-          if [[ ${CUTOVER_TEST_S3_BLOB_SOURCE:-} == true ]]; then
-            printf 'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\n'
-          fi
+          printf 'TG_MEDIA_KEY_CURRENT=1\n'
+          printf 'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\n'
+          printf 'TG_BLOB_S3_BUCKET=teagram\n'
+          printf 'TG_BLOB_S3_PREFIX=teagramd/\n'
+          printf 'TG_BLOB_S3_ACCESS_KEY_ID=0123456789abcdef0123\n'
+          printf 'TG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key\n'
           ;;
         *) return 1 ;;
       esac
@@ -109,12 +147,29 @@ docker_command() {
       path=$1
       [[ $2 == - ]] || return 1
       path=${path#*:}
-      if [[ $path == /var/lib/teagramd-blobs/. ]]; then
-        kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
-          tar -cf - -C /var/lib/teagramd-blobs .
-      else
-        docker cp "${INCUS_TEST_SOURCE_CONTAINER:?}:$path" -
-      fi
+      case "$path" in
+        /var/lib/teagramd-blobs/.)
+          kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+            tar -cf - -C /var/lib/teagramd-blobs .
+          ;;
+        /run/teagramd/blob-mode/.)
+          kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+            tar -cf - -C /run/teagramd/blob-mode .
+          ;;
+        /run/teagramd/media-keys/.)
+          secret_archive teagramd-media-keys
+          ;;
+        /run/secrets/teagramd-blob-secret-key)
+          secret_archive teagramd-blob-credentials TG_BLOB_S3_SECRET_ACCESS_KEY
+          ;;
+        *) docker cp "${INCUS_TEST_SOURCE_CONTAINER:?}:$path" - ;;
+      esac
+      ;;
+    image)
+      [[ ${args[0]} == inspect ]] || return 1
+      image=${args[1]}
+      format=${args[-1]}
+      docker image inspect "$image" --format "$format"
       ;;
     *) return 1 ;;
   esac
