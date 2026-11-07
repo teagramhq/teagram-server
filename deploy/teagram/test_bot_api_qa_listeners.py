@@ -104,6 +104,43 @@ class ListenerInspectionTests(unittest.TestCase):
                 with patch.object(owner, method, side_effect=raise_esrch, autospec=True):
                     self.assertTrue(self.inspect())
 
+    def test_ignores_esrch_during_fd_scandir_iteration(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        self.add_process(51, "tailscaled", 1002)
+        fd_path = self.proc / "51" / "fd"
+        original_scandir = LISTENERS.os.scandir
+
+        class InterruptedScandir:
+            def __init__(self, entries, path):
+                self.entries = iter(entries)
+                self.path = path
+                self.yielded = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.yielded:
+                    raise ProcessLookupError(errno.ESRCH, "process exited", str(self.path))
+                self.yielded = True
+                return next(self.entries)
+
+        def scandir_with_exit(path):
+            if Path(path) == fd_path:
+                with original_scandir(path) as entries:
+                    return InterruptedScandir(list(entries), path)
+            return original_scandir(path)
+
+        with patch.object(LISTENERS.os, "scandir", side_effect=scandir_with_exit, autospec=True):
+            self.assertTrue(self.inspect())
+
     def test_reports_fd_directory_errors_with_path_and_cause(self):
         self.write_tables([tcp_row("100.64.1.1", 1002)], [])
         fd_path = self.proc / "50" / "fd"
