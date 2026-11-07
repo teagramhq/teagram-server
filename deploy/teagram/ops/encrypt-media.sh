@@ -78,6 +78,7 @@ recover_runtime() {
     for _ in {1..60}; do
       container_state=$(docker inspect --format '{{.State.Status}}' "$SERVER_CONTAINER") || return 1
       if [[ "$container_state" == running ]]; then
+        restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || return 1
         SERVER_STOPPED=0
         return 0
       fi

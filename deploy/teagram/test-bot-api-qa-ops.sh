@@ -107,6 +107,8 @@ case "$*" in
       exit 41
     fi
     jq -r '.[]' "$MOCK_REPO/.runtime-env" ;;
+  'inspect --format {{.State.Health.Status}} '* ) printf 'healthy\n' ;;
+  'inspect --format {{.HostConfig.NetworkMode}} '*) printf 'container:%s\n' "$MOCK_SERVER" ;;
   'inspect --format {{.Id}} '*) printf '%s\n' "$MOCK_SERVER" ;;
   'compose --profile bot-api-qa config --format json') cat "$MOCK_TMP/config.json" ;;
   'compose --profile bot-api-qa ps -q bot-api-inner')
@@ -313,7 +315,7 @@ write_success_runner
 failure_status=0
 bash "$tmp/op.sh" apply > "$tmp/relay-failure.stdout" 2> "$tmp/relay-failure.stderr" || failure_status=$?
 [[ "$failure_status" != 0 ]]
-grep -q 'cannot start relays' "$tmp/relay-failure.stderr"
+grep -q 'Bot API inner relay did not become healthy after recreation' "$tmp/relay-failure.stderr"
 grep -Fxq 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' "$repo/.env"
 [[ ! -e "$repo/.runtime-relays" && ! -e "$repo/.fail-relay-up-once" ]]
 bash "$tmp/op.sh" apply > "$tmp/relay-retry.stdout"

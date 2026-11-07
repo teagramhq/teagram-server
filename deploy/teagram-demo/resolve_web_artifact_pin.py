@@ -9,6 +9,7 @@ import binascii
 import hashlib
 import json
 import math
+import os
 import pathlib
 import re
 import subprocess
@@ -52,7 +53,14 @@ def validate_request_url(url: str) -> None:
 class PublicationRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, new_url):
         validate_request_url(new_url)
-        return super().redirect_request(request, response, code, message, headers, new_url)
+        redirected = super().redirect_request(request, response, code, message, headers, new_url)
+        if (
+            redirected is not None
+            and urllib.parse.urlsplit(request.full_url).hostname
+            != urllib.parse.urlsplit(new_url).hostname
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 HTTP_OPENER = urllib.request.build_opener(PublicationRedirectHandler())
@@ -60,14 +68,15 @@ HTTP_OPENER = urllib.request.build_opener(PublicationRedirectHandler())
 
 def fetch_json(url: str) -> Any:
     validate_request_url(url)
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "teagram-demo-release-check",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "teagram-demo-release-check",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and urllib.parse.urlsplit(url).hostname == "api.github.com":
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         try:
             with HTTP_OPENER.open(request, timeout=20) as response:

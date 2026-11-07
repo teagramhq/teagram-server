@@ -35,7 +35,11 @@ FIXTURE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 FIXTURE_ORIGIN_REVISION=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 FIXTURE_IMAGE=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 FIXTURE_RETAGGED_IMAGE=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-export FIXTURE_SHA FIXTURE_REVISION FIXTURE_ORIGIN_REVISION FIXTURE_IMAGE FIXTURE_RETAGGED_IMAGE
+FIXTURE_SERVER_ID=1111111111111111111111111111111111111111111111111111111111111111
+FIXTURE_INNER_ID=2222222222222222222222222222222222222222222222222222222222222222
+FIXTURE_INGRESS_ID=3333333333333333333333333333333333333333333333333333333333333333
+export FIXTURE_SHA FIXTURE_REVISION FIXTURE_ORIGIN_REVISION FIXTURE_IMAGE FIXTURE_RETAGGED_IMAGE \
+  FIXTURE_SERVER_ID FIXTURE_INNER_ID FIXTURE_INGRESS_ID
 
 cat > "$TMP/bin/id" <<'ID'
 #!/usr/bin/env bash
@@ -116,6 +120,7 @@ case "$1" in
           -e "s|/etc/teagramd/media-key-backups|$FIXTURE_EVIDENCE/media-key-backups|g" \
           -e "s|/tmp/teagram-deploy.lock|$FIXTURE_TMP/deploy.lock|g" "$FIXTURE_COMMON"
         ;;
+      "$FIXTURE_SHA:deploy/teagram/ops/bot-api-qa.sh") cat "$FIXTURE_BOT_API_QA" ;;
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py")
         printf '# fixture helper\n'
@@ -196,6 +201,30 @@ case "$1" in
     if [[ "$format" == *'com.teagram.ops.operation'* ]]; then
       [[ "$container" == teagram-media-restore-* ]] || exit 99
       printf 'media-backup\n'
+      exit
+    fi
+    if [[ "$container" == teagram-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
+      if [[ "$FIXTURE_BOT_API_ENABLED" == 1 ]]; then
+        printf '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]\n'
+      else
+        printf '[]\n'
+      fi
+      exit
+    fi
+    if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
+      printf '%s\n' "$FIXTURE_SERVER_ID"
+      exit
+    fi
+    if [[ "$format" == '{{.State.Health.Status}}' && "$container" == "$FIXTURE_INNER_ID" ]]; then
+      printf 'healthy\n'
+      exit
+    fi
+    if [[ "$format" == '{{.HostConfig.NetworkMode}}' && "$container" == "$FIXTURE_INNER_ID" ]]; then
+      printf 'container:%s\n' "$FIXTURE_SERVER_ID"
+      exit
+    fi
+    if [[ "$format" == '{{.State.Health.Status}}' && "$container" == "$FIXTURE_INGRESS_ID" ]]; then
+      printf 'healthy\n'
       exit
     fi
     case "$container" in
@@ -279,6 +308,26 @@ case "$1" in
     fi
     ;;
   compose)
+    if [[ "$*" == *' ps --all -q bot-api-inner' ]]; then
+      [[ "$FIXTURE_BOT_API_ENABLED" != 1 ]] || printf '%s\n' "$FIXTURE_INNER_ID"
+      exit
+    fi
+    if [[ "$*" == *' ps --all -q bot-api-ingress' || "$*" == *' ps -q bot-api-inner' || \
+      "$*" == *' ps -q bot-api-ingress' ]]; then
+      [[ "$FIXTURE_BOT_API_ENABLED" != 1 ]] || {
+        if [[ "$*" == *'bot-api-inner' ]]; then printf '%s\n' "$FIXTURE_INNER_ID"; else printf '%s\n' "$FIXTURE_INGRESS_ID"; fi
+      }
+      exit
+    fi
+    if [[ "$*" == *' up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner' ]]; then
+      printf 'restore:bot-api-inner\n' >> "$FIXTURE_EVENTS"
+      [[ "$FIXTURE_SCENARIO" != bot-api-restore-failure ]] || exit 42
+      exit
+    fi
+    if [[ "$*" == *' up -d --no-deps --wait --wait-timeout 60 bot-api-ingress' ]]; then
+      printf 'restore:bot-api-ingress\n' >> "$FIXTURE_EVENTS"
+      exit
+    fi
     if [[ "$*" == *' config --format json' ]]; then
       if [[ "$FIXTURE_SCENARIO" == compose-render-failure ]]; then
         echo 'fixture Compose render failure' >&2
@@ -376,7 +425,8 @@ SYNC
 chmod 755 "$TMP/bin/"*
 
 FIXTURE_COMMON=$SCRIPT_DIR/ops/blob-encryption-common.inc
-export FIXTURE_COMMON
+FIXTURE_BOT_API_QA=$SCRIPT_DIR/ops/bot-api-qa.sh
+export FIXTURE_COMMON FIXTURE_BOT_API_QA
 
 setup_case() {
   local scenario=$1 authority=$2 case_dir
@@ -395,13 +445,19 @@ setup_case() {
   FIXTURE_PLAINTEXT_OBJECT=$case_dir/plaintext-source
   FIXTURE_EVENTS=$case_dir/events
   FIXTURE_SCENARIO=$scenario
+  FIXTURE_BOT_API_ENABLED=0
+  case "$scenario" in
+    backup-failure|encrypt-success|cleanup-success|bot-api-restore-failure|cleanup-recheck-removes|cleanup-post-unaccounted)
+      FIXTURE_BOT_API_ENABLED=1
+      ;;
+  esac
   FIXTURE_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   TEAGRAM_BLOB_MODE_REPORT_ROOT=$FIXTURE_EVIDENCE
   export TEAGRAM_BLOB_MODE_REPORT_ROOT
   export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_KEY_DIR FIXTURE_POSTGRES_STATE \
     FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
     FIXTURE_CLEANUP_CALLS FIXTURE_ENCRYPT_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
-    FIXTURE_COMPOSE_FILES
+    FIXTURE_COMPOSE_FILES FIXTURE_BOT_API_ENABLED
 
   mkdir -p "$FIXTURE_REPO/.state/blob-mode" "$FIXTURE_EVIDENCE/media-key-backups" "$FIXTURE_KEY_DIR"
   mkdir -m 700 "$FIXTURE_OPERATION_EVIDENCE"
@@ -564,8 +620,8 @@ output=$(run_encrypt)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'pg_dump failed'* ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nstart:server' ]]
-printf '%s\n' 'PASS failed pre-migration backup restores teagramd without starting migration'
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
+printf '%s\n' 'PASS failed pre-migration backup restores teagramd and its Bot API relays without starting migration'
 
 setup_case interrupted-migration encrypted
 output=$(run_encrypt)
@@ -612,7 +668,7 @@ for manifest in "$FIXTURE_OPERATION_EVIDENCE"/pgdump-pre-migration-*.manifest; d
   [[ -s "$dump_path" ]]
 done
 [[ "$manifest_count" == 1 ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nrestore:psql\nrestore:stop\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\npg_dump\nrestore:start\nrestore:pg_restore-list\nrestore:pg_restore\nrestore:psql\nrestore:stop\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress\nsmoke' ]]
 printf '%s\n' 'PASS encryption publishes verified backup and encrypted authority before restarting services'
 
 setup_case cleanup-success encrypted
@@ -622,8 +678,17 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$output" == *'plaintext_objects_removed=1'* && "$output" == *'cleanup_recheck_removed=0'* ]]
 [[ ! -e "$FIXTURE_PLAINTEXT_OBJECT" ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nsmoke' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress\nsmoke' ]]
 printf '%s\n' 'PASS cleanup removes plaintext only after acceptance and verifies encrypted readback'
+
+setup_case bot-api-restore-failure encrypted
+output=$(run_encrypt)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'Bot API inner relay did not become healthy after recreation'* ]]
+[[ "$output" == *'runtime recovery failed'* ]]
+[[ "$(cat "$FIXTURE_SERVER_STATE")" == running ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nrestart:rustfs\nimage-check\nmigration\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-inner' ]]
+printf '%s\n' 'PASS media operation fails when the Bot API relay cannot rejoin teagramd'
 
 setup_case retagged-image s3-accepted
 output=$(run_encrypt)
@@ -639,7 +704,7 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$output" == *'referenced plaintext objects remained after cleanup verification'* ]]
 [[ ! -e "$FIXTURE_PLAINTEXT_OBJECT" ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS cleanup rejects a nonzero removal recheck and restores the server'
 
 setup_case cleanup-post-unaccounted encrypted
@@ -647,7 +712,7 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'media migration result contains 1 unaccounted objects'* ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS cleanup refuses post-cleanup unaccounted objects and restores the server'
 
 setup_case already-encrypted-success encrypted
