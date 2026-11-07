@@ -5,8 +5,8 @@ import {createInterface} from 'node:readline';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
+import {selectRealClientScenarios} from './real_client_scenarios.mjs';
 
-const SCENARIOS = 'sign-in,first-message,message,group,channel,poll';
 const GUEST_SIGNUP_SCENARIOS = 'guest-signup';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const EVENT_TIMEOUTS = {serverReady: 8 * 60_000, artifactReady: 3 * 60_000};
@@ -35,6 +35,24 @@ function requiredRevision(name) {
   const value = process.env[name];
   if(!REVISION_PATTERN.test(value || '')) throw new FlowError('input-validation', `${name} must be a full lowercase SHA`);
   return value;
+}
+
+async function readRealClientScenarios(webRoot) {
+  let contract;
+  try {
+    contract = await import(pathToFileURL(join(webRoot, 'scripts/real-client/contract.mjs')).href);
+  } catch(error) {
+    throw new FlowError('input-validation', `pinned web scenario contract could not be loaded: ${error.message}`);
+  }
+
+  try {
+    return selectRealClientScenarios({
+      required: contract.REQUIRED_SCENARIOS,
+      optional: contract.OPTIONAL_SCENARIOS
+    });
+  } catch(error) {
+    throw new FlowError('input-validation', `pinned web scenario contract is unsupported: ${error.message}`);
+  }
 }
 
 function stageTimeout(startedAt, maximumMs, stage) {
@@ -243,9 +261,9 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass}) {
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios}) {
   const scenarios = guestSignupOnly ? (guestSignupGateOff ?
-    (guestSignupQaBypass ? 'guest-signup-gate-off-qa-bypass' : 'guest-signup-gate-off') : GUEST_SIGNUP_SCENARIOS) : SCENARIOS;
+    (guestSignupQaBypass ? ['guest-signup-gate-off-qa-bypass'] : ['guest-signup-gate-off']) : [GUEST_SIGNUP_SCENARIOS]) : selectedScenarios;
   const result = {
     status,
     runId,
@@ -253,7 +271,7 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
     webRevision,
     pullRequestHead: headRevision,
     testedRevision,
-    scenarios: scenarios.split(','),
+    scenarios,
     elapsedMs,
     fixtureCleanup: cleanupVerified ? 'verified' : 'failed',
     traceArtifact: traceReady ? 'uploaded on this workflow run' : 'not produced'
@@ -279,7 +297,7 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
       `Web revision: \`${webRevision}\``,
       `Pull request head: \`${headRevision}\``,
       `Tested revision: \`${testedRevision}\``,
-      `Scenarios: \`${scenarios}\``,
+      `Scenarios: \`${scenarios.join(',')}\``,
       `Elapsed through fixture cleanup: **${formatDuration(elapsedMs)}**`,
       `Fixture cleanup: **${cleanupVerified ? 'verified' : 'failed'}**`,
       traceReady ? `Playwright trace artifact: [open workflow artifacts](${artifactLink})` : 'Playwright trace artifact: not produced',
@@ -319,6 +337,7 @@ async function main() {
   const serverRoot = resolve(process.env.REAL_CLIENT_SERVER_ROOT || process.cwd());
   const webRoot = resolve(process.env.REAL_CLIENT_WEB_ROOT || process.cwd());
   const runId = randomBytes(16).toString('hex');
+  let selectedScenarios = [];
   const guestSignupQaBypassToken = guestSignupQaBypass ? randomBytes(32).toString('hex') : undefined;
   const runTemp = createDirectory('/dev/shm', 'real-client-run-');
   const artifactParent = createDirectory(process.env.RUNNER_TEMP || tmpdir(), 'real-client-artifact-');
@@ -338,6 +357,10 @@ async function main() {
   try {
     repositoryHead(serverRoot, serverRevision, 'server');
     repositoryHead(webRoot, webRevision, 'web');
+    if(!guestSignupOnly) {
+      runStage = 'input-validation';
+      selectedScenarios = await readRealClientScenarios(webRoot);
+    }
     runStage = 'fixture-startup';
 
     const fixtureScript = join(serverRoot, 'test/e2e/real_server_fixture/run.sh');
@@ -425,7 +448,7 @@ async function main() {
         '--server-revision', serverRevision,
         '--web-revision', webRevision,
         '--run-id', runId,
-        ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : ['--scenarios', SCENARIOS])
+        ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : ['--scenarios', selectedScenarios.join(',')])
       ], {
         cwd: webRoot,
         env: runnerEnvironment,
@@ -470,7 +493,7 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass});
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
       status = 'failed';
