@@ -1139,6 +1139,7 @@ jobs:
           bash -n deploy/teagram/ops/attest-blob-mode-reports.sh
           bash -n deploy/teagram/ops/blob-encryption-common.inc
           bash -n deploy/teagram/test-media-encryption-ops.sh
+          bash -n deploy/teagram/test-media-encryption-pg18.sh
           bash -n deploy/teagram/test-start-server.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
@@ -1254,6 +1255,7 @@ jobs:
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
             deploy/teagram/test-media-encryption-ops.sh \
+            deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
             .github/scripts/test-deploy-workflow-contract.sh
@@ -1290,6 +1292,16 @@ jobs:
 
       - name: Check media encryption and cleanup operations
         run: bash deploy/teagram/test-media-encryption-ops.sh
+
+      - name: Pull PostgreSQL 18 image for media dump validation
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+
+      - name: Check media dump validation against PostgreSQL 18
+        env:
+          PG18_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+        run: bash deploy/teagram/test-media-encryption-pg18.sh
 
       - name: Check teagram server start operation
         run: bash deploy/teagram/test-start-server.sh

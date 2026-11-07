@@ -12,7 +12,6 @@ readonly EXPECTED_ROOT_UID=0
 readonly KEY_DIR=/etc/teagramd/media-keys
 readonly KEY_FILE="$KEY_DIR/1.key"
 readonly KEY_BACKUP=/etc/teagramd/media-key-backups/1.key
-readonly EVIDENCE_ROOT=/root/teagram-media-encryption
 readonly PROGRESS_PATH=/run/teagramd/reports/blob-encryption-progress.jsonl
 readonly MINIMUM_MEDIA_SHA=91e50a0
 
@@ -20,6 +19,8 @@ declare -a COMPOSE=()
 declare -a SERVER_CONTAINERS=()
 COMPOSE_ENV_FILES=()
 REPORT_ROOT=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+readonly EVIDENCE_ROOT="$REPORT_ROOT/teagram-media-encryption"
+readonly LEGACY_EVIDENCE_ROOT=/root/teagram-media-encryption
 export TEAGRAM_BLOB_MODE_REPORT_ROOT="$REPORT_ROOT"
 SERVER_STOPPED=0
 RUSTFS_STOPPED=0
@@ -96,10 +97,66 @@ authority_record_file() {
 }
 
 ensure_evidence_root() {
+  private_dir "$REPORT_ROOT" || ops_fail 'report root is not root-owned mode 0700'
   if [[ ! -e "$EVIDENCE_ROOT" && ! -L "$EVIDENCE_ROOT" ]]; then
     mkdir -m 700 -- "$EVIDENCE_ROOT" || ops_fail 'cannot create private evidence directory'
   fi
   private_dir "$EVIDENCE_ROOT" || ops_fail 'evidence directory is not root-owned mode 0700'
+}
+
+pg_restore_failure_kind() {
+  local stderr_path=$1
+  if LC_ALL=C grep -Fq -- 'could not open input file "-"' "$stderr_path"; then
+    printf '%s' stdin-operand-treated-as-filename
+  elif LC_ALL=C grep -Eiq -- 'unsupported version [(]?[0-9]+([.][0-9]+)?[)]? in file header' "$stderr_path"; then
+    printf '%s' unsupported-archive-version
+  elif LC_ALL=C grep -Eiq -- 'input file appears to be a (plain )?text format dump' "$stderr_path"; then
+    printf '%s' text-format-archive
+  elif LC_ALL=C grep -Eiq -- 'could not find header for archive|does not appear to be a valid archive|did not find magic string' "$stderr_path"; then
+    printf '%s' invalid-archive
+  elif LC_ALL=C grep -Fq -- 'could not read from input file' "$stderr_path"; then
+    printf '%s' archive-read-error
+  elif LC_ALL=C grep -Fq -- 'could not execute query' "$stderr_path"; then
+    printf '%s' restore-query-error
+  elif LC_ALL=C grep -Fqi -- 'connection to server' "$stderr_path"; then
+    printf '%s' restore-connection-error
+  else
+    printf '%s' other
+  fi
+}
+
+report_pg_restore_failure() {
+  local phase=$1 stderr_path=$2 kind
+  case "$phase" in
+    archive-list|database-restore) ;;
+    *) phase=unknown ;;
+  esac
+  kind=$(pg_restore_failure_kind "$stderr_path") || kind=other
+  printf 'pg_restore failure phase=%s kind=%s\n' "$phase" "$kind" >&2
+}
+
+run_pg_restore_archive_list() {
+  local container=$1 dump_path=$2 list_path=$3 stderr_path=$4
+  if docker exec -i "$container" pg_restore --list < "$dump_path" \
+    > "$list_path" 2> "$stderr_path"; then
+    chmod 600 -- "$stderr_path" || return 1
+    return 0
+  fi
+  chmod 600 -- "$stderr_path" || true
+  report_pg_restore_failure archive-list "$stderr_path"
+  return 1
+}
+
+run_pg_restore_database() {
+  local container=$1 dump_path=$2 stderr_path=$3
+  if docker exec -i "$container" pg_restore --exit-on-error --no-owner --no-privileges \
+    -U postgres -d teagram < "$dump_path" >/dev/null 2>> "$stderr_path"; then
+    chmod 600 -- "$stderr_path" || return 1
+    return 0
+  fi
+  chmod 600 -- "$stderr_path" || true
+  report_pg_restore_failure database-restore "$stderr_path"
+  return 1
 }
 
 stage_runtime_helpers() {
@@ -455,16 +512,29 @@ start_server_and_smoke() {
 }
 
 latest_backup_manifest() {
+  local evidence_root=$EVIDENCE_ROOT
+  local dump_parent dump_name
   local -a manifests=()
   shopt -s nullglob
   manifests=("$EVIDENCE_ROOT"/pgdump-pre-migration-*.manifest)
+  if [[ "${#manifests[@]}" == 0 && ( -e "$LEGACY_EVIDENCE_ROOT" || -L "$LEGACY_EVIDENCE_ROOT" ) ]]; then
+    private_dir /root || ops_fail 'legacy evidence parent is not root-owned mode 0700'
+    private_dir "$LEGACY_EVIDENCE_ROOT" || ops_fail 'legacy evidence directory is not root-owned mode 0700'
+    manifests=("$LEGACY_EVIDENCE_ROOT"/pgdump-pre-migration-*.manifest)
+    evidence_root=$LEGACY_EVIDENCE_ROOT
+  fi
   shopt -u nullglob
   [[ "${#manifests[@]}" -gt 0 ]] || ops_fail 'verified pre-migration database dump is unavailable'
   BACKUP_MANIFEST=${manifests[-1]}
+  BACKUP_EVIDENCE_ROOT=$evidence_root
   private_file "$BACKUP_MANIFEST" || ops_fail 'database backup manifest is unsafe'
   jq -e '.result == "isolated-restore-pass" and (.dump_path | type == "string") and (.dump_sha256 | test("^[0-9a-f]{64}$"))' \
     "$BACKUP_MANIFEST" >/dev/null || ops_fail 'database backup manifest is invalid'
   BACKUP_DUMP=$(jq -er '.dump_path' "$BACKUP_MANIFEST") || ops_fail 'database dump path is invalid'
+  dump_parent=${BACKUP_DUMP%/*}
+  dump_name=${BACKUP_DUMP##*/}
+  [[ "$dump_parent" == "$BACKUP_EVIDENCE_ROOT" && "$dump_name" == pgdump-pre-migration-*.dump ]] || \
+    ops_fail 'verified database dump path is outside the evidence directory'
   private_file "$BACKUP_DUMP" || ops_fail 'verified database dump is missing or unsafe'
   local expected actual
   expected=$(jq -er '.dump_sha256' "$BACKUP_MANIFEST") || ops_fail 'database dump digest is unavailable'

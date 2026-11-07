@@ -134,17 +134,16 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         bin_dir.mkdir(mode=0o700)
         key_dir = preflight_root / "media-keys"
         key_dir.mkdir(mode=0o700)
-        evidence_root = preflight_root / "evidence"
+        evidence_root = report_root / "teagram-media-encryption"
         evidence_root.mkdir(mode=0o700)
-
         actual_common = SCRIPT_DIR.parents[2] / "deploy" / "teagram" / "ops" / "blob-encryption-common.inc"
         common_source = actual_common.read_text(encoding="utf-8")
+        self.assertIn('readonly EVIDENCE_ROOT="$REPORT_ROOT/teagram-media-encryption"', common_source)
         replacements = {
             "readonly REPO=/opt/teagram": f"readonly REPO={shlex.quote(str(checkout))}",
             "readonly LOCK_FILE=/tmp/teagram-deploy.lock": f"readonly LOCK_FILE={shlex.quote(str(lock_path))}",
             "readonly EXPECTED_ROOT_UID=0": f"readonly EXPECTED_ROOT_UID={os.geteuid()}",
             "readonly KEY_DIR=/etc/teagramd/media-keys": f"readonly KEY_DIR={shlex.quote(str(key_dir))}",
-            "readonly EVIDENCE_ROOT=/root/teagram-media-encryption": f"readonly EVIDENCE_ROOT={shlex.quote(str(evidence_root))}",
             "/opt/teagram/.state/blob-mode": str(state_dir),
         }
         for old, new in replacements.items():
