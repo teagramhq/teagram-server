@@ -8,6 +8,7 @@ readonly SERVER_CONTAINER=teagram-teagramd-1
 readonly EXPECTED_COMPOSE_FILES="$REPO/docker-compose.yml,$REPO/docker-compose.override.yml"
 readonly EXPECTED_POSTGRES_SERVICE=postgres
 readonly EXPECTED_SERVER_SERVICE=teagramd
+readonly CONTAINER_REVISION_FORMAT='{{index .Config.Labels "org.opencontainers.image.revision"}}'
 
 fail() {
   printf 'server start rejected: %s\n' "$1" >&2
@@ -71,6 +72,14 @@ inspect_container "$SERVER_CONTAINER"
 [[ "$container_project" == teagram && "$container_service" == "$EXPECTED_SERVER_SERVICE" ]] || {
   fail 'teagramd container is not in the teagram Compose project'
 }
+checkout_sha=$(git -C "$REPO" rev-parse --verify 'HEAD^{commit}') || fail 'cannot read live checkout SHA'
+server_sha=$(docker inspect --format "$CONTAINER_REVISION_FORMAT" "$SERVER_CONTAINER") || \
+  fail 'cannot inspect teagramd image revision'
+[[ "$checkout_sha" == "$OPS_SHA" && "$server_sha" == "$checkout_sha" ]] || {
+  fail 'live checkout, teagramd image, and reviewed source revisions do not match'
+}
+git -C "$REPO" diff --quiet "$OPS_SHA" -- docker-compose.yml docker-compose.override.yml || \
+  fail 'live Compose files differ from reviewed source'
 LIVE_COMPOSE_FILES=$container_compose_files
 [[ "$LIVE_COMPOSE_FILES" == "$EXPECTED_COMPOSE_FILES" ]] || {
   fail 'live Compose selection is not the reviewed teagram S3 stack'
@@ -175,6 +184,6 @@ done
 
 start_existing_container "$SERVER_CONTAINER" "$EXPECTED_SERVER_SERVICE"
 restore_bot_api_inner optional "$SERVER_CONTAINER" "${COMPOSE[@]}" || \
-  fail 'Bot API relays did not recover after start-server'
+  fail 'teagramd remains running without healthy Bot API relays; rerunning start-server is safe'
 
 printf 'postgres=ready teagramd=running compose_selection=verified\n'

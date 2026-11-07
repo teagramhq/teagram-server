@@ -21,9 +21,10 @@ mkdir -p "$TMP/bin"
 FIXTURE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FIXTURE_BOT_API_QA=$SCRIPT_DIR/ops/bot-api-qa.sh
 FIXTURE_SERVER_ID=1111111111111111111111111111111111111111111111111111111111111111
+FIXTURE_STALE_SERVER_ID=9999999999999999999999999999999999999999999999999999999999999999
 FIXTURE_INNER_ID=2222222222222222222222222222222222222222222222222222222222222222
 FIXTURE_INGRESS_ID=3333333333333333333333333333333333333333333333333333333333333333
-export FIXTURE_SHA FIXTURE_BOT_API_QA FIXTURE_SERVER_ID FIXTURE_INNER_ID FIXTURE_INGRESS_ID
+export FIXTURE_SHA FIXTURE_BOT_API_QA FIXTURE_SERVER_ID FIXTURE_STALE_SERVER_ID FIXTURE_INNER_ID FIXTURE_INGRESS_ID
 
 cat > "$TMP/bin/id" <<'ID'
 #!/usr/bin/env bash
@@ -48,10 +49,20 @@ FLOCK
 cat > "$TMP/bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == -C && "$2" == "$FIXTURE_REPO" && "$3" == show ]] || {
+[[ "$1" == -C && "$2" == "$FIXTURE_REPO" ]] || {
   echo "unexpected fixture git call: $*" >&2
   exit 99
 }
+if [[ "$3" == rev-parse && "$4" == --verify && "$5" == 'HEAD^{commit}' ]]; then
+  printf '%s\n' "${MOCK_CHECKOUT_SHA:-$FIXTURE_SHA}"
+  exit
+fi
+if [[ "$3" == diff && "$4" == --quiet && "$5" == "$FIXTURE_SHA" && "$6" == -- &&
+      "$7" == docker-compose.yml && "$8" == docker-compose.override.yml ]]; then
+  [[ "${MOCK_COMPOSE_DRIFT:-0}" != 1 ]]
+  exit
+fi
+[[ "$3" == show ]] || { echo "unexpected fixture git command: $*" >&2; exit 99; }
 case "$4" in
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
   "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
@@ -97,16 +108,22 @@ if [[ "$1" == inspect ]]; then
     printf '%s\n' "${MOCK_TELEGRAMD_ENV_JSON:-[]}"
     exit
   fi
+  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{index .Config.Labels "org.opencontainers.image.revision"}}' ]]; then
+    printf '%s\n' "${MOCK_SERVER_IMAGE_REVISION:-$FIXTURE_SHA}"
+    exit
+  fi
   if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
     printf '%s\n' "$FIXTURE_SERVER_ID"
     exit
   fi
   if [[ "$container" == "$FIXTURE_INNER_ID" && "$format" == '{{.State.Health.Status}}' ]]; then
-    printf 'healthy\n'
+    printf '%s\n' "${MOCK_INNER_HEALTH:-healthy}"
     exit
   fi
   if [[ "$container" == "$FIXTURE_INNER_ID" && "$format" == '{{.HostConfig.NetworkMode}}' ]]; then
-    printf 'container:%s\n' "$FIXTURE_SERVER_ID"
+    server_id=$FIXTURE_SERVER_ID
+    [[ "${MOCK_STALE_INNER_NETWORK:-0}" != 1 ]] || server_id=$FIXTURE_STALE_SERVER_ID
+    printf 'container:%s\n' "$server_id"
     exit
   fi
   if [[ "$container" == "$FIXTURE_INGRESS_ID" && "$format" == '{{.State.Health.Status}}' ]]; then
@@ -201,6 +218,8 @@ setup_case() {
   MOCK_COMPOSE_FILES=$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml
   unset MOCK_POSTGRES_PROJECT MOCK_TEAGRAMD_PROJECT MOCK_POSTGRES_FILES MOCK_TEAGRAMD_FILES
   unset MOCK_PG_READY MOCK_START_FAIL_SERVICE MOCK_TELEGRAMD_ENV_JSON
+  unset MOCK_SERVER_IMAGE_REVISION MOCK_CHECKOUT_SHA MOCK_COMPOSE_DRIFT
+  unset MOCK_STALE_INNER_NETWORK MOCK_INNER_HEALTH
   FIXTURE_AUTHORITY_JSON=$(jq -cn --arg repo "$FIXTURE_REPO" \
     '{outcome:"s3-accepted",env_files:[$repo + "/.env",$repo + "/.env.rustfs-parked"]}')
   mkdir -p "$FIXTURE_REPO/.state/blob-mode"
@@ -212,7 +231,8 @@ setup_case() {
   printf 'exited\n' > "$MOCK_TEAGRAMD_STATE_FILE"
   printf 'exited\n' > "$MOCK_MIGRATE_STATE_FILE"
   : > "$MOCK_EVENTS"
-  if [[ "$name" == ordered-start || "$name" == relay-recovery-fails ]]; then
+  if [[ "$name" == ordered-start || "$name" == relay-recovery-fails ||
+        "$name" == relay-network-stale || "$name" == relay-inner-unhealthy ]]; then
     MOCK_TELEGRAMD_ENV_JSON=$(jq -cn --arg addr 'TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447' '[$addr]')
     export MOCK_TELEGRAMD_ENV_JSON
   fi
@@ -263,6 +283,15 @@ output=$(run_operation)
 [[ "$output" == *'teagramd container is not in the teagram Compose project'* ]]
 assert_no_event '^start:'
 printf '%s\n' 'PASS rejects teagramd from a different Compose project before starting services'
+
+setup_case image-revision-mismatch
+MOCK_SERVER_IMAGE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export MOCK_SERVER_IMAGE_REVISION
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'live checkout, teagramd image, and reviewed source revisions do not match'* ]]
+assert_no_event '^start:'
+printf '%s\n' 'PASS refuses to recreate relays from a checkout that differs from the running image'
 
 setup_case paused-teagramd
 printf 'paused\n' > "$MOCK_TEAGRAMD_STATE_FILE"
@@ -350,6 +379,7 @@ export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Bot API inner relay did not become healthy after recreation'* ]]
+[[ "$output" == *'teagramd remains running without healthy Bot API relays; rerunning start-server is safe'* ]]
 [[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner' ]]
 [[ "$(cat "$MOCK_TEAGRAMD_STATE_FILE")" == running ]]
 unset MOCK_START_FAIL_SERVICE
@@ -359,6 +389,23 @@ output=$(run_operation)
 [[ "$output" == *'postgres=ready teagramd=running compose_selection=verified'* ]]
 [[ "$(cat "$MOCK_EVENTS")" == $'sleep:5\nreadiness:postgres\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS retries failed Bot API relay recovery while teagramd remains running'
+
+setup_case relay-network-stale
+MOCK_STALE_INNER_NETWORK=1
+export MOCK_STALE_INNER_NETWORK
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'Bot API relays are not healthy in the current teagramd network namespace'* ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
+printf '%s\n' 'PASS rejects an inner relay attached to a stale teagramd network namespace'
+
+setup_case relay-inner-unhealthy
+MOCK_INNER_HEALTH=unhealthy
+export MOCK_INNER_HEALTH
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'Bot API relays are not healthy in the current teagramd network namespace'* ]]
+printf '%s\n' 'PASS rejects an unhealthy inner relay after recreation'
 
 setup_case bad-arguments
 output=$(run_operation unexpected)

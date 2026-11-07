@@ -447,7 +447,7 @@ setup_case() {
   FIXTURE_SCENARIO=$scenario
   FIXTURE_BOT_API_ENABLED=0
   case "$scenario" in
-    backup-failure|encrypt-success|cleanup-success|bot-api-restore-failure)
+    backup-failure|encrypt-success|cleanup-success|bot-api-restore-failure|cleanup-recheck-removes|cleanup-post-unaccounted)
       FIXTURE_BOT_API_ENABLED=1
       ;;
   esac
@@ -704,7 +704,7 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$output" == *'referenced plaintext objects remained after cleanup verification'* ]]
 [[ ! -e "$FIXTURE_PLAINTEXT_OBJECT" ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS cleanup rejects a nonzero removal recheck and restores the server'
 
 setup_case cleanup-post-unaccounted encrypted
@@ -712,7 +712,7 @@ output=$(run_cleanup --acceptance-passed)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'media migration result contains 1 unaccounted objects'* ]]
 [[ "$(cat "$FIXTURE_SERVER_STATE")" == running && "$(cat "$FIXTURE_RUSTFS_STATE")" == running ]]
-[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nstart:server' ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == $'stop:server\nimage-check\nmigration\nimage-check\ncleanup\nimage-check\ncleanup\nimage-check\nmigration\nstart:server\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS cleanup refuses post-cleanup unaccounted objects and restores the server'
 
 setup_case already-encrypted-success encrypted
