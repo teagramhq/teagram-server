@@ -10,7 +10,8 @@ export OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export MOCK_BOT_ID=987654321
 MOCK_CANARY_SECRET=$(printf 'B%.0s' {1..42})A
 export MOCK_CANARY_TOKEN="${MOCK_BOT_ID}:${MOCK_CANARY_SECRET}"
-export MOCK_ROOT_UID=$(id -u)
+MOCK_ROOT_UID=$(id -u)
+export MOCK_ROOT_UID
 
 go build -o "$tmp/teagramd" ./cmd/teagramd
 key_material=$(go run ./cmd/teagramd/testdata/bot-api-qa-age-fixture.go keygen)
