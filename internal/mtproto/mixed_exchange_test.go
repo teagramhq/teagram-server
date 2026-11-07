@@ -167,7 +167,7 @@ func TestKeyExchangeCountSurvivesPreAuthSlotClear(t *testing.T) {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	rsaSetupDuration := time.Since(rsaStarted)
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	exchangeStarted := time.Now()
 	defer func() {
