@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import errno
 import importlib.util
+import io
 import ipaddress
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("ops") / "bot_api_qa_listeners.py"
@@ -53,6 +57,12 @@ class ListenerInspectionTests(unittest.TestCase):
     def inspect(self):
         return LISTENERS.inspect_listeners(self.proc, "100.64.1.1", "fd7a:115c:a1e0::1")
 
+    def inspect_cli(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = LISTENERS.main(["100.64.1.1", "fd7a:115c:a1e0::1", str(self.proc)])
+        return status, stderr.getvalue()
+
     def test_accepts_loopback_and_tailscale_listeners_owned_by_tailscaled(self):
         self.write_tables(
             [tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)],
@@ -60,6 +70,115 @@ class ListenerInspectionTests(unittest.TestCase):
         )
         self.add_process(50, "tailscaled", 1002, 1003)
         self.assertTrue(self.inspect())
+
+    def test_ignores_processes_that_exit_during_owner_scan(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        (self.proc / "49").mkdir()
+        exited_process = self.proc / "51"
+        (exited_process / "fd").mkdir(parents=True)
+        os.symlink("socket:[1002]", exited_process / "fd" / "3")
+
+        self.assertTrue(self.inspect())
+
+    def test_ignores_esrch_for_exiting_pids_when_a_tailscaled_owner_survives(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        self.add_process(51, "tailscaled", 1002)
+        process = self.proc / "51"
+        failures = (
+            ("fd scan", LISTENERS.os, "scandir", process / "fd"),
+            ("fd readlink", LISTENERS.os, "readlink", process / "fd" / "0"),
+            ("comm read", Path, "read_text", process / "comm"),
+        )
+
+        for stage, owner, method, failed_path in failures:
+            original = getattr(owner, method)
+
+            def raise_esrch(path, *args, target=failed_path, delegate=original, **kwargs):
+                if Path(path) == target:
+                    raise ProcessLookupError(errno.ESRCH, "process exited", str(path))
+                return delegate(path, *args, **kwargs)
+
+            with self.subTest(stage=stage):
+                with patch.object(owner, method, side_effect=raise_esrch, autospec=True):
+                    self.assertTrue(self.inspect())
+
+    def test_ignores_esrch_during_fd_scandir_iteration(self):
+        self.write_tables([tcp_row("127.0.0.1", 1001), tcp_row("100.64.1.1", 1002)], [])
+        self.add_process(50, "tailscaled", 1002)
+        self.add_process(51, "tailscaled", 1002)
+        fd_path = self.proc / "51" / "fd"
+        original_scandir = LISTENERS.os.scandir
+
+        class InterruptedScandir:
+            def __init__(self, entries, path):
+                self.entries = iter(entries)
+                self.path = path
+                self.yielded = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.yielded:
+                    raise ProcessLookupError(errno.ESRCH, "process exited", str(self.path))
+                self.yielded = True
+                return next(self.entries)
+
+        def scandir_with_exit(path):
+            if Path(path) == fd_path:
+                with original_scandir(path) as entries:
+                    return InterruptedScandir(list(entries), path)
+            return original_scandir(path)
+
+        with patch.object(LISTENERS.os, "scandir", side_effect=scandir_with_exit, autospec=True):
+            self.assertTrue(self.inspect())
+
+    def test_reports_fd_directory_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        fd_path = self.proc / "50" / "fd"
+        fd_path.parent.mkdir()
+        fd_path.write_text("not a directory")
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(fd_path), stderr)
+        self.assertIn("[Errno", stderr)
+
+    def test_reports_fd_readlink_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        fd_path = self.proc / "50" / "fd"
+        fd_path.mkdir(parents=True)
+        descriptor_path = fd_path / "3"
+        descriptor_path.write_text("not a symlink")
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(descriptor_path), stderr)
+        self.assertIn("[Errno", stderr)
+
+    def test_reports_process_name_errors_with_path_and_cause(self):
+        self.write_tables([tcp_row("100.64.1.1", 1002)], [])
+        process = self.proc / "50"
+        (process / "fd").mkdir(parents=True)
+        os.symlink("socket:[1002]", process / "fd" / "3")
+        comm_path = process / "comm"
+        comm_path.mkdir()
+
+        status, stderr = self.inspect_cli()
+
+        self.assertEqual(1, status)
+        self.assertIn(str(comm_path), stderr)
+        self.assertIn("[Errno", stderr)
 
     def test_accepts_no_listener(self):
         self.assertFalse(self.inspect())
@@ -73,7 +192,7 @@ class ListenerInspectionTests(unittest.TestCase):
 
     def test_rejects_tailscale_address_owned_by_another_process(self):
         self.write_tables([tcp_row("100.64.1.1", 1002)], [])
-        self.add_process(50, "python", 1002)
+        self.add_process(50, "not-tailscaled", 1002)
         with self.assertRaisesRegex(ValueError, "not owned by tailscaled"):
             self.inspect()
 
