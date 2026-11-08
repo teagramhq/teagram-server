@@ -796,6 +796,16 @@ cutover_helper_job=$(kubectl get jobs --namespace "$TARGET_NAMESPACE" \
   jq -er 'if (.items | length) == 1 then .items[0] else error("expected one cutover RustFS initializer Job") end')
 cutover_helper_image=$(jq -er '.spec.template.spec.containers[] | select(.name == "rustfs-init") | .image' \
   <<< "$cutover_helper_job")
+for job_json in "$cutover_job" "$cutover_helper_job"; do
+  jq --exit-status '
+    .spec.manualSelector == true
+    and .metadata.name == .spec.selector.matchLabels["job-revision"]
+    and .metadata.name == .spec.template.metadata.labels["job-revision"]
+  ' <<< "$job_json" >/dev/null || {
+    printf 'cutover Job selector must be stable and unique for its digest-specific name\n' >&2
+    exit 1
+  }
+done
 [[ $cutover_helper_image == "ghcr.io/teagramhq/teagramd-mc-init@$prod_helper_digest" ]] || {
   printf 'cutover RustFS initializer image is %s, want the committed production digest\n' \
     "$cutover_helper_image" >&2

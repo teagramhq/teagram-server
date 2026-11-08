@@ -5,6 +5,10 @@ metadata:
   labels:
     app.kubernetes.io/name: db-migrations
 spec:
+  manualSelector: true
+  selector:
+    matchLabels:
+      job-revision: db-migrations-unreleased
   backoffLimit: 2
   activeDeadlineSeconds: 900
   ttlSecondsAfterFinished: 86400
@@ -12,6 +16,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: db-migrations
+        job-revision: db-migrations-unreleased
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false

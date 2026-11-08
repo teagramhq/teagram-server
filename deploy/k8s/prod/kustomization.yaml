@@ -36,6 +36,8 @@ replacements:
           name: db-migrations
         fieldPaths:
           - metadata.name
+          - spec.selector.matchLabels.job-revision
+          - spec.template.metadata.labels.job-revision
   - source:
       kind: ConfigMap
       name: rustfs-init-job-revision
@@ -48,6 +50,8 @@ replacements:
           name: rustfs-init
         fieldPaths:
           - metadata.name
+          - spec.selector.matchLabels.job-revision
+          - spec.template.metadata.labels.job-revision
 
 images:
   - name: ghcr.io/teagramhq/teagramd

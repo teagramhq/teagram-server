@@ -5,6 +5,10 @@ metadata:
   labels:
     app.kubernetes.io/name: rustfs-init
 spec:
+  manualSelector: true
+  selector:
+    matchLabels:
+      job-revision: rustfs-init-unreleased
   backoffLimit: 4
   activeDeadlineSeconds: 300
   ttlSecondsAfterFinished: 86400
@@ -12,6 +16,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: rustfs-init
+        job-revision: rustfs-init-unreleased
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
