@@ -63,6 +63,33 @@ func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
 
 type call = func(ctx context.Context) error
 
+func TestMutatingPrivateScenariosStayOutOfLongChat(t *testing.T) {
+	e := &env{f: fixture{Owner: 1, Partner: 2, Contacts: []int64{3}}}
+	seen := map[string]bool{}
+	for _, sc := range scenarios() {
+		switch sc.name {
+		case "messages.sendMessage private", "messages.readHistory":
+			seen[sc.name] = true
+			if sc.privatePeer == nil {
+				t.Errorf("%s has no private chat target", sc.name)
+				continue
+			}
+			peer := sc.privatePeer(e)
+			if peer.UserID == e.f.Partner {
+				t.Errorf("%s targets long-chat partner %d", sc.name, peer.UserID)
+			}
+			if peer.UserID != e.f.Contacts[0] {
+				t.Errorf("%s targets %d, want seeded contact %d", sc.name, peer.UserID, e.f.Contacts[0])
+			}
+		}
+	}
+	for _, name := range []string{"messages.sendMessage private", "messages.readHistory"} {
+		if !seen[name] {
+			t.Errorf("scenario %q missing", name)
+		}
+	}
+}
+
 // fixed is a setup for a request that needs nothing from the fixture beyond
 // the env itself.
 func fixed(build func(e *env) call) func(context.Context, *env) (call, string, error) {
@@ -77,6 +104,37 @@ func read(name string, build func(e *env) call) scenario {
 // use, in the order a session meets them. Reads come first: the writes change
 // the account a little, and the reads must see the fixture as seeded.
 func scenarios() []scenario {
+	privateSend := scenario{
+		name: "messages.sendMessage private", kind: perfreport.Write, samples: writeSamples,
+		privatePeer: activityPeer,
+	}
+	privateSend.setup = fixed(func(e *env) call {
+		peer := privateSend.privatePeer(e)
+		return func(ctx context.Context) error {
+			_, err := e.owner.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer: peer, Message: "perf send", RandomID: randomIDs.Add(1),
+			})
+			return err
+		}
+	})
+	readHistory := scenario{
+		name: "messages.readHistory", kind: perfreport.Write, samples: writeSamples,
+		privatePeer: activityPeer,
+	}
+	readHistory.setup = fixed(func(e *env) call {
+		peer := readHistory.privatePeer(e)
+		return func(ctx context.Context) error {
+			_, err := e.owner.api.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{Peer: peer})
+			return err
+		}
+	})
+	// Each sample reads one new incoming message, as an open chat does.
+	readHistory.prepare = func(ctx context.Context, e *env) error {
+		peer := readHistory.privatePeer(e)
+		_, _, _, _, err := e.srv.store.SendMessage(ctx, peer.UserID, e.f.Owner, "unread", randomIDs.Add(1), 0, 0)
+		return err
+	}
+
 	return []scenario{
 		{
 			name: "auth key exchange", kind: perfreport.Write, samples: authKeyExchangeSamples,
@@ -189,18 +247,7 @@ func scenarios() []scenario {
 			name: "upload.getFile first part", kind: perfreport.Read, samples: readSamples,
 			setup: firstPhotoPart,
 		},
-		{
-			name: "messages.sendMessage private", kind: perfreport.Write, samples: writeSamples,
-			setup: fixed(func(e *env) call {
-				peer := userPeer(e.f.Owner, e.f.Partner)
-				return func(ctx context.Context) error {
-					_, err := e.owner.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-						Peer: peer, Message: "perf send", RandomID: randomIDs.Add(1),
-					})
-					return err
-				}
-			}),
-		},
+		privateSend,
 		{
 			name: "messages.sendMessage channel", kind: perfreport.Write, samples: writeSamples,
 			setup: fixed(func(e *env) call {
@@ -219,21 +266,7 @@ func scenarios() []scenario {
 			setup:   fanOut,
 			prepare: func(_ context.Context, e *env) error { drain(e.subscriber); return nil },
 		},
-		{
-			name: "messages.readHistory", kind: perfreport.Write, samples: writeSamples,
-			setup: fixed(func(e *env) call {
-				peer := userPeer(e.f.Owner, e.f.Partner)
-				return func(ctx context.Context) error {
-					_, err := e.owner.api.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{Peer: peer})
-					return err
-				}
-			}),
-			// Each sample reads one new incoming message, as an open chat does.
-			prepare: func(ctx context.Context, e *env) error {
-				_, _, _, _, err := e.srv.store.SendMessage(ctx, e.f.Partner, e.f.Owner, "unread", randomIDs.Add(1), 0, 0)
-				return err
-			},
-		},
+		readHistory,
 	}
 }
 
@@ -243,6 +276,12 @@ func history(e *env, req *tg.MessagesGetHistoryRequest) call {
 		_, err := e.owner.api.MessagesGetHistory(ctx, req)
 		return err
 	}
+}
+
+// activityPeer keeps the mutating private RPC scenarios out of the long chat
+// used by history reads, so repeated measurements leave that fixture stable.
+func activityPeer(e *env) *tg.InputPeerUser {
+	return userPeer(e.f.Owner, e.f.Contacts[0])
 }
 
 // jumpToDate asks for the page around a date half way through the long chat,

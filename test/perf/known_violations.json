@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "scenario": "messages.getHistory jump to date",
+    "check": "timing",
+    "issue": "MAIN-3454"
+  }
+]

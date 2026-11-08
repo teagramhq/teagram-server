@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -46,14 +47,15 @@ type env struct {
 // every sample, outside the measured window and before the server goes quiet;
 // cleanup runs after it, likewise unmeasured.
 type scenario struct {
-	name    string
-	kind    perfreport.Kind
-	fullSet bool
-	samples int
-	note    string
-	setup   func(ctx context.Context, e *env) (call func(ctx context.Context) error, note string, err error)
-	prepare func(ctx context.Context, e *env) error
-	cleanup func(ctx context.Context, e *env) error
+	name        string
+	kind        perfreport.Kind
+	fullSet     bool
+	samples     int
+	note        string
+	privatePeer func(e *env) *tg.InputPeerUser
+	setup       func(ctx context.Context, e *env) (call func(ctx context.Context) error, note string, err error)
+	prepare     func(ctx context.Context, e *env) error
+	cleanup     func(ctx context.Context, e *env) error
 }
 
 // warmup samples fill the plan cache and the buffer pool before measuring.
