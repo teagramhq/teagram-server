@@ -27,7 +27,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR` | *(unset)* | Optional `host:port` used only for the public listener's discovery `websocket.endpoint`; its host becomes `wss://host/apiws`, while MTProto and `client-config` keep `TG_ADVERTISE_ADDR`. Requires `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`; malformed values fail server startup |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
+| `TG_WEBSOCKET_BROWSER_ONLY` | `false` | When `true`, the default WebSocket listener rejects requests without an allowed `Origin`, including native clients, with HTTP 403 and `Teagram-Client-Policy: browser-only`; invalid values fail startup |
 | `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated origins allowed on the public WebSocket listener; set `https://web.teagram.io` for the public web client, and add the demo origin only when it is deployed |
+| `TG_PUBLIC_WEBSOCKET_BROWSER_ONLY` | `false` | When `true`, the public WebSocket listener rejects requests without an allowed `Origin`, including native clients, with HTTP 403 and `Teagram-Client-Policy: browser-only`; invalid values fail startup |
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Its host also forms the discovery `websocket.endpoint` as `wss://host/apiws`. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` | `false` | Set to `true` to advertise demo guest sign-up and the stored wipe generation in discovery and `client-config`; requires the migrated Postgres row, and a non-boolean value fails configuration loading |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
@@ -179,8 +181,12 @@ When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 `TG_WEBSOCKET_ALLOWED_ORIGINS` with the browser origins that may connect to
 `/apiws`. For teagram-web, add the exact origin `https://web.teagram.io`; do
 not use `*` or a wildcard pattern. Requests without an `Origin` header remain
-valid for native clients; requests carrying one are rejected unless it matches
-the configured list. `GET` and `OPTIONS` on exactly
+valid for native clients unless `TG_WEBSOCKET_BROWSER_ONLY=true`; requests
+carrying one are rejected unless it matches the configured list. The public
+listener uses the same policy through its own origin allowlist and
+`TG_PUBLIC_WEBSOCKET_BROWSER_ONLY` setting. Browser-only refusals return HTTP
+403 with `Teagram-Client-Policy: browser-only`; this lets native clients
+distinguish the policy from other handshake failures. `GET` and `OPTIONS` on exactly
 `/.well-known/teagramd/client` return `Access-Control-Allow-Origin: *` without
 credentials; other routes have no CORS headers. This does not relax the
 WebSocket origin check. Keep this listener within the intended network

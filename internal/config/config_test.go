@@ -67,6 +67,8 @@ func TestLoadRejectsRetiredBootstrapEnvBeforeInitialization(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "")
 	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
 	t.Setenv("TG_RECOVERY_EMAIL", "off")
 	cfg, err := config.Load(discardLog())
@@ -81,6 +83,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if len(cfg.WebSocketOriginPatterns) != 0 {
 		t.Errorf("WebSocketOriginPatterns = %v, want no browser origins by default", cfg.WebSocketOriginPatterns)
+	}
+	if cfg.WebSocketBrowserOnly || cfg.PublicWebSocketBrowserOnly {
+		t.Errorf("WebSocket browser-only settings = (%t, %t), want both disabled by default", cfg.WebSocketBrowserOnly, cfg.PublicWebSocketBrowserOnly)
 	}
 	if cfg.DCID != 2 {
 		t.Errorf("DCID = %d, want 2", cfg.DCID)
@@ -417,6 +422,8 @@ func TestLoadWebSocketListenAddr(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
 	t.Setenv("TG_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2445")
+	t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "true")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -424,6 +431,9 @@ func TestLoadWebSocketListenAddr(t *testing.T) {
 	}
 	if cfg.WebSocketListenAddr != "127.0.0.1:2445" {
 		t.Fatalf("WebSocketListenAddr = %q, want configured address", cfg.WebSocketListenAddr)
+	}
+	if !cfg.WebSocketBrowserOnly || cfg.PublicWebSocketBrowserOnly {
+		t.Errorf("WebSocket browser-only settings = (%t, %t), want default listener only", cfg.WebSocketBrowserOnly, cfg.PublicWebSocketBrowserOnly)
 	}
 }
 
@@ -434,6 +444,7 @@ func TestLoadPublicWebSocketSettings(t *testing.T) {
 	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
 	t.Setenv("TG_PUBLIC_REGISTRATION", "invite")
 	t.Setenv("TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "https://web.teagram.io")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "true")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -453,6 +464,9 @@ func TestLoadPublicWebSocketSettings(t *testing.T) {
 	}
 	if err := cfg.ValidateRegistrationMode(); err != nil {
 		t.Fatalf("ValidateRegistrationMode: %v", err)
+	}
+	if !cfg.PublicWebSocketBrowserOnly || cfg.WebSocketBrowserOnly {
+		t.Errorf("WebSocket browser-only settings = (%t, %t), want public only", cfg.WebSocketBrowserOnly, cfg.PublicWebSocketBrowserOnly)
 	}
 }
 
@@ -536,6 +550,23 @@ func TestLoadRejectsMalformedPublicWebSocketOriginPattern(t *testing.T) {
 	_, err := config.Load(discardLog())
 	if err == nil || !strings.Contains(err.Error(), "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") {
 		t.Fatalf("Load error = %v, want malformed public origin variable", err)
+	}
+}
+
+func TestLoadRejectsInvalidWebSocketBrowserOnly(t *testing.T) {
+	for _, name := range []string{"TG_WEBSOCKET_BROWSER_ONLY", "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "")
+			t.Setenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "")
+			t.Setenv(name, "maybe")
+
+			_, err := config.Load(discardLog())
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Load error = %v, want it to name invalid boolean %s", err, name)
+			}
+		})
 	}
 }
 

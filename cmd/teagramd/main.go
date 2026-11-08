@@ -83,6 +83,7 @@ type publicWebSocketListener struct {
 	listener            net.Listener
 	handler             mtproto.Handler
 	originPatterns      []string
+	browserOnly         bool
 	discovery           discovery.Document
 	trustCFConnectingIP bool
 }
@@ -1211,6 +1212,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
+	server.SetWebSocketBrowserOnly(cfg.WebSocketBrowserOnly)
 	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
 		return fmt.Errorf("set client discovery document: %w", err)
 	}

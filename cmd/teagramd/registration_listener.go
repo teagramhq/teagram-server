@@ -36,6 +36,7 @@ func newPublicWebSocketListener(cfg config.Config, listener net.Listener, handle
 		listener:            listener,
 		handler:             handler,
 		originPatterns:      cfg.PublicWebSocketOriginPatterns,
+		browserOnly:         cfg.PublicWebSocketBrowserOnly,
 		discovery:           doc,
 		trustCFConnectingIP: cfg.ClientAddrTrust == config.ClientAddrCFConnectingIP,
 	}
