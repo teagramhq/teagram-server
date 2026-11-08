@@ -43,7 +43,7 @@ func (h *handlers) resolveBlockedPeer(ctx context.Context, peer tg.InputPeerClas
 // it is deliberately not persisted as a different kind of relationship.
 func (h *handlers) handleContactsBlock(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsBlockRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -67,7 +67,7 @@ func (h *handlers) handleContactsBlock(r *mtproto.Request) (bin.Encoder, error) 
 // list. Removing a missing row is a successful no-op.
 func (h *handlers) handleContactsUnblock(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsUnblockRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -93,7 +93,7 @@ func (h *handlers) handleContactsUnblock(r *mtproto.Request) (bin.Encoder, error
 // of applying the live-edge gate used by ordinary message responses.
 func (h *handlers) handleContactsGetBlocked(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsGetBlockedRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

@@ -378,7 +378,7 @@ func (h *handlers) serveFileChunk(
 // document, a live message file or a profile-photo gallery entry.
 func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UploadGetFileRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

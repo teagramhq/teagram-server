@@ -64,7 +64,7 @@ func TestPeerFrameReaderBackpressure(t *testing.T) {
 				t.Fatalf("read frame %d beyond queue bound", got)
 			case <-time.After(50 * time.Millisecond):
 			}
-			frame, err := reader.next(context.Background(), time.Time{}, false)
+			frame, _, err := reader.next(context.Background(), time.Time{}, false)
 			if err != nil {
 				t.Fatal(err)
 			}

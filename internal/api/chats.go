@@ -205,7 +205,7 @@ func memberIDs(perOwner map[int64]int) []int64 {
 // creator included, so it fails safe. Nothing unwinds the chat row.
 func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesCreateChatRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -277,7 +277,7 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 // itself to the chat.
 func (h *handlers) handleDeleteChat(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesDeleteChatRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -319,7 +319,7 @@ func (h *handlers) notifyChatRemoval(ctx context.Context, ownerID, chatID int64)
 // PEER_ID_INVALID; a restricted member receives CHAT_ADMIN_REQUIRED.
 func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatTitleRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -356,7 +356,7 @@ func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) 
 // rights at the final mutation serialization point.
 func (h *handlers) handleEditChatPhoto(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatPhotoRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if h.uploadsDisabled {
@@ -456,7 +456,7 @@ func (h *handlers) handleEditChatPhoto(r *mtproto.Request) (bin.Encoder, error) 
 // handleEditChatAbout serves messages.editChatAbout for basic groups and channels.
 func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatAboutRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -530,7 +530,7 @@ func (h *handlers) notifyChatAbout(ctx context.Context, chatID int64, members []
 // update alone.
 func (h *handlers) handleEditChatDefaultBannedRights(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatDefaultBannedRightsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -612,7 +612,7 @@ func (h *handlers) handleEditChatDefaultBannedRights(r *mtproto.Request) (bin.En
 
 func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetFullChatRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -684,7 +684,7 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleGetChats(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetChatsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

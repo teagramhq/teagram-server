@@ -30,7 +30,7 @@ type messageReportReason struct {
 
 func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReportRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

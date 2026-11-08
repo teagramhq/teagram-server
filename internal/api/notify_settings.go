@@ -96,7 +96,7 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.AccountGetNotifySettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	key, err := h.notifySettingsKey(req.Peer, r.UserID)
@@ -133,7 +133,7 @@ func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, e
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.AccountGetNotifyExceptionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	key, err := h.notifySettingsKey(req.Peer, r.UserID)
@@ -197,7 +197,7 @@ func (h *handlers) handleUpdateNotifySettings(r *mtproto.Request) (bin.Encoder, 
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.AccountUpdateNotifySettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	key, err := h.notifySettingsKey(req.Peer, r.UserID)

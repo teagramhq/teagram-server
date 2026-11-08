@@ -15,7 +15,7 @@ import (
 
 func (h *handlers) handleGetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetPrivacyRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -29,7 +29,7 @@ func (h *handlers) handleGetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleSetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountSetPrivacyRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

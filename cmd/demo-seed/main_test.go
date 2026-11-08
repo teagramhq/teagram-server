@@ -338,6 +338,147 @@ func TestCountSeedMarkersForSpace(t *testing.T) {
 	}
 }
 
+func TestSendTextKeepsMarkerOutOfSeededMessage(t *testing.T) {
+	api := &fakeMarkerSeedInvoker{}
+	seeded := seedMessage{
+		marker: "[[teagram-demo:maps:text-00]]",
+		text:   "Teagram Demo Field Maps note 01: the lower path stayed cool beneath the willow shade.",
+	}
+	if _, err := sendText(context.Background(), tg.NewClient(api), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, seeded, 0); err != nil {
+		t.Fatalf("send seeded text: %v", err)
+	}
+	if api.sent == nil {
+		t.Fatal("sendText did not issue a message request")
+	}
+	if api.sent.Message != seeded.text {
+		t.Fatalf("sent message = %q, want %q", api.sent.Message, seeded.text)
+	}
+}
+
+func TestOtherSeededContentTextsContainNoInternalMarker(t *testing.T) {
+	for _, spec := range publicSpaces {
+		if spec.slug == "welcome" {
+			continue
+		}
+		for _, seeded := range seededMessagesForSpace(spec) {
+			if strings.Contains(seeded.text, "[[teagram-demo:") {
+				t.Errorf("seeded %s message %s contains an internal marker: %q", spec.slug, seeded.marker, seeded.text)
+			}
+		}
+	}
+	seeded := reactionSeedMessage()
+	if strings.Contains(seeded.text, "[[teagram-demo:") {
+		t.Errorf("seeded reaction example contains an internal marker: %q", seeded.text)
+	}
+}
+
+func TestHistoryMarkersRecognizeMarkerFreeAndLegacyOtherSeedMessages(t *testing.T) {
+	for _, spec := range publicSpaces {
+		if spec.slug == "welcome" {
+			continue
+		}
+		seededMessages := seededMessagesForSpace(spec)
+		for _, test := range []struct {
+			name   string
+			legacy bool
+		}{
+			{name: "marker-free"},
+			{name: "legacy marker", legacy: true},
+		} {
+			t.Run(spec.slug+"/"+test.name, func(t *testing.T) {
+				messages := make([]tg.MessageClass, 0, len(seededMessages))
+				for index, seeded := range seededMessages {
+					text := seeded.text
+					if test.legacy {
+						text = seeded.marker + " " + text
+					}
+					messages = append(messages, &tg.Message{ID: index + 1, Message: text})
+				}
+				api := &fakeMarkerSeedInvoker{history: messages}
+				markers, err := historyMarkers(context.Background(), tg.NewClient(api), &tg.InputPeerChannel{ChannelID: 1, AccessHash: 2}, seededMessages...)
+				if err != nil {
+					t.Fatalf("read seeded history: %v", err)
+				}
+				if got, want := len(markers), len(seededMessages); got != want {
+					t.Fatalf("seeded marker count = %d, want %d", got, want)
+				}
+				if got, want := countSeedMarkers(markers, spec), expectedSeedMarkerCount(spec); got != want {
+					t.Fatalf("verified seeded content count = %d, want %d", got, want)
+				}
+				for index, seeded := range seededMessages {
+					if id, ok := markers[seeded.marker]; !ok || id != int64(index+1) {
+						t.Errorf("seeded marker %q resolves to (%d, %t), want (%d, true)", seeded.marker, id, ok, index+1)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSeededMarkerFromTextRecognizesRetiredCopy(t *testing.T) {
+	seeded := seedMessage{
+		marker:  "[[teagram-demo:maps:text-00]]",
+		text:    "The current route note.",
+		retired: []string{"The previous route note."},
+	}
+	if got := seededMarkerFromText("The previous route note.", []seedMessage{seeded}); got != seeded.marker {
+		t.Fatalf("retired copy resolved to %q, want %q", got, seeded.marker)
+	}
+}
+
+func TestHistoryMarkersRecognizeMarkerFreeAndLegacyReactionMessage(t *testing.T) {
+	seeded := reactionSeedMessage()
+	for _, test := range []struct {
+		name   string
+		legacy bool
+	}{
+		{name: "marker-free"},
+		{name: "legacy marker", legacy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			text := seeded.text
+			if test.legacy {
+				text = seeded.marker + " " + text
+			}
+			api := &fakeMarkerSeedInvoker{history: []tg.MessageClass{&tg.Message{ID: 13, Message: text}}}
+			markers, err := historyMarkers(context.Background(), tg.NewClient(api), &tg.InputPeerUser{UserID: 1, AccessHash: 2}, seeded)
+			if err != nil {
+				t.Fatalf("read reaction history: %v", err)
+			}
+			if got := markers[seeded.marker]; got != 13 {
+				t.Fatalf("reaction marker resolves to message %d, want 13", got)
+			}
+		})
+	}
+}
+
+type fakeMarkerSeedInvoker struct {
+	sent    *tg.MessagesSendMessageRequest
+	history []tg.MessageClass
+}
+
+func (api *fakeMarkerSeedInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch request := input.(type) {
+	case *tg.MessagesSendMessageRequest:
+		api.sent = request
+		response, ok := output.(*tg.UpdatesBox)
+		if !ok {
+			return errors.New("unexpected send response type")
+		}
+		response.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: 42, RandomID: request.RandomID}}}
+		return nil
+	case *tg.MessagesGetHistoryRequest:
+		response, ok := output.(*tg.MessagesMessagesBox)
+		if !ok {
+			return errors.New("unexpected history response type")
+		}
+		response.Messages = &tg.MessagesMessages{Messages: api.history}
+		return nil
+	default:
+		return errors.New("unexpected seed test request")
+	}
+}
+
 func TestCheckModeNeedsNoConfigAndRejectsNonInternalEndpoints(t *testing.T) {
 	if err := run([]string{"--check"}); err != nil {
 		t.Fatalf("check without mounted runtime config: %v", err)

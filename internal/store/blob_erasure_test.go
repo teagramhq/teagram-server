@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -234,6 +235,89 @@ func TestBlobErasureSweepReclaimsOwnedClassesAndLeavesParts(t *testing.T) {
 	}
 	if len(recorder.prefixes) != 2*(1<<8) {
 		t.Fatalf("prefix walks = %d, want two complete assembled passes", len(recorder.prefixes))
+	}
+}
+
+// TestBlobErasureSweepReclaimsEncryptedPrefixedObjects covers both shard
+// containment walks and removals in the migrated encrypted namespace.
+func TestBlobErasureSweepReclaimsEncryptedPrefixedObjects(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	local, ok := store.BlobsOf(s).(*blob.Local)
+	if !ok {
+		t.Fatal("store's blob backend is not local")
+	}
+	prefixed, err := blob.NewPrefixedStore(local, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("create prefixed blob store: %v", err)
+	}
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x51}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("create media key ring: %v", err)
+	}
+	sealed, err := blob.NewEncrypted(prefixed, ring, blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("create encrypted blob store: %v", err)
+	}
+	if err := store.SetPartBlobs(s, sealed); err != nil {
+		t.Fatalf("set encrypted blob store: %v", err)
+	}
+	a := mustUser(t, s, "+15559201020")
+
+	orphan := storedFileWithBytes(t, s, a.ID)
+	if err := store.EraseFileRow(ctx, s, orphan.ID); err != nil {
+		t.Fatalf("erase orphan row: %v", err)
+	}
+	accounted := storedFileWithBytes(t, s, a.ID)
+	oldTemp := storedFile(t, s, a.ID)
+	if err := store.SetFileUnstored(ctx, s, oldTemp.ID); err != nil {
+		t.Fatalf("clear temporary's stored flag: %v", err)
+	}
+	if err := store.SetFileDate(ctx, s, oldTemp.ID, time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("age temporary's row: %v", err)
+	}
+	oldTempKey := blob.Key(oldTemp.ID) + blob.TempSuffix
+	if _, err := sealed.Put(ctx, oldTempKey, bytes.NewReader([]byte("old temp"))); err != nil {
+		t.Fatalf("put encrypted temporary: %v", err)
+	}
+	physical := func(key string) string {
+		return blob.EncryptedObjectsPrefix + "/" + key
+	}
+	for _, key := range []string{blob.Key(orphan.ID), oldTempKey} {
+		ageObject(t, local.RootDir(), physical(key), time.Now().Add(-2*time.Hour))
+	}
+
+	cutoff := time.Now().Add(-time.Hour)
+	counts, err := s.SweepBlobErasure(ctx, cutoff, cutoff)
+	if err != nil {
+		t.Fatalf("encrypted blob erasure sweep: %v", err)
+	}
+	orphanPhysicalBytes, err := blob.EnvelopePhysicalSize(int64(len(blobBody)), blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("calculate encrypted orphan size: %v", err)
+	}
+	if counts.OrphanUnlinkAttempts != 1 || counts.OrphanUnlinkAttemptedBytes != orphanPhysicalBytes {
+		t.Fatalf("encrypted orphan counts = %+v, want one orphan and %d physical bytes", counts, orphanPhysicalBytes)
+	}
+	tempPhysicalBytes, err := blob.EnvelopePhysicalSize(int64(len("old temp")), blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("calculate encrypted temporary size: %v", err)
+	}
+	if counts.TempUnlinkAttempts != 1 || counts.TempUnlinkAttemptedBytes != tempPhysicalBytes {
+		t.Fatalf("encrypted temp counts = %+v, want one abandoned temp and %d physical bytes", counts, tempPhysicalBytes)
+	}
+	if counts.OrphanRetained != 1 || !blobPresent(t, s, accounted.ID) {
+		t.Fatalf("encrypted live blob was not retained: counts = %+v", counts)
+	}
+	if rowPresent(t, s, oldTemp.ID) {
+		t.Errorf("encrypted temporary cleanup left the absent files row for %d", oldTemp.ID)
+	}
+	for _, key := range []string{blob.Key(orphan.ID), oldTempKey} {
+		_, err := local.ReadAt(ctx, physical(key), 0, 1)
+		if !errors.Is(err, blob.ErrNotFound) {
+			t.Errorf("encrypted object %q after sweep: err = %v, want ErrNotFound", key, err)
+		}
 	}
 }
 

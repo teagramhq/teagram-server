@@ -78,6 +78,16 @@ func (rpc *welcomeRPC) Invoke(_ context.Context, input bin.Encoder, output bin.D
 
 const expectedWelcomeText = "This fictional demo is refreshed by a weekly data wipe. Explore public notes and groups, then come back after the next reset."
 
+func TestWelcomeSeedMessageUsesCleanRetryKey(t *testing.T) {
+	seeded := welcomeSeedMessage()
+	if seeded.marker != welcomeMarker() || seeded.text != expectedWelcomeText {
+		t.Fatalf("welcome seed message = %+v", seeded)
+	}
+	if got, want := seeded.randomKey, welcomeMarker()+":clean"; got != want {
+		t.Fatalf("welcome random key = %q, want %q", got, want)
+	}
+}
+
 func TestSeedWelcomeIsMarkerFreeAndIdempotent(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
@@ -89,6 +99,7 @@ func TestSeedWelcomeIsMarkerFreeAndIdempotent(t *testing.T) {
 			}
 			api := tg.NewClient(rpc)
 			remote := remoteSpace{channelID: 1, accessHash: 2}
+			seeded := welcomeSeedMessage()
 			for iteration := range 3 {
 				if iteration == 2 {
 					rpc.messages = nil
@@ -121,11 +132,11 @@ func TestSeedWelcomeIsMarkerFreeAndIdempotent(t *testing.T) {
 				if message.Message != expectedWelcomeText || strings.Contains(fmt.Sprint(message.Entities), "[[teagram-demo:") {
 					t.Fatalf("welcome message contains unexpected text or entities: %+v", message)
 				}
-				if err := messageIsPinned(context.Background(), api, remote.peer(), welcomeMarker()); err != nil {
+				if err := messageIsPinned(context.Background(), api, remote.peer(), seeded.marker, seeded); err != nil {
 					t.Fatalf("verify pinned welcome: %v", err)
 				}
-				markers, err := historyMarkers(context.Background(), api, remote.peer())
-				if err != nil || markers[welcomeMarker()] != int64(message.ID) {
+				markers, err := historyMarkers(context.Background(), api, remote.peer(), seeded)
+				if err != nil || markers[seeded.marker] != int64(message.ID) {
 					t.Fatalf("welcome lookup = %v, %v", markers, err)
 				}
 			}

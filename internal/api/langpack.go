@@ -223,7 +223,7 @@ func langpackString(entry catalog.Entry) tg.LangPackStringClass {
 
 func (h *handlers) handleLangpackGetLanguages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.LangpackGetLanguagesRequest
-	if err := req.Decode(r.Buf); err != nil || r.Buf.Len() != 0 {
+	if err := req.Decode(r.BodyBuffer()); err != nil || r.BodyBuffer().Len() != 0 {
 		return nil, errInputRequestInvalid
 	}
 	return h.langpack.getLanguages(req.LangPack)
@@ -231,7 +231,7 @@ func (h *handlers) handleLangpackGetLanguages(r *mtproto.Request) (bin.Encoder, 
 
 func (h *handlers) handleLangpackGetLangPack(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.LangpackGetLangPackRequest
-	if err := req.Decode(r.Buf); err != nil || r.Buf.Len() != 0 {
+	if err := req.Decode(r.BodyBuffer()); err != nil || r.BodyBuffer().Len() != 0 {
 		return nil, errInputRequestInvalid
 	}
 	return h.langpack.getLangPack(req.LangPack, req.LangCode)
@@ -239,7 +239,7 @@ func (h *handlers) handleLangpackGetLangPack(r *mtproto.Request) (bin.Encoder, e
 
 func (h *handlers) handleLangpackGetStrings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.LangpackGetStringsRequest
-	if err := req.Decode(r.Buf); err != nil || r.Buf.Len() != 0 {
+	if err := req.Decode(r.BodyBuffer()); err != nil || r.BodyBuffer().Len() != 0 {
 		return nil, errInputRequestInvalid
 	}
 	return h.langpack.getStrings(req.LangPack, req.LangCode, req.Keys)
@@ -247,7 +247,7 @@ func (h *handlers) handleLangpackGetStrings(r *mtproto.Request) (bin.Encoder, er
 
 func (h *handlers) handleLangpackGetDifference(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.LangpackGetDifferenceRequest
-	if err := req.Decode(r.Buf); err != nil || r.Buf.Len() != 0 {
+	if err := req.Decode(r.BodyBuffer()); err != nil || r.BodyBuffer().Len() != 0 {
 		return nil, errInputRequestInvalid
 	}
 	return h.langpack.getDifference(req.LangPack, req.LangCode, req.FromVersion)
@@ -255,7 +255,7 @@ func (h *handlers) handleLangpackGetDifference(r *mtproto.Request) (bin.Encoder,
 
 func (h *handlers) handleHelpGetNearestDC(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.HelpGetNearestDCRequest
-	if err := req.Decode(r.Buf); err != nil || r.Buf.Len() != 0 {
+	if err := req.Decode(r.BodyBuffer()); err != nil || r.BodyBuffer().Len() != 0 {
 		return nil, errInputRequestInvalid
 	}
 	return h.langpack.nearestDC(), nil

@@ -92,7 +92,7 @@ func chatAvailableReactionsToTL(available store.ChatAvailableReactions) (tg.Chat
 
 func (h *handlers) handleSetChatAvailableReactions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSetChatAvailableReactionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

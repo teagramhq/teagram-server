@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -219,13 +221,33 @@ type rpcAdmission struct {
 	ctx     context.Context
 	release func()
 	cancel  context.CancelFunc
+	refs    atomic.Int32
+}
+
+func (a *rpcAdmission) retain() func() {
+	for refs := a.refs.Load(); refs > 0; refs = a.refs.Load() {
+		if a.refs.CompareAndSwap(refs, refs+1) {
+			var once sync.Once
+			return func() { once.Do(a.finish) }
+		}
+	}
+	return nil
 }
 
 func (a *rpcAdmission) finish() {
+	refs := a.refs.Add(-1)
+	if refs < 0 {
+		panic("rpc admission reference count underflow")
+	}
+	if refs != 0 {
+		return
+	}
 	if a.cancel != nil {
 		a.cancel()
 	}
-	a.release()
+	if a.release != nil {
+		a.release()
+	}
 }
 
 func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
@@ -238,7 +260,9 @@ func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
 	if s.rpcDeadline > 0 {
 		rpcCtx, cancel = context.WithTimeout(ctx, s.rpcDeadline)
 	}
-	return &rpcAdmission{ctx: rpcCtx, release: release, cancel: cancel}, true
+	admission := &rpcAdmission{ctx: rpcCtx, release: release, cancel: cancel}
+	admission.refs.Store(1)
+	return admission, true
 }
 
 // rpcHandle decrypts an encrypted MTProto frame on an established session and
@@ -264,6 +288,14 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	msg, err := s.cipher.Decrypt(c.authKey, m)
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecrypt, fmt.Errorf("decrypt message: %w", err))
+	}
+	if err := c.concurrentRPCs.failure(); err != nil {
+		return err
+	}
+	if c.sessionID != msg.SessionID {
+		if err := c.concurrentRPCs.wait(); err != nil {
+			return err
+		}
 	}
 	// The moment the connection stops being one of the anonymous ones the
 	// pre-auth bounds hold back: the frame's MAC verified under a key this
@@ -296,8 +328,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	// Buffer now holds the plaintext message body.
 	b.ResetTo(msg.Data())
 	c.prefetchPeerFrame()
-
-	return s.handleWithHandler(c, &Request{
+	req := &Request{
 		AuthKeyID:             c.authKey.ID,
 		UserID:                userID,
 		Provisional:           provisional,
@@ -306,10 +337,18 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		ClientAddrFromProxyV2: s.proxyV2 != nil,
 		SessionID:             msg.SessionID,
 		MsgID:                 msg.MessageID,
+		ReceivedAt:            c.frameReceivedAt,
 		seqNo:                 int(msg.SeqNo),
 		Buf:                   b,
 		Ctx:                   ctx,
-	}, handler)
+	}
+	if handler == nil {
+		handler = s.handler
+	}
+	if scheduled, err := s.dispatchConcurrentRPC(c, req, handler); scheduled {
+		return err
+	}
+	return s.handleWithHandler(c, req, handler)
 }
 
 func pingDelayDisconnectReadTimeout(disconnectDelay int, fallback time.Duration) time.Duration {
@@ -343,7 +382,11 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	if c != nil && c.peerLost.Load() {
 		return errPeerDisconnected
 	}
-	in := req.Buf
+	in := req.BodyBuffer()
+	if in == nil {
+		return markRequestFailureCause(requestFailureDecode, errors.New("missing request body"))
+	}
+	req.Body = in
 	id, err := in.PeekID()
 	if err != nil {
 		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
@@ -436,11 +479,15 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 		return nil
 
 	case proto.GZIPTypeID:
-		var content proto.GZIP
-		if err := content.Decode(in); err != nil {
-			return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
+		if req.gzipBody != nil {
+			req.Body = req.gzipBody
+		} else {
+			var content proto.GZIP
+			if err := content.Decode(in); err != nil {
+				return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
+			}
+			req.Body = &bin.Buffer{Buf: content.Data}
 		}
-		req.Buf = &bin.Buffer{Buf: content.Data}
 
 	case proto.MessageContainerTypeID:
 		var container proto.MessageContainer
@@ -461,7 +508,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 		}
 		for i := range container.Messages {
 			m := container.Messages[i]
-			if err := s.handleWithHandler(c, &Request{
+			child := &Request{
 				AuthKeyID:             req.AuthKeyID,
 				UserID:                req.UserID,
 				Provisional:           req.Provisional,
@@ -472,12 +519,20 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 				AuthorizationMetadata: req.AuthorizationMetadata,
 				SessionID:             req.SessionID,
 				MsgID:                 m.ID,
+				ReceivedAt:            req.ReceivedAt,
 				seqNo:                 m.SeqNo,
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
 				admission:             admission,
 				ackQueued:             true,
-			}, handler); err != nil {
+			}
+			if scheduled, err := s.dispatchConcurrentRPC(c, child, handler); scheduled {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.handleWithHandler(c, child, handler); err != nil {
 				return err
 			}
 		}
@@ -511,15 +566,13 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 			cancel()
 			return errPeerDisconnected
 		}
-		defer func() {
-			c.finishActiveRPC(active)
-			cancel()
-		}()
-	} else {
-		defer cancel()
+		defer c.finishActiveRPC(active)
 	}
+	defer cancel()
 	req.Ctx = requestCtx
 	req.CompletionCtx = admission.ctx
+	req.contextCanceled = false
+	defer func() { req.contextCanceled = requestCtx.Err() != nil }()
 
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
 		return s.dispatchRPC(c, req, handler)

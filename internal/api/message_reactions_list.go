@@ -17,7 +17,7 @@ const maxMessageReactionListLimit = 100
 
 func (h *handlers) handleGetMessageReactionsList(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetMessageReactionsListRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

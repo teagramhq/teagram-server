@@ -211,7 +211,7 @@ func (h *handlers) addUserStickerMedia(ctx context.Context, media map[int64]tg.M
 
 func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersCreateStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -451,7 +451,7 @@ func stickerTargetForSet(kind string) (stickervalidation.Target, int, bool) {
 
 func (h *handlers) handleAddStickerToSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersAddStickerToSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -549,7 +549,7 @@ func (h *handlers) handleAddStickerToSet(_ *mtproto.Conn, r *mtproto.Request) (b
 
 func (h *handlers) handleRemoveStickerFromSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersRemoveStickerFromSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -578,7 +578,7 @@ func (h *handlers) handleRemoveStickerFromSet(_ *mtproto.Conn, r *mtproto.Reques
 
 func (h *handlers) handleChangeStickerPosition(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersChangeStickerPositionRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -604,7 +604,7 @@ func (h *handlers) handleChangeStickerPosition(_ *mtproto.Conn, r *mtproto.Reque
 
 func (h *handlers) handleChangeSticker(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersChangeStickerRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -671,7 +671,7 @@ func (h *handlers) handleChangeSticker(_ *mtproto.Conn, r *mtproto.Request) (bin
 
 func (h *handlers) handleSetStickerSetThumb(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersSetStickerSetThumbRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -752,7 +752,7 @@ func (h *handlers) handleSetStickerSetThumb(_ *mtproto.Conn, r *mtproto.Request)
 
 func (h *handlers) handleRenameStickerSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersRenameStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -778,7 +778,7 @@ func (h *handlers) handleRenameStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 
 func (h *handlers) handleDeleteStickerSet(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersDeleteStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkStickerSetMutation(r); err != nil {
@@ -810,7 +810,7 @@ func validMaskCoords(coords tg.MaskCoords) bool {
 
 func (h *handlers) handleCheckStickerSetShortName(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersCheckShortNameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -840,7 +840,7 @@ func (h *handlers) handleCheckStickerSetShortName(_ *mtproto.Conn, r *mtproto.Re
 
 func (h *handlers) handleSuggestStickerSetShortName(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.StickersSuggestShortNameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

@@ -16,7 +16,7 @@ func (h *handlers) handleGetConfig(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleGetConfigWithSystemLangCode(r *mtproto.Request, systemLangCode string) (bin.Encoder, error) {
 	var req tg.HelpGetConfigRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	// Both time fields are stamped per response, not once at startup: a client
@@ -42,7 +42,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetCountriesListRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		if call.Hash == int(helpCountriesListHash) {
@@ -59,7 +59,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetTermsOfServiceUpdateRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		return c.SendResult(req, &tg.HelpTermsOfServiceUpdateEmpty{
@@ -72,7 +72,7 @@ func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
 			return h.handleUnknownGated(c, req)
 		}
 		var call tg.HelpGetPromoDataRequest
-		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+		if err := call.Decode(req.BodyBuffer()); err != nil || req.BodyBuffer().Len() != 0 {
 			return c.SendErr(req, errMethodNotImpl)
 		}
 		return c.SendResult(req, &tg.HelpPromoDataEmpty{

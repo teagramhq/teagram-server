@@ -18,5 +18,6 @@
   "messages.sendMessage private",
   "messages.sendMessage channel",
   "channel post fan-out",
-  "messages.readHistory"
+  "messages.readHistory",
+  "messages.getSearchCounters dispatch wait"
 ]

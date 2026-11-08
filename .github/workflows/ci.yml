@@ -1137,6 +1137,7 @@ jobs:
           bash -n deploy/teagram/ops/cleanup-media.sh
           bash -n deploy/teagram/ops/backup-media-key.sh
           bash -n deploy/teagram/ops/attest-blob-mode-reports.sh
+          bash -n deploy/teagram/ops/quarantine-unaccounted-media.sh
           bash -n deploy/teagram/ops/blob-encryption-common.inc
           bash -n deploy/teagram/test-media-encryption-ops.sh
           bash -n deploy/teagram/test-media-encryption-pg18.sh
@@ -1214,6 +1215,7 @@ jobs:
             deploy/teagram/ops/cleanup-media.sh \
             deploy/teagram/ops/backup-media-key.sh \
             deploy/teagram/ops/attest-blob-mode-reports.sh \
+            deploy/teagram/ops/quarantine-unaccounted-media.sh \
             deploy/teagram/test-start-server.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
@@ -1291,7 +1293,9 @@ jobs:
           bash deploy/teagram/test-bot-api-relays.sh
 
       - name: Check media encryption and cleanup operations
-        run: bash deploy/teagram/test-media-encryption-ops.sh
+        run: |
+          bash deploy/teagram/test-media-encryption-ops.sh
+          python3 -B deploy/teagram/test-quarantine-unaccounted-media.py
 
       - name: Pull PostgreSQL 18 image for media dump validation
         run: >-

@@ -18,7 +18,7 @@ func (h *handlers) handleUploadMedia(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errUploadsDisabled
 	}
 	var req tg.MessagesUploadMediaRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

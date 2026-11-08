@@ -122,6 +122,7 @@ case "$1" in
           -e "s|/tmp/teagram-deploy.lock|$FIXTURE_TMP/deploy.lock|g" "$FIXTURE_COMMON"
         ;;
       "$FIXTURE_SHA:deploy/teagram/ops/bot-api-qa.sh") cat "$FIXTURE_BOT_API_QA" ;;
+      "$FIXTURE_SHA:deploy/teagram/ops/quarantine_unaccounted_media.py") cat "$FIXTURE_QUARANTINE_HELPER" ;;
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
       "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py")
         printf '# fixture helper\n'
@@ -137,6 +138,9 @@ cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1##*/}" in
+  -c)
+    printf '2026-12-07\n'
+    ;;
   blob-transition-runner.py)
     [[ "$2" == deployment-env ]] || exit 99
     jq -cn --arg repo "$FIXTURE_REPO" \
@@ -145,6 +149,18 @@ case "${1##*/}" in
   blob-mode-state.py)
     [[ "$2" == authority ]] || exit 99
     jq -cn --arg outcome "$(cat "$FIXTURE_AUTHORITY_FILE")" '{outcome:$outcome}'
+    ;;
+  quarantine-media.py)
+    printf '%s\n' "$*" >> "$FIXTURE_HELPER_CALLS"
+    if [[ " $* " == *' --mode apply '* ]]; then
+      printf 'quarantine:helper:apply\n' >> "$FIXTURE_EVENTS"
+    fi
+    if [[ "$FIXTURE_SCENARIO" == quarantine-authority-changed-during-apply ]]; then
+      jq '.fixture_mutation = true' "$FIXTURE_REPO/.state/blob-mode/mode.json" > "$FIXTURE_REPO/.state/blob-mode/mode.changed"
+      chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.changed"
+      mv "$FIXTURE_REPO/.state/blob-mode/mode.changed" "$FIXTURE_REPO/.state/blob-mode/mode.json"
+    fi
+    printf 'quarantine=pass fixture\n'
     ;;
   *) echo "unexpected fixture Python helper: $1" >&2; exit 99 ;;
 esac
@@ -205,11 +221,26 @@ case "$1" in
       exit
     fi
     if [[ "$container" == teagram-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
-      if [[ "$FIXTURE_BOT_API_ENABLED" == 1 ]]; then
-        printf '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]\n'
-      else
-        printf '[]\n'
-      fi
+      case "$FIXTURE_SCENARIO" in
+        quarantine-prefix-mismatch)
+          printf '["TG_BLOB_S3_PREFIX=live-prefix/"]\n'
+          ;;
+        quarantine-authority-changed-before-apply|quarantine-authority-changed-during-apply|quarantine-post-check)
+          if [[ "$FIXTURE_SCENARIO" == quarantine-authority-changed-before-apply ]]; then
+            jq '.fixture_mutation = true' "$FIXTURE_REPO/.state/blob-mode/mode.json" > "$FIXTURE_REPO/.state/blob-mode/mode.changed"
+            chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.changed"
+            mv "$FIXTURE_REPO/.state/blob-mode/mode.changed" "$FIXTURE_REPO/.state/blob-mode/mode.json"
+          fi
+          printf '["TG_BLOB_S3_PREFIX=teagramd"]\n'
+          ;;
+        *)
+          if [[ "$FIXTURE_BOT_API_ENABLED" == 1 ]]; then
+            printf '["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]\n'
+          else
+            printf '[]\n'
+          fi
+          ;;
+      esac
       exit
     fi
     if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
@@ -439,7 +470,8 @@ chmod 755 "$TMP/bin/"*
 
 FIXTURE_COMMON=$SCRIPT_DIR/ops/blob-encryption-common.inc
 FIXTURE_BOT_API_QA=$SCRIPT_DIR/ops/bot-api-qa.sh
-export FIXTURE_COMMON FIXTURE_BOT_API_QA
+FIXTURE_QUARANTINE_HELPER=$SCRIPT_DIR/ops/quarantine_unaccounted_media.py
+export FIXTURE_COMMON FIXTURE_BOT_API_QA FIXTURE_QUARANTINE_HELPER
 
 setup_case() {
   local scenario=$1 authority=$2 case_dir
@@ -455,8 +487,11 @@ setup_case() {
   FIXTURE_RUSTFS_STATE=$case_dir/rustfs-state
   FIXTURE_AUTHORITY_FILE=$case_dir/authority
   FIXTURE_RESTORE_CONTAINER=$case_dir/restore-container
+  FIXTURE_QUARANTINE_BASE=$case_dir/quarantine
+  FIXTURE_QUARANTINE_SCRIPT=$case_dir/quarantine-unaccounted-media.sh
   FIXTURE_CLEANUP_CALLS=$case_dir/cleanup-calls
   FIXTURE_ENCRYPT_CALLS=$case_dir/encrypt-calls
+  FIXTURE_HELPER_CALLS=$case_dir/quarantine-helper-calls
   FIXTURE_PLAINTEXT_OBJECT=$case_dir/plaintext-source
   FIXTURE_EVENTS=$case_dir/events
   FIXTURE_SCENARIO=$scenario
@@ -471,6 +506,7 @@ setup_case() {
   export TEAGRAM_BLOB_MODE_REPORT_ROOT
   export FIXTURE_REPO FIXTURE_EVIDENCE FIXTURE_OPERATION_EVIDENCE FIXTURE_LEGACY_EVIDENCE FIXTURE_KEY_DIR FIXTURE_KEY_BACKUP_PARENT FIXTURE_POSTGRES_STATE \
     FIXTURE_SERVER_STATE FIXTURE_RUSTFS_STATE FIXTURE_AUTHORITY_FILE FIXTURE_RESTORE_CONTAINER \
+    FIXTURE_QUARANTINE_BASE FIXTURE_QUARANTINE_SCRIPT FIXTURE_HELPER_CALLS \
     FIXTURE_CLEANUP_CALLS FIXTURE_ENCRYPT_CALLS FIXTURE_PLAINTEXT_OBJECT FIXTURE_EVENTS FIXTURE_SCENARIO \
     FIXTURE_COMPOSE_FILES FIXTURE_BOT_API_ENABLED
 
@@ -509,7 +545,12 @@ setup_case() {
     -e "s|/etc/teagramd/media-keys|$FIXTURE_KEY_DIR|g" \
     -e "s|/tmp/teagram-deploy.lock|$case_dir/deploy.lock|g" \
     "$SCRIPT_DIR/ops/cleanup-media.sh" > "$case_dir/cleanup-media.sh"
-  chmod 755 "$case_dir/encrypt-media.sh" "$case_dir/cleanup-media.sh"
+  sed -e "s|/opt/teagram|$FIXTURE_REPO|g" \
+    -e "s|/root|$FIXTURE_EVIDENCE|g" \
+    -e "s|/var/lib/teagram-plaintext-quarantine|$FIXTURE_QUARANTINE_BASE|g" \
+    -e "s|/tmp/teagram-deploy.lock|$case_dir/deploy.lock|g" \
+    "$SCRIPT_DIR/ops/quarantine-unaccounted-media.sh" > "$FIXTURE_QUARANTINE_SCRIPT"
+  chmod 755 "$case_dir/encrypt-media.sh" "$case_dir/cleanup-media.sh" "$FIXTURE_QUARANTINE_SCRIPT"
 
   if [[ "$authority" == encrypted ]]; then
     setup_encrypted_authority
@@ -573,6 +614,14 @@ run_cleanup() {
   local status=0 output
   output=$(env OPS_SHA="$FIXTURE_SHA" PATH="$TMP/bin:$PATH" \
     bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/cleanup-media.sh" "$@" 2>&1) || status=$?
+  printf '%s\n' "$status" > "$TMP/operation-status"
+  printf '%s\n' "$output"
+}
+
+run_quarantine() {
+  local status=0 output
+  output=$(env OPS_SHA="$FIXTURE_SHA" PATH="$TMP/bin:$PATH" \
+    bash "$FIXTURE_QUARANTINE_SCRIPT" "$@" 2>&1) || status=$?
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$output"
 }
@@ -850,3 +899,41 @@ done
 [[ "$diagnostic_count" == 1 ]]
 [[ "$(cat "$FIXTURE_EVENTS")" != *'stop:server'* ]]
 printf '%s\n' 'PASS Compose render diagnostics persist privately after the operation exits'
+
+setup_case quarantine-prefix-mismatch encrypted
+output=$(run_quarantine --apply)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'running teagramd S3 prefix differs from the live Compose render'* ]]
+[[ ! -e "$FIXTURE_HELPER_CALLS" ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
+printf '%s\n' 'PASS quarantine refuses a live S3 prefix mismatch before invoking apply'
+
+setup_case quarantine-post-check encrypted
+post_run_id=20261107T120000Z-1234-abcdef0
+mkdir -m 700 "$FIXTURE_QUARANTINE_BASE"
+mkdir -m 700 "$FIXTURE_QUARANTINE_BASE/MAIN-3441-$post_run_id"
+output=$(run_quarantine --check-post "$post_run_id")
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'quarantine=pass fixture'* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *'--mode check-post'* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--run-id $post_run_id"* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--mount-dir $FIXTURE_QUARANTINE_BASE/MAIN-3441-$post_run_id"* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *"--journal $FIXTURE_EVIDENCE/blob-encryption-progress.jsonl"* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
+printf '%s\n' 'PASS post-quarantine check targets the original verified run without applying'
+
+setup_case quarantine-authority-changed-before-apply encrypted
+output=$(run_quarantine --apply)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'encrypted authority changed before media quarantine'* ]]
+[[ ! -e "$FIXTURE_HELPER_CALLS" ]]
+[[ "$(cat "$FIXTURE_EVENTS")" != *'quarantine:helper:apply'* ]]
+printf '%s\n' 'PASS quarantine refuses authority drift before invoking apply'
+
+setup_case quarantine-authority-changed-during-apply encrypted
+output=$(run_quarantine --apply)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'encrypted authority changed during media quarantine'* ]]
+[[ "$(cat "$FIXTURE_HELPER_CALLS")" == *'--mode apply'* ]]
+[[ "$(cat "$FIXTURE_EVENTS")" == *'quarantine:helper:apply'* ]]
+printf '%s\n' 'PASS quarantine catches authority drift after the fixture helper returns'

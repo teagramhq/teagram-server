@@ -12,7 +12,7 @@ import (
 
 func (h *handlers) handleGetSavedReactionTags(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetSavedReactionTagsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -23,7 +23,7 @@ func (h *handlers) handleGetSavedReactionTags(r *mtproto.Request) (bin.Encoder, 
 
 func (h *handlers) handleGetAttachMenuBots(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetAttachMenuBotsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -37,7 +37,7 @@ func (h *handlers) handleGetAttachMenuBots(r *mtproto.Request) (bin.Encoder, err
 
 func (h *handlers) handleGetAllDrafts(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetAllDraftsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -120,7 +120,7 @@ func (h *handlers) handleGetAllDrafts(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleReceivedMessages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReceivedMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -131,7 +131,7 @@ func (h *handlers) handleReceivedMessages(r *mtproto.Request) (bin.Encoder, erro
 
 func (h *handlers) handleGetJoinedCommunities(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.CommunitiesGetJoinedCommunitiesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
