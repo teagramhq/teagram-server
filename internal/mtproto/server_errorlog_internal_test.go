@@ -162,10 +162,10 @@ func TestExchangeFailureDiagnostics(t *testing.T) {
 			if isDisconnect(err) {
 				t.Fatalf("synthetic send failure %v was filtered as a disconnect", err)
 			}
-			server.logConnectionFailure(err)
-			server.logConnectionFailure(err)
+			server.logConnectionFailure(err, nil)
+			server.logConnectionFailure(err, nil)
 			server.exchangeErrorLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
-			server.logConnectionFailure(err)
+			server.logConnectionFailure(err, nil)
 
 			var exchangeRecords []serverErrorLogRecord
 			for _, record := range sink.records {
@@ -223,7 +223,7 @@ func TestExchangeFailureDiagnostics(t *testing.T) {
 		if err == nil {
 			t.Fatal("runExchange returned nil after failed lookup-miss response")
 		}
-		server.logConnectionFailure(err)
+		server.logConnectionFailure(err, nil)
 		for _, record := range sink.records {
 			if record.message != "server operation failed" {
 				continue
@@ -360,7 +360,7 @@ func TestExchangeFailureDiagnostics(t *testing.T) {
 		if err == nil {
 			t.Fatal("runExchange returned nil after random source failure")
 		}
-		server.logConnectionFailure(err)
+		server.logConnectionFailure(err, nil)
 		var record *serverErrorLogRecord
 		for i := range sink.records {
 			if sink.records[i].message == "server operation failed" {
@@ -415,7 +415,7 @@ func TestExchangeFailureDiagnostics(t *testing.T) {
 			}
 			if !isDisconnect(wrapped) {
 				t.Errorf("wrapped disconnect %T was not filtered", err)
-				server.logConnectionFailure(wrapped)
+				server.logConnectionFailure(wrapped, nil)
 			}
 		}
 		for _, record := range sink.records {
@@ -482,9 +482,9 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		server.logConnectionFailure(test.err)
+		server.logConnectionFailure(test.err, nil)
 	}
-	server.logConnectionFailure(tests[0].err)
+	server.logConnectionFailure(tests[0].err, nil)
 	if len(sink.records) != len(tests) {
 		t.Fatalf("records after sampled repeats = %d, want %d", len(sink.records), len(tests))
 	}
@@ -513,7 +513,7 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 	}
 
 	server.keyPersistenceErrorLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
-	server.logConnectionFailure(tests[0].err)
+	server.logConnectionFailure(tests[0].err, nil)
 	if len(sink.records) != len(tests)+1 {
 		t.Fatalf("records after persistence sample window = %d, want %d", len(sink.records), len(tests)+1)
 	}
@@ -757,7 +757,7 @@ func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testi
 }
 
 func TestTransportCloseDiagnosticsTracksLatestHandshakeProgress(t *testing.T) {
-	diagnostics := newTransportCloseDiagnostics("/apiws")
+	diagnostics := newTransportCloseDiagnostics("/apiws", "")
 	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
 	diagnostics.observeResponse(mt.ResPQTypeID)
 	diagnostics.observeRequest(mt.ReqDHParamsRequestTypeID)
@@ -776,8 +776,8 @@ func TestConnectionFailureLogsAuthKeyLookupWithSampledCategory(t *testing.T) {
 	const rawDetail = "UNTRUSTED-LOOKUP-ERROR"
 	err := errors.Join(errAuthKeyExchangeFailure, errAuthKeyLookupFailure, errors.New(rawDetail))
 
-	server.logConnectionFailure(err)
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
+	server.logConnectionFailure(err, nil)
 	if len(sink.records) != 1 {
 		t.Fatalf("records after sampled lookup repeats = %d, want 1", len(sink.records))
 	}
@@ -789,7 +789,7 @@ func TestConnectionFailureLogsAuthKeyLookupWithSampledCategory(t *testing.T) {
 	}
 
 	server.authKeyLookupErrorLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	if len(sink.records) != 2 {
 		t.Fatalf("records after lookup sample window = %d, want 2", len(sink.records))
 	}
@@ -829,7 +829,7 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded after auth.signIn failure")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -887,7 +887,7 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 		frame: shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 7}),
 		err:   errors.New(rawError),
 	}
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
@@ -895,7 +895,7 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 	if err == nil {
 		t.Fatal("WebSocket serve loop succeeded after forced read failure")
 	}
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	server.logTransportClose(diagnostics, err)
 
 	var failureRecord, closeRecord *serverErrorLogRecord
@@ -952,7 +952,7 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	peerAddr := netip.MustParseAddr("203.0.113.37")
 	frame := make([]byte, 16)
 	frame[0] = 1
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{frame: frame}), peerAddr, nil, nil, false, nil, diagnostics,
 	)
@@ -962,7 +962,7 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	if isWebSocketDisconnect(err) {
 		t.Fatalf("auth-key lookup EOF = %v, want server failure", err)
 	}
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	server.logTransportClose(diagnostics, err)
 
 	var failureRecord, closeRecord *serverErrorLogRecord
@@ -999,12 +999,12 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 func TestWebSocketAuthKeyPersistenceUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 	err := errors.Join(errAuthKeyPersistenceFailure, io.ErrUnexpectedEOF)
 	if isWebSocketDisconnect(err) {
 		t.Fatalf("auth-key persistence EOF = %v, want server failure", err)
 	}
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	server.logTransportClose(diagnostics, err)
 
 	var failure, closeRecord *serverErrorLogRecord
@@ -1070,12 +1070,12 @@ func TestWebSocketProcessingEOFRemainsServerFailure(t *testing.T) {
 			t.Run(test.name+"/"+eof.name, func(t *testing.T) {
 				sink := &serverErrorLogSink{}
 				server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-				diagnostics := newTransportCloseDiagnostics(websocketPath)
+				diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 				err := newWebSocketServeFailure(test.stage, test.wrap(eof.err), peerAddr, diagnostics)
 				if isWebSocketDisconnect(err) {
 					t.Fatalf("processing error = %v, want server failure", err)
 				}
-				server.logConnectionFailure(err)
+				server.logConnectionFailure(err, nil)
 				server.logTransportClose(diagnostics, err)
 
 				var failure, closeRecord *serverErrorLogRecord
@@ -1130,7 +1130,7 @@ func TestWebSocketTransportReadEOFIsMarkedAtOrigin(t *testing.T) {
 func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{err: io.ErrUnexpectedEOF}),
 		netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
@@ -1168,7 +1168,7 @@ func TestWebSocketKeyExchangeUnexpectedEOFRemainsClientDisconnect(t *testing.T) 
 	}
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 	err = server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{
 			frame: exchangeRequestFrame(t),
@@ -1186,7 +1186,7 @@ func TestWebSocketKeyExchangeUnexpectedEOFRemainsClientDisconnect(t *testing.T) 
 		t.Fatalf("key-exchange diagnostics = (%q, %q), want (%q, %q)", failure.stage, failure.cause, exchangeStageReadReqDH, exchangeCausePeerClose)
 	}
 	if !isWebSocketDisconnect(err) {
-		server.logConnectionFailure(err)
+		server.logConnectionFailure(err, nil)
 		t.Errorf("key-exchange unexpected EOF = %v, want WebSocket disconnect", err)
 	}
 	server.logTransportClose(diagnostics, err)
@@ -1240,14 +1240,14 @@ func TestWebSocketIdleReadTimeoutKeepsIdleTimeoutCategory(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	conn := &serverLoopFailureConn{err: errIdleReadTimeout}
-	diagnostics := newTransportCloseDiagnostics(websocketPath)
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 	)
 	if err == nil {
 		t.Fatal("WebSocket serve loop succeeded after idle timeout")
 	}
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 
 	var record *serverErrorLogRecord
 	for i := range sink.records {
@@ -1383,14 +1383,14 @@ func TestWebSocketReadFrameFailuresLogAllowlistedCause(t *testing.T) {
 			sink := &serverErrorLogSink{}
 			server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 			conn := &serverLoopFailureConn{err: tt.err}
-			diagnostics := newTransportCloseDiagnostics(websocketPath)
+			diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 			err := server.serveConnModeWithDiagnostics(
 				context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 			)
 			if err == nil {
 				t.Fatal("WebSocket serve loop succeeded after forced read failure")
 			}
-			server.logConnectionFailure(err)
+			server.logConnectionFailure(err, nil)
 
 			if len(sink.records) != 1 {
 				t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1429,7 +1429,7 @@ func TestWebSocketExchangeFailuresLogAllowlistedCause(t *testing.T) {
 			server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 			conn := &serverLoopFailureConn{frame: exchangeRequestFrame(t), err: tt.err}
 			peerAddr := netip.MustParseAddr("203.0.113.37")
-			diagnostics := newTransportCloseDiagnostics(websocketPath)
+			diagnostics := newTransportCloseDiagnostics(websocketPath, "")
 			err := server.serveConnModeWithDiagnostics(
 				context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
 			)
@@ -1439,7 +1439,7 @@ func TestWebSocketExchangeFailuresLogAllowlistedCause(t *testing.T) {
 			if diagnostic, ok := errors.AsType[*exchangeFailureError](err); !ok || diagnostic == nil {
 				t.Fatalf("error = %T, want exchangeFailureError", err)
 			}
-			server.logConnectionFailure(err)
+			server.logConnectionFailure(err, nil)
 
 			var record *serverErrorLogRecord
 			for i := range sink.records {
@@ -1477,7 +1477,7 @@ func TestUnknownMethodDecodeFailureLogsDecodeCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded with a truncated request constructor")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1501,7 +1501,7 @@ func TestUnregisteredMethodFailureLogsUnknownMethodCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded with an unregistered request constructor")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1532,7 +1532,7 @@ func TestUnknownRPCFailureLogIncludesConstructorTypeID(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded after the unknown RPC failed")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1558,7 +1558,7 @@ func TestUnregisteredKnownMethodFailureLogsDecodedName(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded with an unregistered known request constructor")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1598,7 +1598,7 @@ func TestWrappedUnknownMethodFailureLogsUnknown(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded with a wrapped unknown request constructor")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1626,7 +1626,7 @@ func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded after help.getAppConfig returned a plain error")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1675,7 +1675,7 @@ func TestDecodedRPCFailureBeforeDispatchLogsMethod(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded after the bad-message response write failed")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1709,7 +1709,7 @@ func TestResponseEncodingFailureLogNamesCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("handle succeeded after response encoding failed")
 	}
-	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err), nil)
 
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
@@ -1729,7 +1729,7 @@ func TestRequestFailureLogIncludesSafeRPCErrorCode(t *testing.T) {
 	req := &Request{rpcMethod: "messages.getDialogs"}
 	err := errors.Join(errRequestHandlingFailure, requestFailureContext(req, tgerr.New(500, rawError)))
 
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
 	}
@@ -1754,7 +1754,7 @@ func TestRequestFailureLogWithoutContextIncludesSafeRPCCode(t *testing.T) {
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	err := errors.Join(errRequestHandlingFailure, tgerr.New(500, rawError))
 
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	if len(sink.records) != 1 {
 		t.Fatalf("failure records = %d, want 1", len(sink.records))
 	}

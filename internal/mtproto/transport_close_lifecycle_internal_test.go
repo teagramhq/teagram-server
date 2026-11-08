@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto/codec"
@@ -100,6 +101,71 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 		}
 	}
 	assertSingleTransportCloseRecord(t, sink.records, "TCP", "none", "client close")
+}
+
+func TestServeLogsOpenAndCloseWithAcceptedConnectionID(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(ctx, listener) }()
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		cancel()
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	if _, err := client.Write([]byte{0x01}); err != nil {
+		t.Fatalf("write non-discovery prefix: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+
+	var opened, closed *serverErrorLogRecord
+	deadline := time.After(3 * time.Second)
+	for opened == nil || closed == nil {
+		select {
+		case record := <-sink.events:
+			switch record.message {
+			case "transport connection opened":
+				opened = &record
+			case "transport connection closed":
+				closed = &record
+			}
+		case <-deadline:
+			cancel()
+			t.Fatalf("timed out waiting for open and close records; opened=%+v closed=%+v", opened, closed)
+		}
+	}
+	connectionID, ok := opened.attrs["connection_id"].(string)
+	if !ok || connectionID == "" {
+		t.Fatalf("open record connection_id = %v, want non-empty string", opened.attrs["connection_id"])
+	}
+	if got := closed.attrs["connection_id"]; got != connectionID {
+		t.Errorf("close record connection_id = %v, want accepted connection id %q", got, connectionID)
+	}
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not stop after cancellation")
+	}
 }
 
 func TestServeSocketLogsAuthenticatedIdleTimeoutContext(t *testing.T) {
@@ -225,6 +291,182 @@ drain:
 	if !ok || closedAt.Before(readDeadline) {
 		t.Fatalf("closed_at = %v, want at or after read deadline %s", failure.attrs["closed_at"], readDeadline)
 	}
+	assertTransportCloseRecord(t, *closed, "TCP", "none", "timeout")
+}
+
+func TestServeSocketLogsLatestUnknownAuthKeyFrameBeforeIdleTimeout(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(t.Context(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.authenticatedReadTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+
+	clientConn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := idleReadPingFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send authenticated ping: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var unknownRaw crypto.Key
+	for i := range unknownRaw {
+		unknownRaw[i] = byte(i + 91)
+	}
+	unknownKey := unknownRaw.WithID()
+	unknownSentAt := time.Now()
+	unknownFrame := idleReadPingFrame(t, unknownKey, 42, 2<<32, &mt.PingRequest{PingID: 2})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: unknownFrame}); err != nil {
+		t.Fatalf("send unknown-auth-key frame: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after the idle timeout")
+	}
+
+	var failure *serverErrorLogRecord
+drain:
+	for {
+		select {
+		case record := <-sink.events:
+			if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {
+				failure = &record
+			}
+		default:
+			break drain
+		}
+	}
+	if failure == nil {
+		t.Fatalf("no idle-timeout record in logs")
+	}
+	lastFrame, ok := failure.attrs["last_frame_received_at"].(time.Time)
+	if !ok || lastFrame.Before(unknownSentAt.Add(-10*time.Millisecond)) {
+		t.Errorf("last_frame_received_at = %v, want the later unknown-key read near %s", failure.attrs["last_frame_received_at"], unknownSentAt)
+	}
+	if failure.attrs["auth_key_id"] != hex.EncodeToString(key.ID[:]) {
+		t.Errorf("idle-timeout auth_key_id = %v, want authenticated key %s", failure.attrs["auth_key_id"], hex.EncodeToString(key.ID[:]))
+	}
+}
+
+func TestServeSocketLogsPingDelayDisconnectDeadlineSource(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(t.Context(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.authenticatedReadTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+	clientConn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := idleReadPingFrame(t, key, 42, 1<<32, &mt.PingDelayDisconnectRequest{PingID: 1, DisconnectDelay: 1})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send ping_delay_disconnect: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after ping_delay_disconnect deadline")
+	}
+
+	var failure *serverErrorLogRecord
+drain:
+	for {
+		select {
+		case record := <-sink.events:
+			if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {
+				failure = &record
+			}
+		default:
+			break drain
+		}
+	}
+	if failure == nil {
+		t.Fatalf("no idle-timeout record in logs")
+	}
+	if got := failure.attrs["deadline_source"]; got != "client_ping_delay_disconnect" {
+		t.Errorf("deadline_source = %v, want client_ping_delay_disconnect", got)
+	}
+	readDeadline, ok := failure.attrs["read_deadline"].(time.Time)
+	if !ok || readDeadline.IsZero() {
+		t.Errorf("read_deadline = %v, want a timestamp", failure.attrs["read_deadline"])
+	}
+	lastFrame, ok := failure.attrs["last_frame_received_at"].(time.Time)
+	if !ok || readDeadline.Sub(lastFrame) < 900*time.Millisecond || readDeadline.Sub(lastFrame) > 1100*time.Millisecond {
+		t.Errorf("read_deadline = %v, want about one second after last_frame_received_at %v", readDeadline, lastFrame)
+	}
 }
 
 func TestReadReqDHTimeoutLogsStageTiming(t *testing.T) {
@@ -234,10 +476,9 @@ func TestReadReqDHTimeoutLogsStageTiming(t *testing.T) {
 	}
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(transportTCP)
 	connectionID := server.newConnectionID()
 	openedAt := time.Now()
-	diagnostics.connectionID = connectionID
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
 	server.logConnectionOpened(transportTCP, connectionID, openedAt)
 	conn := &serverLoopFailureConn{err: context.DeadlineExceeded}
 	first := &bin.Buffer{Buf: exchangeRequestFrame(t)}
@@ -1025,9 +1266,12 @@ func assertTransportCloseRecord(t *testing.T, record serverErrorLogRecord, trans
 	}
 	allowed := map[string]struct{}{
 		"transport": {}, "step": {}, "reason": {}, "suppressed": {},
-		"connection_id": {}, "closed_at": {}, "auth_key_id": {}, "session_id": {},
-		"last_frame_received_at": {}, "read_deadline": {}, "deadline_source": {},
+		"connection_id": {}, "closed_at": {},
 		"stage": {}, "stage_started_at": {}, "gave_up_at": {},
+	}
+	if transport == websocketPath {
+		allowed["auth_key_id"] = struct{}{}
+		allowed["peer_addr"] = struct{}{}
 	}
 	for key := range record.attrs {
 		if _, ok := allowed[key]; !ok {

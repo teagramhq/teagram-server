@@ -254,7 +254,7 @@ func TestPingDelayDisconnectExpiresAfterRequestedDelay(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 900*time.Millisecond || elapsed > 1500*time.Millisecond {
 		t.Fatalf("idle connection closed after %s, want about the requested 1 second", elapsed)
 	}
-	server.logConnectionFailure(err)
+	server.logConnectionFailure(err, nil)
 	var idleTimeoutRecords []serverErrorLogRecord
 	for _, record := range sink.records {
 		if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {

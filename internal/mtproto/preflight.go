@@ -245,10 +245,10 @@ func probePreflight(sock net.Conn, deadline time.Time) (preflightProbe, error) {
 // It deliberately runs before codec detection and never touches auth-key,
 // session, handler or store state. deadline is the original absolute
 // pre-auth deadline, which the response may not extend.
-func (s *Server) servePreflight(ctx context.Context, sock net.Conn, nonce [discovery.NonceSize]byte, deadline time.Time, connectionIDs ...string) error {
+func (s *Server) servePreflight(ctx context.Context, sock net.Conn, nonce [discovery.NonceSize]byte, deadline time.Time, connectionID string) error {
 	connectionIDAttrs := []any(nil)
-	if len(connectionIDs) > 0 && connectionIDs[0] != "" {
-		connectionIDAttrs = []any{"connection_id", connectionIDs[0]}
+	if connectionID != "" {
+		connectionIDAttrs = []any{"connection_id", connectionID}
 	}
 	stop := context.AfterFunc(ctx, func() {
 		if closeErr := sock.Close(); closeErr != nil && !isDisconnect(closeErr) {

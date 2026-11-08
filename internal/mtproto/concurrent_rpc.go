@@ -215,7 +215,7 @@ func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler, releas
 				"error", safeRPCErrorName(err),
 				"suppressed", dropped)
 		}
-		s.logConnectionFailure(err, &transportCloseDiagnostics{connectionID: c.connectionID})
+		s.logConnectionFailure(err, newTransportCloseDiagnostics(transportTCP, c.connectionID))
 	}
 }
 

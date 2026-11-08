@@ -540,7 +540,6 @@ acceptLoop:
 		backoff = 0
 		connectionID := s.newConnectionID()
 		openedAt := time.Now()
-		s.logConnectionOpened(transportTCP, connectionID, openedAt)
 		if s.shutdown.draining() {
 			s.dropRefused(sock, connectionID)
 			break
@@ -557,7 +556,7 @@ acceptLoop:
 			}
 			continue
 		}
-		workers.Go(func() { s.serveSocketWithIdentity(sock, slot, connectionID) })
+		workers.Go(func() { s.serveSocketWithIdentity(sock, slot, connectionID, openedAt) })
 	}
 
 	s.shutdown.beginDrain()
@@ -603,13 +602,11 @@ func (s *Server) logConnectionOpened(transportName, connectionID string, openedA
 func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	connectionID := s.newConnectionID()
 	openedAt := time.Now()
-	s.logConnectionOpened(transportTCP, connectionID, openedAt)
-	s.serveSocketWithIdentity(sock, slot, connectionID)
+	s.serveSocketWithIdentity(sock, slot, connectionID, openedAt)
 }
 
-func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, connectionID string) {
-	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
-	closeDiagnostics.connectionID = connectionID
+func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, connectionID string, openedAt time.Time) {
+	closeDiagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
 	var closeErr error
 	logCloseDiagnostics := true
 	readCtx := s.shutdown.requestCtx
@@ -734,6 +731,7 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 		}
 		return
 	}
+	s.logConnectionOpened(transportTCP, connectionID, openedAt)
 	probe, err := probePreflight(sock, handshakeDeadline)
 	if err != nil {
 		closeErr = err
@@ -786,14 +784,10 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 	}
 }
 
-func (s *Server) logConnectionFailure(err error, transportDiagnostics ...*transportCloseDiagnostics) {
+func (s *Server) logConnectionFailure(err error, closeDiagnostics *transportCloseDiagnostics) {
 	if diagnostic, ok := errors.AsType[*webSocketServeFailureError](err); ok && diagnostic != nil {
 		s.logWebSocketServeFailure(diagnostic)
 		return
-	}
-	var closeDiagnostics *transportCloseDiagnostics
-	if len(transportDiagnostics) > 0 {
-		closeDiagnostics = transportDiagnostics[0]
 	}
 	if closeDiagnostics != nil && closeDiagnostics.closedAt.IsZero() {
 		closeDiagnostics.closedAt = time.Now()
@@ -1197,21 +1191,6 @@ func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err e
 			attrs = append(attrs, "gave_up_at", diagnostics.exchangeGaveUpAt)
 		}
 	}
-	if diagnostics.hasAuthKeyID && diagnostics.transport != websocketPath {
-		attrs = append(attrs, "auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]))
-	}
-	if diagnostics.hasSessionID {
-		attrs = append(attrs, "session_id", diagnostics.sessionID)
-	}
-	if !diagnostics.lastFrameReceivedAt.IsZero() {
-		attrs = append(attrs, "last_frame_received_at", diagnostics.lastFrameReceivedAt)
-	}
-	if !diagnostics.readDeadline.IsZero() {
-		attrs = append(attrs, "read_deadline", diagnostics.readDeadline)
-	}
-	if diagnostics.deadlineSource != "" {
-		attrs = append(attrs, "deadline_source", diagnostics.deadlineSource)
-	}
 	if diagnostics.transport == websocketPath && diagnostics.hasAuthKeyID {
 		attrs = append(attrs,
 			"auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]),
@@ -1334,7 +1313,7 @@ func (s *Server) logAuthKeyNotFound(reason authKeyNotFoundReason, id [8]byte, pe
 // unauthenticated, so a line each is a log an attacker writes as fast as it can
 // open sockets. The line that does come out says how many it stands for, or the
 // bound would turn a flood into silence.
-func (s *Server) logNegotiation(err error, transportDiagnostics ...*transportCloseDiagnostics) {
+func (s *Server) logNegotiation(err error, diagnostics *transportCloseDiagnostics) {
 	if s.rpcTracer != nil {
 		s.rpcTracer.recordTransportNegotiationError()
 	}
@@ -1342,10 +1321,9 @@ func (s *Server) logNegotiation(err error, transportDiagnostics ...*transportClo
 		return
 	}
 	if dropped, ok := s.negotiationLog.allow(time.Now(), negotiationLogInterval); ok {
-		attrs := []any{"err", err, "suppressed", dropped}
-		if len(transportDiagnostics) > 0 {
-			attrs = append(attrs, connectionIDLogAttrs(transportDiagnostics[0])...)
-		}
+		attrs := make([]any, 0, 6)
+		attrs = append(attrs, "err", err, "suppressed", dropped)
+		attrs = append(attrs, connectionIDLogAttrs(diagnostics)...)
 		s.log.Info("transport negotiation error", attrs...)
 	}
 }
@@ -1353,11 +1331,11 @@ func (s *Server) logNegotiation(err error, transportDiagnostics ...*transportClo
 // dropRefused closes a socket refused by a pre-auth bound. Closing is the whole
 // of a refusal: nothing is written back, because a peer past a cap is not owed
 // an answer and writing one is work the refusal exists to avoid.
-func (s *Server) dropRefused(sock net.Conn, connectionIDs ...string) {
+func (s *Server) dropRefused(sock net.Conn, connectionID string) {
 	if err := sock.Close(); err != nil && !isDisconnect(err) {
 		attrs := []any{"err", err}
-		if len(connectionIDs) > 0 && connectionIDs[0] != "" {
-			attrs = append(attrs, "connection_id", connectionIDs[0])
+		if connectionID != "" {
+			attrs = append(attrs, "connection_id", connectionID)
 		}
 		s.log.Info("close refused connection", attrs...)
 	}
@@ -1407,7 +1385,7 @@ func (s *Server) serveConnWithHandlerContextsAndTransport(readCtx, requestCtx co
 }
 
 func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, transportName string, handler Handler) (rErr error) {
-	closeDiagnostics := newTransportCloseDiagnostics(transportName)
+	closeDiagnostics := newTransportCloseDiagnostics(transportName, "")
 	defer func() {
 		s.logTransportClose(closeDiagnostics, rErr)
 	}()
@@ -1416,14 +1394,14 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 
 func (s *Server) serveConnWithHandlerContextsAndTransportDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	if closeDiagnostics == nil {
-		closeDiagnostics = newTransportCloseDiagnostics(transportName)
+		closeDiagnostics = newTransportCloseDiagnostics(transportName, "")
 	}
 	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler, closeDiagnostics)
 }
 
 func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	if closeDiagnostics == nil {
-		closeDiagnostics = newTransportCloseDiagnostics(transportTCP)
+		closeDiagnostics = newTransportCloseDiagnostics(transportTCP, "")
 	}
 	if closeDiagnostics.transport == websocketPath {
 		closeDiagnostics.setPeerAddr(clientAddr)
@@ -1709,6 +1687,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			}
 			return err
 		}
+		closeDiagnostics.lastFrameReceivedAt = conn.frameReceivedAt
 		firstFrame = false
 		if s.shutdown.draining() {
 			retire()
@@ -1865,7 +1844,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			}
 			return errors.Join(errRequestHandlingFailure, err)
 		}
-		closeDiagnostics.observeAuthenticatedFrame(conn.authKey.ID, conn.sessionID, conn.frameReceivedAt)
+		closeDiagnostics.observeAuthenticatedFrame(conn.authKey.ID, conn.sessionID)
 		// A successful fresh signIn is the only transition that can move the
 		// pending start time forward. Its committed database timestamp has
 		// already been placed on the connection by the API handler. Keep the
@@ -2059,7 +2038,7 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	return nil
 }
 
-func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error, connectionIDs ...string) {
+func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error, connectionID string) {
 	dropped, ok := s.exchangeBudgetLog.allow(time.Now(), preAuthLogInterval)
 	if !ok {
 		return
@@ -2069,8 +2048,8 @@ func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimit
 		listenerName = "public"
 	}
 	attrs := []any{"layer", layer, "listener", listenerName, "suppressed", dropped}
-	if len(connectionIDs) > 0 && connectionIDs[0] != "" {
-		attrs = append(attrs, "connection_id", connectionIDs[0])
+	if connectionID != "" {
+		attrs = append(attrs, "connection_id", connectionID)
 	}
 	if err != nil {
 		attrs = append(attrs, "err", err)

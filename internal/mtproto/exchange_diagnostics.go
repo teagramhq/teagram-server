@@ -117,8 +117,8 @@ func classifyTransportCloseReason(err error) transportCloseReason {
 	return transportCloseReasonServerError
 }
 
-func newTransportCloseDiagnostics(transport string) *transportCloseDiagnostics {
-	return &transportCloseDiagnostics{transport: transport, step: transportCloseStepNone}
+func newTransportCloseDiagnostics(transport, connectionID string) *transportCloseDiagnostics {
+	return &transportCloseDiagnostics{transport: transport, step: transportCloseStepNone, connectionID: connectionID}
 }
 
 func (d *transportCloseDiagnostics) observeRequest(id uint32) {
@@ -154,11 +154,10 @@ func (d *transportCloseDiagnostics) observeAuthKeyID(id [8]byte) {
 	d.hasAuthKeyID = id != ([8]byte{})
 }
 
-func (d *transportCloseDiagnostics) observeAuthenticatedFrame(authKeyID [8]byte, sessionID int64, receivedAt time.Time) {
+func (d *transportCloseDiagnostics) observeAuthenticatedFrame(authKeyID [8]byte, sessionID int64) {
 	d.observeAuthKeyID(authKeyID)
 	d.sessionID = sessionID
 	d.hasSessionID = true
-	d.lastFrameReceivedAt = receivedAt
 }
 
 func (d *transportCloseDiagnostics) observeReadTimeout(readDeadline time.Time, deadlineSource string, closedAt time.Time) {

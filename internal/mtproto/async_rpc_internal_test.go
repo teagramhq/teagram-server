@@ -946,8 +946,7 @@ func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
 	server.log = slog.New(&asyncRPCContextLogHandler{sink: sink})
 	closeErr := errors.New("injected connection close failure")
 	conn := &asyncRPCFrameCloseErrorConn{asyncRPCFrameConn: frameConn, closeErr: closeErr}
-	diagnostics := newTransportCloseDiagnostics(transportTCP)
-	diagnostics.connectionID = connectionID
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
 	server.logConnectionOpened(transportTCP, connectionID, time.Now())
 	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
 
