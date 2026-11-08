@@ -76,6 +76,18 @@ remain as defense in depth.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
+### Browser-only WebSocket threat model
+
+The public `/apiws` Origin allowlist blocks browser pages served from unapproved
+origins and rejects WebSocket clients that omit Origin. The intended browser
+origins are `https://demo.teagram.io` and `https://web.teagram.io`. Origin is
+not authentication: a non-browser client can forge it, so the existing
+MTProto authentication, authorization, and rate limits remain necessary. This
+control does not protect against compromise of an allowed origin or stolen
+credentials. Demo seed and activity traffic use the private MTProto TCP path,
+not this public WebSocket endpoint. Deploy smoke tests check the no-Origin
+refusal and successful public handshakes from both allowed origins.
+
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the Siteverify
 secret to `/var/lib/teagram-demo/secrets/turnstile-secret-key`. The merged demo
 setup and deploy scripts provision a separate random QA bypass token at

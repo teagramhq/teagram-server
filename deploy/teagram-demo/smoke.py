@@ -226,11 +226,13 @@ def main() -> None:
     websocket_handshake(port, "https://web.teagram.io", 101)
     websocket_handshake(port, "https://foreign.example", 403)
     websocket_handshake(443, None, 403, "browser-only", public=True)
+    websocket_handshake(443, "https://demo.teagram.io", 101, public=True)
     websocket_handshake(443, "https://web.teagram.io", 101, public=True)
     print(
         "demo smoke=passed app=html config=valid discovery=cors health=200 "
         "local_websocket=101 public_websocket=101 no_origin=403 "
-        "browser_only=present web_origin=101 foreign_origin=403 admin=404"
+        "browser_only=present public_demo_origin=101 public_web_origin=101 "
+        "foreign_origin=403 admin=404"
     )
 
 
