@@ -25,6 +25,9 @@ import (
 const (
 	// websocketPath is the endpoint used by Telegram Web's MTProto transport.
 	websocketPath = "/apiws"
+	// clientPolicyHeader distinguishes browser-only refusals from other failed
+	// WebSocket handshakes.
+	clientPolicyHeader = "Teagram-Client-Policy"
 	// cfConnectingIPHeader is trusted only on the separately bound public
 	// WebSocket listener, whose host port is published on loopback for the
 	// Cloudflare Tunnel connector.
@@ -508,7 +511,7 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
-	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
+	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.webSocketBrowserOnly, s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
 }
 
 // ServeWebSocketWithHandler serves MTProto over WebSocket with a handler and
@@ -519,13 +522,24 @@ func (s *Server) ServeWebSocketWithHandler(ctx context.Context, l net.Listener, 
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), false, s.clientDiscoveryDocument, store.RateLimitListenerTailnet, "")
 }
 
 // ServeWebSocketWithHandlerAndDiscovery serves a listener with its own public
 // discovery document. This keeps public-only client configuration off the
 // default listener's discovery route.
 func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document) error {
+	return s.serveWebSocketWithDiscovery(ctx, l, handler, originPatterns, doc, false, "")
+}
+
+// ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly serves a listener with
+// its own browser-origin policy and discovery document. When browserOnly is
+// true, a request must carry an Origin matching originPatterns.
+func (s *Server) ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document, browserOnly bool) error {
+	return s.serveWebSocketWithDiscovery(ctx, l, handler, originPatterns, doc, browserOnly, "")
+}
+
+func (s *Server) serveWebSocketWithDiscovery(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document, browserOnly bool, clientAddrHeader string) error {
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
@@ -533,7 +547,7 @@ func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l ne
 	if err != nil {
 		return fmt.Errorf("marshal listener client discovery document: %w", err)
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic, "")
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), browserOnly, data, store.RateLimitListenerPublic, clientAddrHeader)
 }
 
 // ServePublicWebSocketWithCFConnectingIP serves a public WebSocket listener
@@ -541,17 +555,17 @@ func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l ne
 // supplied by the loopback-only Cloudflare Tunnel path. Other listeners keep
 // their socket peer address.
 func (s *Server) ServePublicWebSocketWithCFConnectingIP(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document) error {
-	if handler == nil {
-		return errors.New("WebSocket handler is required")
-	}
-	data, err := discovery.MarshalDocument(doc)
-	if err != nil {
-		return fmt.Errorf("marshal listener client discovery document: %w", err)
-	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic, cfConnectingIPHeader)
+	return s.ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(ctx, l, handler, originPatterns, doc, false)
 }
 
-func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte, rateLimitListener store.RateLimitListener, clientAddrHeader string) error {
+// ServePublicWebSocketWithCFConnectingIPAndBrowserOnly serves a public
+// listener with its own discovery document and browser-only policy while
+// trusting its single Cloudflare client-address header.
+func (s *Server) ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document, browserOnly bool) error {
+	return s.serveWebSocketWithDiscovery(ctx, l, handler, originPatterns, doc, browserOnly, cfConnectingIPHeader)
+}
+
+func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, browserOnly bool, discoveryDocument []byte, rateLimitListener store.RateLimitListener, clientAddrHeader string) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
@@ -560,7 +574,7 @@ func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Han
 				state.socket.handlerStarted.Store(true)
 				defer state.socket.handlerDone()
 			}
-			s.handleWebSocket(w, r, handler, originPatterns, discoveryDocument, clientAddrHeader)
+			s.handleWebSocket(w, r, handler, originPatterns, browserOnly, discoveryDocument, clientAddrHeader)
 		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
@@ -649,6 +663,12 @@ func (s *Server) SetWebSocketOriginPatterns(patterns []string) {
 	s.webSocketOriginPatterns = append([]string(nil), patterns...)
 }
 
+// SetWebSocketBrowserOnly requires an allow-listed Origin on the WebSocket
+// endpoint. Call it before ServeWebSocket.
+func (s *Server) SetWebSocketBrowserOnly(browserOnly bool) {
+	s.webSocketBrowserOnly = browserOnly
+}
+
 // SetClientDiscoveryDocument configures the public identity served beside the
 // WebSocket endpoint. Call it before ServeWebSocket.
 func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
@@ -660,7 +680,7 @@ func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
 	return nil
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string, discoveryDocument []byte, clientAddrHeader string) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string, browserOnly bool, discoveryDocument []byte, clientAddrHeader string) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -669,6 +689,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// Keep the slot tied to the request when the HTTP upgrade fails. The listener
 	// worker closes address-establishment failures before they reach net/http.
 	defer state.slot.clear()
+	if browserOnly && r.URL.Path == websocketPath && !webSocketOriginAllowed(r, originPatterns, browserOnly) {
+		w.Header().Set(clientPolicyHeader, "browser-only")
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
 	if clientAddrHeader != "" {
 		values := r.Header.Values(clientAddrHeader)
 		if len(values) != 1 {
@@ -712,7 +737,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		http.NotFound(w, r)
 		return
 	}
-	if !webSocketOriginAllowed(r, originPatterns) {
+	if !webSocketOriginAllowed(r, originPatterns, browserOnly) {
+		if browserOnly {
+			w.Header().Set(clientPolicyHeader, "browser-only")
+		}
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
@@ -844,11 +872,12 @@ func (c webSocketDrainConn) Close() error {
 // WebSocket library's check. The library always allows an Origin matching the
 // request Host, which is useful as a default but would make an unset policy
 // accept a browser request. The server's policy is fail-closed: an Origin must
-// match a configured pattern, while no Origin remains valid for native clients.
-func webSocketOriginAllowed(r *http.Request, patterns []string) bool {
+// match a configured pattern. No Origin is valid for native clients unless the
+// listener is configured as browser-only.
+func webSocketOriginAllowed(r *http.Request, patterns []string, browserOnly bool) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return !browserOnly
 	}
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {

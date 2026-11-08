@@ -157,6 +157,9 @@ type Server struct {
 	// clients that carry no Origin header, but no cross-origin browser request.
 	// Written once before ServeWebSocket and only read by its handlers.
 	webSocketOriginPatterns []string
+	// webSocketBrowserOnly requires an allow-listed Origin on the default
+	// WebSocket listener. Written once before ServeWebSocket.
+	webSocketBrowserOnly bool
 	// negotiationLog thins the per-connection negotiation failure line, which
 	// anyone who can reach the port can provoke.
 	negotiationLog logSampler
