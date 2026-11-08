@@ -22,6 +22,19 @@ func EncryptedObjectKey(key string) (string, error) {
 	return EncryptedObjectsPrefix + "/" + key, nil
 }
 
+// validateKeyPrefix validates a containment prefix, which may end in '/' to
+// include every child under a directory. That separator is valid here even
+// though it would make a complete object key contain an empty segment.
+func validateKeyPrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	if len(prefix) > maxKeyBytes {
+		return ErrInvalidKey
+	}
+	return ValidateKey(strings.TrimSuffix(prefix, "/"))
+}
+
 // PrefixedStore maps logical keys into one physical namespace. The mapping is
 // below decorators such as [Encrypted], so envelopes remain bound to logical
 // keys while the backing store sees only the prefixed keys.
@@ -54,6 +67,17 @@ func (p *PrefixedStore) physicalKey(key string) (string, error) {
 	return physical, nil
 }
 
+func (p *PrefixedStore) physicalPrefix(prefix string) (string, error) {
+	if err := validateKeyPrefix(prefix); err != nil {
+		return "", err
+	}
+	physical := p.prefix + "/" + prefix
+	if err := validateKeyPrefix(physical); err != nil {
+		return "", fmt.Errorf("prefixed blob store: mapped prefix: %w", err)
+	}
+	return physical, nil
+}
+
 func (p *PrefixedStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
 	physical, err := p.physicalKey(key)
 	if err != nil {
@@ -82,7 +106,7 @@ func (p *PrefixedStore) WalkPrefix(ctx context.Context, prefix string, fn func(E
 	if prefix == "" {
 		return nil
 	}
-	physical, err := p.physicalKey(prefix)
+	physical, err := p.physicalPrefix(prefix)
 	if err != nil {
 		return err
 	}
