@@ -233,6 +233,46 @@ func TestPartOrphanPassKeepsLiveRowObject(t *testing.T) {
 	}
 }
 
+// TestPartOrphanPassKeepsPrefixedLiveRowObject exercises the live-key gate
+// through the encrypted namespace used by migrated blob storage.
+func TestPartOrphanPassKeepsPrefixedLiveRowObject(t *testing.T) {
+	t.Parallel()
+	s, local := openOrphanStore(t)
+	ctx := context.Background()
+	prefixed, err := blob.NewPrefixedStore(local, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("prefixed blob store: %v", err)
+	}
+	if err := store.SetPartBlobs(s, prefixed); err != nil {
+		t.Fatalf("set prefixed blob store: %v", err)
+	}
+
+	key := partKey(0x11ffe1)
+	if _, err := prefixed.Put(ctx, key, strings.NewReader("y")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	u, err := s.CreateUser(ctx, "+15551230012")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := store.InsertUploadPartWithKey(ctx, s, u.ID, 7, 0, 1, key); err != nil {
+		t.Fatalf("insert row: %v", err)
+	}
+	physicalKey := blob.EncryptedObjectsPrefix + "/" + key
+	ageObject(t, local.RootDir(), physicalKey, time.Now().Add(-24*time.Hour))
+
+	res, err := s.ReclaimOrphanedPartBytes(ctx, testCutoff(), testTTL)
+	if err != nil {
+		t.Fatalf("reclaim prefixed: %v", err)
+	}
+	if res.Objects != 0 {
+		t.Fatalf("reclaimed %+v, want nothing (live row)", res)
+	}
+	if !objectExists(t, local.RootDir(), physicalKey) {
+		t.Fatal("prefixed live object gone")
+	}
+}
+
 // TestPartOrphanPassKeepsShardedLiveRowObject is the sharded-layout counterpart
 // of TestPartOrphanPassKeepsLiveRowObject.
 func TestPartOrphanPassKeepsShardedLiveRowObject(t *testing.T) {
