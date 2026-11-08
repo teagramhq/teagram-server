@@ -343,6 +343,9 @@ kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed 
 kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-blob-mode-seed -c seed -- \
   sh -ec 'chown -R 0:0 /blob-mode; chmod 0755 /blob-mode /blob-mode/journal; chmod 0644 /blob-mode/mode.json /blob-mode/journal/*.json'
 kubectl delete pod cutover-blob-mode-seed --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
+kubectl rollout restart statefulset/teagramd --namespace "$SOURCE_NAMESPACE" >/dev/null
+kubectl rollout status statefulset/teagramd --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
+printf 'source teagramd restarted with the encrypted blob-mode authority\n'
 kubectl apply --filename deploy/k8s/test-cutover-key-reader.yaml >/dev/null
 kubectl wait --for=condition=Ready pod/cutover-key-reader \
   --namespace "$SOURCE_NAMESPACE" --timeout=180s >/dev/null
