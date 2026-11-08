@@ -1211,7 +1211,11 @@ confirm() {
   local expected=$1 prompt=$2 response
   printf '%s\n' "$prompt" >&2
   printf 'Type %s to continue: ' "$expected" >&2
-  IFS= read -r response
+  if [[ $TEST_MODE == true ]]; then
+    IFS= read -r response <&3
+  else
+    IFS= read -r response
+  fi
   [[ $response == "$expected" ]] || fail 'operator did not confirm the exact route state'
 }
 

@@ -596,9 +596,9 @@ for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-adm
 done
 printf '[Service]\n' > "$tmp_dir/incus-state/units/teagram-linkselector-port-forward.service"
 printf '[Service]\n' > "$tmp_dir/incus-state/units/teagramd-port-forward.service"
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true CUTOVER_FAIL_STOP_PORT_FORWARD=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
   > "$tmp_dir/pre-switch-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly passed the injected post-fence failure\n' >&2
   exit 1
@@ -636,9 +636,9 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true CUTOVER_FAIL_RESOURCE_LOOKUP=cloudflared \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
   > "$tmp_dir/recovery-lookup-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly recovered after a Kubernetes resource lookup failure\n' >&2
   exit 1
@@ -654,8 +654,8 @@ expect_log 'recovery was incomplete' "$tmp_dir/recovery-lookup-failure.log"
 [[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 printf 'resource lookup failure during recovery kept Compose fenced\n'
-printf 'ROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode
+env "${incus_test_env[@]}" \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode 3<<<'ROUTE-RESTORED'
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
@@ -664,8 +664,9 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_TEST_DROP_S3_OBJECT=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/dropped-s3-object.log" 2>&1; then
+if env "${incus_test_env[@]}" CUTOVER_TEST_DROP_S3_OBJECT=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
+  > "$tmp_dir/dropped-s3-object.log" 2>&1; then
   printf 'cutover runner accepted a mismatched encrypted S3 object set\n' >&2
   exit 1
 fi
@@ -677,8 +678,9 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_FIRST_SERVE_ROUTE=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode > "$tmp_dir/first-route-failure.log" 2>&1; then
+if env "${incus_test_env[@]}" CUTOVER_FAIL_FIRST_SERVE_ROUTE=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
+  > "$tmp_dir/first-route-failure.log" 2>&1; then
   printf 'cutover runner accepted a failed first Serve route\n' >&2
   exit 1
 fi
@@ -694,8 +696,8 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if printf 'ROUTE-SWITCHED\n' | env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
-  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+if env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
   > "$tmp_dir/post-switch-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly passed the injected post-switch failure\n' >&2
   exit 1
@@ -856,9 +858,9 @@ printf 'normal production apply preserved discovery, WebSocket, admin authentica
 stop_port_forward
 kubectl delete pod cutover-key-reader --namespace "$SOURCE_NAMESPACE" --wait=true --timeout=180s >/dev/null
 
-if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_FAIL_RESOURCE_LOOKUP=cloudflared \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode 3<<<$'K3S-WRITES-LOST\nROUTE-RESTORED' \
   > "$tmp_dir/connector-lookup-failure.log" 2>&1; then
   printf 'rollback runner ignored a Kubernetes API lookup failure\n' >&2
   exit 1
@@ -873,9 +875,9 @@ expect_log 'could not determine whether deployment/cloudflared exists' "$tmp_dir
 [[ $(kubectl get statefulset teagramd --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 
-if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_FAIL_RESOURCE_LOOKUP=teagramd \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode 3<<<$'K3S-WRITES-LOST\nROUTE-RESTORED' \
   > "$tmp_dir/teagramd-lookup-failure.log" 2>&1; then
   printf 'rollback runner ignored a Kubernetes teagramd lookup failure\n' >&2
   exit 1
@@ -892,9 +894,9 @@ expect_log 'could not determine whether statefulset/teagramd exists' "$tmp_dir/t
 [[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 0 ]]
 
-if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_FAIL_AFTER_FIRST_SERVE_ROUTE=true \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode 3<<<$'K3S-WRITES-LOST\nROUTE-RESTORED' \
   > "$tmp_dir/partial-route-rollback.log" 2>&1; then
   printf 'rollback runner unexpectedly passed the injected partial Serve restore failure\n' >&2
   exit 1
@@ -924,9 +926,9 @@ assert handlers["/apiws"]["Proxy"] == "http://127.0.0.2:18444/apiws"
 PY
 printf 'interrupted partial Serve rollback left both connectors stopped and Compose fenced\n'
 
-if printf 'K3S-WRITES-LOST\nROUTE-RESTORED\n' | env "${incus_test_env[@]}" \
+if env "${incus_test_env[@]}" \
   CUTOVER_FAIL_IMPORTER_DELETE=true CUTOVER_FAIL_STOP_PORT_FORWARD=true \
-  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode \
+  bash deploy/k8s/cutover-alpha.sh --rollback --test-mode 3<<<$'K3S-WRITES-LOST\nROUTE-RESTORED' \
   > "$tmp_dir/importer-delete-failure.log" 2>&1; then
   printf 'rollback reported success after importer deletion failed\n' >&2
   exit 1
