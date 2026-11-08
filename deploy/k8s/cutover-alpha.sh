@@ -78,7 +78,7 @@ Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and te
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
 Would keep private phase, Serve route, and recovery evidence under /var/lib/teagram-k3s-cutover.
-Would wait for PostgreSQL and RustFS, install a target-only RustFS port-forward, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
+Would wait for PostgreSQL and RustFS, install a target-only RustFS port-forward, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL and RustFS, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
 Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before that switch restarts every stopped Compose service.
 Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file, sent over a temporary loopback port-forward, and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
@@ -265,7 +265,7 @@ fence_source_writes() {
       --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id") ||
       fail 'could not identify a running teagram Compose service'
     [[ -n $service ]] || fail 'a running teagram Compose container has no service label'
-    [[ $service == postgres ]] && continue
+    [[ $service == postgres || $service == rustfs ]] && continue
     container_name=$(incus exec "$SOURCE_INSTANCE" -- docker inspect --format '{{.Name}}' "$container_id" | sed 's#^/##') ||
       fail 'could not read a running teagram Compose container name'
     [[ $container_name =~ ^[[:alnum:]_.-]+$ ]] || fail 'a running teagram Compose container has an invalid name'
@@ -275,6 +275,7 @@ fence_source_writes() {
   done <<< "$running_ids"
 
   check_source_container teagram-postgres-1
+  check_source_container teagram-rustfs-1
   [[ $(container_status teagram-web-cloudflared) == exited ]] ||
     fail 'the old Cloudflare connector is not stopped'
   while IFS= read -r container_name; do
@@ -353,9 +354,13 @@ prod_literal() {
   printf '%s' "$value"
 }
 
+source_docker_helper_enabled() {
+  [[ $TEST_MODE == false || ${CUTOVER_TEST_SOURCE_DOCKER_HELPER:-} == true ]]
+}
+
 resolve_image_revision() {
   local image=$1 revision
-  if [[ $TEST_MODE == false ]]; then
+  if source_docker_helper_enabled; then
     incus exec "$SOURCE_INSTANCE" -- docker pull --quiet --platform linux/amd64 "$image" >/dev/null 2>&1 ||
       fail "could not resolve pinned image $image"
   fi
@@ -368,7 +373,8 @@ resolve_image_revision() {
 
 image_latest_migration() {
   local image=$1 version
-  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATION_VERSION:-} ]]; then
+  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATION_VERSION:-} ]] &&
+    ! source_docker_helper_enabled; then
     version=$CUTOVER_TEST_MIGRATION_VERSION
   else
     version=$(incus exec "$SOURCE_INSTANCE" -- docker run --rm --network none \
@@ -743,10 +749,10 @@ PY
 }
 
 mc_client_exec() {
-  if [[ $TEST_MODE == true ]]; then
-    kubectl exec --namespace "$SOURCE_INSTANCE" --stdin pod/cutover-s3-client -- mc "$@"
-  else
+  if [[ -n $MC_HELPER_CONTAINER ]]; then
     incus exec "$SOURCE_INSTANCE" -- docker exec --interactive "$MC_HELPER_CONTAINER" mc "$@"
+  else
+    kubectl exec --namespace "$SOURCE_INSTANCE" --stdin pod/cutover-s3-client -- mc "$@"
   fi
 }
 
@@ -766,11 +772,9 @@ setup_mc_client() {
     MC_CLIENT_POD_CREATED=true
     kubectl wait --for=condition=Ready pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" --timeout=180s >/dev/null ||
       fail 'the disposable S3 client pod is unavailable'
-    # shellcheck disable=SC2016 # The client pod's shell expands these variables.
-    kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec \
-      'mkdir -p "$MC_CONFIG_DIR"; mc alias set source http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1; mc alias set target "$1" "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1' \
-      -- "$target_endpoint" || fail 'could not configure the disposable S3 client'
-  else
+  fi
+
+  if source_docker_helper_enabled; then
     secret_key=$(capture_source_blob_secret "$secret_path") || fail 'could not read the source S3 secret'
     app_network_output=$(source_compose_networks teagram-teagramd-1) ||
       fail 'could not inspect the source Compose networks'
@@ -778,8 +782,8 @@ setup_mc_client() {
       fail 'could not inspect the source RustFS network'
     [[ -n $app_network_output && -n $rustfs_network_output ]] ||
       fail 'source Compose and RustFS networks are unavailable'
-    mapfile -t app_networks <<< "$app_network_output"
-    mapfile -t rustfs_networks <<< "$rustfs_network_output"
+    mapfile -t app_networks < <(printf '%s' "$app_network_output")
+    mapfile -t rustfs_networks < <(printf '%s' "$rustfs_network_output")
     ((${#app_networks[@]} >= 2 && ${#rustfs_networks[@]} == 1)) ||
       fail 'source teagramd must share its RustFS network and a separate target route'
     for network in "${rustfs_networks[@]}"; do
@@ -810,6 +814,11 @@ setup_mc_client() {
       target "$target_endpoint" "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1 ||
       fail 'could not configure the target S3 client'
     secret_key=''
+  else
+    # shellcheck disable=SC2016 # The client pod's shell expands these variables.
+    kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec \
+      'mkdir -p "$MC_CONFIG_DIR"; mc alias set source http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1; mc alias set target "$1" "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1' \
+      -- "$target_endpoint" || fail 'could not configure the disposable S3 client'
   fi
   source_s3_listing source >/dev/null
   target_listing=$(source_s3_listing target)
@@ -817,17 +826,16 @@ setup_mc_client() {
 }
 
 stop_mc_client() {
-  if [[ $TEST_MODE == true ]]; then
-    if [[ $MC_CLIENT_POD_CREATED == true ]]; then
-      kubectl delete pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" \
-        --ignore-not-found --wait=true --timeout=180s >/dev/null ||
-        fail 'could not remove the disposable S3 client pod'
-      MC_CLIENT_POD_CREATED=false
-    fi
-  elif [[ -n $MC_HELPER_CONTAINER ]]; then
+  if [[ -n $MC_HELPER_CONTAINER ]]; then
     incus exec "$SOURCE_INSTANCE" -- docker rm --force "$MC_HELPER_CONTAINER" >/dev/null 2>&1 ||
       fail 'could not remove the temporary S3 client container'
     MC_HELPER_CONTAINER=''
+  fi
+  if [[ $TEST_MODE == true && $MC_CLIENT_POD_CREATED == true ]]; then
+    kubectl delete pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" \
+      --ignore-not-found --wait=true --timeout=180s >/dev/null ||
+      fail 'could not remove the disposable S3 client pod'
+    MC_CLIENT_POD_CREATED=false
   fi
 }
 
@@ -895,7 +903,7 @@ s3_object_hashes() {
   local -a keys=()
   mapfile -t keys < <(awk -F '\t' 'NF == 2 { print $1 }' "$listing_file")
   ((${#keys[@]} == 0)) && return 0
-  if [[ $TEST_MODE == true ]]; then
+  if [[ $TEST_MODE == true && -z $MC_HELPER_CONTAINER ]]; then
     # shellcheck disable=SC2016 # The disposable client's shell expands the variables.
     printf '%s\n' "${keys[@]}" | kubectl exec --stdin --namespace "$SOURCE_INSTANCE" \
       pod/cutover-s3-client -- /bin/sh -ec '
@@ -982,18 +990,31 @@ mirror_encrypted_s3_prefix() {
     >/dev/null 2>&1; then
     fail 'could not mirror encrypted S3 objects to target RustFS'
   fi
-  if [[ ${CUTOVER_TEST_DROP_S3_OBJECT:-} == true && $TEST_MODE == true && -n $source_listing ]]; then
+  if [[ ${CUTOVER_TEST_CORRUPT_S3_OBJECT:-} == true && $TEST_MODE == true && -n $source_listing ]]; then
     first_key=$(awk -F '\t' 'NR == 1 { print $1 }' <<< "$source_listing")
-    mc_client_exec rm "target/teagram/$first_key" >/dev/null 2>&1 || fail 'could not inject the disposable S3 checksum mismatch'
+    first_size=$(awk -F '\t' 'NR == 1 { print $2 }' <<< "$source_listing")
+    [[ $first_size =~ ^[1-9][0-9]*$ ]] || fail 'could not determine the disposable S3 object size for checksum injection'
+    python3 -c '
+import sys
+
+remaining = int(sys.argv[1])
+chunk = b"x" * min(1024 * 1024, remaining)
+while remaining:
+    part = chunk[:remaining]
+    sys.stdout.buffer.write(part)
+    remaining -= len(part)
+' "$first_size" |
+      mc_client_exec pipe "target/teagram/$first_key" >/dev/null 2>&1 ||
+      fail 'could not inject a same-size disposable S3 checksum mismatch'
   fi
   target_listing=$(source_s3_listing target)
   target_inventory=$(inventory_s3_prefix target "$target_listing")
   if [[ -z $target_listing ]]; then target_objects=0; else target_objects=$(wc -l <<< "$target_listing"); fi
   target_total=$(awk -F '\t' '{ total += $2 } END { print total + 0 }' <<< "$target_listing")
-  if [[ $source_objects != "$target_objects" || $source_total != "$target_total" ||
-    $source_inventory != "$target_inventory" ]]; then
-    fail 'source and target S3 object counts, byte totals, or per-object SHA-256 checksums do not match'
-  fi
+  [[ $source_objects == "$target_objects" && $source_total == "$target_total" ]] ||
+    fail 'source and target S3 object counts or byte totals do not match'
+  [[ $source_inventory == "$target_inventory" ]] ||
+    fail 'source and target S3 per-object SHA-256 checksums do not match'
   S3_OBJECTS=$source_objects
   S3_BYTES=$source_total
   stop_mc_client
@@ -1327,16 +1348,16 @@ handle_exit() {
     rmdir -- "$S3_INVENTORY_SCRATCH" 2>/dev/null || true
     S3_INVENTORY_SCRATCH=''
   fi
+  if [[ -n ${MC_HELPER_CONTAINER:-} ]]; then
+    incus exec "$SOURCE_INSTANCE" -- docker rm --force "$MC_HELPER_CONTAINER" >/dev/null 2>&1 ||
+      printf 'k3s cutover: could not remove the temporary S3 client container\n' >&2
+    MC_HELPER_CONTAINER=''
+  fi
   if [[ ${MC_CLIENT_POD_CREATED:-false} == true ]]; then
     kubectl delete pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" \
       --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
       printf 'k3s cutover: could not remove the disposable S3 client pod\n' >&2
     MC_CLIENT_POD_CREATED=false
-  fi
-  if [[ -n ${MC_HELPER_CONTAINER:-} && $TEST_MODE == false ]]; then
-    incus exec "$SOURCE_INSTANCE" -- docker rm --force "$MC_HELPER_CONTAINER" >/dev/null 2>&1 ||
-      printf 'k3s cutover: could not remove the temporary S3 client container\n' >&2
-    MC_HELPER_CONTAINER=''
   fi
   if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
     phase=$(<"$PHASE_FILE")

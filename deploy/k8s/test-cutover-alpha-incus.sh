@@ -8,12 +8,17 @@ mkdir -p "$STATE_DIR/units"
 resource_for_container() {
   case "$1" in
     teagram-postgres-1|postgres) printf 'statefulset/postgres\n' ;;
+    teagram-rustfs-1|rustfs) printf 'statefulset/rustfs\n' ;;
     teagram-teagramd-1|teagramd) printf 'statefulset/teagramd\n' ;;
     teagram-link-edge-selector-1|linkselector) printf 'deployment/linkselector\n' ;;
     teagram-linklanding-1|linklanding) printf 'deployment/linklanding\n' ;;
     teagram-web-cloudflared|cloudflared) printf 'deployment/cloudflared\n' ;;
     *) return 1 ;;
   esac
+}
+
+docker_event() {
+  printf 'docker-event: %s\n' "$1" >> "$STATE_DIR/docker-events"
 }
 
 container_status() {
@@ -63,10 +68,36 @@ except (KeyError, TypeError, ValueError, json.JSONDecodeError):
 }
 
 docker_command() {
-  local subcommand=$1 format container service path image
+  local subcommand=$1 format container service path image network helper_container index
   shift
   local -a args=("$@")
   case "$subcommand" in
+    pull)
+      [[ ${args[0]:-} == --quiet && ${args[1]:-} == --platform &&
+         ${args[2]:-} == linux/amd64 && ${args[3]:-} =~ ^ghcr\.io/teagramhq/ ]] || return 1
+      docker_event pull
+      ;;
+    run)
+      if [[ " ${args[*]} " == *' --network none '* ]]; then
+        [[ " ${args[*]} " == *' --entrypoint /bin/sh '* ]] || return 1
+        docker_event run-migrations
+        printf '%s\n' "${CUTOVER_TEST_MIGRATION_VERSION:?}"
+      else
+        helper_container=''
+        network=''
+        for ((index = 0; index < ${#args[@]}; index++)); do
+          case "${args[index]}" in
+            --name) helper_container=${args[index + 1]:-} ;;
+            --network) network=${args[index + 1]:-} ;;
+          esac
+        done
+        [[ -n $helper_container && $network == teagram_rustfs_private &&
+           " ${args[*]} " == *' --entrypoint /bin/sh '* &&
+           " ${args[*]} " == *' ghcr.io/teagramhq/teagramd-mc-init:ci '* ]] || return 1
+        printf '%s\n' "$helper_container" > "$STATE_DIR/docker-helper-container"
+        docker_event run-helper
+      fi
+      ;;
     inspect)
       format=$2
       container=${args[-1]}
@@ -85,19 +116,28 @@ docker_command() {
           ;;
         *'com.docker.compose.service'*)
           case "$container" in
-            teagramd) printf 'teagramd\n' ;;
-            postgres) printf 'postgres\n' ;;
-            linkselector) printf 'linkselector\n' ;;
-            linklanding) printf 'linklanding\n' ;;
+            teagramd|teagram-teagramd-1) printf 'teagramd\n' ;;
+            postgres|teagram-postgres-1) printf 'postgres\n' ;;
+            rustfs|teagram-rustfs-1) printf 'rustfs\n' ;;
+            linkselector|teagram-link-edge-selector-1) printf 'linkselector\n' ;;
+            linklanding|teagram-linklanding-1) printf 'linklanding\n' ;;
             *) return 1 ;;
           esac
           ;;
         *'.Name'*)
           case "$container" in
-            teagramd) printf '/teagram-teagramd-1\n' ;;
-            postgres) printf '/teagram-postgres-1\n' ;;
-            linkselector) printf '/teagram-link-edge-selector-1\n' ;;
-            linklanding) printf '/teagram-linklanding-1\n' ;;
+            teagramd|teagram-teagramd-1) printf '/teagram-teagramd-1\n' ;;
+            postgres|teagram-postgres-1) printf '/teagram-postgres-1\n' ;;
+            rustfs|teagram-rustfs-1) printf '/teagram-rustfs-1\n' ;;
+            linkselector|teagram-link-edge-selector-1) printf '/teagram-link-edge-selector-1\n' ;;
+            linklanding|teagram-linklanding-1) printf '/teagram-linklanding-1\n' ;;
+            *) return 1 ;;
+          esac
+          ;;
+        *'.NetworkSettings.Networks'*)
+          case "$container" in
+            teagramd|teagram-teagramd-1) printf 'teagram_default\nteagram_rustfs_private\n' ;;
+            rustfs|teagram-rustfs-1) printf 'teagram_rustfs_private\n' ;;
             *) return 1 ;;
           esac
           ;;
@@ -119,7 +159,7 @@ docker_command() {
       esac
       ;;
     ps)
-      for service in teagramd postgres linkselector linklanding; do
+      for service in teagramd postgres rustfs linkselector linklanding; do
         if [[ $(container_status "$service") == running ]]; then
           printf '%s\n' "$service"
         fi
@@ -129,19 +169,31 @@ docker_command() {
       container=${args[-1]}
       scale_container "$subcommand" "$container"
       ;;
+    network)
+      [[ ${args[0]:-} == connect ]] || return 1
+      network=${args[1]:-}
+      helper_container=${args[2]:-}
+      [[ $network == teagram_default && -n $helper_container &&
+         -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$helper_container" ]] || return 1
+      docker_event network-connect
+      ;;
     exec)
-      container=$1
-      shift
-      case "$container" in
-        teagram-postgres-1)
-          kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "$@"
-          ;;
-        teagram-teagramd-1)
-          # Exercise the real distroless container, which has no test binary.
-          kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
-          ;;
-        *) return 1 ;;
-      esac
+      if [[ ${args[0]:-} == --interactive ]]; then
+        args=("${args[@]:1}")
+      fi
+      container=${args[0]:-}
+      [[ -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$container" ]] || return 1
+      kubectl exec --stdin --namespace "$SOURCE_NAMESPACE" pod/cutover-s3-client -- \
+        "${args[@]:1}"
+      ;;
+    rm)
+      helper_container=${args[-1]}
+      [[ ${args[0]:-} == --force && -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$helper_container" ]] || return 1
+      rm -f -- "$STATE_DIR/docker-helper-container"
+      docker_event rm
       ;;
     cp)
       path=$1

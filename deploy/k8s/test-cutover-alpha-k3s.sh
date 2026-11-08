@@ -668,14 +668,14 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if env "${incus_test_env[@]}" CUTOVER_TEST_DROP_S3_OBJECT=true \
+if env "${incus_test_env[@]}" CUTOVER_TEST_CORRUPT_S3_OBJECT=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
-  > "$tmp_dir/dropped-s3-object.log" 2>&1; then
+  > "$tmp_dir/corrupted-s3-object.log" 2>&1; then
   printf 'cutover runner accepted a mismatched encrypted S3 object set\n' >&2
   exit 1
 fi
-expect_log 'source and target S3 object counts, byte totals, or per-object SHA-256 checksums do not match' \
-  "$tmp_dir/dropped-s3-object.log"
+expect_log 'source and target S3 per-object SHA-256 checksums do not match' \
+  "$tmp_dir/corrupted-s3-object.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ -z $(kubectl get pod/cutover-volume-importer --namespace "$TARGET_NAMESPACE" --ignore-not-found --output name) ]]
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
@@ -700,7 +700,8 @@ kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/nu
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
 
-if env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
+if env "${incus_test_env[@]}" CUTOVER_TEST_SOURCE_DOCKER_HELPER=true \
+  CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
   > "$tmp_dir/post-switch-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly passed the injected post-switch failure\n' >&2
@@ -708,6 +709,13 @@ if env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
 fi
 expect_log 'injected disposable-cluster failure after the Cloudflare connector started' "$tmp_dir/post-switch-failure.log"
 expect_log 'automatic recovery is disabled' "$tmp_dir/post-switch-failure.log"
+for docker_event in pull run-migrations run-helper network-connect rm; do
+  grep --fixed-strings --line-regexp --quiet -- "docker-event: $docker_event" \
+    "$tmp_dir/incus-state/docker-events" || {
+    printf 'the source Docker helper path did not reach %s\n' "$docker_event" >&2
+    exit 1
+  }
+done
 # The source teagramd was restarted after the key was created, so kubelet has
 # re-applied the pod fsGroup and added group access (0660). The key must still
 # be non-root-owned and closed to everyone else.

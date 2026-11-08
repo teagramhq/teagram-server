@@ -205,6 +205,9 @@ done
   fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
 grep --fixed-strings --quiet "TG_MEDIA_KEY_CURRENT=\$TG_MEDIA_KEY_CURRENT" deploy/k8s/bootstrap-alpha.sh ||
   fail 'bootstrap must preserve the live media encryption key version in teagramd-runtime'
+runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
+[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* ]] ||
+  fail 'the documented teagramd-runtime ConfigMap keys must include TG_MEDIA_KEY_CURRENT'
 if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
   fail 'the cutover must preserve encrypted S3 objects directly, without a local-blob migration Job'
 fi
@@ -216,7 +219,7 @@ fi
 [[ "$(yq -r '.spec.securityContext.runAsUser' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == 0 &&
    "$(yq -r '.spec.volumes[] | select(.name == "blob-mode") | .persistentVolumeClaim.claimName' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == blob-mode-teagramd-0 ]] ||
   fail 'the disposable blob-mode fixture must use a root-owned seed pod and the source authority PVC'
-grep --fixed-strings --quiet 'CUTOVER_TEST_DROP_S3_OBJECT' deploy/k8s/test-cutover-alpha-k3s.sh ||
+grep --fixed-strings --quiet 'CUTOVER_TEST_CORRUPT_S3_OBJECT' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the cutover integration must fail closed on a per-object S3 checksum mismatch'
 grep --fixed-strings --quiet 'check_source_media_keys' deploy/k8s/cutover-alpha.sh ||
   fail 'the cutover runner must verify that the target encrypted-media key set matches the source'
@@ -224,8 +227,10 @@ grep --fixed-strings --quiet 'check_source_blob_credentials' deploy/k8s/cutover-
   fail 'the cutover runner must verify that the target S3 credentials match the source'
 grep --fixed-strings --quiet 'preserve_media_key_version' deploy/k8s/cutover-alpha.sh ||
   fail 'the cutover runner must preserve the source media encryption key version'
-grep --fixed-strings --quiet 'source and target S3 object counts, byte totals, or per-object SHA-256 checksums do not match' deploy/k8s/cutover-alpha.sh ||
-  fail 'the cutover runner must compare source and target S3 inventories before switching routes'
+grep --fixed-strings --quiet 'source and target S3 object counts or byte totals do not match' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must compare source and target S3 object counts and byte totals before switching routes'
+grep --fixed-strings --quiet 'source and target S3 per-object SHA-256 checksums do not match' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must reject same-size S3 object corruption by SHA-256'
 cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .command | join(" ")' "$cutover_seed_job")" == '/usr/local/bin/teagramd' ]] ||
   fail 'the cutover account seed Job must invoke teagramd directly for its distroless image'
@@ -258,8 +263,22 @@ grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/te
   fail 'the actual cutover runner test adapter must read source identity from the BusyBox helper pod'
 grep --fixed-strings --quiet '/run/teagramd/blob-mode/.' deploy/k8s/test-cutover-alpha-incus.sh ||
   fail 'the actual cutover runner test adapter must read blob-mode authority from the source PVC'
+fence_step=$(sed -n '/^fence_source_writes() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
+[[ "$fence_step" == *'[[ $service == postgres || $service == rustfs ]] && continue'* &&
+   "$fence_step" == *'check_source_container teagram-rustfs-1'* ]] ||
+  fail 'the source write fence must preserve and verify the RustFS Compose service'
+grep --fixed-strings --quiet 'teagram-rustfs-1|rustfs)' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the disposable source adapter must model the RustFS Compose container'
+grep --fixed-strings --quiet 'teagramd postgres rustfs linkselector linklanding' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the disposable source adapter must report RustFS among running Compose services'
 grep --fixed-strings --quiet 'cutover-alpha.sh --apply --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must execute the actual apply runner in its disposable namespace'
+grep --fixed-strings --quiet 'CUTOVER_TEST_SOURCE_DOCKER_HELPER=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise the source Docker helper path'
+grep --fixed-strings --quiet \
+  'for docker_event in pull run-migrations run-helper network-connect rm; do' \
+  deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must verify image pulls, both Docker runs, network attachment, and cleanup'
 grep --fixed-strings --quiet 'cutover-alpha.sh --rollback --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must exercise the actual rollback runner'
 grep --fixed-strings --quiet 'CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
@@ -270,6 +289,11 @@ grep --fixed-strings --quiet 'smoke_upload_preserved_media' deploy/k8s/test-cuto
   fail 'the k3s cutover test must upload an encrypted media object before cutover'
 grep --fixed-strings --quiet 'smoke_download_preserved_media' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must download and compare the preserved media after cutover'
+grep --fixed-strings --quiet 'CUTOVER_TEST_CORRUPT_S3_OBJECT=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must overwrite an object with same-length corrupt data'
+grep --fixed-strings --quiet 'source and target S3 per-object SHA-256 checksums do not match' \
+  deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must assert a per-object checksum mismatch'
 grep --fixed-strings --quiet 'CUTOVER_TEST_PINNED_REVISION=0000000000000000000000000000000000000000' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must prove revision mismatch fails before the write fence'
 [[ "$(tr -d '\r\n' < deploy/k8s/prod/source-revision)" =~ ^[0-9a-f]{40}$ ]] ||
