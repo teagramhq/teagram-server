@@ -724,6 +724,8 @@ grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/nginx.con
 grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, None, 403, "browser-only")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, "https://web.teagram.io", 101)' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(443, None, 403, "browser-only", public=True)' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(443, "https://web.teagram.io", 101, public=True)' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'https://foreign.example", 403' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'response.getheader("Teagram-Client-Policy")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'args.web_source_commit' "$SCRIPT_DIR/smoke.py"

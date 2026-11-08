@@ -63,18 +63,25 @@ def websocket_handshake(
     origin: str | None,
     expected_status: int,
     expected_policy: str | None = None,
+    *,
+    public: bool = False,
 ) -> None:
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    source = f"from {origin}" if origin is not None else "without Origin"
+    host = "demo.teagram.io" if public else "127.0.0.1"
+    connection_type = http.client.HTTPSConnection if public else http.client.HTTPConnection
+    connection = connection_type(host, 443 if public else port, timeout=5)
+    source = f"to wss://demo.teagram.io/apiws from {origin}" if public else f"from {origin}"
+    if origin is None:
+        source = f"to wss://demo.teagram.io/apiws without Origin" if public else "without Origin"
     headers = {
         "Host": "demo.teagram.io",
-        "CF-Connecting-IP": "192.0.2.1",
         "Connection": "Upgrade",
         "Upgrade": "websocket",
         "Sec-WebSocket-Key": key,
         "Sec-WebSocket-Version": "13",
     }
+    if not public:
+        headers["CF-Connecting-IP"] = "192.0.2.1"
     if origin is not None:
         headers["Origin"] = origin
     try:
@@ -218,10 +225,12 @@ def main() -> None:
     websocket_handshake(port, "https://demo.teagram.io", 101)
     websocket_handshake(port, "https://web.teagram.io", 101)
     websocket_handshake(port, "https://foreign.example", 403)
+    websocket_handshake(443, None, 403, "browser-only", public=True)
+    websocket_handshake(443, "https://web.teagram.io", 101, public=True)
     print(
         "demo smoke=passed app=html config=valid discovery=cors health=200 "
-        "websocket=101 web_origin=101 no_origin=403 browser_only=present "
-        "foreign_origin=403 admin=404"
+        "local_websocket=101 public_websocket=101 no_origin=403 "
+        "browser_only=present web_origin=101 foreign_origin=403 admin=404"
     )
 
 
