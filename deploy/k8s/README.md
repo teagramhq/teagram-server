@@ -68,9 +68,12 @@ rendering and applying it, so teagramd waits until that migration has run.
 After a migration merges and CI publishes the corresponding images, update the
 production teagramd, migration and mc-init image digests, required migration
 version, migration Job name, and `prod/source-revision` together. The production
-pin check must pass before applying that overlay. The cutover also compares the
-live Compose image revision and database migration version with these pins
-before it creates the target workloads or fences source writes.
+pin check must pass before applying that overlay. The cutover reads the live
+Compose image revision, resolves that revision's published `sha-<revision>`
+images to immutable digests, and derives the migration version and both Job
+names from those images. It checks the live database migration version against
+the resolved migration image before creating target workloads or fencing
+source writes.
 
 The production overlay expects these namespace-scoped resources to be supplied
 by the cluster's secret and configuration management before it is applied:
@@ -176,12 +179,16 @@ sudo deploy/k8s/cutover-alpha.sh --dry-run
 sudo deploy/k8s/cutover-alpha.sh --apply
 ```
 
-Before applying workloads, the runner checks that the live teagramd revision,
-the pinned teagramd and migration image labels, the newest migration in the
-pinned migration image, the migration Job name, and the live database version
-agree. A mismatch stops the run before source writes are fenced and names the
-live and pinned revisions. Re-pin `prod/` and `source-revision` together after
-each deployment that should be eligible for cutover.
+Before applying workloads, the runner reads the live teagramd revision and
+pulls the five published k8s images tagged for that SHA. It verifies each
+image's revision label, pins their registry digests for the rendered manifest,
+and derives the migration version and immutable Job names from the selected
+images. The live database migration version must match the newest migration in
+that migration image. Missing tags, label mismatches, or a database mismatch
+stop the run before source writes are fenced. Immediately before the first
+Serve route changes, the runner verifies that every fenced Compose container
+is still stopped, PostgreSQL has no client connections, RustFS is running, and
+the teagramd revision has not changed.
 
 The script keeps the k8s app and tunnel connector at zero replicas while it
 restores PostgreSQL and applies the matching Atlas migration. It copies

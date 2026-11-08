@@ -42,11 +42,15 @@ readonly POSTGRES_PVC_BYTES=$((8 * 1024 * 1024 * 1024))
 readonly MIN_STORAGE_RESERVE_BYTES=$((1024 * 1024 * 1024))
 MC_HELPER_CONTAINER=''
 APP_IMAGE=''
+MIGRATIONS_IMAGE=''
 MC_IMAGE=''
+K8S_MC_IMAGE=''
+LINK_LANDING_IMAGE=''
+LINK_SELECTOR_IMAGE=''
 MIGRATIONS_JOB_NAME=''
+RUSTFS_INIT_JOB_NAME=''
 REQUIRED_MIGRATION_VERSION=''
 LIVE_SOURCE_REVISION=''
-PINNED_SOURCE_REVISION=''
 target_lxc_ip=''
 MC_CLIENT_POD_CREATED=false
 S3_INVENTORY_SCRATCH=''
@@ -73,12 +77,13 @@ EOF
 
 dry_run() {
   cat <<'EOF'
-Would verify alpha, the root-only cutover kubeconfig, source Compose containers and encrypted S3 authority, the live teagramd and migration image revisions, required migration version and Job name, the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
+Would verify alpha, the root-only cutover kubeconfig, source Compose containers and encrypted S3 authority, the live teagramd and migration image revisions, matching immutable k8s images, required migration version and Job names, the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database migrations, the web Service, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
 Would keep private phase, Serve route, and recovery evidence under /var/lib/teagram-k3s-cutover.
 Would wait for PostgreSQL and RustFS, install a target-only RustFS port-forward, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL and RustFS, plus teagram-web-cloudflared; keep source RustFS available for the post-fence S3 listing and mirror, and verify no PostgreSQL client connections remain.
+Would recheck the stopped Compose containers, PostgreSQL client count, RustFS availability, and live teagramd revision immediately before the first live edge switch.
 Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before the first live edge switch restarts only the Compose services stopped by the runner, while PostgreSQL and RustFS stay running.
 Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file, sent over a temporary loopback port-forward, and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
@@ -247,6 +252,28 @@ verify_no_source_postgres_clients() {
   fail 'source PostgreSQL still has client connections after the Compose write fence'
 }
 
+verify_source_write_fence() {
+  local container_name status fenced_revision
+  [[ -f $COMPOSE_STOPPED_FILE && ! -L $COMPOSE_STOPPED_FILE ]] ||
+    fail 'stopped Compose service evidence is missing while the source write fence is active'
+  verify_private_file "$COMPOSE_STOPPED_FILE" 600 ||
+    fail 'stopped Compose service evidence is not root-owned mode 0600'
+  check_source_container teagram-postgres-1
+  check_source_container teagram-rustfs-1
+  while IFS= read -r container_name; do
+    [[ -z $container_name ]] && continue
+    status=$(container_status "$container_name") ||
+      fail "could not verify stopped Compose service state: $container_name"
+    [[ $status == exited ]] ||
+      fail "Compose service $container_name restarted while source writes were fenced"
+  done < "$COMPOSE_STOPPED_FILE"
+  verify_no_source_postgres_clients
+  fenced_revision=$(source_container_revision) ||
+    fail 'could not verify the live teagramd revision while source writes were fenced'
+  [[ $fenced_revision == "$LIVE_SOURCE_REVISION" ]] ||
+    fail "live teagramd revision changed from $LIVE_SOURCE_REVISION to $fenced_revision while source writes were fenced"
+}
+
 fence_source_writes() {
   local running_ids container_id service container_name
   ensure_private_dir "$EVIDENCE_DIR"
@@ -274,16 +301,7 @@ fence_source_writes() {
       fail 'could not stop every running Compose writer before the PostgreSQL snapshot'
   done <<< "$running_ids"
 
-  check_source_container teagram-postgres-1
-  check_source_container teagram-rustfs-1
-  [[ $(container_status teagram-web-cloudflared) == exited ]] ||
-    fail 'the old Cloudflare connector is not stopped'
-  while IFS= read -r container_name; do
-    [[ -z $container_name ]] && continue
-    [[ $(container_status "$container_name") == exited ]] ||
-      fail 'a Compose service restarted unexpectedly while the source write fence is active'
-  done < "$COMPOSE_STOPPED_FILE"
-  verify_no_source_postgres_clients
+  verify_source_write_fence
   record_phase fenced
 }
 
@@ -371,6 +389,30 @@ resolve_image_revision() {
   printf '%s' "$revision"
 }
 
+resolve_release_image() {
+  local image_name=$1 revision=$2 tagged_image image_revision repo_digests reference digest=''
+  tagged_image="$image_name:sha-$revision"
+  incus exec "$SOURCE_INSTANCE" -- docker pull --quiet --platform linux/amd64 "$tagged_image" >/dev/null 2>&1 ||
+    fail "could not resolve published image $tagged_image"
+  image_revision=$(incus exec "$SOURCE_INSTANCE" -- docker image inspect "$tagged_image" \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}') ||
+    fail "could not read published image revision: $tagged_image"
+  [[ $image_revision == "$revision" ]] ||
+    fail "published image $tagged_image has source revision ${image_revision:-<empty>}, expected $revision"
+  repo_digests=$(incus exec "$SOURCE_INSTANCE" -- docker image inspect "$tagged_image" \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}') ||
+    fail "could not read published image digest: $tagged_image"
+  while IFS= read -r reference; do
+    if [[ $reference == "$image_name@sha256:"* ]]; then
+      digest=${reference##*@}
+      break
+    fi
+  done <<< "$repo_digests"
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "published image $tagged_image has no valid immutable registry digest"
+  printf '%s@%s' "$image_name" "$digest"
+}
+
 image_latest_migration() {
   local image=$1 version
   if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATION_VERSION:-} ]] &&
@@ -387,69 +429,110 @@ image_latest_migration() {
 }
 
 validate_release_for_source() {
-  local expected_revision live_revision app_digest migrations_digest helper_digest
-  local app_image migrations_image helper_image app_revision migrations_revision helper_revision
+  local live_revision app_digest migrations_digest helper_digest landing_digest selector_digest
   local migrations_validation_image helper_validation_image
-  local required_version latest_version migration_job expected_job_suffix
-  expected_revision=$(<"$REPO_ROOT/deploy/k8s/prod/source-revision")
-  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_PINNED_REVISION:-} ]]; then
-    expected_revision=$CUTOVER_TEST_PINNED_REVISION
-  fi
-  [[ $expected_revision =~ ^[0-9a-f]{40}$ ]] || fail 'pinned production source revision is invalid'
+  local app_revision migrations_revision helper_revision required_version latest_version
+  local migration_job rustfs_init_job expected_job_suffix expected_helper_suffix
   live_revision=$(source_container_revision) || fail 'could not read the live teagramd image revision'
   [[ $live_revision =~ ^[0-9a-f]{40}$ ]] || fail "live teagramd image has an invalid source revision: ${live_revision:-<empty>}"
-  [[ $live_revision == "$expected_revision" ]] ||
-    fail "live teagramd revision $live_revision does not match pinned production revision $expected_revision"
+  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_PINNED_REVISION:-} &&
+    $live_revision != "$CUTOVER_TEST_PINNED_REVISION" ]]; then
+    fail "live teagramd revision $live_revision does not match test revision $CUTOVER_TEST_PINNED_REVISION"
+  fi
   LIVE_SOURCE_REVISION=$live_revision
-  PINNED_SOURCE_REVISION=$expected_revision
-
-  app_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd)
-  migrations_digest=$(prod_image_digest ghcr.io/teagramhq/teagram-migrations)
-  helper_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd-mc-init)
-  app_image="ghcr.io/teagramhq/teagramd@$app_digest"
-  migrations_image="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
-  helper_image="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
-  migrations_validation_image=$migrations_image
-  helper_validation_image=$helper_image
   if [[ $TEST_MODE == true ]]; then
-    app_image=${CUTOVER_TEST_TEAGRAMD_IMAGE:-$app_image}
-    migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$migrations_image}
-    helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$helper_image}
-  fi
-  app_revision=$(resolve_image_revision "$app_image")
-  migrations_revision=$(resolve_image_revision "$migrations_validation_image")
-  helper_revision=$(resolve_image_revision "$helper_validation_image")
-  [[ $app_revision == "$expected_revision" ]] ||
-    fail "pinned teagramd image revision $app_revision does not match production revision $expected_revision"
-  [[ $migrations_revision == "$expected_revision" ]] ||
-    fail "pinned migration image revision $migrations_revision does not match production revision $expected_revision"
-  [[ $helper_revision == "$expected_revision" ]] ||
-    fail "pinned S3 client image revision $helper_revision does not match production revision $expected_revision"
+    app_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd)
+    migrations_digest=$(prod_image_digest ghcr.io/teagramhq/teagram-migrations)
+    helper_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd-mc-init)
+    landing_digest=$(prod_image_digest ghcr.io/teagramhq/link-edge-landing)
+    selector_digest=$(prod_image_digest ghcr.io/teagramhq/link-edge-selector)
+    APP_IMAGE=${CUTOVER_TEST_TEAGRAMD_IMAGE:-ghcr.io/teagramhq/teagramd@$app_digest}
+    MIGRATIONS_IMAGE="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
+    K8S_MC_IMAGE="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
+    LINK_LANDING_IMAGE="ghcr.io/teagramhq/link-edge-landing@$landing_digest"
+    LINK_SELECTOR_IMAGE="ghcr.io/teagramhq/link-edge-selector@$selector_digest"
+    migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$MIGRATIONS_IMAGE}
+    helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$K8S_MC_IMAGE}
 
-  required_version=$(prod_literal required-migration-version migration-version=)
-  migration_job=$(prod_literal db-migrations-job-revision job-name=)
-  expected_job_suffix=${migrations_digest#sha256:}
-  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATIONS_JOB_NAME:-} ]]; then
-    [[ $CUTOVER_TEST_MIGRATIONS_JOB_NAME == "$migration_job" ]] ||
+    app_revision=$(resolve_image_revision "$APP_IMAGE")
+    migrations_revision=$(resolve_image_revision "$migrations_validation_image")
+    helper_revision=$(resolve_image_revision "$helper_validation_image")
+    [[ $app_revision == "$live_revision" ]] ||
+      fail "test teagramd image revision $app_revision does not match live revision $live_revision"
+    [[ $migrations_revision == "$live_revision" ]] ||
+      fail "test migration image revision $migrations_revision does not match live revision $live_revision"
+    [[ $helper_revision == "$live_revision" ]] ||
+      fail "test S3 client image revision $helper_revision does not match live revision $live_revision"
+
+    required_version=$(prod_literal required-migration-version migration-version=)
+    migration_job=$(prod_literal db-migrations-job-revision job-name=)
+    rustfs_init_job=$(prod_literal rustfs-init-job-revision job-name=)
+    expected_job_suffix=${migrations_digest#sha256:}
+    expected_helper_suffix=${helper_digest#sha256:}
+    [[ $migration_job == "db-migrations-${expected_job_suffix:0:16}" ]] ||
+      fail 'production migration Job name does not match its pinned migration image digest'
+    [[ $rustfs_init_job == "rustfs-init-${expected_helper_suffix:0:16}" ]] ||
+      fail 'production RustFS initializer Job name does not match its pinned helper image digest'
+    if [[ -n ${CUTOVER_TEST_MIGRATIONS_JOB_NAME:-} && $CUTOVER_TEST_MIGRATIONS_JOB_NAME != "$migration_job" ]]; then
       fail 'CI migration Job name does not match the committed production Job'
-  fi
-  [[ $migration_job == "db-migrations-${expected_job_suffix:0:16}" ]] ||
-    fail 'production migration Job name does not match its pinned migration image digest'
-  latest_version=$(image_latest_migration "$migrations_validation_image")
-  [[ $required_version == "$latest_version" ]] ||
-    fail "pinned migration version $required_version does not match pinned image newest migration $latest_version"
-
-  if [[ $TEST_MODE == false ]]; then
-    REQUIRED_MIGRATION_VERSION=$required_version
-    APP_IMAGE=$app_image
-    MC_IMAGE=$helper_image
-    MIGRATIONS_JOB_NAME=$migration_job
+    fi
   else
-    REQUIRED_MIGRATION_VERSION=$latest_version
-    APP_IMAGE=$app_image
-    MC_IMAGE=$helper_validation_image
-    MIGRATIONS_JOB_NAME=$migration_job
+    APP_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd "$live_revision")
+    MIGRATIONS_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagram-migrations "$live_revision")
+    K8S_MC_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd-mc-init "$live_revision")
+    LINK_LANDING_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-landing "$live_revision")
+    LINK_SELECTOR_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-selector "$live_revision")
+    migrations_validation_image=$MIGRATIONS_IMAGE
+    helper_validation_image=$K8S_MC_IMAGE
+
+    app_revision=$(resolve_image_revision "$APP_IMAGE")
+    migrations_revision=$(resolve_image_revision "$migrations_validation_image")
+    helper_revision=$(resolve_image_revision "$helper_validation_image")
+    [[ $app_revision == "$live_revision" ]] ||
+      fail "published teagramd image revision $app_revision does not match live revision $live_revision"
+    [[ $migrations_revision == "$live_revision" ]] ||
+      fail "published migration image revision $migrations_revision does not match live revision $live_revision"
+    [[ $helper_revision == "$live_revision" ]] ||
+      fail "published S3 client image revision $helper_revision does not match live revision $live_revision"
+
+    migrations_digest=${MIGRATIONS_IMAGE##*@}
+    helper_digest=${K8S_MC_IMAGE##*@}
+    expected_job_suffix=${migrations_digest#sha256:}
+    expected_helper_suffix=${helper_digest#sha256:}
+    migration_job="db-migrations-${expected_job_suffix:0:16}"
+    rustfs_init_job="rustfs-init-${expected_helper_suffix:0:16}"
+    latest_version=$(image_latest_migration "$migrations_validation_image")
+    required_version=$latest_version
   fi
+  if [[ $TEST_MODE == true ]]; then
+    latest_version=$(image_latest_migration "$migrations_validation_image")
+  fi
+  if [[ $TEST_MODE == true ]]; then
+    [[ $required_version == "$latest_version" ]] ||
+      fail "production migration version $required_version does not match the newest migration in the pinned image $latest_version"
+  fi
+  MC_IMAGE=$helper_validation_image
+  MIGRATIONS_JOB_NAME=$migration_job
+  RUSTFS_INIT_JOB_NAME=$rustfs_init_job
+  REQUIRED_MIGRATION_VERSION=$latest_version
+}
+
+render_cutover_manifest() {
+  local destination=$1
+  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
+    sed \
+      -e "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" \
+      -e "s|ghcr.io/teagramhq/teagramd@sha256:[0-9a-f]*|$APP_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/teagram-migrations@sha256:[0-9a-f]*|$MIGRATIONS_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/teagramd-mc-init@sha256:[0-9a-f]*|$K8S_MC_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/link-edge-landing@sha256:[0-9a-f]*|$LINK_LANDING_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/link-edge-selector@sha256:[0-9a-f]*|$LINK_SELECTOR_IMAGE|g" \
+      -e "s|name: db-migrations-[0-9a-f]*|name: $MIGRATIONS_JOB_NAME|g" \
+      -e "s|job-name: db-migrations-[0-9a-f]*|job-name: $MIGRATIONS_JOB_NAME|g" \
+      -e "s|name: rustfs-init-[0-9a-f]*|name: $RUSTFS_INIT_JOB_NAME|g" \
+      -e "s|job-name: rustfs-init-[0-9a-f]*|job-name: $RUSTFS_INIT_JOB_NAME|g" \
+      -e "s|migration-version: \"[0-9]*\"|migration-version: \"$REQUIRED_MIGRATION_VERSION\"|g" \
+      > "$destination"
 }
 
 check_source_migration_version() {
@@ -1572,28 +1655,17 @@ install_admin_secret "$admin_hash_file" "$admin_origin_file"
 rm -f -- "$admin_hash_file" "$admin_origin_file"
 admin_hash_file=''
 admin_origin_file=''
+cutover_manifest=$(mktemp "$EVIDENCE_DIR/cutover-alpha.XXXXXX.yaml")
+render_cutover_manifest "$cutover_manifest"
+kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
+record_phase applying
+kubectl apply --filename "$cutover_manifest" >/dev/null
 if [[ $TEST_MODE == true ]]; then
-  cutover_manifest=$(mktemp "$RUNNER_TEMP/cutover-alpha.XXXXXX.yaml")
-  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
-    sed \
-      -e "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" \
-      -e "s|ghcr.io/teagramhq/teagramd@sha256:[0-9a-f]*|$APP_IMAGE|g" \
-      -e "s|name: db-migrations-[0-9a-f]*|name: $MIGRATIONS_JOB_NAME|g" \
-      -e "s|job-name: db-migrations-[0-9a-f]*|job-name: $MIGRATIONS_JOB_NAME|g" \
-      -e "s|migration-version: \"[0-9]*\"|migration-version: \"$REQUIRED_MIGRATION_VERSION\"|g" \
-      > "$cutover_manifest"
-  kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
-  record_phase applying
-  kubectl apply --filename "$cutover_manifest" >/dev/null
   kubectl patch deployment/cloudflared --namespace "$NAMESPACE" --type=strategic \
     --patch-file "$SCRIPT_DIR/test-cutover-cloudflared-patch.yaml" >/dev/null
-  rm -f -- "$cutover_manifest"
-  cutover_manifest=''
-else
-  kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
-  record_phase applying
-  kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
 fi
+rm -f -- "$cutover_manifest"
+cutover_manifest=''
 
 kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=600s >/dev/null
 kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
@@ -1616,9 +1688,7 @@ target_s3_endpoint="http://$target_lxc_ip:$RUSTFS_PORT"
 setup_mc_client "$target_s3_endpoint"
 
 fence_source_writes
-fenced_source_revision=$(source_container_revision) || fail 'could not recheck the source teagramd revision after the write fence'
-[[ $fenced_source_revision == "$LIVE_SOURCE_REVISION" ]] ||
-  fail "live teagramd revision changed from $LIVE_SOURCE_REVISION to $fenced_source_revision during the write fence; pinned production revision is $PINNED_SOURCE_REVISION"
+verify_source_write_fence
 check_source_migration_version "$REQUIRED_MIGRATION_VERSION"
 check_source_blob_authority
 check_source_media_keys
@@ -1947,6 +2017,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
+verify_source_write_fence
 record_phase serve-switch-started
 incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
   "http://$linkselector_ip:$LINKSELECTOR_PORT" >/dev/null
