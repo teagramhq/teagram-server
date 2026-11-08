@@ -184,8 +184,9 @@ smoke_restored_account() {
 }
 
 smoke_upload_preserved_media() {
+  # Run as the runner user so the manifest and downloaded file stay readable here.
   timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
-    --user 0:0 \
+    --user "$(id -u):$(id -g)" \
     --volume "$tmp_dir/media:/media" \
     --volume "$tmp_dir/username:/username:ro" \
     --volume "$tmp_dir/password:/password:ro" \
@@ -202,7 +203,7 @@ smoke_upload_preserved_media() {
 
 smoke_download_preserved_media() {
   timeout --signal=TERM --kill-after=5s 120s docker run --rm --network host \
-    --user 0:0 \
+    --user "$(id -u):$(id -g)" \
     --volume "$tmp_dir/media:/media" \
     --volume "$tmp_dir/username:/username:ro" \
     --volume "$tmp_dir/password:/password:ro" \
