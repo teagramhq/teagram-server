@@ -574,7 +574,7 @@ if env "${incus_test_env[@]}" CUTOVER_TEST_PINNED_REVISION=000000000000000000000
   printf 'cutover runner accepted a source/pin revision mismatch\n' >&2
   exit 1
 fi
-expect_log "live teagramd revision $K8S_IMAGE_REVISION does not match pinned production revision 0000000000000000000000000000000000000000" \
+expect_log "live teagramd revision $K8S_IMAGE_REVISION does not match test revision 0000000000000000000000000000000000000000" \
   "$tmp_dir/revision-mismatch.log"
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
