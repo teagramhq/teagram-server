@@ -13,6 +13,7 @@ import (
 const (
 	maxConcurrentRPCsPerConn       = 2
 	maxQueuedConcurrentRPCsPerConn = 16
+	maxConcurrentRPCBodyBytes      = 4 << 10
 )
 
 type concurrentRPCWork struct {
@@ -242,6 +243,11 @@ func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (
 	}
 	classifier, ok := handler.(ConcurrentRPCClassifier)
 	if !ok || !classifier.CanRunConcurrently(typeID) {
+		return false, nil
+	}
+	// The entry cap bounds work count; bound each retained frame too so padded
+	// bodies cannot turn the queue into per-connection memory amplification.
+	if len(req.Buf.Buf) > maxConcurrentRPCBodyBytes || len(view.BodyBuffer().Buf) > maxConcurrentRPCBodyBytes {
 		return false, nil
 	}
 	req.rpcTypeID = typeID

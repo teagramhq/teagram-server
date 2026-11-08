@@ -282,6 +282,19 @@ func asyncRPCGZIP(t *testing.T, message bin.Encoder) *proto.GZIP {
 	return &proto.GZIP{Data: body.Copy()}
 }
 
+type asyncRPCPaddedEncoder struct {
+	message bin.Encoder
+	padding int
+}
+
+func (e asyncRPCPaddedEncoder) Encode(b *bin.Buffer) error {
+	if err := e.message.Encode(b); err != nil {
+		return err
+	}
+	b.Buf = append(b.Buf, make([]byte, e.padding)...)
+	return nil
+}
+
 func asyncRPCContainerFrame(t *testing.T, key crypto.AuthKey, sessionID, firstID, containerID int64, messages ...bin.Encoder) []byte {
 	t.Helper()
 	container := &proto.MessageContainer{Messages: make([]proto.Message, 0, len(messages))}
@@ -720,6 +733,99 @@ func TestConcurrentRPCClassifiesGZIPCountersAndIndependentRequests(t *testing.T)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("serve loop did not finish after releasing counters")
+	}
+}
+
+func TestConcurrentRPCFallsBackToSerialForOversizedBodies(t *testing.T) {
+	const bodyLimit = maxConcurrentRPCBodyBytes
+	for _, test := range []struct {
+		name string
+		gzip bool
+	}{
+		{name: "packed frame"},
+		{name: "gzip decoded body", gzip: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			padded := asyncRPCPaddedEncoder{
+				message: &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}},
+				padding: bodyLimit + 1,
+			}
+			var packed bin.Buffer
+			if test.gzip {
+				compressed := asyncRPCGZIP(t, padded)
+				if len(compressed.Data) <= bodyLimit {
+					t.Fatalf("gzip logical body is %d bytes, want over %d", len(compressed.Data), bodyLimit)
+				}
+				if err := compressed.Encode(&packed); err != nil {
+					t.Fatalf("encode compressed request: %v", err)
+				}
+			} else if err := padded.Encode(&packed); err != nil {
+				t.Fatalf("encode padded request: %v", err)
+			}
+			if test.gzip && packed.Len() >= bodyLimit {
+				t.Fatalf("compressed request is %d bytes, want under %d", packed.Len(), bodyLimit)
+			}
+			if !test.gzip && packed.Len() <= bodyLimit {
+				t.Fatalf("packed request is %d bytes, want over %d", packed.Len(), bodyLimit)
+			}
+
+			conn := &Conn{}
+			conn.concurrentRPCs.entries = map[int64]chan struct{}{
+				1 << 32: make(chan struct{}),
+				2 << 32: make(chan struct{}),
+			}
+			conn.concurrentRPCs.active = maxConcurrentRPCsPerConn
+			admission := &rpcAdmission{ctx: context.Background()}
+			admission.refs.Store(1)
+			req := &Request{
+				MsgID:     3 << 32,
+				Buf:       &bin.Buffer{Buf: packed.Buf},
+				Ctx:       context.Background(),
+				admission: admission,
+			}
+			originalBuf := req.Buf
+			server := &Server{}
+			handler := asyncRPCBatchHandlerForTest()
+
+			defer func() {
+				conn.concurrentRPCs.mu.Lock()
+				queued := conn.concurrentRPCs.queue
+				conn.concurrentRPCs.queue = nil
+				for _, done := range conn.concurrentRPCs.entries {
+					close(done)
+				}
+				conn.concurrentRPCs.entries = nil
+				conn.concurrentRPCs.active = 0
+				conn.concurrentRPCs.mu.Unlock()
+				for _, work := range queued {
+					if work.release != nil {
+						work.release()
+					}
+				}
+				admission.finish()
+			}()
+
+			scheduled, err := server.dispatchConcurrentRPC(conn, req, handler)
+			if err != nil {
+				t.Fatalf("dispatchConcurrentRPC: %v", err)
+			}
+			if scheduled {
+				t.Fatal("oversized counters request was scheduled concurrently")
+			}
+			if req.Buf != originalBuf {
+				t.Fatal("serial fallback replaced the packed request buffer")
+			}
+			if got := admission.refs.Load(); got != 1 {
+				t.Fatalf("serial fallback retained an admission reference: refs=%d", got)
+			}
+			conn.concurrentRPCs.mu.Lock()
+			queued := len(conn.concurrentRPCs.queue)
+			entries := len(conn.concurrentRPCs.entries)
+			conn.concurrentRPCs.mu.Unlock()
+			if queued != 0 || entries != maxConcurrentRPCsPerConn {
+				t.Fatalf("oversized request changed concurrent work: queued=%d entries=%d", queued, entries)
+			}
+		})
 	}
 }
 
