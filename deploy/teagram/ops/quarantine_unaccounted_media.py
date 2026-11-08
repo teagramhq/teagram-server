@@ -575,6 +575,23 @@ def record_post_delete_inventory(
     atomic_manifest(manifest_path, manifest)
 
 
+def record_post_delete_inventory_unavailable(
+    manifest_path: pathlib.Path,
+    manifest: dict[str, object],
+    referenced_count: int,
+) -> None:
+    checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    manifest["post_delete_envelope_inventory"] = {
+        "status": "unavailable",
+        "referenced_count": referenced_count,
+    }
+    manifest["post_delete_checked_at_utc"] = checked_at
+    manifest["status"] = "verification_pending"
+    manifest["verification_pending_at_utc"] = checked_at
+    manifest.pop("completed_at_utc", None)
+    atomic_manifest(manifest_path, manifest)
+
+
 def post_delete_inventory_failure(run_id: str, inventory: EnvelopeInventory) -> str:
     referenced_without_valid = inventory.no_valid_envelope_count + inventory.missing_count
     return (
@@ -663,7 +680,11 @@ def apply_quarantine(
         validate_envelopes(final_reference_count)
         final_envelope_inventory = EnvelopeInventory(final_reference_count, 0, 0, 0, 0)
     else:
-        final_envelope_inventory = record_post_delete_envelopes(final_reference_count)
+        try:
+            final_envelope_inventory = record_post_delete_envelopes(final_reference_count)
+        except QuarantineError as error:
+            record_post_delete_inventory_unavailable(manifest_path, manifest, final_reference_count)
+            fail(f"post-delete envelope inventory failed ({error}); rerun --check-post {run_id}")
     record_post_delete_inventory(manifest_path, manifest, final_envelope_inventory)
     if not final_envelope_inventory.valid:
         fail(post_delete_inventory_failure(run_id, final_envelope_inventory))

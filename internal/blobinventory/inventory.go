@@ -100,10 +100,10 @@ func Scan(ctx context.Context, blobs blob.Store, ring *blob.KeyRing, references 
 	return scan(ctx, blobs, ring, references, nil)
 }
 
-// ScanWithReferenceRefresh reads references again after the tree walk and
-// reclassifies observed objects whose rows committed during the inventory. It
-// does not provide a point-in-time view of concurrent deletes or writes that
-// commit after the refresh.
+// ScanWithReferenceRefresh reads references again after the tree walk,
+// reclassifies observed objects against that set, and looks up refreshed keys
+// missing from the walk. It does not provide a point-in-time view of concurrent
+// deletes or writes that commit after the refresh.
 func ScanWithReferenceRefresh(
 	ctx context.Context,
 	blobs blob.Store,
@@ -147,7 +147,7 @@ func scan(
 		}
 	}
 	seenReferences := make(map[string]struct{}, len(byKey))
-	unaccountedObjects := make(map[string]unaccountedObservation)
+	observedObjects := make(map[string]unaccountedObservation)
 	unaccountedDirectories := make(map[string]struct{})
 	seenTreeEntries := make(map[string]struct{})
 
@@ -156,11 +156,12 @@ func scan(
 			return err
 		}
 		if entry.Dir {
-			if _, referenced := byKey[entry.Key]; referenced {
-				return fmt.Errorf("blob inventory: referenced key %q is a directory", entry.Key)
-			}
 			if refresh != nil {
 				unaccountedDirectories[entry.Key] = struct{}{}
+				return nil
+			}
+			if _, referenced := byKey[entry.Key]; referenced {
+				return fmt.Errorf("blob inventory: referenced key %q is a directory", entry.Key)
 			}
 			return nil
 		}
@@ -182,23 +183,25 @@ func scan(
 		}
 
 		if !entry.Regular {
+			if refresh != nil {
+				observedObjects[entry.Key] = unaccountedObservation{entry: entry}
+				return nil
+			}
 			if referenced {
 				return addClass(&report.Classes.NoValidEnvelope, ref.LogicalBytes, 0, nil)
-			}
-			if refresh != nil {
-				unaccountedObjects[entry.Key] = unaccountedObservation{entry: entry}
 			}
 			id := objectIDForKey(entry.Key)
 			return addClass(&report.Classes.Unaccounted, 0, 0, &id)
 		}
 		if err := blob.ValidateKey(entry.Key); err != nil {
-			if referenced {
-				return fmt.Errorf("blob inventory: referenced key is invalid: %w", err)
-			}
 			if refresh != nil {
-				unaccountedObjects[entry.Key] = unaccountedObservation{
+				observedObjects[entry.Key] = unaccountedObservation{
 					entry: entry, logicalBytes: entry.Size, physicalBytes: entry.Size,
 				}
+				return nil
+			}
+			if referenced {
+				return fmt.Errorf("blob inventory: referenced key is invalid: %w", err)
 			}
 			id := objectIDForKey(entry.Key)
 			return addClass(&report.Classes.Unaccounted, entry.Size, entry.Size, &id)
@@ -210,17 +213,22 @@ func scan(
 		}
 		validEnvelope := inspectErr == nil
 		if inspectErr != nil && !errors.Is(inspectErr, blob.ErrEnvelope) {
+			if refresh != nil && errors.Is(inspectErr, blob.ErrNotFound) {
+				return nil
+			}
 			return fmt.Errorf("blob inventory: inspect %q: %w", entry.Key, inspectErr)
 		}
-		if refresh != nil && !referenced {
+		if refresh != nil {
 			logicalBytes := entry.Size
 			if info.HasLogicalBytes {
 				logicalBytes = info.LogicalBytes
 			}
-			unaccountedObjects[entry.Key] = unaccountedObservation{
+			observation := unaccountedObservation{
 				entry: entry, info: info, inspected: true, validEnvelope: validEnvelope,
 				logicalBytes: logicalBytes, physicalBytes: entry.Size,
 			}
+			observedObjects[entry.Key] = observation
+			return addVersionObjectMetrics(versions, observation)
 		}
 		if referenced && info.HasEnvelopeMagic && !info.HasKeyVersion {
 			report.UnversionedEnvelopeReferences++
@@ -287,29 +295,68 @@ func scan(
 		if err != nil {
 			return Report{}, fmt.Errorf("blob inventory: refresh references: %w", err)
 		}
-		refreshedByKey, err := indexReferences(refreshed)
+		byKey, err = indexReferences(refreshed)
 		if err != nil {
 			return Report{}, err
 		}
-		for key, ref := range byKey {
-			if refreshedRef, exists := refreshedByKey[key]; !exists || refreshedRef != ref {
-				return Report{}, fmt.Errorf("blob inventory: database reference changed during inventory for key %q", key)
-			}
-		}
-		for key, ref := range refreshedByKey {
-			if _, exists := byKey[key]; exists {
-				continue
-			}
+		for key := range byKey {
 			if _, isDirectory := unaccountedDirectories[key]; isDirectory {
 				return Report{}, fmt.Errorf("blob inventory: referenced key %q is a directory", key)
 			}
-			byKey[key] = ref
-			if observation, exists := unaccountedObjects[key]; exists {
-				if err := reclassifyUnaccounted(&report, versions, ref, observation); err != nil {
-					return Report{}, fmt.Errorf("blob inventory: reclassify newly referenced key %q: %w", key, err)
+		}
+
+		report.Classes = Classes{
+			Missing:     Class{IDs: make([]ObjectID, 0)},
+			Unaccounted: Class{IDs: make([]ObjectID, 0)},
+		}
+		report.UnversionedEnvelopeReferences = 0
+		for _, version := range versions {
+			version.ReferencedObjects = 0
+			version.ReferencedValidEnvelopes = 0
+			version.ReferencedLogicalBytes = 0
+			version.ReferencedPhysicalBytes = 0
+		}
+		seenReferences = make(map[string]struct{}, len(byKey))
+
+		for key, observation := range observedObjects {
+			ref, referenced := byKey[key]
+			if referenced {
+				if err := addReferencedObservation(&report, versions, ref, observation); err != nil {
+					return Report{}, fmt.Errorf("blob inventory: classify referenced key %q: %w", key, err)
 				}
 				seenReferences[key] = struct{}{}
+				continue
 			}
+			if err := addUnaccountedObservation(&report, observation); err != nil {
+				return Report{}, fmt.Errorf("blob inventory: classify unaccounted key %q: %w", key, err)
+			}
+		}
+
+		for key, ref := range byKey {
+			if _, exists := seenReferences[key]; exists {
+				continue
+			}
+			entry, exists, err := findEntry(ctx, blobs, tree, key)
+			if err != nil {
+				return Report{}, fmt.Errorf("blob inventory: lookup newly referenced key %q: %w", key, err)
+			}
+			if !exists {
+				continue
+			}
+			observation, exists, err := inspectEntry(ctx, blobs, ring, entry)
+			if err != nil {
+				return Report{}, fmt.Errorf("blob inventory: inspect newly referenced key %q: %w", key, err)
+			}
+			if !exists {
+				continue
+			}
+			if err := addVersionObjectMetrics(versions, observation); err != nil {
+				return Report{}, fmt.Errorf("blob inventory: key %q object metrics: %w", key, err)
+			}
+			if err := addReferencedObservation(&report, versions, ref, observation); err != nil {
+				return Report{}, fmt.Errorf("blob inventory: classify referenced key %q: %w", key, err)
+			}
+			seenReferences[key] = struct{}{}
 		}
 	}
 
@@ -368,38 +415,44 @@ func indexReferences(references []Reference) (map[string]Reference, error) {
 	return byKey, nil
 }
 
-func reclassifyUnaccounted(
+func addVersionObjectMetrics(versions map[uint32]*KeyVersion, observation unaccountedObservation) error {
+	info := observation.info
+	if !observation.inspected || !info.HasKeyVersion {
+		return nil
+	}
+	version := versions[info.KeyVersion]
+	if version == nil {
+		version = &KeyVersion{Version: info.KeyVersion}
+		versions[info.KeyVersion] = version
+	}
+	version.Objects++
+	if info.HasLogicalBytes {
+		if err := addBytes(&version.LogicalBytes, info.LogicalBytes); err != nil {
+			return fmt.Errorf("key version %d logical bytes: %w", info.KeyVersion, err)
+		}
+	} else {
+		version.UnknownLogicalObjects++
+	}
+	if err := addBytes(&version.PhysicalBytes, observation.entry.Size); err != nil {
+		return fmt.Errorf("key version %d physical bytes: %w", info.KeyVersion, err)
+	}
+	if observation.validEnvelope {
+		version.ValidEnvelopes++
+	}
+	return nil
+}
+
+func addReferencedObservation(
 	report *Report,
 	versions map[uint32]*KeyVersion,
 	ref Reference,
 	observation unaccountedObservation,
 ) error {
-	class := &report.Classes.Unaccounted
-	if class.Count == 0 || class.LogicalBytes < observation.logicalBytes || class.PhysicalBytes < observation.physicalBytes {
-		return errors.New("unaccounted totals cannot be reconciled")
-	}
-	class.Count--
-	class.LogicalBytes -= observation.logicalBytes
-	class.PhysicalBytes -= observation.physicalBytes
-	remaining := class.IDs[:0]
-	removed := 0
-	for _, id := range class.IDs {
-		if id.Key == ref.Key {
-			removed++
-			continue
-		}
-		remaining = append(remaining, id)
-	}
-	if removed != 1 {
-		return errors.New("unaccounted object identity cannot be reconciled")
-	}
-	class.IDs = remaining
-
-	if !observation.inspected {
-		if observation.entry.Regular {
-			return errors.New("regular unaccounted object has no envelope inspection")
-		}
+	if !observation.entry.Regular {
 		return addClass(&report.Classes.NoValidEnvelope, ref.LogicalBytes, 0, nil)
+	}
+	if !observation.inspected {
+		return errors.New("regular referenced object has no envelope inspection")
 	}
 	info := observation.info
 	if info.HasEnvelopeMagic && !info.HasKeyVersion {
@@ -429,6 +482,78 @@ func reclassifyUnaccounted(
 	}
 	id := ObjectID{Kind: ref.Kind, ID: ref.ID, Key: ref.Key}
 	return addClass(&report.Classes.NoValidEnvelope, ref.LogicalBytes, observation.entry.Size, &id)
+}
+
+func addUnaccountedObservation(report *Report, observation unaccountedObservation) error {
+	id := objectIDForKey(observation.entry.Key)
+	if !observation.entry.Regular {
+		return addClass(&report.Classes.Unaccounted, 0, 0, &id)
+	}
+	return addClass(&report.Classes.Unaccounted, observation.logicalBytes, observation.physicalBytes, &id)
+}
+
+func inspectEntry(
+	ctx context.Context,
+	blobs blob.Store,
+	ring *blob.KeyRing,
+	entry blob.Entry,
+) (unaccountedObservation, bool, error) {
+	if entry.Dir {
+		return unaccountedObservation{}, false, fmt.Errorf("referenced key %q is a directory", entry.Key)
+	}
+	if entry.Size < 0 {
+		return unaccountedObservation{}, false, fmt.Errorf("full-tree listing returned negative size for %q", entry.Key)
+	}
+	if !entry.Regular {
+		return unaccountedObservation{entry: entry}, true, nil
+	}
+	if err := blob.ValidateKey(entry.Key); err != nil {
+		return unaccountedObservation{}, false, fmt.Errorf("referenced key is invalid: %w", err)
+	}
+	info, inspectErr := blob.InspectEnvelopeHeader(ctx, blobs, ring, entry.Key, entry.Size)
+	if errors.Is(inspectErr, blob.ErrEnvelopeKeyUnavailable) {
+		return unaccountedObservation{}, false, fmt.Errorf("cannot authenticate envelope header for %q: %w", entry.Key, inspectErr)
+	}
+	if errors.Is(inspectErr, blob.ErrNotFound) {
+		return unaccountedObservation{}, false, nil
+	}
+	if inspectErr != nil && !errors.Is(inspectErr, blob.ErrEnvelope) {
+		return unaccountedObservation{}, false, fmt.Errorf("inspect %q: %w", entry.Key, inspectErr)
+	}
+	logicalBytes := entry.Size
+	if info.HasLogicalBytes {
+		logicalBytes = info.LogicalBytes
+	}
+	return unaccountedObservation{
+		entry: entry, info: info, inspected: true, validEnvelope: inspectErr == nil,
+		logicalBytes: logicalBytes, physicalBytes: entry.Size,
+	}, true, nil
+}
+
+func findEntry(ctx context.Context, blobs blob.Store, tree Tree, key string) (blob.Entry, bool, error) {
+	var found blob.Entry
+	foundExact := false
+	collect := func(entry blob.Entry) error {
+		if entry.Key != key {
+			return nil
+		}
+		if foundExact {
+			return fmt.Errorf("full-tree listing returned key %q twice", key)
+		}
+		found = entry
+		foundExact = true
+		return nil
+	}
+	var err error
+	if strings.Contains(key, "/") {
+		err = blobs.WalkPrefix(ctx, key, collect)
+	} else {
+		err = tree.Walk(ctx, collect)
+	}
+	if err != nil {
+		return blob.Entry{}, false, err
+	}
+	return found, foundExact, nil
 }
 
 func addClass(class *Class, logicalBytes, physicalBytes int64, id *ObjectID) error {

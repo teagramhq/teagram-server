@@ -523,6 +523,34 @@ class QuarantineFixtures(unittest.TestCase):
         })
         self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
 
+    def test_post_delete_envelope_command_failure_leaves_verification_pending(self) -> None:
+        directory = self.qbase / f"MAIN-3441-{self.run_id}"
+        store = FakeStorage(dict(CANDIDATE_BYTES), directory)
+
+        def fail_inventory(_referenced_count: int) -> MEDIA.EnvelopeInventory:
+            raise MEDIA.QuarantineError("fresh encrypted envelope inventory failed; private diagnostics were retained")
+
+        with self.assertRaisesRegex(MEDIA.QuarantineError, r"rerun --check-post " + self.run_id):
+            MEDIA.apply_quarantine(
+                self.snapshot_provider(store),
+                store,
+                directory,
+                self.run_id,
+                "2026-12-07",
+                lambda _count: None,
+                fail_inventory,
+            )
+
+        self.assertEqual(set(store.removed), set(CANDIDATE_BYTES))
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "verification_pending")
+        self.assertEqual(manifest["post_delete_envelope_inventory"], {
+            "status": "unavailable",
+            "referenced_count": 1,
+        })
+        self.assertNotIn("completed_at_utc", manifest)
+        self.assertTrue(all(record["deleted"] for record in manifest["objects"]))
+
     def test_post_quarantine_check_retries_after_removal_until_inventory_passes(self) -> None:
         directory = self.qbase / f"MAIN-3441-{self.run_id}"
         manifest_path = directory / "manifest.json"
