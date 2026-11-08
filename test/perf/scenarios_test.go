@@ -63,27 +63,123 @@ func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
 
 type call = func(ctx context.Context) error
 
-func TestMutatingPrivateScenariosUseContactChat(t *testing.T) {
+type privateChatMemberSnapshot struct {
+	ownerID     int64
+	peerID      int64
+	nextLocalID int64
+	topMessage  int64
+	unreadCount int32
+}
+
+type privateChatSnapshot struct {
+	members [2]privateChatMemberSnapshot
+}
+
+func privateChatLifecycle() (prepare func(context.Context, *env) error, cleanup func(context.Context, *env) error) {
+	var snapshot *privateChatSnapshot
+	prepare = func(ctx context.Context, e *env) error {
+		var err error
+		snapshot, err = capturePrivateChatSnapshot(ctx, e)
+		return err
+	}
+	cleanup = func(ctx context.Context, e *env) error {
+		if snapshot == nil {
+			return errors.New("private chat state was not captured before sample")
+		}
+		previous := snapshot
+		snapshot = nil
+		return cleanupPrivateChatSample(ctx, e, previous)
+	}
+	return prepare, cleanup
+}
+
+func capturePrivateChatSnapshot(ctx context.Context, e *env) (*privateChatSnapshot, error) {
+	if e.cleanupDB == nil {
+		return nil, errors.New("private chat cleanup connection is not configured")
+	}
+	snapshot := &privateChatSnapshot{}
+	participants := [2][2]int64{{e.f.Owner, e.f.Partner}, {e.f.Partner, e.f.Owner}}
+	for i, participant := range participants {
+		member := privateChatMemberSnapshot{ownerID: participant[0], peerID: participant[1]}
+		if err := e.cleanupDB.QueryRow(ctx, `
+			SELECT state.next_local_id, dialog.top_message, dialog.unread_count
+			FROM update_state AS state
+			JOIN dialogs AS dialog
+			  ON dialog.owner_id = state.user_id
+			 AND dialog.peer_type = 1
+			 AND dialog.peer_id = $2
+			WHERE state.user_id = $1`, member.ownerID, member.peerID).Scan(
+			&member.nextLocalID, &member.topMessage, &member.unreadCount,
+		); err != nil {
+			return nil, fmt.Errorf("snapshot private dialog %d/%d: %w", member.ownerID, member.peerID, err)
+		}
+		snapshot.members[i] = member
+	}
+	return snapshot, nil
+}
+
+func cleanupPrivateChatSample(ctx context.Context, e *env, snapshot *privateChatSnapshot) error {
+	tx, err := e.cleanupDB.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin private chat cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	// Connected perf clients can already have observed these events, so keep
+	// update_state and message_events monotonic while removing the history rows.
+	for _, member := range snapshot.members {
+		deleted, err := tx.Exec(ctx, `
+			DELETE FROM messages
+			WHERE owner_id = $1 AND local_id = $2 AND peer_type = 1 AND peer_id = $3`,
+			member.ownerID, member.nextLocalID, member.peerID,
+		)
+		if err != nil {
+			return fmt.Errorf("delete private sample message %d/%d/%d: %w", member.ownerID, member.peerID, member.nextLocalID, err)
+		}
+		if deleted.RowsAffected() != 1 {
+			return fmt.Errorf("private sample messages deleted for %d/%d: got %d, want 1", member.ownerID, member.peerID, deleted.RowsAffected())
+		}
+		updated, err := tx.Exec(ctx, `
+			UPDATE dialogs SET top_message = $3, unread_count = $4
+			WHERE owner_id = $1 AND peer_type = 1 AND peer_id = $2`,
+			member.ownerID, member.peerID, member.topMessage, member.unreadCount,
+		)
+		if err != nil {
+			return fmt.Errorf("restore private dialog %d/%d: %w", member.ownerID, member.peerID, err)
+		}
+		if updated.RowsAffected() != 1 {
+			return fmt.Errorf("private dialog restored for %d/%d: got %d rows, want 1", member.ownerID, member.peerID, updated.RowsAffected())
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit private chat cleanup: %w", err)
+	}
+	return nil
+}
+
+func TestMutatingPrivateScenariosUseLongChatAndCleanSamples(t *testing.T) {
 	e := &env{f: fixture{Owner: 1, Partner: 2, Contacts: []int64{3}}}
 	seen := map[string]bool{}
 	for _, sc := range scenarios() {
 		switch sc.name {
-		case "messages.sendMessage private contact chat", "messages.readHistory contact chat":
+		case "messages.sendMessage private", "messages.readHistory":
 			seen[sc.name] = true
 			if sc.privatePeer == nil {
 				t.Errorf("%s has no private chat target", sc.name)
 				continue
 			}
 			peer := sc.privatePeer(e)
-			if peer.UserID == e.f.Partner {
-				t.Errorf("%s targets long-chat partner %d", sc.name, peer.UserID)
+			if peer.UserID != e.f.Partner {
+				t.Errorf("%s targets %d, want long-chat partner %d", sc.name, peer.UserID, e.f.Partner)
 			}
-			if peer.UserID != e.f.Contacts[0] {
-				t.Errorf("%s targets %d, want seeded contact %d", sc.name, peer.UserID, e.f.Contacts[0])
+			if sc.prepare == nil {
+				t.Errorf("%s does not snapshot state before each sample", sc.name)
+			}
+			if sc.cleanup == nil {
+				t.Errorf("%s does not clean up after each sample", sc.name)
 			}
 		}
 	}
-	for _, name := range []string{"messages.sendMessage private contact chat", "messages.readHistory contact chat"} {
+	for _, name := range []string{"messages.sendMessage private", "messages.readHistory"} {
 		if !seen[name] {
 			t.Errorf("scenario %q missing", name)
 		}
@@ -105,9 +201,10 @@ func read(name string, build func(e *env) call) scenario {
 // the account a little, and the reads must see the fixture as seeded.
 func scenarios() []scenario {
 	privateSend := scenario{
-		name: "messages.sendMessage private contact chat", kind: perfreport.Write, samples: writeSamples,
-		privatePeer: activityPeer,
+		name: "messages.sendMessage private", kind: perfreport.Write, samples: writeSamples,
+		privatePeer: longChatPeer,
 	}
+	privateSend.prepare, privateSend.cleanup = privateChatLifecycle()
 	privateSend.setup = fixed(func(e *env) call {
 		peer := privateSend.privatePeer(e)
 		return func(ctx context.Context) error {
@@ -118,9 +215,11 @@ func scenarios() []scenario {
 		}
 	})
 	readHistory := scenario{
-		name: "messages.readHistory contact chat", kind: perfreport.Write, samples: writeSamples,
-		privatePeer: activityPeer,
+		name: "messages.readHistory", kind: perfreport.Write, samples: writeSamples,
+		privatePeer: longChatPeer,
 	}
+	captureReadHistoryState, cleanupReadHistorySample := privateChatLifecycle()
+	readHistory.cleanup = cleanupReadHistorySample
 	readHistory.setup = fixed(func(e *env) call {
 		peer := readHistory.privatePeer(e)
 		return func(ctx context.Context) error {
@@ -130,6 +229,9 @@ func scenarios() []scenario {
 	})
 	// Each sample reads one new incoming message, as an open chat does.
 	readHistory.prepare = func(ctx context.Context, e *env) error {
+		if err := captureReadHistoryState(ctx, e); err != nil {
+			return err
+		}
 		peer := readHistory.privatePeer(e)
 		_, _, _, _, err := e.srv.store.SendMessage(ctx, peer.UserID, e.f.Owner, "unread", randomIDs.Add(1), 0, 0)
 		return err
@@ -278,10 +380,8 @@ func history(e *env, req *tg.MessagesGetHistoryRequest) call {
 	}
 }
 
-// activityPeer keeps the mutating private RPC scenarios out of the long chat
-// used by history reads, so repeated measurements leave that fixture stable.
-func activityPeer(e *env) *tg.InputPeerUser {
-	return userPeer(e.f.Owner, e.f.Contacts[0])
+func longChatPeer(e *env) *tg.InputPeerUser {
+	return userPeer(e.f.Owner, e.f.Partner)
 }
 
 // jumpToDate asks for the page around a date half way through the long chat,

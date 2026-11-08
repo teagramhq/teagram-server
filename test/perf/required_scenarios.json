@@ -15,8 +15,8 @@
   "updates.getDifference 30 days offline",
   "channels.getParticipants",
   "upload.getFile first part",
-  "messages.sendMessage private contact chat",
+  "messages.sendMessage private",
   "messages.sendMessage channel",
   "channel post fan-out",
-  "messages.readHistory contact chat"
+  "messages.readHistory"
 ]

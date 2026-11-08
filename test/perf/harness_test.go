@@ -35,6 +35,7 @@ type env struct {
 	srv        *server
 	owner      *client
 	subscriber *client
+	cleanupDB  *pgx.Conn
 	// logSQL, set by TG_PERF_SQL, prints the statements of each scenario's
 	// counted sample: the first thing to read when a query count fails.
 	logSQL func(scenario string, captured []capturedQuery)
@@ -135,6 +136,7 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.cleanupDB = explain.conn
 	defer func() {
 		if err := explain.close(ctx); err != nil {
 			t.Errorf("close explain connection: %v", err)
