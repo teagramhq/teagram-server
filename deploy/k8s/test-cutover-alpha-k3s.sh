@@ -437,6 +437,53 @@ if [[ ${CUTOVER_FAIL_IMPORTER_DELETE:-} == true && " $* " == *' delete pod/cutov
   printf 'injected importer deletion failure\n' >&2
   exit 42
 fi
+if [[ ${1:-} == rollout && ${2:-} == status ]]; then
+  resource=${3:-unknown}
+  if "$REAL_KUBECTL" "$@"; then
+    exit 0
+  else
+    rollout_status=$?
+  fi
+
+  namespace=default
+  shift 3
+  while (($#)); do
+    if [[ $1 == --namespace || $1 == -n ]]; then
+      shift
+      [[ $# -eq 0 ]] || namespace=$1
+      break
+    fi
+    shift
+  done
+  printf 'rollout failed for %s in %s; collecting Kubernetes diagnostics\n' \
+    "$resource" "$namespace" >&2
+  "$REAL_KUBECTL" get "$resource" --namespace "$namespace" --output wide >&2 || true
+  "$REAL_KUBECTL" get pods --namespace "$namespace" --output wide >&2 || true
+  pod_names=$("$REAL_KUBECTL" get pods --namespace "$namespace" \
+    --output 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || pod_names=''
+  while IFS= read -r pod; do
+    [[ -n $pod ]] || continue
+    printf '\n--- describe pod/%s in %s ---\n' "$pod" "$namespace" >&2
+    "$REAL_KUBECTL" describe pod "$pod" --namespace "$namespace" >&2 || true
+    printf '\n--- current logs for pod/%s in %s ---\n' "$pod" "$namespace" >&2
+    "$REAL_KUBECTL" logs "pod/$pod" --namespace "$namespace" \
+      --all-containers=true --prefix=true --tail=200 >&2 || true
+    pod_json=$("$REAL_KUBECTL" get pod "$pod" --namespace "$namespace" --output json 2>/dev/null) || pod_json=''
+    previous_containers=$(jq -r '
+      [.status.initContainerStatuses[]?, .status.containerStatuses[]?]
+      | map(select(.restartCount > 0) | .name) | unique | .[]
+    ' <<< "$pod_json") || previous_containers=''
+    while IFS= read -r container; do
+      [[ -n $container ]] || continue
+      printf '\n--- previous logs for pod/%s container/%s ---\n' "$pod" "$container" >&2
+      "$REAL_KUBECTL" logs "pod/$pod" --namespace "$namespace" --container "$container" \
+        --previous --tail=200 >&2 || true
+    done <<< "$previous_containers"
+  done <<< "$pod_names"
+  printf '\n--- recent events in %s ---\n' "$namespace" >&2
+  "$REAL_KUBECTL" get events --namespace "$namespace" --sort-by=.lastTimestamp >&2 || true
+  exit "$rollout_status"
+fi
 exec "$REAL_KUBECTL" "$@"
 SH
 chmod 0700 "$tmp_dir/bin/kubectl"
