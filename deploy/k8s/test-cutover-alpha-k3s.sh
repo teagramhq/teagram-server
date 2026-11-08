@@ -707,9 +707,13 @@ if env "${incus_test_env[@]}" CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true \
 fi
 expect_log 'injected disposable-cluster failure after the Cloudflare connector started' "$tmp_dir/post-switch-failure.log"
 expect_log 'automatic recovery is disabled' "$tmp_dir/post-switch-failure.log"
-[[ $(kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
-  stat -c '%a:%u' /var/lib/teagramd/server_key.pem) == 600:65532 ]] || {
-  printf 'source RSA fixture does not exercise a private non-root key\n' >&2
+# The source teagramd was restarted after the key was created, so kubelet has
+# re-applied the pod fsGroup and added group access (0660). The key must still
+# be non-root-owned and closed to everyone else.
+source_key_stat=$(kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+  stat -c '%a:%u' /var/lib/teagramd/server_key.pem)
+[[ $source_key_stat =~ ^6[06]0:65532$ ]] || {
+  printf 'source RSA fixture does not exercise a private non-root key (mode:uid is %s)\n' "$source_key_stat" >&2
   exit 1
 }
 sed 's/^  namespace: teagram$/  namespace: teagram-cutover/' deploy/k8s/test-cutover-key-reader.yaml |
