@@ -28,7 +28,7 @@ PRODUCT_REFERENCES = (
     "https://t.me/botfather",
 )
 CSP = (
-    "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
+    "default-src 'self'; base-uri 'self'; form-action 'self'; "
     "frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; "
     "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; "
@@ -229,6 +229,21 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(report["productReferenceCount"], len(PRODUCT_REFERENCES))
         (self.source / "index.html").write_text("caller changed after attach", encoding="utf-8")
         self.assertEqual(hashlib.sha256((self.destination / "index.html").read_bytes()).hexdigest(), expected_index)
+
+    def test_accepts_legacy_frame_ancestor_in_current_meta_csp(self) -> None:
+        index_path = self.source / "index.html"
+        original = index_path.read_text(encoding="utf-8")
+        legacy_csp = CSP.replace(
+            "form-action 'self'; ",
+            "form-action 'self'; frame-ancestors 'none'; ",
+        )
+        index_path.write_text(original.replace(CSP, legacy_csp), encoding="utf-8")
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["checks"]["privateCSP"])
 
     def test_rejects_unreviewed_csp_network_sources(self) -> None:
         index_path = self.source / "index.html"
