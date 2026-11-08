@@ -10,6 +10,38 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blobinventory"
 )
 
+type prefixWalkProbe struct {
+	blob.Store
+
+	calls int
+}
+
+func (p *prefixWalkProbe) WalkPrefix(context.Context, string, func(blob.Entry) error) error {
+	p.calls++
+	return errors.New("backend WalkPrefix called")
+}
+
+func TestPrefixedStoreWalkPrefixRejectsInvalidPrefixesBeforeBackendCall(t *testing.T) {
+	t.Parallel()
+	for _, prefix := range []string{"/", "parts//", "parts/../"} {
+		t.Run(prefix, func(t *testing.T) {
+			backend := &prefixWalkProbe{}
+			prefixed, err := blob.NewPrefixedStore(backend, blob.EncryptedObjectsPrefix)
+			if err != nil {
+				t.Fatalf("create prefixed store: %v", err)
+			}
+
+			err = prefixed.WalkPrefix(context.Background(), prefix, func(blob.Entry) error { return nil })
+			if !errors.Is(err, blob.ErrInvalidKey) {
+				t.Fatalf("walk invalid prefix %q: err = %v, want ErrInvalidKey", prefix, err)
+			}
+			if backend.calls != 0 {
+				t.Fatalf("backend WalkPrefix called %d times for invalid prefix %q", backend.calls, prefix)
+			}
+		})
+	}
+}
+
 func TestPrefixedStoreKeepsLogicalEnvelopeIdentity(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,25 @@ func openOrphanStore(t *testing.T) (*store.Store, *blob.Local) {
 	return s, b
 }
 
+type sortedBlobWalk struct{ blob.Store }
+
+func (b sortedBlobWalk) WalkPrefix(ctx context.Context, prefix string, fn func(blob.Entry) error) error {
+	var entries []blob.Entry
+	if err := b.Store.WalkPrefix(ctx, prefix, func(entry blob.Entry) error {
+		entries = append(entries, entry)
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	for _, entry := range entries {
+		if err := fn(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TestPartOrphanPassReclaimsCrashWindowObject covers the crash window the
 // row-driven sweep cannot see: the row was committed (and then deleted by the
 // sweep) but the bytes were never uploaded. The object is old enough and no
@@ -124,6 +144,64 @@ func TestPartOrphanPassReclaimsShardedCrashWindowObject(t *testing.T) {
 	}
 }
 
+// TestPartOrphanPassHandlesPrefixedPartsNamespace covers the encrypted S3
+// namespace: PartsPrefix is a containment prefix ending in '/', not an object
+// key. An unrecognized object under it must remain while the valid orphan is
+// reclaimed.
+func TestPartOrphanPassHandlesPrefixedPartsNamespace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	local, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	prefixed, err := blob.NewPrefixedStore(local, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("prefixed blob store: %v", err)
+	}
+	key := partKey(0xfeed)
+	if _, err := prefixed.Put(ctx, key, strings.NewReader("orphan")); err != nil {
+		t.Fatalf("put orphan: %v", err)
+	}
+	physicalKey := blob.EncryptedObjectsPrefix + "/" + key
+	ageObject(t, local.RootDir(), physicalKey, time.Now().Add(-24*time.Hour))
+
+	malformed := blob.EncryptedObjectsPrefix + "/" + blob.PartsPrefix + "!README"
+	malformedPath := filepath.Join(local.RootDir(), filepath.FromSlash(malformed))
+	if err := os.MkdirAll(filepath.Dir(malformedPath), 0o700); err != nil {
+		t.Fatalf("mkdir malformed object: %v", err)
+	}
+	if err := os.WriteFile(malformedPath, []byte("unidentified"), 0o600); err != nil {
+		t.Fatalf("write malformed object: %v", err)
+	}
+	ageObject(t, local.RootDir(), malformed, time.Now().Add(-72*time.Hour))
+
+	blobs := sortedBlobWalk{Store: prefixed}
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+
+	res, err := s.ReclaimOrphanedPartBytes(ctx, testCutoff(), testTTL)
+	if err != nil {
+		t.Fatalf("reclaim prefixed parts: %v", err)
+	}
+	if res.Objects != 1 || res.Bytes != int64(len("orphan")) {
+		t.Fatalf("reclaimed %+v, want only the valid orphan (1 object / 6 bytes)", res)
+	}
+	if objectExists(t, local.RootDir(), physicalKey) {
+		t.Fatal("valid orphan still present")
+	}
+	if !objectExists(t, local.RootDir(), malformed) {
+		t.Fatal("unrecognized object was deleted")
+	}
+}
+
 // TestPartOrphanPassKeepsLiveRowObject asserts the live-key gate: an object
 // whose key a row still names is never removed, whatever its age.
 func TestPartOrphanPassKeepsLiveRowObject(t *testing.T) {
@@ -152,6 +230,46 @@ func TestPartOrphanPassKeepsLiveRowObject(t *testing.T) {
 	}
 	if !objectExists(t, l.RootDir(), key) {
 		t.Fatal("live object gone")
+	}
+}
+
+// TestPartOrphanPassKeepsPrefixedLiveRowObject exercises the live-key gate
+// through the encrypted namespace used by migrated blob storage.
+func TestPartOrphanPassKeepsPrefixedLiveRowObject(t *testing.T) {
+	t.Parallel()
+	s, local := openOrphanStore(t)
+	ctx := context.Background()
+	prefixed, err := blob.NewPrefixedStore(local, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("prefixed blob store: %v", err)
+	}
+	if err := store.SetPartBlobs(s, prefixed); err != nil {
+		t.Fatalf("set prefixed blob store: %v", err)
+	}
+
+	key := partKey(0x11ffe1)
+	if _, err := prefixed.Put(ctx, key, strings.NewReader("y")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	u, err := s.CreateUser(ctx, "+15551230012")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := store.InsertUploadPartWithKey(ctx, s, u.ID, 7, 0, 1, key); err != nil {
+		t.Fatalf("insert row: %v", err)
+	}
+	physicalKey := blob.EncryptedObjectsPrefix + "/" + key
+	ageObject(t, local.RootDir(), physicalKey, time.Now().Add(-24*time.Hour))
+
+	res, err := s.ReclaimOrphanedPartBytes(ctx, testCutoff(), testTTL)
+	if err != nil {
+		t.Fatalf("reclaim prefixed: %v", err)
+	}
+	if res.Objects != 0 {
+		t.Fatalf("reclaimed %+v, want nothing (live row)", res)
+	}
+	if !objectExists(t, local.RootDir(), physicalKey) {
+		t.Fatal("prefixed live object gone")
 	}
 }
 
