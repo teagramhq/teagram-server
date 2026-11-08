@@ -27,7 +27,7 @@ PUBLICATION_RUNS_URL = (
     "?branch=master&event=push&head_sha={source_commit}&status=success&per_page=100"
 )
 LIVE_MANIFEST_URL = "https://web.teagram.io/mtproto-target.json"
-MAX_FETCH_ATTEMPTS = 3
+MAX_FETCH_ATTEMPTS = 6
 MAX_RETRY_DELAY_SECONDS = 30
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 MAX_JSON_BYTES = 1024 * 1024

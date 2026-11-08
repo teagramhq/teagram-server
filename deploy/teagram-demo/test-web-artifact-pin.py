@@ -104,6 +104,31 @@ def check_fetch_retries_transient_errors() -> None:
             raise SystemExit("upstream retry delays were not respected")
 
 
+def check_fetch_recovers_after_gateway_outage() -> None:
+    url = f"{API_ROOT}/actions/runs/{RUN_ID}/artifacts?per_page=100"
+    gateway_errors = [
+        HTTPError(url, 504, "Gateway Timeout", {}, io.BytesIO())
+        for _ in range(MODULE.MAX_FETCH_ATTEMPTS - 1)
+    ]
+    with (
+        patch.object(
+            MODULE.HTTP_OPENER,
+            "open",
+            side_effect=[*gateway_errors, io.BytesIO(b'{"artifacts":[]}')],
+        ) as open_url,
+        patch.object(MODULE.time, "sleep") as sleep,
+    ):
+        if MODULE.fetch_json(url) != {"artifacts": []}:
+            raise SystemExit("upstream gateway outage did not recover")
+        if open_url.call_count != MODULE.MAX_FETCH_ATTEMPTS:
+            raise SystemExit("gateway errors were not retried through the configured attempt budget")
+        expected_delays = [
+            float(2**attempt) for attempt in range(MODULE.MAX_FETCH_ATTEMPTS - 1)
+        ]
+        if [call.args[0] for call in sleep.call_args_list] != expected_delays:
+            raise SystemExit("gateway retries did not use bounded exponential backoff")
+
+
 def check_fetch_uses_github_token_when_configured() -> None:
     url = f"{API_ROOT}/actions/runs/{RUN_ID}"
     with (
@@ -197,7 +222,9 @@ def check_fetch_exhausts_secondary_rate_limit_attempts() -> None:
             raise SystemExit("secondary rate-limit retry exhaustion unexpectedly passed")
         if open_url.call_count != MODULE.MAX_FETCH_ATTEMPTS:
             raise SystemExit("secondary rate-limit retry exhaustion used the wrong attempt count")
-        if [call.args[0] for call in sleep.call_args_list] != [0.0, 0.0]:
+        if [call.args[0] for call in sleep.call_args_list] != [
+            0.0 for _ in range(MODULE.MAX_FETCH_ATTEMPTS - 1)
+        ]:
             raise SystemExit("secondary rate-limit retries did not stop after the final attempt")
 
 
@@ -479,6 +506,7 @@ def check_live_publication_fails_closed() -> None:
 
 def main() -> None:
     check_fetch_retries_transient_errors()
+    check_fetch_recovers_after_gateway_outage()
     check_fetch_uses_github_token_when_configured()
     check_fetch_retries_secondary_rate_limit_reset()
     check_fetch_aborts_excessive_secondary_rate_limit_delay()

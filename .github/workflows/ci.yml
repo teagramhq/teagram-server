@@ -1458,6 +1458,7 @@ jobs:
           tools_dir="$RUNNER_TEMP/k8s-tools"
           mkdir -p "$tools_dir"
           curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60 \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
             --output "$tools_dir/kubectl"
           printf '%s  %s\n' 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8 "$tools_dir/kubectl" \
@@ -1466,6 +1467,7 @@ jobs:
 
           kubeconform_archive=kubeconform-linux-amd64.tar.gz
           curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60 \
             "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/${kubeconform_archive}" \
             --output "$tools_dir/$kubeconform_archive"
           printf '%s  %s\n' 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 "$tools_dir/$kubeconform_archive" \

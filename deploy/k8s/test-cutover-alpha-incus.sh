@@ -183,6 +183,11 @@ docker_command() {
         args=("${args[@]:1}")
       fi
       container=${args[0]:-}
+      if [[ $container == teagram-postgres-1 ]]; then
+        [[ ${args[1]:-} == psql ]] || return 1
+        kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "${args[@]:1}"
+        return
+      fi
       [[ -f $STATE_DIR/docker-helper-container &&
          $(<"$STATE_DIR/docker-helper-container") == "$container" ]] || return 1
       kubectl exec --stdin --namespace "$SOURCE_NAMESPACE" pod/cutover-s3-client -- \

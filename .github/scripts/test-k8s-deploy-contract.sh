@@ -205,6 +205,7 @@ done
   fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
 grep --fixed-strings --quiet "TG_MEDIA_KEY_CURRENT=\$TG_MEDIA_KEY_CURRENT" deploy/k8s/bootstrap-alpha.sh ||
   fail 'bootstrap must preserve the live media encryption key version in teagramd-runtime'
+# shellcheck disable=SC2016
 runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
 [[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* ]] ||
   fail 'the documented teagramd-runtime ConfigMap keys must include TG_MEDIA_KEY_CURRENT'
@@ -261,9 +262,13 @@ cutover_key_reader=deploy/k8s/test-cutover-key-reader.yaml
   fail 'the cutover helper must mount source identity, blob-mode and local blob PVCs read-only'
 grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/test-cutover-alpha-incus.sh ||
   fail 'the actual cutover runner test adapter must read source identity from the BusyBox helper pod'
+grep --fixed-strings --quiet "kubectl exec --namespace \"\$SOURCE_NAMESPACE\" postgres-0 -c postgres --" \
+  deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the actual cutover runner test adapter must read the source migration version from disposable PostgreSQL'
 grep --fixed-strings --quiet '/run/teagramd/blob-mode/.' deploy/k8s/test-cutover-alpha-incus.sh ||
   fail 'the actual cutover runner test adapter must read blob-mode authority from the source PVC'
 fence_step=$(sed -n '/^fence_source_writes() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
+# shellcheck disable=SC2016
 [[ "$fence_step" == *'[[ $service == postgres || $service == rustfs ]] && continue'* &&
    "$fence_step" == *'check_source_container teagram-rustfs-1'* ]] ||
   fail 'the source write fence must preserve and verify the RustFS Compose service'
