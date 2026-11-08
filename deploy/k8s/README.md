@@ -202,11 +202,21 @@ document through the source S3-backed teagramd before cutover and downloads
 the same document through the target after cutover, comparing the bytes.
 
 Before the final snapshot, the script stops every running Compose service other
-than PostgreSQL, including `teagramd` and any active database or blob writer,
-and stops `teagram-web-cloudflared`. It verifies PostgreSQL has no remaining
-client connections. Compose volumes and PostgreSQL data are left intact. The
-fence-to-switch interval is planned downtime; a failure before the complete
-edge switch restarts the stopped Compose services.
+than PostgreSQL and RustFS, including `teagramd` and any active database or blob
+writer, and stops `teagram-web-cloudflared`. PostgreSQL and RustFS are verified
+to remain running, and PostgreSQL has no remaining client connections. RustFS
+must stay online because the post-fence source S3 listing, per-object checksum
+reads, and mirror use `http://rustfs:9000`. Compose volumes and PostgreSQL data
+are left intact. The fence-to-switch interval is planned downtime; a failure
+before the first live edge switch restarts only the Compose services the runner
+stopped. PostgreSQL and RustFS are not stopped during recovery.
+
+After a successful cutover, the old Compose application and edge services stay
+stopped, while PostgreSQL and source RustFS remain running with their existing
+data. The k8s application uses the copied objects in target RustFS; the source
+bucket remains the pre-switch recovery copy for at least seven days. Apply and
+rollback leave the source PostgreSQL and RustFS services and their data in
+place. Retiring them requires a separate cleanup after the recovery period.
 
 The cutover keeps the k8s app and connector at zero while it restores the
 database, identity and blobs. It applies teagram-web's pinned k8s base and adds
@@ -230,9 +240,11 @@ not automatically restart Compose and discard writes accepted by k3s. Rollback
 requires confirmation of that data loss, scales the k8s app and connector to
 zero, and verifies their pods have stopped before restoring the Cloudflare
 route, all five Serve paths, the MTProto TCP route, and the old Bot API route.
-It then restarts the stopped Compose services and stops both port-forwards.
-PostgreSQL and PVC data remain intact. Writes made on k3s after the switch are
-not carried back to Compose.
+It then restarts only the Compose services stopped by apply and stops both
+port-forwards. PostgreSQL and source RustFS were already running, so the restored
+Compose teagramd reconnects to the original bucket. PostgreSQL and PVC data
+remain intact. Writes made on k3s after the switch are not copied to the source
+RustFS bucket or carried back to Compose.
 
 ### Retry after a pre-switch failure
 

@@ -11,7 +11,9 @@ for required in \
   'source Compose containers and encrypted S3 authority' \
   'live teagramd and migration image revisions' \
   'fence writes before the final PostgreSQL snapshot' \
-  'stop all running Compose services except PostgreSQL' \
+  'stop all running Compose services except PostgreSQL and RustFS' \
+  'keep source RustFS available for the post-fence S3 listing and mirror' \
+  'PostgreSQL and RustFS stay running' \
   'verify no PostgreSQL client connections remain' \
   'save a mode-0600 pg_dump' \
   'sent over a temporary loopback port-forward' \
@@ -31,9 +33,21 @@ for required in \
   'verify every k8s cloudflared pod has stopped before restoring routes' \
   'advertised MTProto TCP route on port 2443' \
   'explicit rollback after the first live Serve route' \
-  'k3s writes since the switch are not carried back'; do
+  'source RustFS bucket, old Compose volumes, database dump, and recovery evidence for at least seven days' \
+  'PostgreSQL and source RustFS are already running' \
+  'k3s writes since the switch are not copied back to the source bucket'; do
   if [[ $plan != *"$required"* ]]; then
     printf 'alpha cutover dry-run omitted: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+for required_runbook in \
+  'must stay online because the post-fence source S3 listing' \
+  'bucket remains the pre-switch recovery copy for at least seven days' \
+  'PostgreSQL and source RustFS were already running'; do
+  if ! grep --fixed-strings --quiet -- "$required_runbook" deploy/k8s/README.md; then
+    printf 'alpha cutover runbook omitted: %s\n' "$required_runbook" >&2
     exit 1
   fi
 done
