@@ -184,7 +184,7 @@ docker_command() {
       fi
       container=${args[0]:-}
       if [[ $container == teagram-postgres-1 ]]; then
-        [[ ${args[1]:-} == psql ]] || return 1
+        [[ ${args[1]:-} == psql || ${args[1]:-} == pg_dump ]] || return 1
         kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "${args[@]:1}"
         return
       fi
