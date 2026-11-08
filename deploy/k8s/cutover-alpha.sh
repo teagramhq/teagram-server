@@ -42,7 +42,6 @@ readonly POSTGRES_PVC_BYTES=$((8 * 1024 * 1024 * 1024))
 readonly MIN_STORAGE_RESERVE_BYTES=$((1024 * 1024 * 1024))
 MC_HELPER_CONTAINER=''
 APP_IMAGE=''
-MIGRATIONS_IMAGE=''
 MC_IMAGE=''
 MIGRATIONS_JOB_NAME=''
 REQUIRED_MIGRATION_VERSION=''
@@ -384,6 +383,7 @@ image_latest_migration() {
 validate_release_for_source() {
   local expected_revision live_revision app_digest migrations_digest helper_digest
   local app_image migrations_image helper_image app_revision migrations_revision helper_revision
+  local migrations_validation_image helper_validation_image
   local required_version latest_version migration_job expected_job_suffix
   expected_revision=$(<"$REPO_ROOT/deploy/k8s/prod/source-revision")
   if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_PINNED_REVISION:-} ]]; then
@@ -403,14 +403,16 @@ validate_release_for_source() {
   app_image="ghcr.io/teagramhq/teagramd@$app_digest"
   migrations_image="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
   helper_image="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
+  migrations_validation_image=$migrations_image
+  helper_validation_image=$helper_image
   if [[ $TEST_MODE == true ]]; then
     app_image=${CUTOVER_TEST_TEAGRAMD_IMAGE:-$app_image}
-    migrations_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$migrations_image}
-    helper_image=${CUTOVER_TEST_MC_IMAGE:-$helper_image}
+    migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$migrations_image}
+    helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$helper_image}
   fi
   app_revision=$(resolve_image_revision "$app_image")
-  migrations_revision=$(resolve_image_revision "$migrations_image")
-  helper_revision=$(resolve_image_revision "$helper_image")
+  migrations_revision=$(resolve_image_revision "$migrations_validation_image")
+  helper_revision=$(resolve_image_revision "$helper_validation_image")
   [[ $app_revision == "$expected_revision" ]] ||
     fail "pinned teagramd image revision $app_revision does not match production revision $expected_revision"
   [[ $migrations_revision == "$expected_revision" ]] ||
@@ -422,26 +424,24 @@ validate_release_for_source() {
   migration_job=$(prod_literal db-migrations-job-revision job-name=)
   expected_job_suffix=${migrations_digest#sha256:}
   if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATIONS_JOB_NAME:-} ]]; then
-    migration_job=$CUTOVER_TEST_MIGRATIONS_JOB_NAME
-    expected_job_suffix=${CUTOVER_TEST_MIGRATIONS_JOB_NAME#db-migrations-}
+    [[ $CUTOVER_TEST_MIGRATIONS_JOB_NAME == "$migration_job" ]] ||
+      fail 'CI migration Job name does not match the committed production Job'
   fi
   [[ $migration_job == "db-migrations-${expected_job_suffix:0:16}" ]] ||
     fail 'production migration Job name does not match its pinned migration image digest'
-  latest_version=$(image_latest_migration "$migrations_image")
+  latest_version=$(image_latest_migration "$migrations_validation_image")
   [[ $required_version == "$latest_version" ]] ||
     fail "pinned migration version $required_version does not match pinned image newest migration $latest_version"
 
   if [[ $TEST_MODE == false ]]; then
     REQUIRED_MIGRATION_VERSION=$required_version
     APP_IMAGE=$app_image
-    MIGRATIONS_IMAGE=$migrations_image
     MC_IMAGE=$helper_image
     MIGRATIONS_JOB_NAME=$migration_job
   else
     REQUIRED_MIGRATION_VERSION=$latest_version
     APP_IMAGE=$app_image
-    MIGRATIONS_IMAGE=$migrations_image
-    MC_IMAGE=$helper_image
+    MC_IMAGE=$helper_validation_image
     MIGRATIONS_JOB_NAME=$migration_job
   fi
 }
@@ -1557,8 +1557,6 @@ if [[ $TEST_MODE == true ]]; then
     sed \
       -e "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" \
       -e "s|ghcr.io/teagramhq/teagramd@sha256:[0-9a-f]*|$APP_IMAGE|g" \
-      -e "s|ghcr.io/teagramhq/teagram-migrations@sha256:[0-9a-f]*|$MIGRATIONS_IMAGE|g" \
-      -e "s|ghcr.io/teagramhq/teagramd-mc-init@sha256:[0-9a-f]*|$MC_IMAGE|g" \
       -e "s|name: db-migrations-[0-9a-f]*|name: $MIGRATIONS_JOB_NAME|g" \
       -e "s|job-name: db-migrations-[0-9a-f]*|job-name: $MIGRATIONS_JOB_NAME|g" \
       -e "s|migration-version: \"[0-9]*\"|migration-version: \"$REQUIRED_MIGRATION_VERSION\"|g" \

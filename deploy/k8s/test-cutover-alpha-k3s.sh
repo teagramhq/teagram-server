@@ -769,12 +769,28 @@ assert not any(serve.get("AllowFunnel", {}).values())
 assert serve["TCP"]["443"] == {"HTTPS": True}
 PY
 printf 'post-switch failure kept k3s live and Compose fenced\n'
+prod_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
+prod_helper_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
+[[ $prod_migrations_digest =~ ^sha256:[0-9a-f]{64}$ &&
+   $prod_helper_digest =~ ^sha256:[0-9a-f]{64}$ ]]
 cutover_job=$(kubectl get job "$test_migrations_job" --namespace "$TARGET_NAMESPACE" --output json)
 cutover_job_image=$(jq -er '.spec.template.spec.containers[] | select(.name == "migrate") | .image' \
   <<< "$cutover_job")
-[[ $cutover_job_image == ghcr.io/teagramhq/teagram-migrations:ci ]] || {
-  printf 'cutover migration image is %s, want the verified live-revision CI image\n' \
+[[ $cutover_job_image == "ghcr.io/teagramhq/teagram-migrations@$prod_migrations_digest" ]] || {
+  printf 'cutover migration image is %s, want the committed production digest\n' \
     "$cutover_job_image" >&2
+  exit 1
+}
+cutover_helper_job=$(kubectl get jobs --namespace "$TARGET_NAMESPACE" \
+  --selector=app.kubernetes.io/name=rustfs-init --output json |
+  jq -er 'if (.items | length) == 1 then .items[0] else error("expected one cutover RustFS initializer Job") end')
+cutover_helper_image=$(jq -er '.spec.template.spec.containers[] | select(.name == "rustfs-init") | .image' \
+  <<< "$cutover_helper_job")
+[[ $cutover_helper_image == "ghcr.io/teagramhq/teagramd-mc-init@$prod_helper_digest" ]] || {
+  printf 'cutover RustFS initializer image is %s, want the committed production digest\n' \
+    "$cutover_helper_image" >&2
   exit 1
 }
 jq --exit-status '.status.conditions | any(.type == "Complete" and .status == "True")' \
