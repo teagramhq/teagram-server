@@ -87,10 +87,10 @@ source_configmap_name() {
   kubectl get configmaps --namespace "$SOURCE_NAMESPACE" --output json |
     jq -er --arg name "$name" '
       [.items[].metadata.name | select(. == $name or startswith($name + "-"))]
-      | if index($name) then $name
-        elif length == 1 then .[0]
+      | if length == 1 then .[0]
+        elif length == 2 and (index($name) != null) then map(select(. != $name))[0]
         elif length == 0 then error("ConfigMap not found: " + $name)
-        else error("multiple generated ConfigMaps found for: " + $name)
+        else error("ambiguous ConfigMaps found for: " + $name)
         end
     '
 }
@@ -777,7 +777,11 @@ target_migration_version=$(kubectl exec --namespace "$TARGET_NAMESPACE" postgres
 [[ $target_migration_version == "$test_migration_version" ]]
 target_media_key_current=$(kubectl get configmap teagramd-runtime --namespace "$TARGET_NAMESPACE" \
   --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
-[[ $target_media_key_current == "$test_media_key_current" ]]
+[[ $target_media_key_current == "$test_media_key_current" ]] || {
+  printf 'target media key version is %q; source runtime ConfigMap has %q\n' \
+    "$target_media_key_current" "$test_media_key_current" >&2
+  exit 1
+}
 printf 'actual runner completed the matching migration Job and preserved the live database version\n'
 
 target_pod=$(kubectl get pods --namespace "$TARGET_NAMESPACE" \
