@@ -22,7 +22,7 @@ func (h *handlers) handleGetUserPhotos(r *mtproto.Request) (bin.Encoder, error) 
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.PhotosGetUserPhotosRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if req.Offset < -1 || req.MaxID < 0 || (req.Offset == -1 && req.MaxID == 0) {

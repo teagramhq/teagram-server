@@ -24,7 +24,7 @@ func (h *handlers) handleSaveFilePart(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errUploadsDisabled
 	}
 	var req tg.UploadSaveFilePartRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -51,7 +51,7 @@ func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error
 		return nil, errUploadsDisabled
 	}
 	var req tg.UploadSaveBigFilePartRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

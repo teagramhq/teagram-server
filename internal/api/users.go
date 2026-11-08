@@ -22,7 +22,7 @@ import (
 // error is returned as on any target-side refusal (indistinguishability).
 func (h *handlers) handleResolvePhone(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsResolvePhoneRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -73,7 +73,7 @@ func (h *handlers) handleResolvePhone(r *mtproto.Request) (bin.Encoder, error) {
 // non-members — but not membership details. The phone field is never emitted.
 func (h *handlers) handleResolveUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsResolveUsernameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -225,7 +225,7 @@ func (h *handlers) channelToTLPublic(c store.Channel, participants int64, viewer
 // one query costs one quota unit whatever it matches.
 func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ContactsSearchRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -462,7 +462,7 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 // refreshed before a dialog exists, while a bare id cannot enumerate users.
 func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UsersGetUsersRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -550,7 +550,7 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.UsersGetFullUserRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	target, err := h.inputUserID(req.ID, r.UserID)

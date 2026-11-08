@@ -136,7 +136,7 @@ func (h *handlers) inputChannelID(c tg.InputChannelClass, viewerID int64) (int64
 // message is written as the first channel event and returned in this reply.
 func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsCreateChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -208,7 +208,7 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 // the title service message to the channel difference stream.
 func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsEditTitleRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -265,7 +265,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 
 func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsEditPhotoRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if h.uploadsDisabled {
@@ -384,7 +384,7 @@ func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, erro
 // membership state.
 func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetFullChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -495,7 +495,7 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 // to the authenticated member and does not emit an update or read receipt.
 func (h *handlers) handleChannelReadHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsReadHistoryRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -524,7 +524,7 @@ func (h *handlers) handleChannelReadHistory(r *mtproto.Request) (bin.Encoder, er
 // intentionally ignored and this method emits no update or notification.
 func (h *handlers) handleChannelReadMessageContents(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsReadMessageContentsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -553,7 +553,7 @@ func (h *handlers) handleChannelReadMessageContents(r *mtproto.Request) (bin.Enc
 // with concurrent demotions without touching committed post markers.
 func (h *handlers) handleToggleSlowMode(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsToggleSlowModeRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -589,7 +589,7 @@ func (h *handlers) handleToggleSlowMode(r *mtproto.Request) (bin.Encoder, error)
 // updated channel from the same transaction.
 func (h *handlers) handleTogglePreHistoryHidden(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsTogglePreHistoryHiddenRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -625,7 +625,7 @@ func (h *handlers) handleTogglePreHistoryHidden(r *mtproto.Request) (bin.Encoder
 // broadcast kind and current change_info authority in its transaction.
 func (h *handlers) handleToggleSignatures(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsToggleSignaturesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -662,7 +662,7 @@ func (h *handlers) handleToggleSignatures(r *mtproto.Request) (bin.Encoder, erro
 // title, and an id with no channel row is dropped rather than distinguished.
 func (h *handlers) handleGetChannels(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetChannelsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -693,7 +693,7 @@ func (h *handlers) handleGetChannels(r *mtproto.Request) (bin.Encoder, error) {
 // are checked here against the requester's own view before any write.
 func (h *handlers) handleInviteToChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsInviteToChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -768,7 +768,7 @@ func (h *handlers) handleInviteToChannel(r *mtproto.Request) (bin.Encoder, error
 // oversight: refusing would strand the creator in every channel they ever made.
 func (h *handlers) handleLeaveChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsLeaveChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -830,7 +830,7 @@ func (h *handlers) handleLeaveChannel(r *mtproto.Request) (bin.Encoder, error) {
 // the store commit already makes every read unauthorized.
 func (h *handlers) handleDeleteChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsDeleteChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1030,7 +1030,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 // (ROADMAP.md:258).
 func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UpdatesGetChannelDifferenceRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1138,7 +1138,7 @@ func setDefaultChannelDifferenceTimeout(response bin.Encoder) {
 // channel, for a caller who is currently an unbanned member of it.
 func (h *handlers) handleGetChannelMessages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1188,7 +1188,7 @@ func (h *handlers) handleGetChannelMessages(r *mtproto.Request) (bin.Encoder, er
 // under the ordered transaction locks before changing any post.
 func (h *handlers) handleDeleteChannelMessages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsDeleteMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1238,7 +1238,7 @@ func (h *handlers) handleDeleteChannelMessages(r *mtproto.Request) (bin.Encoder,
 // caller's membership, ban state and history floor with the post read.
 func (h *handlers) handleExportMessageLink(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsExportMessageLinkRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1530,7 +1530,7 @@ func (h *handlers) handleExportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesExportChatInviteRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
@@ -1575,7 +1575,7 @@ func (h *handlers) handleGetExportedChatInvites(r *mtproto.Request) (bin.Encoder
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesGetExportedChatInvitesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
@@ -1657,7 +1657,7 @@ func (h *handlers) handleRevokeExportedChatInvite(r *mtproto.Request) (bin.Encod
 		return nil, errAuthKeyUnreg
 	}
 	var req revokeExportedChatInviteRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
@@ -1770,7 +1770,7 @@ func (h *handlers) channelRoleUnchanged(
 // exists and what the target's role is.
 func (h *handlers) handleEditAdmin(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsEditAdminRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1826,7 +1826,7 @@ func (h *handlers) handleEditAdmin(r *mtproto.Request) (bin.Encoder, error) {
 // so the caller would be told a member was banned who is not.
 func (h *handlers) handleEditBanned(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsEditBannedRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1896,7 +1896,7 @@ func (h *handlers) handleCheckChatInvite(r *mtproto.Request) (bin.Encoder, error
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesCheckChatInviteRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -1954,7 +1954,7 @@ func (h *handlers) handleImportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesImportChatInviteRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -2006,7 +2006,7 @@ func (h *handlers) handleImportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 // existence oracle for every id an attacker can name.
 func (h *handlers) handleJoinChannel(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsJoinChannelRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2067,7 +2067,7 @@ func (h *handlers) handleJoinChannel(r *mtproto.Request) (bin.Encoder, error) {
 // Rate limit exceeded is errUsernameFloodWait.
 func (h *handlers) handleEditChannelUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsUpdateUsernameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2129,7 +2129,7 @@ func (h *handlers) handleEditChannelUsername(r *mtproto.Request) (bin.Encoder, e
 // check consumes the shared username lookup budget before the namespace lookup.
 func (h *handlers) handleCheckChannelUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsCheckUsernameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2183,7 +2183,7 @@ func (h *handlers) handleCheckChannelUsername(r *mtproto.Request) (bin.Encoder, 
 // each returned peer is rendered with the caller's access hash.
 func (h *handlers) handleGetAdminedPublicChannels(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetAdminedPublicChannelsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

@@ -21,7 +21,7 @@ const (
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -32,7 +32,7 @@ func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, er
 
 func (h *handlers) handleGetGlobalPrivacySettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetGlobalPrivacySettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -43,7 +43,7 @@ func (h *handlers) handleGetGlobalPrivacySettings(r *mtproto.Request) (bin.Encod
 
 func (h *handlers) handleGetThemes(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetThemesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -54,7 +54,7 @@ func (h *handlers) handleGetThemes(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleGetWallPapers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetWallPapersRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -71,7 +71,7 @@ func (h *handlers) handleGetWallPapers(r *mtproto.Request) (bin.Encoder, error) 
 
 func (h *handlers) handleGetChatThemes(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetChatThemesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -88,7 +88,7 @@ func (h *handlers) handleGetChatThemes(r *mtproto.Request) (bin.Encoder, error) 
 
 func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.HelpGetAppConfigRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	// help.appConfig carries an extensible JSON object, so the registration mode

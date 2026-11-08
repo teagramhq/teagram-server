@@ -414,7 +414,7 @@ func (h *handlers) handleSendMessageAfterReply(r *mtproto.Request) (bin.Encoder,
 
 func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesSendMessageRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -766,7 +766,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 // current sender who owns the requested live outgoing copy.
 func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetMessageReadParticipantsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -804,7 +804,7 @@ func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Enc
 // for a caller who is still a member of the target channel.
 func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReportReadMetricsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -827,7 +827,7 @@ func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, err
 // newest-first history with offset_id or offset_date and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetHistoryRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -934,7 +934,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 	var req tg.MessagesGetMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errInputRequestInvalid
 	}
 	if len(req.ID) > maxHistoryLimit {
@@ -1159,7 +1159,7 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 // event owners, and returns the caller's affected pts.
 func (h *handlers) handleReadHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesReadHistoryRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1210,7 +1210,7 @@ func (h *handlers) handleEditMessage(r *mtproto.Request) (bin.Encoder, error) {
 
 func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesEditMessageRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1372,7 +1372,7 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 // creator only).
 func (h *handlers) handleDeleteMessages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesDeleteMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1400,7 +1400,7 @@ func (h *handlers) handleDeleteMessages(r *mtproto.Request) (bin.Encoder, error)
 // positive.
 func (h *handlers) handleDeleteHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesDeleteHistoryRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1446,7 +1446,7 @@ func (h *handlers) handleDeleteHistory(r *mtproto.Request) (bin.Encoder, error) 
 // peers. Typing is transient and never persisted.
 func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSetTypingRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1549,7 +1549,7 @@ func (h *handlers) handleForwardMessages(r *mtproto.Request) (bin.Encoder, error
 
 func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesForwardMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -1911,7 +1911,7 @@ func (h *handlers) finishForwardReply(
 // reaction (or clears it) and pushes updateMessageReactions to all parties.
 func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSendReactionRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2052,7 +2052,7 @@ const maxReactionMessagesPerCall = 100
 // while absent or deleted message ids are omitted so they cannot be probed.
 func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetMessagesReactionsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2344,7 +2344,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 // returns success and advances no pts.
 func (h *handlers) handleUpdatePinnedMessage(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesUpdatePinnedMessageRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2487,7 +2487,7 @@ func (h *handlers) pinChannelMessage(r *mtproto.Request, channelID int64, req *t
 // peers are refused before any change.
 func (h *handlers) handleUnpinAllMessages(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesUnpinAllMessagesRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -2569,7 +2569,7 @@ func mediaSearchFilterFromTL(filter tg.MessagesFilterClass) (store.MediaSearchFi
 // shared posts instead and applies the caller's membership, ban and floor.
 func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

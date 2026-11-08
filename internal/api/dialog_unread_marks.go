@@ -34,7 +34,7 @@ func (h *handlers) handleMarkDialogUnread(r *mtproto.Request) (bin.Encoder, erro
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesMarkDialogUnreadRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if _, parentPeer := req.GetParentPeer(); parentPeer {

@@ -72,7 +72,7 @@ func (h *handlers) userTL(u store.User) *tg.User {
 // Provisional accounts (hasPw == false) are not subject to any limit.
 func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetPasswordRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -178,7 +178,7 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 
 func (h *handlers) handleCheckPasswordWithConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthCheckPasswordRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if err := h.verifyTurnstile(r, "signin"); err != nil {
@@ -383,7 +383,7 @@ func (h *handlers) handleUpdatePasswordSettings(r *mtproto.Request) (bin.Encoder
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.AccountUpdatePasswordSettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 
@@ -493,7 +493,7 @@ func (h *handlers) handleGetPasswordSettings(r *mtproto.Request) (bin.Encoder, e
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.AccountGetPasswordSettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	proof, ok := req.Password.(*tg.InputCheckPasswordSRP)

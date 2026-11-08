@@ -38,7 +38,9 @@ type serverErrorLogRecord struct {
 }
 
 type serverErrorLogSink struct {
+	mu      sync.Mutex
 	records []serverErrorLogRecord
+	updates chan struct{}
 }
 
 type serverErrorLogEncoder struct{ err error }
@@ -96,8 +98,32 @@ func (s *serverErrorLogSink) Handle(_ context.Context, record slog.Record) error
 		attrs[attr.Key] = attr.Value.Any()
 		return true
 	})
+	s.mu.Lock()
 	s.records = append(s.records, serverErrorLogRecord{message: record.Message, level: record.Level, attrs: attrs})
+	updates := s.updates
+	s.mu.Unlock()
+	if updates != nil {
+		select {
+		case updates <- struct{}{}:
+		default:
+		}
+	}
 	return nil
+}
+
+func (s *serverErrorLogSink) snapshot() []serverErrorLogRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]serverErrorLogRecord(nil), s.records...)
+}
+
+func (s *serverErrorLogSink) watch() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updates == nil {
+		s.updates = make(chan struct{}, 1)
+	}
+	return s.updates
 }
 
 func (s *serverErrorLogSink) WithAttrs([]slog.Attr) slog.Handler { return s }

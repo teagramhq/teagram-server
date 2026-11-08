@@ -26,7 +26,7 @@ func (h *handlers) handleUploadProfilePhoto(r *mtproto.Request) (bin.Encoder, er
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.PhotosUploadProfilePhotoRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if req.GetFallback() {

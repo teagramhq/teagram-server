@@ -81,7 +81,7 @@ func (h *handlers) attachDialogDrafts(ctx context.Context, ownerID int64, dialog
 
 func (h *handlers) handleSaveDraftAfterReplyOnConn(_ *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesSaveDraftRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

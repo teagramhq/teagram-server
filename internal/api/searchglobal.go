@@ -28,7 +28,7 @@ import (
 // client asked to see, never more than the caller may read.
 func (h *handlers) handleSearchGlobal(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchGlobalRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

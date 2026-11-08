@@ -288,7 +288,7 @@ func (h *handlers) handleSendMediaAfterReply(r *mtproto.Request) (bin.Encoder, *
 
 func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 	var req tg.MessagesSendMediaRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
 	if h.uploadsDisabled {

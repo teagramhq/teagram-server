@@ -68,7 +68,7 @@ func (h *handlers) registerDialogFilterMutation(d *mtproto.Dispatcher, id uint32
 
 func (h *handlers) handleGetDialogFilters(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, func(), error) {
 	var request tg.MessagesGetDialogFiltersRequest
-	if err := request.Decode(req.Buf); err != nil {
+	if err := request.Decode(req.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if req.UserID == 0 || req.Provisional {
@@ -126,7 +126,7 @@ func (h *handlers) handleGetDialogFilters(c *mtproto.Conn, req *mtproto.Request)
 
 func (h *handlers) handleUpdateDialogFilter(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesUpdateDialogFilterRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -215,7 +215,7 @@ func (h *handlers) handleUpdateDialogFilter(r *mtproto.Request) (bin.Encoder, er
 
 func (h *handlers) handleUpdateDialogFiltersOrder(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesUpdateDialogFiltersOrderRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -236,7 +236,7 @@ func (h *handlers) handleUpdateDialogFiltersOrder(r *mtproto.Request) (bin.Encod
 
 func (h *handlers) handleGetSuggestedDialogFilters(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetSuggestedDialogFiltersRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 || r.Provisional {

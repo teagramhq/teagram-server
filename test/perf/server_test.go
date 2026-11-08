@@ -150,6 +150,11 @@ func (h *rpcTimingHandler) OnMessage(c *mtproto.Conn, req *mtproto.Request) erro
 	return err
 }
 
+func (h *rpcTimingHandler) CanRunConcurrently(typeID uint32) bool {
+	classifier, ok := h.next.(interface{ CanRunConcurrently(uint32) bool })
+	return ok && classifier.CanRunConcurrently(typeID)
+}
+
 func isContactsGetContacts(req *mtproto.Request) bool {
 	if req == nil || req.Buf == nil {
 		return false

@@ -20,8 +20,11 @@ const Version = 2
 
 // Fixture names.
 const (
-	Small = "1x"
-	Large = "100x"
+	Small                            = "1x"
+	Large                            = "100x"
+	dispatchWaitScenario             = "messages.getSearchCounters dispatch wait"
+	concurrentRequestLatencyBudgetMs = 50.0
+	receiveToDispatchWaitBudgetMs    = 50.0
 )
 
 // Kind selects a scenario's latency budget.
@@ -92,10 +95,22 @@ type Result struct {
 	// FullSet marks an RPC whose answer is the whole collection by protocol
 	// (contacts.getContacts). Its latency and rows grow with the collection, so
 	// only its query count is held to scale invariance.
-	FullSet bool    `json:"full_set,omitempty"`
-	Samples int     `json:"samples"`
-	P50Ms   float64 `json:"p50_ms"`
-	P95Ms   float64 `json:"p95_ms"`
+	FullSet bool `json:"full_set,omitempty"`
+	// ScaleIndependent skips timing, row-count, and allocation scale comparisons
+	// between fixture sizes. Hard scenario limits and available comparisons
+	// against main still apply.
+	ScaleIndependent bool    `json:"scale_independent,omitempty"`
+	Samples          int     `json:"samples"`
+	P50Ms            float64 `json:"p50_ms"`
+	P95Ms            float64 `json:"p95_ms"`
+	// MaxConcurrentRequestLatencyMs is the maximum client-observed help.getConfig
+	// latency while messages.getSearchCounters has an active database query.
+	MaxConcurrentRequestLatencyMs float64 `json:"max_concurrent_request_latency_ms"`
+	ConcurrentRequestSamples      int     `json:"concurrent_request_samples"`
+	// MaxReceiveToDispatchWaitMs is the longest server-side delay from a frame's
+	// receipt to its RPC handler dispatch while the counters probe is active.
+	MaxReceiveToDispatchWaitMs float64 `json:"max_receive_to_dispatch_wait_ms"`
+	ReceiveToDispatchSamples   int     `json:"receive_to_dispatch_samples"`
 	// Queries is the median statement count per call, including the delivery
 	// work the call triggered after its reply.
 	Queries int `json:"queries"`
@@ -132,7 +147,13 @@ const (
 	CheckRows    = "rows"
 	CheckAlloc   = "alloc"
 	CheckSeqScan = "seqscan"
-	CheckError   = "error"
+	// CheckConcurrentRequestLatency is the hard help.getConfig latency ceiling
+	// while messages.getSearchCounters is active.
+	CheckConcurrentRequestLatency = "concurrent_request_latency"
+	// CheckReceiveToDispatchWait is the hard server-side receive-to-dispatch
+	// wait ceiling while the search counters probe is active.
+	CheckReceiveToDispatchWait = "receive_to_dispatch_wait"
+	CheckError                 = "error"
 	// CheckUnexplained fails a statement whose plan could not be read.
 	CheckUnexplained = "unexplained"
 	checkMissing     = "missing"
@@ -356,13 +377,27 @@ func Evaluate(in Input) Verdict {
 			continue
 		}
 		s, l := row.Small, row.Large
+		if name == dispatchWaitScenario {
+			if l.ReceiveToDispatchSamples == 0 {
+				fail(checkMissing, "no server receive-to-dispatch wait samples at %s", Large)
+			} else if l.MaxReceiveToDispatchWaitMs > receiveToDispatchWaitBudgetMs {
+				fail(CheckReceiveToDispatchWait, "max server receive-to-dispatch wait %.1f ms at %s, budget %.0f ms",
+					l.MaxReceiveToDispatchWaitMs, Large, receiveToDispatchWaitBudgetMs)
+			}
+			if l.ConcurrentRequestSamples == 0 {
+				fail(checkMissing, "no help.getConfig latency samples while counters were active at %s", Large)
+			} else if l.MaxConcurrentRequestLatencyMs > concurrentRequestLatencyBudgetMs {
+				fail(CheckConcurrentRequestLatency, "max help.getConfig latency while counters ran %.1f ms at %s, budget %.0f ms",
+					l.MaxConcurrentRequestLatencyMs, Large, concurrentRequestLatencyBudgetMs)
+			}
+		}
 		if budget := budgetFor(name, l.Kind); l.P95Ms > budget {
 			fail(CheckBudget, "p95 %.1f ms at %s, budget %.0f ms", l.P95Ms, Large, budget)
 		}
 		if s.Queries != l.Queries {
 			fail(CheckQueries, "queries %d at %s, %d at %s", s.Queries, Small, l.Queries, Large)
 		}
-		if !l.FullSet {
+		if !l.FullSet && !l.ScaleIndependent {
 			if l.P50Ms > scaleRatio*s.P50Ms && l.P50Ms-s.P50Ms > scaleSlackMs {
 				fail(CheckLatency, "p50 %.1f ms at %s is %.1fx the %s %.1f ms", l.P50Ms, Large, l.P50Ms/s.P50Ms, Small, s.P50Ms)
 			}
@@ -540,6 +575,17 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 		agg.Queries = int(median(rs, func(r Result) float64 { return float64(r.Queries) }))
 		agg.RowsRead = int64(median(rs, func(r Result) float64 { return float64(r.RowsRead) }))
 		agg.AllocBytes = int64(median(rs, func(r Result) float64 { return float64(r.AllocBytes) }))
+		agg.MaxConcurrentRequestLatencyMs = 0
+		agg.ConcurrentRequestSamples = 0
+		agg.MaxReceiveToDispatchWaitMs = 0
+		agg.ReceiveToDispatchSamples = 0
+		for _, r := range rs {
+			agg.MaxConcurrentRequestLatencyMs = max(agg.MaxConcurrentRequestLatencyMs, r.MaxConcurrentRequestLatencyMs)
+			agg.ConcurrentRequestSamples += r.ConcurrentRequestSamples
+			agg.MaxReceiveToDispatchWaitMs = max(agg.MaxReceiveToDispatchWaitMs, r.MaxReceiveToDispatchWaitMs)
+			agg.ReceiveToDispatchSamples += r.ReceiveToDispatchSamples
+			agg.ScaleIndependent = agg.ScaleIndependent || r.ScaleIndependent
+		}
 		agg.SeqScans, agg.Unexplained, agg.Error = nil, nil, ""
 		for _, r := range rs {
 			for _, scan := range r.SeqScans {
@@ -678,6 +724,12 @@ func Markdown(v Verdict) string {
 	for _, row := range v.Rows {
 		if row.Large != nil && row.Large.Note != "" {
 			notes = append(notes, fmt.Sprintf("- `%s`: %s", row.Name, row.Large.Note))
+		}
+		if row.Name == dispatchWaitScenario && row.Large != nil {
+			notes = append(notes, fmt.Sprintf("- `%s`: head maximum help.getConfig latency while counters ran %.1f ms across %d samples; limit %.0f ms",
+				row.Name, row.Large.MaxConcurrentRequestLatencyMs, row.Large.ConcurrentRequestSamples, concurrentRequestLatencyBudgetMs))
+			notes = append(notes, fmt.Sprintf("- `%s`: head maximum server receive-to-dispatch wait %.1f ms across %d RPCs; limit %.0f ms",
+				row.Name, row.Large.MaxReceiveToDispatchWaitMs, row.Large.ReceiveToDispatchSamples, receiveToDispatchWaitBudgetMs))
 		}
 	}
 	if len(notes) > 0 {
