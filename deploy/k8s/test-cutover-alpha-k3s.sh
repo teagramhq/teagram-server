@@ -441,6 +441,22 @@ if [[ ${CUTOVER_FAIL_IMPORTER_DELETE:-} == true && " $* " == *' delete pod/cutov
   printf 'injected importer deletion failure\n' >&2
   exit 42
 fi
+if [[ ${CUTOVER_TEST_RESTART_SOURCE_AFTER_SNAPSHOT:-} == true &&
+  ${1:-} == rollout && ${2:-} == status && ${3:-} == statefulset/teagramd &&
+  " $* " == *' --namespace teagram-cutover '* &&
+  -f $RUNNER_TEMP/teagram-cutover-runner/phase &&
+  $(<"$RUNNER_TEMP/teagram-cutover-runner/phase") == database-restored &&
+  ! -e $INCUS_STATE_DIR/source-restarted-after-snapshot ]]; then
+  source_replicas=$("$REAL_KUBECTL" get statefulset/teagramd --namespace teagram \
+    --output 'jsonpath={.spec.replicas}')
+  [[ $source_replicas == 0 ]] || {
+    printf 'source teagramd was not fenced when the post-snapshot restart was injected\n' >&2
+    exit 42
+  }
+  : > "$INCUS_STATE_DIR/source-restarted-after-snapshot"
+  incus exec teagram -- docker start teagram-teagramd-1 >/dev/null
+  printf 'injected source teagramd restart after the PostgreSQL snapshot and S3 mirror\n' >&2
+fi
 if [[ ${1:-} == rollout && ${2:-} == status ]]; then
   resource=${3:-unknown}
   if "$REAL_KUBECTL" "$@"; then
@@ -696,6 +712,48 @@ if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/first
   exit 1
 fi
 rm -f "$tmp_dir/incus-state/serve-route-failure-injected"
+kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
+rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
+create_target_namespace
+
+cp "$tmp_dir/incus-state/serve.json" "$tmp_dir/serve-before-post-snapshot-restart.json"
+rm -f -- "$tmp_dir/incus-state/source-restarted-after-snapshot"
+if env "${incus_test_env[@]}" CUTOVER_TEST_RESTART_SOURCE_AFTER_SNAPSHOT=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
+  > "$tmp_dir/post-snapshot-restart.log" 2>&1; then
+  printf 'cutover accepted a source teagramd restart after the snapshot and S3 mirror\n' >&2
+  exit 1
+fi
+expect_log 'injected source teagramd restart after the PostgreSQL snapshot and S3 mirror' \
+  "$tmp_dir/post-snapshot-restart.log"
+expect_log 'Compose service teagram-teagramd-1 restarted while source writes were fenced' \
+  "$tmp_dir/post-snapshot-restart.log"
+[[ -e $tmp_dir/incus-state/source-restarted-after-snapshot ]]
+cmp --silent "$tmp_dir/serve-before-post-snapshot-restart.json" "$tmp_dir/incus-state/serve.json" || {
+  printf 'Serve changed after the source writer restarted following the snapshot\n' >&2
+  exit 1
+}
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ $(kubectl get deployment cloudflared --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ $(kubectl get statefulset teagramd --namespace "$TARGET_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 0 ]]
+[[ $(kubectl get deployment cloudflared --namespace "$TARGET_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 0 ]]
+[[ -z $(kubectl get pods --namespace "$TARGET_NAMESPACE" \
+  --selector=app.kubernetes.io/name=teagramd --output name) ]]
+[[ -z $(kubectl get pods --namespace "$TARGET_NAMESPACE" \
+  --selector=app.kubernetes.io/name=cloudflared --output name) ]]
+if grep --fixed-strings --quiet 'recovery was incomplete' "$tmp_dir/post-snapshot-restart.log"; then
+  printf 'post-snapshot source restart did not recover cleanly before the edge switch\n' >&2
+  exit 1
+fi
+if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/post-snapshot-restart.log"; then
+  printf 'post-snapshot restart incorrectly selected post-switch recovery\n' >&2
+  exit 1
+fi
+printf 'post-snapshot source restart was caught before Serve changes and recovered pre-switch\n'
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
