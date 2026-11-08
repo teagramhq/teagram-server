@@ -197,9 +197,10 @@ type ChannelPostSummary struct {
 }
 
 type ChannelPostSummaryState struct {
-	ChannelID int64
-	Version   int16
-	Ready     bool
+	ChannelID     int64
+	Version       int16
+	Ready         bool
+	ExpiringReady bool
 }
 
 type ChannelReadState struct {

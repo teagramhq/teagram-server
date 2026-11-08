@@ -1432,6 +1432,9 @@ func (s *Store) ChannelHistoryWithOffset(
 	if err != nil {
 		return nil, 0, fmt.Errorf("count channel history posts: %w", err)
 	}
+	if countRow.ExpiredPostCount < 0 {
+		return nil, 0, fmt.Errorf("%w: unexpired expiring posts exceed expiring summary", ErrChannelPostSummaryCorrupt)
+	}
 	if countRow.ExpiredPostCount > postCount {
 		return nil, 0, fmt.Errorf("%w: expired posts exceed live summary", ErrChannelPostSummaryCorrupt)
 	}

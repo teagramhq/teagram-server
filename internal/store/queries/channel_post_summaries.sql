@@ -27,10 +27,10 @@ FOR UPDATE;
 -- Call only after taking channel_state FOR UPDATE. Readiness becomes false only
 -- in the explicit maintenance initializer, never on source mutation paths.
 -- name: MarkChannelPostSummariesNotReady :exec
-INSERT INTO channel_post_summary_state (channel_id, version, ready)
-VALUES ($1, 1, false)
+INSERT INTO channel_post_summary_state (channel_id, version, ready, expiring_ready)
+VALUES ($1, 1, false, false)
 ON CONFLICT (channel_id)
-DO UPDATE SET version = 1, ready = false;
+DO UPDATE SET version = 1, ready = false, expiring_ready = false;
 
 -- name: InitializeChannelPostSummaries :exec
 SELECT initialize_channel_post_summaries($1);
