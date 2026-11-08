@@ -719,7 +719,7 @@ grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.clou
 grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'headers["CF-Connecting-IP"] = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, None, 403, "browser-only")' "$SCRIPT_DIR/smoke.py"
