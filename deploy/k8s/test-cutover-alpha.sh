@@ -201,15 +201,16 @@ kubectl() {
   cat "$fixture_dir/prod-cutover.yaml"
 }
 REPO_ROOT=$repo_root
-NAMESPACE=teagram-cutover
-APP_IMAGE=ghcr.io/teagramhq/teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-K8S_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-LINK_LANDING_IMAGE=ghcr.io/teagramhq/link-edge-landing@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-MIGRATIONS_JOB_NAME=$live_migration_job
-RUSTFS_INIT_JOB_NAME=$live_rustfs_job
-REQUIRED_MIGRATION_VERSION=20261105000021
+kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+export NAMESPACE=teagram-cutover
+export APP_IMAGE=ghcr.io/teagramhq/teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export K8S_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+export LINK_LANDING_IMAGE=ghcr.io/teagramhq/link-edge-landing@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+export LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+export MIGRATIONS_JOB_NAME=$live_migration_job
+export RUSTFS_INIT_JOB_NAME=$live_rustfs_job
+export REQUIRED_MIGRATION_VERSION=20261105000021
 render_cutover_manifest "$fixture_dir/rendered-cutover.yaml"
 for dynamic_job in "$live_migration_job" "$live_rustfs_job"; do
   if ! EXPECTED_JOB_NAME="$dynamic_job" yq --exit-status \
