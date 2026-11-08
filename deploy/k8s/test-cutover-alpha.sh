@@ -110,10 +110,13 @@ fi
 
 prod_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
   deploy/k8s/prod/kustomization.yaml)
+prod_helper_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
 cutover_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
   deploy/k8s/prod-cutover/kustomization.yaml)
 [[ $cutover_migrations_digest == null ]] && cutover_migrations_digest=''
 if [[ ! $prod_migrations_digest =~ ^sha256:[0-9a-f]{64}$ ||
+  ! $prod_helper_digest =~ ^sha256:[0-9a-f]{64}$ ||
   ( -n $cutover_migrations_digest && $cutover_migrations_digest != "$prod_migrations_digest" ) ]] ||
   ! grep --fixed-strings --quiet -- '  - ../prod' deploy/k8s/prod-cutover/kustomization.yaml ||
   grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
@@ -151,6 +154,81 @@ fi
 fixture_dir=$(mktemp -d)
 trap 'rm -rf -- "$fixture_dir"' EXIT
 mkdir -p "$fixture_dir/bin" "$fixture_dir/state" "$fixture_dir/teagram-cutover-runner"
+# Exercise the live-image renderer with digest-derived Job names that differ
+# from the committed production image pins. The cutover and normal prod Jobs
+# must keep matching selectors and pod labels after the image changes.
+prod_migration_job="db-migrations-$(printf '%s' "$prod_migrations_digest" | cut -c8-23)"
+prod_rustfs_job="rustfs-init-$(printf '%s' "$prod_helper_digest" | cut -c8-23)"
+live_migrations_digest=sha256:0123456789abcdef000000000000000000000000000000000000000000000000
+live_helper_digest=sha256:fedcba9876543210000000000000000000000000000000000000000000000000
+live_migration_job="db-migrations-$(printf '%s' "$live_migrations_digest" | cut -c8-23)"
+live_rustfs_job="rustfs-init-$(printf '%s' "$live_helper_digest" | cut -c8-23)"
+if [[ $live_migration_job == "$prod_migration_job" || $live_rustfs_job == "$prod_rustfs_job" ]]; then
+  printf 'renderer regression fixture must use live Job digests different from production pins\n' >&2
+  exit 1
+fi
+cat > "$fixture_dir/prod-cutover.yaml" <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $prod_migration_job
+spec:
+  selector:
+    matchLabels:
+      job-revision: $prod_migration_job
+  template:
+    metadata:
+      labels:
+        job-revision: $prod_migration_job
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $prod_rustfs_job
+spec:
+  selector:
+    matchLabels:
+      job-revision: $prod_rustfs_job
+  template:
+    metadata:
+      labels:
+        job-revision: $prod_rustfs_job
+EOF
+eval "$(sed -n '/^render_cutover_manifest() {/,/^check_source_migration_version() {/p' \
+  deploy/k8s/cutover-alpha.sh | sed '$d')"
+kubectl() {
+  [[ $1 == kustomize && $2 == "$REPO_ROOT/deploy/k8s/prod-cutover" ]] || return 1
+  cat "$fixture_dir/prod-cutover.yaml"
+}
+REPO_ROOT=$repo_root
+NAMESPACE=teagram-cutover
+APP_IMAGE=ghcr.io/teagramhq/teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+K8S_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+LINK_LANDING_IMAGE=ghcr.io/teagramhq/link-edge-landing@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+MIGRATIONS_JOB_NAME=$live_migration_job
+RUSTFS_INIT_JOB_NAME=$live_rustfs_job
+REQUIRED_MIGRATION_VERSION=20261105000021
+render_cutover_manifest "$fixture_dir/rendered-cutover.yaml"
+for dynamic_job in "$live_migration_job" "$live_rustfs_job"; do
+  if ! EXPECTED_JOB_NAME="$dynamic_job" yq --exit-status \
+    'select(.kind == "Job" and .metadata.name == strenv(EXPECTED_JOB_NAME)) |
+      (.metadata.name == strenv(EXPECTED_JOB_NAME) and
+       .spec.selector.matchLabels."job-revision" == strenv(EXPECTED_JOB_NAME) and
+       .spec.template.metadata.labels."job-revision" == strenv(EXPECTED_JOB_NAME))' \
+    "$fixture_dir/rendered-cutover.yaml" >/dev/null; then
+    printf 'renderer did not apply the dynamic Job name to its selector and pod label: %s\n' \
+      "$dynamic_job" >&2
+    exit 1
+  fi
+done
+if grep --fixed-strings --quiet -- "job-revision: $prod_migration_job" "$fixture_dir/rendered-cutover.yaml" ||
+  grep --fixed-strings --quiet -- "job-revision: $prod_rustfs_job" "$fixture_dir/rendered-cutover.yaml"; then
+  printf 'renderer left a production Job selector or pod label beside a dynamic Job name\n' >&2
+  exit 1
+fi
+unset -f kubectl
 # Exercise the runner's actual validator with realistic CLI output and unsafe
 # variants, independently of the disposable-cluster integration test.
 eval "$(sed -n '/^check_serve_status() {/,/^set_serve_routes() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"

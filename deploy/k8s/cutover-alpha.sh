@@ -519,9 +519,9 @@ validate_release_for_source() {
 
 render_cutover_manifest() {
   local destination=$1
-  # The Job-name patterns are anchored to the full 16-digit suffix so they do
-  # not rewrite names that merely start with the same prefix (for example the
-  # rustfs-init-secrets volume or the job-revision ConfigMaps).
+  # The Job-name and revision patterns are anchored to the full 16-digit
+  # suffix so they do not rewrite names that merely start with the same prefix
+  # (for example the rustfs-init-secrets volume or job-revision ConfigMaps).
   kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
     sed \
       -e "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" \
@@ -534,6 +534,8 @@ render_cutover_manifest() {
       -e "s|job-name: db-migrations-[0-9a-f]\{16\}$|job-name: $MIGRATIONS_JOB_NAME|" \
       -e "s|name: rustfs-init-[0-9a-f]\{16\}$|name: $RUSTFS_INIT_JOB_NAME|" \
       -e "s|job-name: rustfs-init-[0-9a-f]\{16\}$|job-name: $RUSTFS_INIT_JOB_NAME|" \
+      -e "s|job-revision: db-migrations-[0-9a-f]\{16\}$|job-revision: $MIGRATIONS_JOB_NAME|" \
+      -e "s|job-revision: rustfs-init-[0-9a-f]\{16\}$|job-revision: $RUSTFS_INIT_JOB_NAME|" \
       -e "s|migration-version: \"[0-9]*\"|migration-version: \"$REQUIRED_MIGRATION_VERSION\"|g" \
       > "$destination"
 }
