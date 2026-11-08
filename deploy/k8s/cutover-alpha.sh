@@ -477,17 +477,17 @@ validate_release_for_source() {
       fail 'CI migration Job name does not match the committed production Job'
     fi
   else
-    APP_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd "$live_revision")
-    MIGRATIONS_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagram-migrations "$live_revision")
-    K8S_MC_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd-mc-init "$live_revision")
-    LINK_LANDING_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-landing "$live_revision")
-    LINK_SELECTOR_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-selector "$live_revision")
+    APP_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd "$live_revision") || return $?
+    MIGRATIONS_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagram-migrations "$live_revision") || return $?
+    K8S_MC_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd-mc-init "$live_revision") || return $?
+    LINK_LANDING_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-landing "$live_revision") || return $?
+    LINK_SELECTOR_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-selector "$live_revision") || return $?
     migrations_validation_image=$MIGRATIONS_IMAGE
     helper_validation_image=$K8S_MC_IMAGE
 
-    app_revision=$(resolve_image_revision "$APP_IMAGE")
-    migrations_revision=$(resolve_image_revision "$migrations_validation_image")
-    helper_revision=$(resolve_image_revision "$helper_validation_image")
+    app_revision=$(resolve_image_revision "$APP_IMAGE") || return $?
+    migrations_revision=$(resolve_image_revision "$migrations_validation_image") || return $?
+    helper_revision=$(resolve_image_revision "$helper_validation_image") || return $?
     [[ $app_revision == "$live_revision" ]] ||
       fail "published teagramd image revision $app_revision does not match live revision $live_revision"
     [[ $migrations_revision == "$live_revision" ]] ||
@@ -501,7 +501,7 @@ validate_release_for_source() {
     expected_helper_suffix=${helper_digest#sha256:}
     migration_job="db-migrations-${expected_job_suffix:0:16}"
     rustfs_init_job="rustfs-init-${expected_helper_suffix:0:16}"
-    latest_version=$(image_latest_migration "$migrations_validation_image")
+    latest_version=$(image_latest_migration "$migrations_validation_image") || return $?
     required_version=$latest_version
   fi
   if [[ $TEST_MODE == true ]]; then

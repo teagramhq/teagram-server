@@ -108,15 +108,24 @@ if ! grep --fixed-strings --quiet 'test-cutover-alpha-k3s.sh' .github/workflows/
   exit 1
 fi
 
+prod_app_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
 prod_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
   deploy/k8s/prod/kustomization.yaml)
 prod_helper_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd-mc-init") | .digest' \
   deploy/k8s/prod/kustomization.yaml)
+prod_landing_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/link-edge-landing") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
+prod_selector_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/link-edge-selector") | .digest' \
+  deploy/k8s/prod/kustomization.yaml)
 cutover_migrations_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagram-migrations") | .digest' \
   deploy/k8s/prod-cutover/kustomization.yaml)
 [[ $cutover_migrations_digest == null ]] && cutover_migrations_digest=''
-if [[ ! $prod_migrations_digest =~ ^sha256:[0-9a-f]{64}$ ||
+if [[ ! $prod_app_digest =~ ^sha256:[0-9a-f]{64}$ ||
+  ! $prod_migrations_digest =~ ^sha256:[0-9a-f]{64}$ ||
   ! $prod_helper_digest =~ ^sha256:[0-9a-f]{64}$ ||
+  ! $prod_landing_digest =~ ^sha256:[0-9a-f]{64}$ ||
+  ! $prod_selector_digest =~ ^sha256:[0-9a-f]{64}$ ||
   ( -n $cutover_migrations_digest && $cutover_migrations_digest != "$prod_migrations_digest" ) ]] ||
   ! grep --fixed-strings --quiet -- '  - ../prod' deploy/k8s/prod-cutover/kustomization.yaml ||
   grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
@@ -230,6 +239,191 @@ if grep --fixed-strings --quiet -- "job-revision: $prod_migration_job" "$fixture
   exit 1
 fi
 unset -f kubectl
+# Exercise the production release lookup branch with fake Incus image output.
+# A stale published revision must stop validation; matching revision labels
+# must yield immutable image references and digest-derived Job names.
+cat > "$fixture_dir/release-prod-cutover.yaml" <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $prod_migration_job
+spec:
+  selector:
+    matchLabels:
+      job-revision: $prod_migration_job
+  template:
+    metadata:
+      labels:
+        job-revision: $prod_migration_job
+    spec:
+      containers:
+        - name: migrations
+          image: ghcr.io/teagramhq/teagram-migrations@$prod_migrations_digest
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $prod_rustfs_job
+spec:
+  selector:
+    matchLabels:
+      job-revision: $prod_rustfs_job
+  template:
+    metadata:
+      labels:
+        job-revision: $prod_rustfs_job
+    spec:
+      containers:
+        - name: rustfs-init
+          image: ghcr.io/teagramhq/teagramd-mc-init@$prod_helper_digest
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cutover-release-images
+spec:
+  containers:
+    - name: teagramd
+      image: ghcr.io/teagramhq/teagramd@$prod_app_digest
+    - name: linklanding
+      image: ghcr.io/teagramhq/link-edge-landing@$prod_landing_digest
+    - name: linkselector
+      image: ghcr.io/teagramhq/link-edge-selector@$prod_selector_digest
+EOF
+
+live_revision=0123456789abcdef0123456789abcdef01234567
+mismatched_revision=ffffffffffffffffffffffffffffffffffffffff
+run_production_release_case() (
+  local mode=$1 rendered_manifest=$2
+  export SOURCE_INSTANCE=teagram
+  export TEST_MODE=false
+  export LIVE_REVISION=$live_revision
+  export MISMATCHED_REVISION=$mismatched_revision
+  export RELEASE_CASE=$mode
+  RELEASE_APP_DIGEST="sha256:$(printf '%016x%048x' 0xa0a0a0a0a0a0a0a0 0)"
+  RELEASE_MIGRATIONS_DIGEST="sha256:$(printf '%016x%048x' 0xb1b1b1b1b1b1b1b1 0)"
+  RELEASE_HELPER_DIGEST="sha256:$(printf '%016x%048x' 0xc2c2c2c2c2c2c2c2 0)"
+  RELEASE_LANDING_DIGEST="sha256:$(printf '%016x%048x' 0xd3d3d3d3d3d3d3d3 0)"
+  RELEASE_SELECTOR_DIGEST="sha256:$(printf '%016x%048x' 0xe4e4e4e4e4e4e4e4 0)"
+  export RELEASE_APP_DIGEST RELEASE_MIGRATIONS_DIGEST RELEASE_HELPER_DIGEST \
+    RELEASE_LANDING_DIGEST RELEASE_SELECTOR_DIGEST
+  export NAMESPACE=teagram-cutover
+  export REPO_ROOT=$repo_root
+  eval "$(sed -n '/^source_container_revision() {/,/^prod_image_digest() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^source_docker_helper_enabled() {/,/^resolve_image_revision() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^resolve_image_revision() {/,/^resolve_release_image() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^resolve_release_image() {/,/^image_latest_migration() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^image_latest_migration() {/,/^validate_release_for_source() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^validate_release_for_source() {/,/^render_cutover_manifest() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  fail() { printf 'k3s cutover: %s\n' "$*" >&2; exit 1; }
+  incus() {
+    [[ $1 == exec && $2 == "$SOURCE_INSTANCE" && $3 == -- ]] || return 91
+    shift 3
+    [[ $1 == docker ]] || return 91
+    shift
+    case $1 in
+      inspect)
+        [[ $2 == --format && $4 == teagram-teagramd-1 ]] || return 91
+        printf '%s\n' "$LIVE_REVISION"
+        ;;
+      pull) return 0 ;;
+      image)
+        [[ $2 == inspect && $4 == --format ]] || return 91
+        local image=$3 format=$5
+        if [[ $format == *RepoDigests* ]]; then
+          case $image in
+            ghcr.io/teagramhq/teagramd:sha-*)
+              printf 'ghcr.io/teagramhq/teagramd@%s\n' "$RELEASE_APP_DIGEST" ;;
+            ghcr.io/teagramhq/teagram-migrations:sha-*)
+              printf 'ghcr.io/teagramhq/teagram-migrations@%s\n' "$RELEASE_MIGRATIONS_DIGEST" ;;
+            ghcr.io/teagramhq/teagramd-mc-init:sha-*)
+              printf 'ghcr.io/teagramhq/teagramd-mc-init@%s\n' "$RELEASE_HELPER_DIGEST" ;;
+            ghcr.io/teagramhq/link-edge-landing:sha-*)
+              printf 'ghcr.io/teagramhq/link-edge-landing@%s\n' "$RELEASE_LANDING_DIGEST" ;;
+            ghcr.io/teagramhq/link-edge-selector:sha-*)
+              printf 'ghcr.io/teagramhq/link-edge-selector@%s\n' "$RELEASE_SELECTOR_DIGEST" ;;
+            *) return 91 ;;
+          esac
+        elif [[ $RELEASE_CASE == mismatch &&
+          $image == "ghcr.io/teagramhq/teagramd:sha-$LIVE_REVISION" ]]; then
+          printf '%s\n' "$MISMATCHED_REVISION"
+        else
+          printf '%s\n' "$LIVE_REVISION"
+        fi
+        ;;
+      run) printf '20261105000021\n' ;;
+      *) return 91 ;;
+    esac
+  }
+  fence_source_writes() { printf 'fence reached\n'; }
+  kubectl() {
+    [[ $1 == kustomize && $2 == "$REPO_ROOT/deploy/k8s/prod-cutover" ]] || return 91
+    cat "$fixture_dir/release-prod-cutover.yaml"
+  }
+  incus exec "$SOURCE_INSTANCE" -- docker inspect --format revision teagram-teagramd-1 >/dev/null
+  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+  validate_release_for_source || return $?
+  if [[ $mode == mismatch ]]; then
+    fence_source_writes
+    return 0
+  fi
+  [[ $mode == matching ]] || return 0
+  [[ $LIVE_SOURCE_REVISION == "$LIVE_REVISION" ]] ||
+    fail 'production release validation lost the live source revision'
+  [[ $APP_IMAGE == "ghcr.io/teagramhq/teagramd@$RELEASE_APP_DIGEST" &&
+    $MIGRATIONS_IMAGE == "ghcr.io/teagramhq/teagram-migrations@$RELEASE_MIGRATIONS_DIGEST" &&
+    $K8S_MC_IMAGE == "ghcr.io/teagramhq/teagramd-mc-init@$RELEASE_HELPER_DIGEST" &&
+    $LINK_LANDING_IMAGE == "ghcr.io/teagramhq/link-edge-landing@$RELEASE_LANDING_DIGEST" &&
+    $LINK_SELECTOR_IMAGE == "ghcr.io/teagramhq/link-edge-selector@$RELEASE_SELECTOR_DIGEST" ]] ||
+    fail 'production release validation did not retain the published immutable digests'
+  expected_migration_job="db-migrations-$(printf '%s' "$RELEASE_MIGRATIONS_DIGEST" | cut -c8-23)"
+  expected_rustfs_job="rustfs-init-$(printf '%s' "$RELEASE_HELPER_DIGEST" | cut -c8-23)"
+  [[ $MIGRATIONS_JOB_NAME == "$expected_migration_job" &&
+    $RUSTFS_INIT_JOB_NAME == "$expected_rustfs_job" &&
+    $REQUIRED_MIGRATION_VERSION == 20261105000021 ]] ||
+    fail 'production release validation did not derive migration metadata from the live images'
+  render_cutover_manifest "$rendered_manifest"
+  for expected_image in "$APP_IMAGE" "$MIGRATIONS_IMAGE" "$K8S_MC_IMAGE" \
+    "$LINK_LANDING_IMAGE" "$LINK_SELECTOR_IMAGE"; do
+    grep --fixed-strings --quiet -- "image: $expected_image" "$rendered_manifest" ||
+      fail "cutover render omitted published immutable image $expected_image"
+  done
+  for expected_job in "$MIGRATIONS_JOB_NAME" "$RUSTFS_INIT_JOB_NAME"; do
+    EXPECTED_JOB_NAME=$expected_job yq --exit-status \
+      'select(.kind == "Job" and .metadata.name == strenv(EXPECTED_JOB_NAME)) |
+        (.metadata.name == strenv(EXPECTED_JOB_NAME) and
+         .spec.selector.matchLabels."job-revision" == strenv(EXPECTED_JOB_NAME) and
+         .spec.template.metadata.labels."job-revision" == strenv(EXPECTED_JOB_NAME))' \
+      "$rendered_manifest" >/dev/null ||
+      fail "cutover render omitted digest-derived Job name and labels $expected_job"
+  done
+)
+
+if mismatch_output=$(run_production_release_case mismatch "$fixture_dir/release-mismatch.yaml" 2>&1); then
+  printf 'production release validation accepted a published image with a mismatched revision\n' >&2
+  exit 1
+fi
+for expected_revision in "$live_revision" "$mismatched_revision"; do
+  if [[ $mismatch_output != *"$expected_revision"* ]]; then
+    printf 'production release mismatch did not report both revisions: %s\n' "$mismatch_output" >&2
+    exit 1
+  fi
+done
+if [[ $mismatch_output != *'published image ghcr.io/teagramhq/teagramd:sha-'* ]]; then
+  printf 'production release mismatch did not identify the rejected published image: %s\n' "$mismatch_output" >&2
+  exit 1
+fi
+if [[ $mismatch_output == *'fence reached'* ]]; then
+  printf 'production release mismatch reached the write fence: %s\n' "$mismatch_output" >&2
+  exit 1
+fi
+run_production_release_case matching "$fixture_dir/release-rendered.yaml"
 # Exercise the runner's actual validator with realistic CLI output and unsafe
 # variants, independently of the disposable-cluster integration test.
 eval "$(sed -n '/^check_serve_status() {/,/^set_serve_routes() {/p' deploy/k8s/cutover-alpha.sh | sed '$d')"
