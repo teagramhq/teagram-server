@@ -1444,6 +1444,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		connLog = connLog.With("connection_id", closeDiagnostics.connectionID)
 	}
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, connLog)
+	conn.connectionID = closeDiagnostics.connectionID
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {

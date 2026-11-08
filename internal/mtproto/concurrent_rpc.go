@@ -199,7 +199,7 @@ func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler, releas
 	}
 	if err != nil {
 		if closeErr := c.closeServer(); closeErr != nil && !isDisconnect(closeErr) {
-			s.log.Info("close connection after concurrent RPC failure", "err", closeErr)
+			c.log.Info("close connection after concurrent RPC failure", "err", closeErr)
 		}
 	}
 	if release != nil {
@@ -208,14 +208,14 @@ func (s *Server) runConcurrentRPC(c *Conn, req *Request, handler Handler, releas
 	discarded := c.concurrentRPCs.finish(req.MsgID, err)
 	if err != nil {
 		if dropped, ok := s.concurrentRPCFailureLog.allow(time.Now(), preAuthLogInterval); ok {
-			s.log.Info("concurrent RPC failed",
+			c.log.Info("concurrent RPC failed",
 				"method", concurrentRPCMethodName(req),
 				"auth_key_id", requestAuthKeyID(req),
 				"discarded_queued_rpcs", discarded,
 				"error", safeRPCErrorName(err),
 				"suppressed", dropped)
 		}
-		s.logConnectionFailure(err)
+		s.logConnectionFailure(err, &transportCloseDiagnostics{connectionID: c.connectionID})
 	}
 }
 
