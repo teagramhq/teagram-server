@@ -79,9 +79,36 @@ func run(args []string, stdout, stderr io.Writer) (err error) {
 		}
 	}()
 
-	storeRefs, err := st.BlobInventoryReferences(ctx)
+	refs, err := readInventoryReferences(ctx, st)
 	if err != nil {
 		return err
+	}
+	inventoryBlobs, err := inventoryStoreWithAuthority(blobs, authority)
+	if err != nil {
+		return err
+	}
+	report, err := blobinventory.ScanWithReferenceRefresh(
+		ctx,
+		inventoryBlobs,
+		cfg.MediaKeys,
+		refs,
+		func(ctx context.Context) ([]blobinventory.Reference, error) {
+			return readInventoryReferences(ctx, st)
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if err := writeReport(stdout, stderr, report); err != nil {
+		return fmt.Errorf("write inventory report: %w", err)
+	}
+	return nil
+}
+
+func readInventoryReferences(ctx context.Context, st *store.Store) ([]blobinventory.Reference, error) {
+	storeRefs, err := st.BlobInventoryReferences(ctx)
+	if err != nil {
+		return nil, err
 	}
 	refs := make([]blobinventory.Reference, len(storeRefs))
 	for i, ref := range storeRefs {
@@ -92,18 +119,7 @@ func run(args []string, stdout, stderr io.Writer) (err error) {
 			LogicalBytes: ref.LogicalBytes,
 		}
 	}
-	inventoryBlobs, err := inventoryStoreWithAuthority(blobs, authority)
-	if err != nil {
-		return err
-	}
-	report, err := blobinventory.Scan(ctx, inventoryBlobs, cfg.MediaKeys, refs)
-	if err != nil {
-		return err
-	}
-	if err := writeReport(stdout, stderr, report); err != nil {
-		return fmt.Errorf("write inventory report: %w", err)
-	}
-	return nil
+	return refs, nil
 }
 
 func inventoryStoreWithAuthority(blobs blob.Store, authority blobmode.Authority) (blob.Store, error) {

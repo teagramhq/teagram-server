@@ -412,6 +412,172 @@ func TestServeWebSocketOriginPolicy(t *testing.T) {
 	}
 }
 
+func TestServeWebSocketBrowserOnlyPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		browserOnly bool
+		origin      string
+		patterns    []string
+		wantStatus  int
+		wantPolicy  string
+	}{
+		{name: "disabled accepts native clients", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusSwitchingProtocols},
+		{name: "disabled keeps unlisted origin refusal unmarked", origin: "https://evil.example", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden},
+		{name: "enabled marks missing origin refusal", browserOnly: true, patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only"},
+		{name: "enabled marks unlisted origin refusal", browserOnly: true, origin: "https://evil.example", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only"},
+		{name: "enabled accepts allow-listed origin", browserOnly: true, origin: "https://web.teagram.io", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusSwitchingProtocols},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+			var handlerCalls atomic.Int32
+			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, _ *mtproto.Request) error {
+				handlerCalls.Add(1)
+				return nil
+			})
+			server := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), handler, nil)
+			server.SetWebSocketOriginPatterns(tt.patterns)
+			if tt.browserOnly {
+				setter, ok := any(server).(interface{ SetWebSocketBrowserOnly(bool) })
+				if !ok {
+					t.Fatal("server does not support browser-only WebSocket policy")
+				}
+				setter.SetWebSocketBrowserOnly(true)
+			}
+			served := make(chan error, 1)
+			go func() { served <- server.ServeWebSocket(ctx, ln) }()
+			t.Cleanup(func() {
+				cancel()
+				if err := <-served; err != nil {
+					t.Errorf("serve websocket: %v", err)
+				}
+			})
+
+			var headers http.Header
+			if tt.origin != "" {
+				headers = http.Header{"Origin": []string{tt.origin}}
+			}
+			ws, resp, err := websocket.Dial(ctx, "ws://"+ln.Addr().String()+"/apiws", &websocket.DialOptions{
+				HTTPHeader:   headers,
+				Subprotocols: []string{"binary"},
+			})
+			if tt.wantStatus == http.StatusSwitchingProtocols {
+				if err != nil {
+					t.Fatalf("WebSocket handshake: %v", err)
+				}
+				if ws == nil {
+					t.Fatal("WebSocket handshake returned no session")
+				}
+				closeWebSocket(t, ws)
+			} else {
+				if err == nil {
+					closeWebSocket(t, ws)
+					t.Fatal("disallowed WebSocket origin was accepted")
+				}
+				if resp == nil {
+					t.Fatalf("WebSocket refusal returned no HTTP response: %v", err)
+				}
+				if resp.StatusCode != tt.wantStatus {
+					t.Errorf("WebSocket refusal status = %d, want %d", resp.StatusCode, tt.wantStatus)
+				}
+				if got := resp.Header.Get("Teagram-Client-Policy"); got != tt.wantPolicy {
+					t.Errorf("Teagram-Client-Policy = %q, want %q", got, tt.wantPolicy)
+				}
+			}
+			if resp != nil && resp.Body != nil {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("close HTTP response body: %v", err)
+				}
+			}
+			if got := handlerCalls.Load(); got != 0 {
+				t.Errorf("MTProto handler calls = %d, want 0 before a client frame", got)
+			}
+		})
+	}
+}
+
+func TestServePublicWebSocketBrowserOnlyPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+	rsaKey, err := rsa.GenerateKey(rand.Reader, crypto.RSAKeyBits)
+	if err != nil {
+		t.Fatalf("generate server RSA key: %v", err)
+	}
+	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	var handlerCalls atomic.Int32
+	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, _ *mtproto.Request) error {
+		handlerCalls.Add(1)
+		return nil
+	})
+	server := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), handler, nil)
+	served := make(chan error, 1)
+	go func() {
+		served <- server.ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(
+			ctx, ln, handler, []string{"https://web.teagram.io"}, doc, true,
+		)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve public websocket: %v", err)
+		}
+	})
+
+	ws, resp, err := websocket.Dial(ctx, "ws://"+ln.Addr().String()+"/apiws", &websocket.DialOptions{
+		Subprotocols: []string{"binary"},
+	})
+	if err == nil {
+		closeWebSocket(t, ws)
+		t.Fatal("public listener accepted a request without Origin")
+	}
+	if resp == nil {
+		t.Fatalf("public WebSocket refusal returned no HTTP response: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("public WebSocket refusal status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if got := resp.Header.Get("Teagram-Client-Policy"); got != "browser-only" {
+		t.Errorf("public Teagram-Client-Policy = %q, want browser-only", got)
+	}
+	if resp.Body != nil {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close refusal body: %v", err)
+		}
+	}
+
+	ws, resp, err = websocket.Dial(ctx, "ws://"+ln.Addr().String()+"/apiws", &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Origin":           []string{"https://web.teagram.io"},
+			"CF-Connecting-Ip": []string{"203.0.113.7"},
+		},
+		Subprotocols: []string{"binary"},
+	})
+	if err != nil {
+		t.Fatalf("allow-listed public WebSocket handshake: %v", err)
+	}
+	if ws == nil {
+		t.Fatal("allow-listed public handshake returned no WebSocket session")
+	}
+	closeWebSocket(t, ws)
+	if resp != nil && resp.Body != nil {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close successful response body: %v", err)
+		}
+	}
+	if got := handlerCalls.Load(); got != 0 {
+		t.Errorf("MTProto handler calls = %d, want 0 before a client frame", got)
+	}
+}
+
 func TestServeWebSocketWithHandlerUsesListenerOriginPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)

@@ -34,7 +34,7 @@ func viewerContactEdge(snapshot store.PeerSettingsSnapshot, targetID int64) stor
 
 func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetPeerSettingsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -88,7 +88,7 @@ func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error
 // add-contact/block bar. Other peer types have no supported bar to dismiss.
 func (h *handlers) handleHidePeerSettingsBar(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesHidePeerSettingsBarRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

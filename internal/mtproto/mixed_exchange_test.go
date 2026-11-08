@@ -161,12 +161,18 @@ func beginMixedExchange(t *testing.T, run *mixedExchangeRun) {
 }
 
 func TestKeyExchangeCountSurvivesPreAuthSlotClear(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
+	rsaStarted := time.Now()
 	rsaKey, err := rsa.GenerateKey(crand.Reader, crypto.RSAKeyBits)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
+	rsaSetupDuration := time.Since(rsaStarted)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	exchangeStarted := time.Now()
+	defer func() {
+		t.Logf("RSA setup %s; exchange test path %s", rsaSetupDuration, time.Since(exchangeStarted))
+	}()
 	privateKey := exchange.PrivateKey{RSA: rsaKey}
 	keys := &mixedExchangeKeyStore{}
 	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
@@ -204,11 +210,13 @@ func TestKeyExchangeCountSurvivesPreAuthSlotClear(t *testing.T) {
 	})
 
 	for exchangeNumber := 1; exchangeNumber <= 2; exchangeNumber++ {
+		negotiationStarted := time.Now()
 		result, err := exchange.NewExchanger(client, 2).
 			Client([]exchange.PublicKey{privateKey.Public()}).Run(ctx)
 		if err != nil {
 			t.Fatalf("complete exchange %d: %v", exchangeNumber, err)
 		}
+		t.Logf("exchange %d negotiation %s", exchangeNumber, time.Since(negotiationStarted))
 		requestID := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))
 		frame := clientFrame(t, result.AuthKey, 72, requestID, &tg.HelpGetConfigRequest{})
 		if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {

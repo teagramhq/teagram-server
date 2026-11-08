@@ -38,14 +38,20 @@ credentials it contained.
 Per scenario and fixture it records p50 and p95 latency, statements per call
 (including the delivery work the call triggers), rows read (from `EXPLAIN
 ANALYZE` of every statement), allocated bytes and every sequential scan over a
-table above 10,000 rows.
+table above 10,000 rows. The `messages.getSearchCounters dispatch wait`
+scenario records server-side receive-to-dispatch waits for both the counters
+request and its same-connection `help.getConfig` follow-up, plus the client
+latency for `help.getConfig` while the counters query is active. Both 100x
+maximum values must stay at or below 50 ms.
 
 `cmd/perfreport` judges the reports:
 
 - Blocking from the first run: statement count and rows read against the base
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
   of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
-  scenario, and the `contacts.getContacts` 100x p95 budget of 45 ms.
+  scenario, the `contacts.getContacts` 100x p95 budget of 45 ms, and the
+  `messages.getSearchCounters dispatch wait` 100x server receive-to-dispatch
+  wait and client-observed `help.getConfig` latency ceilings of 50 ms.
 - Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s)
   and the 1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
   scenario has a `timing` waiver. Independently, p50 regressions compare with

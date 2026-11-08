@@ -205,20 +205,23 @@ type Conn struct {
 	closeSource                atomic.Uint32
 	peerLost                   atomic.Bool
 	activeRPCMu                sync.Mutex
-	activeRPC                  *activePeerRPC
+	activeRPCs                 map[*activePeerRPC]struct{}
 	// activeWriteDeadline and writeDeadlineGeneration are guarded by activeRPCMu
 	// so the peer reader can distinguish an expired local write from peer loss.
 	activeWriteDeadline     time.Time
 	writeDeadlineGeneration uint64
 	startPeerRead           func()
+	frameReceivedAt         time.Time
+	concurrentRPCs          concurrentRPCSet
 
 	// dialogFilterRecovery is connection-local coverage state for content-free
 	// folder invalidations. Its immutable snapshots are replaced with CAS so a
 	// listener callback never waits behind a socket write.
 	dialogFilterRecovery      atomic.Pointer[dialogFilterRecovery]
 	dialogFilterRecoveryClaim atomic.Uint64
-	// rpcOutcomes is a 64-entry dependency ring. Only the connection's serve
-	// goroutine reads or writes it; a session change clears the ring.
+	// rpcOutcomes is a 64-entry dependency ring guarded by rpcOutcomeMu. A
+	// session change clears the ring.
+	rpcOutcomeMu   sync.RWMutex
 	rpcOutcomes    [64]rpcOutcome
 	rpcOutcomeNext int
 	rpcOutcomeSize int
@@ -831,6 +834,8 @@ func (c *Conn) resetDialogFilterRecoveryLocked(owner, session int64) {
 }
 
 func (c *Conn) resetRPCOutcomesLocked() {
+	c.rpcOutcomeMu.Lock()
+	defer c.rpcOutcomeMu.Unlock()
 	c.rpcOutcomes = [64]rpcOutcome{}
 	c.rpcOutcomeNext = 0
 	c.rpcOutcomeSize = 0
@@ -1024,9 +1029,15 @@ func (c *Conn) FinishDialogFilterRecoveryAttempt(owner, session int64, claimID u
 // RPCDependencyOutcome returns a recent result only when the dependency is an
 // earlier message in this same connection and session.
 func (c *Conn) RPCDependencyOutcome(session, dependency, current int64) (found, success bool) {
-	if dependency <= 0 || dependency >= current || session != c.sessionID {
+	if dependency <= 0 || dependency >= current {
 		return false, false
 	}
+	binding := c.recoveryBinding.Load()
+	if binding == nil || session != binding.Session {
+		return false, false
+	}
+	c.rpcOutcomeMu.RLock()
+	defer c.rpcOutcomeMu.RUnlock()
 	for i := range c.rpcOutcomeSize {
 		index := (c.rpcOutcomeNext - 1 - i + len(c.rpcOutcomes)) % len(c.rpcOutcomes)
 		outcome := c.rpcOutcomes[index]
@@ -1560,6 +1571,8 @@ func (c *Conn) recordRPCOutcome(msgID, session int64, success bool) {
 	if msgID <= 0 || session != c.sessionID {
 		return
 	}
+	c.rpcOutcomeMu.Lock()
+	defer c.rpcOutcomeMu.Unlock()
 	c.rpcOutcomes[c.rpcOutcomeNext] = rpcOutcome{msgID: msgID, session: session, success: success}
 	c.rpcOutcomeNext = (c.rpcOutcomeNext + 1) % len(c.rpcOutcomes)
 	if c.rpcOutcomeSize < len(c.rpcOutcomes) {

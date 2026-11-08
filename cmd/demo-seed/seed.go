@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/gotd/td/tg"
@@ -77,6 +79,8 @@ var conversationLines = []string{
 
 const seedReactionEmoji = "❤"
 
+const welcomeText = "This fictional demo is refreshed by a weekly data wipe. Explore public notes and groups, then come back after the next reset."
+
 func seedDemo(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, inventory map[string]string) error {
 	for _, account := range seedAccounts {
 		if err := withSeedAccount(ctx, cfg, options, account, ownerPassword, inventory, func(runCtx context.Context, api *tg.Client) error {
@@ -143,7 +147,7 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 			if !remote.creator {
 				return fmt.Errorf("seed owner does not own public space %s", spec.username)
 			}
-			markers, err := historyMarkers(runCtx, api, remote.peer())
+			markers, err := historyMarkers(runCtx, api, remote.peer(), seededMessagesForSpace(spec)...)
 			if err != nil {
 				return err
 			}
@@ -157,17 +161,17 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 						return fmt.Errorf("group %s is missing a conversation post", spec.username)
 					}
 				}
-				if messageIsPinned(runCtx, api, remote.peer(), conversationMarker(spec, 1)) != nil {
+				if messageIsPinned(runCtx, api, remote.peer(), conversationMarker(spec, 1), conversationSeedMessage(spec, 1)) != nil {
 					return fmt.Errorf("group %s is missing its pinned conversation post", spec.username)
 				}
 				continue
 			}
 			if spec.slug == "welcome" {
-				marker := welcomeMarker()
-				if _, ok := markers[marker]; !ok {
+				welcome := welcomeSeedMessage()
+				if _, ok := markers[welcome.marker]; !ok {
 					return errors.New("welcome channel is missing its weekly-wipe note")
 				}
-				if messageIsPinned(runCtx, api, remote.peer(), marker) != nil {
+				if messageIsPinned(runCtx, api, remote.peer(), welcome.marker, welcome) != nil {
 					return errors.New("welcome weekly-wipe note is not pinned")
 				}
 				continue
@@ -177,7 +181,7 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 					return fmt.Errorf("channel %s is missing seeded content", spec.username)
 				}
 			}
-			if messageIsPinned(runCtx, api, remote.peer(), textMarker(spec, 0)) != nil {
+			if messageIsPinned(runCtx, api, remote.peer(), textMarker(spec, 0), channelPostSeedMessage(spec, 0)) != nil {
 				return fmt.Errorf("channel %s is missing its pinned post", spec.username)
 			}
 		}
@@ -425,6 +429,11 @@ func welcomeMarker() string {
 	return "[[teagram-demo:welcome:weekly-wipe]]"
 }
 
+func welcomeSeedMessage() seedMessage {
+	marker := welcomeMarker()
+	return seedMessage{marker: marker, text: welcomeText, randomKey: marker + ":clean"}
+}
+
 func textMarker(spec spaceSpec, index int) string {
 	return fmt.Sprintf("[[teagram-demo:%s:text-%02d]]", spec.slug, index)
 }
@@ -445,6 +454,80 @@ func conversationMarker(spec spaceSpec, turn int) string {
 	return fmt.Sprintf("[[teagram-demo:%s:conversation-%02d]]", spec.slug, turn)
 }
 
+type seedMessage struct {
+	marker    string
+	text      string
+	retired   []string
+	randomKey string
+}
+
+const (
+	channelReplyText    = "I saved this first route note; the next sketch adds a quieter path by the water."
+	photoCaptionText    = "A locally generated study of a quiet imaginary landscape."
+	pollCaptionText     = "Choose a detail for the next imaginary route sketch."
+	reactionMessageText = "I saved the public route summary here too, in case it helps with the next walk."
+)
+
+func channelPostSeedMessage(spec spaceSpec, index int) seedMessage {
+	return seedMessage{marker: textMarker(spec, index), text: channelText(spec, index)}
+}
+
+func channelReplySeedMessage(spec spaceSpec) seedMessage {
+	return seedMessage{marker: conversationMarker(spec, 0), text: channelReplyText}
+}
+
+func photoSeedMessage(spec spaceSpec) seedMessage {
+	return seedMessage{marker: photoMarker(spec), text: photoCaptionText}
+}
+
+func pollSeedMessage(spec spaceSpec) seedMessage {
+	return seedMessage{marker: pollMarker(spec), text: pollCaptionText}
+}
+
+func linkSeedMessage(spec spaceSpec) seedMessage {
+	link := fmt.Sprintf("https://%s.field-notes.invalid/walk-%02d", spec.slug, 1)
+	return seedMessage{
+		marker: linkMarker(spec),
+		text:   "A reserved fictional link for the route notes: " + link,
+	}
+}
+
+func conversationSeedMessage(spec spaceSpec, turn int) seedMessage {
+	return seedMessage{marker: conversationMarker(spec, turn), text: conversationLines[turn]}
+}
+
+func reactionSeedMessage() seedMessage {
+	return seedMessage{
+		marker: "[[teagram-demo:conversation:reaction-example]]",
+		text:   reactionMessageText,
+	}
+}
+
+func seededMessagesForSpace(spec spaceSpec) []seedMessage {
+	if spec.slug == "welcome" {
+		return []seedMessage{welcomeSeedMessage()}
+	}
+	if spec.megagroup {
+		messages := make([]seedMessage, 0, len(conversationLines))
+		for turn := range conversationLines {
+			messages = append(messages, conversationSeedMessage(spec, turn))
+		}
+		return messages
+	}
+
+	messages := make([]seedMessage, 0, 32)
+	for index := range 28 {
+		messages = append(messages, channelPostSeedMessage(spec, index))
+	}
+	messages = append(messages,
+		channelReplySeedMessage(spec),
+		photoSeedMessage(spec),
+		pollSeedMessage(spec),
+		linkSeedMessage(spec),
+	)
+	return messages
+}
+
 func broadcastMarkers(spec spaceSpec) []string {
 	markers := make([]string, 0, 32)
 	for index := range 28 {
@@ -455,51 +538,82 @@ func broadcastMarkers(spec spaceSpec) []string {
 }
 
 func seedWelcome(ctx context.Context, api *tg.Client, remote remoteSpace) error {
-	markers, err := historyMarkers(ctx, api, remote.peer())
+	messages, err := historyMessages(ctx, api, remote.peer())
 	if err != nil {
 		return err
 	}
-	marker := welcomeMarker()
-	if _, ok := markers[marker]; !ok {
-		if _, err := sendText(ctx, api, remote.peer(), marker, "This fictional demo is refreshed by a weekly data wipe. Explore public notes and groups, then come back after the next reset.", 0); err != nil {
+	seeded := welcomeSeedMessage()
+	var cleanFound bool
+	var legacyID int
+	for _, candidate := range messages {
+		message, ok := candidate.(*tg.Message)
+		if !ok {
+			continue
+		}
+		if message.Message == seeded.marker+" "+seeded.text {
+			if legacyID != 0 {
+				return errors.New("duplicate legacy welcome notes")
+			}
+			legacyID = message.ID
+			continue
+		}
+		if seededMarkerFromText(message.Message, []seedMessage{seeded}) == seeded.marker {
+			if cleanFound {
+				return errors.New("duplicate welcome notes")
+			}
+			cleanFound = true
+		}
+	}
+	if legacyID != 0 {
+		_, err := api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: remote.channelID, AccessHash: remote.accessHash},
+			ID:      []int{legacyID},
+		})
+		if err != nil {
+			return fmt.Errorf("delete legacy welcome note: %w", err)
+		}
+	}
+	if !cleanFound {
+		if _, err := sendText(ctx, api, remote.peer(), seeded, 0); err != nil {
 			return fmt.Errorf("post weekly-wipe welcome note: %w", err)
 		}
 	}
-	if err := pinMarker(ctx, api, remote.peer(), marker); err != nil {
+	if err := pinMarker(ctx, api, remote.peer(), seeded.marker, seeded); err != nil {
 		return fmt.Errorf("pin weekly-wipe welcome note: %w", err)
 	}
 	return nil
 }
 
 func seedBroadcastChannel(ctx context.Context, api *tg.Client, remote remoteSpace) error {
-	markers, err := historyMarkers(ctx, api, remote.peer())
+	markers, err := historyMarkers(ctx, api, remote.peer(), seededMessagesForSpace(remote.spec)...)
 	if err != nil {
 		return err
 	}
-	rootMarker := textMarker(remote.spec, 0)
-	if _, ok := markers[rootMarker]; !ok {
-		id, err := sendText(ctx, api, remote.peer(), rootMarker, channelText(remote.spec, 0), 0)
+	root := channelPostSeedMessage(remote.spec, 0)
+	if _, ok := markers[root.marker]; !ok {
+		id, err := sendText(ctx, api, remote.peer(), root, 0)
 		if err != nil {
 			return fmt.Errorf("post channel introduction: %w", err)
 		}
-		markers[rootMarker] = id
+		markers[root.marker] = id
 	}
 	for index := 1; index < 28; index++ {
-		marker := textMarker(remote.spec, index)
-		if _, ok := markers[marker]; ok {
+		seeded := channelPostSeedMessage(remote.spec, index)
+		if _, ok := markers[seeded.marker]; ok {
 			continue
 		}
-		if _, err := sendText(ctx, api, remote.peer(), marker, channelText(remote.spec, index), 0); err != nil {
+		if _, err := sendText(ctx, api, remote.peer(), seeded, 0); err != nil {
 			return fmt.Errorf("post fictional channel note: %w", err)
 		}
 	}
-	replyMarker := conversationMarker(remote.spec, 0)
-	if _, ok := markers[replyMarker]; !ok {
-		if _, err := sendText(ctx, api, remote.peer(), replyMarker, "I saved this first route note; the next sketch adds a quieter path by the water.", markers[rootMarker]); err != nil {
+	reply := channelReplySeedMessage(remote.spec)
+	if _, ok := markers[reply.marker]; !ok {
+		if _, err := sendText(ctx, api, remote.peer(), reply, markers[root.marker]); err != nil {
 			return fmt.Errorf("post channel reply: %w", err)
 		}
 	}
-	if _, ok := markers[photoMarker(remote.spec)]; !ok {
+	photo := photoSeedMessage(remote.spec)
+	if _, ok := markers[photo.marker]; !ok {
 		payload, err := avatarJPEG(20 + int(remote.channelID%10))
 		if err != nil {
 			return err
@@ -508,37 +622,35 @@ func seedBroadcastChannel(ctx context.Context, api *tg.Client, remote remoteSpac
 		if err != nil {
 			return fmt.Errorf("upload generated channel photo: %w", err)
 		}
-		marker := photoMarker(remote.spec)
 		_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer:     remote.peer(),
 			Media:    &tg.InputMediaUploadedPhoto{File: file},
-			Message:  marker + " A locally generated study of a quiet imaginary landscape.",
-			RandomID: randomID(marker),
+			Message:  photo.text,
+			RandomID: randomID(photo.marker),
 		})
 		if err != nil {
 			return fmt.Errorf("post generated channel photo: %w", err)
 		}
 	}
-	if _, ok := markers[pollMarker(remote.spec)]; !ok {
-		marker := pollMarker(remote.spec)
+	poll := pollSeedMessage(remote.spec)
+	if _, ok := markers[poll.marker]; !ok {
 		_, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer:     remote.peer(),
 			Media:    demoPoll(),
-			Message:  marker + " Choose a detail for the next imaginary route sketch.",
-			RandomID: randomID(marker),
+			Message:  poll.text,
+			RandomID: randomID(poll.marker),
 		})
 		if err != nil {
 			return fmt.Errorf("post channel poll: %w", err)
 		}
 	}
-	if _, ok := markers[linkMarker(remote.spec)]; !ok {
-		marker := linkMarker(remote.spec)
-		link := fmt.Sprintf("https://%s.field-notes.invalid/walk-%02d", remote.spec.slug, 1)
-		if _, err := sendText(ctx, api, remote.peer(), marker, "A reserved fictional link for the route notes: "+link, 0); err != nil {
+	link := linkSeedMessage(remote.spec)
+	if _, ok := markers[link.marker]; !ok {
+		if _, err := sendText(ctx, api, remote.peer(), link, 0); err != nil {
 			return fmt.Errorf("post fictional channel link: %w", err)
 		}
 	}
-	if err := pinMarker(ctx, api, remote.peer(), rootMarker); err != nil {
+	if err := pinMarker(ctx, api, remote.peer(), root.marker, root); err != nil {
 		return fmt.Errorf("pin channel introduction: %w", err)
 	}
 	return nil
@@ -613,14 +725,14 @@ func seedGroupConversations(ctx context.Context, cfg apiConfig, options seedOpti
 			groups = append(groups, remote)
 		}
 	}
-	current := make([]map[string]int64, len(groups))
+	current := make(map[string]int64)
 	if err := withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
-		for index, group := range groups {
-			markers, err := historyMarkers(runCtx, api, group.peer())
+		for _, group := range groups {
+			markers, err := historyMarkers(runCtx, api, group.peer(), seededMessagesForSpace(group.spec)...)
 			if err != nil {
 				return err
 			}
-			current[index] = markers
+			maps.Copy(current, markers)
 		}
 		return nil
 	}); err != nil {
@@ -629,29 +741,15 @@ func seedGroupConversations(ctx context.Context, cfg apiConfig, options seedOpti
 	for turn := range conversationLines {
 		account := seedAccounts[1+turn%3]
 		if err := withSeedAccount(ctx, cfg, options, account, ownerPassword, inventory, func(runCtx context.Context, api *tg.Client) error {
-			for groupIndex, original := range groups {
+			resolved := make([]remoteSpace, 0, len(groups))
+			for _, original := range groups {
 				remote, err := resolvePublicSpace(runCtx, api, original.spec)
 				if err != nil {
 					return err
 				}
-				marker := conversationMarker(remote.spec, turn)
-				if _, ok := current[groupIndex][marker]; ok {
-					continue
-				}
-				replyTo := int64(0)
-				if turn > 0 {
-					replyTo = current[groupIndex][conversationMarker(remote.spec, turn-1)]
-					if replyTo == 0 {
-						return fmt.Errorf("group %s reply parent is missing", remote.spec.username)
-					}
-				}
-				id, err := sendText(runCtx, api, remote.peer(), marker, conversationLines[turn], replyTo)
-				if err != nil {
-					return fmt.Errorf("post group conversation message: %w", err)
-				}
-				current[groupIndex][marker] = id
+				resolved = append(resolved, remote)
 			}
-			return nil
+			return seedGroupConversationTurn(runCtx, api, resolved, current, turn)
 		}); err != nil {
 			return err
 		}
@@ -659,18 +757,45 @@ func seedGroupConversations(ctx context.Context, cfg apiConfig, options seedOpti
 	return nil
 }
 
-func pinPublicGroups(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, remotes []remoteSpace) error {
-	return withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
-		for _, remote := range remotes {
-			if !remote.spec.megagroup {
-				continue
-			}
-			if err := pinMarker(runCtx, api, remote.peer(), conversationMarker(remote.spec, 1)); err != nil {
-				return fmt.Errorf("pin group conversation in %s: %w", remote.spec.username, err)
+func seedGroupConversationTurn(ctx context.Context, api *tg.Client, groups []remoteSpace, current map[string]int64, turn int) error {
+	for _, remote := range groups {
+		seeded := conversationSeedMessage(remote.spec, turn)
+		if _, ok := current[seeded.marker]; ok {
+			continue
+		}
+		replyTo := int64(0)
+		if turn > 0 {
+			replyTo = current[conversationMarker(remote.spec, turn-1)]
+			if replyTo == 0 {
+				return fmt.Errorf("group %s reply parent is missing", remote.spec.username)
 			}
 		}
-		return nil
+		id, err := sendText(ctx, api, remote.peer(), seeded, replyTo)
+		if err != nil {
+			return fmt.Errorf("post group conversation message: %w", err)
+		}
+		current[seeded.marker] = id
+	}
+	return nil
+}
+
+func pinPublicGroups(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, remotes []remoteSpace) error {
+	return withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
+		return pinGroupConversations(runCtx, api, remotes)
 	})
+}
+
+func pinGroupConversations(ctx context.Context, api *tg.Client, groups []remoteSpace) error {
+	for _, remote := range groups {
+		if !remote.spec.megagroup {
+			continue
+		}
+		seeded := conversationSeedMessage(remote.spec, 1)
+		if err := pinMarker(ctx, api, remote.peer(), seeded.marker, seeded); err != nil {
+			return fmt.Errorf("pin group conversation in %s: %w", remote.spec.username, err)
+		}
+	}
+	return nil
 }
 
 func seedReactionExample(ctx context.Context, cfg apiConfig, options seedOptions, inventory map[string]string) error {
@@ -682,16 +807,16 @@ func seedReactionExample(ctx context.Context, cfg apiConfig, options seedOptions
 		if err != nil {
 			return err
 		}
-		marker := "[[teagram-demo:conversation:reaction-example]]"
-		markers, err := historyMarkers(runCtx, api, peer)
+		seeded := reactionSeedMessage()
+		markers, err := historyMarkers(runCtx, api, peer, seeded)
 		if err != nil {
 			return err
 		}
-		if id, ok := markers[marker]; ok {
+		if id, ok := markers[seeded.marker]; ok {
 			messageID = int(id)
 			return nil
 		}
-		id, err := sendText(runCtx, api, peer, marker, "I saved the public route summary here too, in case it helps with the next walk.", 0)
+		id, err := sendText(runCtx, api, peer, seeded, 0)
 		if err != nil {
 			return err
 		}
@@ -705,11 +830,12 @@ func seedReactionExample(ctx context.Context, cfg apiConfig, options seedOptions
 		if err != nil {
 			return err
 		}
-		markers, err := historyMarkers(runCtx, api, peer)
+		seeded := reactionSeedMessage()
+		markers, err := historyMarkers(runCtx, api, peer, seeded)
 		if err != nil {
 			return err
 		}
-		if id, ok := markers["[[teagram-demo:conversation:reaction-example]]"]; ok {
+		if id, ok := markers[seeded.marker]; ok {
 			messageID = int(id)
 		}
 		if messageID <= 0 {
@@ -759,7 +885,7 @@ func verifySearchResult(ctx context.Context, api *tg.Client, spec spaceSpec) err
 	return fmt.Errorf("fresh-account search did not find public space %s", spec.username)
 }
 
-func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (map[string]int64, error) {
+func historyMessages(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) ([]tg.MessageClass, error) {
 	history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 100})
 	if err != nil {
 		return nil, fmt.Errorf("read seeded message history: %w", err)
@@ -775,13 +901,21 @@ func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass)
 	default:
 		return nil, fmt.Errorf("unexpected message history response %T", history)
 	}
+	return messages, nil
+}
+
+func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, seededMessages ...seedMessage) (map[string]int64, error) {
+	messages, err := historyMessages(ctx, api, peer)
+	if err != nil {
+		return nil, err
+	}
 	markers := make(map[string]int64, len(messages))
 	for _, candidate := range messages {
 		message, ok := candidate.(*tg.Message)
 		if !ok {
 			continue
 		}
-		marker := markerFromText(message.Message)
+		marker := seededMarkerFromText(message.Message, seededMessages)
 		if marker != "" {
 			if previous, exists := markers[marker]; exists && previous != int64(message.ID) {
 				return nil, fmt.Errorf("duplicate seeded message marker %s", marker)
@@ -790,6 +924,21 @@ func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass)
 		}
 	}
 	return markers, nil
+}
+
+func seededMarkerFromText(value string, seededMessages []seedMessage) string {
+	if marker := markerFromText(value); marker != "" {
+		return marker
+	}
+	for _, seeded := range seededMessages {
+		if value == seeded.text {
+			return seeded.marker
+		}
+		if slices.Contains(seeded.retired, value) {
+			return seeded.marker
+		}
+	}
+	return ""
 }
 
 func expectedSeedMarkerCount(spec spaceSpec) int {
@@ -826,11 +975,15 @@ func markerFromText(value string) string {
 	return value[start : start+end+2]
 }
 
-func sendText(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker, body string, replyTo int64) (int64, error) {
+func sendText(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, seeded seedMessage, replyTo int64) (int64, error) {
+	randomKey := seeded.randomKey
+	if randomKey == "" {
+		randomKey = seeded.marker
+	}
 	request := &tg.MessagesSendMessageRequest{
 		Peer:      peer,
-		Message:   marker + " " + body,
-		RandomID:  randomID(marker),
+		Message:   seeded.text,
+		RandomID:  randomID(randomKey),
 		NoWebpage: true,
 	}
 	if replyTo > 0 {
@@ -888,8 +1041,8 @@ func uploadInputFile(ctx context.Context, api *tg.Client, payload []byte, name s
 	return &tg.InputFile{ID: fileID, Parts: parts, Name: name, MD5Checksum: hex.EncodeToString(checksum[:])}, nil
 }
 
-func pinMarker(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker string) error {
-	markers, err := historyMarkers(ctx, api, peer)
+func pinMarker(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker string, seeded ...seedMessage) error {
+	markers, err := historyMarkers(ctx, api, peer, seeded...)
 	if err != nil {
 		return err
 	}
@@ -904,8 +1057,8 @@ func pinMarker(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, mark
 	return err
 }
 
-func messageIsPinned(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker string) error {
-	markers, err := historyMarkers(ctx, api, peer)
+func messageIsPinned(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, marker string, seeded ...seedMessage) error {
+	markers, err := historyMarkers(ctx, api, peer, seeded...)
 	if err != nil {
 		return err
 	}

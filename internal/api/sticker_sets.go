@@ -678,7 +678,7 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesGetStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if _, ok := req.Stickerset.(*tg.InputStickerSetShortName); ok {
@@ -742,7 +742,7 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesGetAllStickersRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	catalog, err := h.stickerSetCatalog()
@@ -797,7 +797,7 @@ func (h *handlers) handleInstallStickerSet(c *mtproto.Conn, r *mtproto.Request) 
 		return nil, nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesInstallStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
@@ -836,7 +836,7 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 		return nil, nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesUninstallStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
@@ -931,7 +931,7 @@ func (h *handlers) handleReorderStickerSets(_ *mtproto.Conn, r *mtproto.Request)
 		return nil, nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesReorderStickerSetsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if req.Masks && req.Emojis {

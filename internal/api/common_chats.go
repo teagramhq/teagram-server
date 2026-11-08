@@ -15,7 +15,7 @@ func (h *handlers) handleGetCommonChats(r *mtproto.Request) (bin.Encoder, error)
 		return nil, errAuthKeyUnreg
 	}
 	var req tg.MessagesGetCommonChatsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	targetID, err := h.inputUserID(req.UserID, r.UserID)

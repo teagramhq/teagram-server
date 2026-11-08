@@ -88,7 +88,7 @@ func (h *handlers) validateCustomEmojiDocumentReferences(userID int64, entities 
 
 func (h *handlers) handleGetCustomEmojiDocuments(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetCustomEmojiDocumentsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if len(req.DocumentID) > maxCustomEmojiDocumentIDs {

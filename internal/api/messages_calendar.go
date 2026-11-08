@@ -14,7 +14,7 @@ import (
 // teagram-web's date picker.
 func (h *handlers) handleGetSearchResultsCalendar(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetSearchResultsCalendarRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

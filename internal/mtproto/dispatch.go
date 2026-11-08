@@ -7,8 +7,10 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
@@ -51,11 +53,18 @@ type Request struct {
 	SessionID int64
 	// MsgID is the message ID of the request, used as the RPC result target.
 	MsgID int64
+	// ReceivedAt is when the connection reader received this frame. A zero
+	// value means the transport did not record a receive timestamp.
+	ReceivedAt time.Time
 	// seqNo is the request's msg_seqno, echoed by a bad_msg_notification. An
 	// odd one marks a content message owed an acknowledgement.
 	seqNo int
-	// Buf holds the plaintext request body, positioned at the constructor ID.
+	// Buf holds the packed plaintext message body as received after decryption.
 	Buf *bin.Buffer
+	// Body is the decoded RPC body cursor. It starts at Buf and moves through
+	// invocation wrappers; gzip decoding replaces it while Buf keeps the packed
+	// bytes.
+	Body *bin.Buffer
 	// Ctx is the request context.
 	Ctx context.Context
 	// CompletionCtx is the admitted request context without connection-scoped
@@ -64,6 +73,11 @@ type Request struct {
 	CompletionCtx context.Context
 	// admission is shared by serial RPCs queued inside one message container.
 	admission *rpcAdmission
+	// contextCanceled records whether the request context was canceled before
+	// normal handler cleanup canceled its child context.
+	contextCanceled bool
+	// gzipBody caches a safely decoded request body for scheduling and dispatch.
+	gzipBody *bin.Buffer
 	// ackQueued is set when the enclosing container already queued the
 	// message's acknowledgement.
 	ackQueued bool
@@ -93,6 +107,133 @@ type HandlerFunc func(c *Conn, req *Request) error
 // OnMessage implements Handler.
 func (h HandlerFunc) OnMessage(c *Conn, req *Request) error {
 	return h(c, req)
+}
+
+// ConcurrentRPCClassifier opts explicitly selected RPCs into concurrent
+// dispatch with later requests on the same connection. Only requests whose
+// result does not depend on per-connection request order are eligible.
+type ConcurrentRPCClassifier interface {
+	CanRunConcurrently(typeID uint32) bool
+}
+
+// ConcurrentRPCBarrierClassifier marks requests that must wait for concurrent
+// work already admitted on the same connection before they are dispatched.
+type ConcurrentRPCBarrierClassifier interface {
+	MustWaitForConcurrentRPC(typeID uint32) bool
+}
+
+type concurrentRPCHandler struct {
+	next    Handler
+	typeIDs map[uint32]struct{}
+}
+
+func (h *concurrentRPCHandler) OnMessage(c *Conn, req *Request) error {
+	return h.next.OnMessage(c, req)
+}
+
+func (h *concurrentRPCHandler) CanRunConcurrently(typeID uint32) bool {
+	_, ok := h.typeIDs[typeID]
+	return ok
+}
+
+func (h *concurrentRPCHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
+}
+
+// ConcurrentRPCs marks the listed RPC constructors as safe to run while later
+// requests on the same connection are dispatched. InvokeWithLayer and
+// InvokeWithoutUpdates envelopes are transparent; stateful wrappers,
+// dependencies, and containers remain serial.
+func ConcurrentRPCs(next Handler, typeIDs ...uint32) Handler {
+	if next == nil || len(typeIDs) == 0 {
+		return next
+	}
+	registered := make(map[uint32]struct{}, len(typeIDs))
+	for _, id := range typeIDs {
+		registered[id] = struct{}{}
+	}
+	return &concurrentRPCHandler{next: next, typeIDs: registered}
+}
+
+type concurrentRPCBarrierHandler struct {
+	next    Handler
+	typeIDs map[uint32]struct{}
+}
+
+func (h *concurrentRPCBarrierHandler) OnMessage(c *Conn, req *Request) error {
+	return h.next.OnMessage(c, req)
+}
+
+func (h *concurrentRPCBarrierHandler) CanRunConcurrently(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCClassifier)
+	return ok && classifier.CanRunConcurrently(typeID)
+}
+
+func (h *concurrentRPCBarrierHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	if _, ok := h.typeIDs[typeID]; ok {
+		return true
+	}
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
+}
+
+// ConcurrentRPCBarriers marks the listed methods to wait for already-admitted
+// concurrent RPCs before dispatch. Concurrent classification on next is
+// forwarded so the policies can be composed around one handler.
+func ConcurrentRPCBarriers(next Handler, typeIDs ...uint32) Handler {
+	if next == nil || len(typeIDs) == 0 {
+		return next
+	}
+	registered := make(map[uint32]struct{}, len(typeIDs))
+	for _, id := range typeIDs {
+		registered[id] = struct{}{}
+	}
+	return &concurrentRPCBarrierHandler{next: next, typeIDs: registered}
+}
+
+// concurrentRPCMethodID returns a direct method ID through the two stateless
+// envelopes used around ordinary client requests. Other wrappers retain their
+// sequencing semantics and cannot opt a request into concurrent dispatch.
+func concurrentRPCMethodID(body *bin.Buffer) (uint32, bool) {
+	if body == nil {
+		return 0, false
+	}
+	b := &bin.Buffer{Buf: body.Buf}
+	id, err := b.PeekID()
+	if err != nil {
+		return 0, false
+	}
+	for id == tg.InvokeWithLayerRequestTypeID || id == tg.InvokeWithoutUpdatesRequestTypeID {
+		obj := &peekIDObject{}
+		var wrapper bin.Decoder
+		switch id {
+		case tg.InvokeWithLayerRequestTypeID:
+			wrapper = &tg.InvokeWithLayerRequest{Query: obj}
+		case tg.InvokeWithoutUpdatesRequestTypeID:
+			wrapper = &tg.InvokeWithoutUpdatesRequest{Query: obj}
+		}
+		if err := wrapper.Decode(b); err != nil {
+			return 0, false
+		}
+		id = obj.TypeID
+	}
+	if id == proto.MessageContainerTypeID || id == proto.GZIPTypeID || isInvokeWrapper(id) {
+		return 0, false
+	}
+	return id, true
+}
+
+// BodyBuffer returns the logical RPC body. Request.Buf remains the packed
+// plaintext frame while wrappers and gzip decoding update this cursor.
+func (r *Request) BodyBuffer() *bin.Buffer {
+	if r == nil {
+		return nil
+	}
+	if r.Body != nil {
+		return r.Body
+	}
+	return r.Buf
 }
 
 // Dispatcher routes requests to handlers keyed by TL constructor ID.
@@ -155,7 +296,7 @@ func (d *Dispatcher) Fallback(h Handler) *Dispatcher {
 // OnMessage implements Handler by peeking the request constructor ID and
 // dispatching to the registered handler, else the fallback.
 func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
-	id, err := req.Buf.PeekID()
+	id, err := req.BodyBuffer().PeekID()
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
 	}
@@ -257,7 +398,7 @@ var compiledMethodVocabulary = func() map[string]struct{} {
 // positioned at the inner query. Mirrors gotd tgtest/middleware.go.
 func UnpackInvoke(next Handler) Handler {
 	return HandlerFunc(func(c *Conn, req *Request) error {
-		id, err := req.Buf.PeekID()
+		id, err := req.BodyBuffer().PeekID()
 		if err != nil {
 			return fmt.Errorf("peek id: %w", err)
 		}
@@ -281,7 +422,7 @@ func UnpackInvoke(next Handler) Handler {
 				return next.OnMessage(c, req)
 			}
 
-			if err := r.Decode(req.Buf); err != nil {
+			if err := r.Decode(req.BodyBuffer()); err != nil {
 				return err
 			}
 			id = obj.TypeID
@@ -291,7 +432,7 @@ func UnpackInvoke(next Handler) Handler {
 
 func unpackInitConnection(c *Conn, req *Request, obj *peekIDObject) error {
 	init := &tg.InitConnectionRequest{Query: obj}
-	if err := init.Decode(req.Buf); err != nil {
+	if err := init.Decode(req.BodyBuffer()); err != nil {
 		return err
 	}
 	if c != nil {
@@ -337,163 +478,186 @@ func UnpackInvokeWithAfterMsgAndReCaptcha(next Handler, onRefusal func(*Conn, *R
 	return unpackInvokeWithAfterMsg(next, onRefusal, true)
 }
 
-func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error, allowReCaptcha bool) Handler {
-	return HandlerFunc(func(c *Conn, req *Request) error {
-		id, err := req.Buf.PeekID()
-		if err != nil {
-			return fmt.Errorf("peek id: %w", err)
-		}
+type invokeAfterMsgHandler struct {
+	next           Handler
+	onRefusal      func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error
+	allowReCaptcha bool
+}
 
-		obj := &peekIDObject{}
-		refuse := func(innerID uint32, reason InvokeAfterMsgRefusal, charge bool) error {
-			verdict := UnimplementedAnswer
-			if charge && c != nil {
-				verdict = c.ChargeUnimplemented()
-			}
-			if onRefusal != nil {
-				return onRefusal(c, req, innerID, reason, verdict)
-			}
-			if c == nil {
-				return errors.New("invokeAfterMsg refused without connection")
-			}
-			if reason == InvokeAfterMsgWaitFailed {
-				return c.SendErr(req, tgerr.New(400, "MSG_WAIT_FAILED"))
-			}
-			switch verdict {
-			case UnimplementedClose:
-				return errors.New("unimplemented-method ceiling")
-			case UnimplementedFloodWait:
-				return c.SendErr(req, tgerr.New(420, "FLOOD_WAIT_30"))
-			default:
-				return c.SendErr(req, tgerr.New(400, "MSG_WAIT_TIMEOUT"))
+func (h *invokeAfterMsgHandler) CanRunConcurrently(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCClassifier)
+	return ok && classifier.CanRunConcurrently(typeID)
+}
+
+func (h *invokeAfterMsgHandler) MustWaitForConcurrentRPC(typeID uint32) bool {
+	classifier, ok := h.next.(ConcurrentRPCBarrierClassifier)
+	return ok && classifier.MustWaitForConcurrentRPC(typeID)
+}
+
+func (h *invokeAfterMsgHandler) OnMessage(c *Conn, req *Request) error {
+	return h.onMessage(c, req)
+}
+
+func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error, allowReCaptcha bool) Handler {
+	return &invokeAfterMsgHandler{next: next, onRefusal: onRefusal, allowReCaptcha: allowReCaptcha}
+}
+
+func (h *invokeAfterMsgHandler) onMessage(c *Conn, req *Request) error {
+	next, onRefusal, allowReCaptcha := h.next, h.onRefusal, h.allowReCaptcha
+	id, err := req.BodyBuffer().PeekID()
+	if err != nil {
+		return fmt.Errorf("peek id: %w", err)
+	}
+
+	obj := &peekIDObject{}
+	refuse := func(innerID uint32, reason InvokeAfterMsgRefusal, charge bool) error {
+		verdict := UnimplementedAnswer
+		if charge && c != nil {
+			verdict = c.ChargeUnimplemented()
+		}
+		if onRefusal != nil {
+			return onRefusal(c, req, innerID, reason, verdict)
+		}
+		if c == nil {
+			return errors.New("invokeAfterMsg refused without connection")
+		}
+		if reason == InvokeAfterMsgWaitFailed {
+			return c.SendErr(req, tgerr.New(400, "MSG_WAIT_FAILED"))
+		}
+		switch verdict {
+		case UnimplementedClose:
+			return errors.New("unimplemented-method ceiling")
+		case UnimplementedFloodWait:
+			return c.SendErr(req, tgerr.New(420, "FLOOD_WAIT_30"))
+		default:
+			return c.SendErr(req, tgerr.New(400, "MSG_WAIT_TIMEOUT"))
+		}
+	}
+	refuseUnsupported := func(innerID uint32) error {
+		if isInvokeWrapper(innerID) {
+			var err error
+			innerID, err = enclosedInvokeMethodID(req.BodyBuffer(), innerID)
+			if err != nil {
+				return err
 			}
 		}
-		refuseUnsupported := func(innerID uint32) error {
-			if isInvokeWrapper(innerID) {
-				var err error
-				innerID, err = enclosedInvokeMethodID(req.Buf, innerID)
-				if err != nil {
-					return err
-				}
+		setRPCMethodForHandler(req, innerID, next)
+		return refuse(innerID, InvokeAfterMsgWaitTimeout, true)
+	}
+	for {
+		setRPCMethodForHandler(req, id, next)
+		switch id {
+		case tg.InvokeWithLayerRequestTypeID:
+			if err := (&tg.InvokeWithLayerRequest{Query: obj}).Decode(req.BodyBuffer()); err != nil {
+				return err
 			}
-			setRPCMethodForHandler(req, innerID, next)
-			return refuse(innerID, InvokeAfterMsgWaitTimeout, true)
-		}
-		for {
+			id = obj.TypeID
+		case tg.InitConnectionRequestTypeID:
+			if err := unpackInitConnection(c, req, obj); err != nil {
+				return err
+			}
+			id = obj.TypeID
+		case tg.InvokeWithoutUpdatesRequestTypeID:
+			if err := (&tg.InvokeWithoutUpdatesRequest{Query: obj}).Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+		case tg.InvokeAfterMsgRequestTypeID:
+			var wrapper tg.InvokeAfterMsgRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
 			setRPCMethodForHandler(req, id, next)
-			switch id {
-			case tg.InvokeWithLayerRequestTypeID:
-				if err := (&tg.InvokeWithLayerRequest{Query: obj}).Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-			case tg.InitConnectionRequestTypeID:
-				if err := unpackInitConnection(c, req, obj); err != nil {
-					return err
-				}
-				id = obj.TypeID
-			case tg.InvokeWithoutUpdatesRequestTypeID:
-				if err := (&tg.InvokeWithoutUpdatesRequest{Query: obj}).Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-			case tg.InvokeAfterMsgRequestTypeID:
-				var wrapper tg.InvokeAfterMsgRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				if isInvokeWrapper(id) {
-					return refuseUnsupported(id)
-				}
-				if wrapper.MsgID <= 0 || wrapper.MsgID >= req.MsgID || c == nil {
-					return refuse(id, InvokeAfterMsgWaitTimeout, true)
-				}
-				found, success := c.RPCDependencyOutcome(req.SessionID, wrapper.MsgID, req.MsgID)
-				if !found {
-					return refuse(id, InvokeAfterMsgWaitTimeout, true)
-				}
-				if !success {
-					return refuse(id, InvokeAfterMsgWaitFailed, false)
-				}
-				continue
-			case tg.InvokeAfterMsgsRequestTypeID:
-				var wrapper tg.InvokeAfterMsgsRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
+			if isInvokeWrapper(id) {
 				return refuseUnsupported(id)
-			case tg.InvokeWithTakeoutRequestTypeID:
-				var wrapper tg.InvokeWithTakeoutRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				return refuseUnsupported(id)
-			case tg.InvokeWithGooglePlayIntegrityRequestTypeID:
-				var wrapper tg.InvokeWithGooglePlayIntegrityRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				return refuseUnsupported(id)
-			case tg.InvokeWithBusinessConnectionRequestTypeID:
-				var wrapper tg.InvokeWithBusinessConnectionRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				return refuseUnsupported(id)
-			case tg.InvokeWithReCaptchaRequestTypeID:
-				var wrapper tg.InvokeWithReCaptchaRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				if !allowReCaptcha || (id != tg.AuthSendCodeRequestTypeID && id != tg.AuthCheckPasswordRequestTypeID && id != tg.AuthSignUpRequestTypeID) {
-					return refuseUnsupported(id)
-				}
-				req.ReCaptchaToken = wrapper.Token
-				continue
-			case tg.InvokeWithApnsSecretRequestTypeID:
-				var wrapper tg.InvokeWithApnsSecretRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				return refuseUnsupported(id)
-			case tg.InvokeWithMessagesRangeRequestTypeID:
-				var wrapper tg.InvokeWithMessagesRangeRequest
-				wrapper.Query = obj
-				if err := wrapper.Decode(req.Buf); err != nil {
-					return err
-				}
-				id = obj.TypeID
-				setRPCMethodForHandler(req, id, next)
-				return refuseUnsupported(id)
-			default:
-				if req.ReCaptchaToken != "" {
-					defer func() { req.ReCaptchaToken = "" }()
-				}
-				return next.OnMessage(c, req)
 			}
+			if wrapper.MsgID <= 0 || wrapper.MsgID >= req.MsgID || c == nil {
+				return refuse(id, InvokeAfterMsgWaitTimeout, true)
+			}
+			found, success := c.RPCDependencyOutcome(req.SessionID, wrapper.MsgID, req.MsgID)
+			if !found {
+				return refuse(id, InvokeAfterMsgWaitTimeout, true)
+			}
+			if !success {
+				return refuse(id, InvokeAfterMsgWaitFailed, false)
+			}
+			continue
+		case tg.InvokeAfterMsgsRequestTypeID:
+			var wrapper tg.InvokeAfterMsgsRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		case tg.InvokeWithTakeoutRequestTypeID:
+			var wrapper tg.InvokeWithTakeoutRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		case tg.InvokeWithGooglePlayIntegrityRequestTypeID:
+			var wrapper tg.InvokeWithGooglePlayIntegrityRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		case tg.InvokeWithBusinessConnectionRequestTypeID:
+			var wrapper tg.InvokeWithBusinessConnectionRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		case tg.InvokeWithReCaptchaRequestTypeID:
+			var wrapper tg.InvokeWithReCaptchaRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			if !allowReCaptcha || (id != tg.AuthSendCodeRequestTypeID && id != tg.AuthCheckPasswordRequestTypeID && id != tg.AuthSignUpRequestTypeID) {
+				return refuseUnsupported(id)
+			}
+			req.ReCaptchaToken = wrapper.Token
+			continue
+		case tg.InvokeWithApnsSecretRequestTypeID:
+			var wrapper tg.InvokeWithApnsSecretRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		case tg.InvokeWithMessagesRangeRequestTypeID:
+			var wrapper tg.InvokeWithMessagesRangeRequest
+			wrapper.Query = obj
+			if err := wrapper.Decode(req.BodyBuffer()); err != nil {
+				return err
+			}
+			id = obj.TypeID
+			setRPCMethodForHandler(req, id, next)
+			return refuseUnsupported(id)
+		default:
+			if req.ReCaptchaToken != "" {
+				defer func() { req.ReCaptchaToken = "" }()
+			}
+			return next.OnMessage(c, req)
 		}
-	})
+	}
 }
 
 // enclosedInvokeMethodID walks supported wrapper bodies without dispatching

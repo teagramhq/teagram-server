@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="326cd222ddb16762aa4eec9cb1970bcd7d980f04187a6694254d2f538ddb8a99"
+readonly APPROVED_QA_SCRIPT_SHA256="9220f9efe60e00b0e9c8ea8d4d9987b98ee5051b17e7dc4382ca1c07190307bd"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -16,6 +16,7 @@ readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy
 RESULT_JSON=''
 RESULT_STATUS=1
 PROJECT_TOUCHED=0
+SNAPSHOT_DIR=''
 MANIFEST_PATH=''
 QA_SCRIPT_PATH=''
 PROBE_CREDENTIAL_PATH='/etc/teagram-browser-acceptance/probe.pgpass'
@@ -34,6 +35,9 @@ cleanup_and_report() {
     if ! "${COMPOSE[@]}" down --rmi local </dev/null >/dev/null 2>&1; then
       cleanup_failed=1
     fi
+  fi
+  if [[ -n "$SNAPSHOT_DIR" ]] && ! rm -rf -- "$SNAPSHOT_DIR"; then
+    cleanup_failed=1
   fi
   if (( cleanup_failed )); then
     local evidence_result qa_failure_code='' wss_output='' wss_fields=''
@@ -143,9 +147,9 @@ parse_options() {
   fi
 }
 
-resolve_readonly_input() {
+resolve_regular_input() {
   local path="$1"
-  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ -f "$path" && -r "$path" && ! -L "$path" ]] || return 1
   case "$path" in
     /*) ;;
     *) path="./$path" ;;
@@ -280,8 +284,14 @@ prepare() {
     *) fail runtime-unavailable ;;
   esac
   local root
-  root="$(resolve_readonly_input "$MANIFEST_PATH")" || fail manifest-invalid
-  MANIFEST_PATH="$root"
+  SNAPSHOT_DIR="$(mktemp -d /tmp/teagram-browser-acceptance.XXXXXXXXXX)" || fail runtime-unavailable
+  chmod 0700 -- "$SNAPSHOT_DIR" || fail runtime-unavailable
+
+  root="$(resolve_regular_input "$MANIFEST_PATH")" || fail manifest-invalid
+  MANIFEST_PATH="$SNAPSHOT_DIR/release-record.json"
+  cat -- "$root" >"$MANIFEST_PATH" || fail runtime-unavailable
+  chmod 0444 -- "$MANIFEST_PATH" || fail runtime-unavailable
+
   validate_manifest "$MANIFEST_PATH" || fail manifest-invalid
   local manifest_status=0
   validate_served_manifest "$MANIFEST_PATH" || manifest_status=$?
@@ -291,8 +301,10 @@ prepare() {
     *) fail manifest-mismatch ;;
   esac
   if [[ -n "$QA_SCRIPT_PATH" ]]; then
-    root="$(resolve_readonly_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
-    QA_SCRIPT_PATH="$root"
+    root="$(resolve_regular_input "$QA_SCRIPT_PATH")" || fail qa-script-unapproved
+    QA_SCRIPT_PATH="$SNAPSHOT_DIR/approved-qa.mjs"
+    cat -- "$root" >"$QA_SCRIPT_PATH" || fail runtime-unavailable
+    chmod 0444 -- "$QA_SCRIPT_PATH" || fail runtime-unavailable
     validate_qa_script "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
   cd "$PROJECT_DIR"

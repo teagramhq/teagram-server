@@ -63,12 +63,18 @@ type Config struct {
 	// origins accepted by the WebSocket endpoint. Empty accepts no Origin
 	// header, while clients that send no Origin remain valid.
 	WebSocketOriginPatterns []string
+	// WebSocketBrowserOnly rejects WebSocket requests without an allow-listed
+	// Origin on the default listener.
+	WebSocketBrowserOnly bool
 	// PublicWebSocketListenAddr enables the separate WebSocket listener for
 	// public traffic. Empty disables the endpoint.
 	PublicWebSocketListenAddr string
 	// PublicWebSocketOriginPatterns is the independent browser-origin allowlist
 	// for the public WebSocket endpoint.
 	PublicWebSocketOriginPatterns []string
+	// PublicWebSocketBrowserOnly rejects public WebSocket requests without an
+	// allow-listed Origin.
+	PublicWebSocketBrowserOnly bool
 	// AdminListenAddr is the address the admin HTTP server binds to.
 	// Empty disables the admin server entirely.
 	AdminListenAddr string
@@ -935,12 +941,22 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	webSocketBrowserOnly, err := parseWebSocketBrowserOnly(os.Getenv("TG_WEBSOCKET_BROWSER_ONLY"), "TG_WEBSOCKET_BROWSER_ONLY")
+	if err != nil {
+		return Config{}, err
+	}
+	publicWebSocketBrowserOnly, err := parseWebSocketBrowserOnly(os.Getenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY"), "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
 		WebSocketListenAddr:           os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
 		WebSocketOriginPatterns:       originPatterns,
+		WebSocketBrowserOnly:          webSocketBrowserOnly,
 		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
 		PublicWebSocketOriginPatterns: publicOriginPatterns,
+		PublicWebSocketBrowserOnly:    publicWebSocketBrowserOnly,
 		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
 		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
@@ -2516,6 +2532,17 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 		}
 	}
 	return patterns, nil
+}
+
+func parseWebSocketBrowserOnly(raw, name string) (bool, error) {
+	if raw == "" {
+		return false, nil
+	}
+	browserOnly, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return browserOnly, nil
 }
 
 // WarnClientAddrTrust states any socket-mode assumption still in use, once, at

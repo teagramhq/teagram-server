@@ -1501,7 +1501,7 @@ func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate in
 
 func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.UpdatesGetDifferenceRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

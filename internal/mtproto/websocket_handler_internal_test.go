@@ -89,7 +89,7 @@ func TestHandleWebSocketDoesNotKeyAddressAfterAcceptedSocketCloses(t *testing.T)
 		http.MethodGet, "/not-apiws", nil,
 	)
 	request.Header.Set("Cf-Connecting-Ip", "198.51.100.41")
-	server.handleWebSocket(httptest.NewRecorder(), request, nil, nil, nil, cfConnectingIPHeader)
+	server.handleWebSocket(httptest.NewRecorder(), request, nil, nil, false, nil, cfConnectingIPHeader)
 
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
@@ -140,7 +140,7 @@ func TestHandleWebSocketLogsInvalidCFConnectingIPThrottled(t *testing.T) {
 			)
 			request.Header = tt.header.Clone()
 			recorder := httptest.NewRecorder()
-			server.handleWebSocket(recorder, request, nil, nil, nil, cfConnectingIPHeader)
+			server.handleWebSocket(recorder, request, nil, nil, false, nil, cfConnectingIPHeader)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("response status = %d, want %d", recorder.Code, http.StatusBadRequest)

@@ -94,7 +94,7 @@ func noUpdates() *tg.Updates {
 // sees the chat from the add onwards.
 func (h *handlers) handleAddChatUser(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesAddChatUserRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -139,7 +139,7 @@ func (h *handlers) handleAddChatUser(r *mtproto.Request) (bin.Encoder, error) {
 // none of it is deleted or rolled back.
 func (h *handlers) handleDeleteChatUser(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesDeleteChatUserRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -169,7 +169,7 @@ func (h *handlers) handleDeleteChatUser(r *mtproto.Request) (bin.Encoder, error)
 
 func (h *handlers) handleEditChatAdmin(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatAdminRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

@@ -157,6 +157,9 @@ type Server struct {
 	// clients that carry no Origin header, but no cross-origin browser request.
 	// Written once before ServeWebSocket and only read by its handlers.
 	webSocketOriginPatterns []string
+	// webSocketBrowserOnly requires an allow-listed Origin on the default
+	// WebSocket listener. Written once before ServeWebSocket.
+	webSocketBrowserOnly bool
 	// negotiationLog thins the per-connection negotiation failure line, which
 	// anyone who can reach the port can provoke.
 	negotiationLog logSampler
@@ -208,11 +211,13 @@ type Server struct {
 	// Keep each server-side failure class sampled independently. The category
 	// names are fixed; raw storage, exchange, and request errors may carry secrets
 	// or attacker-controlled data and never reach these log records.
-	keyPersistenceErrorLog  logSampler
-	exchangeErrorLog        logSampler
-	requestHandlingErrorLog logSampler
-	idleTimeoutErrorLog     logSampler
-	webSocketServeErrorLog  logSampler
+	keyPersistenceErrorLog   logSampler
+	exchangeErrorLog         logSampler
+	requestHandlingErrorLog  logSampler
+	idleTimeoutErrorLog      logSampler
+	webSocketServeErrorLog   logSampler
+	concurrentRPCOverloadLog logSampler
+	concurrentRPCFailureLog  logSampler
 	// Keep the two server-generated -404 paths independently sampled across all
 	// connections handled by this server.
 	lookupMissLog         logSampler
@@ -1335,6 +1340,13 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 	}()
 	defer func() {
+		if err := conn.concurrentRPCs.wait(); err != nil {
+			if rErr == nil {
+				rErr = err
+			} else {
+				rErr = errors.Join(rErr, err)
+			}
+		}
 		conn.stopAcks()
 		if err := conn.closeServer(); err != nil && rErr == nil && !isDisconnect(err) {
 			failureStage = "connection_cleanup"
@@ -1420,11 +1432,16 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	var pendingLoginDeadline time.Time
 	readFrame := func(readDeadline time.Time, idleDeadline bool) error {
 		if peerReader == nil {
-			return s.readOrDrainWithTimeout(readCtx, tconn, b, readDeadline, s.readTimeout, idleDeadline)
+			if err := s.readOrDrainWithTimeout(readCtx, tconn, b, readDeadline, s.readTimeout, idleDeadline); err != nil {
+				return err
+			}
+			conn.frameReceivedAt = time.Now()
+			return nil
 		}
-		frame, err := peerReader.next(s.shutdown.drainCtx, readDeadline, idleDeadline)
+		frame, receivedAt, err := peerReader.next(s.shutdown.drainCtx, readDeadline, idleDeadline)
 		if frame != nil {
 			b.ResetTo(frame.Buf)
+			conn.frameReceivedAt = receivedAt
 		}
 		return err
 	}
@@ -1614,6 +1631,12 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			return nil
 		}
 
+		if conn.AuthKeyID() != key.IntID() {
+			failureStage = "wait_concurrent_rpcs_for_auth_key_change"
+			if err := conn.concurrentRPCs.wait(); err != nil {
+				return err
+			}
+		}
 		conn.setKey(key)
 		conn.observeAuthorizationOwner(userID)
 		// Stop delivering updates under the old identity before dispatching a

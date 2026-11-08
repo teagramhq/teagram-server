@@ -23,7 +23,7 @@ const authorizationTTLDays = 365
 // matching the request's own auth key is flagged Current.
 func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetAuthorizationsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -72,7 +72,7 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 // never makes the current session eligible for the next sweep.
 func (h *handlers) handleSetAuthorizationTTL(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountSetAuthorizationTTLRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -112,7 +112,7 @@ func validAuthorizationTTLDays(days int) bool {
 // socket the reply goes out on.
 func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.AccountResetAuthorizationRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -141,7 +141,7 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 // exact-key eviction for each formerly bound session before returning success.
 func (h *handlers) handleResetAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthResetAuthorizationsRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -168,7 +168,7 @@ func (h *handlers) handleResetAuthorizations(r *mtproto.Request) (bin.Encoder, e
 // Offline=false marks them online. Returns tg.BoolTrue.
 func (h *handlers) handleUpdateStatus(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateStatusRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -192,7 +192,7 @@ func (h *handlers) handleUpdateStatus(r *mtproto.Request) (bin.Encoder, error) {
 // visible after a set is taken down.
 func (h *handlers) handleUpdateEmojiStatus(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateEmojiStatusRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -292,7 +292,7 @@ func IsReservedUsername(username string) bool {
 // answer comes before any occupancy probe or quota charge.
 func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateUsernameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {
@@ -363,7 +363,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 // same immutable answers as account.updateUsername.
 func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountCheckUsernameRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	preAuth := r.UserID == 0
@@ -463,7 +463,7 @@ const maxProfileAboutRunes = 70
 // rejected here.
 func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateProfileRequest
-	if err := req.Decode(r.Buf); err != nil {
+	if err := req.Decode(r.BodyBuffer()); err != nil {
 		return nil, errMethodNotImpl
 	}
 	if r.UserID == 0 {

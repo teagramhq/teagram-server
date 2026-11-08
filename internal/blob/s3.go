@@ -323,26 +323,10 @@ func normalizeS3Prefix(prefix string) (string, error) {
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	if err := validateS3Prefix(prefix); err != nil {
+	if err := validateKeyPrefix(prefix); err != nil {
 		return "", err
 	}
 	return prefix, nil
-}
-
-// validateS3Prefix accepts a containment prefix's one trailing separator while
-// reusing the package-wide key validator for every actual segment.
-func validateS3Prefix(prefix string) error {
-	if prefix == "" {
-		return nil
-	}
-	if !strings.HasSuffix(prefix, "/") {
-		return ValidateKey(prefix)
-	}
-	trimmed := strings.TrimSuffix(prefix, "/")
-	if trimmed == "" {
-		return ErrInvalidKey
-	}
-	return ValidateKey(trimmed)
 }
 
 func (s *S3) scopedKey(key string) (string, error) {
@@ -360,18 +344,11 @@ func (s *S3) scopedKey(key string) (string, error) {
 }
 
 func (s *S3) scopedWalkPrefix(prefix string) (string, error) {
-	if err := validateS3Prefix(prefix); err != nil {
+	if err := validateKeyPrefix(prefix); err != nil {
 		return "", err
 	}
 	remote := s.prefix + prefix
-	if !strings.HasPrefix(remote, s.prefix) || len(remote) > maxKeyBytes {
-		return "", ErrInvalidKey
-	}
-	if strings.HasSuffix(remote, "/") {
-		if err := validateS3Prefix(remote); err != nil {
-			return "", ErrInvalidKey
-		}
-	} else if err := ValidateKey(remote); err != nil {
+	if !strings.HasPrefix(remote, s.prefix) || validateKeyPrefix(remote) != nil {
 		return "", ErrInvalidKey
 	}
 	return remote, nil

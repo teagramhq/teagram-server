@@ -811,8 +811,8 @@ FRONT_SERVER_IP="$(docker inspect --format "{{(index .NetworkSettings.Networks \
 docker run --detach --name "$BROWSER" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --network "$BROWSER_NET" \
 	--log-driver none --read-only --user 1001:1001 --cap-drop ALL \
 	--security-opt no-new-privileges:true --security-opt "seccomp=$SCRIPT_DIR/seccomp-browser.json" \
-	--memory 3g --memory-swap 3g --cpus 2 --pids-limit 256 --ulimit core=0 \
-	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001 \
+	--memory 3g --memory-swap 3g --cpus 2 --pids-limit 512 --ulimit core=0 \
+	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=768m,uid=1001,gid=1001 \
 	--tmpfs /home/pwuser:rw,noexec,nosuid,nodev,size=64m,uid=1001,gid=1001 \
 	--tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=512m,uid=1001,gid=1001 \
 	--env HOME=/tmp --env TMPDIR=/tmp \

@@ -701,10 +701,19 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.PaymentsGetPremiumGiftCodeOptionsRequestTypeID, h.handleGetPremiumGiftCodeOptions)
 	register(d, tg.CommunitiesGetJoinedCommunitiesRequestTypeID, h.handleGetJoinedCommunities)
 	d.Fallback(mtproto.HandlerFunc(h.handleUnknownGated))
+	var handler mtproto.Handler
 	if h.turnstileVerifier != nil {
-		return mtproto.UnpackInvokeWithAfterMsgAndReCaptcha(d, h.handleInvokeAfterMsgRefusal)
+		handler = mtproto.UnpackInvokeWithAfterMsgAndReCaptcha(d, h.handleInvokeAfterMsgRefusal)
+	} else {
+		handler = mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
 	}
-	return mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
+	handler = mtproto.ConcurrentRPCs(handler, tg.MessagesGetSearchCountersRequestTypeID)
+	// Do not let a session revocation overtake earlier concurrent reads on its connection.
+	return mtproto.ConcurrentRPCBarriers(handler,
+		tg.AuthLogOutRequestTypeID,
+		tg.AuthResetAuthorizationsRequestTypeID,
+		tg.AccountResetAuthorizationRequestTypeID,
+	)
 }
 
 func registerLangpackMethods(d *mtproto.Dispatcher, h *handlers) {

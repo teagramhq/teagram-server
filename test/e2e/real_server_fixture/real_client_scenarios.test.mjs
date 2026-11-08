@@ -15,7 +15,7 @@ test('fails when the pinned web contract omits the custom emoji scenario', () =>
   }), /web contract omits required scenarios: custom-emoji/);
 });
 
-test('includes custom emoji when the pinned web contract requires it', () => {
+test('selects the scenarios supported by the pinned web contract', () => {
   assert.deepEqual(selectRealClientScenarios({
     required: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group'],
     optional: ['channel', 'poll']
