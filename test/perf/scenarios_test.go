@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/test/perf/perfreport"
 )
@@ -118,12 +119,17 @@ func capturePrivateChatSnapshot(ctx context.Context, e *env) (*privateChatSnapsh
 	return snapshot, nil
 }
 
-func cleanupPrivateChatSample(ctx context.Context, e *env, snapshot *privateChatSnapshot) error {
+func cleanupPrivateChatSample(ctx context.Context, e *env, snapshot *privateChatSnapshot) (err error) {
 	tx, err := e.cleanupDB.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin private chat cleanup: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	defer func() {
+		rollbackErr := tx.Rollback(ctx)
+		if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			err = errors.Join(err, fmt.Errorf("rollback private chat cleanup: %w", rollbackErr))
+		}
+	}()
 	// Connected perf clients can already have observed these events, so keep
 	// update_state and message_events monotonic while removing the history rows.
 	for _, member := range snapshot.members {
