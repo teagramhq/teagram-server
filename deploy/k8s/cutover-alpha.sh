@@ -653,13 +653,17 @@ import tarfile
 value = None
 try:
     with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
-        files = [member for member in archive if member.isfile()]
-        if len(files) != 1 or files[0].size != 64:
-            raise ValueError("invalid source secret")
-        stream = archive.extractfile(files[0])
-        if stream is None:
-            raise ValueError("unreadable source secret")
-        value = stream.read().decode("ascii")
+        for member in archive:
+            if not member.isfile():
+                continue
+            if value is not None or member.size != 64:
+                raise ValueError("invalid source secret")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("unreadable source secret")
+            value = stream.read().decode("ascii")
+    if value is None:
+        raise ValueError("invalid source secret")
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise ValueError("invalid source secret")
 except (tarfile.TarError, OSError, ValueError, UnicodeDecodeError):
