@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -117,6 +118,7 @@ const (
 // Server is an MTProto server: it accepts transport connections, performs key
 // exchange for new clients, and dispatches decrypted RPC requests to a Handler.
 type Server struct {
+	connectionIDs           atomic.Uint64
 	dcID                    int
 	key                     exchange.PrivateKey
 	keys                    AuthKeyStore
@@ -536,22 +538,26 @@ acceptLoop:
 			break
 		}
 		backoff = 0
+		connectionID := s.newConnectionID()
+		openedAt := time.Now()
+		s.logConnectionOpened(transportTCP, connectionID, openedAt)
 		if s.shutdown.draining() {
-			s.dropRefused(sock)
+			s.dropRefused(sock, connectionID)
 			break
 		}
 		// The global pre-auth cap is applied here, before a socket costs a
 		// goroutine, deadline, or read.
 		slot, ok := s.preAuth.admit(store.RateLimitListenerTailnet)
 		if !ok {
-			s.dropRefused(sock)
+			s.dropRefused(sock, connectionID)
 			if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
 				s.log.Info("connection refused at the pre-auth cap",
+					"connection_id", connectionID,
 					"cap", s.preAuth.limits.MaxConns, "suppressed", dropped)
 			}
 			continue
 		}
-		workers.Go(func() { s.serveSocket(sock, slot) })
+		workers.Go(func() { s.serveSocketWithIdentity(sock, slot, connectionID) })
 	}
 
 	s.shutdown.beginDrain()
@@ -574,6 +580,18 @@ acceptLoop:
 	return serveErr
 }
 
+func (s *Server) newConnectionID() string {
+	return fmt.Sprintf("%x-%x", time.Now().UnixNano(), s.connectionIDs.Add(1))
+}
+
+func (s *Server) logConnectionOpened(transportName, connectionID string, openedAt time.Time) {
+	s.log.Info("transport connection opened",
+		"transport", transportName,
+		"connection_id", connectionID,
+		"opened_at", openedAt,
+	)
+}
+
 // serveSocket negotiates the transport of an accepted socket and then serves
 // it. Every failure here is one connection's own — a peer that closed early,
 // sent a transport nobody speaks, or sent nothing at all — so it ends that
@@ -583,7 +601,15 @@ acceptLoop:
 // loop. It is given back here whatever ends the connection, and given back early
 // by the frame that authenticates it.
 func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
+	connectionID := s.newConnectionID()
+	openedAt := time.Now()
+	s.logConnectionOpened(transportTCP, connectionID, openedAt)
+	s.serveSocketWithIdentity(sock, slot, connectionID)
+}
+
+func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, connectionID string) {
 	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
+	closeDiagnostics.connectionID = connectionID
 	var closeErr error
 	logCloseDiagnostics := true
 	readCtx := s.shutdown.requestCtx
@@ -623,7 +649,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at drain cutoff", "err", err)
+			s.log.Info("close connection at drain cutoff", "connection_id", connectionID, "err", err)
 		}
 	})
 	defer func() {
@@ -638,7 +664,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection during negotiation drain", "err", err)
+			s.log.Info("close connection during negotiation drain", "connection_id", connectionID, "err", err)
 		}
 	})
 	var stopNegotiationOnce sync.Once
@@ -677,11 +703,11 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at the pre-auth ceiling", "err", err)
+			s.log.Info("close connection at the pre-auth ceiling", "connection_id", connectionID, "err", err)
 		}
 		if dropped, ok := s.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
 			s.log.Info("connection closed at the pre-auth lifetime ceiling",
-				"lifetime", s.preAuth.limits.Lifetime, "suppressed", dropped)
+				"connection_id", connectionID, "lifetime", s.preAuth.limits.Lifetime, "suppressed", dropped)
 		}
 	})
 
@@ -690,7 +716,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	if err != nil {
 		closeErr = err
 		if !s.shutdown.draining() {
-			s.logNegotiation(err)
+			s.logNegotiation(err, closeDiagnostics)
 		}
 		return
 	}
@@ -700,9 +726,10 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// flood consists of.
 	if !slot.keyAddr(addr) {
 		logCloseDiagnostics = false
-		s.dropRefused(sock)
+		s.dropRefused(sock, connectionID)
 		if dropped, ok := s.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
 			s.log.Info("connection refused at the per-network pre-auth cap",
+				"connection_id", connectionID,
 				"client_addr", addr, "cap", s.preAuth.limits.MaxConnsPerNet, "suppressed", dropped)
 		}
 		return
@@ -710,8 +737,8 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	probe, err := probePreflight(sock, handshakeDeadline)
 	if err != nil {
 		closeErr = err
-		s.dropRefused(sock)
-		s.logNegotiation(errors.Join(errors.New("detect discovery preflight"), err))
+		s.dropRefused(sock, connectionID)
+		s.logNegotiation(errors.Join(errors.New("detect discovery preflight"), err), closeDiagnostics)
 		return
 	}
 	if probe.matched {
@@ -721,33 +748,33 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		cancel()
 		if err != nil {
 			closeErr = err
-			s.dropRefused(sock)
-			s.log.Error("check discovery rate limit", "err", err)
+			s.dropRefused(sock, connectionID)
+			s.log.Error("check discovery rate limit", "connection_id", connectionID, "err", err)
 			return
 		}
 		if !allowed {
-			s.dropRefused(sock)
+			s.dropRefused(sock, connectionID)
 			if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
 				s.log.Info("discovery request refused at rate limit",
-					"client_addr", addr, "suppressed", dropped)
+					"connection_id", connectionID, "client_addr", addr, "suppressed", dropped)
 			}
 			return
 		}
-		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline)
+		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline, connectionID)
 		if closeErr != nil && !isDisconnect(closeErr) && !s.shutdown.draining() {
-			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), closeErr))
+			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), closeErr), closeDiagnostics)
 		}
 		return
 	}
 	if probe.malformed {
-		s.dropRefused(sock)
+		s.dropRefused(sock, connectionID)
 		return
 	}
 	conn, err := s.detectCodec(probe.stream)
 	if err != nil {
 		closeErr = err
 		if !s.shutdown.draining() {
-			s.logNegotiation(err)
+			s.logNegotiation(err, closeDiagnostics)
 		}
 		return
 	}
@@ -755,14 +782,21 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing, transportTCP, s.handler, closeDiagnostics,
 	)
 	if closeErr != nil && !isDisconnect(closeErr) {
-		s.logConnectionFailure(closeErr)
+		s.logConnectionFailure(closeErr, closeDiagnostics)
 	}
 }
 
-func (s *Server) logConnectionFailure(err error) {
+func (s *Server) logConnectionFailure(err error, transportDiagnostics ...*transportCloseDiagnostics) {
 	if diagnostic, ok := errors.AsType[*webSocketServeFailureError](err); ok && diagnostic != nil {
 		s.logWebSocketServeFailure(diagnostic)
 		return
+	}
+	var closeDiagnostics *transportCloseDiagnostics
+	if len(transportDiagnostics) > 0 {
+		closeDiagnostics = transportDiagnostics[0]
+	}
+	if closeDiagnostics != nil && closeDiagnostics.closedAt.IsZero() {
+		closeDiagnostics.closedAt = time.Now()
 	}
 	category := serverFailureRequest
 	var details []any
@@ -771,7 +805,10 @@ func (s *Server) logConnectionFailure(err error) {
 		category = serverFailureIdleTimeout
 	case errors.Is(err, errAuthKeyLookupFailure):
 		if dropped, ok := s.authKeyLookupErrorLog.allow(time.Now(), preAuthLogInterval); ok {
-			s.log.Info("auth key lookup failed", "category", string(serverFailureAuthKeyLookup), "suppressed", dropped)
+			attrs := make([]any, 0, 6)
+			attrs = append(attrs, "category", string(serverFailureAuthKeyLookup), "suppressed", dropped)
+			attrs = append(attrs, connectionIDLogAttrs(closeDiagnostics)...)
+			s.log.Info("auth key lookup failed", attrs...)
 		}
 		return
 	case errors.Is(err, errAuthKeyPersistenceFailure):
@@ -783,7 +820,18 @@ func (s *Server) logConnectionFailure(err error) {
 	}
 	if category == serverFailureExchange {
 		if diagnostic, ok := errors.AsType[*exchangeFailureError](err); ok {
-			s.logServerFailure(category, "stage", string(diagnostic.stage), "cause", string(diagnostic.cause))
+			details = []any{"stage", string(diagnostic.stage), "cause", string(diagnostic.cause)}
+			if diagnostic.cause == exchangeCauseTimeout {
+				if !diagnostic.stageStartedAt.IsZero() {
+					details = append(details, "stage_started_at", diagnostic.stageStartedAt)
+				}
+				if !diagnostic.gaveUpAt.IsZero() {
+					details = append(details, "gave_up_at", diagnostic.gaveUpAt)
+				}
+			}
+			details = append(details, connectionIDLogAttrs(closeDiagnostics)...)
+			details = append(details, closedAtLogAttrs(closeDiagnostics)...)
+			s.logServerFailure(category, details...)
 			return
 		}
 	}
@@ -796,6 +844,12 @@ func (s *Server) logConnectionFailure(err error) {
 		if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok {
 			details = diagnostic.logAttrs()
 		}
+	}
+	if category == serverFailureIdleTimeout {
+		details = append(details, idleTimeoutLogAttrs(closeDiagnostics)...)
+	} else {
+		details = append(details, connectionIDLogAttrs(closeDiagnostics)...)
+		details = append(details, closedAtLogAttrs(closeDiagnostics)...)
 	}
 	s.logServerFailure(category, details...)
 }
@@ -1116,6 +1170,9 @@ func isWebSocketProtocolDecodeError(err error) bool {
 }
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
+	if diagnostics.closedAt.IsZero() {
+		diagnostics.closedAt = time.Now()
+	}
 	reason := classifyTransportCloseReason(err)
 	if diagnostics.transport == websocketPath && reason != transportCloseReasonTimeout {
 		if isWebSocketDisconnect(err) {
@@ -1128,6 +1185,32 @@ func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err e
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
 		"reason", string(reason),
+	}
+	attrs = append(attrs, connectionIDLogAttrs(diagnostics)...)
+	attrs = append(attrs, closedAtLogAttrs(diagnostics)...)
+	if diagnostics.exchangeStage != "" {
+		attrs = append(attrs, "stage", string(diagnostics.exchangeStage))
+		if !diagnostics.exchangeStageStartedAt.IsZero() {
+			attrs = append(attrs, "stage_started_at", diagnostics.exchangeStageStartedAt)
+		}
+		if !diagnostics.exchangeGaveUpAt.IsZero() {
+			attrs = append(attrs, "gave_up_at", diagnostics.exchangeGaveUpAt)
+		}
+	}
+	if diagnostics.hasAuthKeyID && diagnostics.transport != websocketPath {
+		attrs = append(attrs, "auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]))
+	}
+	if diagnostics.hasSessionID {
+		attrs = append(attrs, "session_id", diagnostics.sessionID)
+	}
+	if !diagnostics.lastFrameReceivedAt.IsZero() {
+		attrs = append(attrs, "last_frame_received_at", diagnostics.lastFrameReceivedAt)
+	}
+	if !diagnostics.readDeadline.IsZero() {
+		attrs = append(attrs, "read_deadline", diagnostics.readDeadline)
+	}
+	if diagnostics.deadlineSource != "" {
+		attrs = append(attrs, "deadline_source", diagnostics.deadlineSource)
 	}
 	if diagnostics.transport == websocketPath && diagnostics.hasAuthKeyID {
 		attrs = append(attrs,
@@ -1149,6 +1232,53 @@ func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err e
 	}
 	attrs = append(attrs, "suppressed", dropped)
 	s.log.Log(context.Background(), slog.LevelInfo, "transport connection closed", attrs...)
+}
+
+func connectionIDLogAttrs(diagnostics *transportCloseDiagnostics) []any {
+	if diagnostics == nil || diagnostics.connectionID == "" {
+		return nil
+	}
+	return []any{"connection_id", diagnostics.connectionID}
+}
+
+func closedAtLogAttrs(diagnostics *transportCloseDiagnostics) []any {
+	if diagnostics == nil || diagnostics.connectionID == "" || diagnostics.closedAt.IsZero() {
+		return nil
+	}
+	return []any{"closed_at", diagnostics.closedAt}
+}
+
+func idleTimeoutLogAttrs(diagnostics *transportCloseDiagnostics) []any {
+	if diagnostics == nil {
+		return nil
+	}
+	attrs := connectionIDLogAttrs(diagnostics)
+	attrs = append(attrs, closedAtLogAttrs(diagnostics)...)
+	if diagnostics.hasAuthKeyID {
+		attrs = append(attrs, "auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]))
+	}
+	if diagnostics.hasSessionID {
+		attrs = append(attrs, "session_id", diagnostics.sessionID)
+	}
+	if !diagnostics.lastFrameReceivedAt.IsZero() {
+		attrs = append(attrs, "last_frame_received_at", diagnostics.lastFrameReceivedAt)
+	}
+	if !diagnostics.readDeadline.IsZero() {
+		attrs = append(attrs, "read_deadline", diagnostics.readDeadline)
+	}
+	if diagnostics.deadlineSource != "" {
+		attrs = append(attrs, "deadline_source", diagnostics.deadlineSource)
+	}
+	if diagnostics.exchangeStage != "" {
+		attrs = append(attrs, "stage", string(diagnostics.exchangeStage))
+		if !diagnostics.exchangeStageStartedAt.IsZero() {
+			attrs = append(attrs, "stage_started_at", diagnostics.exchangeStageStartedAt)
+		}
+		if !diagnostics.exchangeGaveUpAt.IsZero() {
+			attrs = append(attrs, "gave_up_at", diagnostics.exchangeGaveUpAt)
+		}
+	}
+	return attrs
 }
 
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {
@@ -1204,7 +1334,7 @@ func (s *Server) logAuthKeyNotFound(reason authKeyNotFoundReason, id [8]byte, pe
 // unauthenticated, so a line each is a log an attacker writes as fast as it can
 // open sockets. The line that does come out says how many it stands for, or the
 // bound would turn a flood into silence.
-func (s *Server) logNegotiation(err error) {
+func (s *Server) logNegotiation(err error, transportDiagnostics ...*transportCloseDiagnostics) {
 	if s.rpcTracer != nil {
 		s.rpcTracer.recordTransportNegotiationError()
 	}
@@ -1212,16 +1342,24 @@ func (s *Server) logNegotiation(err error) {
 		return
 	}
 	if dropped, ok := s.negotiationLog.allow(time.Now(), negotiationLogInterval); ok {
-		s.log.Info("transport negotiation error", "err", err, "suppressed", dropped)
+		attrs := []any{"err", err, "suppressed", dropped}
+		if len(transportDiagnostics) > 0 {
+			attrs = append(attrs, connectionIDLogAttrs(transportDiagnostics[0])...)
+		}
+		s.log.Info("transport negotiation error", attrs...)
 	}
 }
 
 // dropRefused closes a socket refused by a pre-auth bound. Closing is the whole
 // of a refusal: nothing is written back, because a peer past a cap is not owed
 // an answer and writing one is work the refusal exists to avoid.
-func (s *Server) dropRefused(sock net.Conn) {
+func (s *Server) dropRefused(sock net.Conn, connectionIDs ...string) {
 	if err := sock.Close(); err != nil && !isDisconnect(err) {
-		s.log.Info("close refused connection", "err", err)
+		attrs := []any{"err", err}
+		if len(connectionIDs) > 0 && connectionIDs[0] != "" {
+			attrs = append(attrs, "connection_id", connectionIDs[0])
+		}
+		s.log.Info("close refused connection", attrs...)
 	}
 }
 
@@ -1301,7 +1439,11 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		rErr = newWebSocketServeFailure(failureStage, rErr, clientAddr, closeDiagnostics)
 	}()
 
-	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
+	connLog := s.log
+	if closeDiagnostics.connectionID != "" {
+		connLog = connLog.With("connection_id", closeDiagnostics.connectionID)
+	}
+	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, connLog)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
@@ -1316,6 +1458,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			} else if len(rpcTypeIDs) > 1 {
 				details = append(details, "rpc_type_ids", rpcTypeIDs)
 			}
+			details = append(details, connectionIDLogAttrs(closeDiagnostics)...)
 			s.logServerFailure(serverFailureRequest, details...)
 		}
 	}
@@ -1331,7 +1474,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// cancel the child RPC context here: that could wake its handler before
 		// the shared completion context has inherited the same hard cutoff.
 		if err := conn.closeAtHardCutoff(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at drain cutoff", "err", err)
+			s.log.Info("close connection at drain cutoff", "connection_id", closeDiagnostics.connectionID, "err", err)
 		}
 	})
 	defer func() {
@@ -1445,6 +1588,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 		return err
 	}
+	firstFrame := true
 	var pendingLoginTimer *time.Timer
 	observePendingLogin := func(startedAt time.Time, remaining time.Duration) (bool, error) {
 		if !pendingLoginObserved {
@@ -1456,6 +1600,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if !acquired {
 				if dropped, ok := s.pendingLoginCapLog.allow(time.Now(), preAuthLogInterval); ok {
 					s.log.Info("connection closed at the pending-login cap",
+						"connection_id", closeDiagnostics.connectionID,
 						"cap", s.pendingLogins.max, "suppressed", dropped)
 				}
 				return false, nil
@@ -1485,10 +1630,11 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 					return
 				}
 				if err := conn.Close(); err != nil && !isDisconnect(err) {
-					s.log.Info("close connection at the pending-login ceiling", "err", err)
+					s.log.Info("close connection at the pending-login ceiling", "connection_id", closeDiagnostics.connectionID, "err", err)
 				}
 				if dropped, ok := s.pendingLoginCeilingLog.allow(time.Now(), preAuthLogInterval); ok {
 					s.log.Info("connection closed at the pending-login lifetime ceiling",
+						"connection_id", closeDiagnostics.connectionID,
 						"lifetime", s.pendingLoginLifetime, "suppressed", dropped)
 				}
 			})
@@ -1507,7 +1653,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		case <-pushesDone:
 		case <-s.shutdown.outputCtx.Done():
 			if err := conn.closeTransport(); err != nil && !isDisconnect(err) {
-				s.log.Info("close connection after drain output deadline", "err", err)
+				s.log.Info("close connection after drain output deadline", "connection_id", closeDiagnostics.connectionID, "err", err)
 			}
 			<-pushesDone
 		}
@@ -1519,9 +1665,15 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			retire()
 			return nil
 		}
+		if firstFrame {
+			closeDiagnostics.observeExchangeStage(exchangeStageReadReqPQ, time.Now())
+		}
+		deadlineSource := "default_timeout"
 		readDeadline := conn.pingDelayDisconnectDeadline
 		if readDeadline.IsZero() {
 			readDeadline = conn.authenticatedReadDeadline
+		} else {
+			deadlineSource = "client_ping_delay_disconnect"
 		}
 		idleDeadline := !readDeadline.IsZero()
 		if !pendingLoginDeadline.IsZero() && (readDeadline.IsZero() || pendingLoginDeadline.Before(readDeadline)) {
@@ -1539,14 +1691,24 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if peerReader == nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errIdleReadTimeout) {
 					if closeErr := conn.closeServer(); closeErr != nil && !isDisconnect(closeErr) {
-						s.log.Info("close connection at read deadline", "err", closeErr)
+						s.log.Info("close connection at read deadline", "connection_id", closeDiagnostics.connectionID, "err", closeErr)
 					}
 				} else {
 					conn.observePeerDisconnect()
 				}
 			}
+			if errors.Is(err, errIdleReadTimeout) {
+				closedAt := time.Now()
+				closeDiagnostics.closedAt = closedAt
+				if closeDiagnostics.hasSessionID {
+					closeDiagnostics.observeReadTimeout(readDeadline, deadlineSource, closedAt)
+				} else if closeDiagnostics.exchangeStage != "" {
+					closeDiagnostics.exchangeGaveUpAt = closedAt
+				}
+			}
 			return err
 		}
+		firstFrame = false
 		if s.shutdown.draining() {
 			retire()
 			return nil
@@ -1560,6 +1722,9 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		if closeDiagnostics.transport == websocketPath {
 			closeDiagnostics.observeAuthKeyID(authKeyID)
 		}
+		if authKeyID != ([8]byte{}) && closeDiagnostics.exchangeStage == exchangeStageReadReqPQ {
+			closeDiagnostics.clearExchangeStage()
+		}
 
 		if authKeyID == ([8]byte{}) {
 			// Key exchange never reaches s.keys.Get, so neither the resync below
@@ -1572,6 +1737,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			//
 			// Before runExchange, not after: gotd applies its own 60s
 			// DefaultTimeout per handshake read, wider than the frame deadline.
+			closeDiagnostics.observeExchangeStage(exchangeStageReadReqPQ, time.Now())
 			bind(0)
 			exchangeTransport := tconn
 			if peerReader != nil {
@@ -1691,12 +1857,14 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if errors.Is(err, errUnboundKeyCap) {
 				if dropped, ok := s.unboundKeyLog.allow(time.Now(), preAuthLogInterval); ok {
 					s.log.Info("connection closed at the cap on one unbound auth key",
+						"connection_id", closeDiagnostics.connectionID,
 						"cap", s.unboundKeys.max, "suppressed", dropped)
 				}
 				return nil
 			}
 			return errors.Join(errRequestHandlingFailure, err)
 		}
+		closeDiagnostics.observeAuthenticatedFrame(conn.authKey.ID, conn.sessionID, conn.frameReceivedAt)
 		// A successful fresh signIn is the only transition that can move the
 		// pending start time forward. Its committed database timestamp has
 		// already been placed on the connection by the API handler. Keep the
@@ -1746,6 +1914,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			// include the hex key ID.
 			if dropped, ok := s.unboundKeyLog.allow(time.Now(), preAuthLogInterval); ok {
 				s.log.Info("connection closed at the cap on one unbound auth key",
+					"connection_id", closeDiagnostics.connectionID,
 					"cap", s.unboundKeys.max, "suppressed", dropped)
 			}
 			return nil
@@ -1765,7 +1934,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			// answered normally; the socket then closes on the way out, so a
 			// client that keeps opening sockets is refused the new one instead
 			// of costing the user a working one.
-			s.log.Info("connection refused at user cap", "user_id", userID)
+			s.log.Info("connection refused at user cap", "connection_id", closeDiagnostics.connectionID, "user_id", userID)
 			return nil
 		}
 
@@ -1822,13 +1991,20 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
 	if layer, err := s.exchangeBudget.charge(ctx, s.keys, attempts, clientAddr, listener, time.Now()); layer != "" {
-		s.logExchangeBudgetRefusal(layer, listener, err)
+		connectionID := ""
+		if closeDiagnostics != nil {
+			connectionID = closeDiagnostics.connectionID
+		}
+		s.logExchangeBudgetRefusal(layer, listener, err, connectionID)
 		if sendErr := s.sendProtoError(ctx, bc, codec.CodeTransportFlood); sendErr != nil {
 			return sendErr
 		}
 		return errKeyExchangeRateLimited
 	}
 	diagnostics := newExchangeDiagnostics()
+	if closeDiagnostics != nil && closeDiagnostics.exchangeStage == diagnostics.stage && !closeDiagnostics.exchangeStageStartedAt.IsZero() {
+		diagnostics.stageStartedAt = closeDiagnostics.exchangeStageStartedAt
+	}
 
 	key, err := s.exchange(ctx, exchangeConn{
 		Conn: exchangeDiagnosticConn{
@@ -1855,10 +2031,21 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 			return nil
 		}
 		failure := errors.Join(errAuthKeyExchangeFailure, errors.Join(errors.New("key exchange"), err))
+		cause := classifyExchangeFailure(err, diagnostics.operation)
+		gaveUpAt := time.Now()
+		if closeDiagnostics != nil {
+			if cause == exchangeCauseTimeout {
+				closeDiagnostics.observeExchangeFailure(diagnostics.stage, diagnostics.stageStartedAt, gaveUpAt)
+			} else {
+				closeDiagnostics.clearExchangeStage()
+			}
+		}
 		return &exchangeFailureError{
-			err:   failure,
-			stage: diagnostics.stage,
-			cause: classifyExchangeFailure(err, diagnostics.operation),
+			err:            failure,
+			stage:          diagnostics.stage,
+			cause:          cause,
+			stageStartedAt: diagnostics.stageStartedAt,
+			gaveUpAt:       gaveUpAt,
 		}
 	}
 	if closeDiagnostics != nil {
@@ -1871,7 +2058,7 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	return nil
 }
 
-func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error) {
+func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error, connectionIDs ...string) {
 	dropped, ok := s.exchangeBudgetLog.allow(time.Now(), preAuthLogInterval)
 	if !ok {
 		return
@@ -1881,6 +2068,9 @@ func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimit
 		listenerName = "public"
 	}
 	attrs := []any{"layer", layer, "listener", listenerName, "suppressed", dropped}
+	if len(connectionIDs) > 0 && connectionIDs[0] != "" {
+		attrs = append(attrs, "connection_id", connectionIDs[0])
+	}
 	if err != nil {
 		attrs = append(attrs, "err", err)
 		s.log.Error("key exchange refused at budget", attrs...)
