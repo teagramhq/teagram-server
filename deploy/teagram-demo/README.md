@@ -64,7 +64,9 @@ policy. Required layout and policy:
 The public origin and discovery document advertise
 `demo.teagram.io:443`; browser clients use the separate WSS endpoint. Discovery
 CORS remains limited to `https://web.teagram.io`; WebSocket origin checks allow
-both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
+both `https://web.teagram.io` and `https://demo.teagram.io`. The demo enables
+`TG_WEBSOCKET_BROWSER_ONLY=true`, so upgrades without an allowed Origin return
+403 with `Teagram-Client-Policy: browser-only`. The app CSP keeps
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,

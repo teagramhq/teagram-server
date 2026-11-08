@@ -58,26 +58,39 @@ def check_security_headers(headers: object) -> None:
             fail(f"{name} returned {headers.get(name)!r}, want {expected!r}")
 
 
-def websocket_handshake(port: int, origin: str, expected_status: int) -> None:
+def websocket_handshake(
+    port: int,
+    origin: str | None,
+    expected_status: int,
+    expected_policy: str | None = None,
+) -> None:
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    source = f"from {origin}" if origin is not None else "without Origin"
+    headers = {
+        "Host": "demo.teagram.io",
+        "CF-Connecting-IP": "192.0.2.1",
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Key": key,
+        "Sec-WebSocket-Version": "13",
+    }
+    if origin is not None:
+        headers["Origin"] = origin
     try:
         connection.request(
             "GET",
             "/apiws",
-            headers={
-                "Host": "demo.teagram.io",
-                "Origin": origin,
-                "CF-Connecting-IP": "192.0.2.1",
-                "Connection": "Upgrade",
-                "Upgrade": "websocket",
-                "Sec-WebSocket-Key": key,
-                "Sec-WebSocket-Version": "13",
-            },
+            headers=headers,
         )
         response = connection.getresponse()
         if response.status != expected_status:
-            fail(f"WebSocket handshake from {origin} returned HTTP {response.status}, want {expected_status}")
+            fail(f"WebSocket handshake {source} returned HTTP {response.status}, want {expected_status}")
+        if (
+            expected_policy is not None
+            and response.getheader("Teagram-Client-Policy") != expected_policy
+        ):
+            fail(f"WebSocket handshake {source} did not return Teagram-Client-Policy: {expected_policy}")
         if expected_status == 101:
             expected_accept = base64.b64encode(
                 hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
@@ -85,7 +98,7 @@ def websocket_handshake(port: int, origin: str, expected_status: int) -> None:
             if response.getheader("Sec-WebSocket-Accept") != expected_accept:
                 fail("WebSocket handshake accept value does not match the request key")
     except OSError as error:
-        fail(f"WebSocket handshake from {origin} failed: {error}")
+        fail(f"WebSocket handshake {source} failed: {error}")
     finally:
         connection.close()
 
@@ -201,9 +214,15 @@ def main() -> None:
     if admin_status != 404:
         fail(f"/admin/ returned HTTP {admin_status}, want 404")
 
+    websocket_handshake(port, None, 403, "browser-only")
     websocket_handshake(port, "https://demo.teagram.io", 101)
+    websocket_handshake(port, "https://web.teagram.io", 101)
     websocket_handshake(port, "https://foreign.example", 403)
-    print("demo smoke=passed app=html config=valid discovery=cors health=200 websocket=101 foreign_origin=403 admin=404")
+    print(
+        "demo smoke=passed app=html config=valid discovery=cors health=200 "
+        "websocket=101 web_origin=101 no_origin=403 browser_only=present "
+        "foreign_origin=403 admin=404"
+    )
 
 
 if __name__ == "__main__":
