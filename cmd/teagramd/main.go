@@ -364,6 +364,7 @@ func readAdminPassword(stdin io.Reader) ([]byte, error) {
 func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr io.Writer) (err error) {
 	var channelSummaryID int64
 	var messageSearchPostingsBatchSize int
+	var expiringSummaryBatchSize int
 	if len(args) == 0 {
 		return maintenanceUsageError()
 	}
@@ -383,6 +384,14 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		if err != nil || channelSummaryID <= 0 {
 			return maintenanceUsageError()
 		}
+	case "initialize-channel-post-expiring-summaries":
+		flagSet := flag.NewFlagSet("initialize-channel-post-expiring-summaries", flag.ContinueOnError)
+		flagSet.SetOutput(io.Discard)
+		batchSize := flagSet.Int("batch-size", 100, "channels per run (1-1000)")
+		if err := flagSet.Parse(args[1:]); err != nil || flagSet.NArg() != 0 || *batchSize < 1 || *batchSize > store.ChannelPostExpiringSummaryMaxBatchSize {
+			return maintenanceUsageError()
+		}
+		expiringSummaryBatchSize = *batchSize
 	case "initialize-message-search-postings":
 		flagSet := flag.NewFlagSet("initialize-message-search-postings", flag.ContinueOnError)
 		flagSet.SetOutput(io.Discard)
@@ -410,7 +419,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
 	}
-	if messageSearchPostingsBatchSize == 0 {
+	if messageSearchPostingsBatchSize == 0 && expiringSummaryBatchSize == 0 {
 		storeOptions = append(storeOptions, store.WithStatementTimeout(cfg.StatementTimeout))
 	}
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, storeOptions...)
@@ -429,6 +438,16 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		}
 		if _, err := fmt.Fprintf(stderr, "Channel post summaries initialized: %d\n", channelSummaryID); err != nil {
 			return fmt.Errorf("write channel post summary confirmation: %w", err)
+		}
+		return nil
+	}
+	if expiringSummaryBatchSize > 0 {
+		initialized, remaining, err := st.InitializeChannelPostExpiringSummaries(ctx, expiringSummaryBatchSize)
+		if err != nil {
+			return fmt.Errorf("initialize channel post expiring summaries: %w", err)
+		}
+		if _, err := fmt.Fprintf(stderr, "Channel post expiring summaries initialized: %d channels, %d remaining\n", initialized, remaining); err != nil {
+			return fmt.Errorf("write channel post expiring summary confirmation: %w", err)
 		}
 		return nil
 	}
@@ -452,7 +471,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 }
 
 func maintenanceUsageError() error {
-	return errors.New("usage: teagramd maintenance assign-operator | initialize-channel-post-summaries --channel-id <positive-id> | initialize-message-search-postings [--batch-size <1-1000>]")
+	return errors.New("usage: teagramd maintenance assign-operator | initialize-channel-post-summaries --channel-id <positive-id> | initialize-channel-post-expiring-summaries [--batch-size <1-1000>] | initialize-message-search-postings [--batch-size <1-1000>]")
 }
 
 func writeClientConfigUsage(w io.Writer) error {

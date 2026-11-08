@@ -6,8 +6,8 @@
 -- Online-safe and additive: no source row is read or rewritten here. Existing
 -- channels start with expiring_ready = false and history keeps the previous
 -- expired-row subtraction for them until
--- `teagramd maintenance initialize-channel-post-summaries --channel-id <id>`
--- rebuilds their nodes. New channels are inserted ready. Reversal: drop the
+-- `teagramd maintenance initialize-channel-post-expiring-summaries` rebuilds
+-- their nodes, a bounded batch of channels per run. New channels are inserted ready. Reversal: drop the
 -- column and scope-2 rows, restore the previous function bodies.
 ALTER TABLE channel_post_summary_state
     ADD COLUMN expiring_ready BOOL NOT NULL DEFAULT false;
@@ -231,6 +231,61 @@ BEGIN
     VALUES (p_channel_id, 1, true, true)
     ON CONFLICT (channel_id)
     DO UPDATE SET version = 1, ready = true, expiring_ready = true;
+END;
+$$;
+
+-- Rebuilds only the expiring scope of one already-ready channel. Writers on
+-- the channel serialize on the same channel_state lock, so the nodes and the
+-- flag become visible together and a writer released afterwards maintains them.
+-- Returns false when the channel needs no rebuild (flag set, or the full
+-- initializer owns it because the channel is not ready).
+CREATE FUNCTION initialize_channel_post_expiring_summaries(p_channel_id BIGINT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF p_channel_id <= 0 THEN
+        RAISE EXCEPTION 'channel ID must be positive';
+    END IF;
+
+    PERFORM channel_id
+      FROM channel_state
+     WHERE channel_id = p_channel_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'channel % has no state row for summary initialization', p_channel_id;
+    END IF;
+
+    PERFORM 1
+      FROM channel_post_summary_state
+     WHERE channel_id = p_channel_id
+       AND version = 1
+       AND ready
+       AND NOT expiring_ready;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    DELETE FROM channel_post_summaries
+     WHERE channel_id = p_channel_id AND scope_kind = 2;
+
+    INSERT INTO channel_post_summaries
+        (channel_id, scope_kind, author_id, depth, prefix, live_count)
+    SELECT p_channel_id, 2::SMALLINT, 0::BIGINT, depth.depth::SMALLINT,
+           (post.local_id >> (63 - depth.depth))::BIGINT, COUNT(*)::BIGINT
+      FROM channel_messages AS post
+      CROSS JOIN generate_series(0, 63) AS depth(depth)
+     WHERE post.channel_id = p_channel_id
+       AND post.deleted = false
+       AND post.action_type = 0
+       AND post.expires_at IS NOT NULL
+     GROUP BY depth.depth, (post.local_id >> (63 - depth.depth))
+     ORDER BY depth.depth, (post.local_id >> (63 - depth.depth));
+
+    UPDATE channel_post_summary_state
+       SET expiring_ready = true
+     WHERE channel_id = p_channel_id;
+    RETURN true;
 END;
 $$;
 

@@ -325,3 +325,59 @@ func channelPostSummarySchemaInstalled(ctx context.Context, q *db.Queries) (bool
 	installed, err := q.ChannelPostSummarySchemaInstalled(ctx)
 	return installed != nil && *installed, err
 }
+
+// ChannelPostExpiringSummaryMaxBatchSize bounds the channels rebuilt by one
+// InitializeChannelPostExpiringSummaries call.
+const ChannelPostExpiringSummaryMaxBatchSize = 1000
+
+// InitializeChannelPostExpiringSummaries rebuilds the expiring-post nodes of up
+// to batchSize ready channels that still lack them, one transaction per channel,
+// and returns how many it rebuilt and how many channels remain. Group history
+// uses the cheap expiry subtraction for a channel only after its rebuild, so
+// the rollout is complete once remaining is zero.
+func (s *Store) InitializeChannelPostExpiringSummaries(ctx context.Context, batchSize int) (initialized, remaining int64, err error) {
+	if batchSize < 1 || batchSize > ChannelPostExpiringSummaryMaxBatchSize {
+		return 0, 0, fmt.Errorf("initialize channel post expiring summaries: batch size must be between 1 and %d", ChannelPostExpiringSummaryMaxBatchSize)
+	}
+	installed, err := channelPostSummarySchemaInstalled(ctx, s.q)
+	if err != nil {
+		return 0, 0, fmt.Errorf("check channel post summary schema: %w", err)
+	}
+	if !installed {
+		return 0, 0, ErrChannelPostSummarySchemaMissing
+	}
+	channelIDs, err := s.q.ChannelPostExpiringSummaryPendingChannels(ctx, int32(batchSize))
+	if err != nil {
+		return 0, 0, fmt.Errorf("list channels pending expiring summaries: %w", err)
+	}
+	for _, channelID := range channelIDs {
+		rebuilt, rebuildErr := s.initializeChannelPostExpiringSummaries(ctx, channelID)
+		if rebuildErr != nil {
+			return initialized, 0, rebuildErr
+		}
+		if rebuilt {
+			initialized++
+		}
+	}
+	remaining, err = s.q.ChannelPostExpiringSummaryPendingCount(ctx)
+	if err != nil {
+		return initialized, 0, fmt.Errorf("count channels pending expiring summaries: %w", err)
+	}
+	return initialized, remaining, nil
+}
+
+func (s *Store) initializeChannelPostExpiringSummaries(ctx context.Context, channelID int64) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin channel %d expiring summary rebuild: %w", channelID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	rebuilt, err := s.q.WithTx(tx).InitializeChannelPostExpiringSummaries(ctx, channelID)
+	if err != nil {
+		return false, fmt.Errorf("rebuild channel %d expiring summaries: %w", channelID, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit channel %d expiring summary rebuild: %w", channelID, err)
+	}
+	return rebuilt, nil
+}

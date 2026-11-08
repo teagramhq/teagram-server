@@ -57,12 +57,25 @@ The expiring-post summary migrations (`20261108000001` to `20261108000003`) add 
 third summary scope for live posts with an expiry, an `expiring_ready` flag on
 `channel_post_summary_state`, and a concurrently built expiry index. They read
 and rewrite no source rows. Existing channels start with `expiring_ready = false`
-and group history keeps the direct expired-row count for them until the same
-per-channel initializer above is run again, which rebuilds the expiring nodes
-and flips the flag; new channels are created ready. The scope check on
-`channel_post_summaries` is added `NOT VALID` and validated in the next
-migration so no scan runs under an exclusive lock. Reversal: drop the index,
-the column and the scope-2 rows, and restore the previous function bodies.
+and group history keeps the old direct expired-row count for them, so the fix
+does not take effect until the rollout below finishes. New channels are created
+ready. The scope check on `channel_post_summaries` is added `NOT VALID` and
+validated in the next migration so no scan runs under an exclusive lock.
+
+Rollout, after the migrations are applied and the new binary is serving:
+
+```bash
+teagramd maintenance initialize-channel-post-expiring-summaries [--batch-size <1-1000>]
+```
+
+Each run rebuilds the expiring nodes of up to `--batch-size` (default 100)
+ready channels, one transaction per channel, serialized with that channel's
+posts, and prints `Channel post expiring summaries initialized: N channels, M
+remaining`. Re-run until `M` is `0`; that is the completion signal, and it is
+safe to interrupt and resume. Channels still waiting for
+`initialize-channel-post-summaries` are rebuilt in full by that command, which
+also sets the flag. Reversal: drop the index, the column and the scope-2 rows,
+and restore the previous function bodies.
 
 The basic-group read-receipt migration adds only `chat_read_receipts`; it does
 not alter messages or read markers and does not fabricate dates for earlier

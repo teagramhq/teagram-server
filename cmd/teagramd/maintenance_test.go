@@ -78,6 +78,20 @@ func TestRunCommandMaintenanceSummaryInitializerRequiresPositiveChannelID(t *tes
 	}
 }
 
+func TestRunCommandMaintenanceExpiringSummaryInitializerRejectsBadBatchSize(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"maintenance", "initialize-channel-post-expiring-summaries", "--batch-size", "0"},
+		{"maintenance", "initialize-channel-post-expiring-summaries", "--batch-size", "1001"},
+		{"maintenance", "initialize-channel-post-expiring-summaries", "--batch-size", "x"},
+		{"maintenance", "initialize-channel-post-expiring-summaries", "extra"},
+	} {
+		if err := runCommand(args, slog.New(slog.DiscardHandler), &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("runCommand(%v) succeeded, want usage error", args)
+		}
+	}
+}
+
 func seedMaintenanceOperator(t *testing.T, dsn string) {
 	t.Helper()
 	ctx := context.Background()

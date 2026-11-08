@@ -33,6 +33,52 @@ func (q *Queries) AdvanceChannelReadMarker(ctx context.Context, arg AdvanceChann
 	return err
 }
 
+const channelPostExpiringSummaryPendingChannels = `-- name: ChannelPostExpiringSummaryPendingChannels :many
+SELECT channel_id
+FROM channel_post_summary_state
+WHERE version = 1
+  AND ready
+  AND NOT expiring_ready
+ORDER BY channel_id
+LIMIT $1::int
+`
+
+// Ready channels whose expiring-post nodes still need the one-time rebuild.
+func (q *Queries) ChannelPostExpiringSummaryPendingChannels(ctx context.Context, batchSize int32) ([]int64, error) {
+	rows, err := q.db.Query(ctx, channelPostExpiringSummaryPendingChannels, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var channel_id int64
+		if err := rows.Scan(&channel_id); err != nil {
+			return nil, err
+		}
+		items = append(items, channel_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelPostExpiringSummaryPendingCount = `-- name: ChannelPostExpiringSummaryPendingCount :one
+SELECT count(*)::bigint
+FROM channel_post_summary_state
+WHERE version = 1
+  AND ready
+  AND NOT expiring_ready
+`
+
+func (q *Queries) ChannelPostExpiringSummaryPendingCount(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, channelPostExpiringSummaryPendingCount)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const channelPostSummaryReadinessByChannel = `-- name: ChannelPostSummaryReadinessByChannel :one
 SELECT version, ready
 FROM channel_post_summary_state
@@ -150,6 +196,17 @@ func (q *Queries) ChannelReadMarkerForMember(ctx context.Context, arg ChannelRea
 	var read_max_id int64
 	err := row.Scan(&read_max_id)
 	return read_max_id, err
+}
+
+const initializeChannelPostExpiringSummaries = `-- name: InitializeChannelPostExpiringSummaries :one
+SELECT initialize_channel_post_expiring_summaries($1)::boolean
+`
+
+func (q *Queries) InitializeChannelPostExpiringSummaries(ctx context.Context, pChannelID int64) (bool, error) {
+	row := q.db.QueryRow(ctx, initializeChannelPostExpiringSummaries, pChannelID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const initializeChannelPostSummaries = `-- name: InitializeChannelPostSummaries :exec
