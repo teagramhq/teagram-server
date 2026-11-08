@@ -63,12 +63,12 @@ func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
 
 type call = func(ctx context.Context) error
 
-func TestMutatingPrivateScenariosStayOutOfLongChat(t *testing.T) {
+func TestMutatingPrivateScenariosUseContactChat(t *testing.T) {
 	e := &env{f: fixture{Owner: 1, Partner: 2, Contacts: []int64{3}}}
 	seen := map[string]bool{}
 	for _, sc := range scenarios() {
 		switch sc.name {
-		case "messages.sendMessage private", "messages.readHistory":
+		case "messages.sendMessage private contact chat", "messages.readHistory contact chat":
 			seen[sc.name] = true
 			if sc.privatePeer == nil {
 				t.Errorf("%s has no private chat target", sc.name)
@@ -83,7 +83,7 @@ func TestMutatingPrivateScenariosStayOutOfLongChat(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"messages.sendMessage private", "messages.readHistory"} {
+	for _, name := range []string{"messages.sendMessage private contact chat", "messages.readHistory contact chat"} {
 		if !seen[name] {
 			t.Errorf("scenario %q missing", name)
 		}
@@ -105,7 +105,7 @@ func read(name string, build func(e *env) call) scenario {
 // the account a little, and the reads must see the fixture as seeded.
 func scenarios() []scenario {
 	privateSend := scenario{
-		name: "messages.sendMessage private", kind: perfreport.Write, samples: writeSamples,
+		name: "messages.sendMessage private contact chat", kind: perfreport.Write, samples: writeSamples,
 		privatePeer: activityPeer,
 	}
 	privateSend.setup = fixed(func(e *env) call {
@@ -118,7 +118,7 @@ func scenarios() []scenario {
 		}
 	})
 	readHistory := scenario{
-		name: "messages.readHistory", kind: perfreport.Write, samples: writeSamples,
+		name: "messages.readHistory contact chat", kind: perfreport.Write, samples: writeSamples,
 		privatePeer: activityPeer,
 	}
 	readHistory.setup = fixed(func(e *env) call {
