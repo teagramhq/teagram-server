@@ -53,6 +53,34 @@ separate transaction from the Atlas migration. It serializes with that
 channel's posts; draining writers is an operational performance precaution,
 not a correctness requirement.
 
+The expiring-post summary migrations (`20261108000001` to `20261108000003`) add two
+summary scopes for live posts with an expiry (by local ID, and by expiry time in
+microseconds), an `expiring_ready` flag on `channel_post_summary_state`, and a
+concurrently built expiry index. Group history reads the channel-wide expiring
+total and expired-unswept backlog in O(log n) and runs the cheaper exact scan,
+so per-open cost follows the smaller of the backlog and the live expiring posts.
+The migrations read and rewrite no source rows. Existing channels start with
+`expiring_ready = false` and history keeps the old direct expired-row count for
+them, so the fix does not take effect until the rollout below finishes. New
+channels are created ready. The scope check on `channel_post_summaries` is added
+`NOT VALID` and validated in the next migration so no scan runs under an
+exclusive lock.
+
+Rollout, after the migrations are applied and the new binary is serving:
+
+```bash
+teagramd maintenance initialize-channel-post-expiring-summaries [--batch-size <1-1000>]
+```
+
+Each run rebuilds the expiring nodes of up to `--batch-size` (default 100)
+ready channels, one transaction per channel, serialized with that channel's
+posts, and prints `Channel post expiring summaries initialized: N channels, M
+remaining`. Re-run until `M` is `0`; that is the completion signal, and it is
+safe to interrupt and resume. A channel that fails is skipped for that run and named in the error together with the rebuilt and pending counts, so one bad channel does not hide progress. While any channel is pending, `teagramd` logs a startup warning with the pending count. Channels still waiting for
+`initialize-channel-post-summaries` are rebuilt in full by that command, which
+also sets the flag. Reversal: drop the index, the column and the scope-2 and
+scope-3 rows, and restore the previous function bodies.
+
 The basic-group read-receipt migration adds only `chat_read_receipts`; it does
 not alter messages or read markers and does not fabricate dates for earlier
 reads. If the application rollout is reverted, leave this additive table in

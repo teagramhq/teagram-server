@@ -149,11 +149,15 @@ func TestChannelHistoryCountDoesNotReadEveryChannelMessage(t *testing.T) {
 }
 
 type historyPlanNode struct {
-	NodeType     string            `json:"Node Type"`
-	RelationName string            `json:"Relation Name"`
-	ActualRows   float64           `json:"Actual Rows"`
-	ActualLoops  float64           `json:"Actual Loops"`
-	Plans        []historyPlanNode `json:"Plans"`
+	NodeType     string  `json:"Node Type"`
+	RelationName string  `json:"Relation Name"`
+	ActualRows   float64 `json:"Actual Rows"`
+	ActualLoops  float64 `json:"Actual Loops"`
+	// RowsRemovedByFilter and RowsRemovedByRecheck are rows a node examined and
+	// discarded; like ActualRows they are per-loop averages.
+	RowsRemovedByFilter  float64           `json:"Rows Removed by Filter"`
+	RowsRemovedByRecheck float64           `json:"Rows Removed by Index Recheck"`
+	Plans                []historyPlanNode `json:"Plans"`
 }
 
 func (node historyPlanNode) walk(visit func(historyPlanNode)) {

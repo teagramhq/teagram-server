@@ -27,10 +27,10 @@ FOR UPDATE;
 -- Call only after taking channel_state FOR UPDATE. Readiness becomes false only
 -- in the explicit maintenance initializer, never on source mutation paths.
 -- name: MarkChannelPostSummariesNotReady :exec
-INSERT INTO channel_post_summary_state (channel_id, version, ready)
-VALUES ($1, 1, false)
+INSERT INTO channel_post_summary_state (channel_id, version, ready, expiring_ready)
+VALUES ($1, 1, false, false)
 ON CONFLICT (channel_id)
-DO UPDATE SET version = 1, ready = false;
+DO UPDATE SET version = 1, ready = false, expiring_ready = false;
 
 -- name: InitializeChannelPostSummaries :exec
 SELECT initialize_channel_post_summaries($1);
@@ -73,3 +73,23 @@ WHERE participant.channel_id = sqlc.arg(channel_id)::bigint
 ON CONFLICT (channel_id, user_id)
 DO UPDATE SET read_max_id = GREATEST(channel_read_state.read_max_id, EXCLUDED.read_max_id)
 WHERE EXCLUDED.read_max_id > channel_read_state.read_max_id;
+
+-- Ready channels whose expiring-post nodes still need the one-time rebuild.
+-- name: ChannelPostExpiringSummaryPendingChannels :many
+SELECT channel_id
+FROM channel_post_summary_state
+WHERE version = 1
+  AND ready
+  AND NOT expiring_ready
+ORDER BY channel_id
+LIMIT sqlc.arg(batch_size)::int;
+
+-- name: ChannelPostExpiringSummaryPendingCount :one
+SELECT count(*)::bigint
+FROM channel_post_summary_state
+WHERE version = 1
+  AND ready
+  AND NOT expiring_ready;
+
+-- name: InitializeChannelPostExpiringSummaries :one
+SELECT initialize_channel_post_expiring_summaries($1)::boolean;
