@@ -36,6 +36,27 @@ associated user has no password row, `UNKNOWN` when no unique user row can be
 identified, and `AMBIGUOUS` when multiple rows match. The operation never
 selects or prints salts, verifiers, or password values.
 
+### Threat model
+
+The protected data is the existence and current owner of these four QA handles
+and the associated password-row update times. The invoker controls the SSH menu
+request, but the forced-command dispatcher accepts only an allowlisted operation
+from a full commit SHA on `origin/main`, builds the script path itself, and
+`qa-password-timestamps` accepts no arguments. Any agent runtime holding the
+`teagram-ops` SSH key can invoke this bounded read; key custody, the dispatcher,
+and reviewed `main` are trusted. A stolen key or malicious reviewed script could
+expose QA account metadata, while this operation cannot change account rows or
+expand its fixed handle set.
+
+The script verifies the existing server and Postgres containers and Compose
+selection, runs a fixed `SELECT`, validates its four-row output, suppresses
+Postgres error details, and stores no result. Stdout is returned to the caller's
+terminal. If reported, keep the metadata in the issue that requested it and
+include no credential material; do not copy raw output into CI logs, PR text,
+repository files, or general logs. Issue readers can see account existence,
+ownership, and password-row timing, so that limited disclosure is the residual
+risk accepted for this one-off QA diagnosis.
+
 Run it from its merged `main` commit:
 
 ```sh
