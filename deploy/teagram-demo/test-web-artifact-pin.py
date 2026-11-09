@@ -360,6 +360,44 @@ def check_new_live_publication_resolves_without_pin_edit() -> None:
         raise SystemExit("host identity check accepted the stale web publication")
 
 
+def check_pinned_release_identity_survives_concurrent_publication() -> None:
+    responses = published_responses()
+    responses[MODULE.LIVE_MANIFEST_URL] = {
+        "mode": "private",
+        "sourceCommit": "5" * 40,
+        "artifactDigest": "sha256:" + "6" * 64,
+    }
+    key = (SCRIPT.parent / "testdata/reviewed-web-public.txt").read_bytes()
+    target = {
+        "MTPROTO_TARGET_MODE": "private",
+        "MTPROTO_PRIVATE_ENDPOINT": "wss://teagram.tailaa4918.ts.net/apiws",
+        "MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": "ci/private-mtproto-server-public.pem",
+        "publicKeySha256": hashlib.sha256(key).hexdigest(),
+        "fingerprint": "fbb62871f07fae2a",
+    }
+
+    def file_response(content: bytes) -> dict[str, Any]:
+        return {"type": "file", "encoding": "base64", "size": len(content),
+                "content": base64.b64encode(content).decode("ascii")}
+
+    target_url = f"{API_ROOT}/contents/ci/private-mtproto-target.json?ref={SOURCE_SHA}"
+    key_url = f"{API_ROOT}/contents/ci/private-mtproto-server-public.pem?ref={SOURCE_SHA}"
+    responses[target_url] = file_response(json.dumps(target).encode())
+    responses[key_url] = file_response(key)
+    pinned = MODULE.validate_pinned_release_identity(
+        SOURCE_SHA,
+        ARTIFACT_DIGEST,
+        fetch=fake_fetch(responses),
+    )
+    if (
+        pinned["sourceCommit"] != SOURCE_SHA
+        or pinned["artifactDigest"] != ARTIFACT_DIGEST
+        or pinned["endpoint"] != target["MTPROTO_PRIVATE_ENDPOINT"]
+        or pinned["fingerprint"] != target["fingerprint"]
+    ):
+        raise SystemExit("verified publication snapshot changed when the live publication advanced")
+
+
 def check_existing_publication_baseline() -> None:
     responses = published_responses()
     responses[MODULE.LIVE_MANIFEST_URL] = {
@@ -488,6 +526,7 @@ def main() -> None:
     check_oversized_response_is_rejected()
     check_reviewed_target_and_key()
     check_new_live_publication_resolves_without_pin_edit()
+    check_pinned_release_identity_survives_concurrent_publication()
     check_existing_publication_baseline()
     check_rollback_requires_explicit_dispatch()
     check_live_publication_fails_closed()

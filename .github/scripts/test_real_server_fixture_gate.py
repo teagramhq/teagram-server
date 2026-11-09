@@ -194,7 +194,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
             git.chmod(0o755)
             python = root / "python3"
             python.write_text(
-                '#!/bin/sh\n[ "$2" = --verify-release-identity ] && '
+                '#!/bin/sh\n[ "$2" = --verify-pinned-release-identity ] && '
                 '[ "$3" = "$QA_WEB_SOURCE_SHA" ] && [ "$4" = "$QA_WEB_ARTIFACT_DIGEST" ] || exit 1\n'
                 'printf \'%s\\n\' \'{"endpoint":"wss://web.example/apiws","fingerprint":"cccccccccccccccc"}\'\n',
                 encoding="utf-8",

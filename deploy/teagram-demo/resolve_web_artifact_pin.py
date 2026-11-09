@@ -396,6 +396,19 @@ def validate_release_identity(
     return resolved
 
 
+def validate_pinned_release_identity(
+    source_commit: str,
+    artifact_digest: str,
+    *,
+    fetch: Callable[[str], Any] = fetch_json,
+) -> dict[str, Any]:
+    """Verify a resolved publication snapshot without rereading the live pin."""
+    resolved = resolve_published_identity(source_commit, artifact_digest, fetch=fetch)
+    endpoint, fingerprint = fetch_reviewed_target(source_commit, fetch=fetch)
+    resolved.update(endpoint=endpoint, fingerprint=fingerprint)
+    return resolved
+
+
 def verify_rollback_authorization(
     run_id: int, server_sha: str, publication_run_id: int, *, fetch: Callable[[str], Any] = fetch_json
 ) -> None:
@@ -442,6 +455,11 @@ def main() -> None:
         nargs=2,
         metavar=("SOURCE_COMMIT", "ARTIFACT_DIGEST"),
     )
+    group.add_argument(
+        "--verify-pinned-release-identity",
+        nargs=2,
+        metavar=("SOURCE_COMMIT", "ARTIFACT_DIGEST"),
+    )
     group.add_argument("--verify-rollback-request", nargs=3, metavar=("RUN_ID", "SERVER_SHA", "PUBLICATION_RUN_ID"))
     args = parser.parse_args()
     try:
@@ -454,6 +472,10 @@ def main() -> None:
             return
         if args.verify_published_identity:
             print(json.dumps(resolve_published_identity(*args.verify_published_identity), separators=(",", ":")))
+            return
+        if args.verify_pinned_release_identity:
+            result = validate_pinned_release_identity(*args.verify_pinned_release_identity)
+            print(json.dumps(result, separators=(",", ":")))
             return
         if args.verify_release_identity:
             result = validate_release_identity(*args.verify_release_identity)
