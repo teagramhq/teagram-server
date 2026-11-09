@@ -135,6 +135,8 @@ type webSocketAcceptedConn struct {
 	preAuthClosing bool
 	addr           netip.Addr
 	deadline       time.Time
+	connectionID   string
+	openedAt       time.Time
 	// lifecycleCloseCauseSet distinguishes an explicit nil server-close cause
 	// from a socket closed by the peer.
 	lifecycleCloseCause    error
@@ -173,6 +175,19 @@ func (c *webSocketAcceptedConn) lifecycleCloseCauseValue() (error, bool) {
 	c.state.Lock()
 	defer c.state.Unlock()
 	return c.lifecycleCloseCause, c.lifecycleCloseCauseSet
+}
+
+func (c *webSocketAcceptedConn) setConnectionIdentity(connectionID string, openedAt time.Time) {
+	c.state.Lock()
+	c.connectionID = connectionID
+	c.openedAt = openedAt
+	c.state.Unlock()
+}
+
+func (c *webSocketAcceptedConn) identityLogAttrs() []any {
+	c.state.Lock()
+	defer c.state.Unlock()
+	return connectionIdentityLogAttrs(c.connectionID, c.openedAt)
 }
 
 func (c *webSocketAcceptedConn) markServing() bool {
@@ -327,11 +342,13 @@ func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 		l.pendingMu.Unlock()
 
 		if err := accepted.closeWithLifecycleCause(context.DeadlineExceeded); err != nil && !isDisconnect(err) {
-			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", "err", err)
+			attrs := append(accepted.identityLogAttrs(), "err", err)
+			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", attrs...)
 		}
 		if dropped, ok := l.server.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
-			l.server.log.Info("WebSocket connection closed at the pre-auth lifetime ceiling",
-				"lifetime", l.server.preAuth.limits.Lifetime, "suppressed", dropped)
+			attrs := accepted.identityLogAttrs()
+			attrs = append(attrs, "lifetime", l.server.preAuth.limits.Lifetime, "suppressed", dropped)
+			l.server.log.Info("WebSocket connection closed at the pre-auth lifetime ceiling", attrs...)
 		}
 	})
 }
@@ -756,6 +773,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}
 	connectionID := s.newConnectionID()
 	openedAt := time.Now()
+	state.socket.setConnectionIdentity(connectionID, openedAt)
 	s.logConnectionOpened(websocketPath, connectionID, openedAt)
 	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 	var closeErr error

@@ -1486,6 +1486,34 @@ func TestServeWebSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 			records = append(records, record)
 		default:
 			assertSingleTransportCloseRecord(t, records, "/apiws", "resPQ sent", "timeout")
+			var openRecord, ceilingRecord *serverErrorLogRecord
+			for i := range records {
+				record := &records[i]
+				switch record.message {
+				case "transport connection opened":
+					openRecord = record
+				case "WebSocket connection closed at the pre-auth lifetime ceiling":
+					ceilingRecord = record
+				}
+			}
+			if openRecord == nil || ceilingRecord == nil {
+				t.Fatalf("expected WebSocket open and pre-auth lifetime records; got %+v", records)
+			}
+			connectionID, ok := openRecord.attrs["connection_id"].(string)
+			if !ok || connectionID == "" {
+				t.Fatalf("open record connection_id = %v, want a non-empty ID", openRecord.attrs["connection_id"])
+			}
+			if got := ceilingRecord.attrs["connection_id"]; got != connectionID {
+				t.Errorf("pre-auth lifetime record connection_id = %v, want open record ID %q", got, connectionID)
+			}
+			openedAt, ok := openRecord.attrs["opened_at"].(time.Time)
+			if !ok || openedAt.IsZero() {
+				t.Fatalf("open record opened_at = %v, want a timestamp", openRecord.attrs["opened_at"])
+			}
+			lifetimeOpenedAt, ok := ceilingRecord.attrs["opened_at"].(time.Time)
+			if !ok || !openedAt.Equal(lifetimeOpenedAt) {
+				t.Errorf("pre-auth lifetime record opened_at = %v, want open timestamp %s", ceilingRecord.attrs["opened_at"], openedAt)
+			}
 			return
 		}
 	}
