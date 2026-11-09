@@ -13,7 +13,7 @@ spec:
             - name: TG_TURNSTILE_SIGNIN_ENABLED
               value: "false"
             - name: TG_TURNSTILE_TEST_MODE
-              value: "false"
+              value: "true"
             - name: TG_TURNSTILE_HOSTNAMES
               value: web.example.test
             - name: TG_TURNSTILE_SITE_KEY

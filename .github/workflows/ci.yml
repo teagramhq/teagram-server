@@ -1916,7 +1916,7 @@ jobs:
             --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
           rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
           umask 077
-          python3 -c 'import secrets; print(secrets.token_hex(32), end="")' \
+          printf '%s' 1x0000000000000000000000000000000AA \
             > "$RUNNER_TEMP/turnstile-secret-key"
           kubectl create secret generic teagramd-turnstile --namespace teagram \
             --from-file=secret-key="$RUNNER_TEMP/turnstile-secret-key"

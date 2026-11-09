@@ -181,8 +181,9 @@ if grep --extended-regexp --quiet 'docker login ghcr.io|ghcr-pull|GITHUB_TOKEN' 
 fi
 [[ "$k8s_deploy_run" == *'kubectl create secret generic teagramd-turnstile --namespace teagram'* &&
    "$k8s_deploy_run" == *'--from-file=secret-key='* &&
+   "$k8s_deploy_run" == *'1x0000000000000000000000000000000AA'* &&
    "$k8s_deploy_run" == *'--expect-registration-mode open'* ]] ||
-  fail 'the k3s deployment lane must supply the Turnstile Secret and verify open registration'
+  fail 'the k3s deployment lane must supply Cloudflare test credentials and verify open registration'
 for overlay in prod prod-cutover bootstrap bootstrap/ci ci; do
   rendered_overlay="$(kubectl kustomize "deploy/k8s/$overlay")" ||
     fail "could not render $overlay while checking public image pulls"
@@ -252,12 +253,14 @@ if ! kubectl kustomize deploy/k8s/ci |
   yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
     .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
     select(.name == "TG_REGISTRATION" or .name == "TG_WEBSOCKET_ALLOWED_ORIGINS" or
-           .name == "TG_TURNSTILE_SIGNIN_ENABLED" or .name == "TG_TURNSTILE_SITE_KEY" or
+           .name == "TG_TURNSTILE_SIGNIN_ENABLED" or .name == "TG_TURNSTILE_TEST_MODE" or
+           .name == "TG_TURNSTILE_SITE_KEY" or
            .name == "TG_RSA_KEY_FINGERPRINT")]' - |
-  jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+  jq -e 'length == 5 and (map({key: .name, value: .}) | from_entries |
     .TG_REGISTRATION.value == "open" and
     .TG_WEBSOCKET_ALLOWED_ORIGINS.value == "https://web.example.test" and
     .TG_TURNSTILE_SIGNIN_ENABLED.value == "false" and
+    .TG_TURNSTILE_TEST_MODE.value == "true" and
     .TG_TURNSTILE_SITE_KEY.value == "1x00000000000000000000AA" and
     (has("TG_RSA_KEY_FINGERPRINT") | not))' >/dev/null; then
   fail 'CI must use synthetic Turnstile/origin settings without pinning the production RSA identity'
@@ -322,6 +325,7 @@ runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' depl
    "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
    "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
   fail 'the documented teagramd-runtime ConfigMap keys must include the externally supplied listener settings'
+# shellcheck disable=SC2016
 grep --fixed-strings --quiet '`teagramd-turnstile` Secret' deploy/k8s/README.md ||
   fail 'the external Turnstile Secret must be documented without its value'
 grep --fixed-strings --quiet 'test-k8s-public-websocket.py' .github/workflows/ci.yml ||
