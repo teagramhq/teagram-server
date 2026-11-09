@@ -2110,7 +2110,7 @@ WITH member AS MATERIALIZED (
            result.expiring_live,
            result.expiring_total,
            result.expiring_expired,
-           result.expiring_total - result.expiring_expired AS expiring_unexpired,
+           GREATEST(result.expiring_total - result.expiring_expired, 0::bigint) AS expiring_unexpired,
            result.expiring_expired > result.expiring_total
                OR result.expiring_live > result.expiring_total AS corrupt
     FROM member
@@ -2120,33 +2120,57 @@ WITH member AS MATERIALIZED (
         statement_timestamp()
     ) AS result(expiring_ready, expiring_live, expiring_total, expiring_expired)
 ), plan AS MATERIALIZED (
-    SELECT NOT expiring.expiring_ready
-               OR (NOT expiring.corrupt
-                   AND expiring.expiring_expired <= expiring.expiring_unexpired) AS scan_expired,
+    SELECT NOT expiring.expiring_ready AS scan_fallback,
+           expiring.expiring_ready
+               AND NOT expiring.corrupt
+               AND expiring.expiring_expired <= expiring.expiring_unexpired AS scan_expired,
            expiring.expiring_ready
                AND NOT expiring.corrupt
                AND expiring.expiring_expired > expiring.expiring_unexpired AS scan_unexpired
     FROM expiring
-), expired_scan AS (
+), expired_fallback AS (
     SELECT count(*)::bigint AS count
     FROM member
     JOIN channel_messages AS expired
       ON expired.channel_id = $1::bigint
      AND expired.expires_at <= statement_timestamp()
-    WHERE (SELECT plan.scan_expired FROM plan)
+    WHERE (SELECT plan.scan_fallback FROM plan)
       AND expired.local_id > member.available_min_id
       AND expired.deleted = false
       AND expired.action_type = 0
-), unexpired_scan AS (
+), expired_scan AS (
+    -- The first expiring_expired live expiring posts in expiry order are
+    -- exactly the expired ones, so a limited walk of the expiry index reads
+    -- that many entries whatever the planner estimates for the table.
     SELECT count(*)::bigint AS count
-    FROM member
-    JOIN channel_messages AS live
-      ON live.channel_id = $1::bigint
-     AND live.expires_at > statement_timestamp()
-    WHERE (SELECT plan.scan_unexpired FROM plan)
-      AND live.local_id > member.available_min_id
-      AND live.deleted = false
-      AND live.action_type = 0
+    FROM (
+        SELECT candidate.local_id
+        FROM channel_messages AS candidate
+        WHERE (SELECT plan.scan_expired FROM plan)
+          AND candidate.channel_id = $1::bigint
+          AND candidate.deleted = false
+          AND candidate.action_type = 0
+          AND candidate.expires_at IS NOT NULL
+        ORDER BY candidate.expires_at
+        LIMIT (SELECT expiring.expiring_expired FROM expiring)
+    ) AS expired_window
+    WHERE expired_window.local_id > (SELECT member.available_min_id FROM member)
+), unexpired_scan AS (
+    -- Likewise the last expiring_unexpired posts in expiry order are the
+    -- unexpired ones.
+    SELECT count(*)::bigint AS count
+    FROM (
+        SELECT candidate.local_id
+        FROM channel_messages AS candidate
+        WHERE (SELECT plan.scan_unexpired FROM plan)
+          AND candidate.channel_id = $1::bigint
+          AND candidate.deleted = false
+          AND candidate.action_type = 0
+          AND candidate.expires_at IS NOT NULL
+        ORDER BY candidate.expires_at DESC
+        LIMIT (SELECT expiring.expiring_unexpired FROM expiring)
+    ) AS unexpired_window
+    WHERE unexpired_window.local_id > (SELECT member.available_min_id FROM member)
 )
 SELECT summary.entitled::boolean AS entitled,
        summary.status_exists::boolean AS status_exists,
@@ -2154,7 +2178,8 @@ SELECT summary.entitled::boolean AS entitled,
        summary.summary_ready::boolean AS summary_ready,
        summary.total_live::bigint AS total_live,
        COALESCE(service_count.count, 0)::bigint AS service_count,
-       CASE WHEN plan.scan_expired THEN expired_scan.count
+       CASE WHEN plan.scan_fallback THEN expired_fallback.count
+            WHEN plan.scan_expired THEN expired_scan.count
             WHEN plan.scan_unexpired THEN expiring.expiring_live - unexpired_scan.count
             ELSE 0
        END::bigint AS expired_post_count,
@@ -2163,6 +2188,7 @@ FROM summary
 CROSS JOIN service_count
 CROSS JOIN expiring
 CROSS JOIN plan
+CROSS JOIN expired_fallback
 CROSS JOIN expired_scan
 CROSS JOIN unexpired_scan
 `

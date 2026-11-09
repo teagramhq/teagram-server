@@ -235,11 +235,8 @@ func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 		// channel, must not read the unselected scan's rows: the channel with
 		// no backlog reads no expired rows and, with a backlog sibling, no
 		// unexpired ones either.
-		// Small channels may be read in full by the planner's choice of a
-		// primary key scan; that is bounded by the channel's own live posts,
-		// never by the backlog sibling.
-		if cleanCountRows > 200+int64(live) {
-			t.Fatalf("live %d: count statement of the no-backlog channel read %d rows, want at most summary probes + live posts", live, cleanCountRows)
+		if cleanCountRows > 200 {
+			t.Fatalf("live %d: count statement of the no-backlog channel read %d rows, want only summary probes", live, cleanCountRows)
 		}
 		if want := int64(min(expiredCountExpiredPosts, live)); backlogCountRows > 200+want {
 			t.Fatalf("live %d: count statement with backlog read %d rows, want summary probes + min(backlog, live) = %d", live, backlogCountRows, want)
@@ -261,7 +258,11 @@ func TestChannelHistoryCountCostIgnoresLiveTTLPostsWithoutBacklog(t *testing.T) 
 	large := f.seedHealthyTTLChannel("TTL channel with 100,000 live posts", 100_000)
 
 	smallStatements, smallRows, smallCount, _ := f.historyCost(small)
+	smallCountRows := f.lastCountRows
 	largeStatements, largeRows, largeCount, largeIDs := f.historyCost(large)
+	if smallCountRows > 200 || f.lastCountRows > 200 {
+		t.Fatalf("count statement rows at 1,000 and 100,000 live = %d and %d, want summary probes only", smallCountRows, f.lastCountRows)
+	}
 	t.Logf("healthy: 1,000 live statements/rows = %d/%d, 100,000 live = %d/%d", smallStatements, smallRows, largeStatements, largeRows)
 	if smallCount != 1_001 || largeCount != 100_001 {
 		t.Fatalf("counts small/large = %d/%d, want 1001/100001", smallCount, largeCount)
