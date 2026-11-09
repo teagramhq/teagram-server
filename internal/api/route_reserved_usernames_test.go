@@ -2,6 +2,7 @@ package api_test
 
 func routeConflictingUsernameVariants() []string {
 	return []string{
+		"tdhbcfiles", "TDHBCFiles",
 		"apiws", "ApIwS",
 		"share", "ShArE",
 		"stream", "StReAm",
