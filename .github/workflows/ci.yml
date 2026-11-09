@@ -226,6 +226,12 @@ jobs:
       - name: Test Actions cache write policy
         run: python3 .github/scripts/test_actions_cache_policy.py
 
+      - name: Test documentation checks
+        run: python3 -B .github/scripts/test_documentation_check.py
+
+      - name: Check configuration reference and Markdown links
+        run: python3 -B .github/scripts/check_documentation.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
