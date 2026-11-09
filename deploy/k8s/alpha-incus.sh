@@ -29,7 +29,7 @@ alpha_install_remote_file() {
     destination=$1
     mode=$2
     directory=${destination%/*}
-    install -d -o root -g root "$directory"
+    [ -d "$directory" ] || install -d -o root -g root -m 0755 "$directory"
     temporary=$(mktemp "${destination}.XXXXXX")
     trap "rm -f -- \"$temporary\"" EXIT
     cat > "$temporary"

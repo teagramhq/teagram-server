@@ -260,6 +260,9 @@ def kubectl(args, state):
         if env_file is None:
             text = sys.stdin.read()
         else:
+            expected_env_dir = pathlib.Path(LXC_ROOT, "run").resolve()
+            if pathlib.Path(env_file).resolve().parent != expected_env_dir:
+                fail("temporary env file was created outside the LXC sandbox")
             try:
                 with open(env_file) as handle:
                     text = handle.read()
@@ -365,7 +368,7 @@ def lxc(cmd):
         sys.stdin.read()
         sys.exit(0)
     if (cmd[0] == "bash" and cmd[1:2] == ["-c"] and
-            'manifest=$(k3s kubectl "$@")' in cmd[2]):
+            "--from-env-file=$env_file" in cmd[2]):
         script = cmd[2].replace(
             "/run/teagram-k3s-env.",
             os.path.join(LXC_ROOT, "run/teagram-k3s-env."),

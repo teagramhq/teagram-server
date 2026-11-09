@@ -25,7 +25,7 @@ grep --fixed-strings --quiet 'alpha_for_each_line' \
   "$repo_root/deploy/k8s/cutover-alpha.sh"
 
 readonly TEST_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
-docker run --rm -i \
+container_output=$(docker run --rm -i \
   --volume "$repo_root/deploy/k8s/alpha-incus.sh:/alpha-incus.sh:ro" \
   --env DEBIAN_FRONTEND=noninteractive \
   "$TEST_IMAGE" bash -s <<'CONTAINER_TEST'
@@ -77,6 +77,10 @@ alpha_install_remote_file "$test_instance" /tmp/alpha-compat/config 0640 \
   < /tmp/alpha-transfer-source
 [[ $(cat /tmp/alpha-compat/config) == 'transferred over inherited stdin' ]]
 [[ $(stat -c '%a:%u:%g' /tmp/alpha-compat/config) == 640:0:0 ]]
+chmod 0700 /tmp/alpha-compat
+alpha_install_remote_file "$test_instance" /tmp/alpha-compat/config 0640 \
+  < /tmp/alpha-transfer-source
+[[ $(stat -c '%a:%u:%g' /tmp/alpha-compat) == 700:0:0 ]]
 alpha_remote_file_matches "$test_instance" /tmp/alpha-compat/config \
   /tmp/alpha-transfer-source
 printf 'different input' > /tmp/alpha-transfer-source
@@ -104,7 +108,7 @@ record_with_exec() {
   new_records+=("$1")
   incus exec "$test_instance" -- sh -c 'cat >/dev/null'
 }
-alpha_for_each_line $'one\ntwo\nthree' record_with_exec
+alpha_for_each_line $'one\ntwo\nthree' record_with_exec <<< 'consumed-by-exec'
 [[ ${#new_records[@]} == 3 && ${new_records[0]} == one &&
   ${new_records[1]} == two && ${new_records[2]} == three ]]
 
@@ -117,4 +121,7 @@ grep --fixed-strings --quiet 'Missing privilege separation directory: /run/sshd'
 alpha_ensure_sshd_runtime_dir "$test_instance"
 [[ $(stat -c '%a:%u:%g' /run/sshd) == 755:0:0 ]]
 incus exec "$test_instance" -- sshd -t
+printf 'alpha Incus compatibility test passed\n'
 CONTAINER_TEST
+)
+[[ $container_output == *'alpha Incus compatibility test passed'* ]]
