@@ -1109,11 +1109,15 @@ jobs:
       - name: Test the alpha bootstrap apply path with mocks
         run: sudo deploy/k8s/test-bootstrap-alpha.sh
 
+      - name: Test alpha Incus host compatibility
+        run: deploy/k8s/test-alpha-incus-compat.sh
+
       - name: Check deploy script syntax
         run: |
           ./deploy/k8s/bootstrap-alpha.sh --dry-run
-          bash -n deploy/k8s/bootstrap-alpha.sh
+          bash -n deploy/k8s/alpha-incus.sh deploy/k8s/bootstrap-alpha.sh
           bash -n deploy/k8s/test-bootstrap-alpha.sh
+          bash -n deploy/k8s/test-alpha-incus-compat.sh
           sh -n deploy/k8s/teagram-k3s-ops.sh
           ./deploy/k8s/cutover-alpha.sh --dry-run
           bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
@@ -1185,7 +1189,9 @@ jobs:
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/k8s/bootstrap-alpha.sh \
+            deploy/k8s/alpha-incus.sh \
             deploy/k8s/test-bootstrap-alpha.sh \
+            deploy/k8s/test-alpha-incus-compat.sh \
             deploy/k8s/teagram-k3s-ops.sh \
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \

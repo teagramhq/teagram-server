@@ -603,6 +603,47 @@ expect_log 'Forbidden' "$tmp_dir/deployer-boundary.log"
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
 printf 'bootstrap deployer kubeconfig was denied before cutover mutation\n'
 
+cp "$tmp_dir/incus-state/serve.json" "$tmp_dir/serve-before-missing-route.json"
+python3 - "$tmp_dir/incus-state/serve.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+status = json.loads(path.read_text())
+status["TCP"].pop("2443")
+path.write_text(json.dumps(status))
+PY
+if env "${incus_test_env[@]}" bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/missing-serve-route.log" 2>&1; then
+  printf 'cutover accepted a missing source Tailscale Serve TCP 2443 route\n' >&2
+  exit 1
+fi
+expect_log 'source Tailscale Serve TCP route 2443 is missing; refusing to cut over without a rollback route' \
+  "$tmp_dir/missing-serve-route.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+if grep --fixed-strings --quiet 'docker-event: stop ' "$tmp_dir/incus-state/docker-events"; then
+  printf 'missing Serve route was detected after the source write fence\n' >&2
+  exit 1
+fi
+mv "$tmp_dir/serve-before-missing-route.json" "$tmp_dir/incus-state/serve.json"
+printf 'missing Serve TCP 2443 route was rejected before fencing\n'
+
+if env "${incus_test_env[@]}" CUTOVER_TEST_MISSING_ENC_KEY=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/missing-enc-key.log" 2>&1; then
+  printf 'cutover accepted a missing source enc_key.hex\n' >&2
+  exit 1
+fi
+expect_log 'source identity file is missing or unreadable: /var/lib/teagramd/enc_key.hex' \
+  "$tmp_dir/missing-enc-key.log"
+[[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
+  --output 'jsonpath={.spec.replicas}') == 1 ]]
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+printf 'missing enc_key.hex was reported before fencing\n'
+
 if env "${incus_test_env[@]}" CUTOVER_TEST_PINNED_REVISION=0000000000000000000000000000000000000000 \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
   > "$tmp_dir/revision-mismatch.log" 2>&1; then
@@ -689,6 +730,7 @@ printf '[Service]\n' > "$tmp_dir/incus-state/units/teagram-linkselector-port-for
 printf '[Service]\n' > "$tmp_dir/incus-state/units/teagramd-port-forward.service"
 if env "${incus_test_env[@]}" \
   CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE=true CUTOVER_FAIL_STOP_PORT_FORWARD=true \
+  CUTOVER_TEST_CONSUME_STDIN_ON_FENCE=true \
   bash deploy/k8s/cutover-alpha.sh --apply --test-mode 3<<<'ROUTE-SWITCHED' \
   > "$tmp_dir/pre-switch-failure.log" 2>&1; then
   printf 'cutover runner unexpectedly passed the injected post-fence failure\n' >&2
@@ -723,6 +765,15 @@ if grep --fixed-strings --quiet 'automatic recovery is disabled' "$tmp_dir/pre-s
   exit 1
 fi
 printf 'pre-switch failure recovery restarted the fenced source services\n'
+for container in teagram-teagramd-1 teagram-link-edge-selector-1 \
+  teagram-linklanding-1 teagram-web-cloudflared; do
+  grep --fixed-strings --line-regexp --quiet -- "docker-event: stop $container" \
+    "$tmp_dir/incus-state/docker-events" || {
+    printf 'the write fence did not stop every Compose writer; missing %s\n' "$container" >&2
+    exit 1
+  }
+done
+printf 'write fence stopped every running Compose writer despite incus consuming stdin\n'
 kubectl delete namespace "$TARGET_NAMESPACE" --wait=true --timeout=300s >/dev/null
 rm -rf -- "$RUNNER_TEMP/teagram-cutover-runner"
 create_target_namespace
