@@ -22,6 +22,13 @@ test('selects the scenarios supported by the pinned web contract', () => {
   }), ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']);
 });
 
+test('fails when the pinned web contract omits the required group scenario', () => {
+  assert.throws(() => selectRealClientScenarios({
+    required: ['sign-in', 'first-message', 'message', 'custom-emoji'],
+    optional: ['channel', 'poll']
+  }), /web contract omits required scenarios: group/);
+});
+
 test('fails when the pinned web contract requires an unsupported scenario', () => {
   assert.throws(() => selectRealClientScenarios({required: ['new-scenario'], optional: []}),
     /server runner does not support required scenarios: new-scenario/);
