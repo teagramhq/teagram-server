@@ -1890,7 +1890,7 @@ jobs:
               >&2
             exit 1
           fi
-          kubectl apply --filename deploy/k8s/base/namespace.yaml
+          kubectl create namespace teagram
           printf '%s' "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-password"
           printf 'postgres://postgres:%s@postgres:5432/teagram?sslmode=disable' \
             "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-dsn"

@@ -176,6 +176,8 @@ if [[ "$(yq -r '.jobs."test-k8s-deploy".permissions.packages // "none"' .github/
   fail 'the k3s deployment lane must not require GHCR package credentials'
 fi
 k8s_deploy_run="$(yq -r '.jobs."test-k8s-deploy".steps[] | .run // ""' .github/workflows/ci.yml)"
+[[ "$k8s_deploy_run" == *'kubectl create namespace teagram'* ]] ||
+  fail 'the cutover fixture namespace must stay unlabeled so Pod Security does not mask its capability check'
 if grep --extended-regexp --quiet 'docker login ghcr.io|ghcr-pull|GITHUB_TOKEN' <<< "$k8s_deploy_run"; then
   fail 'the k3s deployment lane must pull public images without registry credentials'
 fi
