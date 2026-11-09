@@ -49,13 +49,15 @@ expose QA account metadata, while this operation cannot change account rows or
 expand its fixed handle set.
 
 The script verifies the existing server and Postgres containers and Compose
-selection, runs a fixed `SELECT`, validates its four-row output, suppresses
-Postgres error details, and stores no result. Stdout is returned to the caller's
+selection, runs a fixed `SELECT`, validates its four-row output, and stores no
+result. Query output and Postgres diagnostics are returned to the caller's
 terminal. If reported, keep the metadata in the issue that requested it and
 include no credential material; do not copy raw output into CI logs, PR text,
 repository files, or general logs. Issue readers can see account existence,
-ownership, and password-row timing, so that limited disclosure is the residual
-risk accepted for this one-off QA diagnosis.
+ownership, and password-row timing. Because the operation remains allowlisted
+after merge, this is a standing disclosure risk for every authorized key
+holder; remove the operation from the dispatcher and allowlist when it is no
+longer needed.
 
 Run it from its merged `main` commit:
 

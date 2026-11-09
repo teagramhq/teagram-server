@@ -101,8 +101,8 @@ ORDER BY targets.handle;
 SQL
 )
 if ! result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
-  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$query" 2>/dev/null); then
-  fail 'password timestamp query failed'
+  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$query"); then
+  fail 'account status query failed'
 fi
 
 mapfile -t rows <<< "$result"

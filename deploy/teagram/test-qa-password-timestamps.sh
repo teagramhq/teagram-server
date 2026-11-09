@@ -2,8 +2,20 @@
 set -euo pipefail
 
 script="$(cd "$(dirname "$0")" && pwd)/ops/qa-password-timestamps.sh"
+DOCKER_BIN=$(command -v docker)
+readonly DOCKER_BIN
 tmp=$(mktemp -d)
-cleanup() { /bin/rm -rf -- "$tmp"; }
+postgres_container=
+cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
+  if [[ -n "$postgres_container" ]]; then
+    "$DOCKER_BIN" stop --time 5 "$postgres_container" >/dev/null 2>&1 || status=1
+  fi
+  /bin/rm -rf -- "$tmp" || status=1
+  exit "$status"
+}
 trap cleanup EXIT
 mkdir -p "$tmp/bin"
 
@@ -46,7 +58,10 @@ case "$1" in
           shift
         done
         printf '%s\n' "$query" > "$MOCK_SQL_PATH"
-        [[ "${MOCK_PSQL_FAIL:-}" != true ]] || exit 94
+        if [[ "${MOCK_PSQL_FAIL:-}" == true ]]; then
+          printf '%s\n' 'fixture psql diagnostic' >&2
+          exit 94
+        fi
         printf '%s\n' "${MOCK_PSQL_OUTPUT:-}"
         ;;
       *) exit 95 ;;
@@ -123,11 +138,66 @@ MOCK_PSQL_OUTPUT=$'test1\t2026-01-02T03:04:05.123456Z\ntest2\tNULL'
 export MOCK_PSQL_OUTPUT
 MOCK_PSQL_FAIL=true
 export MOCK_PSQL_FAIL
-expect_failure 1
+if failure_output=$("$script" 2>&1); then
+  printf '%s\n' 'password query failure unexpectedly succeeded' >&2
+  exit 1
+else
+  failure_status=$?
+fi
+[[ "$failure_status" == 1 ]]
+grep -Fxq 'fixture psql diagnostic' <<< "$failure_output"
+grep -Fxq 'qa-password-timestamps: account status query failed' <<< "$failure_output"
 unset MOCK_PSQL_FAIL
 
 MOCK_PSQL_OUTPUT=$'qa\tUNRESOLVED_BY_HANDLE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tPRESENT\tABSENT\tNONE\tNOT_STORED\t2026-01-02T03:04:05Z\ntest1\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-01-02T03:04:05.123456Z\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\tNULL'
 export MOCK_PSQL_OUTPUT
 expect_failure 1
+
+MOCK_PSQL_OUTPUT=$'qa\tUNRECOGNIZED_STATE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tMISSING_TARGET_USER\tPRESENT\tNO\tNOT_STORED\tUNKNOWN\ntest1\tMULTIPLE\tPRESENT\tYES\tNOT_STORED\tAMBIGUOUS\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-01-02T03:04:05.123456Z'
+export MOCK_PSQL_OUTPUT
+expect_failure 1
+
+postgres_container="qa-password-query-pg18-${BASHPID}-${RANDOM}"
+postgres_image=${QA_PASSWORD_QUERY_PG18_IMAGE:-mirror.gcr.io/library/postgres:18-alpine}
+"$DOCKER_BIN" run --detach --rm --name "$postgres_container" --network none --log-driver none \
+  --tmpfs /var/lib/postgresql:rw,nosuid,nodev \
+  --env PGDATA=/var/lib/postgresql/18/docker \
+  --env POSTGRES_HOST_AUTH_METHOD=trust --env POSTGRES_DB=teagram \
+  "$postgres_image" >/dev/null
+postgres_ready=false
+for _ in {1..60}; do
+  if "$DOCKER_BIN" exec "$postgres_container" pg_isready -h 127.0.0.1 -U postgres -d teagram >/dev/null 2>&1; then
+    postgres_ready=true
+    break
+  fi
+  sleep 1
+done
+[[ "$postgres_ready" == true ]] || {
+  printf '%s\n' 'isolated PostgreSQL fixture did not become ready' >&2
+  exit 1
+}
+"$DOCKER_BIN" exec -i "$postgres_container" psql -X -v ON_ERROR_STOP=1 -U postgres -d teagram <<'SQL' >/dev/null
+CREATE TABLE users (id BIGINT PRIMARY KEY, username TEXT);
+CREATE TABLE usernames (handle TEXT PRIMARY KEY, owner_type TEXT NOT NULL, owner_id BIGINT NOT NULL);
+CREATE TABLE user_passwords (user_id BIGINT PRIMARY KEY, updated_at TIMESTAMPTZ NOT NULL);
+INSERT INTO usernames (handle, owner_type, owner_id) VALUES
+  ('qa2', 'user', 2002),
+  ('test1', 'user', 3001),
+  ('test2', 'user', 4001);
+INSERT INTO users (id, username) VALUES
+  (3001, 'test1'),
+  (3002, 'test1'),
+  (4001, 'test2');
+INSERT INTO user_passwords (user_id, updated_at) VALUES
+  (4001, '2026-01-02T03:04:05.123456Z');
+SQL
+postgres_output=$("$DOCKER_BIN" exec -i "$postgres_container" psql -X -A -t -q -F $'\t' \
+  -U postgres -d teagram -v ON_ERROR_STOP=1 < "$MOCK_SQL_PATH")
+expected_postgres_output=$'qa\tUNRESOLVED_BY_HANDLE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tMISSING_TARGET_USER\tPRESENT\tNO\tNOT_STORED\tUNKNOWN\ntest1\tMULTIPLE\tPRESENT\tYES\tNOT_STORED\tAMBIGUOUS\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-01-02T03:04:05.123456Z'
+[[ "$postgres_output" == "$expected_postgres_output" ]] || {
+  printf '%s\n' 'PostgreSQL query output did not match the seeded account states' >&2
+  exit 1
+}
+printf '%s\n' 'seeded PostgreSQL query output:' "$postgres_output"
 
 printf '%s\n' 'qa password timestamp fixture cases pass'
