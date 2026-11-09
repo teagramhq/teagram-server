@@ -8,12 +8,17 @@ mkdir -p "$STATE_DIR/units"
 resource_for_container() {
   case "$1" in
     teagram-postgres-1|postgres) printf 'statefulset/postgres\n' ;;
+    teagram-rustfs-1|rustfs) printf 'statefulset/rustfs\n' ;;
     teagram-teagramd-1|teagramd) printf 'statefulset/teagramd\n' ;;
     teagram-link-edge-selector-1|linkselector) printf 'deployment/linkselector\n' ;;
     teagram-linklanding-1|linklanding) printf 'deployment/linklanding\n' ;;
     teagram-web-cloudflared|cloudflared) printf 'deployment/cloudflared\n' ;;
     *) return 1 ;;
   esac
+}
+
+docker_event() {
+  printf 'docker-event: %s\n' "$1" >> "$STATE_DIR/docker-events"
 }
 
 container_status() {
@@ -30,11 +35,69 @@ scale_container() {
   kubectl scale "$resource" --namespace "$SOURCE_NAMESPACE" --replicas="$replicas" >/dev/null
 }
 
+secret_archive() {
+  local secret_name=$1 source_key=${2:-}
+  kubectl get secret "$secret_name" --namespace "$SOURCE_NAMESPACE" --output json |
+    python3 -c '
+import base64
+import io
+import json
+import sys
+import tarfile
+
+try:
+    secret = json.load(sys.stdin)
+    data = secret.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("missing Secret data")
+    source_key = sys.argv[1]
+    if source_key:
+        entries = {"teagramd-blob-secret-key": data[source_key]}
+    else:
+        entries = data
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+        for name, encoded in entries.items():
+            content = base64.b64decode(encoded, validate=True)
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            member.mode = 0o600
+            archive.addfile(member, io.BytesIO(content))
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit("disposable cutover test could not read a fixture Secret")
+' "$source_key"
+}
+
 docker_command() {
-  local subcommand=$1 format container service path
+  local subcommand=$1 format container service path image network helper_container index
   shift
   local -a args=("$@")
   case "$subcommand" in
+    pull)
+      [[ ${args[0]:-} == --quiet && ${args[1]:-} == --platform &&
+         ${args[2]:-} == linux/amd64 && ${args[3]:-} =~ ^ghcr\.io/teagramhq/ ]] || return 1
+      docker_event pull
+      ;;
+    run)
+      if [[ " ${args[*]} " == *' --network none '* ]]; then
+        [[ " ${args[*]} " == *' --entrypoint /bin/sh '* ]] || return 1
+        docker_event run-migrations
+        printf '%s\n' "${CUTOVER_TEST_MIGRATION_VERSION:?}"
+      else
+        helper_container=''
+        network=''
+        for ((index = 0; index < ${#args[@]}; index++)); do
+          case "${args[index]}" in
+            --name) helper_container=${args[index + 1]:-} ;;
+            --network) network=${args[index + 1]:-} ;;
+          esac
+        done
+        [[ -n $helper_container && $network == teagram_rustfs_private &&
+           " ${args[*]} " == *' --entrypoint /bin/sh '* &&
+           " ${args[*]} " == *' ghcr.io/teagramhq/teagramd-mc-init:ci '* ]] || return 1
+        printf '%s\n' "$helper_container" > "$STATE_DIR/docker-helper-container"
+        docker_event run-helper
+      fi
+      ;;
     inspect)
       format=$2
       container=${args[-1]}
@@ -53,35 +116,50 @@ docker_command() {
           ;;
         *'com.docker.compose.service'*)
           case "$container" in
-            teagramd) printf 'teagramd\n' ;;
-            postgres) printf 'postgres\n' ;;
-            linkselector) printf 'linkselector\n' ;;
-            linklanding) printf 'linklanding\n' ;;
+            teagramd|teagram-teagramd-1) printf 'teagramd\n' ;;
+            postgres|teagram-postgres-1) printf 'postgres\n' ;;
+            rustfs|teagram-rustfs-1) printf 'rustfs\n' ;;
+            linkselector|teagram-link-edge-selector-1) printf 'linkselector\n' ;;
+            linklanding|teagram-linklanding-1) printf 'linklanding\n' ;;
             *) return 1 ;;
           esac
           ;;
         *'.Name'*)
           case "$container" in
-            teagramd) printf '/teagram-teagramd-1\n' ;;
-            postgres) printf '/teagram-postgres-1\n' ;;
-            linkselector) printf '/teagram-link-edge-selector-1\n' ;;
-            linklanding) printf '/teagram-linklanding-1\n' ;;
+            teagramd|teagram-teagramd-1) printf '/teagram-teagramd-1\n' ;;
+            postgres|teagram-postgres-1) printf '/teagram-postgres-1\n' ;;
+            rustfs|teagram-rustfs-1) printf '/teagram-rustfs-1\n' ;;
+            linkselector|teagram-link-edge-selector-1) printf '/teagram-link-edge-selector-1\n' ;;
+            linklanding|teagram-linklanding-1) printf '/teagram-linklanding-1\n' ;;
             *) return 1 ;;
           esac
+          ;;
+        *'.NetworkSettings.Networks'*)
+          case "$container" in
+            teagramd|teagram-teagramd-1) printf 'teagram_default\nteagram_rustfs_private\n' ;;
+            rustfs|teagram-rustfs-1) printf 'teagram_rustfs_private\n' ;;
+            *) return 1 ;;
+          esac
+          ;;
+        *'org.opencontainers.image.revision'*)
+          docker inspect "${INCUS_TEST_SOURCE_CONTAINER:?}" --format "$format"
           ;;
         *'.Config.Env'*)
           printf 'TG_ADMIN_TOKEN_HASH=%064d\n' 0
           printf 'TG_ADMIN_ORIGIN=https://links.example.test\n'
           printf 'TG_BLOB_DIR=/var/lib/teagramd-blobs\n'
-          if [[ ${CUTOVER_TEST_S3_BLOB_SOURCE:-} == true ]]; then
-            printf 'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\n'
-          fi
+          printf 'TG_MEDIA_KEY_CURRENT=1\n'
+          printf 'TG_BLOB_S3_ENDPOINT=http://rustfs:9000\n'
+          printf 'TG_BLOB_S3_BUCKET=teagram\n'
+          printf 'TG_BLOB_S3_PREFIX=teagramd/\n'
+          printf 'TG_BLOB_S3_ACCESS_KEY_ID=0123456789abcdef0123\n'
+          printf 'TG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key\n'
           ;;
         *) return 1 ;;
       esac
       ;;
     ps)
-      for service in teagramd postgres linkselector linklanding; do
+      for service in teagramd postgres rustfs linkselector linklanding; do
         if [[ $(container_status "$service") == running ]]; then
           printf '%s\n' "$service"
         fi
@@ -91,30 +169,64 @@ docker_command() {
       container=${args[-1]}
       scale_container "$subcommand" "$container"
       ;;
+    network)
+      [[ ${args[0]:-} == connect ]] || return 1
+      network=${args[1]:-}
+      helper_container=${args[2]:-}
+      [[ $network == teagram_default && -n $helper_container &&
+         -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$helper_container" ]] || return 1
+      docker_event network-connect
+      ;;
     exec)
-      container=$1
-      shift
-      case "$container" in
-        teagram-postgres-1)
-          kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "$@"
-          ;;
-        teagram-teagramd-1)
-          # Exercise the real distroless container, which has no test binary.
-          kubectl exec --namespace "$SOURCE_NAMESPACE" teagramd-0 -- "$@"
-          ;;
-        *) return 1 ;;
-      esac
+      if [[ ${args[0]:-} == --interactive ]]; then
+        args=("${args[@]:1}")
+      fi
+      container=${args[0]:-}
+      if [[ $container == teagram-postgres-1 ]]; then
+        [[ ${args[1]:-} == psql || ${args[1]:-} == pg_dump ]] || return 1
+        kubectl exec --namespace "$SOURCE_NAMESPACE" postgres-0 -c postgres -- "${args[@]:1}"
+        return
+      fi
+      [[ -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$container" ]] || return 1
+      kubectl exec --stdin --namespace "$SOURCE_NAMESPACE" pod/cutover-s3-client -- \
+        "${args[@]:1}"
+      ;;
+    rm)
+      helper_container=${args[-1]}
+      [[ ${args[0]:-} == --force && -f $STATE_DIR/docker-helper-container &&
+         $(<"$STATE_DIR/docker-helper-container") == "$helper_container" ]] || return 1
+      rm -f -- "$STATE_DIR/docker-helper-container"
+      docker_event rm
       ;;
     cp)
       path=$1
       [[ $2 == - ]] || return 1
       path=${path#*:}
-      if [[ $path == /var/lib/teagramd-blobs/. ]]; then
-        kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
-          tar -cf - -C /var/lib/teagramd-blobs .
-      else
-        docker cp "${INCUS_TEST_SOURCE_CONTAINER:?}:$path" -
-      fi
+      case "$path" in
+        /var/lib/teagramd-blobs/.)
+          kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+            tar -cf - -C /var/lib/teagramd-blobs .
+          ;;
+        /run/teagramd/blob-mode/.)
+          kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
+            tar -cf - -C /run/teagramd/blob-mode .
+          ;;
+        /run/teagramd/media-keys/.)
+          secret_archive teagramd-media-keys
+          ;;
+        /run/secrets/teagramd-blob-secret-key)
+          secret_archive teagramd-blob-credentials TG_BLOB_S3_SECRET_ACCESS_KEY
+          ;;
+        *) docker cp "${INCUS_TEST_SOURCE_CONTAINER:?}:$path" - ;;
+      esac
+      ;;
+    image)
+      [[ ${args[0]} == inspect ]] || return 1
+      image=${args[1]}
+      format=${args[-1]}
+      docker image inspect "$image" --format "$format"
       ;;
     *) return 1 ;;
   esac

@@ -23,6 +23,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+        # Restore the blob-mode records' guarded permissions after fsGroup setup.
         - name: prepare-data-directories
           image: mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
           imagePullPolicy: IfNotPresent
@@ -32,8 +33,8 @@ spec:
             - >-
               chown 65532:65532 /var/lib/teagramd /var/lib/teagramd-blobs;
               chmod 0700 /var/lib/teagramd /var/lib/teagramd-blobs;
-              chown 0:0 /run/teagramd/blob-mode;
-              chmod 0755 /run/teagramd/blob-mode
+              chown -R 0:65532 /run/teagramd/blob-mode;
+              chmod -R go-w /run/teagramd/blob-mode
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -187,7 +188,10 @@ spec:
               # The projected Secret's versioned directory has safe directory permissions.
               value: /run/teagramd/media-keys/..data
             - name: TG_MEDIA_KEY_CURRENT
-              value: "1"
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-runtime
+                  key: TG_MEDIA_KEY_CURRENT
             - name: TG_BLOB_DIR
               value: /var/lib/teagramd-blobs
             - name: TG_AUTHKEY_ENC_KEY_FILE

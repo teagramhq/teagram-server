@@ -104,6 +104,8 @@ def main() -> None:
             raise SystemExit("web archive receipt did not create a mode 0600 file")
 
         qa_script = (SCRIPT_DIR.parent / "qa-invite/test-qa-invite-browser-flow.sh").read_text()
+        if '--verify-published-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST"' not in qa_script:
+            raise SystemExit("QA browser flow must verify its pinned publication, not the changing live pointer")
         qa_start = qa_script.index("WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256=")
         qa_end = qa_script.index('\n[[ "$WEB_RELEASE"', qa_start)
         qa_client = root / "qa-client"

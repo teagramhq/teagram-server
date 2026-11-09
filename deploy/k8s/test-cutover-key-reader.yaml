@@ -39,6 +39,15 @@ spec:
         - name: legacy-blobs
           mountPath: /var/lib/teagramd-blobs
           readOnly: true
+        - name: blob-mode
+          mountPath: /run/teagramd/blob-mode
+          readOnly: true
+        - name: media-keys
+          mountPath: /run/teagramd/media-keys
+          readOnly: true
+        - name: s3-credentials
+          mountPath: /run/secrets
+          readOnly: true
   volumes:
     - name: key-data
       persistentVolumeClaim:
@@ -48,3 +57,16 @@ spec:
       persistentVolumeClaim:
         claimName: legacy-blobs-teagramd-0
         readOnly: true
+    - name: blob-mode
+      persistentVolumeClaim:
+        claimName: blob-mode-teagramd-0
+        readOnly: true
+    - name: media-keys
+      secret:
+        secretName: teagramd-media-keys
+    - name: s3-credentials
+      secret:
+        secretName: teagramd-blob-credentials
+        items:
+          - key: TG_BLOB_S3_SECRET_ACCESS_KEY
+            path: teagramd-blob-secret-key
