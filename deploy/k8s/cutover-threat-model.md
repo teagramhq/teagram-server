@@ -7,6 +7,17 @@ to create workloads or exec into pods in the teagram namespace. Compromise of
 any of these can expose or replace the copied identity or data. The separate
 [identity threat model](identity-threat-model.md) covers key storage and backup.
 
+The `sha-<revision>` image tags are mutable because same-repository pull
+requests can publish packages. The cutover treats those tags only as lookup
+handles: before fencing source writes, it resolves each tag to a registry
+digest and verifies its GitHub build provenance against the exact live source
+commit, `refs/heads/main`, and `.github/workflows/ci.yml` as signer. Main CI
+emits attestations only on successful main pushes; a PR-produced attestation
+cannot satisfy the source and signer checks. A PR image, an un-attested digest,
+or provenance for a different revision fails closed before the fence. The
+rendered workloads use the verified digest references rather than the mutable
+tags.
+
 The runner and recovery commands use the root-owned, mode-0600
 `/root/teagram-k3s-cutover.kubeconfig`, which contains the k3s admin client
 certificate. It is separate from the restricted `teagram-deployer` token and

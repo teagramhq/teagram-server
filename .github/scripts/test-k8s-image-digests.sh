@@ -86,6 +86,29 @@ publish_step="$(yq -r '.jobs."publish-k8s-images".steps[] | select(.name == "Pub
 # shellcheck disable=SC2016 # Match the literal expression in the workflow source.
 [[ "$(yq -r '.jobs."publish-k8s-images".steps[] | select(.name == "Upload immutable image digests") | .with.name' .github/workflows/ci.yml)" == 'k8s-image-digests-${{ env.K8S_IMAGE_REVISION }}' ]] ||
   fail 'the digest artifact must be named for the image source revision'
+publisher_permissions="$(yq -o=json '.jobs."publish-k8s-images".permissions' .github/workflows/ci.yml)"
+jq --exit-status '."id-token" == "write" and .attestations == "write"' \
+  <<<"$publisher_permissions" >/dev/null ||
+  fail 'the image publisher must have the permissions required for build provenance'
+attestation_steps="$(yq -o=json '[.jobs."publish-k8s-images".steps[] | select(.uses == "actions/attest@v4.2.2")]' .github/workflows/ci.yml)"
+main_push_condition='${{ github.event_name == '\''push'\'' && github.ref == '\''refs/heads/main'\'' }}'
+jq --exit-status --arg condition "$main_push_condition" '
+  length == 5
+  and all(.[];
+    .if == $condition
+    and (.with["subject-digest"] | startswith("${{ steps.k8s-image-digests.outputs.")))
+  and (([.[].with["subject-name"]] | sort) == ([
+    "ghcr.io/teagramhq/teagramd",
+    "ghcr.io/teagramhq/teagram-migrations",
+    "ghcr.io/teagramhq/teagramd-mc-init",
+    "ghcr.io/teagramhq/link-edge-landing",
+    "ghcr.io/teagramhq/link-edge-selector"
+  ] | sort))
+' <<<"$attestation_steps" >/dev/null ||
+  fail 'main pushes must attest every published k8s image digest'
+digest_selection_if="$(yq -r '.jobs."publish-k8s-images".steps[] | select(.id == "k8s-image-digests") | .if' .github/workflows/ci.yml)"
+[[ "$digest_selection_if" == "$main_push_condition" ]] ||
+  fail 'trusted image digests must be selected only for main push runs'
 
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT

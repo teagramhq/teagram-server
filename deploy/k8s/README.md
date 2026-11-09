@@ -179,16 +179,23 @@ sudo deploy/k8s/cutover-alpha.sh --dry-run
 sudo deploy/k8s/cutover-alpha.sh --apply
 ```
 
+The alpha host needs the GitHub CLI (`gh`) for the public image-provenance
+check. The repository is public, so verification does not require a stored
+GitHub credential.
+
 Before applying workloads, the runner reads the live teagramd revision and
-pulls the five published k8s images tagged for that SHA. It verifies each
-image's revision label, pins their registry digests for the rendered manifest,
-and derives the migration version and immutable Job names from the selected
-images. The live database migration version must match the newest migration in
-that migration image. Missing tags, label mismatches, or a database mismatch
-stop the run before source writes are fenced. Immediately before the first
-Serve route changes, the runner verifies that every fenced Compose container
-is still stopped, PostgreSQL has no client connections, RustFS is running, and
-the teagramd revision has not changed.
+pulls the five published k8s images tagged for that SHA and resolves their
+immutable registry digests. For each digest it verifies GitHub build provenance
+with `gh attestation verify`, requiring source ref `refs/heads/main`, the exact
+live source commit, and `.github/workflows/ci.yml` as the signer. Main CI emits
+these attestations only on successful main pushes; a PR-produced attestation
+cannot satisfy the source and signer checks. It pins only verified digests in
+the rendered manifest and derives migration versions and immutable Job names
+from those images. Missing provenance, a digest from a PR build, a label
+mismatch, or a database mismatch stops the run before source writes are fenced.
+Immediately before the first Serve route changes, the runner verifies that
+every fenced Compose container is still stopped, PostgreSQL has no client
+connections, RustFS is running, and the teagramd revision has not changed.
 
 The script keeps the k8s app and tunnel connector at zero replicas while it
 restores PostgreSQL and applies the matching Atlas migration. It copies

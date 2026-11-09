@@ -10,6 +10,7 @@ for required in \
   'Would server-dry-run and apply deploy/k8s/prod-cutover' \
   'source Compose containers and encrypted S3 authority' \
   'live teagramd and migration image revisions' \
+  'main-branch build provenance for all five resolved image digests and the exact live revision' \
   'fence writes before the final PostgreSQL snapshot' \
   'stop all running Compose services except PostgreSQL and RustFS' \
   'keep source RustFS available for the post-fence S3 listing and mirror' \
@@ -45,7 +46,11 @@ done
 for required_runbook in \
   'must stay online because the post-fence source S3 listing' \
   'bucket remains the pre-switch recovery copy for at least seven days' \
-  'PostgreSQL and source RustFS were already running'; do
+  'PostgreSQL and source RustFS were already running' \
+  'GitHub CLI (`gh`)' \
+  'gh attestation verify' \
+  'source ref `refs/heads/main`' \
+  '`.github/workflows/ci.yml` as the signer'; do
   if ! grep --fixed-strings --quiet -- "$required_runbook" deploy/k8s/README.md; then
     printf 'alpha cutover runbook omitted: %s\n' "$required_runbook" >&2
     exit 1
@@ -293,6 +298,12 @@ EOF
 
 live_revision=0123456789abcdef0123456789abcdef01234567
 mismatched_revision=ffffffffffffffffffffffffffffffffffffffff
+test_release_app_digest="sha256:$(printf '%016x%048x' 0xa0a0a0a0a0a0a0a0 0)"
+test_untrusted_app_digest=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+test_release_migrations_digest="sha256:$(printf '%016x%048x' 0xb1b1b1b1b1b1b1b1 0)"
+test_release_helper_digest="sha256:$(printf '%016x%048x' 0xc2c2c2c2c2c2c2c2 0)"
+test_release_landing_digest="sha256:$(printf '%016x%048x' 0xd3d3d3d3d3d3d3d3 0)"
+test_release_selector_digest="sha256:$(printf '%016x%048x' 0xe4e4e4e4e4e4e4e4 0)"
 run_production_release_case() (
   local mode=$1 rendered_manifest=$2
   export SOURCE_INSTANCE=teagram
@@ -300,18 +311,30 @@ run_production_release_case() (
   export LIVE_REVISION=$live_revision
   export MISMATCHED_REVISION=$mismatched_revision
   export RELEASE_CASE=$mode
-  RELEASE_APP_DIGEST="sha256:$(printf '%016x%048x' 0xa0a0a0a0a0a0a0a0 0)"
-  RELEASE_MIGRATIONS_DIGEST="sha256:$(printf '%016x%048x' 0xb1b1b1b1b1b1b1b1 0)"
-  RELEASE_HELPER_DIGEST="sha256:$(printf '%016x%048x' 0xc2c2c2c2c2c2c2c2 0)"
-  RELEASE_LANDING_DIGEST="sha256:$(printf '%016x%048x' 0xd3d3d3d3d3d3d3d3 0)"
-  RELEASE_SELECTOR_DIGEST="sha256:$(printf '%016x%048x' 0xe4e4e4e4e4e4e4e4 0)"
+  RELEASE_APP_DIGEST=$test_release_app_digest
+  RELEASE_MIGRATIONS_DIGEST=$test_release_migrations_digest
+  RELEASE_HELPER_DIGEST=$test_release_helper_digest
+  RELEASE_LANDING_DIGEST=$test_release_landing_digest
+  RELEASE_SELECTOR_DIGEST=$test_release_selector_digest
+  TRUSTED_APP_DIGEST=$RELEASE_APP_DIGEST
+  TRUSTED_MIGRATIONS_DIGEST=$RELEASE_MIGRATIONS_DIGEST
+  TRUSTED_HELPER_DIGEST=$RELEASE_HELPER_DIGEST
+  TRUSTED_LANDING_DIGEST=$RELEASE_LANDING_DIGEST
+  TRUSTED_SELECTOR_DIGEST=$RELEASE_SELECTOR_DIGEST
+  if [[ $mode == digest-mismatch ]]; then
+    TRUSTED_APP_DIGEST=$test_untrusted_app_digest
+  fi
   export RELEASE_APP_DIGEST RELEASE_MIGRATIONS_DIGEST RELEASE_HELPER_DIGEST \
-    RELEASE_LANDING_DIGEST RELEASE_SELECTOR_DIGEST
+    RELEASE_LANDING_DIGEST RELEASE_SELECTOR_DIGEST TRUSTED_APP_DIGEST \
+    TRUSTED_MIGRATIONS_DIGEST TRUSTED_HELPER_DIGEST TRUSTED_LANDING_DIGEST \
+    TRUSTED_SELECTOR_DIGEST
   export NAMESPACE=teagram-cutover
   export REPO_ROOT=$repo_root
   eval "$(sed -n '/^source_container_revision() {/,/^prod_image_digest() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   eval "$(sed -n '/^source_docker_helper_enabled() {/,/^resolve_image_revision() {/p' \
+    deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^verify_main_release_image() {/,/^resolve_image_revision() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   eval "$(sed -n '/^resolve_image_revision() {/,/^resolve_release_image() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
@@ -322,6 +345,24 @@ run_production_release_case() (
   eval "$(sed -n '/^validate_release_for_source() {/,/^render_cutover_manifest() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   fail() { printf 'k3s cutover: %s\n' "$*" >&2; exit 1; }
+  gh() {
+    [[ $1 == attestation && $2 == verify && $4 == --repo &&
+      $5 == teagramhq/teagram-server && $6 == --source-ref &&
+      $7 == refs/heads/main && $8 == --source-digest &&
+      $9 == "$LIVE_REVISION" && ${10} == --signer-workflow &&
+      ${11} == teagramhq/teagram-server/.github/workflows/ci.yml &&
+      ${12} == --format && ${13} == json ]] || return 91
+    local expected_digest
+    case $3 in
+      oci://ghcr.io/teagramhq/teagramd@*) expected_digest=$TRUSTED_APP_DIGEST ;;
+      oci://ghcr.io/teagramhq/teagram-migrations@*) expected_digest=$TRUSTED_MIGRATIONS_DIGEST ;;
+      oci://ghcr.io/teagramhq/teagramd-mc-init@*) expected_digest=$TRUSTED_HELPER_DIGEST ;;
+      oci://ghcr.io/teagramhq/link-edge-landing@*) expected_digest=$TRUSTED_LANDING_DIGEST ;;
+      oci://ghcr.io/teagramhq/link-edge-selector@*) expected_digest=$TRUSTED_SELECTOR_DIGEST ;;
+      *) return 91 ;;
+    esac
+    [[ $3 == *@$expected_digest ]]
+  }
   incus() {
     [[ $1 == exec && $2 == "$SOURCE_INSTANCE" && $3 == -- ]] || return 91
     shift 3
@@ -369,7 +410,7 @@ run_production_release_case() (
   incus exec "$SOURCE_INSTANCE" -- docker inspect --format revision teagram-teagramd-1 >/dev/null
   kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
   validate_release_for_source || return $?
-  if [[ $mode == mismatch ]]; then
+  if [[ $mode == mismatch || $mode == digest-mismatch ]]; then
     fence_source_writes
     return 0
   fi
@@ -421,6 +462,24 @@ if [[ $mismatch_output != *'published image ghcr.io/teagramhq/teagramd:sha-'* ]]
 fi
 if [[ $mismatch_output == *'fence reached'* ]]; then
   printf 'production release mismatch reached the write fence: %s\n' "$mismatch_output" >&2
+  exit 1
+fi
+if digest_mismatch_output=$(run_production_release_case digest-mismatch \
+  "$fixture_dir/release-digest-mismatch.yaml" 2>&1); then
+  printf 'production release validation accepted a digest without matching main CI provenance\n' >&2
+  exit 1
+fi
+for expected_digest in "$test_release_app_digest" "$live_revision"; do
+  if [[ $digest_mismatch_output != *"$expected_digest"* ]]; then
+    printf 'production provenance mismatch did not report the digest and source revision: %s\n' \
+      "$digest_mismatch_output" >&2
+    exit 1
+  fi
+done
+if [[ $digest_mismatch_output != *'no valid main CI attestation'* ||
+  $digest_mismatch_output == *'fence reached'* ]]; then
+  printf 'production digest mismatch did not fail before fencing: %s\n' \
+    "$digest_mismatch_output" >&2
   exit 1
 fi
 run_production_release_case matching "$fixture_dir/release-rendered.yaml"

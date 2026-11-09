@@ -2240,6 +2240,8 @@ jobs:
       actions: read
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -2260,6 +2262,66 @@ jobs:
           printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           .github/scripts/publish-k8s-image-digests.sh \
             "$RUNNER_TEMP/k8s-image-digests.json" "$K8S_IMAGE_REVISION"
+
+      - name: Select digests for main image attestations
+        id: k8s-image-digests
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          DIGEST_RECORD: ${{ runner.temp }}/k8s-image-digests.json
+        run: |
+          set -euo pipefail
+          jq --exit-status --arg commit "$K8S_IMAGE_REVISION" \
+            '.commit == $commit and (.images | length == 5)' "$DIGEST_RECORD" >/dev/null
+          digest_for() {
+            jq -er --arg image "$1" \
+              '.images[] | select(.name == $image) | .reference | capture("@(?<digest>sha256:[0-9a-f]{64})$").digest' \
+              "$DIGEST_RECORD"
+          }
+          printf 'teagramd=%s\n' \
+            "$(digest_for ghcr.io/teagramhq/teagramd)" >> "$GITHUB_OUTPUT"
+          printf 'migrations=%s\n' \
+            "$(digest_for ghcr.io/teagramhq/teagram-migrations)" >> "$GITHUB_OUTPUT"
+          printf 'mc-init=%s\n' \
+            "$(digest_for ghcr.io/teagramhq/teagramd-mc-init)" >> "$GITHUB_OUTPUT"
+          printf 'link-landing=%s\n' \
+            "$(digest_for ghcr.io/teagramhq/link-edge-landing)" >> "$GITHUB_OUTPUT"
+          printf 'link-selector=%s\n' \
+            "$(digest_for ghcr.io/teagramhq/link-edge-selector)" >> "$GITHUB_OUTPUT"
+
+      - name: Attest main teagramd image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ghcr.io/teagramhq/teagramd
+          subject-digest: ${{ steps.k8s-image-digests.outputs.teagramd }}
+
+      - name: Attest main migrations image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ghcr.io/teagramhq/teagram-migrations
+          subject-digest: ${{ steps.k8s-image-digests.outputs.migrations }}
+
+      - name: Attest main S3 helper image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ghcr.io/teagramhq/teagramd-mc-init
+          subject-digest: ${{ steps.k8s-image-digests.outputs.mc-init }}
+
+      - name: Attest main link landing image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ghcr.io/teagramhq/link-edge-landing
+          subject-digest: ${{ steps.k8s-image-digests.outputs.link-landing }}
+
+      - name: Attest main link selector image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ghcr.io/teagramhq/link-edge-selector
+          subject-digest: ${{ steps.k8s-image-digests.outputs.link-selector }}
 
       - name: Upload immutable image digests
         uses: actions/upload-artifact@v7.0.1

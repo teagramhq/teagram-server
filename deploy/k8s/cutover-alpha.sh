@@ -78,6 +78,7 @@ EOF
 dry_run() {
   cat <<'EOF'
 Would verify alpha, the root-only cutover kubeconfig, source Compose containers and encrypted S3 authority, the live teagramd and migration image revisions, matching immutable k8s images, required migration version and Job names, the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
+Would verify main-branch build provenance for all five resolved image digests and the exact live revision before source writes are fenced.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database migrations, the web Service, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
@@ -119,6 +120,11 @@ fi
 for command_name in incus kubectl readlink stat install sha256sum python3 awk grep sed tar flock date sleep wc; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
+if [[ $TEST_MODE == false && $ACTION == --apply ]]; then
+  command -v gh >/dev/null 2>&1 || fail 'required command is missing: gh'
+  gh attestation verify --help >/dev/null 2>&1 ||
+    fail 'GitHub CLI does not support build provenance verification'
+fi
 
 export KUBECONFIG=$KUBECONFIG_PATH
 [[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] || fail 'root-only cutover kubeconfig is missing or not a regular file'
@@ -376,6 +382,19 @@ source_docker_helper_enabled() {
   [[ $TEST_MODE == false || ${CUTOVER_TEST_SOURCE_DOCKER_HELPER:-} == true ]]
 }
 
+verify_main_release_image() {
+  local image_name=$1 revision=$2 digest=$3
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "published image $image_name has an invalid immutable registry digest: $digest"
+  gh attestation verify "oci://$image_name@$digest" \
+    --repo teagramhq/teagram-server \
+    --source-ref refs/heads/main \
+    --source-digest "$revision" \
+    --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml \
+    --format json >/dev/null 2>&1 ||
+    fail "published image $image_name resolved digest $digest has no valid main CI attestation for live revision $revision"
+}
+
 resolve_image_revision() {
   local image=$1 revision
   if source_docker_helper_enabled; then
@@ -410,6 +429,7 @@ resolve_release_image() {
   done <<< "$repo_digests"
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
     fail "published image $tagged_image has no valid immutable registry digest"
+  verify_main_release_image "$image_name" "$revision" "$digest"
   printf '%s@%s' "$image_name" "$digest"
 }
 
@@ -484,6 +504,10 @@ validate_release_for_source() {
     LINK_SELECTOR_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-selector "$live_revision") || return $?
     migrations_validation_image=$MIGRATIONS_IMAGE
     helper_validation_image=$K8S_MC_IMAGE
+
+    app_digest=${APP_IMAGE##*@}
+    migrations_digest=${MIGRATIONS_IMAGE##*@}
+    helper_digest=${K8S_MC_IMAGE##*@}
 
     app_revision=$(resolve_image_revision "$APP_IMAGE") || return $?
     migrations_revision=$(resolve_image_revision "$migrations_validation_image") || return $?
