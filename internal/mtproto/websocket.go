@@ -125,9 +125,10 @@ type webSocketAcceptedConn struct {
 	handlerTracked  atomic.Bool
 	handlerStarted  atomic.Bool
 	handlerDoneOnce sync.Once
-	// Lock order: lockForUpgrade takes pendingMu before state. prepare may hold
-	// state while keyAddr acquires the pre-auth limiter mutex. Close releases
-	// state before slot.clear and untrack, so neither order is reversed.
+	// Lock order: publishConnectionIdentity takes pendingMu before state.
+	// prepare may hold state while keyAddr acquires the pre-auth limiter mutex.
+	// Close releases state before slot.clear and untrack, so neither order is
+	// reversed.
 	state  sync.Mutex
 	closed bool
 	// preAuthClosing is protected by webSocketListener.pendingMu. It prevents
@@ -177,10 +178,9 @@ func (c *webSocketAcceptedConn) lifecycleCloseCauseValue() (error, bool) {
 	return c.lifecycleCloseCause, c.lifecycleCloseCauseSet
 }
 
-// lockForUpgrade serializes a successful HTTP upgrade and its open record with
-// the pre-auth lifetime callback. It returns with state locked so the caller
-// can publish the identity before an expiry closes the accepted socket.
-func (c *webSocketAcceptedConn) lockForUpgrade() bool {
+// publishConnectionIdentity gives lifecycle callbacks the identity before the
+// HTTP upgrade starts, without holding the close mutex during upgrade I/O.
+func (c *webSocketAcceptedConn) publishConnectionIdentity(connectionID string, openedAt time.Time) bool {
 	if c.listener != nil {
 		c.listener.pendingMu.Lock()
 		if _, tracked := c.listener.pending[c]; !tracked || c.preAuthClosing {
@@ -188,14 +188,36 @@ func (c *webSocketAcceptedConn) lockForUpgrade() bool {
 			return false
 		}
 		c.state.Lock()
-		c.listener.pendingMu.Unlock()
-	} else {
-		c.state.Lock()
-	}
-	if c.closed {
+		if c.closed {
+			c.state.Unlock()
+			c.listener.pendingMu.Unlock()
+			return false
+		}
+		c.connectionID = connectionID
+		c.openedAt = openedAt
 		c.state.Unlock()
+		c.listener.pendingMu.Unlock()
+		return true
+	}
+	c.state.Lock()
+	defer c.state.Unlock()
+	if c.closed {
 		return false
 	}
+	c.connectionID = connectionID
+	c.openedAt = openedAt
+	return true
+}
+
+// logOpenedIfActive orders the open record before any close record while
+// keeping the HTTP upgrade itself outside the close mutex.
+func (c *webSocketAcceptedConn) logOpenedIfActive(logOpen func()) bool {
+	c.state.Lock()
+	defer c.state.Unlock()
+	if c.closed {
+		return false
+	}
+	logOpen()
 	return true
 }
 
@@ -237,9 +259,9 @@ type webSocketListener struct {
 	acceptDone        chan struct{}
 	closeOnce         sync.Once
 
-	// pendingMu protects pending and preAuthClosing. lockForUpgrade nests
-	// accepted.state beneath it; no path acquires pendingMu while holding state.
-	// It is released before pre-auth, socket, or server operations.
+	// pendingMu protects pending and preAuthClosing. publishConnectionIdentity
+	// nests accepted.state beneath it; no path acquires pendingMu while holding
+	// state. It is released before pre-auth, socket, or server operations.
 	pendingMu sync.Mutex
 	pending   map[*webSocketAcceptedConn]struct{}
 	live      sync.WaitGroup
@@ -777,31 +799,26 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return
 	}
 
-	if !state.socket.lockForUpgrade() {
+	connectionID := s.newConnectionID()
+	openedAt := time.Now()
+	if !state.socket.publishConnectionIdentity(connectionID, openedAt) {
 		return
 	}
-	var ws *websocket.Conn
-	var err error
-	var connectionID string
-	var openedAt time.Time
-	func() {
-		defer state.socket.state.Unlock()
-		ws, err = websocket.Accept(w, r, &websocket.AcceptOptions{
-			Subprotocols:    []string{"binary"},
-			CompressionMode: websocket.CompressionDisabled,
-			OriginPatterns:  originPatterns,
-		})
-		if err != nil {
-			return
-		}
-		connectionID = s.newConnectionID()
-		openedAt = time.Now()
-		state.socket.connectionID = connectionID
-		state.socket.openedAt = openedAt
-		s.logConnectionOpened(websocketPath, connectionID, openedAt)
-	}()
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		Subprotocols:    []string{"binary"},
+		CompressionMode: websocket.CompressionDisabled,
+		OriginPatterns:  originPatterns,
+	})
 	if err != nil {
 		s.logNegotiation(err, nil)
+		return
+	}
+	if !state.socket.logOpenedIfActive(func() {
+		s.logConnectionOpened(websocketPath, connectionID, openedAt)
+	}) {
+		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
+			s.log.Info("close WebSocket connection after concurrent close", "err", err)
+		}
 		return
 	}
 	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
