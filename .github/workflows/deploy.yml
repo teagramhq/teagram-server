@@ -31,7 +31,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
-    environment: production
+    environment: k3s-prod
     permissions:
       actions: read
       attestations: read
@@ -183,6 +183,7 @@ jobs:
           kubectl auth can-i patch persistentvolumeclaims --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-prod.yaml"
           kubectl apply --dry-run=server -k deploy/k8s/backup-bootstrap
+          kubectl create --dry-run=server --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml >/dev/null
 
       - name: Take and verify a pre-deploy PostgreSQL backup
         env:

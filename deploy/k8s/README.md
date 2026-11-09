@@ -13,7 +13,8 @@ runtime values described below from the live `teagram` LXC, installs the
 namespace-scoped deploy account, the restricted `teagram-agent` read account,
 and the agent operations menu, and writes the
 restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
-`0600`. Store that file in the designated GitHub environment secret. It also
+`0600`. Store that file as the `KUBECONFIG` secret in the `k3s-prod` GitHub
+environment, restricted to deployments from `main`. It also
 writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
 certificate, root-owned mode `0600`; use it only for root-run cutover, rollback,
 target reset, and the one-time deployer-role refresh documented below on alpha.
@@ -164,6 +165,18 @@ kubectl get jobs --namespace teagram \
 kubectl get events --namespace teagram --sort-by=.lastTimestamp
 kubectl logs --namespace teagram job/<failed-backup-job> --all-containers=true
 ```
+
+## Expiring channel-post summary initialization
+
+After the production rollout is ready and smoke checks pass, `Deploy.` runs
+`teagramd maintenance initialize-channel-post-expiring-summaries` in a
+restricted, short-lived Job using the tested teagramd image. Each Job reads
+`TG_POSTGRES_DSN` from `postgres-credentials` and mounts the server key PVC
+read-only so the maintenance command can load its required auth-key key. The
+runner starts another batch until the command reports `0 remaining`; a failed,
+unreadable, or non-progressing batch fails the deployment and triggers workload
+rollback. Completed batches are safe to resume, as described in
+`docs/migrations.md`.
 
 `test: k8s-deploy` creates a disposable account, takes a dump, recreates the
 throwaway database from that dump, and signs in with the restored account. Do

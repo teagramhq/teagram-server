@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guards the production deploy workflow: it may run only after CI passes on a
-# push to main (or by manual dispatch), one at a time, in the production
+# push to main (or by manual dispatch), one at a time, in the k3s-prod
 # environment. It deploys the commit whose CI run passed; the canonical host
 # script runs the MTProto smoke from that deployed image after readiness.
 # shellcheck disable=SC2016 # single-quoted strings are literal workflow text
@@ -577,8 +577,8 @@ check_contract() {
     fail 'the production deploy job must use the deploy stage naming contract'
   [[ "$(query '.jobs."deploy-server".if')" == "$expected_if" ]] ||
     fail 'the dev job must run only on dispatch or a successful CI push run'
-  [[ "$(query '.jobs."deploy-server".environment')" == 'production' ]] ||
-    fail 'the dev job must use environment: production'
+  [[ "$(query '.jobs."deploy-server".environment')" == 'k3s-prod' ]] ||
+    fail 'the k3s deploy job must use environment: k3s-prod'
   [[ "$(query '.jobs."deploy-server".permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the dev job must not request write permissions'
   [[ "$(query '.jobs."deploy-server".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read,attestations=read,contents=read' ]] ||
@@ -637,6 +637,8 @@ check_contract() {
     fail 'the production release must pass server-side dry-run before applying changes'
   local deploy_preflight_run
   deploy_preflight_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Validate the production release manifest") | .run')"
+  [[ "$deploy_preflight_run" == *'kubectl create --dry-run=server --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml'* ]] ||
+    fail 'the restricted deployer must server-dry-run the maintenance Job before applying resources'
   for permission in 'create cronjobs.batch' 'get cronjobs.batch' \
     'create persistentvolumeclaims' 'patch persistentvolumeclaims'; do
     grep -Fq "kubectl auth can-i $permission --namespace teagram" <<< "$deploy_preflight_run" ||

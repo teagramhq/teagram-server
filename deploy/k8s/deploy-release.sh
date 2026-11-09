@@ -117,4 +117,6 @@ if [[ "$cloudflared_replicas" != 1 || "$cloudflared_ready" != 1 ]]; then
   exit 1
 fi
 bash "$(dirname -- "${BASH_SOURCE[0]}")/smoke-production.sh"
+bash "$(dirname -- "${BASH_SOURCE[0]}")/initialize-channel-post-expiring-summaries.sh" \
+  "${TEAGRAMD_IMAGE:?TEAGRAMD_IMAGE must name the tested server image}"
 printf 'rollout=verified sha=%s\n' "$revision"

@@ -623,18 +623,35 @@ release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filena
 release_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename "$manifest"' "$release_script" | cut -d: -f1)"
 release_marker_line="$(grep -n -m 1 -F 'rollout=verified sha=%s' "$release_script" | cut -d: -f1)"
 release_smoke_line="$(grep -n -m 1 -F 'smoke-production.sh' "$release_script" | cut -d: -f1)"
+release_maintenance_line="$(grep -n -m 1 -F 'initialize-channel-post-expiring-summaries.sh' "$release_script" | cut -d: -f1)"
 [[ "$release_dry_run_line" =~ ^[0-9]+$ && "$release_apply_line" =~ ^[0-9]+$ &&
-   "$release_smoke_line" =~ ^[0-9]+$ && "$release_marker_line" =~ ^[0-9]+$ &&
+   "$release_smoke_line" =~ ^[0-9]+$ && "$release_maintenance_line" =~ ^[0-9]+$ &&
+   "$release_marker_line" =~ ^[0-9]+$ &&
    "$release_dry_run_line" -lt "$release_apply_line" &&
    "$release_apply_line" -lt "$release_smoke_line" &&
-   "$release_smoke_line" -lt "$release_marker_line" ]] ||
-  fail 'the deploy runner must dry-run, apply, smoke, then emit the verified rollout marker'
+   "$release_smoke_line" -lt "$release_maintenance_line" &&
+   "$release_maintenance_line" -lt "$release_marker_line" ]] ||
+  fail 'the deploy runner must dry-run, apply, smoke, initialize summaries, then emit the verified rollout marker'
 grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script" ||
   fail 'the release runner must automatically undo changed workload revisions on failure'
 grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
   fail 'the release runner must wait for every production workload rollout'
 grep --fixed-strings --quiet 'expected exactly one ready k3s tunnel connector' "$release_script" ||
   fail 'the production release must leave exactly one ready k3s tunnel connector'
+
+maintenance_job=deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
+[[ "$(yq -r '.kind' "$maintenance_job")" == Job &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .command | join(" ")' "$maintenance_job")" == '/usr/local/bin/teagramd' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .args | join(" ")' "$maintenance_job")" == 'maintenance initialize-channel-post-expiring-summaries' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .env[] | select(.name == "TG_POSTGRES_DSN") | .valueFrom.secretKeyRef.name' "$maintenance_job")" == postgres-credentials &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .env[] | select(.name == "TG_AUTHKEY_ENC_KEY_FILE") | .value' "$maintenance_job")" == /var/lib/teagramd/enc_key.hex &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .volumeMounts[] | select(.name == "key-data") | .readOnly' "$maintenance_job")" == true &&
+   "$(yq -r '.spec.template.spec.volumes[] | select(.name == "key-data") | .persistentVolumeClaim.claimName' "$maintenance_job")" == key-data-teagramd-0 &&
+   "$(yq -r '.spec.template.spec.automountServiceAccountToken' "$maintenance_job")" == false ]] ||
+  fail 'the summary maintenance Job must use the documented command with only its database secret and read-only identity PVC'
+
+bash deploy/k8s/test-initialize-channel-post-expiring-summaries.sh >/dev/null ||
+  fail 'the summary maintenance runner must continue until zero remain and fail closed on invalid batches'
 
 backup_restore_test=deploy/k8s/test-postgres-backup-restore.sh
 for restore_line in \

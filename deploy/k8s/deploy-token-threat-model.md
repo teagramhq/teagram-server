@@ -51,11 +51,11 @@ Pod Security blocks the direct node-root escape described above.
 
 ## GitHub secret storage
 
-- The kubeconfig is stored only as a secret of a GitHub environment used by
-  the Kubernetes deploy job alone. Do not use the `production` environment,
-  which already holds the Compose deploy's secrets and would expose this token
-  to that job.
-- Restrict that environment's deployment branches to `main`. No
+- The kubeconfig is stored only as a secret of the GitHub environment
+  `k3s-prod`, used by the Kubernetes deploy job alone. Do not use the
+  `production` environment, which already holds the Compose deploy's secrets
+  and would expose this token to that job.
+- Restrict `k3s-prod` deployment branches to `main`. No
   `pull_request` or fork-triggered workflow may reference it.
 - Protect the workflow files that reference the environment with branch
   protection and required review, because anyone who can change such a

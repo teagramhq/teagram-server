@@ -1100,8 +1100,14 @@ jobs:
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
-          bash -n deploy/k8s/deploy-release.sh deploy/k8s/test-postgres-backup-restore.sh
-          shellcheck deploy/k8s/deploy-release.sh deploy/k8s/test-postgres-backup-restore.sh
+          bash -n deploy/k8s/deploy-release.sh \
+            deploy/k8s/initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-postgres-backup-restore.sh
+          shellcheck deploy/k8s/deploy-release.sh \
+            deploy/k8s/initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-postgres-backup-restore.sh
           shellcheck --shell=sh deploy/k8s/base/postgres-backup/backup.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
@@ -1569,6 +1575,10 @@ jobs:
             kubectl apply --dry-run=client --validate=false \
               --filename "deploy/k8s/$manifest"
           done
+kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+            deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
+          kubectl create --dry-run=server \
+            --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml >/dev/null
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
       - name: Verify deployer RBAC and Pod Security boundaries
