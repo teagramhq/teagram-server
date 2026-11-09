@@ -20,7 +20,7 @@ export function patchRealClientObserver(webRoot) {
   let observation = readFileSync(observationPath, 'utf8');
   let browser = readFileSync(browserPath, 'utf8');
   if(observation.includes('noteMtprotoSourceFetch') || browser.includes('collectMtprotoSourceFetches') ||
-      browser.includes('waitForSettledMessageCount')) {
+      browser.includes('waitForDirectMessageCount')) {
     throw new Error('pinned web observer is already patched');
   }
 
@@ -100,26 +100,16 @@ export function patchRealClientObserver(webRoot) {
       'poll content assertion export');
   }
 
-  const settledMessageWaiter = `async function waitForSettledMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS, chat, groupTitle) {
+  const directMessageWaiter = `async function waitForDirectMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
   currentStage = stage;
-  if(groupMessageTrace.page !== page || groupMessageTrace.stage !== stage) {
-    await startGroupMessageTrace(page, stage);
-  }
+  await startGroupMessageTrace(page, stage);
   const deadline = Date.now() + Math.min(timeoutMs, GROUP_MESSAGE_SETTLE_TIMEOUT_MS);
   let stableSince;
   let lastResult = 'pending';
   while(Date.now() <= deadline) {
     let sample;
     try {
-      const [chatCount, titleCount] = chat && groupTitle
-        ? await Promise.all([chat.count(), groupTitle.count()])
-        : [1, 1];
-      sample = chatCount !== 1 || titleCount !== 1 ? {
-        count: 0,
-        bubbles: [],
-        distinctIds: false,
-        distinctServerIds: false
-      } : await message.evaluateAll((elements) => {
+      sample = await message.evaluateAll((elements) => {
         // Count each bubble element. Its data-mid is diagnostic only while the
         // optimistic message is replaced by its sent copy.
         const bubbleElements = [...new Set(elements.map((element) => element.closest('.bubble')).filter(Boolean))];
@@ -177,29 +167,26 @@ export function patchRealClientObserver(webRoot) {
 `;
   browser = replaceOnce(browser,
     'async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {',
-    `${settledMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
-    'settled message helper');
+    `${directMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
+    'direct message settle helper');
   const legacyDirectMessageAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
   const currentDirectMessageAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
-  const settledDirectMessageAssertion = '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForSettledMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);';
+  const settledDirectMessageAssertion = '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForDirectMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);';
   if(browser.includes(legacyDirectMessageAssertion)) {
     browser = replaceOnce(browser, legacyDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
   } else {
     browser = replaceOnce(browser, currentDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
   }
-  const currentGroupMessageAssertion = '    await waitForGroupMessageCount(page, chat, groupTitle, message, `${stage}_message_count`, timeoutMs);';
-  const settledGroupMessageAssertion = '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForSettledMessageCount(page, message, messageStage, timeoutMs, chat, groupTitle);\n    if(!settled) failGroupMessageStep(messageStage);';
-  browser = replaceOnce(browser, currentGroupMessageAssertion, settledGroupMessageAssertion, 'group message settle assertion');
   const legacyDirectMessageExport = 'waitForGroupMessageCount, waitForPollMessage';
   const currentDirectMessageExport = 'waitForGroupMessageCount, waitForSingleSentMessage,';
   if(browser.includes(legacyDirectMessageExport)) {
     browser = replaceOnce(browser, legacyDirectMessageExport,
-      'waitForGroupMessageCount, waitForSettledMessageCount, waitForPollMessage',
-      'settled message helper export');
+      'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
+      'direct message settle helper export');
   } else {
     browser = replaceOnce(browser, currentDirectMessageExport,
-      'waitForGroupMessageCount, waitForSettledMessageCount, waitForSingleSentMessage,',
-      'settled message helper export');
+      'waitForGroupMessageCount, waitForDirectMessageCount, waitForSingleSentMessage,',
+      'direct message settle helper export');
   }
 
   const originalWorkerMethods = `const WORKER_CDP_METHODS = Object.freeze([

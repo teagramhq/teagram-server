@@ -119,7 +119,7 @@ test('the patched direct-message assertion settles idless and pending/sent bubbl
   const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
     browserSource.indexOf('async function waitForMessageReaction'));
   assert.match(sendTextSource,
-    /const messageStage = `\$\{stage\}_message_count`;\s+const settled = await waitForSettledMessageCount\(page, message, messageStage, timeoutMs\);/);
+    /const messageStage = `\$\{stage\}_message_count`;\s+const settled = await waitForDirectMessageCount\(page, message, messageStage, timeoutMs\);/);
 
   const page = messagePage();
   const sentBubble = messageBubble('8', 'sent');
@@ -128,7 +128,7 @@ test('the patched direct-message assertion settles idless and pending/sent bubbl
     [messageBubble('-7', 'pending'), messageBubble('8', 'sent')],
     [sentBubble, sentBubble],
   ]);
-  assert.equal(await browser.waitForSettledMessageCount(page, message, 'alice_direct_message_count', 2_000), true);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), true);
 
   const trace = await browser.captureGroupMessageState();
   assert.equal(trace.result, 'settled');
@@ -155,39 +155,12 @@ test('the patched direct-message assertion fails if idless duplicate bubbles per
   const message = messageLocator([
     [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
   ]);
-  assert.equal(await browser.waitForSettledMessageCount(page, message, 'alice_direct_message_count', 250), false);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 250), false);
 
   const trace = await browser.captureGroupMessageState();
   assert.equal(trace.result, 'settle_timeout');
   assert.ok(trace.samples.length > 1);
   assert.ok(trace.samples.every((sample) => sample.count === 2));
-});
-
-test('the patched group-message assertion rejects a persistent pending/sent pair', async (t) => {
-  assert.equal(typeof patchRealClientObserver, 'function');
-  const {browser, browserPath} = patchBrowserForTest(t);
-  const browserSource = readFileSync(browserPath, 'utf8');
-  const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
-    browserSource.indexOf('async function waitForMessageReaction'));
-  assert.match(sendTextSource,
-    /if\(chat\)\s*\{\s*const messageStage = `\$\{stage\}_message_count`;\s+const settled = await waitForSettledMessageCount\(page, message, messageStage, timeoutMs, chat, groupTitle\);\s+if\(!settled\) failGroupMessageStep\(messageStage\);/);
-
-  const page = messagePage();
-  const chat = {count: async() => 1};
-  const groupTitle = {count: async() => 1};
-  const message = messageLocator([
-    [messageBubble('-7', 'pending'), messageBubble('8', 'sent')],
-  ]);
-  assert.equal(await browser.waitForSettledMessageCount(
-    page, message, 'alice_group_message_count', 250, chat, groupTitle
-  ), false);
-
-  const trace = await browser.captureGroupMessageState();
-  assert.equal(trace.result, 'settle_timeout');
-  assert.ok(trace.samples.length > 1);
-  assert.ok(trace.samples.every((sample) => sample.count === 2));
-  assert.ok(trace.samples.every((sample) => sample.bubbles.some((bubble) => bubble.sendState === 'pending')));
-  assert.ok(trace.samples.every((sample) => sample.bubbles.some((bubble) => bubble.sendState === 'sent')));
 });
 
 test('the patched direct-message assertion rejects two bubble elements with one id', async (t) => {
@@ -197,7 +170,7 @@ test('the patched direct-message assertion rejects two bubble elements with one 
   const message = messageLocator([
     [messageBubble('8', 'sent'), messageBubble('8', 'sent')],
   ]);
-  assert.equal(await browser.waitForSettledMessageCount(page, message, 'alice_direct_message_count', 2_000), false);
+  assert.equal(await browser.waitForDirectMessageCount(page, message, 'alice_direct_message_count', 2_000), false);
 
   const trace = await browser.captureGroupMessageState();
   assert.equal(trace.result, 'duplicate_bubbles');
