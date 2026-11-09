@@ -65,7 +65,10 @@ output=$("$script")
 [[ "$output" == "$MOCK_PSQL_OUTPUT" ]]
 grep -Fq 'up.updated_at' "$MOCK_SQL_PATH"
 grep -Fq 'username.owner_type' "$MOCK_SQL_PATH"
-! grep -Eiq 'salt1|salt2|verifier' "$MOCK_SQL_PATH"
+if grep -Eiq 'salt1|salt2|verifier' "$MOCK_SQL_PATH"; then
+  printf '%s\n' 'timestamp query contains a forbidden password field' >&2
+  exit 1
+fi
 [[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 1 ]]
 
 expect_failure() {
