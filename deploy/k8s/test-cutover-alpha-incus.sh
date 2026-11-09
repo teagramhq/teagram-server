@@ -3,6 +3,8 @@ set -euo pipefail
 
 readonly SOURCE_NAMESPACE=teagram
 readonly STATE_DIR=${INCUS_STATE_DIR:?INCUS_STATE_DIR is required for the disposable cutover test}
+# shellcheck disable=SC2016
+readonly REMOTE_TEMP_COMMAND='temporary=$(mktemp "${destination}.XXXXXX")'
 mkdir -p "$STATE_DIR/units"
 
 resource_for_container() {
@@ -70,8 +72,6 @@ except (KeyError, TypeError, ValueError, json.JSONDecodeError):
 
 docker_command() {
   local subcommand=$1 format container service path image network helper_container index
-  # shellcheck disable=SC2016
-  local remote_temp_command='temporary=$(mktemp "${destination}.XXXXXX")'
   shift
   local -a args=("$@")
   case "$subcommand" in
@@ -410,7 +410,7 @@ case "${1:-}" in
               systemctl|k3s|ip|awk|curl) exit 0 ;;
               *) exit 1 ;;
             esac
-          elif [[ ${args[0]:-} == -c && ${args[1]:-} == *"$remote_temp_command"* ]]; then
+          elif [[ ${args[0]:-} == -c && ${args[1]:-} == *"$REMOTE_TEMP_COMMAND"* ]]; then
             destination=${args[-2]}
             cat > "$STATE_DIR/units/${destination##*/}"
           elif [[ ${args[1]:-} == *'ip -o -4 addr show dev eth0'* ]]; then

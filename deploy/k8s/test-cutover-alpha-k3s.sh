@@ -624,7 +624,8 @@ expect_log 'source Tailscale Serve TCP route 2443 is missing; refusing to cut ov
 [[ $(kubectl get statefulset teagramd --namespace "$SOURCE_NAMESPACE" \
   --output 'jsonpath={.spec.replicas}') == 1 ]]
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
-if grep --fixed-strings --quiet 'docker-event: stop ' "$tmp_dir/incus-state/docker-events"; then
+if [[ -f $tmp_dir/incus-state/docker-events ]] &&
+  grep --fixed-strings --quiet 'docker-event: stop ' "$tmp_dir/incus-state/docker-events"; then
   printf 'missing Serve route was detected after the source write fence\n' >&2
   exit 1
 fi

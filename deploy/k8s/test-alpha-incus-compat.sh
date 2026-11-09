@@ -4,24 +4,24 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 for script in deploy/k8s/bootstrap-alpha.sh deploy/k8s/cutover-alpha.sh; do
-  if rg --line-number '/dev/stdin|incus exec .*-- command -v' "$repo_root/$script"; then
+  if grep -En '/dev/stdin|incus exec .*-- command -v' "$repo_root/$script"; then
     printf 'alpha host script still relies on an unsupported Incus command form: %s\n' \
       "$script" >&2
     exit 1
   fi
 done
-if rg --line-number 'mktemp.*XXXXXX\.[[:alpha:]]' \
+if grep -En 'mktemp.*XXXXXX\.[[:alpha:]]' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh" "$repo_root/deploy/k8s/cutover-alpha.sh"; then
   printf 'alpha host scripts place a suffix after BusyBox mktemp XXXXXX\n' >&2
   exit 1
 fi
-rg --fixed-strings --quiet 'alpha_install_remote_file' \
+grep --fixed-strings --quiet 'alpha_install_remote_file' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh"
-rg --fixed-strings --quiet 'alpha_install_remote_file' \
+grep --fixed-strings --quiet 'alpha_install_remote_file' \
   "$repo_root/deploy/k8s/cutover-alpha.sh"
-rg --fixed-strings --quiet 'alpha_ensure_sshd_runtime_dir' \
+grep --fixed-strings --quiet 'alpha_ensure_sshd_runtime_dir' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh"
-rg --fixed-strings --quiet 'alpha_for_each_line' \
+grep --fixed-strings --quiet 'alpha_for_each_line' \
   "$repo_root/deploy/k8s/cutover-alpha.sh"
 
 readonly TEST_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
