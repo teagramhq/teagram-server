@@ -17,6 +17,7 @@ TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
+TG_WEBSOCKET_BROWSER_ONLY=true
 TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
@@ -115,6 +116,8 @@ jq -e \
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+  and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
@@ -155,6 +158,7 @@ jq -e '
   and (.services["teagramd-maintenance"].ports // [] | length) == 0
   and (.services["teagramd-maintenance"].networks | keys) == ["backend"]
   and (.services["teagramd-maintenance"].networks.backend | has("ipv4_address") | not)
+  and .services["teagramd-maintenance"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
   and any(.services["teagramd-maintenance"].volumes[]; .target == "/var/lib/teagramd")
   and any(.services["teagramd-maintenance"].volumes[]; .target == "/run/teagramd/blob-mode" and .read_only)
 ' "$TMP_DIR/maintenance.json" >/dev/null
@@ -493,6 +497,8 @@ jq -e '
   and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
+  and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
@@ -522,6 +528,8 @@ jq -e '
   and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
+  and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
@@ -711,10 +719,16 @@ grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.clou
 grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'headers["CF-Connecting-IP"] = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(port, None, 403, "browser-only")' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(port, "https://web.teagram.io", 101)' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(443, None, 403, "browser-only", public=True)' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(443, "https://demo.teagram.io", 101, public=True)' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'websocket_handshake(443, "https://web.teagram.io", 101, public=True)' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'https://foreign.example", 403' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'response.getheader("Teagram-Client-Policy")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'args.web_source_commit' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
@@ -749,6 +763,8 @@ grep -Fq 'host: 127.0.0.1' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'port: 3128' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
+grep -Fq 'Origin: https://web.teagram.io' "$SCRIPT_DIR/gatus.yaml"
+grep -Fq '"[STATUS] == 400"' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
   printf 'legacy ops fingerprint config copy does not match the mounted Nginx config\n' >&2

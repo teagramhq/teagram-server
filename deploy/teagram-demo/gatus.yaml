@@ -24,10 +24,10 @@ endpoints:
     group: teagram-demo
     url: https://demo.teagram.io/apiws
     interval: 1m
+    headers:
+      Origin: https://web.teagram.io
     conditions:
-      # A non-upgrade GET passes through edge and HAProxy to the teagramd
-      # WebSocket listener and returns its fixed bad-handshake status. A 502
-      # means the backend path is unavailable.
+      # An allowed-Origin GET reaches the listener; without Upgrade it returns 400.
       - "[STATUS] == 400"
       - "[CERTIFICATE_EXPIRATION] > 72h"
 

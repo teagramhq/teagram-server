@@ -230,6 +230,7 @@ def main() -> None:
         if (
             updated.returncode != 0
             or "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io\n" not in expected_env
+            or "TG_WEBSOCKET_BROWSER_ONLY=true\n" not in expected_env
             or "TG_UPLOADS_DISABLED=true\n" not in expected_env
             or "POSTGRES_PASSWORD=" + "d" * 64 + "\n" not in expected_env
             or "fixture-secret-must-not-be-printed" in updated.stdout.decode(errors="replace")
@@ -250,6 +251,8 @@ def main() -> None:
         migrated = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(current_origins_env))
         if migrated.returncode != 0 or "TG_UPLOADS_DISABLED=true\n" not in current_origins_env.read_text(encoding="utf-8"):
             raise SystemExit("demo env migration omitted TG_UPLOADS_DISABLED for existing origins")
+        if "TG_WEBSOCKET_BROWSER_ONLY=true\n" not in current_origins_env.read_text(encoding="utf-8"):
+            raise SystemExit("demo env migration omitted the browser-only WebSocket policy")
 
         unsafe_env = expected_env.replace("TG_UPLOADS_DISABLED=true\n", "TG_UPLOADS_DISABLED=false\n")
         env_file.write_text(unsafe_env, encoding="utf-8")
@@ -257,6 +260,15 @@ def main() -> None:
         rejected_uploads = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(env_file))
         if rejected_uploads.returncode == 0 or env_file.read_text(encoding="utf-8") != unsafe_env:
             raise SystemExit("demo environment update accepted client uploads or rewrote the file")
+
+        unsafe_browser_only = expected_env.replace(
+            "TG_WEBSOCKET_BROWSER_ONLY=true\n", "TG_WEBSOCKET_BROWSER_ONLY=false\n"
+        )
+        env_file.write_text(unsafe_browser_only, encoding="utf-8")
+        env_file.chmod(0o600)
+        rejected_browser_only = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(env_file))
+        if rejected_browser_only.returncode == 0 or env_file.read_text(encoding="utf-8") != unsafe_browser_only:
+            raise SystemExit("demo environment update disabled or rewrote the browser-only policy")
 
     print("demo web release receipt and extraction checks passed")
 
