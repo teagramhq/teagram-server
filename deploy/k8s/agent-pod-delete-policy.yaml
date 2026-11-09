@@ -1,0 +1,43 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: teagram-agent-pod-delete
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["pods"]
+        scope: Namespaced
+  matchConditions:
+    - name: teagram-agent-only
+      expression: >-
+        request.namespace == 'teagram' &&
+        request.userInfo.username == 'system:serviceaccount:teagram:teagram-agent'
+  validations:
+    - expression: >-
+        has(oldObject.metadata.ownerReferences) &&
+        oldObject.metadata.ownerReferences.exists(owner,
+          has(owner.controller) && owner.controller == true &&
+          owner.kind in ['ReplicaSet', 'StatefulSet']) &&
+        has(oldObject.metadata.labels) &&
+        'app.kubernetes.io/name' in oldObject.metadata.labels &&
+        oldObject.metadata.labels['app.kubernetes.io/name'] in
+          ['teagramd', 'linkselector', 'linklanding', 'cloudflared']
+      message: >-
+        teagram-agent may delete only controller-owned teagramd, linkselector,
+        linklanding, or cloudflared pods
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: teagram-agent-pod-delete
+spec:
+  policyName: teagram-agent-pod-delete
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: teagram

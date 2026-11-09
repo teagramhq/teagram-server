@@ -260,19 +260,28 @@ def kubectl(args, state):
     if args[:2] == ["auth", "can-i"]:
         verb, resource = args[2:4]
         namespace = args[args.index("--namespace") + 1] if "--namespace" in args else ""
+        subject = next(
+            (arg.split("=", 1)[1] for arg in args if arg.startswith("--as=")), ""
+        )
         group = ""
         if "." in resource:
             resource, group = resource.split(".", 1)
-        subresource = (
-            args[args.index("--subresource") + 1] if "--subresource" in args else ""
-        )
+        if "--subresource" in args:
+            subresource = args[args.index("--subresource") + 1]
+        else:
+            subresource = next(
+                (arg.split("=", 1)[1] for arg in args
+                 if arg.startswith("--subresource=")),
+                "",
+            )
         if resource == "namespaces":
             print(
                 "Warning: resource 'namespaces' is not namespace scoped",
                 file=sys.stderr,
             )
         allowed = False
-        if namespace == NAMESPACE:
+        if (namespace == NAMESPACE and
+                subject == "system:serviceaccount:teagram:teagram-deployer"):
             if group == "apps" and resource in ("deployments", "statefulsets"):
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
             elif group == "apps" and resource in ("replicasets", "controllerrevisions"):
@@ -285,6 +294,23 @@ def kubectl(args, state):
                 allowed = verb in {"get", "list", "watch"}
             elif group == "" and resource == "pods" and subresource == "log":
                 allowed = verb == "get"
+        elif (namespace == NAMESPACE and
+              subject == "system:serviceaccount:teagram:teagram-agent"):
+            if group == "" and resource == "pods" and subresource == "log":
+                allowed = verb in {"get", "list", "watch"}
+            elif (group == "" and
+                  resource in ("pods", "events", "services", "endpoints") and
+                  not subresource):
+                allowed = verb in {"get", "list", "watch"}
+                if resource == "pods" and verb == "delete":
+                    allowed = True
+            elif (group == "apps" and
+                  resource in ("statefulsets", "deployments", "replicasets")):
+                allowed = verb in {"get", "list", "watch"}
+            elif group == "apps" and resource == "controllerrevisions":
+                allowed = verb in {"get", "list"}
+            elif group == "batch" and resource in ("jobs", "cronjobs"):
+                allowed = verb in {"get", "list", "watch"}
         answer = "yes" if allowed else "no"
         print(answer)
         sys.exit(0 if answer == "yes" else 1)

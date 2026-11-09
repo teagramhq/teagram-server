@@ -176,6 +176,8 @@ if [[ "$(yq -r '.jobs."test-k8s-deploy".permissions.packages // "none"' .github/
   fail 'the k3s deployment lane must not require GHCR package credentials'
 fi
 k8s_deploy_run="$(yq -r '.jobs."test-k8s-deploy".steps[] | .run // ""' .github/workflows/ci.yml)"
+[[ "$k8s_deploy_run" == *'kubectl create namespace teagram'* ]] ||
+  fail 'the cutover fixture namespace must stay unlabeled so Pod Security does not mask its capability check'
 if grep --extended-regexp --quiet 'docker login ghcr.io|ghcr-pull|GITHUB_TOKEN' <<< "$k8s_deploy_run"; then
   fail 'the k3s deployment lane must pull public images without registry credentials'
 fi
@@ -352,5 +354,81 @@ public_workload_guard_status=0
 yq -e '.resources[] | select(. == "teagramd-public-deployment.yaml")' \
   deploy/k8s/base/kustomization.yaml >/dev/null 2>&1 || public_workload_guard_status=$?
 require_no_match_status "$public_workload_guard_status" 'the K8s public WebSocket workload guard'
+
+agent_role=deploy/k8s/agent-access.yaml
+[[ "$(yq -r '.kind' "$agent_role" | sed '/^---$/d' | paste -sd, -)" == 'ServiceAccount,Role,RoleBinding' ]] ||
+  fail 'agent access must use only a ServiceAccount, namespace Role, and RoleBinding'
+[[ "$(yq -r 'select(.kind == "ServiceAccount" and .metadata.name == "teagram-agent") | .automountServiceAccountToken' "$agent_role")" == false ]] ||
+  fail 'the agent ServiceAccount must disable token automount'
+[[ "$(yq -r 'select(.kind == "RoleBinding" and .metadata.name == "teagram-agent") | .metadata.namespace' "$agent_role")" == teagram &&
+   "$(yq -r 'select(.kind == "RoleBinding" and .metadata.name == "teagram-agent") | .roleRef.kind' "$agent_role")" == Role &&
+   "$(yq -r 'select(.kind == "RoleBinding" and .metadata.name == "teagram-agent") | .subjects[0].name' "$agent_role")" == teagram-agent ]] ||
+  fail 'the agent RoleBinding must bind only the agent ServiceAccount in teagram'
+agent_policy=deploy/k8s/agent-pod-delete-policy.yaml
+[[ "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.failurePolicy' "$agent_policy")" == Fail &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicyBinding") | .spec.policyName' "$agent_policy")" == teagram-agent-pod-delete ]] ||
+  fail 'the agent pod-delete policy must fail closed and have a binding'
+[[ "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.matchConditions[0].expression' "$agent_policy")" == *'system:serviceaccount:teagram:teagram-agent'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'ReplicaSet'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'StatefulSet'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'teagramd'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'linkselector'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'linklanding'* &&
+   "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'cloudflared'* ]] ||
+  fail 'the agent admission policy must scope identity and controller-owned workload names'
+agent_rollback_block="$(sed -n '/^To roll back only agent access after bootstrap/,/^```$/p' deploy/k8s/README.md)"
+case "$agent_rollback_block" in
+  *'set -euo pipefail'*'serviceaccount teagram-agent'*'rolebinding teagram-agent'*'validatingadmissionpolicybinding teagram-agent-pod-delete'*'validatingadmissionpolicy teagram-agent-pod-delete'*'role teagram-agent'*) ;;
+  *) fail 'agent rollback must revoke its ServiceAccount and RoleBinding before removing admission protection' ;;
+esac
+wildcard_access_status=0
+yq -e 'select(.kind == "Role" and .metadata.name == "teagram-agent")
+  | .rules[]
+  | select((.verbs | contains(["*"])) or
+      (.resources | contains(["*"]) or contains(["pods/*"]) or contains(["services/*"])))' \
+  "$agent_role" >/dev/null 2>&1 || wildcard_access_status=$?
+require_no_match_status "$wildcard_access_status" 'wildcard agent Role access'
+if ! python3 - "$agent_role" <<'PY'
+import json
+import subprocess
+import sys
+
+rules = subprocess.run(
+    ["yq", "-o=json", 'select(.kind == "Role" and .metadata.name == "teagram-agent") | .rules', sys.argv[1]],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+expected = [
+    {"apiGroups": [""], "resources": ["pods", "pods/log", "events", "services", "endpoints"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["apps"], "resources": ["statefulsets", "deployments", "replicasets"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["apps"], "resources": ["controllerrevisions"], "verbs": ["get", "list"]},
+    {"apiGroups": ["batch"], "resources": ["jobs", "cronjobs"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["delete"]},
+]
+if json.loads(rules) != expected:
+    raise SystemExit(1)
+PY
+then
+  fail 'the agent Role must contain exactly the approved resources and verbs'
+fi
+grep --fixed-strings --quiet 'log_parameter_max_length = 0' deploy/k8s/base/postgresql.conf ||
+  fail 'PostgreSQL statement logs must not include bind parameter values'
+[[ -f deploy/k8s/agent-access-threat-model.md ]] ||
+  fail 'the agent access threat model must be committed with the Kubernetes manifests'
+
+deployer_boundary_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verify deployer RBAC and Pod Security boundaries") | .run' .github/workflows/ci.yml)"
+[[ "$deployer_boundary_step" == *'kubectl apply --filename deploy/k8s/base/namespace.yaml'* ]] ||
+  fail 'the deployer boundary check must apply the namespace Pod Security labels before testing pod admission'
+
+agent_access_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Verify agent RBAC and pod-delete admission") | .run' .github/workflows/ci.yml)"
+[[ "$agent_access_step" == *'test-k8s-agent-access.sh'* ]] ||
+  fail 'test: k8s-deploy must exercise agent RBAC and pod-delete admission'
+grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod \"\$linkselector_pod\" --dry-run=server" \
+  .github/scripts/test-k8s-agent-access.sh ||
+  fail 'the agent admission test must server-side dry-run an allowed linkselector delete'
+grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod postgres-0 --dry-run=server" \
+  .github/scripts/test-k8s-agent-access.sh ||
+  fail 'the agent admission test must server-side dry-run a denied postgres delete'
 
 printf 'K8s deployment contract passed\n'

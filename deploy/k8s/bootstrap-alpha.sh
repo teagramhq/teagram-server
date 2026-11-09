@@ -48,6 +48,8 @@ Would install /etc/sysctl.d/90-teagram-k3s.conf in the LXC and enable IP forward
 Would install pinned k3s v1.37.1+k3s1 with Traefik, ServiceLB, and metrics-server disabled, then enable it and wait for a Ready node.
 Would install the agents' forced-command SSH menu and the existing Multica public key, restrict root SSH to that command, disable password login and forwarding, and restart sshd only if its files change.
 Would create the teagram namespace with enforced Pod Security baseline, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
+Would create ServiceAccount teagram-agent with token automount disabled and a namespace-only read Role and RoleBinding.
+Would install the cluster-scoped ValidatingAdmissionPolicy teagram-agent-pod-delete and binding, restricting agent pod deletes to controller-owned teagramd, linkselector, linklanding, or cloudflared pods.
 Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, and cloudflared-token from the live teagram LXC (values are not displayed).
 Would configure Tailscale Serve TCP routes on alpha ports 6443 and 2222 to the loopback proxies; no public listener is configured.
 Would write /root/teagram-k3s-deploy.kubeconfig with the namespace-restricted deployer token, plus /root/teagram-k3s-cutover.kubeconfig with the k3s admin client certificate for root-only cutover, rollback, and reset. Both files use mode 0600; the deployer Role remains restricted.
@@ -317,6 +319,9 @@ assert_hex_length() {
 
 [[ -f $REPO_ROOT/deploy/k8s/teagram-k3s-ops.sh ]] || fail 'forced-command menu is missing from this checkout'
 [[ -f $REPO_ROOT/deploy/k8s/deployer-access.yaml ]] || fail 'deployer access manifest is missing from this checkout'
+[[ -f $REPO_ROOT/deploy/k8s/agent-access.yaml ]] || fail 'agent access manifest is missing from this checkout'
+[[ -f $REPO_ROOT/deploy/k8s/agent-pod-delete-policy.yaml ]] || fail 'agent pod-delete policy manifest is missing from this checkout'
+[[ -f $REPO_ROOT/deploy/k8s/check-agent-rbac.sh ]] || fail 'agent RBAC check is missing from this checkout'
 incus info "$SOURCE_INSTANCE" >/dev/null 2>&1 || fail 'the live teagram LXC is unavailable'
 incus exec "$SOURCE_INSTANCE" -- docker inspect teagram-teagramd-1 teagram-postgres-1 \
   teagram-rustfs-1 teagram-link-edge-selector-1 teagram-web-cloudflared >/dev/null ||
@@ -566,6 +571,10 @@ if (not isinstance(labels, dict) or
   fail 'the teagram namespace does not enforce the Pod Security baseline'
 fi
 apply_manifest 'deployer RBAC and token manifest' < "$REPO_ROOT/deploy/k8s/deployer-access.yaml"
+apply_manifest 'agent namespace-scoped RBAC manifest' < "$REPO_ROOT/deploy/k8s/agent-access.yaml"
+apply_manifest 'agent pod-delete admission policy and binding' < "$REPO_ROOT/deploy/k8s/agent-pod-delete-policy.yaml"
+bash "$REPO_ROOT/deploy/k8s/check-agent-rbac.sh" \
+  incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl
 
 apply_env_resource configmap teagramd-runtime \
   "TG_PUBLIC_LINK_PREFIX=$TG_PUBLIC_LINK_PREFIX" \
