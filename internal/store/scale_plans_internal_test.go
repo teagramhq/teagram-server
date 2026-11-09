@@ -950,6 +950,7 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		scaleQueryError(q.ChannelEventsWindow(ctx, db.ChannelEventsWindowParams{ChannelID: 42, FromPts: 5, ToPts: 9, Lim: 20})),
 		scaleQueryError(q.ChannelMessagesByLocalIDs(ctx, db.ChannelMessagesByLocalIDsParams{ChannelID: 42, LocalIds: []int64{6, 7}})),
 		scaleQueryError(q.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{ChannelID: 42, OffsetID: 9, AddOffset: 1, MaxID: 10, MinID: 1, Lim: 5})),
+		scaleQueryError(q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{ChannelID: 42, OwnerID: 42, OffsetID: 9, AddOffset: 1, MaxID: 10, MinID: 1, Lim: 5, UnexpiredLimit: 3})),
 		scaleQueryError(q.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{ChannelID: 42, OffsetID: 9, AddOffset: -2, MaxID: 10, MinID: 1, Lim: 5})),
 		scaleQueryError(q.ChannelsForUser(ctx, 42)),
 		scaleQueryError(q.ChannelDialogsForUser(ctx, db.ChannelDialogsForUserParams{UserID: 42})),
