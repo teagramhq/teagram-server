@@ -34,6 +34,11 @@ CSP = (
     "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; "
     "worker-src 'self' blob:; manifest-src 'self'; " + DISCOVERY_CONNECT_SRC + ";"
 )
+ENDPOINT_CSP = CSP.replace(DISCOVERY_CONNECT_SRC, f"connect-src 'self' {ENDPOINT}")
+LEGACY_CSP = ENDPOINT_CSP.replace(
+    "form-action 'self'; ",
+    "form-action 'self'; frame-ancestors 'none'; ",
+)
 AUTH_PROGRESS_CSP = (
     "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
     "object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
@@ -230,7 +235,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
         (self.source / "index.html").write_text("caller changed after attach", encoding="utf-8")
         self.assertEqual(hashlib.sha256((self.destination / "index.html").read_bytes()).hexdigest(), expected_index)
 
-    def test_accepts_legacy_frame_ancestor_in_current_meta_csp(self) -> None:
+    def test_accepts_frame_ancestor_with_discovery_ready_csp(self) -> None:
         index_path = self.source / "index.html"
         original = index_path.read_text(encoding="utf-8")
         legacy_csp = CSP.replace(
@@ -265,11 +270,23 @@ class ArtifactBoundaryTests(unittest.TestCase):
                 self.assertIn("privateCSP", result.stderr)
                 self.assertFalse(self.destination.exists())
 
+    def test_accepts_endpoint_csp_without_frame_ancestors(self) -> None:
+        index_path = self.source / "index.html"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(CSP, ENDPOINT_CSP),
+            encoding="utf-8",
+        )
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["checks"]["privateCSP"])
+
     def test_accepts_legacy_exact_private_csp_for_current_revision(self) -> None:
         index_path = self.source / "index.html"
-        legacy_csp = CSP.replace(DISCOVERY_CONNECT_SRC, f"connect-src 'self' {ENDPOINT}")
         index_path.write_text(
-            index_path.read_text(encoding="utf-8").replace(CSP, legacy_csp),
+            index_path.read_text(encoding="utf-8").replace(CSP, LEGACY_CSP),
             encoding="utf-8",
         )
         write_manifest(self.source)
