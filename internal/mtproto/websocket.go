@@ -28,9 +28,6 @@ const (
 	// clientPolicyHeader distinguishes browser-only refusals from other failed
 	// WebSocket handshakes.
 	clientPolicyHeader = "Teagram-Client-Policy"
-	// webSocketBrowserOnlyPolicyBody lets monitors distinguish the application's
-	// refusal from an intermediary-generated 403 page.
-	webSocketBrowserOnlyPolicyBody = "TEAGRAM_BROWSER_ONLY_POLICY"
 	// cfConnectingIPHeader is trusted only on the separately bound public
 	// WebSocket listener, whose host port is published on loopback for the
 	// Cloudflare Tunnel connector.
@@ -694,7 +691,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	defer state.slot.clear()
 	if browserOnly && r.URL.Path == websocketPath && !webSocketOriginAllowed(r, originPatterns, browserOnly) {
 		w.Header().Set(clientPolicyHeader, "browser-only")
-		http.Error(w, webSocketBrowserOnlyPolicyBody, http.StatusForbidden)
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 	if clientAddrHeader != "" {
@@ -743,8 +740,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	if !webSocketOriginAllowed(r, originPatterns, browserOnly) {
 		if browserOnly {
 			w.Header().Set(clientPolicyHeader, "browser-only")
-			http.Error(w, webSocketBrowserOnlyPolicyBody, http.StatusForbidden)
-			return
 		}
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return

@@ -422,12 +422,11 @@ func TestServeWebSocketBrowserOnlyPolicy(t *testing.T) {
 		patterns    []string
 		wantStatus  int
 		wantPolicy  string
-		wantBody    string
 	}{
 		{name: "disabled accepts native clients", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusSwitchingProtocols},
 		{name: "disabled keeps unlisted origin refusal unmarked", origin: "https://evil.example", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden},
-		{name: "enabled marks missing origin refusal", browserOnly: true, patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only", wantBody: "TEAGRAM_BROWSER_ONLY_POLICY\n"},
-		{name: "enabled marks unlisted origin refusal", browserOnly: true, origin: "https://evil.example", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only", wantBody: "TEAGRAM_BROWSER_ONLY_POLICY\n"},
+		{name: "enabled marks missing origin refusal", browserOnly: true, patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only"},
+		{name: "enabled marks unlisted origin refusal", browserOnly: true, origin: "https://evil.example", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusForbidden, wantPolicy: "browser-only"},
 		{name: "enabled accepts allow-listed origin", browserOnly: true, origin: "https://web.teagram.io", patterns: []string{"https://web.teagram.io"}, wantStatus: http.StatusSwitchingProtocols},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -486,15 +485,6 @@ func TestServeWebSocketBrowserOnlyPolicy(t *testing.T) {
 				}
 				if got := resp.Header.Get("Teagram-Client-Policy"); got != tt.wantPolicy {
 					t.Errorf("Teagram-Client-Policy = %q, want %q", got, tt.wantPolicy)
-				}
-				if tt.wantBody != "" && resp.Body != nil {
-					body, err := io.ReadAll(resp.Body)
-					if err != nil {
-						t.Fatalf("read WebSocket refusal body: %v", err)
-					}
-					if string(body) != tt.wantBody {
-						t.Errorf("WebSocket refusal body = %q, want %q", body, tt.wantBody)
-					}
 				}
 			}
 			if resp != nil && resp.Body != nil {
@@ -559,13 +549,6 @@ func TestServePublicWebSocketBrowserOnlyPolicy(t *testing.T) {
 		t.Errorf("public Teagram-Client-Policy = %q, want browser-only", got)
 	}
 	if resp.Body != nil {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read public refusal body: %v", err)
-		}
-		if got, want := string(body), "TEAGRAM_BROWSER_ONLY_POLICY\n"; got != want {
-			t.Errorf("public WebSocket refusal body = %q, want %q", got, want)
-		}
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close refusal body: %v", err)
 		}

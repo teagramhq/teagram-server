@@ -25,10 +25,9 @@ endpoints:
     url: https://demo.teagram.io/apiws
     interval: 1m
     conditions:
-      # Gatus exposes response bodies but not response headers to conditions.
-      # The app marker prevents an intermediary's generic 403 page from passing.
+      # A non-upgrade GET has no Origin, so browser-only policy rejects it
+      # before upgrade validation. A 502 means the backend path is unavailable.
       - "[STATUS] == 403"
-      - "[BODY] == pat(TEAGRAM_BROWSER_ONLY_POLICY*)"
       - "[CERTIFICATE_EXPIRATION] > 72h"
 
   - name: Admin remains private
