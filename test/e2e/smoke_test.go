@@ -108,7 +108,8 @@ func TestSmoke(t *testing.T) {
 		testSmokeAuthorizationDeviceMetadata(t)
 	})
 	t.Run("authorization-ttl", func(t *testing.T) {
-		t.Parallel()
+		// These scenarios restart their fixture on the same port. Keep them
+		// serial so another smoke listener cannot claim it during the restart.
 		testSmokeAuthorizationTTL(t)
 	})
 	t.Run("last-seen-privacy", func(t *testing.T) {
@@ -120,7 +121,6 @@ func TestSmoke(t *testing.T) {
 		testSmokeContactsGetStatuses(t)
 	})
 	t.Run("one-to-one", func(t *testing.T) {
-		t.Parallel()
 		testSmokeOneToOne(t)
 	})
 	t.Run("history-ttl", func(t *testing.T) {
@@ -132,7 +132,6 @@ func TestSmoke(t *testing.T) {
 		testSmokePeerDisconnect(t)
 	})
 	t.Run("photo-media", func(t *testing.T) {
-		t.Parallel()
 		testSmokePhotoMedia(t)
 	})
 	t.Run("profile-photo-upload", func(t *testing.T) {
@@ -180,11 +179,9 @@ func TestSmoke(t *testing.T) {
 		testSmokeDefaultDialogFilter(t)
 	})
 	t.Run("dialog-pins", func(t *testing.T) {
-		t.Parallel()
 		testSmokeDialogPins(t)
 	})
 	t.Run("dialog-filters", func(t *testing.T) {
-		t.Parallel()
 		testSmokeDialogFilters(t)
 	})
 	t.Run("cloud-drafts", func(t *testing.T) {
@@ -200,7 +197,6 @@ func TestSmoke(t *testing.T) {
 		testSmokeManualDialogUnreadMark(t)
 	})
 	t.Run("notify-settings", func(t *testing.T) {
-		t.Parallel()
 		testSmokeNotifySettings(t)
 	})
 	t.Run("notify-settings-recovery", func(t *testing.T) {
