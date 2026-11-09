@@ -295,22 +295,28 @@ additive schema details.
 
 ## Assets and boundaries
 
-The `/apiws` failure and matching transport-close records can include an
-`auth_key_id` and `peer_addr` after the server has read an auth-key identifier.
-The identifier is a stable pseudonymous session reference, and the peer address
-is personal network data. Neither is a credential, but an operator with access
-to auth-key records can map an identifier to a stored session and its account.
-The records omit auth-key bytes, request payloads, tokens, and account IDs.
-Database lookup errors expose a PostgreSQL SQLSTATE and an allowlisted category,
-or a safe network failure summary. Arbitrary database messages, detail, and hint
-fields are omitted.
+The `/apiws` serve-failure and matching transport-close records can include an
+`auth_key_id` after the server has read an auth-key identifier, but they do not
+include `peer_addr`. The identifier is a stable pseudonymous session reference;
+an operator with access to auth-key records can map it to a stored session and
+its account. These records omit auth-key bytes, request payloads, tokens, and
+account IDs. Database lookup errors expose a PostgreSQL SQLSTATE and an
+allowlisted category, or a safe network failure summary. Arbitrary database
+messages, detail, and hint fields are omitted.
+
+Separately, auth-key lookup misses and exchange lookup misses produce sampled
+`server rejected MTProto auth key` records. These include `reason`,
+`auth_key_id`, `peer_addr`, `event_time`, and `suppressed`. The peer address is
+personal network data; these rejection records do not include auth-key bytes,
+request payloads, tokens, or account IDs.
 
 ## Abuse cases and controls
 
 | Abuse case | Control and remaining risk |
 |---|---|
-| A reader correlates a failure with a transport close or later failures | The shared auth-key ID and peer address intentionally match the failure and close records. This reveals connection timing, source network address, and repeated failure patterns; a reader with database access can associate the stable ID with a session and account. Restrict log access and treat these fields as sensitive personal data. |
-| A log reader obtains session or request secrets | These records do not include key bytes, payloads, or tokens. Auth-key lookup diagnostics include only a PostgreSQL SQLSTATE and allowlisted category or a safe network failure summary, not arbitrary database messages, wrapped error text, detail, or hint. Continue to treat the identifier and peer address as sensitive even with those omissions. |
+| A reader correlates a WebSocket failure with its transport close or later failures | The shared auth-key ID can match WebSocket failure and close records and can be associated with a session or account by a reader with auth-key record access. Those records omit `peer_addr`, so they do not reveal the source network address. Restrict access and treat the identifier and timing as sensitive personal data. |
+| A reader correlates rejected auth-key attempts with their source network | The separate sampled `server rejected MTProto auth key` record for lookup misses and exchange lookup misses includes both `auth_key_id` and `peer_addr`, as well as `reason`, `event_time`, and `suppressed`. Treat the peer address as personal network data and restrict access to trusted responders. |
+| A log reader obtains session or request secrets | WebSocket failure, close, and auth-key rejection records omit auth-key bytes, request payloads, and tokens. Auth-key lookup errors expose only a PostgreSQL SQLSTATE and allowlisted category or a safe network failure summary, not arbitrary database messages, wrapped error text, detail, or hint. |
 
 ## Log access and retention
 
