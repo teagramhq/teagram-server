@@ -26,6 +26,8 @@ type expiredCountFixture struct {
 	lastMillis float64
 	// lastCountRows is the rows the CountChannelHistory statement alone read.
 	lastCountRows int64
+	// lastPageRows is the rows the history page statement alone read.
+	lastPageRows int64
 }
 
 func newExpiredCountFixture(t *testing.T, phone string) *expiredCountFixture {
@@ -130,12 +132,18 @@ func (f *expiredCountFixture) seedHealthyTTLChannel(title string, live int) int6
 // and the summary nodes (measured by replaying each one under EXPLAIN
 // ANALYZE), the reported total count and the IDs of the returned page.
 func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows int64, count int, pageIDs []int64) {
+	return f.historyCostAt(channelID, 0)
+}
+
+// historyCostAt is historyCost for the page below offsetID (0 reads the newest).
+func (f *expiredCountFixture) historyCostAt(channelID, offsetID int64) (statements int, rows int64, count int, pageIDs []int64) {
 	f.lastMillis = 0
 	f.lastCountRows = 0
+	f.lastPageRows = 0
 	f.t.Helper()
 	ctx := context.Background()
 	f.trace.reset()
-	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, 0, 0, 0, 0, 0, 100)
+	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, offsetID, 0, 0, 0, 0, 100)
 	if err != nil {
 		f.t.Fatalf("read history: %v", err)
 	}
@@ -174,6 +182,9 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 				if strings.Contains(query.sql, "-- name: CountChannelHistory") {
 					f.lastCountRows += read
 				}
+				if strings.Contains(query.sql, "-- name: ChannelHistoryPage") {
+					f.lastPageRows += read
+				}
 			}
 		})
 	}
@@ -199,9 +210,8 @@ func assertCostWithin1_5x(t *testing.T, label string, gotStatements int, gotRows
 // no backlog, and the count statement's rows examined (returned plus filtered
 // or rechecked) stay within 1.5x of its no-backlog rows plus the smaller of the
 // backlog and the live expiring posts: cost may grow only with that minimum.
-// The history page statement is not bounded here: it walks newest-first past
-// expired rows it must skip, a separate cost that predates the count change and
-// is logged below for the whole open.
+// The history page statement has its own bound in
+// TestChannelHistoryPageCostIgnoresExpiredUnsweptPosts.
 func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 	t.Parallel()
 	f := newExpiredCountFixture(t, "+15551290001")

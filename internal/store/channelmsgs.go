@@ -1475,6 +1475,27 @@ func (s *Store) ChannelHistoryWithOffset(
 		for i, row := range rows {
 			msgs[i] = channelMessageFromFields(channelMsgFields(row))
 		}
+	case countRow.ExpiredBacklogLarger:
+		// The walk below visits every expired unswept post newer than the page
+		// (and older ones too when the page is short); with a backlog larger
+		// than the unexpired expiring posts, read those instead. Both
+		// statements return the same rows.
+		rows, e := qtx.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
+			ChannelID: channelID,
+			OwnerID:   ownerID,
+			OffsetID:  offsetID,
+			AddOffset: addOffset,
+			MaxID:     maxID,
+			MinID:     minID,
+			Lim:       int32(limit), //nolint:gosec // limit is validated and capped by the API
+		})
+		if e != nil {
+			return nil, 0, fmt.Errorf("channel history page: %w", e)
+		}
+		msgs = make([]ChannelMessage, len(rows))
+		for i, row := range rows {
+			msgs[i] = channelMessageFromFields(channelMsgFields(row))
+		}
 	default:
 		rows, e := qtx.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
 			ChannelID: channelID,
