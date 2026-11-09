@@ -114,13 +114,20 @@ class ArtifactError(ValueError):
     """The supplied bundle cannot cross the fixture trust boundary."""
 
 
-def private_csp(endpoint: str, web_revision: str, *, discovery_ready: bool = True) -> str:
+def private_csp(
+    endpoint: str,
+    web_revision: str,
+    *,
+    discovery_ready: bool = True,
+    frame_ancestors: bool = False,
+) -> str:
     directives = [
         "default-src 'self'",
         "base-uri 'self'",
         "form-action 'self'",
-        "frame-ancestors 'none'",
     ]
+    if frame_ancestors or web_revision == AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION:
+        directives.append("frame-ancestors 'none'")
     if web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION:
         directives.append("frame-src 'self' https://challenges.cloudflare.com")
     directives.extend((
@@ -565,6 +572,13 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         expected_csps = {private_csp(args.endpoint, args.web_revision)}
         if args.web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION:
             expected_csps.add(private_csp(args.endpoint, args.web_revision, discovery_ready=False))
+            expected_csps.add(private_csp(args.endpoint, args.web_revision, frame_ancestors=True))
+            expected_csps.add(private_csp(
+                args.endpoint,
+                args.web_revision,
+                discovery_ready=False,
+                frame_ancestors=True,
+            ))
         checks["privateCSP"] = (
             len(csp_parser.policies) == 1
             and csp_parser.policies[0] in expected_csps
