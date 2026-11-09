@@ -754,7 +754,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		s.logNegotiation(err, nil)
 		return
 	}
-	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
+	connectionID := s.newConnectionID()
+	openedAt := time.Now()
+	s.logConnectionOpened(websocketPath, connectionID, openedAt)
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 	var closeErr error
 	defer func() {
 		if cause, set := state.socket.lifecycleCloseCauseValue(); set {
