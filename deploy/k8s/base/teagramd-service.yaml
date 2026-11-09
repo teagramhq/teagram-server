@@ -21,6 +21,12 @@ spec:
     - name: bot-api
       port: 2447
       targetPort: bot-api-ingress
+    - name: public-websocket
+      port: 2446
+      targetPort: 2446
+    - name: public-bot-api
+      port: 2449
+      targetPort: 2449
 ---
 apiVersion: v1
 kind: Service

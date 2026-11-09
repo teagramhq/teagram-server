@@ -172,6 +172,91 @@ cutover_web_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teag
   fail 'the cutover web Service must address the teagram-web deployment on port 8080'
 grep --fixed-strings --quiet -- 'http://web:8080' deploy/k8s/base/linkselector-deployment.yaml ||
   fail 'linkselector must resolve its web backend through the in-cluster web Service'
+if grep --fixed-strings --quiet 'teagramd' deploy/k8s/base/linkselector-deployment.yaml; then
+  fail 'linkselector must not forward public or tailnet requests to teagramd'
+fi
+[[ "$(yq -r '.spec.type' deploy/k8s/base/linkselector-service.yaml)" == ClusterIP &&
+   "$(yq -r '.spec.ports[] | select(has("nodePort")) | .nodePort' deploy/k8s/base/linkselector-service.yaml)" == '' ]] ||
+  fail 'linkselector must remain a ClusterIP-only Service'
+[[ "$(yq -r 'select(.metadata.name == "teagramd") | .spec.type' deploy/k8s/base/teagramd-service.yaml)" == ClusterIP &&
+   "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(has("nodePort")) | .nodePort' deploy/k8s/base/teagramd-service.yaml)" == '' &&
+   "$(yq -r 'select(.metadata.name == "teagramd") | [.spec.ports[] | [.name, .port] | join(":")] | join(",")' deploy/k8s/base/teagramd-service.yaml)" == \
+     'mtproto:2443,websocket:2444,admin:2445,bot-api:2447,public-websocket:2446,public-bot-api:2449' ]] ||
+  fail 'teagramd Services must stay internal and expose only the reviewed listener ports'
+[[ "$(yq -r '.spec.ingress | length' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 2 &&
+   "$(yq -r '[.spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/name"] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 'tailscale-proxy,cloudflared' &&
+   "$(yq -r '[.spec.ingress[0].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2443,2444,2445,2448' &&
+   "$(yq -r '[.spec.ingress[1].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2446,2449' ]] ||
+  fail 'the default-deny teagramd policy must isolate tailnet and public listener ports by pod identity'
+if grep --fixed-strings --quiet 'ipBlock:' deploy/k8s/base/teagramd-networkpolicy.yaml; then
+  fail 'teagramd ingress must be admitted by trusted pod selectors, not pod CIDRs'
+fi
+serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
+jq --exit-status '
+  .TCP["443"].HTTPS == true and
+  .TCP["2443"].TCPForward == "teagramd:2443" and
+  .TCP["2447"].TCPForward == "teagramd:2447" and
+  .TCP["2447"].ProxyProtocol == 1 and
+  ((.TCP | keys | sort) == ["2443", "2447", "443"]) and
+  (has("AllowFunnel") | not) and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/"] .Proxy == "http://linkselector:8081" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/apiws"].Proxy == "http://teagramd:2444" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/teagramd/client"].Proxy == "http://teagramd:2444" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/telegramd/client"].Proxy == "http://teagramd:2444" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/admin"].Proxy == "http://teagramd:2445"
+' <<<"$serve_config" >/dev/null ||
+  fail 'the Tailscale Serve config must contain only the named tailnet Service targets and ports'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .image' deploy/k8s/base/tailscale-proxy.yaml)" == \
+     'ghcr.io/tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_KUBE_SECRET") | .value' deploy/k8s/base/tailscale-proxy.yaml)" == teagram-tailscale-state &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_AUTHKEY") | .valueFrom.secretKeyRef.name' deploy/k8s/base/tailscale-proxy.yaml)" == tailscale-auth &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_AUTHKEY") | .valueFrom.secretKeyRef.key' deploy/k8s/base/tailscale-proxy.yaml)" == authkey &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .securityContext.capabilities.add // [] | length' deploy/k8s/base/tailscale-proxy.yaml)" == 0 &&
+   "$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "tailscale-proxy") | .spec.template.spec.hostNetwork // false' deploy/k8s/base/tailscale-proxy.yaml)" == false ]] ||
+  fail 'the proxy must use a pinned userspace image, external key, stable state Secret, and no host networking or added capabilities'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_USERSPACE") | .value' deploy/k8s/base/tailscale-proxy.yaml)" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_HOSTNAME") | .value' deploy/k8s/base/tailscale-proxy.yaml)" == teagram &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_AUTH_ONCE") | .value' deploy/k8s/base/tailscale-proxy.yaml)" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .livenessProbe // "none"' deploy/k8s/base/tailscale-proxy.yaml)" == none &&
+   "$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "tailscale-proxy") | .spec.replicas' deploy/k8s/base/tailscale-proxy.yaml)" == 1 &&
+   "$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "tailscale-proxy") | .spec.template.spec.serviceAccountName' deploy/k8s/base/tailscale-proxy.yaml)" == tailscale-proxy ]] ||
+  fail 'the proxy must preserve the teagram node identity without auth churn or liveness restarts'
+[[ "$(yq -r 'select(.kind == "Role" and .metadata.name == "tailscale-proxy-state") | .rules[0].verbs | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == 'get,update,patch' &&
+   "$(yq -r 'select(.kind == "Role" and .metadata.name == "tailscale-proxy-state") | .rules[0].resourceNames | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == teagram-tailscale-state &&
+   "$(yq -r 'select(.kind == "Role" and .metadata.name == "teagram-deployer-networkpolicy") | .rules[0].resources | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == networkpolicies &&
+   "$(yq -r 'select(.kind == "Role" and .metadata.name == "teagram-deployer-networkpolicy") | .rules[0].verbs | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == 'get,list,watch,create,patch' ]] ||
+  fail 'Tailscale state and deployer NetworkPolicy RBAC must remain resource- and namespace-scoped'
+grep --fixed-strings --quiet -- '--dry-run' deploy/k8s/install-tailnet-proxy-access.sh &&
+grep --fixed-strings --quiet -- '--rollback' deploy/k8s/install-tailnet-proxy-access.sh ||
+  fail 'the one-time tailnet installer must provide a dry-run and exact rollback'
+grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
+  fail 'the shared discovery probe must send the v1 half-close request'
+ingress_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Probe Tailscale, cloudflared, and denied in-cluster ingress") | .run' .github/workflows/ci.yml)"
+[[ "$ingress_step" == *'test-service-ingress.py'* &&
+   "$ingress_step" != *'kubectl port-forward'* ]] ||
+  fail 'k8s-deploy must exercise ingress from in-cluster identities without port-forward'
+if yq -r '.jobs."test-k8s-deploy".steps[].run // ""' .github/workflows/ci.yml |
+  grep --fixed-strings --quiet 'kubectl port-forward'; then
+  fail 'k8s-deploy must not use port-forward for any smoke test'
+fi
+grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
+  fail 'the tailnet Bot API check must send a PROXY v1 header'
+grep --fixed-strings --quiet 'status_line' deploy/k8s/test-networkpolicy.py &&
+grep --fixed-strings --quiet '401' deploy/k8s/test-networkpolicy.py ||
+  fail 'the Bot API probe must exercise an unauthenticated request and inspect its response'
+[[ "$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "tailscale-proxy") | .spec.replicas' deploy/k8s/ci/tailscale-proxy-ci.yaml)" == 0 ]] ||
+  fail 'the disposable k3s lane must not authenticate a production Tailscale device'
+cutover_plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"
+[[ "$cutover_plan" == *'source teagram LXC was deleted'* &&
+   "$cutover_plan" != *'Serve'* && "$cutover_plan" != *'port-forward'* ]] ||
+  fail 'the retired cutover dry-run must not describe host-side ingress changes'
+if deploy/k8s/cutover-alpha.sh --apply >/dev/null 2>&1; then
+  fail 'the retired cutover script must refuse production apply'
+fi
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ["deploy/k8s/probe-discovery.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
+  fail 'the in-cluster ingress probe scripts must parse as Python'
+grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
+  fail 'the shared discovery probe must send the v1 half-close request'
 if [[ "$(yq -r '.jobs."test-k8s-deploy".permissions.packages // "none"' .github/workflows/ci.yml)" != none ]]; then
   fail 'the k3s deployment lane must not require GHCR package credentials'
 fi

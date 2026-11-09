@@ -3,6 +3,8 @@ kind: Kustomization
 namespace: teagram
 resources:
   - ../prod
+  - tailnet-policy-probes.yaml
+  - mtproto-probe-job.yaml
 configMapGenerator:
   - name: required-migration-version
     behavior: replace
@@ -29,3 +31,4 @@ images:
     newTag: ci
 patches:
   - path: cloudflared-ci.yaml
+  - path: tailscale-proxy-ci.yaml

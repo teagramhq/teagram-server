@@ -76,9 +76,9 @@ usage() {
 Usage: cutover-alpha.sh --dry-run | --apply | --rollback
        cutover-alpha.sh --apply|--rollback --test-mode (disposable CI namespace only)
 
-  --dry-run  Print the complete plan without contacting alpha or the cluster.
-  --apply    Run once as root on alpha after bootstrap and before production data is in k3s.
-  --rollback Restore the old Tailscale and Cloudflare edges; the old Compose data stays intact.
+  --dry-run  Confirm the retired cutover path performs no host or cluster actions.
+  --apply    Retired; the source teagram LXC has been deleted.
+  --rollback Retired; there is no LXC edge to restore.
 EOF
 }
 
@@ -113,11 +113,22 @@ if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && ${2:-} != --test-mode ) ]]; then
   exit 64
 fi
 case "$1" in
-  --dry-run) dry_run; exit 0 ;;
+  --dry-run)
+    if [[ $TEST_MODE == false ]]; then
+      printf 'Retired: the source teagram LXC was deleted; production cutover performs no actions.\n'
+      exit 0
+    fi
+    dry_run
+    exit 0
+    ;;
   --apply|--rollback) ACTION=$1 ;;
   --help|-h) usage; exit 0 ;;
   *) usage >&2; exit 64 ;;
 esac
+
+if [[ $TEST_MODE == false ]]; then
+  fail 'production cutover is retired because the source teagram LXC was deleted; use the in-cluster ingress procedure in deploy/k8s/README.md'
+fi
 
 if [[ $TEST_MODE == false ]]; then
   [[ $(id -u) -eq 0 ]] || fail "run $ACTION as root on alpha"

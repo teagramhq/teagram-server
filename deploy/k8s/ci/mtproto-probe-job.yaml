@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mtproto-smoke
+  labels:
+    app.kubernetes.io/name: tailscale-proxy
+    app.kubernetes.io/component: ci-probe
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tailscale-proxy
+        app.kubernetes.io/component: ci-probe
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          image: ghcr.io/teagramhq/teagramd:ci
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/mtproto-smoke
+            - --endpoint
+            - teagramd:2443
+            - --discovery-file
+            - /client/client.json
+          volumeMounts:
+            - name: client-config
+              mountPath: /client
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: client-config
+          configMap:
+            name: mtproto-probe-client

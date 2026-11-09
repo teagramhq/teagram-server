@@ -7,12 +7,17 @@ spec:
     spec:
       containers:
         - name: cloudflared
-          image: mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
           imagePullPolicy: IfNotPresent
-          command: ["sh", "-ec"]
-          args: ["exec sleep 3600"]
+          command: ["python3", "-c", "import time; time.sleep(3600)"]
           env:
             - $patch: replace
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: ingress-probes
+              mountPath: /tests
+              readOnly: true
           startupProbe:
             $patch: replace
             exec:
@@ -34,3 +39,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
+      volumes:
+        - name: ingress-probes
+          configMap:
+            name: k8s-ingress-probes
