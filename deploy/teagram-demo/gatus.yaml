@@ -24,10 +24,11 @@ endpoints:
     group: teagram-demo
     url: https://demo.teagram.io/apiws
     interval: 1m
+    headers:
+      Origin: https://web.teagram.io
     conditions:
-      # A non-upgrade GET has no Origin, so browser-only policy rejects it
-      # before upgrade validation. A 502 means the backend path is unavailable.
-      - "[STATUS] == 403"
+      # An allowed-Origin GET reaches the listener; without Upgrade it returns 400.
+      - "[STATUS] == 400"
       - "[CERTIFICATE_EXPIRATION] > 72h"
 
   - name: Admin remains private

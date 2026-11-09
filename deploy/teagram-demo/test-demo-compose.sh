@@ -763,7 +763,8 @@ grep -Fq 'host: 127.0.0.1' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'port: 3128' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
-grep -Fq '"[STATUS] == 403"' "$SCRIPT_DIR/gatus.yaml"
+grep -Fq 'Origin: https://web.teagram.io' "$SCRIPT_DIR/gatus.yaml"
+grep -Fq '"[STATUS] == 400"' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
   printf 'legacy ops fingerprint config copy does not match the mounted Nginx config\n' >&2
