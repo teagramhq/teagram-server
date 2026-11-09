@@ -3,19 +3,36 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the twelve current operations: `target-failure-report`, `rollout-evidence`,
+the thirteen current operations: `target-failure-report`, `rollout-evidence`,
 `invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
 `encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
-`bot-api-qa`, `bot-api-qa-bot`, and `quarantine-unaccounted-media`. A script's
+`bot-api-qa`, `bot-api-qa-bot`, `quarantine-unaccounted-media`, and
+`qa-password-timestamps`. A script's
 presence in an older main commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names
 at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
 secrets in arguments, logs, or output.
+
+## QA password timestamps
+
+`qa-password-timestamps` is a no-argument, read-only query for the `test1` and
+`test2` accounts. It checks the running server and Postgres container identities
+and the live S3 Compose selection before querying `user_passwords.updated_at`.
+Its output contains only each fixed handle and its UTC timestamp, or `NULL` if
+the account has no password row. The schema has no separate password-change
+timestamp; `updated_at` is refreshed when the password row is updated. The
+operation never selects or prints salts, verifiers, or other password fields.
+
+Run it from its merged `main` commit:
+
+```sh
+ssh teagram run <reviewed-main-sha> qa-password-timestamps
+```
 
 ## Bot API QA
 
@@ -95,7 +112,7 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the eleven
+therefore become host-root execution. The dispatcher limits `run` to the thirteen
 current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs

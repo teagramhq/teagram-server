@@ -62,10 +62,9 @@ is root-only mode 0700. Older commits without the tracked file leave the
 installed command in place.
 
 The `run` verb is a root dispatch, not a general Git script runner. It accepts
-only `target-failure-report`, `rollout-evidence`, `invite-web-signup-url`,
-`apply-user-invite-quota`, and `start-server`; an older `main` SHA cannot
-reactivate a removed operation. Any new operation must be added to the
-dispatcher allowlist and its forced-command fixture tests.
+only explicitly allowlisted operations from `deploy/teagram/ops/README.md`; an
+older `main` SHA cannot reactivate a removed operation. Any new operation must
+be added to the dispatcher allowlist and its forced-command fixture tests.
 
 There is no staging LXC. The preview gate is `deploy/teagram/test-deploy-main.sh`
 plus the forced-command fixture suite in CI; these verify the installed bytes,
