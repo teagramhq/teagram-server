@@ -619,8 +619,8 @@ check_contract() {
      "$(query '.jobs.deploy-server.steps[] | select(.id == "digest-artifact") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
     fail 'production image digests must come from the exact selected CI run and commit'
   digest_run="$(query '.jobs.deploy-server.steps[] | select(.id == "digest-artifact") | .run')"
-  grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$digest_run" &&
-    grep -Fq 'k8s-image-digests-$DEPLOY_SHA' <<< "$digest_run" ||
+  { grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$digest_run" &&
+    grep -Fq 'k8s-image-digests-$DEPLOY_SHA' <<< "$digest_run"; } ||
     fail 'the deploy runner must download the selected run artifact named for its commit'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Verify build provenance for every production image") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
     fail 'image provenance must be tied to the selected tested source SHA'
