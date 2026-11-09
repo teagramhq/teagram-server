@@ -24,6 +24,8 @@ type expiredCountFixture struct {
 	owner store.User
 	// lastMillis is the summed server execution time of the last historyCost.
 	lastMillis float64
+	// lastCountRows is the rows the CountChannelHistory statement alone read.
+	lastCountRows int64
 }
 
 func newExpiredCountFixture(t *testing.T, phone string) *expiredCountFixture {
@@ -85,6 +87,7 @@ func (f *expiredCountFixture) seedTTLChannel(title string, live, expired int) in
 // ANALYZE), the reported total count and the IDs of the returned page.
 func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows int64, count int, pageIDs []int64) {
 	f.lastMillis = 0
+	f.lastCountRows = 0
 	f.t.Helper()
 	ctx := context.Background()
 	f.trace.reset()
@@ -120,7 +123,11 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 		f.lastMillis += explained[0].ExecutionTime
 		explained[0].Plan.walk(func(node historyPlanNode) {
 			if node.RelationName == "channel_messages" || node.RelationName == "channel_post_summaries" {
-				rows += int64(node.ActualRows * node.ActualLoops)
+				read := int64(node.ActualRows * node.ActualLoops)
+				rows += read
+				if strings.Contains(query.sql, "-- name: CountChannelHistory") {
+					f.lastCountRows += read
+				}
 			}
 		})
 	}
@@ -154,7 +161,9 @@ func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 		backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
 
 		cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
+		cleanCountRows := f.lastCountRows
 		backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
+		backlogCountRows := f.lastCountRows
 		bound := cleanRows + int64(min(expiredCountExpiredPosts, live))
 		t.Logf("live %d: clean statements/rows = %d/%d, %d expired unswept statements/rows = %d/%d (row bound %d)",
 			live, cleanStatements, cleanRows, expiredCountExpiredPosts, backlogStatements, backlogRows, bound)
@@ -172,6 +181,16 @@ func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 		// never count.
 		if want := live + 1; cleanCount != want || backlogCount != want {
 			t.Fatalf("live %d: history counts clean/backlog = %d/%d, want %d", live, cleanCount, backlogCount, want)
+		}
+		// The count statement alone, in a table that also holds a backlog
+		// channel, must not read the unselected scan's rows: the channel with
+		// no backlog reads no expired rows and, with a backlog sibling, no
+		// unexpired ones either.
+		if cleanCountRows > 200 {
+			t.Fatalf("live %d: count statement of the no-backlog channel read %d rows, want only summary probes", live, cleanCountRows)
+		}
+		if want := int64(min(expiredCountExpiredPosts, live)); backlogCountRows > 200+want {
+			t.Fatalf("live %d: count statement with backlog read %d rows, want summary probes + min(backlog, live) = %d", live, backlogCountRows, want)
 		}
 		if backlogStatements != cleanStatements {
 			t.Fatalf("live %d: statements with backlog = %d, no backlog = %d, want equal", live, backlogStatements, cleanStatements)

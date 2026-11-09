@@ -1040,23 +1040,21 @@ WITH member AS MATERIALIZED (
 ), expired_scan AS (
     SELECT count(*)::bigint AS count
     FROM member
-    JOIN plan
-      ON plan.scan_expired
     JOIN channel_messages AS expired
       ON expired.channel_id = sqlc.arg(channel_id)::bigint
      AND expired.expires_at <= statement_timestamp()
-    WHERE expired.local_id > member.available_min_id
+    WHERE (SELECT plan.scan_expired FROM plan)
+      AND expired.local_id > member.available_min_id
       AND expired.deleted = false
       AND expired.action_type = 0
 ), unexpired_scan AS (
     SELECT count(*)::bigint AS count
     FROM member
-    JOIN plan
-      ON plan.scan_unexpired
     JOIN channel_messages AS live
       ON live.channel_id = sqlc.arg(channel_id)::bigint
      AND live.expires_at > statement_timestamp()
-    WHERE live.local_id > member.available_min_id
+    WHERE (SELECT plan.scan_unexpired FROM plan)
+      AND live.local_id > member.available_min_id
       AND live.deleted = false
       AND live.action_type = 0
 )
