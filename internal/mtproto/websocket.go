@@ -138,6 +138,7 @@ type webSocketAcceptedConn struct {
 	deadline       time.Time
 	connectionID   string
 	openedAt       time.Time
+	upgradeResult  chan struct{}
 	// lifecycleCloseCauseSet distinguishes an explicit nil server-close cause
 	// from a socket closed by the peer.
 	lifecycleCloseCause    error
@@ -195,6 +196,7 @@ func (c *webSocketAcceptedConn) publishConnectionIdentity(connectionID string, o
 		}
 		c.connectionID = connectionID
 		c.openedAt = openedAt
+		c.upgradeResult = make(chan struct{})
 		c.state.Unlock()
 		c.listener.pendingMu.Unlock()
 		return true
@@ -206,19 +208,36 @@ func (c *webSocketAcceptedConn) publishConnectionIdentity(connectionID string, o
 	}
 	c.connectionID = connectionID
 	c.openedAt = openedAt
+	c.upgradeResult = make(chan struct{})
 	return true
 }
 
-// logOpenedIfActive orders the open record before any close record while
-// keeping the HTTP upgrade itself outside the close mutex.
-func (c *webSocketAcceptedConn) logOpenedIfActive(logOpen func()) bool {
+// completeWebSocketUpgrade publishes the upgrade result to lifecycle callbacks.
+// A successful upgrade is logged even when a concurrent close has already
+// started, so its eventual close record can still be correlated with the open.
+func (c *webSocketAcceptedConn) completeWebSocketUpgrade(success bool, logOpen func()) {
 	c.state.Lock()
 	defer c.state.Unlock()
-	if c.closed {
-		return false
+	done := c.upgradeResult
+	if done == nil {
+		return
 	}
-	logOpen()
-	return true
+	if success {
+		logOpen()
+	}
+	c.upgradeResult = nil
+	close(done)
+}
+
+// waitForWebSocketUpgrade keeps lifecycle records behind the handler's result
+// without making socket closure wait for HTTP upgrade I/O.
+func (c *webSocketAcceptedConn) waitForWebSocketUpgrade() {
+	c.state.Lock()
+	done := c.upgradeResult
+	c.state.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func (c *webSocketAcceptedConn) identityLogAttrs() []any {
@@ -378,8 +397,10 @@ func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 		accepted.preAuthClosing = true
 		l.pendingMu.Unlock()
 
-		if err := accepted.closeWithLifecycleCause(context.DeadlineExceeded); err != nil && !isDisconnect(err) {
-			attrs := append(accepted.identityLogAttrs(), "err", err)
+		closeErr := accepted.closeWithLifecycleCause(context.DeadlineExceeded)
+		accepted.waitForWebSocketUpgrade()
+		if closeErr != nil && !isDisconnect(closeErr) {
+			attrs := append(accepted.identityLogAttrs(), "err", closeErr)
 			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", attrs...)
 		}
 		if dropped, ok := l.server.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
@@ -804,23 +825,27 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	if !state.socket.publishConnectionIdentity(connectionID, openedAt) {
 		return
 	}
+	upgradeCompleted := false
+	defer func() {
+		if !upgradeCompleted {
+			state.socket.completeWebSocketUpgrade(false, nil)
+		}
+	}()
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols:    []string{"binary"},
 		CompressionMode: websocket.CompressionDisabled,
 		OriginPatterns:  originPatterns,
 	})
 	if err != nil {
+		state.socket.completeWebSocketUpgrade(false, nil)
+		upgradeCompleted = true
 		s.logNegotiation(err, nil)
 		return
 	}
-	if !state.socket.logOpenedIfActive(func() {
+	state.socket.completeWebSocketUpgrade(true, func() {
 		s.logConnectionOpened(websocketPath, connectionID, openedAt)
-	}) {
-		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
-			s.log.Info("close WebSocket connection after concurrent close", "err", err)
-		}
-		return
-	}
+	})
+	upgradeCompleted = true
 	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 	var closeErr error
 	defer func() {
