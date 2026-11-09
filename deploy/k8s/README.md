@@ -51,9 +51,10 @@ access path.
 
 The deploy job cannot update its own Role. When its allowed resource kinds
 change, reapply `deployer-access.yaml` with the root-only cutover kubeconfig
-before the next release; the workflow checks its required backup permissions
-before creating any resources. After this change merges, refresh the role from
-the reviewed checkout on alpha before the first `Deploy.` run:
+before the next release; the workflow checks the permissions required for
+backup and rollback before creating any resources. After this change merges,
+refresh the role from the reviewed checkout on alpha before the first `Deploy.`
+run:
 
 ```sh
 sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
@@ -252,9 +253,12 @@ matching database snapshot because the Job does not run down migrations.
 `Deploy.` records the prior revisions of PostgreSQL, RustFS, teagramd, the link
 edge Deployments, and cloudflared. If apply, a Job, rollout, or smoke fails, its
 release runner issues `kubectl rollout undo` for each changed controller and
-waits for the previous revision to become ready. If an Atlas migration already
-completed, use the matching pre-deploy dump on the `postgres-backups` PVC before
-resuming application traffic.
+waits for the previous revision to become ready. After a StatefulSet rollback,
+it deletes only Pods whose `controller-revision-hash` differs from the restored
+revision; Kubernetes can otherwise leave an unready Pod on the failed template
+and stall the rollback. If an Atlas migration already completed, use the
+matching pre-deploy dump on the `postgres-backups` PVC before resuming
+application traffic.
 
 The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
 target `http://linkselector:8081`. The selector sends the exact public API paths

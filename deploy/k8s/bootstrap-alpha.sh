@@ -884,6 +884,7 @@ expect_deployer_can_i yes create persistentvolumeclaims --namespace teagram
 expect_deployer_can_i yes patch persistentvolumeclaims --namespace teagram
 expect_deployer_can_i yes list pods --namespace teagram
 expect_deployer_can_i yes get pods --subresource=log --namespace teagram
+expect_deployer_can_i yes delete pods --namespace teagram
 expect_deployer_can_i yes list events --namespace teagram
 expect_deployer_can_i no create pods --namespace teagram
 for secret_verb in get list watch create update patch delete; do

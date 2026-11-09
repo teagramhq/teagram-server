@@ -12,10 +12,12 @@ holds a copy of that kubeconfig. It does not cover the RSA server identity
 The token is the only credential a deploy job presents to the k3s API. Its
 Role can create, get, list, patch and watch Deployments and StatefulSets,
 Jobs, Services and ConfigMaps in `teagram`. It can read ReplicaSets and
-ControllerRevisions for rollout history and undo, PVCs, Pods, events and Pod
-logs. It cannot read or write Secrets, create Pods, ServiceAccounts,
-TokenRequests, Roles or RoleBindings. The production overlay's generated
-ConfigMaps and workload resources fit this allowlist.
+ControllerRevisions for rollout history and undo, and read PVCs, Pods, events
+and Pod logs. It can delete namespace Pods so the release runner can replace a
+stuck StatefulSet Pod after reverting its template. It cannot read or write
+Secrets, create Pods, ServiceAccounts, TokenRequests, Roles or RoleBindings.
+The production overlay's generated ConfigMaps and workload resources fit this
+allowlist.
 
 ## Actors and trust
 
@@ -124,8 +126,9 @@ rotation.
 ## Residual risk
 
 - A holder of the token can change or disrupt production workloads and may
-  expose namespace Secrets by mounting them into workloads. The token has no
-  direct Secret read or write permission.
+  delete namespace Pods or expose namespace Secrets by mounting them into
+  workloads. The token has no direct Secret read or write permission, and
+  controllers recreate deleted workload Pods.
 - The token does not expire and is valid until its Secret is deleted.
 - Secrets sit in plaintext in the k3s datastore until encryption at rest is
   enabled.

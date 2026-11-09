@@ -17,6 +17,7 @@ namespace=teagram
 rollout_timeout="${ROLLOUT_TIMEOUT:-300s}"
 apply_started=false
 declare -A baseline_revisions=()
+declare -A baseline_statefulset_hashes=()
 readonly controllers=(
   statefulset/postgres
   statefulset/rustfs
@@ -38,6 +39,53 @@ controller_revision() {
     kubectl get "$resource" --namespace "$namespace" \
       --output 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}'
   fi
+}
+
+wait_for_statefulset_revision() {
+  local resource="$1" expected_revision="$2" revision deadline=$((SECONDS + 60))
+  while ((SECONDS < deadline)); do
+    if ! revision="$(kubectl get "$resource" --namespace "$namespace" \
+      --output 'jsonpath={.status.updateRevision}')"; then
+      return 1
+    fi
+    if [[ "$revision" == "$expected_revision" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'rollback=failed resource=%s reason=statefulset-revision-not-restored expected=%s actual=%s\n' \
+    "$resource" "$expected_revision" "${revision:-unknown}" >&2
+  return 1
+}
+
+delete_stale_statefulset_pods() {
+  local resource="$1" expected_revision="$2" name pods_json stale_pods pod
+  name="${resource#statefulset/}"
+  if ! pods_json="$(kubectl get pods --namespace "$namespace" --output json)"; then
+    printf 'rollback=failed resource=%s reason=pods-unreadable\n' "$resource" >&2
+    return 1
+  fi
+  if ! stale_pods="$(jq -r --arg name "$name" --arg revision "$expected_revision" '
+    .items[]?
+    | select(any(.metadata.ownerReferences[]?; .kind == "StatefulSet" and .name == $name))
+    | select(.metadata.labels["controller-revision-hash"] != $revision)
+    | .metadata.name
+  ' <<< "$pods_json")"; then
+    printf 'rollback=failed resource=%s reason=pods-unparseable\n' "$resource" >&2
+    return 1
+  fi
+  [[ -n "$stale_pods" ]] || return 0
+  while IFS= read -r pod; do
+    [[ -n "$pod" ]] || continue
+    printf 'rollback=replacing-stale-pod resource=%s pod=%s revision=%s\n' \
+      "$resource" "$pod" "$expected_revision" >&2
+    if ! kubectl delete pod "$pod" --namespace "$namespace" \
+      --ignore-not-found=true --wait=true --timeout="$rollout_timeout"; then
+      printf 'rollback=failed resource=%s pod=%s reason=stale-pod-delete-failed\n' \
+        "$resource" "$pod" >&2
+      return 1
+    fi
+  done <<< "$stale_pods"
 }
 
 rollback() {
@@ -67,6 +115,17 @@ rollback() {
         rollback_failed=1
         continue
       fi
+      if [[ "$kind" == statefulset ]]; then
+        local baseline_hash="${baseline_statefulset_hashes[$resource]:-}"
+        if [[ -z "$baseline_hash" ]] ||
+          ! wait_for_statefulset_revision "$resource" "$baseline_hash" ||
+          ! delete_stale_statefulset_pods "$resource" "$baseline_hash"; then
+          printf 'rollback=failed resource=%s reason=statefulset-pod-repair-failed\n' \
+            "$resource" >&2
+          rollback_failed=1
+          continue
+        fi
+      fi
       if ! kubectl rollout status "$resource" --namespace "$namespace" \
         --timeout="$rollout_timeout"; then
         printf 'rollback=failed resource=%s reason=rollout-not-ready\n' "$resource" >&2
@@ -87,6 +146,15 @@ trap 'printf "deploy-release failed at line %s: %s\\n" "$LINENO" "$BASH_COMMAND"
 kubectl apply --dry-run=server --filename "$manifest"
 for resource in "${controllers[@]}"; do
   kind="${resource%%/*}"
+  if [[ "$kind" == statefulset ]]; then
+    baseline_hash="$(kubectl get "$resource" --namespace "$namespace" \
+      --output 'jsonpath={.status.updateRevision}')"
+    [[ -n "$baseline_hash" ]] || {
+      printf 'deploy-release: no stable prior revision for %s\n' "$resource" >&2
+      exit 1
+    }
+    baseline_statefulset_hashes["$resource"]="$baseline_hash"
+  fi
   baseline="$(controller_revision "$resource" "$kind")"
   [[ "$baseline" =~ ^[1-9][0-9]*$ ]] || {
     printf 'deploy-release: no stable prior revision for %s\n' "$resource" >&2

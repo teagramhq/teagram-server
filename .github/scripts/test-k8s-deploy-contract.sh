@@ -617,6 +617,15 @@ grep --fixed-strings --quiet 'expect_deployer_can_i yes create cronjobs.batch' d
   fail 'alpha bootstrap must verify backup CronJob permissions'
 grep --fixed-strings --quiet 'expect_deployer_can_i yes create persistentvolumeclaims' deploy/k8s/bootstrap-alpha.sh ||
   fail 'alpha bootstrap must verify backup PVC permissions'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes delete pods --namespace teagram' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify the pod deletion permission needed for StatefulSet rollback'
+grep --fixed-strings --quiet 'resources: ["pods"]' deploy/k8s/deployer-access.yaml ||
+  fail 'the deployer Role must scope recovery deletion to namespace Pods'
+grep --fixed-strings --quiet 'verbs: ["delete"]' deploy/k8s/deployer-access.yaml ||
+  fail 'the deployer Role must allow deleting stuck StatefulSet Pods during rollback'
+rbac_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verify deployer RBAC and Pod Security boundaries") | .run' .github/workflows/ci.yml)"
+[[ "$rbac_step" == *'expect_deployer_can_i yes delete pods --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can delete recovery Pods'
 
 release_script=deploy/k8s/deploy-release.sh
 release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$manifest"' "$release_script" | cut -d: -f1)"
@@ -636,6 +645,10 @@ grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script
   fail 'the release runner must automatically undo changed workload revisions on failure'
 grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
   fail 'the release runner must wait for every production workload rollout'
+grep --fixed-strings --quiet 'kubectl delete pod "$pod"' "$release_script" ||
+  fail 'the release runner must replace failed StatefulSet Pods after reverting their template'
+grep --fixed-strings --quiet 'controller-revision-hash' "$release_script" ||
+  fail 'the release runner must preserve Pods already on the restored StatefulSet revision'
 grep --fixed-strings --quiet 'expected exactly one ready k3s tunnel connector' "$release_script" ||
   fail 'the production release must leave exactly one ready k3s tunnel connector'
 

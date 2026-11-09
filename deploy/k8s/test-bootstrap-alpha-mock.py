@@ -303,10 +303,13 @@ def kubectl(args, state):
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
             elif group == "" and resource in ("configmaps", "services"):
                 allowed = verb in {"create", "get", "list", "patch", "watch"}
-            elif group == "" and resource in ("persistentvolumeclaims", "pods", "events"):
+            elif group == "" and resource in ("persistentvolumeclaims", "events"):
                 allowed = verb in {"get", "list", "watch"}
-            elif group == "" and resource == "pods" and subresource == "log":
-                allowed = verb == "get"
+            elif group == "" and resource == "pods":
+                allowed = (
+                    (subresource == "" and verb in {"get", "list", "watch", "delete"})
+                    or (subresource == "log" and verb == "get")
+                )
         elif (namespace == NAMESPACE and
               subject == "system:serviceaccount:teagram:teagram-agent"):
             if group == "" and resource == "pods" and subresource == "log":

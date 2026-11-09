@@ -639,10 +639,10 @@ check_contract() {
   deploy_preflight_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Validate the production release manifest") | .run')"
   [[ "$deploy_preflight_run" == *'kubectl create --dry-run=server --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml'* ]] ||
     fail 'the restricted deployer must server-dry-run the maintenance Job before applying resources'
-  for permission in 'create cronjobs.batch' 'get cronjobs.batch' \
+  for permission in 'delete pods' 'create cronjobs.batch' 'get cronjobs.batch' \
     'create persistentvolumeclaims' 'patch persistentvolumeclaims'; do
     grep -Fq "kubectl auth can-i $permission --namespace teagram" <<< "$deploy_preflight_run" ||
-      fail 'the restricted deployer must verify backup resource permissions before applying'
+      fail 'the restricted deployer must verify its required namespace permissions before applying'
   done
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Take and verify a pre-deploy PostgreSQL backup") | .run')" == *'kubectl create job "$BACKUP_JOB" --from=cronjob/postgres-backup'*'backup=verified'* ]] ||
     fail 'the production release must verify a fresh PostgreSQL dump before deploying'
