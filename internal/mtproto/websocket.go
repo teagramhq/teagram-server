@@ -125,9 +125,10 @@ type webSocketAcceptedConn struct {
 	handlerTracked  atomic.Bool
 	handlerStarted  atomic.Bool
 	handlerDoneOnce sync.Once
-	// Lock order: prepare may hold state while keyAddr acquires the pre-auth
-	// limiter mutex. Close releases state before slot.clear(), so no path takes
-	// those two locks in the reverse order.
+	// Lock order: publishConnectionIdentity takes pendingMu before state.
+	// prepare may hold state while keyAddr acquires the pre-auth limiter mutex.
+	// Close releases state before slot.clear and untrack, so neither order is
+	// reversed.
 	state  sync.Mutex
 	closed bool
 	// preAuthClosing is protected by webSocketListener.pendingMu. It prevents
@@ -135,6 +136,9 @@ type webSocketAcceptedConn struct {
 	preAuthClosing bool
 	addr           netip.Addr
 	deadline       time.Time
+	connectionID   string
+	openedAt       time.Time
+	upgradeResult  chan struct{}
 	// lifecycleCloseCauseSet distinguishes an explicit nil server-close cause
 	// from a socket closed by the peer.
 	lifecycleCloseCause    error
@@ -175,6 +179,73 @@ func (c *webSocketAcceptedConn) lifecycleCloseCauseValue() (error, bool) {
 	return c.lifecycleCloseCause, c.lifecycleCloseCauseSet
 }
 
+// publishConnectionIdentity gives lifecycle callbacks the identity before the
+// HTTP upgrade starts, without holding the close mutex during upgrade I/O.
+func (c *webSocketAcceptedConn) publishConnectionIdentity(connectionID string, openedAt time.Time) bool {
+	if c.listener != nil {
+		c.listener.pendingMu.Lock()
+		if _, tracked := c.listener.pending[c]; !tracked || c.preAuthClosing {
+			c.listener.pendingMu.Unlock()
+			return false
+		}
+		c.state.Lock()
+		if c.closed {
+			c.state.Unlock()
+			c.listener.pendingMu.Unlock()
+			return false
+		}
+		c.connectionID = connectionID
+		c.openedAt = openedAt
+		c.upgradeResult = make(chan struct{})
+		c.state.Unlock()
+		c.listener.pendingMu.Unlock()
+		return true
+	}
+	c.state.Lock()
+	defer c.state.Unlock()
+	if c.closed {
+		return false
+	}
+	c.connectionID = connectionID
+	c.openedAt = openedAt
+	c.upgradeResult = make(chan struct{})
+	return true
+}
+
+// completeWebSocketUpgrade publishes the upgrade result to lifecycle callbacks.
+// A successful upgrade is logged even when a concurrent close has already
+// started, so its eventual close record can still be correlated with the open.
+func (c *webSocketAcceptedConn) completeWebSocketUpgrade(success bool, logOpen func()) {
+	c.state.Lock()
+	defer c.state.Unlock()
+	done := c.upgradeResult
+	if done == nil {
+		return
+	}
+	if success {
+		logOpen()
+	}
+	c.upgradeResult = nil
+	close(done)
+}
+
+// waitForWebSocketUpgrade keeps lifecycle records behind the handler's result
+// without making socket closure wait for HTTP upgrade I/O.
+func (c *webSocketAcceptedConn) waitForWebSocketUpgrade() {
+	c.state.Lock()
+	done := c.upgradeResult
+	c.state.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *webSocketAcceptedConn) identityLogAttrs() []any {
+	c.state.Lock()
+	defer c.state.Unlock()
+	return connectionIdentityLogAttrs(c.connectionID, c.openedAt)
+}
+
 func (c *webSocketAcceptedConn) markServing() bool {
 	if c.listener == nil {
 		c.serving.Store(true)
@@ -207,9 +278,9 @@ type webSocketListener struct {
 	acceptDone        chan struct{}
 	closeOnce         sync.Once
 
-	// pendingMu is a leaf bookkeeping lock. It is never held while calling
-	// pre-auth, socket or server methods, so it cannot order against any other
-	// lock in the connection path.
+	// pendingMu protects pending and preAuthClosing. publishConnectionIdentity
+	// nests accepted.state beneath it; no path acquires pendingMu while holding
+	// state. It is released before pre-auth, socket, or server operations.
 	pendingMu sync.Mutex
 	pending   map[*webSocketAcceptedConn]struct{}
 	live      sync.WaitGroup
@@ -326,12 +397,16 @@ func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 		accepted.preAuthClosing = true
 		l.pendingMu.Unlock()
 
-		if err := accepted.closeWithLifecycleCause(context.DeadlineExceeded); err != nil && !isDisconnect(err) {
-			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", "err", err)
+		closeErr := accepted.closeWithLifecycleCause(context.DeadlineExceeded)
+		accepted.waitForWebSocketUpgrade()
+		if closeErr != nil && !isDisconnect(closeErr) {
+			attrs := append(accepted.identityLogAttrs(), "err", closeErr)
+			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", attrs...)
 		}
 		if dropped, ok := l.server.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
-			l.server.log.Info("WebSocket connection closed at the pre-auth lifetime ceiling",
-				"lifetime", l.server.preAuth.limits.Lifetime, "suppressed", dropped)
+			attrs := accepted.identityLogAttrs()
+			attrs = append(attrs, "lifetime", l.server.preAuth.limits.Lifetime, "suppressed", dropped)
+			l.server.log.Info("WebSocket connection closed at the pre-auth lifetime ceiling", attrs...)
 		}
 	})
 }
@@ -745,16 +820,33 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return
 	}
 
+	connectionID := s.newConnectionID()
+	openedAt := time.Now()
+	if !state.socket.publishConnectionIdentity(connectionID, openedAt) {
+		return
+	}
+	upgradeCompleted := false
+	defer func() {
+		if !upgradeCompleted {
+			state.socket.completeWebSocketUpgrade(false, nil)
+		}
+	}()
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols:    []string{"binary"},
 		CompressionMode: websocket.CompressionDisabled,
 		OriginPatterns:  originPatterns,
 	})
 	if err != nil {
+		state.socket.completeWebSocketUpgrade(false, nil)
+		upgradeCompleted = true
 		s.logNegotiation(err, nil)
 		return
 	}
-	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
+	state.socket.completeWebSocketUpgrade(true, func() {
+		s.logConnectionOpened(websocketPath, connectionID, openedAt)
+	})
+	upgradeCompleted = true
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 	var closeErr error
 	defer func() {
 		if cause, set := state.socket.lifecycleCloseCauseValue(); set {
