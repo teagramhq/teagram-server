@@ -387,6 +387,49 @@ def check_new_live_publication_resolves_without_pin_edit() -> None:
         raise SystemExit("host identity check accepted the stale web publication")
 
 
+def check_published_release_survives_live_publication_update() -> None:
+    responses = published_responses()
+    responses[MODULE.LIVE_MANIFEST_URL] = {
+        "mode": "private",
+        "sourceCommit": "5" * 40,
+        "artifactDigest": "sha256:" + "6" * 64,
+    }
+    key = (SCRIPT.parent / "testdata/reviewed-web-public.txt").read_bytes()
+    target = {
+        "MTPROTO_TARGET_MODE": "private",
+        "MTPROTO_PRIVATE_ENDPOINT": "wss://teagram.tailaa4918.ts.net/apiws",
+        "MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": "ci/private-mtproto-server-public.pem",
+        "publicKeySha256": hashlib.sha256(key).hexdigest(),
+        "fingerprint": "fbb62871f07fae2a",
+    }
+
+    def file_response(content: bytes) -> dict[str, Any]:
+        return {
+            "type": "file",
+            "encoding": "base64",
+            "size": len(content),
+            "content": base64.b64encode(content).decode("ascii"),
+        }
+
+    responses[f"{API_ROOT}/contents/ci/private-mtproto-target.json?ref={SOURCE_SHA}"] = file_response(
+        json.dumps(target).encode()
+    )
+    responses[f"{API_ROOT}/contents/ci/private-mtproto-server-public.pem?ref={SOURCE_SHA}"] = file_response(key)
+    identity = MODULE.validate_published_release_identity(
+        SOURCE_SHA,
+        ARTIFACT_DIGEST,
+        fetch=fake_fetch(responses),
+    )
+    if (
+        identity["sourceCommit"] != SOURCE_SHA
+        or identity["artifactDigest"] != ARTIFACT_DIGEST
+        or identity["runId"] != RUN_ID
+        or identity["endpoint"] != target["MTPROTO_PRIVATE_ENDPOINT"]
+        or identity["fingerprint"] != target["fingerprint"]
+    ):
+        raise SystemExit("a verified pinned release failed after the live publication advanced")
+
+
 def check_existing_publication_baseline() -> None:
     responses = published_responses()
     responses[MODULE.LIVE_MANIFEST_URL] = {
@@ -516,6 +559,7 @@ def main() -> None:
     check_oversized_response_is_rejected()
     check_reviewed_target_and_key()
     check_new_live_publication_resolves_without_pin_edit()
+    check_published_release_survives_live_publication_update()
     check_existing_publication_baseline()
     check_rollback_requires_explicit_dispatch()
     check_live_publication_fails_closed()

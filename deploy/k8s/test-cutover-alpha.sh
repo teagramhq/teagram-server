@@ -43,6 +43,8 @@ for required in \
   fi
 done
 
+# These phrases are literal documentation checks, including backticks.
+# shellcheck disable=SC2016
 for required_runbook in \
   'must stay online because the post-fence source S3 listing' \
   'bucket remains the pre-switch recovery copy for at least seven days' \
@@ -345,6 +347,7 @@ run_production_release_case() (
   eval "$(sed -n '/^validate_release_for_source() {/,/^render_cutover_manifest() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   fail() { printf 'k3s cutover: %s\n' "$*" >&2; exit 1; }
+  # shellcheck disable=SC2329 # This test invokes the stub through eval'd source.
   gh() {
     [[ $1 == attestation && $2 == verify && $4 == --repo &&
       $5 == teagramhq/teagram-server && $6 == --source-ref &&
