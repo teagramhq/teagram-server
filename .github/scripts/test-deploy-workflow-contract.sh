@@ -854,8 +854,16 @@ check_contract() {
     fail 'the restricted cluster kubeconfig must be removed before the demo handoff'
   grep -Fq 'KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}' "$workflow" ||
     fail 'only the restricted cluster kubeconfig secret may be installed in the deploy runner'
-  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Join the tailnet") | .with.ping')" == '100.124.236.66' ]] ||
-    fail 'the deploy runner must join the tailnet before reaching the k3s API'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ steps.kubeconfig.outputs.api_host }}' ]] ||
+    fail 'the deploy runner must ping the k3s API host taken from the kubeconfig secret'
+  kubeconfig_index="$(query '.jobs."deploy-server".steps | map(.name) | to_entries | .[] | select(.value == "Install the restricted cluster kubeconfig") | .key')"
+  tailnet_index="$(query '.jobs."deploy-server".steps | map(.name) | to_entries | .[] | select(.value == "Join the tailnet") | .key')"
+  [[ -n "$kubeconfig_index" && -n "$tailnet_index" && "$kubeconfig_index" -lt "$tailnet_index" ]] ||
+    fail 'the kubeconfig must be installed before the tailnet join that reads its API host'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Install the restricted cluster kubeconfig") | .id')" == kubeconfig ]] ||
+    fail 'the kubeconfig step must expose the API host output'
+  ! grep -Fq '100.124.236.66' "$workflow" ||
+    fail 'the deploy workflow must not name the deleted teagram LXC address'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
   [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
