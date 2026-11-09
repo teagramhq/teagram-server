@@ -57,7 +57,8 @@ func TestChannelHistoryPageCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 // Both page statements return the same rows for every floor, offset, window
 // and bound, over a channel mixing every row class the statements partition:
 // posts with no deadline, unexpired and expired expiring posts, service rows
-// with and without a TTL policy and deleted rows of each.
+// with and without a TTL policy and deleted rows of each, for members with
+// every floor, non-members, banned members and deleted channels.
 func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -98,6 +99,35 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 	stranger := mustUser(t, f.s, "+15551290032")
 
 	compared := 0
+	compare := func(owner, floor, offsetID, addOffset, maxID, minID int64, lim int32) {
+		t.Helper()
+		walk, err := q.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
+			ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		skip, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
+			ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
+			UnexpiredLimit: unexpired,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		walkIDs := make([]int64, len(walk))
+		for i, row := range walk {
+			walkIDs[i] = row.LocalID
+		}
+		skipIDs := make([]int64, len(skip))
+		for i, row := range skip {
+			skipIDs[i] = row.LocalID
+		}
+		if !slices.Equal(walkIDs, skipIDs) {
+			t.Fatalf("owner %d floor %d offset %d add %d max %d min %d lim %d: unexpired page %v, walk page %v",
+				owner, floor, offsetID, addOffset, maxID, minID, lim, skipIDs, walkIDs)
+		}
+		compared++
+	}
 	for _, owner := range []int64{f.owner.ID, stranger.ID} {
 		for _, floor := range []int64{0, 50, 299} {
 			f.exec(`UPDATE channel_participants SET available_min_id = $3 WHERE channel_id = $1 AND user_id = $2`, group.ID, owner, floor)
@@ -106,37 +136,52 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 					for _, maxID := range []int64{0, 200} {
 						for _, minID := range []int64{0, 20} {
 							for _, lim := range []int32{1, 10, 100} {
-								walk, err := q.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
-									ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
-								})
-								if err != nil {
-									t.Fatal(err)
-								}
-								skip, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
-									ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
-									UnexpiredLimit: unexpired,
-								})
-								if err != nil {
-									t.Fatal(err)
-								}
-								walkIDs := make([]int64, len(walk))
-								for i, row := range walk {
-									walkIDs[i] = row.LocalID
-								}
-								skipIDs := make([]int64, len(skip))
-								for i, row := range skip {
-									skipIDs[i] = row.LocalID
-								}
-								if !slices.Equal(walkIDs, skipIDs) {
-									t.Fatalf("owner %d floor %d offset %d add %d max %d min %d lim %d: unexpired page %v, walk page %v",
-										owner, floor, offsetID, addOffset, maxID, minID, lim, skipIDs, walkIDs)
-								}
-								compared++
+								compare(owner, floor, offsetID, addOffset, maxID, minID, lim)
 							}
 						}
 					}
 				}
 			}
+		}
+	}
+
+	// Access state decides visibility in both statements: an active ban, a
+	// channel deleted after the page was last read, and a lapsed ban must
+	// agree. The two denied states must return nothing, so a statement that
+	// ignored them cannot pass as "equal and empty" by accident.
+	f.exec(`UPDATE channel_participants SET available_min_id = 0 WHERE channel_id = $1 AND user_id = $2`, group.ID, f.owner.ID)
+	for _, state := range []struct {
+		name   string
+		setup  string
+		denied bool
+	}{
+		{"active ban", `UPDATE channel_participants SET banned_until = now() + interval '1 hour' WHERE channel_id = $1 AND user_id = $2`, true},
+		{"lapsed ban", `UPDATE channel_participants SET banned_until = now() - interval '1 hour' WHERE channel_id = $1 AND user_id = $2`, false},
+		{"deleted channel", `UPDATE channel_participants SET banned_until = NULL WHERE channel_id = $1 AND user_id = $2; UPDATE channels SET deleted_at = now() WHERE id = $1`, true},
+	} {
+		for stmt := range strings.SplitSeq(state.setup, "; ") {
+			if strings.HasPrefix(stmt, "UPDATE channels") {
+				f.exec(stmt, group.ID)
+			} else {
+				f.exec(stmt, group.ID, f.owner.ID)
+			}
+		}
+		for _, offsetID := range []int64{0, 150} {
+			for _, addOffset := range []int64{0, 3} {
+				compare(f.owner.ID, 0, offsetID, addOffset, 0, 0, 10)
+			}
+		}
+		rows, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
+			ChannelID: group.ID, OwnerID: f.owner.ID, Lim: 10, UnexpiredLimit: unexpired,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.denied && len(rows) != 0 {
+			t.Fatalf("%s: unexpired page returned %d rows, want none", state.name, len(rows))
+		}
+		if !state.denied && len(rows) == 0 {
+			t.Fatalf("%s: unexpired page returned no rows, want the member's page", state.name)
 		}
 	}
 	if compared == 0 {
