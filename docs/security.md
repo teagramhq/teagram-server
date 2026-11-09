@@ -295,22 +295,28 @@ additive schema details.
 
 ## Assets and boundaries
 
-The `/apiws` failure and matching transport-close records can include an
-`auth_key_id` and `peer_addr` after the server has read an auth-key identifier.
-The identifier is a stable pseudonymous session reference, and the peer address
-is personal network data. Neither is a credential, but an operator with access
-to auth-key records can map an identifier to a stored session and its account.
-The records omit auth-key bytes, request payloads, tokens, and account IDs.
-Database lookup errors expose a PostgreSQL SQLSTATE and an allowlisted category,
-or a safe network failure summary. Arbitrary database messages, detail, and hint
-fields are omitted.
+The `/apiws` serve-failure and matching transport-close records can include an
+`auth_key_id` after the server has read an auth-key identifier, but they do not
+include `peer_addr`. The identifier is a stable pseudonymous session reference;
+an operator with access to auth-key records can map it to a stored session and
+its account. These records omit auth-key bytes, request payloads, tokens, and
+account IDs. Database lookup errors expose a PostgreSQL SQLSTATE and an
+allowlisted category, or a safe network failure summary. Arbitrary database
+messages, detail, and hint fields are omitted.
+
+Separately, auth-key lookup misses and exchange lookup misses produce sampled
+`server rejected MTProto auth key` records. These include `reason`,
+`auth_key_id`, `peer_addr`, `event_time`, and `suppressed`. The peer address is
+personal network data; these rejection records do not include auth-key bytes,
+request payloads, tokens, or account IDs.
 
 ## Abuse cases and controls
 
 | Abuse case | Control and remaining risk |
 |---|---|
-| A reader correlates a failure with a transport close or later failures | The shared auth-key ID and peer address intentionally match the failure and close records. This reveals connection timing, source network address, and repeated failure patterns; a reader with database access can associate the stable ID with a session and account. Restrict log access and treat these fields as sensitive personal data. |
-| A log reader obtains session or request secrets | These records do not include key bytes, payloads, or tokens. Auth-key lookup diagnostics include only a PostgreSQL SQLSTATE and allowlisted category or a safe network failure summary, not arbitrary database messages, wrapped error text, detail, or hint. Continue to treat the identifier and peer address as sensitive even with those omissions. |
+| A reader correlates a WebSocket failure with its transport close or later failures | The shared auth-key ID can match WebSocket failure and close records and can be associated with a session or account by a reader with auth-key record access. Those records omit `peer_addr`, so they do not reveal the source network address. Restrict access and treat the identifier and timing as sensitive personal data. |
+| A reader correlates rejected auth-key attempts with their source network | The separate sampled `server rejected MTProto auth key` record for lookup misses and exchange lookup misses includes both `auth_key_id` and `peer_addr`, as well as `reason`, `event_time`, and `suppressed`. Treat the peer address as personal network data and restrict access to trusted responders. |
+| A log reader obtains session or request secrets | WebSocket failure, close, and auth-key rejection records omit auth-key bytes, request payloads, and tokens. Auth-key lookup errors expose only a PostgreSQL SQLSTATE and allowlisted category or a safe network failure summary, not arbitrary database messages, wrapped error text, detail, or hint. |
 
 ## Log access and retention
 
@@ -326,36 +332,39 @@ documents the full reader, rotation, archive, and deletion boundaries. Forwarded
 copies inherit the same sensitivity and require their own access and retention
 controls.
 
-# Threat model: TCP connection timeout diagnostics
+# Threat model: TCP and WebSocket connection timeout diagnostics
 
 ## Assets and boundaries
 
-TCP open, close, and timeout records carry a timestamp-and-counter connection
-ID. Close and timeout records also carry `opened_at`, so a socket remains
-identifiable when its open record was sampled out. Open records are emitted
-only after any required PROXY header is parsed and both global and per-network
-pre-auth admission checks succeed. Because unauthenticated clients can connect
-and close repeatedly, open records are sampled to one per 10-second server
-window and report the number suppressed. A socket that fails, stalls, or is
-refused before the PROXY header is read and pre-auth admission succeeds has no
-open record. Authenticated idle-timeout records also carry the MTProto auth-key
-ID and session ID when known. These connection IDs and open records currently
-cover TCP connections only; WebSocket (`/apiws`) coverage is tracked separately
-in MAIN-3511. The connection ID is not an authentication token. The auth-key ID
+Admitted TCP connections and WebSocket (`/apiws`) connections whose upgrade
+succeeds receive a server-generated timestamp-and-counter connection ID. Open
+records carry the ID, and close and timeout records carry the ID and
+`opened_at`, so a socket remains identifiable when its open record was sampled
+out. TCP open records are emitted only after any required PROXY header is
+parsed and global and per-network pre-auth admission succeeds. WebSocket open
+records are emitted only after the HTTP upgrade succeeds; the socket has
+already passed address establishment and pre-auth admission by then. HTTP
+requests that fail before the upgrade completes and sockets refused before
+admission have no open record. Because unauthenticated clients can connect and
+close repeatedly, open records for both transports are sampled to one per
+10-second server window and report the number suppressed. Authenticated
+idle-timeout records carry the MTProto auth-key ID and session ID when known,
+the last frame received time, the expired read deadline and its source, and the
+close time. The connection ID is not an authentication token. The auth-key ID
 is a stable pseudonymous identifier; an operator with access to auth-key records
 can map it to a stored session and account. These fields reveal connection
 timing and, across reconnects, activity associated with the same auth key. The
-TCP diagnostics do not include auth-key bytes, RPC payloads, or raw peer IP
-addresses in the lifecycle and timeout records covered here.
+lifecycle and timeout records covered here do not include auth-key bytes, RPC
+payloads, or raw peer IP addresses.
 
 ## Abuse cases and controls
 
 | Abuse case | Control and remaining risk |
 |---|---|
-| A log reader correlates one socket's lifetime | The connection ID joins sampled open records with close and timeout records. Failures while resolving the client address or reading the PROXY header before admission have no open record and, when sampled, are reported as `transport negotiation error`; global and per-network pre-auth cap refusals also have no open record, but use their own sampled `connection refused at the pre-auth cap` and `connection refused at the per-network pre-auth cap` records, respectively. `opened_at` keeps close records identifiable when the open line was suppressed and reveals approximate accept time and event order. It is generated by the server and is not accepted as a credential. |
+| A log reader correlates one socket's lifetime | The connection ID joins sampled open records with close and timeout records. TCP failures while resolving the client address or reading the PROXY header before admission have no open record and, when sampled, are reported as `transport negotiation error`; WebSocket requests that fail before a successful upgrade also have no open record. Global and per-network pre-auth cap refusals have no open record, but use their own sampled `connection refused at the pre-auth cap` and `connection refused at the per-network pre-auth cap` records, respectively. `opened_at` keeps close records identifiable when the open line was suppressed and gives a server-side lifetime reference. It is generated by the server and is not accepted as a credential. |
 | A log reader correlates reconnects or identifies an account | The auth-key ID and session ID make authenticated timeout records linkable; a reader with database access can map the stable auth-key ID to an account. Treat the identifiers and timing as sensitive personal data and restrict log access to trusted responders. |
 | An unauthenticated peer floods the log with short-lived connections | Open records are sampled independently from close records and report `suppressed`, bounding the synchronous open-log writes per server. This does not bound connection attempts or other log classes, and retained logs remain subject to size-based rotation. |
-| A log reader obtains authentication secrets, request contents, or a source IP from these records | The TCP lifecycle and timeout records omit auth-key bytes, request payloads, and raw peer IP addresses. Other log record types have their own fields and threat models. |
+| A log reader obtains authentication secrets, request contents, or a source IP from these records | The TCP and WebSocket lifecycle and timeout records omit auth-key bytes, request payloads, and raw peer IP addresses. Other log record types have their own fields and threat models. |
 
 ## Log access and retention
 

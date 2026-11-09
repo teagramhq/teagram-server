@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"time"
 
@@ -79,7 +78,6 @@ type transportCloseDiagnostics struct {
 	connectionID           string
 	openedAt               time.Time
 	closedAt               time.Time
-	peerAddr               netip.Addr
 	authKeyID              [8]byte
 	hasAuthKeyID           bool
 	sessionID              int64
@@ -146,10 +144,6 @@ func (d *transportCloseDiagnostics) markDHComplete() {
 
 func (d *transportCloseDiagnostics) markAuthorized() {
 	d.step = transportCloseStepAuthorized
-}
-
-func (d *transportCloseDiagnostics) setPeerAddr(addr netip.Addr) {
-	d.peerAddr = addr
 }
 
 func (d *transportCloseDiagnostics) observeAuthKeyID(id [8]byte) {

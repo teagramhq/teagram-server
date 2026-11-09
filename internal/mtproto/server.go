@@ -83,12 +83,10 @@ var (
 )
 
 type webSocketServeFailureError struct {
-	stage        string
-	cause        string
-	err          error
-	peerAddr     netip.Addr
-	authKeyID    [8]byte
-	hasAuthKeyID bool
+	stage       string
+	cause       string
+	err         error
+	diagnostics *transportCloseDiagnostics
 }
 
 func (e *webSocketServeFailureError) Error() string {
@@ -799,12 +797,20 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 }
 
 func (s *Server) logConnectionFailure(err error, closeDiagnostics *transportCloseDiagnostics) {
-	if diagnostic, ok := errors.AsType[*webSocketServeFailureError](err); ok && diagnostic != nil {
-		s.logWebSocketServeFailure(diagnostic)
-		return
+	diagnostic, isWebSocketFailure := errors.AsType[*webSocketServeFailureError](err)
+	isWebSocketFailure = isWebSocketFailure && diagnostic != nil
+	if isWebSocketFailure && closeDiagnostics == nil {
+		closeDiagnostics = diagnostic.diagnostics
+	}
+	if isWebSocketFailure && diagnostic.diagnostics == nil {
+		diagnostic.diagnostics = closeDiagnostics
 	}
 	if closeDiagnostics != nil && closeDiagnostics.closedAt.IsZero() {
 		closeDiagnostics.closedAt = time.Now()
+	}
+	if isWebSocketFailure {
+		s.logWebSocketServeFailure(diagnostic)
+		return
 	}
 	category := serverFailureRequest
 	var details []any
@@ -877,15 +883,18 @@ func (s *Server) logWebSocketServeFailure(failure *webSocketServeFailureError) {
 		)
 		details = withSafeRPCErrorCode(details, diagnostic.err)
 	}
-	if failure.hasAuthKeyID {
-		details = append(details,
-			"auth_key_id", hex.EncodeToString(failure.authKeyID[:]),
-			"peer_addr", failure.peerAddr.String(),
-		)
-	}
 	category := serverFailureWebSocket
 	if errors.Is(failure.err, errIdleReadTimeout) {
 		category = serverFailureIdleTimeout
+		details = append(details, connectionIDLogAttrs(failure.diagnostics)...)
+		details = append(details, closedAtLogAttrs(failure.diagnostics)...)
+		details = append(details, idleTimeoutContextLogAttrs(failure.diagnostics)...)
+	} else {
+		if failure.diagnostics != nil && failure.diagnostics.hasAuthKeyID {
+			details = append(details, "auth_key_id", hex.EncodeToString(failure.diagnostics.authKeyID[:]))
+		}
+		details = append(details, connectionIDLogAttrs(failure.diagnostics)...)
+		details = append(details, closedAtLogAttrs(failure.diagnostics)...)
 	}
 	s.logServerFailure(category, details...)
 }
@@ -898,22 +907,16 @@ func (s *Server) logPendingLoginLeaseFailure(err error, transportName string) {
 	s.log.Error("maintain pending login limit lease", "err", err)
 }
 
-func newWebSocketServeFailure(stage string, err error, peerAddr netip.Addr, diagnostics *transportCloseDiagnostics) *webSocketServeFailureError {
+func newWebSocketServeFailure(stage string, err error, diagnostics *transportCloseDiagnostics) *webSocketServeFailureError {
 	if exchangeErr, ok := errors.AsType[*exchangeFailureError](err); ok && exchangeErr != nil {
 		stage = string(exchangeErr.stage)
 	}
-	failure := &webSocketServeFailureError{
-		stage:    stage,
-		cause:    classifyWebSocketServeCause(stage, err),
-		err:      err,
-		peerAddr: peerAddr,
+	return &webSocketServeFailureError{
+		stage:       stage,
+		cause:       classifyWebSocketServeCause(stage, err),
+		err:         err,
+		diagnostics: diagnostics,
 	}
-	if diagnostics != nil && diagnostics.hasAuthKeyID {
-		failure.authKeyID = diagnostics.authKeyID
-		failure.hasAuthKeyID = true
-		failure.peerAddr = diagnostics.peerAddr
-	}
-	return failure
 }
 
 func classifyWebSocketServeCause(stage string, err error) string {
@@ -1206,10 +1209,7 @@ func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err e
 		}
 	}
 	if diagnostics.transport == websocketPath && diagnostics.hasAuthKeyID {
-		attrs = append(attrs,
-			"auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]),
-			"peer_addr", diagnostics.peerAddr.String(),
-		)
+		attrs = append(attrs, "auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]))
 	}
 	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
 		s.log.Debug("transport connection closed", attrs...)
@@ -1258,6 +1258,24 @@ func idleTimeoutLogAttrs(diagnostics *transportCloseDiagnostics) []any {
 	}
 	attrs := connectionIDLogAttrs(diagnostics)
 	attrs = append(attrs, closedAtLogAttrs(diagnostics)...)
+	attrs = append(attrs, idleTimeoutContextLogAttrs(diagnostics)...)
+	if diagnostics.exchangeStage != "" {
+		attrs = append(attrs, "stage", string(diagnostics.exchangeStage))
+		if !diagnostics.exchangeStageStartedAt.IsZero() {
+			attrs = append(attrs, "stage_started_at", diagnostics.exchangeStageStartedAt)
+		}
+		if !diagnostics.exchangeGaveUpAt.IsZero() {
+			attrs = append(attrs, "gave_up_at", diagnostics.exchangeGaveUpAt)
+		}
+	}
+	return attrs
+}
+
+func idleTimeoutContextLogAttrs(diagnostics *transportCloseDiagnostics) []any {
+	if diagnostics == nil {
+		return nil
+	}
+	var attrs []any
 	if diagnostics.hasAuthKeyID {
 		attrs = append(attrs, "auth_key_id", hex.EncodeToString(diagnostics.authKeyID[:]))
 	}
@@ -1272,15 +1290,6 @@ func idleTimeoutLogAttrs(diagnostics *transportCloseDiagnostics) []any {
 	}
 	if diagnostics.deadlineSource != "" {
 		attrs = append(attrs, "deadline_source", diagnostics.deadlineSource)
-	}
-	if diagnostics.exchangeStage != "" {
-		attrs = append(attrs, "stage", string(diagnostics.exchangeStage))
-		if !diagnostics.exchangeStageStartedAt.IsZero() {
-			attrs = append(attrs, "stage_started_at", diagnostics.exchangeStageStartedAt)
-		}
-		if !diagnostics.exchangeGaveUpAt.IsZero() {
-			attrs = append(attrs, "gave_up_at", diagnostics.exchangeGaveUpAt)
-		}
 	}
 	return attrs
 }
@@ -1427,9 +1436,6 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	if closeDiagnostics == nil {
 		closeDiagnostics = newTransportCloseDiagnostics(transportTCP, "", time.Time{})
 	}
-	if closeDiagnostics.transport == websocketPath {
-		closeDiagnostics.setPeerAddr(clientAddr)
-	}
 	failureStage := "connection_cleanup"
 	defer func() {
 		if closeDiagnostics.transport != websocketPath || rErr == nil || isWebSocketDisconnect(rErr) {
@@ -1438,7 +1444,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		if diagnostic, ok := errors.AsType[*webSocketServeFailureError](rErr); ok && diagnostic != nil {
 			return
 		}
-		rErr = newWebSocketServeFailure(failureStage, rErr, clientAddr, closeDiagnostics)
+		rErr = newWebSocketServeFailure(failureStage, rErr, closeDiagnostics)
 	}()
 
 	connLog := s.log

@@ -887,7 +887,9 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 		frame: shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 7}),
 		err:   errors.New(rawError),
 	}
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
+	const connectionID = "conn-test"
+	openedAt := time.Now()
+	diagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
@@ -918,11 +920,24 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 		"cause":       "transport",
 		"error":       "transport failure",
 		"auth_key_id": hex.EncodeToString(key.ID[:]),
-		"peer_addr":   peerAddr.String(),
 	} {
 		if got := failureRecord.attrs[key]; got != want {
 			t.Errorf("failure %s = %v, want %v", key, got, want)
 		}
+	}
+	if got := failureRecord.attrs["connection_id"]; got != connectionID {
+		t.Errorf("failure connection_id = %v, want %q", got, connectionID)
+	}
+	recordOpenedAt, ok := failureRecord.attrs["opened_at"].(time.Time)
+	if !ok || !openedAt.Equal(recordOpenedAt) {
+		t.Errorf("failure opened_at = %v, want %s", failureRecord.attrs["opened_at"], openedAt)
+	}
+	closedAt, ok := failureRecord.attrs["closed_at"].(time.Time)
+	if !ok || closedAt.IsZero() {
+		t.Errorf("failure closed_at = %v, want a timestamp", failureRecord.attrs["closed_at"])
+	}
+	if _, ok := failureRecord.attrs["peer_addr"]; ok {
+		t.Errorf("WebSocket failure record contains raw peer address: %+v", failureRecord.attrs)
 	}
 	if failureRecord.attrs["cause"] == "other" {
 		t.Fatalf("failure cause fell back to other: %+v", failureRecord.attrs)
@@ -932,11 +947,13 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 	}
 	for key, want := range map[string]any{
 		"auth_key_id": hex.EncodeToString(key.ID[:]),
-		"peer_addr":   peerAddr.String(),
 	} {
 		if got := closeRecord.attrs[key]; got != want {
 			t.Errorf("transport close %s = %v, want %v", key, got, want)
 		}
+	}
+	if _, ok := closeRecord.attrs["peer_addr"]; ok {
+		t.Errorf("WebSocket transport close record contains raw peer address: %+v", closeRecord.attrs)
 	}
 	logged := fmt.Sprint(sink.records)
 	for _, forbidden := range []string{rawError, fmt.Sprintf("%x", keyBytes), payload, token} {
@@ -1029,7 +1046,6 @@ func TestWebSocketAuthKeyPersistenceUnexpectedEOFRemainsServerFailure(t *testing
 }
 
 func TestWebSocketProcessingEOFRemainsServerFailure(t *testing.T) {
-	peerAddr := netip.MustParseAddr("203.0.113.37")
 	tests := []struct {
 		name      string
 		stage     string
@@ -1071,7 +1087,7 @@ func TestWebSocketProcessingEOFRemainsServerFailure(t *testing.T) {
 				sink := &serverErrorLogSink{}
 				server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 				diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
-				err := newWebSocketServeFailure(test.stage, test.wrap(eof.err), peerAddr, diagnostics)
+				err := newWebSocketServeFailure(test.stage, test.wrap(eof.err), diagnostics)
 				if isWebSocketDisconnect(err) {
 					t.Fatalf("processing error = %v, want server failure", err)
 				}
