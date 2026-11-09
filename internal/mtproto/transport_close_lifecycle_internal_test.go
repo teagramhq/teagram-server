@@ -157,6 +157,14 @@ func TestServeLogsOpenAndCloseWithAcceptedConnectionID(t *testing.T) {
 	if got := closed.attrs["connection_id"]; got != connectionID {
 		t.Errorf("close record connection_id = %v, want accepted connection id %q", got, connectionID)
 	}
+	openedAt, ok := opened.attrs["opened_at"].(time.Time)
+	if !ok || openedAt.IsZero() {
+		t.Fatalf("open record opened_at = %v, want a timestamp", opened.attrs["opened_at"])
+	}
+	closedOpenedAt, ok := closed.attrs["opened_at"].(time.Time)
+	if !ok || !openedAt.Equal(closedOpenedAt) {
+		t.Errorf("close record opened_at = %v, want open timestamp %s", closed.attrs["opened_at"], openedAt)
+	}
 	cancel()
 	select {
 	case err := <-served:
@@ -165,6 +173,89 @@ func TestServeLogsOpenAndCloseWithAcceptedConnectionID(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not stop after cancellation")
+	}
+}
+
+func TestServeSamplesOpenRecordsDuringConnectCloseFlood(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(ctx, listener) }()
+
+	const connections = 25
+	for i := range connections {
+		conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial connection %d: %v", i, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close connection %d: %v", i, err)
+		}
+		waitForLogSamplerDrops(t, &server.preAuthCloseLog, int64(i))
+	}
+	if got := server.preAuthOpenLog.dropped.Load(); got != int64(connections-1) {
+		t.Fatalf("suppressed open records = %d, want %d", got, connections-1)
+	}
+
+	// Let the sampler emit the accumulated count at the next interval without
+	// making the regression test wait for the production sampling window.
+	server.preAuthOpenLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial connection after sample interval: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection after sample interval: %v", err)
+	}
+	waitForLogSamplerDrops(t, &server.preAuthCloseLog, connections)
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not stop after cancellation")
+	}
+
+	var opens []serverErrorLogRecord
+	for _, record := range sink.snapshot() {
+		if record.message == "transport connection opened" {
+			opens = append(opens, record)
+		}
+	}
+	if len(opens) != 2 {
+		t.Fatalf("connect-close flood wrote %d open records, want one per sample window: %+v", len(opens), opens)
+	}
+	if got := opens[1].attrs["suppressed"]; got != int64(connections-1) {
+		t.Errorf("suppressed open records = %v, want %d", got, connections-1)
+	}
+}
+
+func waitForLogSamplerDrops(t *testing.T, sampler *logSampler, want int64) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(3 * time.Second)
+	defer timeout.Stop()
+	for {
+		if sampler.last.Load() != 0 && sampler.dropped.Load() >= want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("log sampler dropped %d records, want at least %d", sampler.dropped.Load(), want)
+		}
 	}
 }
 
@@ -256,9 +347,17 @@ drain:
 	if !ok || connectionID == "" {
 		t.Fatalf("open record connection_id = %v, want non-empty string", opened.attrs["connection_id"])
 	}
+	openedAt, ok := opened.attrs["opened_at"].(time.Time)
+	if !ok || openedAt.IsZero() {
+		t.Fatalf("open record opened_at = %v, want a timestamp", opened.attrs["opened_at"])
+	}
 	for _, record := range []*serverErrorLogRecord{failure, closed} {
 		if got := record.attrs["connection_id"]; got != connectionID {
 			t.Errorf("%s connection_id = %v, want open record id %q", record.message, got, connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want open timestamp %v", record.message, record.attrs["opened_at"], openedAt)
 		}
 		for _, key := range []string{"peer_addr", "client_addr"} {
 			if _, ok := record.attrs[key]; ok {
@@ -478,7 +577,7 @@ func TestReadReqDHTimeoutLogsStageTiming(t *testing.T) {
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	connectionID := server.newConnectionID()
 	openedAt := time.Now()
-	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID, openedAt)
 	server.logConnectionOpened(transportTCP, connectionID, openedAt)
 	conn := &serverLoopFailureConn{err: context.DeadlineExceeded}
 	first := &bin.Buffer{Buf: exchangeRequestFrame(t)}
@@ -513,6 +612,10 @@ func TestReadReqDHTimeoutLogsStageTiming(t *testing.T) {
 	for _, record := range []*serverErrorLogRecord{failure, closed} {
 		if record.attrs["connection_id"] != connectionID {
 			t.Errorf("%s connection_id = %v, want %q", record.message, record.attrs["connection_id"], connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want %s", record.message, record.attrs["opened_at"], openedAt)
 		}
 	}
 	for key, want := range map[string]any{
@@ -1266,7 +1369,7 @@ func assertTransportCloseRecord(t *testing.T, record serverErrorLogRecord, trans
 	}
 	allowed := map[string]struct{}{
 		"transport": {}, "step": {}, "reason": {}, "suppressed": {},
-		"connection_id": {}, "closed_at": {},
+		"connection_id": {}, "opened_at": {}, "closed_at": {},
 		"stage": {}, "stage_started_at": {}, "gave_up_at": {},
 	}
 	if transport == websocketPath {

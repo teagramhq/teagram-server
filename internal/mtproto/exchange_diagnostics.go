@@ -77,6 +77,7 @@ type transportCloseDiagnostics struct {
 	transport              string
 	step                   transportCloseStep
 	connectionID           string
+	openedAt               time.Time
 	closedAt               time.Time
 	peerAddr               netip.Addr
 	authKeyID              [8]byte
@@ -117,8 +118,10 @@ func classifyTransportCloseReason(err error) transportCloseReason {
 	return transportCloseReasonServerError
 }
 
-func newTransportCloseDiagnostics(transport, connectionID string) *transportCloseDiagnostics {
-	return &transportCloseDiagnostics{transport: transport, step: transportCloseStepNone, connectionID: connectionID}
+func newTransportCloseDiagnostics(transport, connectionID string, openedAt time.Time) *transportCloseDiagnostics {
+	return &transportCloseDiagnostics{
+		transport: transport, step: transportCloseStepNone, connectionID: connectionID, openedAt: openedAt,
+	}
 }
 
 func (d *transportCloseDiagnostics) observeRequest(id uint32) {

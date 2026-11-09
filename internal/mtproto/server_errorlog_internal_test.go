@@ -757,7 +757,7 @@ func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testi
 }
 
 func TestTransportCloseDiagnosticsTracksLatestHandshakeProgress(t *testing.T) {
-	diagnostics := newTransportCloseDiagnostics("/apiws", "")
+	diagnostics := newTransportCloseDiagnostics("/apiws", "", time.Time{})
 	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
 	diagnostics.observeResponse(mt.ResPQTypeID)
 	diagnostics.observeRequest(mt.ReqDHParamsRequestTypeID)
@@ -887,7 +887,7 @@ func TestWebSocketServeLoopFailureLogsStageAndRedactedConnectionIdentity(t *test
 		frame: shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 7}),
 		err:   errors.New(rawError),
 	}
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
@@ -952,7 +952,7 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	peerAddr := netip.MustParseAddr("203.0.113.37")
 	frame := make([]byte, 16)
 	frame[0] = 1
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{frame: frame}), peerAddr, nil, nil, false, nil, diagnostics,
 	)
@@ -999,7 +999,7 @@ func TestWebSocketAuthKeyLookupUnexpectedEOFRemainsServerFailure(t *testing.T) {
 func TestWebSocketAuthKeyPersistenceUnexpectedEOFRemainsServerFailure(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	err := errors.Join(errAuthKeyPersistenceFailure, io.ErrUnexpectedEOF)
 	if isWebSocketDisconnect(err) {
 		t.Fatalf("auth-key persistence EOF = %v, want server failure", err)
@@ -1070,7 +1070,7 @@ func TestWebSocketProcessingEOFRemainsServerFailure(t *testing.T) {
 			t.Run(test.name+"/"+eof.name, func(t *testing.T) {
 				sink := &serverErrorLogSink{}
 				server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-				diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+				diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 				err := newWebSocketServeFailure(test.stage, test.wrap(eof.err), peerAddr, diagnostics)
 				if isWebSocketDisconnect(err) {
 					t.Fatalf("processing error = %v, want server failure", err)
@@ -1130,7 +1130,7 @@ func TestWebSocketTransportReadEOFIsMarkedAtOrigin(t *testing.T) {
 func TestWebSocketFrameReadUnexpectedEOFRemainsClientDisconnect(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{err: io.ErrUnexpectedEOF}),
 		netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
@@ -1168,7 +1168,7 @@ func TestWebSocketKeyExchangeUnexpectedEOFRemainsClientDisconnect(t *testing.T) 
 	}
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	err = server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), webSocketTestConn(server, &serverLoopFailureConn{
 			frame: exchangeRequestFrame(t),
@@ -1240,7 +1240,7 @@ func TestWebSocketIdleReadTimeoutKeepsIdleTimeoutCategory(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	conn := &serverLoopFailureConn{err: errIdleReadTimeout}
-	diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	err := server.serveConnModeWithDiagnostics(
 		context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 	)
@@ -1383,7 +1383,7 @@ func TestWebSocketReadFrameFailuresLogAllowlistedCause(t *testing.T) {
 			sink := &serverErrorLogSink{}
 			server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 			conn := &serverLoopFailureConn{err: tt.err}
-			diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+			diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 			err := server.serveConnModeWithDiagnostics(
 				context.Background(), context.Background(), conn, netip.MustParseAddr("203.0.113.37"), nil, nil, false, nil, diagnostics,
 			)
@@ -1429,7 +1429,7 @@ func TestWebSocketExchangeFailuresLogAllowlistedCause(t *testing.T) {
 			server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 			conn := &serverLoopFailureConn{frame: exchangeRequestFrame(t), err: tt.err}
 			peerAddr := netip.MustParseAddr("203.0.113.37")
-			diagnostics := newTransportCloseDiagnostics(websocketPath, "")
+			diagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 			err := server.serveConnModeWithDiagnostics(
 				context.Background(), context.Background(), conn, peerAddr, nil, nil, false, nil, diagnostics,
 			)

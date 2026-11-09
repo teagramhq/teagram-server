@@ -946,8 +946,9 @@ func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
 	server.log = slog.New(&asyncRPCContextLogHandler{sink: sink})
 	closeErr := errors.New("injected connection close failure")
 	conn := &asyncRPCFrameCloseErrorConn{asyncRPCFrameConn: frameConn, closeErr: closeErr}
-	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
-	server.logConnectionOpened(transportTCP, connectionID, time.Now())
+	openedAt := time.Now()
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID, openedAt)
+	server.logConnectionOpened(transportTCP, connectionID, openedAt)
 	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
 
 	if err := server.serveConnModeWithDiagnostics(
@@ -968,6 +969,10 @@ func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
 		}
 		if got := record.attrs["connection_id"]; got != connectionID {
 			t.Errorf("%s connection_id = %v, want %q", record.message, got, connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want %s", record.message, record.attrs["opened_at"], openedAt)
 		}
 		want[record.message] = true
 	}

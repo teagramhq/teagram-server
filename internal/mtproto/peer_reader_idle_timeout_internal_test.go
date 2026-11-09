@@ -97,7 +97,8 @@ func TestPeerFrameReaderCloseErrorsIncludeConnectionID(t *testing.T) {
 				transport.recvErr = io.EOF
 			}
 			const connectionID = "peer-reader-test-id"
-			conn := &Conn{transport: transport, log: logger.With("connection_id", connectionID)}
+			openedAt := time.Now()
+			conn := &Conn{transport: transport, log: logger.With("connection_id", connectionID, "opened_at", openedAt)}
 			reader := &peerFrameReader{server: server, transport: transport, conn: conn}
 
 			if tc.peerDisconnect {
@@ -118,6 +119,9 @@ func TestPeerFrameReaderCloseErrorsIncludeConnectionID(t *testing.T) {
 			}
 			if !strings.Contains(logOutput, "connection_id="+connectionID) {
 				t.Errorf("%s record omits connection_id %q:\n%s", tc.message, connectionID, logOutput)
+			}
+			if !strings.Contains(logOutput, "opened_at=") {
+				t.Errorf("%s record omits opened_at %s:\n%s", tc.message, openedAt, logOutput)
 			}
 		})
 	}

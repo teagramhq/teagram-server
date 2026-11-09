@@ -341,7 +341,7 @@ func TestServePreflightReturnsWriteFailure(t *testing.T) {
 	server := New(exchange.PrivateKey{RSA: key}, 2, NewMemoryAuthKeyStore(), nil, nil)
 	conn := &failingPreflightConn{}
 	var nonce [32]byte
-	if err := server.servePreflight(context.Background(), conn, nonce, time.Time{}, ""); err == nil || !strings.Contains(err.Error(), "write discovery response") {
+	if err := server.servePreflight(context.Background(), conn, nonce, time.Time{}, nil); err == nil || !strings.Contains(err.Error(), "write discovery response") {
 		t.Fatalf("servePreflight error = %v, want write failure", err)
 	}
 	if conn.writes != 1 {
@@ -362,7 +362,7 @@ func TestServePreflightCancellationClosesBlockedWrite(t *testing.T) {
 	var nonce [32]byte
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- server.servePreflight(ctx, left, nonce, time.Time{}, "") }()
+	go func() { done <- server.servePreflight(ctx, left, nonce, time.Time{}, nil) }()
 	time.Sleep(10 * time.Millisecond)
 	cancel()
 	select {

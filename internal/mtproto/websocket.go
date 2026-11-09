@@ -289,7 +289,7 @@ func (l *webSocketListener) acceptLoop() {
 
 		slot, ok := l.server.preAuth.admit(l.rateLimitListener)
 		if !ok {
-			l.server.dropRefused(sock, "")
+			l.server.dropRefused(sock, "", time.Time{})
 			if dropped, allow := l.server.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
 				l.server.log.Info("WebSocket connection refused at the pre-auth cap",
 					"cap", l.server.preAuth.limits.MaxConns, "suppressed", dropped)
@@ -356,7 +356,7 @@ func (l *webSocketListener) prepare(accepted *webSocketAcceptedConn) {
 	}
 	if l.clientAddrHeader == "" && !accepted.slot.keyAddr(addr) {
 		accepted.state.Unlock()
-		l.server.dropRefused(accepted, "")
+		l.server.dropRefused(accepted, "", time.Time{})
 		accepted.slot.clear()
 		l.untrack(accepted)
 		if dropped, ok := l.server.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
@@ -754,7 +754,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		s.logNegotiation(err, nil)
 		return
 	}
-	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, "")
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	var closeErr error
 	defer func() {
 		if cause, set := state.socket.lifecycleCloseCauseValue(); set {

@@ -195,6 +195,9 @@ type Server struct {
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler
+	// Admitted unauthenticated sockets can be opened and closed at an unbounded
+	// rate, so their open records have an independent sampling window as well.
+	preAuthOpenLog logSampler
 	// Signed-in clients can also provoke INFO close diagnostics with malformed
 	// frames or timeouts; keep those sampled independently of pre-auth closes.
 	authorizedCloseLog logSampler
@@ -541,18 +544,18 @@ acceptLoop:
 		connectionID := s.newConnectionID()
 		openedAt := time.Now()
 		if s.shutdown.draining() {
-			s.dropRefused(sock, connectionID)
+			s.dropRefused(sock, connectionID, openedAt)
 			break
 		}
 		// The global pre-auth cap is applied here, before a socket costs a
 		// goroutine, deadline, or read.
 		slot, ok := s.preAuth.admit(store.RateLimitListenerTailnet)
 		if !ok {
-			s.dropRefused(sock, connectionID)
+			s.dropRefused(sock, connectionID, openedAt)
 			if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
-				s.log.Info("connection refused at the pre-auth cap",
-					"connection_id", connectionID,
-					"cap", s.preAuth.limits.MaxConns, "suppressed", dropped)
+				attrs := connectionIdentityLogAttrs(connectionID, openedAt)
+				attrs = append(attrs, "cap", s.preAuth.limits.MaxConns, "suppressed", dropped)
+				s.log.Info("connection refused at the pre-auth cap", attrs...)
 			}
 			continue
 		}
@@ -584,10 +587,15 @@ func (s *Server) newConnectionID() string {
 }
 
 func (s *Server) logConnectionOpened(transportName, connectionID string, openedAt time.Time) {
+	dropped, ok := s.preAuthOpenLog.allow(time.Now(), preAuthLogInterval)
+	if !ok {
+		return
+	}
 	s.log.Info("transport connection opened",
 		"transport", transportName,
 		"connection_id", connectionID,
 		"opened_at", openedAt,
+		"suppressed", dropped,
 	)
 }
 
@@ -606,7 +614,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 }
 
 func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, connectionID string, openedAt time.Time) {
-	closeDiagnostics := newTransportCloseDiagnostics(transportTCP, connectionID)
+	closeDiagnostics := newTransportCloseDiagnostics(transportTCP, connectionID, openedAt)
 	var closeErr error
 	logCloseDiagnostics := true
 	readCtx := s.shutdown.requestCtx
@@ -646,7 +654,8 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at drain cutoff", "connection_id", connectionID, "err", err)
+			attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+			s.log.Info("close connection at drain cutoff", attrs...)
 		}
 	})
 	defer func() {
@@ -661,7 +670,8 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection during negotiation drain", "connection_id", connectionID, "err", err)
+			attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+			s.log.Info("close connection during negotiation drain", attrs...)
 		}
 	})
 	var stopNegotiationOnce sync.Once
@@ -700,11 +710,13 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at the pre-auth ceiling", "connection_id", connectionID, "err", err)
+			attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+			s.log.Info("close connection at the pre-auth ceiling", attrs...)
 		}
 		if dropped, ok := s.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
-			s.log.Info("connection closed at the pre-auth lifetime ceiling",
-				"connection_id", connectionID, "lifetime", s.preAuth.limits.Lifetime, "suppressed", dropped)
+			attrs := connectionIDLogAttrs(closeDiagnostics)
+			attrs = append(attrs, "lifetime", s.preAuth.limits.Lifetime, "suppressed", dropped)
+			s.log.Info("connection closed at the pre-auth lifetime ceiling", attrs...)
 		}
 	})
 
@@ -723,11 +735,11 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 	// flood consists of.
 	if !slot.keyAddr(addr) {
 		logCloseDiagnostics = false
-		s.dropRefused(sock, connectionID)
+		s.dropRefused(sock, connectionID, openedAt)
 		if dropped, ok := s.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
-			s.log.Info("connection refused at the per-network pre-auth cap",
-				"connection_id", connectionID,
-				"client_addr", addr, "cap", s.preAuth.limits.MaxConnsPerNet, "suppressed", dropped)
+			attrs := connectionIDLogAttrs(closeDiagnostics)
+			attrs = append(attrs, "client_addr", addr, "cap", s.preAuth.limits.MaxConnsPerNet, "suppressed", dropped)
+			s.log.Info("connection refused at the per-network pre-auth cap", attrs...)
 		}
 		return
 	}
@@ -735,7 +747,7 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 	probe, err := probePreflight(sock, handshakeDeadline)
 	if err != nil {
 		closeErr = err
-		s.dropRefused(sock, connectionID)
+		s.dropRefused(sock, connectionID, openedAt)
 		s.logNegotiation(errors.Join(errors.New("detect discovery preflight"), err), closeDiagnostics)
 		return
 	}
@@ -746,26 +758,28 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 		cancel()
 		if err != nil {
 			closeErr = err
-			s.dropRefused(sock, connectionID)
-			s.log.Error("check discovery rate limit", "connection_id", connectionID, "err", err)
+			s.dropRefused(sock, connectionID, openedAt)
+			attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+			s.log.Error("check discovery rate limit", attrs...)
 			return
 		}
 		if !allowed {
-			s.dropRefused(sock, connectionID)
+			s.dropRefused(sock, connectionID, openedAt)
 			if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
-				s.log.Info("discovery request refused at rate limit",
-					"connection_id", connectionID, "client_addr", addr, "suppressed", dropped)
+				attrs := connectionIDLogAttrs(closeDiagnostics)
+				attrs = append(attrs, "client_addr", addr, "suppressed", dropped)
+				s.log.Info("discovery request refused at rate limit", attrs...)
 			}
 			return
 		}
-		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline, connectionID)
+		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline, closeDiagnostics)
 		if closeErr != nil && !isDisconnect(closeErr) && !s.shutdown.draining() {
 			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), closeErr), closeDiagnostics)
 		}
 		return
 	}
 	if probe.malformed {
-		s.dropRefused(sock, connectionID)
+		s.dropRefused(sock, connectionID, openedAt)
 		return
 	}
 	conn, err := s.detectCodec(probe.stream)
@@ -1214,10 +1228,21 @@ func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err e
 }
 
 func connectionIDLogAttrs(diagnostics *transportCloseDiagnostics) []any {
-	if diagnostics == nil || diagnostics.connectionID == "" {
+	if diagnostics == nil {
 		return nil
 	}
-	return []any{"connection_id", diagnostics.connectionID}
+	return connectionIdentityLogAttrs(diagnostics.connectionID, diagnostics.openedAt)
+}
+
+func connectionIdentityLogAttrs(connectionID string, openedAt time.Time) []any {
+	if connectionID == "" {
+		return nil
+	}
+	attrs := []any{"connection_id", connectionID}
+	if !openedAt.IsZero() {
+		attrs = append(attrs, "opened_at", openedAt)
+	}
+	return attrs
 }
 
 func closedAtLogAttrs(diagnostics *transportCloseDiagnostics) []any {
@@ -1331,12 +1356,11 @@ func (s *Server) logNegotiation(err error, diagnostics *transportCloseDiagnostic
 // dropRefused closes a socket refused by a pre-auth bound. Closing is the whole
 // of a refusal: nothing is written back, because a peer past a cap is not owed
 // an answer and writing one is work the refusal exists to avoid.
-func (s *Server) dropRefused(sock net.Conn, connectionID string) {
+func (s *Server) dropRefused(sock net.Conn, connectionID string, openedAt time.Time) {
 	if err := sock.Close(); err != nil && !isDisconnect(err) {
-		attrs := []any{"err", err}
-		if connectionID != "" {
-			attrs = append(attrs, "connection_id", connectionID)
-		}
+		attrs := make([]any, 0, 6)
+		attrs = append(attrs, "err", err)
+		attrs = append(attrs, connectionIdentityLogAttrs(connectionID, openedAt)...)
 		s.log.Info("close refused connection", attrs...)
 	}
 }
@@ -1385,7 +1409,7 @@ func (s *Server) serveConnWithHandlerContextsAndTransport(readCtx, requestCtx co
 }
 
 func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, transportName string, handler Handler) (rErr error) {
-	closeDiagnostics := newTransportCloseDiagnostics(transportName, "")
+	closeDiagnostics := newTransportCloseDiagnostics(transportName, "", time.Time{})
 	defer func() {
 		s.logTransportClose(closeDiagnostics, rErr)
 	}()
@@ -1394,14 +1418,14 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 
 func (s *Server) serveConnWithHandlerContextsAndTransportDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	if closeDiagnostics == nil {
-		closeDiagnostics = newTransportCloseDiagnostics(transportName, "")
+		closeDiagnostics = newTransportCloseDiagnostics(transportName, "", time.Time{})
 	}
 	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler, closeDiagnostics)
 }
 
 func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	if closeDiagnostics == nil {
-		closeDiagnostics = newTransportCloseDiagnostics(transportTCP, "")
+		closeDiagnostics = newTransportCloseDiagnostics(transportTCP, "", time.Time{})
 	}
 	if closeDiagnostics.transport == websocketPath {
 		closeDiagnostics.setPeerAddr(clientAddr)
@@ -1419,10 +1443,11 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 
 	connLog := s.log
 	if closeDiagnostics.connectionID != "" {
-		connLog = connLog.With("connection_id", closeDiagnostics.connectionID)
+		connLog = connLog.With(connectionIDLogAttrs(closeDiagnostics)...)
 	}
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, connLog)
 	conn.connectionID = closeDiagnostics.connectionID
+	conn.openedAt = closeDiagnostics.openedAt
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
@@ -1453,7 +1478,8 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// cancel the child RPC context here: that could wake its handler before
 		// the shared completion context has inherited the same hard cutoff.
 		if err := conn.closeAtHardCutoff(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at drain cutoff", "connection_id", closeDiagnostics.connectionID, "err", err)
+			attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+			s.log.Info("close connection at drain cutoff", attrs...)
 		}
 	})
 	defer func() {
@@ -1578,9 +1604,9 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			}
 			if !acquired {
 				if dropped, ok := s.pendingLoginCapLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("connection closed at the pending-login cap",
-						"connection_id", closeDiagnostics.connectionID,
-						"cap", s.pendingLogins.max, "suppressed", dropped)
+					attrs := connectionIDLogAttrs(closeDiagnostics)
+					attrs = append(attrs, "cap", s.pendingLogins.max, "suppressed", dropped)
+					s.log.Info("connection closed at the pending-login cap", attrs...)
 				}
 				return false, nil
 			}
@@ -1609,12 +1635,13 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 					return
 				}
 				if err := conn.Close(); err != nil && !isDisconnect(err) {
-					s.log.Info("close connection at the pending-login ceiling", "connection_id", closeDiagnostics.connectionID, "err", err)
+					attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+					s.log.Info("close connection at the pending-login ceiling", attrs...)
 				}
 				if dropped, ok := s.pendingLoginCeilingLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("connection closed at the pending-login lifetime ceiling",
-						"connection_id", closeDiagnostics.connectionID,
-						"lifetime", s.pendingLoginLifetime, "suppressed", dropped)
+					attrs := connectionIDLogAttrs(closeDiagnostics)
+					attrs = append(attrs, "lifetime", s.pendingLoginLifetime, "suppressed", dropped)
+					s.log.Info("connection closed at the pending-login lifetime ceiling", attrs...)
 				}
 			})
 		}
@@ -1632,7 +1659,8 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		case <-pushesDone:
 		case <-s.shutdown.outputCtx.Done():
 			if err := conn.closeTransport(); err != nil && !isDisconnect(err) {
-				s.log.Info("close connection after drain output deadline", "connection_id", closeDiagnostics.connectionID, "err", err)
+				attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", err)
+				s.log.Info("close connection after drain output deadline", attrs...)
 			}
 			<-pushesDone
 		}
@@ -1670,7 +1698,8 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if peerReader == nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errIdleReadTimeout) {
 					if closeErr := conn.closeServer(); closeErr != nil && !isDisconnect(closeErr) {
-						s.log.Info("close connection at read deadline", "connection_id", closeDiagnostics.connectionID, "err", closeErr)
+						attrs := append(connectionIDLogAttrs(closeDiagnostics), "err", closeErr)
+						s.log.Info("close connection at read deadline", attrs...)
 					}
 				} else {
 					conn.observePeerDisconnect()
@@ -1836,9 +1865,9 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			}
 			if errors.Is(err, errUnboundKeyCap) {
 				if dropped, ok := s.unboundKeyLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("connection closed at the cap on one unbound auth key",
-						"connection_id", closeDiagnostics.connectionID,
-						"cap", s.unboundKeys.max, "suppressed", dropped)
+					attrs := connectionIDLogAttrs(closeDiagnostics)
+					attrs = append(attrs, "cap", s.unboundKeys.max, "suppressed", dropped)
+					s.log.Info("connection closed at the cap on one unbound auth key", attrs...)
 				}
 				return nil
 			}
@@ -1893,9 +1922,9 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			// session. Sampled -404 diagnostics are a separate exception and
 			// include the hex key ID.
 			if dropped, ok := s.unboundKeyLog.allow(time.Now(), preAuthLogInterval); ok {
-				s.log.Info("connection closed at the cap on one unbound auth key",
-					"connection_id", closeDiagnostics.connectionID,
-					"cap", s.unboundKeys.max, "suppressed", dropped)
+				attrs := connectionIDLogAttrs(closeDiagnostics)
+				attrs = append(attrs, "cap", s.unboundKeys.max, "suppressed", dropped)
+				s.log.Info("connection closed at the cap on one unbound auth key", attrs...)
 			}
 			return nil
 		}
@@ -1914,7 +1943,9 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			// answered normally; the socket then closes on the way out, so a
 			// client that keeps opening sockets is refused the new one instead
 			// of costing the user a working one.
-			s.log.Info("connection refused at user cap", "connection_id", closeDiagnostics.connectionID, "user_id", userID)
+			attrs := connectionIDLogAttrs(closeDiagnostics)
+			attrs = append(attrs, "user_id", userID)
+			s.log.Info("connection refused at user cap", attrs...)
 			return nil
 		}
 
@@ -1971,11 +2002,7 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
 	if layer, err := s.exchangeBudget.charge(ctx, s.keys, attempts, clientAddr, listener, time.Now()); layer != "" {
-		connectionID := ""
-		if closeDiagnostics != nil {
-			connectionID = closeDiagnostics.connectionID
-		}
-		s.logExchangeBudgetRefusal(layer, listener, err, connectionID)
+		s.logExchangeBudgetRefusal(layer, listener, err, closeDiagnostics)
 		if sendErr := s.sendProtoError(ctx, bc, codec.CodeTransportFlood); sendErr != nil {
 			return sendErr
 		}
@@ -2038,7 +2065,7 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	return nil
 }
 
-func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error, connectionID string) {
+func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error, closeDiagnostics *transportCloseDiagnostics) {
 	dropped, ok := s.exchangeBudgetLog.allow(time.Now(), preAuthLogInterval)
 	if !ok {
 		return
@@ -2048,9 +2075,7 @@ func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimit
 		listenerName = "public"
 	}
 	attrs := []any{"layer", layer, "listener", listenerName, "suppressed", dropped}
-	if connectionID != "" {
-		attrs = append(attrs, "connection_id", connectionID)
-	}
+	attrs = append(attrs, connectionIDLogAttrs(closeDiagnostics)...)
 	if err != nil {
 		attrs = append(attrs, "err", err)
 		s.log.Error("key exchange refused at budget", attrs...)
