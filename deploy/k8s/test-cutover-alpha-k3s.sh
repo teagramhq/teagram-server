@@ -988,7 +988,12 @@ prod_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") |
 kubectl kustomize deploy/k8s/prod |
   sed -e "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" \
     -e "s|ghcr.io/teagramhq/teagramd@$prod_digest|$CUTOVER_IMAGE|g" |
-  yq 'select(.kind != "Deployment" or .metadata.name != "cloudflared")' - > "$tmp_dir/normal-prod.yaml"
+  yq 'select(.kind != "Deployment" or .metadata.name != "cloudflared")' - |
+  # The disposable source generates its own RSA identity, so the production
+  # fingerprint pin cannot match it.
+  yq '(select(.kind == "StatefulSet" and .metadata.name == "teagramd")
+    | .spec.template.spec.containers[] | select(.name == "teagramd") | .env)
+    |= map(select(.name != "TG_RSA_KEY_FINGERPRINT"))' - > "$tmp_dir/normal-prod.yaml"
 printf '\n---\n' >> "$tmp_dir/normal-prod.yaml"
 kubectl kustomize deploy/k8s/ci |
   sed "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" |
