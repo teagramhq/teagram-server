@@ -216,6 +216,15 @@ done
 for overlay in prod prod-cutover ci; do
   if ! kubectl kustomize "deploy/k8s/$overlay" |
     yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
+      select(has("value") and has("valueFrom"))]' - |
+    jq -e 'length == 0' >/dev/null; then
+    fail "$overlay must not render an environment variable with both value and valueFrom"
+  fi
+done
+for overlay in prod prod-cutover ci; do
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
       .spec.template.spec.containers[] | select(.name == "teagramd") | .ports[] |
       select(.name == "public-ws")]' - |
     jq -e 'length == 1 and .[0].containerPort == 2446 and .[0].protocol == "TCP"' >/dev/null; then

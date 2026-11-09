@@ -18,6 +18,7 @@ spec:
                   name: teagramd-runtime
                   key: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
             - name: TG_PUBLIC_REGISTRATION
+              value: null
               valueFrom:
                 configMapKeyRef:
                   name: teagramd-runtime
