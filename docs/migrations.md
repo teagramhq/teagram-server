@@ -72,7 +72,7 @@ Each run rebuilds the expiring nodes of up to `--batch-size` (default 100)
 ready channels, one transaction per channel, serialized with that channel's
 posts, and prints `Channel post expiring summaries initialized: N channels, M
 remaining`. Re-run until `M` is `0`; that is the completion signal, and it is
-safe to interrupt and resume. Channels still waiting for
+safe to interrupt and resume. A channel that fails is skipped for that run and named in the error together with the rebuilt and pending counts, so one bad channel does not hide progress. While any channel is pending, `teagramd` logs a startup warning with the pending count. Channels still waiting for
 `initialize-channel-post-summaries` are rebuilt in full by that command, which
 also sets the flag. Reversal: drop the index, the column and the scope-2 rows,
 and restore the previous function bodies.

@@ -330,11 +330,23 @@ func channelPostSummarySchemaInstalled(ctx context.Context, q *db.Queries) (bool
 // InitializeChannelPostExpiringSummaries call.
 const ChannelPostExpiringSummaryMaxBatchSize = 1000
 
+// ChannelPostExpiringSummaryPending returns how many ready channels still lack
+// expiring-post nodes. Group history scans expired rows directly for each.
+func (s *Store) ChannelPostExpiringSummaryPending(ctx context.Context) (int64, error) {
+	pending, err := s.q.ChannelPostExpiringSummaryPendingCount(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count channels pending expiring summaries: %w", err)
+	}
+	return pending, nil
+}
+
 // InitializeChannelPostExpiringSummaries rebuilds the expiring-post nodes of up
 // to batchSize ready channels that still lack them, one transaction per channel,
-// and returns how many it rebuilt and how many channels remain. Group history
-// uses the cheap expiry subtraction for a channel only after its rebuild, so
-// the rollout is complete once remaining is zero.
+// and returns how many it rebuilt and how many channels remain pending. Group
+// history uses the cheap expiry subtraction for a channel only after its
+// rebuild, so the rollout is complete once remaining is zero with no error.
+// A channel that fails is skipped for this run and reported in the joined
+// error; progress and the pending count are returned either way.
 func (s *Store) InitializeChannelPostExpiringSummaries(ctx context.Context, batchSize int) (initialized, remaining int64, err error) {
 	if batchSize < 1 || batchSize > ChannelPostExpiringSummaryMaxBatchSize {
 		return 0, 0, fmt.Errorf("initialize channel post expiring summaries: batch size must be between 1 and %d", ChannelPostExpiringSummaryMaxBatchSize)
@@ -350,18 +362,26 @@ func (s *Store) InitializeChannelPostExpiringSummaries(ctx context.Context, batc
 	if err != nil {
 		return 0, 0, fmt.Errorf("list channels pending expiring summaries: %w", err)
 	}
+	var failures []error
 	for _, channelID := range channelIDs {
 		rebuilt, rebuildErr := s.initializeChannelPostExpiringSummaries(ctx, channelID)
 		if rebuildErr != nil {
-			return initialized, 0, rebuildErr
+			failures = append(failures, rebuildErr)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
 		}
 		if rebuilt {
 			initialized++
 		}
 	}
-	remaining, err = s.q.ChannelPostExpiringSummaryPendingCount(ctx)
-	if err != nil {
-		return initialized, 0, fmt.Errorf("count channels pending expiring summaries: %w", err)
+	remaining, countErr := s.q.ChannelPostExpiringSummaryPendingCount(ctx)
+	if countErr != nil {
+		failures = append(failures, fmt.Errorf("count channels pending expiring summaries: %w", countErr))
+	}
+	if len(failures) > 0 {
+		return initialized, remaining, fmt.Errorf("rebuilt %d channels, %d pending: %w", initialized, remaining, errors.Join(failures...))
 	}
 	return initialized, remaining, nil
 }

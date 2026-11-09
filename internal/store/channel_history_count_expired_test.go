@@ -3,9 +3,11 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -21,6 +23,8 @@ type expiredCountFixture struct {
 	s     *store.Store
 	trace *historyCountTrace
 	owner store.User
+	// lastMillis is the summed server execution time of the last historyCost.
+	lastMillis float64
 }
 
 func newExpiredCountFixture(t *testing.T, phone string) *expiredCountFixture {
@@ -81,6 +85,7 @@ func (f *expiredCountFixture) seedTTLChannel(title string, live, expired int) in
 // and the summary nodes (measured by replaying each one under EXPLAIN
 // ANALYZE), the reported total count and the IDs of the returned page.
 func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows int64, count int, pageIDs []int64) {
+	f.lastMillis = 0
 	f.t.Helper()
 	ctx := context.Background()
 	f.trace.reset()
@@ -107,11 +112,13 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 			f.t.Fatalf("explain history statement: %v", err)
 		}
 		var explained []struct {
-			Plan historyPlanNode `json:"Plan"`
+			Plan          historyPlanNode `json:"Plan"`
+			ExecutionTime float64         `json:"Execution Time"`
 		}
 		if err := json.Unmarshal(raw, &explained); err != nil || len(explained) != 1 {
 			f.t.Fatalf("decode history statement plan: %v", err)
 		}
+		f.lastMillis += explained[0].ExecutionTime
 		explained[0].Plan.walk(func(node historyPlanNode) {
 			if node.RelationName == "channel_messages" || node.RelationName == "channel_post_summaries" {
 				rows += int64(node.ActualRows * node.ActualLoops)
@@ -124,36 +131,43 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 	return statements, rows, count, pageIDs
 }
 
+// expiredCountLiveSizes are the live TTL post counts at which the backlog
+// independence bound is checked. History cost may grow with live TTL posts (the
+// documented tradeoff); at every size it must not grow with the backlog.
+var expiredCountLiveSizes = []int{expiredCountLivePosts, 10 * expiredCountLivePosts}
+
 func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 	t.Parallel()
 	f := newExpiredCountFixture(t, "+15551290001")
-	clean := f.seedTTLChannel("TTL channel without expired posts", expiredCountLivePosts, 0)
-	backlog := f.seedTTLChannel("TTL channel with unswept expired posts", expiredCountLivePosts, expiredCountExpiredPosts)
+	for _, live := range expiredCountLiveSizes {
+		clean := f.seedTTLChannel("TTL channel without expired posts", live, 0)
+		backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
 
-	cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
-	backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
+		cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
+		cleanMillis := f.lastMillis
+		backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
+		t.Logf("live %d: clean statements/rows/ms = %d/%d/%.1f, %d expired unswept statements/rows/ms = %d/%d/%.1f",
+			live, cleanStatements, cleanRows, cleanMillis, expiredCountExpiredPosts, backlogStatements, backlogRows, f.lastMillis)
 
-	t.Logf("clean statements/rows = %d/%d, backlog statements/rows = %d/%d", cleanStatements, cleanRows, backlogStatements, backlogRows)
-
-	if len(backlogIDs) != 100 || !slices.Equal(backlogIDs, cleanIDs) {
-		t.Fatalf("page with expired unswept posts = %v, want the clean channel's newest live page %v", backlogIDs, cleanIDs)
-	}
-	for _, id := range backlogIDs {
-		if id > expiredCountLivePosts+1 {
-			t.Fatalf("page contains expired post %d", id)
+		if len(backlogIDs) != 100 || !slices.Equal(backlogIDs, cleanIDs) {
+			t.Fatalf("live %d: page with expired unswept posts = %v, want the clean channel's newest live page %v", live, backlogIDs, cleanIDs)
 		}
-	}
-
-	// The service row at local ID 1 plus the live TTL posts; expired posts
-	// never count.
-	if want := expiredCountLivePosts + 1; cleanCount != want || backlogCount != want {
-		t.Fatalf("history counts clean/backlog = %d/%d, want %d", cleanCount, backlogCount, want)
-	}
-	if float64(backlogStatements) > 1.5*float64(cleanStatements) {
-		t.Fatalf("statements with %d expired unswept posts = %d, clean = %d, want within 1.5x", expiredCountExpiredPosts, backlogStatements, cleanStatements)
-	}
-	if float64(backlogRows) > 1.5*float64(cleanRows) {
-		t.Fatalf("rows read with %d expired unswept posts = %d, clean = %d, want within 1.5x", expiredCountExpiredPosts, backlogRows, cleanRows)
+		for _, id := range backlogIDs {
+			if id > int64(live)+1 {
+				t.Fatalf("live %d: page contains expired post %d", live, id)
+			}
+		}
+		// The service row at local ID 1 plus the live TTL posts; expired posts
+		// never count.
+		if want := live + 1; cleanCount != want || backlogCount != want {
+			t.Fatalf("live %d: history counts clean/backlog = %d/%d, want %d", live, cleanCount, backlogCount, want)
+		}
+		if float64(backlogStatements) > 1.5*float64(cleanStatements) {
+			t.Fatalf("live %d: statements with %d expired unswept posts = %d, clean = %d, want within 1.5x", live, expiredCountExpiredPosts, backlogStatements, cleanStatements)
+		}
+		if float64(backlogRows) > 1.5*float64(cleanRows) {
+			t.Fatalf("live %d: rows read with %d expired unswept posts = %d, clean = %d, want within 1.5x", live, expiredCountExpiredPosts, backlogRows, cleanRows)
+		}
 	}
 }
 
@@ -291,5 +305,233 @@ func TestChannelPostExpiringSummaryBackfillIsBoundedAndComplete(t *testing.T) {
 				t.Fatalf("channel %d page contains expired post %d", channelID, id)
 			}
 		}
+	}
+}
+
+func TestChannelHistoryCountTracksTTLPostsWrittenThroughNormalPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290005")
+	group, err := f.s.CreateChannel(ctx, f.owner.ID, "TTL normal path", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		t.Helper()
+		_, _, n, _ := f.historyCost(group.ID)
+		return n
+	}
+	before := count()
+	if _, _, _, changed, err := f.s.SetChannelHistoryTTL(ctx, group.ID, f.owner.ID, 86400, store.RateLimitConfig{}); err != nil || !changed {
+		t.Fatalf("set channel history TTL: changed=%v err=%v", changed, err)
+	}
+	serviceRows := count() // the TTL-change service row, no TTL posts yet
+	if serviceRows != before+1 {
+		t.Fatalf("count after TTL change = %d, want %d", serviceRows, before+1)
+	}
+	postIDs := make([]int64, 0, 3)
+	for i := range int64(3) {
+		msg, _ := post(t, f.s, group.ID, f.owner.ID, "ttl post", 90_000+i)
+		postIDs = append(postIDs, msg.LocalID)
+	}
+	if got, want := count(), serviceRows+3; got != want {
+		t.Fatalf("count with 3 TTL posts = %d, want %d", got, want)
+	}
+	var root int64
+	if err := store.StorePool(f.s).QueryRow(ctx, `
+		SELECT live_count FROM channel_post_summaries
+		 WHERE channel_id = $1 AND scope_kind = 2 AND author_id = 0 AND depth = 0 AND prefix = 0
+	`, group.ID).Scan(&root); err != nil || root != 3 {
+		t.Fatalf("expiring root after TTL posts = %d, err %v, want 3", root, err)
+	}
+
+	f.exec(`UPDATE channel_messages SET expires_at = now() - interval '1 minute' WHERE channel_id = $1 AND local_id = $2`, group.ID, postIDs[0])
+	if got, want := count(), serviceRows+2; got != want {
+		t.Fatalf("count after one post expires = %d, want %d", got, want)
+	}
+	f.exec(`UPDATE channel_messages SET deleted = true WHERE channel_id = $1 AND local_id = $2`, group.ID, postIDs[0])
+	if got, want := count(), serviceRows+2; got != want {
+		t.Fatalf("count after the sweeper tombstones it = %d, want %d", got, want)
+	}
+	if err := store.StorePool(f.s).QueryRow(ctx, `
+		SELECT live_count FROM channel_post_summaries
+		 WHERE channel_id = $1 AND scope_kind = 2 AND author_id = 0 AND depth = 0 AND prefix = 0
+	`, group.ID).Scan(&root); err != nil || root != 2 {
+		t.Fatalf("expiring root after sweep = %d, err %v, want 2", root, err)
+	}
+}
+
+func TestChannelHistoryCountFailsClosedWhenExpiringNodesAreMissing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290006")
+	channelID := f.seedTTLChannel("TTL corrupt channel", 5, 5)
+	f.exec(`DELETE FROM channel_post_summaries WHERE channel_id = $1 AND scope_kind = 2 AND depth = 0 AND prefix = 0`, channelID)
+	_, _, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, 0, 0, 0, 0, 0, 100)
+	if !errors.Is(err, store.ErrChannelPostSummaryCorrupt) {
+		t.Fatalf("history with a missing expiring root = %v, want ErrChannelPostSummaryCorrupt", err)
+	}
+}
+
+func (f *expiredCountFixture) expiringReady(channelID int64) bool {
+	f.t.Helper()
+	var ready bool
+	if err := store.StorePool(f.s).QueryRow(context.Background(),
+		`SELECT expiring_ready FROM channel_post_summary_state WHERE channel_id = $1`, channelID).Scan(&ready); err != nil {
+		f.t.Fatalf("read expiring readiness: %v", err)
+	}
+	return ready
+}
+
+// pendingExpiringChannel is a channel that predates the expiring scope: ready
+// for the older scopes, with live and expired TTL posts and no scope-2 nodes.
+func (f *expiredCountFixture) pendingExpiringChannel(title string) int64 {
+	f.t.Helper()
+	channelID := f.seedTTLChannel(title, 10, 20)
+	f.exec(`UPDATE channel_post_summary_state SET expiring_ready = false WHERE channel_id = $1`, channelID)
+	f.exec(`DELETE FROM channel_post_summaries WHERE channel_id = $1 AND scope_kind = 2`, channelID)
+	f.exec(`UPDATE channels SET ttl_period = 86400 WHERE id = $1`, channelID)
+	return channelID
+}
+
+func TestChannelPostExpiringSummaryRebuildIsAtomicAndRetries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290007")
+	channelID := f.pendingExpiringChannel("TTL failing rebuild")
+
+	f.exec(`ALTER TABLE channel_post_summaries ADD CONSTRAINT channel_post_expiring_test_fail CHECK (false) NOT VALID`)
+	initialized, remaining, err := f.s.InitializeChannelPostExpiringSummaries(ctx, 10)
+	if err == nil {
+		t.Fatal("rebuild succeeded with a failing derived-row constraint")
+	}
+	if initialized != 0 || remaining != 1 {
+		t.Fatalf("failed run initialized/remaining = %d/%d, want 0/1 (error %v)", initialized, remaining, err)
+	}
+	if f.expiringReady(channelID) {
+		t.Fatal("expiring_ready is set after a failed rebuild")
+	}
+	var nodes int
+	if err := store.StorePool(f.s).QueryRow(ctx,
+		`SELECT count(*) FROM channel_post_summaries WHERE channel_id = $1 AND scope_kind = 2`, channelID).Scan(&nodes); err != nil || nodes != 0 {
+		t.Fatalf("expiring nodes after failed rebuild = %d, err %v, want 0", nodes, err)
+	}
+	if _, _, got, _ := f.historyCost(channelID); got != 11 {
+		t.Fatalf("count after failed rebuild = %d, want 11 from the fallback", got)
+	}
+
+	f.exec(`ALTER TABLE channel_post_summaries DROP CONSTRAINT channel_post_expiring_test_fail`)
+	initialized, remaining, err = f.s.InitializeChannelPostExpiringSummaries(ctx, 10)
+	if err != nil || initialized != 1 || remaining != 0 {
+		t.Fatalf("retry initialized/remaining = %d/%d, err %v, want 1/0", initialized, remaining, err)
+	}
+	if !f.expiringReady(channelID) {
+		t.Fatal("expiring_ready is unset after a successful rebuild")
+	}
+	if _, _, got, _ := f.historyCost(channelID); got != 11 {
+		t.Fatalf("count after retry = %d, want 11", got)
+	}
+}
+
+func TestChannelPostExpiringSummaryRebuildSerializesWithTTLPosts(t *testing.T) {
+	t.Parallel()
+	for _, rebuildFirst := range []bool{true, false} {
+		name := "writer queued first"
+		if rebuildFirst {
+			name = "rebuild queued first"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			phone := "+15551290008"
+			if rebuildFirst {
+				phone = "+15551290009"
+			}
+			f := newExpiredCountFixture(t, phone)
+			channelID := f.pendingExpiringChannel("TTL rebuild race")
+
+			hold, err := store.BeginChannelPostSummaryStateHold(ctx, f.s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = hold.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
+			if _, err := hold.Exec(ctx, `SELECT channel_id FROM channel_state WHERE channel_id = $1 FOR UPDATE`, channelID); err != nil {
+				t.Fatalf("hold channel state: %v", err)
+			}
+
+			rebuildDone := make(chan error, 1)
+			writeDone := make(chan error, 1)
+			startRebuild := func() {
+				go func() {
+					_, _, rebuildErr := f.s.InitializeChannelPostExpiringSummaries(ctx, 10)
+					rebuildDone <- rebuildErr
+				}()
+			}
+			startWrite := func() {
+				go func() {
+					writeDone <- store.ExecChannelPostSummarySQL(ctx, f.s, `
+						INSERT INTO channel_messages (channel_id, local_id, from_id, message)
+						VALUES ($1, 1000, $2, 'ttl post during rebuild')
+					`, channelID, f.owner.ID)
+				}()
+			}
+			first, second := startWrite, startRebuild
+			if rebuildFirst {
+				first, second = startRebuild, startWrite
+			}
+			first()
+			if err := store.WaitForLockWaiters(ctx, f.s, 1); err != nil {
+				t.Fatalf("wait for first queued transaction: %v", err)
+			}
+			second()
+			if err := store.WaitForLockWaiters(ctx, f.s, 2); err != nil {
+				t.Fatalf("wait for second queued transaction: %v", err)
+			}
+			if err := hold.Rollback(ctx); err != nil {
+				t.Fatalf("release channel state: %v", err)
+			}
+			if err := <-rebuildDone; err != nil {
+				t.Fatalf("rebuild: %v", err)
+			}
+			if err := <-writeDone; err != nil {
+				t.Fatalf("write TTL post: %v", err)
+			}
+
+			if !f.expiringReady(channelID) {
+				t.Fatal("expiring_ready is unset after the rebuild")
+			}
+			var root int64
+			if err := store.StorePool(f.s).QueryRow(ctx, `
+				SELECT live_count FROM channel_post_summaries
+				 WHERE channel_id = $1 AND scope_kind = 2 AND author_id = 0 AND depth = 0 AND prefix = 0
+			`, channelID).Scan(&root); err != nil {
+				t.Fatalf("read expiring root: %v", err)
+			}
+			// 10 live and 20 expired TTL posts seeded, plus the racing post.
+			if root != 31 {
+				t.Fatalf("expiring root = %d, want 31 (the racing post counted exactly once)", root)
+			}
+			if _, _, got, _ := f.historyCost(channelID); got != 12 {
+				t.Fatalf("history count = %d, want 12", got)
+			}
+		})
+	}
+}
+
+func TestChannelPostExpiringSummaryPendingReportsUnrebuiltChannels(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290010")
+	f.pendingExpiringChannel("TTL pending one")
+	f.pendingExpiringChannel("TTL pending two")
+	if pending, err := f.s.ChannelPostExpiringSummaryPending(ctx); err != nil || pending != 2 {
+		t.Fatalf("pending = %d, err %v, want 2", pending, err)
+	}
+	if _, remaining, err := f.s.InitializeChannelPostExpiringSummaries(ctx, 10); err != nil || remaining != 0 {
+		t.Fatalf("remaining = %d, err %v, want 0", remaining, err)
+	}
+	if pending, err := f.s.ChannelPostExpiringSummaryPending(ctx); err != nil || pending != 0 {
+		t.Fatalf("pending after rollout = %d, err %v, want 0", pending, err)
 	}
 }

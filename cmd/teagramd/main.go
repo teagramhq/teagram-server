@@ -444,6 +444,8 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	if expiringSummaryBatchSize > 0 {
 		initialized, remaining, err := st.InitializeChannelPostExpiringSummaries(ctx, expiringSummaryBatchSize)
 		if err != nil {
+			// The error carries the rebuilt and pending counts; a failed run
+			// never prints the completion line.
 			return fmt.Errorf("initialize channel post expiring summaries: %w", err)
 		}
 		if _, err := fmt.Fprintf(stderr, "Channel post expiring summaries initialized: %d channels, %d remaining\n", initialized, remaining); err != nil {
@@ -1092,6 +1094,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 	if err := st.ValidateChannelPostSummariesReady(ctx); err != nil {
 		return fmt.Errorf("validate channel post summaries before startup: %w", err)
+	}
+	if pending, err := st.ChannelPostExpiringSummaryPending(ctx); err != nil {
+		log.Warn("channel post expiring summary rollout check failed", "err", err)
+	} else if pending > 0 {
+		log.Warn("group history still scans expired unswept posts for channels awaiting the expiring-summary rollout; run `teagramd maintenance initialize-channel-post-expiring-summaries` until it reports 0 remaining",
+			"pending_channels", pending)
 	}
 	if err := st.RefreshCatalogSnapshot(ctx); err != nil {
 		// Catalog data is optional for the built-in English behavior. A failed
