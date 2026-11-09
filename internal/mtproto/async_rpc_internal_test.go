@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"reflect"
 	"slices"
 	"sync"
@@ -932,6 +933,86 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 		t.Fatal("shutdown drain retained admissions for discarded container counters")
 	}
 }
+
+func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
+	const connectionID = "tcp-test-connection"
+	key := shutdownTestAuthKey()
+	sink := &serverErrorLogSink{}
+	handler := ConcurrentRPCs(HandlerFunc(func(*Conn, *Request) error {
+		return errors.New("injected concurrent RPC failure")
+	}), tg.MessagesGetSearchCountersRequestTypeID)
+	server, frameConn := asyncRPCBatchServer(t, key, handler,
+		shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}))
+	server.log = slog.New(&asyncRPCContextLogHandler{sink: sink})
+	closeErr := errors.New("injected connection close failure")
+	conn := &asyncRPCFrameCloseErrorConn{asyncRPCFrameConn: frameConn, closeErr: closeErr}
+	openedAt := time.Now()
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID, openedAt)
+	server.logConnectionOpened(transportTCP, connectionID, openedAt)
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+
+	if err := server.serveConnModeWithDiagnostics(
+		context.Background(), context.Background(), conn, netip.Addr{}, nil, nil, false, server.handler, diagnostics,
+	); err == nil {
+		t.Fatal("serve connection succeeded after a concurrent RPC failure")
+	}
+
+	want := map[string]bool{
+		"transport connection opened":                   false,
+		"close connection after concurrent RPC failure": false,
+		"concurrent RPC failed":                         false,
+		"server operation failed":                       false,
+	}
+	for _, record := range sink.snapshot() {
+		if _, ok := want[record.message]; !ok {
+			continue
+		}
+		if got := record.attrs["connection_id"]; got != connectionID {
+			t.Errorf("%s connection_id = %v, want %q", record.message, got, connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want %s", record.message, record.attrs["opened_at"], openedAt)
+		}
+		want[record.message] = true
+	}
+	for message, seen := range want {
+		if !seen {
+			t.Errorf("missing %q log record; got %+v", message, sink.snapshot())
+		}
+	}
+}
+
+type asyncRPCFrameCloseErrorConn struct {
+	*asyncRPCFrameConn
+
+	closeErr error
+}
+
+func (c *asyncRPCFrameCloseErrorConn) Close() error {
+	if err := c.asyncRPCFrameConn.Close(); err != nil {
+		return err
+	}
+	return c.closeErr
+}
+
+type asyncRPCContextLogHandler struct {
+	sink  *serverErrorLogSink
+	attrs []slog.Attr
+}
+
+func (h *asyncRPCContextLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *asyncRPCContextLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	record.AddAttrs(h.attrs...)
+	return h.sink.Handle(ctx, record)
+}
+
+func (h *asyncRPCContextLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &asyncRPCContextLogHandler{sink: h.sink, attrs: append(slices.Clone(h.attrs), attrs...)}
+}
+
+func (h *asyncRPCContextLogHandler) WithGroup(string) slog.Handler { return h }
 
 type asyncRPCFixedClassifier struct {
 	typeID    uint32

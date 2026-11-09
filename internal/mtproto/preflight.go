@@ -245,16 +245,19 @@ func probePreflight(sock net.Conn, deadline time.Time) (preflightProbe, error) {
 // It deliberately runs before codec detection and never touches auth-key,
 // session, handler or store state. deadline is the original absolute
 // pre-auth deadline, which the response may not extend.
-func (s *Server) servePreflight(ctx context.Context, sock net.Conn, nonce [discovery.NonceSize]byte, deadline time.Time) error {
+func (s *Server) servePreflight(ctx context.Context, sock net.Conn, nonce [discovery.NonceSize]byte, deadline time.Time, closeDiagnostics *transportCloseDiagnostics) error {
+	connectionAttrs := connectionIDLogAttrs(closeDiagnostics)
 	stop := context.AfterFunc(ctx, func() {
 		if closeErr := sock.Close(); closeErr != nil && !isDisconnect(closeErr) {
-			s.log.Info("close discovery connection at shutdown", "err", closeErr)
+			attrs := append([]any{"err", closeErr}, connectionAttrs...)
+			s.log.Info("close discovery connection at shutdown", attrs...)
 		}
 	})
 	defer stop()
 	defer func() {
 		if closeErr := sock.Close(); closeErr != nil && !isDisconnect(closeErr) {
-			s.log.Info("close discovery connection", "err", closeErr)
+			attrs := append([]any{"err", closeErr}, connectionAttrs...)
+			s.log.Info("close discovery connection", attrs...)
 		}
 	}() // the response socket has no next protocol
 
