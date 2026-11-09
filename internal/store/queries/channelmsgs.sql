@@ -1020,6 +1020,7 @@ WITH member AS MATERIALIZED (
            result.expiring_live,
            result.expiring_total,
            result.expiring_expired,
+           result.expiring_total - result.expiring_expired AS expiring_unexpired,
            result.expiring_expired > result.expiring_total
                OR result.expiring_live > result.expiring_total AS corrupt
     FROM member
@@ -1031,10 +1032,10 @@ WITH member AS MATERIALIZED (
 ), plan AS MATERIALIZED (
     SELECT NOT expiring.expiring_ready
                OR (NOT expiring.corrupt
-                   AND expiring.expiring_expired <= expiring.expiring_total - expiring.expiring_expired) AS scan_expired,
+                   AND expiring.expiring_expired <= expiring.expiring_unexpired) AS scan_expired,
            expiring.expiring_ready
                AND NOT expiring.corrupt
-               AND expiring.expiring_expired > expiring.expiring_total - expiring.expiring_expired AS scan_unexpired
+               AND expiring.expiring_expired > expiring.expiring_unexpired AS scan_unexpired
     FROM expiring
 ), expired_scan AS (
     SELECT count(*)::bigint AS count
