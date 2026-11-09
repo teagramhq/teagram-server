@@ -415,6 +415,7 @@ func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 // encryption master key, blob storage, or any other service resource.
 type ClientConfig struct {
 	ListenAddr                string
+	WebSocketListenAddr       string
 	PublicWebSocketListenAddr string
 	WebSocketBrowserOnly      bool
 	RSAKeyPath                string
@@ -731,6 +732,14 @@ func LoadClientConfig() (ClientConfig, error) {
 	if err != nil {
 		return ClientConfig{}, err
 	}
+	if err := validateBrowserOnlyListener(
+		cfg.WebSocketBrowserOnly,
+		cfg.WebSocketListenAddr,
+		"TG_WEBSOCKET_BROWSER_ONLY",
+		"TG_WEBSOCKET_LISTEN_ADDR",
+	); err != nil {
+		return ClientConfig{}, err
+	}
 	turnstile, err := loadTurnstileConfig()
 	if err != nil {
 		return ClientConfig{}, err
@@ -744,6 +753,7 @@ func loadClientIdentityConfig() (ClientConfig, error) {
 	listenAddr := envOr("TG_LISTEN_ADDR", ":2443")
 	cfg := ClientConfig{
 		ListenAddr:                listenAddr,
+		WebSocketListenAddr:       os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
 		PublicWebSocketListenAddr: os.Getenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"),
 		RSAKeyPath:                RSAKeyPath(),
 		DCID:                      2,
@@ -957,9 +967,15 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := validateBrowserOnlyListener(webSocketBrowserOnly, identity.WebSocketListenAddr, "TG_WEBSOCKET_BROWSER_ONLY", "TG_WEBSOCKET_LISTEN_ADDR"); err != nil {
+		return Config{}, err
+	}
+	if err := validateBrowserOnlyListener(publicWebSocketBrowserOnly, identity.PublicWebSocketListenAddr, "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"); err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
-		WebSocketListenAddr:           os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
+		WebSocketListenAddr:           identity.WebSocketListenAddr,
 		WebSocketOriginPatterns:       originPatterns,
 		WebSocketBrowserOnly:          webSocketBrowserOnly,
 		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
@@ -2551,6 +2567,13 @@ func parseWebSocketBrowserOnly(raw, name string) (bool, error) {
 		return false, fmt.Errorf("%s must be a boolean", name)
 	}
 	return browserOnly, nil
+}
+
+func validateBrowserOnlyListener(browserOnly bool, listenAddr, settingName, listenName string) error {
+	if browserOnly && listenAddr == "" {
+		return fmt.Errorf("%s requires %s", settingName, listenName)
+	}
+	return nil
 }
 
 // WarnClientAddrTrust states any socket-mode assumption still in use, once, at

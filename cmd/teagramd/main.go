@@ -500,11 +500,18 @@ func runClientConfigCommand(stdout io.Writer) error {
 			return fmt.Errorf("read demo wipe generation for client-config: %w", err)
 		}
 	}
-	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp, wipeGeneration)
+	doc, err := discovery.NewDocumentWithWebSocketAdvertiseAddr(
+		endpoint,
+		endpoint,
+		cfg.DCID,
+		&key.PublicKey,
+		cfg.AdvertiseDemoGuestSignUp,
+		wipeGeneration,
+		cfg.WebSocketBrowserOnly,
+	)
 	if err != nil {
 		return err
 	}
-	doc.WebSocket.BrowserOnly = cfg.WebSocketBrowserOnly
 	if cfg.TurnstileEnabled && cfg.PublicWebSocketListenAddr == "" {
 		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
 	}
@@ -1240,7 +1247,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
-	server.SetWebSocketBrowserOnly(cfg.WebSocketBrowserOnly)
+	if err := server.SetWebSocketBrowserOnly(cfg.WebSocketBrowserOnly); err != nil {
+		return fmt.Errorf("set WebSocket browser-only policy: %w", err)
+	}
 	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
 		return fmt.Errorf("set client discovery document: %w", err)
 	}
@@ -1416,7 +1425,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		if err != nil {
 			return errors.Join(fmt.Errorf("websocket listen: %w", err), closeListener(ln))
 		}
-		log.Info("WebSocket MTProto listening", "addr", cfg.WebSocketListenAddr)
+		log.Info("WebSocket MTProto listening",
+			"addr", cfg.WebSocketListenAddr,
+			"browser_only", cfg.WebSocketBrowserOnly,
+			"native_mtproto_endpoint_must_be_unreachable", cfg.WebSocketBrowserOnly,
+		)
 	}
 
 	var publicWebSocket *publicWebSocketListener
@@ -1426,7 +1439,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			closeErr := errors.Join(closeListener(websocketLn), closeListener(ln))
 			return errors.Join(fmt.Errorf("public websocket listen: %w", listenErr), closeErr)
 		}
-		log.Info("Public WebSocket MTProto listening", "addr", cfg.PublicWebSocketListenAddr)
+		log.Info("Public WebSocket MTProto listening",
+			"addr", cfg.PublicWebSocketListenAddr,
+			"browser_only", cfg.PublicWebSocketBrowserOnly,
+			"native_mtproto_endpoint_must_be_unreachable", cfg.PublicWebSocketBrowserOnly,
+		)
 		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler, publicClientDiscovery)
 	}
 
@@ -1435,11 +1452,18 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGeneration string) (discovery.Document, discovery.Document, error) {
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp, wipeGeneration)
+	clientDiscovery, err := discovery.NewDocumentWithWebSocketAdvertiseAddr(
+		advertise,
+		advertise,
+		cfg.DCID,
+		pub,
+		cfg.AdvertiseDemoGuestSignUp,
+		wipeGeneration,
+		cfg.WebSocketBrowserOnly,
+	)
 	if err != nil {
 		return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate discovery identity: %w", err)
 	}
-	clientDiscovery.WebSocket.BrowserOnly = cfg.WebSocketBrowserOnly
 	if cfg.PublicWebSocketListenAddr == "" {
 		if cfg.Turnstile.Enabled() {
 			clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
@@ -1447,17 +1471,22 @@ func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGener
 		return clientDiscovery, clientDiscovery, nil
 	}
 
-	publicClientDiscovery := clientDiscovery
+	publicAdvertise := advertise
 	if cfg.PublicWebSocketAdvertiseHost != "" {
-		publicAdvertise := net.JoinHostPort(cfg.PublicWebSocketAdvertiseHost, strconv.Itoa(cfg.PublicWebSocketAdvertisePort))
-		publicClientDiscovery, err = discovery.NewDocumentWithWebSocketAdvertiseAddr(
-			advertise, publicAdvertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp, wipeGeneration,
-		)
-		if err != nil {
-			return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate public WebSocket discovery identity: %w", err)
-		}
+		publicAdvertise = net.JoinHostPort(cfg.PublicWebSocketAdvertiseHost, strconv.Itoa(cfg.PublicWebSocketAdvertisePort))
 	}
-	publicClientDiscovery.WebSocket.BrowserOnly = cfg.PublicWebSocketBrowserOnly
+	publicClientDiscovery, err := discovery.NewDocumentWithWebSocketAdvertiseAddr(
+		advertise,
+		publicAdvertise,
+		cfg.DCID,
+		pub,
+		cfg.AdvertiseDemoGuestSignUp,
+		wipeGeneration,
+		cfg.PublicWebSocketBrowserOnly,
+	)
+	if err != nil {
+		return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate public WebSocket discovery identity: %w", err)
+	}
 	if cfg.Turnstile.Enabled() {
 		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
 	}

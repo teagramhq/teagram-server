@@ -41,6 +41,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	withPublicHostConfig := base
 	withPublicHostConfig.PublicWebSocketAdvertiseHost = "server.teagram.io"
 	withPublicHostConfig.PublicWebSocketAdvertisePort = 443
+	withPublicHostConfig.PublicWebSocketBrowserOnly = true
 	withOverride, public, err := listenerDiscoveryDocuments(withPublicHostConfig, &key.PublicKey, wipeGeneration)
 	if err != nil {
 		t.Fatalf("build listener-scoped discovery: %v", err)
@@ -60,7 +61,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	if withoutPublic.WebSocket.Endpoint != "wss://tailnet.example.test/apiws" {
 		t.Fatalf("public discovery without override = %q, want tailnet endpoint", withoutPublic.WebSocket.Endpoint)
 	}
-	if public.MTProto.Endpoint != "tailnet.example.test:2443" || public.WebSocket.Endpoint != "wss://server.teagram.io/apiws" {
+	if public.MTProto.Endpoint != "tailnet.example.test:2443" || public.WebSocket.Endpoint != "wss://server.teagram.io/apiws" || !public.WebSocket.BrowserOnly {
 		t.Fatalf("public discovery endpoints = MTProto %q, WebSocket %q", public.MTProto.Endpoint, public.WebSocket.Endpoint)
 	}
 	if public.Demo == nil || !public.Demo.GuestSignUp || public.Demo.WipeGeneration != wipeGeneration || public.Turnstile == nil || public.Turnstile.SiteKey != "public-site-key" {
@@ -109,6 +110,9 @@ func TestListenerDiscoveryDocumentsAdvertiseBrowserOnlyPolicyPerListener(t *test
 	if !strings.Contains(string(defaultJSON), `"browser_only":true`) {
 		t.Errorf("default discovery = %s, want browser_only true", defaultJSON)
 	}
+	if defaultDocument.MTProto.Endpoint != "demo.example.test:443" {
+		t.Errorf("browser-only default discovery MTProto endpoint = %q, want demo.example.test:443", defaultDocument.MTProto.Endpoint)
+	}
 	if strings.Contains(string(publicJSON), `"browser_only"`) {
 		t.Errorf("public discovery = %s, want browser_only omitted", publicJSON)
 	}
@@ -136,6 +140,9 @@ func TestListenerDiscoveryDocumentsAdvertiseBrowserOnlyPolicyPerListener(t *test
 	}
 	if !strings.Contains(string(publicJSON), `"browser_only":true`) {
 		t.Errorf("public discovery = %s, want browser_only true", publicJSON)
+	}
+	if publicDocument.MTProto.Endpoint != "demo.example.test:443" {
+		t.Errorf("browser-only public discovery MTProto endpoint = %q, want demo.example.test:443", publicDocument.MTProto.Endpoint)
 	}
 }
 
