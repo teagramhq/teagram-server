@@ -1557,7 +1557,7 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          kubectl create namespace teagram
+          kubectl apply --filename deploy/k8s/base/namespace.yaml
           kubectl apply --filename deploy/k8s/deployer-access.yaml
           kubectl wait --for=create secret/teagram-deployer-token \
             --namespace teagram --timeout=60s >/dev/null

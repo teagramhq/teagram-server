@@ -410,13 +410,17 @@ grep --fixed-strings --quiet 'log_parameter_max_length = 0' deploy/k8s/base/post
 [[ -f deploy/k8s/agent-access-threat-model.md ]] ||
   fail 'the agent access threat model must be committed with the Kubernetes manifests'
 
+deployer_boundary_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verify deployer RBAC and Pod Security boundaries") | .run' .github/workflows/ci.yml)"
+[[ "$deployer_boundary_step" == *'kubectl apply --filename deploy/k8s/base/namespace.yaml'* ]] ||
+  fail 'the deployer boundary check must apply the namespace Pod Security labels before testing pod admission'
+
 agent_access_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Verify agent RBAC and pod-delete admission") | .run' .github/workflows/ci.yml)"
 [[ "$agent_access_step" == *'test-k8s-agent-access.sh'* ]] ||
   fail 'test: k8s-deploy must exercise agent RBAC and pod-delete admission'
-grep --fixed-strings --quiet 'kubectl --as="$agent" delete pod "$linkselector_pod" --dry-run=server' \
+grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod \"\$linkselector_pod\" --dry-run=server" \
   .github/scripts/test-k8s-agent-access.sh ||
   fail 'the agent admission test must server-side dry-run an allowed linkselector delete'
-grep --fixed-strings --quiet 'kubectl --as="$agent" delete pod postgres-0 --dry-run=server' \
+grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod postgres-0 --dry-run=server" \
   .github/scripts/test-k8s-agent-access.sh ||
   fail 'the agent admission test must server-side dry-run a denied postgres delete'
 
