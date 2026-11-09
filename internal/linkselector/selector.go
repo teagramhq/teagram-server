@@ -219,8 +219,14 @@ func (s *selector) serveServerAPI(w http.ResponseWriter, incoming *http.Request)
 		},
 		Transport: s.serverTransport,
 		ErrorLog:  log.New(io.Discard, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			failed = true
+			s.logger.Error("selector upstream request failed",
+				"route_class", serverAPIRouteClass,
+				"route", serverAPIRouteName(incoming.RequestURI),
+				"method", incoming.Method,
+				"cause", proxyErrorCause(err),
+			)
 			writeUnavailable(w, webErrorStatus)
 		},
 	}
@@ -502,6 +508,33 @@ func isServerAPIPath(path string) bool {
 	default:
 		return false
 	}
+}
+
+func serverAPIRouteName(requestURI string) string {
+	path, _, _, valid := splitRequestTarget(requestURI)
+	if !valid {
+		return "unknown"
+	}
+	switch path {
+	case "/apiws":
+		return "websocket"
+	case "/.well-known/teagramd/client":
+		return "discovery"
+	case "/.well-known/telegramd/client":
+		return "legacy_discovery"
+	default:
+		return "unknown"
+	}
+}
+
+func proxyErrorCause(err error) string {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
+		return opErr.Error()
+	}
+	if urlErr, ok := errors.AsType[*url.Error](err); ok && urlErr.Err != nil {
+		return proxyErrorCause(urlErr.Err)
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 func splitRequestTarget(requestURI string) (path, query string, hasQuery, valid bool) {
