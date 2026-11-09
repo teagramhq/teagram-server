@@ -91,6 +91,7 @@ jq --exit-status '."id-token" == "write" and .attestations == "write"' \
   <<<"$publisher_permissions" >/dev/null ||
   fail 'the image publisher must have the permissions required for build provenance'
 attestation_steps="$(yq -o=json '[.jobs."publish-k8s-images".steps[] | select(.uses == "actions/attest@v4.2.2")]' .github/workflows/ci.yml)"
+# shellcheck disable=SC2016 # Compare the literal GitHub Actions expression.
 main_push_condition='${{ github.event_name == '\''push'\'' && github.ref == '\''refs/heads/main'\'' }}'
 jq --exit-status --arg condition "$main_push_condition" '
   length == 5
