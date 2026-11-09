@@ -441,10 +441,10 @@ func TestChannelPostExpiringSummaryBackfillIsBoundedAndComplete(t *testing.T) {
 	// Channels that predate the expiring scope: ready for the old scopes only.
 	f.exec(`UPDATE channel_post_summary_state SET expiring_ready = false`)
 	f.exec(`DELETE FROM channel_post_summaries WHERE scope_kind = 2`)
-	_, _, count, _ := f.historyCost(first)
+	slowCount := f.historyCount(first)
 	slowRows := f.lastCountRows
-	if count != 11 {
-		t.Fatalf("pre-backfill count = %d, want 11", count)
+	if slowCount != 11 {
+		t.Fatalf("pre-backfill count = %d, want 11", slowCount)
 	}
 	if slowRows < 2_000 {
 		t.Fatalf("pre-backfill count statement read %d rows, want the direct expired-row scan", slowRows)
@@ -715,4 +715,12 @@ func TestChannelPostExpiringSummaryPendingReportsUnrebuiltChannels(t *testing.T)
 	if pending, err := f.s.ChannelPostExpiringSummaryPending(ctx); err != nil || pending != 0 {
 		t.Fatalf("pending after rollout = %d, err %v, want 0", pending, err)
 	}
+}
+
+// historyCount reads one history open and returns only its total count.
+func (f *expiredCountFixture) historyCount(channelID int64) int {
+	f.t.Helper()
+	statements, rows, count, pageIDs := f.historyCost(channelID)
+	f.t.Logf("history open %d: %d statements, %d rows, page of %d", channelID, statements, rows, len(pageIDs))
+	return count
 }
