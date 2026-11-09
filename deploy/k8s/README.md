@@ -10,7 +10,8 @@ sudo deploy/k8s/bootstrap-alpha.sh --apply
 The script
 creates the `teagram` namespace, transfers only the production credentials and
 runtime values described below from the live `teagram` LXC, installs the
-namespace-scoped deploy account and agent operations menu, and writes the
+namespace-scoped deploy account, the restricted `teagram-agent` read account,
+and the agent operations menu, and writes the
 restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
 `0600`. Store that file in the designated GitHub environment secret. It also
 writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
@@ -18,6 +19,32 @@ certificate, root-owned mode `0600`; use it only for the root-run cutover,
 rollback, and target reset on alpha. Never store this admin kubeconfig in GitHub
 or give it to the deploy job. The API and operations SSH menu are exposed
 through Tailscale Serve only; the Incus proxy listeners bind to host loopback.
+The bootstrap also installs a cluster-scoped ValidatingAdmissionPolicy and
+binding. Rerunning the bootstrap reapplies the same manifests without changing
+them. The policy limits pod deletion by `teagram-agent` to controller-owned
+teagramd, linkselector, linklanding, and cloudflared pods.
+
+To roll back only agent access after bootstrap, remove the admission binding
+before the policy, then remove the namespace RoleBinding, Role, and
+ServiceAccount. Deleting the ServiceAccount revokes TokenRequest tokens bound
+to it:
+
+```sh
+sudo incus exec teagram-k3s -- k3s kubectl delete \
+  validatingadmissionpolicybinding teagram-agent-pod-delete
+sudo incus exec teagram-k3s -- k3s kubectl delete \
+  validatingadmissionpolicy teagram-agent-pod-delete
+sudo incus exec teagram-k3s -- k3s kubectl delete rolebinding teagram-agent \
+  --namespace teagram
+sudo incus exec teagram-k3s -- k3s kubectl delete role teagram-agent \
+  --namespace teagram
+sudo incus exec teagram-k3s -- k3s kubectl delete serviceaccount teagram-agent \
+  --namespace teagram
+```
+
+This removes the agent credential path without changing workloads or their
+data. Reverting the code and rerunning the bootstrap restores the configured
+access path.
 
 Before workloads have written production data, rollback on `alpha` with:
 
@@ -52,6 +79,8 @@ Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a
 privileged `hostPath` pod.
+Read the [agent access threat model](agent-access-threat-model.md) before
+minting or using a `teagram-agent` TokenRequest token.
 
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
@@ -89,6 +118,7 @@ by the cluster's secret and configuration management before it is applied:
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
 | `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
 | `cloudflared-token` Secret | `token` |
+| Agent token (external credential, not a Kubernetes resource) | The Steward mints a TokenRequest token inside the LXC with the root-only admin credential and `kubectl create token teagram-agent --namespace teagram --duration=2160h` (expires in 90 days or less; record its exact expiry). Never store it in a `kubernetes.io/service-account-token` Secret or commit it. To rotate or revoke it, delete and recreate the `teagram-agent` ServiceAccount, then mint a replacement token. |
 
 All images used by the production overlays are publicly pullable. Bootstrap does
 not read Docker credentials or create a registry Secret; this also keeps the

@@ -1099,6 +1099,8 @@ jobs:
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
+          shellcheck .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
           bash -n .github/scripts/check-k8s-migration-version.sh
           shellcheck .github/scripts/check-k8s-migration-version.sh
           bash -n .github/scripts/set-k8s-ci-migration-version.sh
@@ -1543,13 +1545,19 @@ jobs:
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
+          for manifest in agent-access.yaml agent-pod-delete-policy.yaml; do
+            kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+              "deploy/k8s/$manifest"
+            kubectl apply --dry-run=client --validate=false \
+              --filename "deploy/k8s/$manifest"
+          done
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
       - name: Verify deployer RBAC and Pod Security boundaries
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          kubectl apply --filename deploy/k8s/base/namespace.yaml
+          kubectl create namespace teagram
           kubectl apply --filename deploy/k8s/deployer-access.yaml
           kubectl wait --for=create secret/teagram-deployer-token \
             --namespace teagram --timeout=60s >/dev/null
@@ -1882,7 +1890,7 @@ jobs:
               >&2
             exit 1
           fi
-          kubectl create namespace teagram
+          kubectl apply --filename deploy/k8s/base/namespace.yaml
           printf '%s' "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-password"
           printf 'postgres://postgres:%s@postgres:5432/teagram?sslmode=disable' \
             "$POSTGRES_TEST_PASSWORD" > "$RUNNER_TEMP/postgres-dsn"
@@ -1927,6 +1935,12 @@ jobs:
           kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
+
+      - name: Verify agent RBAC and pod-delete admission
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash .github/scripts/test-k8s-agent-access.sh
 
       - name: Bootstrap the server identity explicitly
         run: |
