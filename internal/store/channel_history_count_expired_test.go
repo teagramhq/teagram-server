@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	expiredCountLivePosts    = 1_000
 	expiredCountExpiredPosts = 10_000
 )
 
@@ -131,42 +130,174 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 	return statements, rows, count, pageIDs
 }
 
-// expiredCountLiveSizes are the live TTL post counts at which the backlog
-// independence bound is checked. History cost may grow with live TTL posts (the
-// documented tradeoff); at every size it must not grow with the backlog.
-var expiredCountLiveSizes = []int{expiredCountLivePosts, 10 * expiredCountLivePosts}
+// assertCostWithin1_5x reports whether the history cost of got stays within
+// 1.5x of want in both statements and rows read.
+func assertCostWithin1_5x(t *testing.T, label string, gotStatements int, gotRows int64, wantStatements int, wantRows int64) {
+	t.Helper()
+	if float64(gotStatements) > 1.5*float64(wantStatements) {
+		t.Fatalf("%s: statements = %d, baseline %d, want within 1.5x", label, gotStatements, wantStatements)
+	}
+	if float64(gotRows) > 1.5*float64(wantRows) {
+		t.Fatalf("%s: rows read = %d, baseline %d, want within 1.5x", label, gotRows, wantRows)
+	}
+}
 
+// Cost may grow with the smaller of the expired backlog and the live expiring
+// posts. With few live posts a huge backlog must not show up in the cost.
 func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 	t.Parallel()
 	f := newExpiredCountFixture(t, "+15551290001")
-	for _, live := range expiredCountLiveSizes {
-		clean := f.seedTTLChannel("TTL channel without expired posts", live, 0)
-		backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
+	const live = 50
+	clean := f.seedTTLChannel("TTL channel without expired posts", live, 0)
+	backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
 
-		cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
-		cleanMillis := f.lastMillis
-		backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
-		t.Logf("live %d: clean statements/rows/ms = %d/%d/%.1f, %d expired unswept statements/rows/ms = %d/%d/%.1f",
-			live, cleanStatements, cleanRows, cleanMillis, expiredCountExpiredPosts, backlogStatements, backlogRows, f.lastMillis)
+	cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
+	backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
+	t.Logf("live %d: clean statements/rows = %d/%d, %d expired unswept statements/rows = %d/%d",
+		live, cleanStatements, cleanRows, expiredCountExpiredPosts, backlogStatements, backlogRows)
 
-		if len(backlogIDs) != 100 || !slices.Equal(backlogIDs, cleanIDs) {
-			t.Fatalf("live %d: page with expired unswept posts = %v, want the clean channel's newest live page %v", live, backlogIDs, cleanIDs)
+	if len(backlogIDs) != live+1 || !slices.Equal(backlogIDs, cleanIDs) {
+		t.Fatalf("page with expired unswept posts = %v, want the clean channel's live page %v", backlogIDs, cleanIDs)
+	}
+	for _, id := range backlogIDs {
+		if id > live+1 {
+			t.Fatalf("page contains expired post %d", id)
 		}
-		for _, id := range backlogIDs {
-			if id > int64(live)+1 {
-				t.Fatalf("live %d: page contains expired post %d", live, id)
+	}
+	// The service row at local ID 1 plus the live TTL posts; expired posts
+	// never count.
+	if want := live + 1; cleanCount != want || backlogCount != want {
+		t.Fatalf("history counts clean/backlog = %d/%d, want %d", cleanCount, backlogCount, want)
+	}
+	assertCostWithin1_5x(t, "10,000 expired unswept posts", backlogStatements, backlogRows, cleanStatements, cleanRows)
+}
+
+// A healthy TTL group (no backlog) does not pay per open for its live posts.
+func TestChannelHistoryCountCostIgnoresLiveTTLPostsWithoutBacklog(t *testing.T) {
+	t.Parallel()
+	f := newExpiredCountFixture(t, "+15551290011")
+	small := f.seedTTLChannel("TTL channel with 1,000 live posts", 1_000, 0)
+	large := f.seedTTLChannel("TTL channel with 100,000 live posts", 100_000, 0)
+
+	smallStatements, smallRows, smallCount, _ := f.historyCost(small)
+	largeStatements, largeRows, largeCount, largeIDs := f.historyCost(large)
+	t.Logf("healthy: 1,000 live statements/rows = %d/%d, 100,000 live = %d/%d", smallStatements, smallRows, largeStatements, largeRows)
+	if smallCount != 1_001 || largeCount != 100_001 {
+		t.Fatalf("counts small/large = %d/%d, want 1001/100001", smallCount, largeCount)
+	}
+	if len(largeIDs) != 100 {
+		t.Fatalf("large channel page = %d posts, want 100", len(largeIDs))
+	}
+	assertCostWithin1_5x(t, "100,000 live expiring posts", largeStatements, largeRows, smallStatements, smallRows)
+}
+
+// Both scan directions are exact and expired posts never reach a page: the
+// expired-row scan (backlog no larger than live posts) and the unexpired-row
+// scan (backlog larger).
+func TestChannelHistoryCountIsExactOnBothScanDirections(t *testing.T) {
+	t.Parallel()
+	f := newExpiredCountFixture(t, "+15551290012")
+	for _, tc := range []struct {
+		name          string
+		live, expired int
+	}{
+		{name: "expired scan", live: 300, expired: 40},
+		{name: "unexpired scan", live: 40, expired: 300},
+		{name: "tie", live: 50, expired: 50},
+		{name: "no backlog", live: 60, expired: 0},
+	} {
+		channelID := f.seedTTLChannel("TTL direction "+tc.name, tc.live, tc.expired)
+		for _, floor := range []int64{0, 1, 7, int64(tc.live) / 2, int64(tc.live), int64(tc.live) + 5, int64(tc.live + tc.expired + 20)} {
+			f.exec(`UPDATE channel_participants SET available_min_id = $3 WHERE channel_id = $1 AND user_id = $2`,
+				channelID, f.owner.ID, floor)
+			want := 0
+			if floor == 0 {
+				want++ // the create service row at local ID 1
+			}
+			for id := int64(2); id <= int64(tc.live)+1; id++ {
+				if id > floor {
+					want++
+				}
+			}
+			_, _, got, ids := f.historyCost(channelID)
+			if got != want {
+				t.Fatalf("%s floor %d: count = %d, want %d", tc.name, floor, got, want)
+			}
+			for _, id := range ids {
+				if id > int64(tc.live)+1 || id <= floor {
+					t.Fatalf("%s floor %d: page contains %d", tc.name, floor, id)
+				}
 			}
 		}
-		// The service row at local ID 1 plus the live TTL posts; expired posts
-		// never count.
-		if want := live + 1; cleanCount != want || backlogCount != want {
-			t.Fatalf("live %d: history counts clean/backlog = %d/%d, want %d", live, cleanCount, backlogCount, want)
+	}
+}
+
+// Maintained expiring nodes (ignoring emptied ones) must equal a from-scratch rebuild after TTL posts
+// are written, retimed, expired, swept and retained.
+func TestChannelPostExpiringNodesMatchRebuildAfterMutations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290013")
+	group, err := f.s.CreateChannel(ctx, f.owner.ID, "TTL node parity", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := f.s.SetChannelHistoryTTL(ctx, group.ID, f.owner.ID, 86400, store.RateLimitConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 0, 8)
+	for i := range int64(8) {
+		msg, _ := post(t, f.s, group.ID, f.owner.ID, "ttl post", 91_000+i)
+		ids = append(ids, msg.LocalID)
+	}
+	f.exec(`UPDATE channel_messages SET expires_at = now() - interval '2 hours' WHERE channel_id = $1 AND local_id = ANY($2)`, group.ID, ids[:3])
+	f.exec(`UPDATE channel_messages SET expires_at = now() + interval '3 days 17 microseconds' WHERE channel_id = $1 AND local_id = $2`, group.ID, ids[3])
+	f.exec(`UPDATE channel_messages SET expires_at = NULL WHERE channel_id = $1 AND local_id = $2`, group.ID, ids[4])
+	f.exec(`UPDATE channel_messages SET expires_at = now() + interval '1 hour' WHERE channel_id = $1 AND local_id = $2`, group.ID, ids[5])
+	f.exec(`UPDATE channel_messages SET deleted = true WHERE channel_id = $1 AND local_id = $2`, group.ID, ids[0])
+	f.exec(`UPDATE channel_messages SET deleted = true WHERE channel_id = $1 AND local_id = $2`, group.ID, ids[6])
+
+	snapshot := func() string {
+		t.Helper()
+		var dump string
+		if err := store.StorePool(f.s).QueryRow(ctx, `
+			SELECT COALESCE(string_agg(scope_kind || ':' || depth || ':' || prefix || '=' || live_count, ',' ORDER BY scope_kind, depth, prefix), '')
+			  FROM channel_post_summaries WHERE channel_id = $1 AND scope_kind IN (2, 3) AND live_count > 0
+		`, group.ID).Scan(&dump); err != nil {
+			t.Fatalf("snapshot expiring nodes: %v", err)
 		}
-		if float64(backlogStatements) > 1.5*float64(cleanStatements) {
-			t.Fatalf("live %d: statements with %d expired unswept posts = %d, clean = %d, want within 1.5x", live, expiredCountExpiredPosts, backlogStatements, cleanStatements)
-		}
-		if float64(backlogRows) > 1.5*float64(cleanRows) {
-			t.Fatalf("live %d: rows read with %d expired unswept posts = %d, clean = %d, want within 1.5x", live, expiredCountExpiredPosts, backlogRows, cleanRows)
+		return dump
+	}
+	maintained := snapshot()
+	if maintained == "" {
+		t.Fatal("no expiring nodes were maintained")
+	}
+	if err := f.s.InitializeChannelPostSummaries(ctx, group.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt := snapshot(); rebuilt != maintained {
+		t.Fatalf("maintained expiring nodes differ from a rebuild:\n maintained %s\n rebuilt    %s", maintained, rebuilt)
+	}
+
+	// The channel-wide expired count from the time tree equals the rows at or
+	// before now, to the microsecond.
+	var treeExpired, rowExpired int64
+	if err := store.StorePool(f.s).QueryRow(ctx, `
+		SELECT counts.expiring_expired,
+		       (SELECT count(*) FROM channel_messages WHERE channel_id = $1 AND deleted = false
+		           AND action_type = 0 AND expires_at <= $2)
+		  FROM channel_post_expiring_counts($1, 0, $2) AS counts
+	`, group.ID, time.Now().Add(2*24*time.Hour)).Scan(&treeExpired, &rowExpired); err != nil || treeExpired != rowExpired {
+		t.Fatalf("expired at +2 days tree/rows = %d/%d, err %v", treeExpired, rowExpired, err)
+	}
+	for _, at := range []time.Time{time.Now(), time.Now().Add(90 * time.Minute), time.Now().Add(72*time.Hour + 17*time.Microsecond), time.Now().Add(72*time.Hour + 5*time.Second)} {
+		if err := store.StorePool(f.s).QueryRow(ctx, `
+			SELECT counts.expiring_expired,
+			       (SELECT count(*) FROM channel_messages WHERE channel_id = $1 AND deleted = false
+			           AND action_type = 0 AND expires_at <= $2)
+			  FROM channel_post_expiring_counts($1, 0, $2) AS counts
+		`, group.ID, at).Scan(&treeExpired, &rowExpired); err != nil || treeExpired != rowExpired {
+			t.Fatalf("expired at %s tree/rows = %d/%d, err %v", at, treeExpired, rowExpired, err)
 		}
 	}
 }

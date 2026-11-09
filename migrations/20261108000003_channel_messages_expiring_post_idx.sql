@@ -1,6 +1,7 @@
--- Serve the unexpired expiring-post count in group history from an index range
--- on expiry, skipping expired rows the sweeper has not tombstoned yet. Build
--- concurrently so channel writes stay available.
+-- Serve both exact expiry scans in group history from one index range on
+-- expiry: expired posts (expires_at <= now) or unexpired posts (expires_at > now),
+-- each bounded to the rows it counts. Build concurrently so channel writes stay
+-- available.
 -- atlas:txmode none
 
 CREATE INDEX CONCURRENTLY channel_messages_expiring_post_idx

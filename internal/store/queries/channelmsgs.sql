@@ -977,12 +977,14 @@ ORDER BY local_id DESC;
 -- name: CountChannelHistory :one
 -- Count content posts from the exact member-floor summary. Expired content
 -- remains in that summary until the TTL sweeper marks it deleted. Once a
--- channel's expiring nodes are initialized, expired-unswept posts are the
--- expiring suffix total minus the unexpired expiring posts above the floor,
--- read from the expiry index, so cost follows live TTL posts and not the
--- sweeper backlog. Channels not yet rebuilt keep the direct expired-row count.
--- Service rows are sparse relative to content posts and have their own partial
--- history index.
+-- channel's expiring nodes are initialized, the channel-wide expiring total and
+-- expired-unswept backlog are read in O(log n) and the cheaper exact scan runs:
+-- the expired rows above the floor when the backlog is no larger than the
+-- unexpired expiring posts, otherwise the unexpired rows above the floor
+-- subtracted from the expiring suffix total. Cost follows the smaller of the
+-- two. Channels not yet rebuilt keep the direct expired-row count. Service
+-- rows are sparse relative to content posts and have their own partial history
+-- index.
 WITH member AS MATERIALIZED (
     SELECT participant.available_min_id
     FROM channel_participants AS participant
@@ -1014,34 +1016,48 @@ WITH member AS MATERIALIZED (
       AND service.action_type <> 0
       AND (service.expires_at IS NULL OR service.expires_at > statement_timestamp())
 ), expiring AS MATERIALIZED (
-    SELECT result.expiring_ready, result.expiring_live
+    SELECT result.expiring_ready,
+           result.expiring_live,
+           result.expiring_total,
+           result.expiring_expired,
+           result.expiring_expired > result.expiring_total
+               OR result.expiring_live > result.expiring_total AS corrupt
     FROM member
-    CROSS JOIN LATERAL channel_post_expiring_suffix_count(
+    CROSS JOIN LATERAL channel_post_expiring_counts(
         sqlc.arg(channel_id)::bigint,
-        member.available_min_id
-    ) AS result(expiring_ready, expiring_live)
-), unexpired_expiring AS (
+        member.available_min_id,
+        statement_timestamp()
+    ) AS result(expiring_ready, expiring_live, expiring_total, expiring_expired)
+), plan AS MATERIALIZED (
+    SELECT NOT expiring.expiring_ready
+               OR (NOT expiring.corrupt
+                   AND expiring.expiring_expired <= expiring.expiring_total - expiring.expiring_expired) AS scan_expired,
+           expiring.expiring_ready
+               AND NOT expiring.corrupt
+               AND expiring.expiring_expired > expiring.expiring_total - expiring.expiring_expired AS scan_unexpired
+    FROM expiring
+), expired_scan AS (
     SELECT count(*)::bigint AS count
     FROM member
-    JOIN expiring
-      ON expiring.expiring_ready
+    JOIN plan
+      ON plan.scan_expired
+    JOIN channel_messages AS expired
+      ON expired.channel_id = sqlc.arg(channel_id)::bigint
+     AND expired.expires_at <= statement_timestamp()
+    WHERE expired.local_id > member.available_min_id
+      AND expired.deleted = false
+      AND expired.action_type = 0
+), unexpired_scan AS (
+    SELECT count(*)::bigint AS count
+    FROM member
+    JOIN plan
+      ON plan.scan_unexpired
     JOIN channel_messages AS live
       ON live.channel_id = sqlc.arg(channel_id)::bigint
      AND live.expires_at > statement_timestamp()
     WHERE live.local_id > member.available_min_id
       AND live.deleted = false
       AND live.action_type = 0
-), expired_scan AS (
-    SELECT count(*)::bigint AS count
-    FROM member
-    JOIN expiring
-      ON NOT expiring.expiring_ready
-    JOIN channel_messages AS expired
-      ON expired.channel_id = sqlc.arg(channel_id)::bigint
-     AND expired.local_id > member.available_min_id
-    WHERE expired.deleted = false
-      AND expired.action_type = 0
-      AND expired.expires_at <= statement_timestamp()
 )
 SELECT summary.entitled::boolean AS entitled,
        summary.status_exists::boolean AS status_exists,
@@ -1049,15 +1065,17 @@ SELECT summary.entitled::boolean AS entitled,
        summary.summary_ready::boolean AS summary_ready,
        summary.total_live::bigint AS total_live,
        COALESCE(service_count.count, 0)::bigint AS service_count,
-       CASE WHEN expiring.expiring_ready
-            THEN expiring.expiring_live - unexpired_expiring.count
-            ELSE expired_scan.count
-       END::bigint AS expired_post_count
+       CASE WHEN plan.scan_expired THEN expired_scan.count
+            WHEN plan.scan_unexpired THEN expiring.expiring_live - unexpired_scan.count
+            ELSE 0
+       END::bigint AS expired_post_count,
+       (expiring.expiring_ready AND expiring.corrupt)::boolean AS expiring_corrupt
 FROM summary
 CROSS JOIN service_count
 CROSS JOIN expiring
-CROSS JOIN unexpired_expiring
-CROSS JOIN expired_scan;
+CROSS JOIN plan
+CROSS JOIN expired_scan
+CROSS JOIN unexpired_scan;
 
 -- ChannelRepliesPage reads a direct-reply page and its authorization snapshot
 -- in one statement. Membership, ban state and floor gate the root, page and
