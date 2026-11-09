@@ -376,6 +376,11 @@ agent_policy=deploy/k8s/agent-pod-delete-policy.yaml
    "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'linklanding'* &&
    "$(yq -r 'select(.kind == "ValidatingAdmissionPolicy") | .spec.validations[0].expression' "$agent_policy")" == *'cloudflared'* ]] ||
   fail 'the agent admission policy must scope identity and controller-owned workload names'
+agent_rollback_block="$(sed -n '/^To roll back only agent access after bootstrap/,/^```$/p' deploy/k8s/README.md)"
+case "$agent_rollback_block" in
+  *'set -euo pipefail'*'serviceaccount teagram-agent'*'rolebinding teagram-agent'*'validatingadmissionpolicybinding teagram-agent-pod-delete'*'validatingadmissionpolicy teagram-agent-pod-delete'*'role teagram-agent'*) ;;
+  *) fail 'agent rollback must revoke its ServiceAccount and RoleBinding before removing admission protection' ;;
+esac
 wildcard_access_status=0
 yq -e 'select(.kind == "Role" and .metadata.name == "teagram-agent")
   | .rules[]

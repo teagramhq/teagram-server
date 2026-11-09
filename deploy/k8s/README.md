@@ -24,22 +24,24 @@ binding. Rerunning the bootstrap reapplies the same manifests without changing
 them. The policy limits pod deletion by `teagram-agent` to controller-owned
 teagramd, linkselector, linklanding, and cloudflared pods.
 
-To roll back only agent access after bootstrap, remove the admission binding
-before the policy, then remove the namespace RoleBinding, Role, and
-ServiceAccount. Deleting the ServiceAccount revokes TokenRequest tokens bound
-to it:
+To roll back only agent access after bootstrap, run this whole block in one
+shell. It deletes the ServiceAccount first to revoke its TokenRequest tokens,
+then removes its RoleBinding. `set -euo pipefail` stops the sequence on either
+failure, leaving admission protection in place until the agent identity and
+its permissions are revoked:
 
 ```sh
-sudo incus exec teagram-k3s -- k3s kubectl delete \
-  validatingadmissionpolicybinding teagram-agent-pod-delete
-sudo incus exec teagram-k3s -- k3s kubectl delete \
-  validatingadmissionpolicy teagram-agent-pod-delete
-sudo incus exec teagram-k3s -- k3s kubectl delete rolebinding teagram-agent \
-  --namespace teagram
-sudo incus exec teagram-k3s -- k3s kubectl delete role teagram-agent \
-  --namespace teagram
+set -euo pipefail
 sudo incus exec teagram-k3s -- k3s kubectl delete serviceaccount teagram-agent \
-  --namespace teagram
+  --namespace teagram --ignore-not-found
+sudo incus exec teagram-k3s -- k3s kubectl delete rolebinding teagram-agent \
+  --namespace teagram --ignore-not-found
+sudo incus exec teagram-k3s -- k3s kubectl delete \
+  validatingadmissionpolicybinding teagram-agent-pod-delete --ignore-not-found
+sudo incus exec teagram-k3s -- k3s kubectl delete \
+  validatingadmissionpolicy teagram-agent-pod-delete --ignore-not-found
+sudo incus exec teagram-k3s -- k3s kubectl delete role teagram-agent \
+  --namespace teagram --ignore-not-found
 ```
 
 This removes the agent credential path without changing workloads or their
