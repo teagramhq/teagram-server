@@ -179,6 +179,10 @@ k8s_deploy_run="$(yq -r '.jobs."test-k8s-deploy".steps[] | .run // ""' .github/w
 if grep --extended-regexp --quiet 'docker login ghcr.io|ghcr-pull|GITHUB_TOKEN' <<< "$k8s_deploy_run"; then
   fail 'the k3s deployment lane must pull public images without registry credentials'
 fi
+[[ "$k8s_deploy_run" == *'kubectl create secret generic teagramd-turnstile --namespace teagram'* &&
+   "$k8s_deploy_run" == *'--from-file=secret-key='* &&
+   "$k8s_deploy_run" == *'--expect-registration-mode open'* ]] ||
+  fail 'the k3s deployment lane must supply the Turnstile Secret and verify open registration'
 for overlay in prod prod-cutover bootstrap bootstrap/ci ci; do
   rendered_overlay="$(kubectl kustomize "deploy/k8s/$overlay")" ||
     fail "could not render $overlay while checking public image pulls"
@@ -190,29 +194,74 @@ for overlay in prod prod-cutover; do
   if ! kubectl kustomize "deploy/k8s/$overlay" |
     yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
       .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
-      select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
+      select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_WEBSOCKET_ALLOWED_ORIGINS" or
+             .name == "TG_REGISTRATION" or .name == "TG_ADMIN_LISTEN_ADDR" or
              .name == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR" or
              .name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR" or
              .name == "TG_PUBLIC_REGISTRATION" or
              .name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" or
+             .name == "TG_TURNSTILE_SIGNIN_ENABLED" or
+             .name == "TG_TURNSTILE_TEST_MODE" or
+             .name == "TG_TURNSTILE_HOSTNAMES" or
+             .name == "TG_TURNSTILE_SITE_KEY" or
+             .name == "TG_TURNSTILE_SECRET_KEY_FILE" or
+             .name == "TG_RSA_KEY_FINGERPRINT" or
              .name == "TG_CLIENT_ADDR_TRUST" or
              .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
-    jq -e 'length == 9 and (map({key: .name, value: .}) | from_entries |
+    jq -e 'length == 17 and (map({key: .name, value: .}) | from_entries |
       .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
+      .TG_WEBSOCKET_ALLOWED_ORIGINS.value == "https://teagram.tailaa4918.ts.net,https://web.teagram.io" and
+      .TG_REGISTRATION.value == "open" and
       .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR.value == ":2446" and
       .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR.valueFrom.configMapKeyRef ==
         {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"} and
-      .TG_PUBLIC_REGISTRATION.valueFrom.configMapKeyRef ==
-        {name: "teagramd-runtime", key: "TG_PUBLIC_REGISTRATION"} and
+      .TG_PUBLIC_REGISTRATION.value == "invite" and
       .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS.valueFrom.configMapKeyRef ==
         {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"} and
-      .TG_CLIENT_ADDR_TRUST.value == "cf-connecting-ip" and
+      .TG_TURNSTILE_SIGNIN_ENABLED.value == "true" and
+      .TG_TURNSTILE_TEST_MODE.value == "false" and
+      .TG_TURNSTILE_HOSTNAMES.value == "web.teagram.io" and
+      .TG_TURNSTILE_SITE_KEY.value == "0x4AAAAAAFaprbPUzPbgdqgU" and
+      .TG_TURNSTILE_SECRET_KEY_FILE.value == "/run/secrets/teagramd-turnstile/secret-key" and
+      .TG_RSA_KEY_FINGERPRINT.value == "-309015054596985302" and
+      .TG_CLIENT_ADDR_TRUST.value == "socket" and
       .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
       .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
       .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
-    fail "$overlay must preserve both WebSocket listeners, public policy, address trust, and admin Secret references"
+    fail "$overlay must preserve live WebSocket, registration, Turnstile, identity, address-trust, and admin settings"
   fi
 done
+for overlay in prod prod-cutover; do
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.volumes[] | select(.name == "teagramd-turnstile")]' - |
+    jq -e 'length == 1 and .[0].secret.secretName == "teagramd-turnstile" and
+      .[0].secret.defaultMode == 288 and
+      .[0].secret.items == [{key: "secret-key", path: "secret-key"}]' >/dev/null; then
+    fail "$overlay must mount the external Turnstile Secret with mode 0440 and its expected key"
+  fi
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.containers[] | select(.name == "teagramd") | .volumeMounts[] |
+      select(.name == "teagramd-turnstile")]' - |
+    jq -e 'length == 1 and .[0].mountPath == "/run/secrets/teagramd-turnstile" and .[0].readOnly == true' >/dev/null; then
+    fail "$overlay must mount the Turnstile Secret read-only at the live path"
+  fi
+done
+if ! kubectl kustomize deploy/k8s/ci |
+  yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+    .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
+    select(.name == "TG_REGISTRATION" or .name == "TG_WEBSOCKET_ALLOWED_ORIGINS" or
+           .name == "TG_TURNSTILE_SIGNIN_ENABLED" or .name == "TG_TURNSTILE_SITE_KEY" or
+           .name == "TG_RSA_KEY_FINGERPRINT")]' - |
+  jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+    .TG_REGISTRATION.value == "open" and
+    .TG_WEBSOCKET_ALLOWED_ORIGINS.value == "https://web.example.test" and
+    .TG_TURNSTILE_SIGNIN_ENABLED.value == "false" and
+    .TG_TURNSTILE_SITE_KEY.value == "1x00000000000000000000AA" and
+    (has("TG_RSA_KEY_FINGERPRINT") | not))' >/dev/null; then
+  fail 'CI must use synthetic Turnstile/origin settings without pinning the production RSA identity'
+fi
 for overlay in prod prod-cutover ci; do
   if ! kubectl kustomize "deploy/k8s/$overlay" |
     yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
@@ -271,11 +320,14 @@ grep --fixed-strings --quiet 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR == :2446' deploy/k
 runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
 [[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* &&
    "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
-   "$runtime_configmap_row" == *TG_PUBLIC_REGISTRATION* &&
    "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
-  fail 'the documented teagramd-runtime ConfigMap keys must include the public listener settings'
+  fail 'the documented teagramd-runtime ConfigMap keys must include the externally supplied listener settings'
+grep --fixed-strings --quiet '`teagramd-turnstile` Secret' deploy/k8s/README.md ||
+  fail 'the external Turnstile Secret must be documented without its value'
 grep --fixed-strings --quiet 'test-k8s-public-websocket.py' .github/workflows/ci.yml ||
   fail 'the k3s deployment test must exercise public discovery and a WebSocket session through its connector'
+grep --fixed-strings --quiet 'foreign.example.test", 403' .github/scripts/test-k8s-public-websocket.py ||
+  fail 'the public WebSocket connector test must reject a foreign origin with HTTP 403'
 grep --fixed-strings --quiet 'TCP:teagramd:2446' deploy/k8s/ci/cloudflared-ci.yaml ||
   fail 'the deployment test connector must route to the public WebSocket Service port'
 if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then

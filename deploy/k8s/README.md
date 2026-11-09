@@ -80,7 +80,7 @@ by the cluster's secret and configuration management before it is applied:
 
 | Resource | Required keys or values |
 | --- | --- |
-| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_REGISTRATION`, `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS`, `TG_MEDIA_KEY_CURRENT` |
+| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS`, `TG_MEDIA_KEY_CURRENT` |
 | `link-edge-runtime` ConfigMap | `TG_INVITE_WEB_SIGNUP_URL`; optional `TG_INVITE_DESKTOP_URL` |
 | `web` Service | ClusterIP endpoint on port 8080 for ordinary web traffic |
 | `postgres-credentials` Secret | `POSTGRES_PASSWORD`, `TG_POSTGRES_DSN` |
@@ -88,6 +88,7 @@ by the cluster's secret and configuration management before it is applied:
 | `teagramd-blob-credentials` Secret | `TG_BLOB_S3_ACCESS_KEY_ID`, `TG_BLOB_S3_SECRET_ACCESS_KEY` |
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
 | `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
+| `teagramd-turnstile` Secret | `secret-key`, mounted read-only at `/run/secrets/teagramd-turnstile/secret-key` with mode `0440` |
 | `cloudflared-token` Secret | `token` |
 
 All images used by the production overlays are publicly pullable. Bootstrap does
@@ -98,6 +99,10 @@ images such as BusyBox are pinned from `mirror.gcr.io`.
 The alpha cutover runner creates the `teagramd-admin` Secret from the existing
 Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
 either value. Subsequent production deployments use the same Secret.
+
+The Turnstile secret is supplied externally as `teagramd-turnstile`; its value
+is never stored in the repository. The teagramd container reads the mounted
+`secret-key` file through `TG_TURNSTILE_SECRET_KEY_FILE`.
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha
@@ -164,9 +169,10 @@ target `http://linkselector:8081`. The selector sends teagramd links to
 port 8080. For `server.teagram.io`, route `^/apiws` and
 `^/\.well-known/teagramd/client` to `http://teagramd:2446`. The public
 listener is a ClusterIP Service port, accepts the Compose origin allowlist,
-registration policy, and discovery endpoint from `teagramd-runtime`, and uses
-`cf-connecting-ip` because Cloudflare Tunnel is its only public path. It is
-separate from the tailnet WebSocket listener on 2444. Configure the external
+uses the live `TG_PUBLIC_REGISTRATION=invite` policy, and reads its discovery
+endpoint from `teagramd-runtime`. It keeps `TG_CLIENT_ADDR_TRUST=socket` while
+Cloudflare client-address trust is disabled. It is separate from the tailnet
+WebSocket listener on 2444. Configure the external
 MTProto TCP route separately before setting `TG_ADVERTISE_ADDR`; the Cloudflare
 HTTP hostname route does not expose the MTProto listener. The
 Cloudflared metrics endpoint is exposed only inside the cluster at

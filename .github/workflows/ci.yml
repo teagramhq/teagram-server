@@ -1915,6 +1915,12 @@ jobs:
             --from-file=TG_ADMIN_TOKEN_HASH="$RUNNER_TEMP/admin-token-hash" \
             --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
           rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
+          umask 077
+          python3 -c 'import secrets; print(secrets.token_hex(32), end="")' \
+            > "$RUNNER_TEMP/turnstile-secret-key"
+          kubectl create secret generic teagramd-turnstile --namespace teagram \
+            --from-file=secret-key="$RUNNER_TEMP/turnstile-secret-key"
+          rm -f "$RUNNER_TEMP/turnstile-secret-key"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
             --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443 \
@@ -2033,7 +2039,8 @@ jobs:
               --volume "$RUNNER_TEMP/client.json:/client.json:ro" \
               --entrypoint /usr/local/bin/mtproto-smoke \
               ghcr.io/teagramhq/teagramd:ci \
-              --endpoint 127.0.0.1:12443 --discovery-file /client.json; then
+              --endpoint 127.0.0.1:12443 --discovery-file /client.json \
+              --expect-registration-mode open; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then

@@ -73,7 +73,7 @@ def test_discovery(host, port):
         raise RuntimeError("public discovery response has no rsa_spki")
 
 
-def test_websocket(host, port):
+def test_websocket(host, port, origin, expected_status):
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     expected_accept = base64.b64encode(
         hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
@@ -85,7 +85,7 @@ def test_websocket(host, port):
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        "Origin: https://web.example.test\r\n"
+        f"Origin: {origin}\r\n"
         "CF-Connecting-IP: 192.0.2.1\r\n"
         "\r\n"
     ).encode("ascii")
@@ -94,8 +94,19 @@ def test_websocket(host, port):
         connection.sendall(request)
         headers, pending = receive_headers(connection)
         lines = headers.split("\r\n")
-        if not lines or " 101 " not in f" {lines[0]} ":
-            raise RuntimeError(f"public WebSocket did not upgrade: {lines[0] if lines else 'empty response'}")
+        status_parts = lines[0].split() if lines else []
+        if len(status_parts) < 2:
+            raise RuntimeError("public WebSocket returned an invalid HTTP status line")
+        try:
+            status = int(status_parts[1])
+        except ValueError as error:
+            raise RuntimeError("public WebSocket returned a non-numeric HTTP status") from error
+        if status != expected_status:
+            raise RuntimeError(
+                f"public WebSocket returned HTTP {status} for {origin}; want {expected_status}"
+            )
+        if status == 403:
+            return
         response_headers = {}
         for line in lines[1:]:
             name, separator, value = line.partition(":")
@@ -120,11 +131,12 @@ def main():
     args = parser.parse_args()
     try:
         test_discovery(args.host, args.port)
-        test_websocket(args.host, args.port)
+        test_websocket(args.host, args.port, "https://web.example.test", 101)
+        test_websocket(args.host, args.port, "https://foreign.example.test", 403)
     except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as error:
         print(f"public connector check failed: {error}", file=sys.stderr)
         return 1
-    print("public discovery and WebSocket ping/pong passed through the connector")
+    print("public discovery, allowed WebSocket session, and foreign-origin rejection passed through the connector")
     return 0
 
 

@@ -10,6 +10,10 @@ spec:
           env:
             - name: TG_WEBSOCKET_LISTEN_ADDR
               value: ":2444"
+            - name: TG_WEBSOCKET_ALLOWED_ORIGINS
+              value: "https://teagram.tailaa4918.ts.net,https://web.teagram.io"
+            - name: TG_REGISTRATION
+              value: open
             - name: TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
               value: ":2446"
             - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
@@ -18,18 +22,26 @@ spec:
                   name: teagramd-runtime
                   key: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
             - name: TG_PUBLIC_REGISTRATION
-              value: null
-              valueFrom:
-                configMapKeyRef:
-                  name: teagramd-runtime
-                  key: TG_PUBLIC_REGISTRATION
+              value: invite
             - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
               valueFrom:
                 configMapKeyRef:
                   name: teagramd-runtime
                   key: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
+            - name: TG_TURNSTILE_SIGNIN_ENABLED
+              value: "true"
+            - name: TG_TURNSTILE_TEST_MODE
+              value: "false"
+            - name: TG_TURNSTILE_HOSTNAMES
+              value: web.teagram.io
+            - name: TG_TURNSTILE_SITE_KEY
+              value: 0x4AAAAAAFaprbPUzPbgdqgU
+            - name: TG_TURNSTILE_SECRET_KEY_FILE
+              value: /run/secrets/teagramd-turnstile/secret-key
+            - name: TG_RSA_KEY_FINGERPRINT
+              value: "-309015054596985302"
             - name: TG_CLIENT_ADDR_TRUST
-              value: cf-connecting-ip
+              value: socket
             - name: TG_ADMIN_LISTEN_ADDR
               value: ":2445"
             - name: TG_ADMIN_TOKEN_HASH
