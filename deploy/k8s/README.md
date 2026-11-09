@@ -19,9 +19,11 @@ namespace-scoped deployment credential.
 
 The alpha bootstrap also installs the restricted `teagram-agent` read account
 and a cluster-scoped ValidatingAdmissionPolicy that limits its pod deletion to
-the approved stateless controllers. To roll back only agent access, run this
-whole block in one shell. It deletes the ServiceAccount first to revoke its
-TokenRequest tokens, then removes its RoleBinding and admission protection:
+the approved stateless controllers.
+
+To roll back only agent access after bootstrap, run this whole block in one
+shell. It deletes the ServiceAccount first to revoke its TokenRequest tokens,
+then removes its RoleBinding and admission protection:
 
 ```sh
 set -euo pipefail
