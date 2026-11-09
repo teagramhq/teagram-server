@@ -54,6 +54,53 @@ func TestChannelHistoryPageCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 	}
 }
 
+// The same bound holds for a page below a non-zero offset_id, the cursor every
+// scroll back through history sends, wherever the expired posts sit relative to
+// it, and the page equals the clean channel's page below the same post.
+func TestChannelHistoryPageCostIgnoresExpiredUnsweptPostsBelowOffset(t *testing.T) {
+	t.Parallel()
+	f := newExpiredCountFixture(t, "+15551290051")
+	for _, expiredOldest := range []bool{false, true} {
+		for _, live := range []int{50, 1_000, 10_000} {
+			clean := f.seedTTLChannelLayout("TTL channel without expired posts", live, 0, expiredOldest)
+			backlog := f.seedTTLChannelLayout("TTL channel with unswept expired posts", live, expiredCountExpiredPosts, expiredOldest)
+			// Below the middle live post. The live posts follow the expired
+			// ones when expiredOldest, so their IDs are shifted in the backlog.
+			cleanOffset := int64(live/2 + 2)
+			backlogOffset := cleanOffset
+			if expiredOldest {
+				backlogOffset += expiredCountExpiredPosts
+			}
+
+			cleanStatements, _, _, cleanIDs := f.historyCostAt(clean, cleanOffset)
+			cleanPageRows := f.lastPageRows
+			backlogStatements, _, _, backlogIDs := f.historyCostAt(backlog, backlogOffset)
+			backlogPageRows := f.lastPageRows
+			bound := cleanPageRows + int64(min(expiredCountExpiredPosts, live))
+			t.Logf("live %d, expired oldest %v, offset_id set: page statement rows %d vs %d with %d expired unswept (bound %d)",
+				live, expiredOldest, cleanPageRows, backlogPageRows, expiredCountExpiredPosts, bound)
+
+			if expiredOldest {
+				for i, id := range backlogIDs {
+					if id > 1 {
+						backlogIDs[i] = id - expiredCountExpiredPosts
+					}
+				}
+			}
+			if len(cleanIDs) == 0 || !slices.Equal(backlogIDs, cleanIDs) {
+				t.Fatalf("live %d, expired oldest %v: page below offset = %v, want the clean channel's page %v", live, expiredOldest, backlogIDs, cleanIDs)
+			}
+			if backlogStatements != cleanStatements {
+				t.Fatalf("live %d, expired oldest %v: statements with backlog = %d, no backlog = %d, want equal", live, expiredOldest, backlogStatements, cleanStatements)
+			}
+			if float64(backlogPageRows) > 1.5*float64(bound) {
+				t.Fatalf("live %d, expired oldest %v: page statement rows below offset with backlog = %d, want within 1.5x of %d (no-backlog %d + min(backlog, live))",
+					live, expiredOldest, backlogPageRows, bound, cleanPageRows)
+			}
+		}
+	}
+}
+
 // Both page statements return the same rows for every floor, offset, window
 // and bound, over a channel mixing every row class the statements partition:
 // posts with no deadline, unexpired and expired expiring posts, service rows
@@ -109,7 +156,6 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 		}
 		skip, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
 			ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
-			UnexpiredLimit: unexpired,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -128,23 +174,46 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 		}
 		compared++
 	}
-	for _, owner := range []int64{f.owner.ID, stranger.ID} {
-		for _, floor := range []int64{0, 50, 299} {
-			f.exec(`UPDATE channel_participants SET available_min_id = $3 WHERE channel_id = $1 AND user_id = $2`, group.ID, owner, floor)
-			for _, offsetID := range []int64{0, 5, 150, 400} {
-				for _, addOffset := range []int64{0, 3, 40} {
-					for _, maxID := range []int64{0, 200} {
-						for _, minID := range []int64{0, 20} {
-							for _, lim := range []int32{1, 10, 100} {
-								compare(owner, floor, offsetID, addOffset, maxID, minID, lim)
+	// Without summary nodes the statement drops its bound and reads every
+	// unexpired post; with them it is bounded by the summary total. A
+	// contradictory summary (more expired than total) also drops the bound.
+	for _, mode := range []string{"no summary nodes", "initialized summary nodes", "contradictory summary nodes"} {
+		switch mode {
+		case "no summary nodes":
+			// New channels start ready; the seeded rows bypassed the triggers,
+			// so mark the nodes as not yet built, as on an existing channel.
+			f.exec(`UPDATE channel_post_summary_state SET expiring_ready = false WHERE channel_id = $1`, group.ID)
+		case "initialized summary nodes":
+			if err := f.s.InitializeChannelPostSummaries(ctx, group.ID); err != nil {
+				t.Fatalf("initialize summaries: %v", err)
+			}
+		case "contradictory summary nodes":
+			f.exec(`UPDATE channel_post_summaries SET live_count = 0 WHERE channel_id = $1 AND scope_kind = 2 AND depth = 0 AND prefix = 0`, group.ID)
+		}
+		for _, owner := range []int64{f.owner.ID, stranger.ID} {
+			for _, floor := range []int64{0, 50, 299} {
+				f.exec(`UPDATE channel_participants SET available_min_id = $3 WHERE channel_id = $1 AND user_id = $2`, group.ID, owner, floor)
+				for _, offsetID := range []int64{0, 5, 150, 400} {
+					for _, addOffset := range []int64{0, 3, 40} {
+						for _, maxID := range []int64{0, 200} {
+							for _, minID := range []int64{0, 20} {
+								for _, lim := range []int32{1, 10, 100} {
+									compare(owner, floor, offsetID, addOffset, maxID, minID, lim)
+								}
 							}
 						}
 					}
 				}
 			}
 		}
+
 	}
 
+	f.exec(`DELETE FROM channel_post_summaries WHERE channel_id = $1`, group.ID)
+	f.exec(`UPDATE channel_post_summary_state SET expiring_ready = false WHERE channel_id = $1`, group.ID)
+	if err := f.s.InitializeChannelPostSummaries(ctx, group.ID); err != nil {
+		t.Fatalf("reinitialize summaries: %v", err)
+	}
 	// Access state decides visibility in both statements: an active ban, a
 	// channel deleted after the page was last read, and a lapsed ban must
 	// agree. The two denied states must return nothing, so a statement that
@@ -172,7 +241,7 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 			}
 		}
 		rows, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
-			ChannelID: group.ID, OwnerID: f.owner.ID, Lim: 10, UnexpiredLimit: unexpired,
+			ChannelID: group.ID, OwnerID: f.owner.ID, Lim: 10,
 		})
 		if err != nil {
 			t.Fatal(err)

@@ -1481,14 +1481,13 @@ func (s *Store) ChannelHistoryWithOffset(
 		// than the unexpired expiring posts, read those instead. Both
 		// statements return the same rows.
 		rows, e := qtx.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
-			ChannelID:      channelID,
-			OwnerID:        ownerID,
-			UnexpiredLimit: countRow.UnexpiredExpiringTotal,
-			OffsetID:       offsetID,
-			AddOffset:      addOffset,
-			MaxID:          maxID,
-			MinID:          minID,
-			Lim:            int32(limit), //nolint:gosec // limit is validated and capped by the API
+			ChannelID: channelID,
+			OwnerID:   ownerID,
+			OffsetID:  offsetID,
+			AddOffset: addOffset,
+			MaxID:     maxID,
+			MinID:     minID,
+			Lim:       int32(limit), //nolint:gosec // limit is validated and capped by the API
 		})
 		if e != nil {
 			return nil, 0, fmt.Errorf("channel history page: %w", e)

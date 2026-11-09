@@ -81,7 +81,7 @@ safe to interrupt and resume. A channel that fails is skipped for that run and n
 also sets the flag. Reversal: drop the index, the column and the scope-2 and
 scope-3 rows, and restore the previous function bodies.
 
-The group history page read needs no schema change or backfill. On a channel
+The group history offset page read (`ChannelHistoryPageWithOffset`) needs no schema change or backfill. On a channel
 whose expiring nodes are initialized and whose expired backlog is larger than
 its unexpired expiring posts, it reads the page from the existing history TTL,
 service and expiry indexes instead of walking past the expired rows; every other

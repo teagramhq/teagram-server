@@ -132,13 +132,18 @@ func (f *expiredCountFixture) seedHealthyTTLChannel(title string, live int) int6
 // and the summary nodes (measured by replaying each one under EXPLAIN
 // ANALYZE), the reported total count and the IDs of the returned page.
 func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows int64, count int, pageIDs []int64) {
+	return f.historyCostAt(channelID, 0)
+}
+
+// historyCostAt is historyCost for the page below offsetID (0 reads the newest).
+func (f *expiredCountFixture) historyCostAt(channelID, offsetID int64) (statements int, rows int64, count int, pageIDs []int64) {
 	f.lastMillis = 0
 	f.lastCountRows = 0
 	f.lastPageRows = 0
 	f.t.Helper()
 	ctx := context.Background()
 	f.trace.reset()
-	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, 0, 0, 0, 0, 0, 100)
+	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, offsetID, 0, 0, 0, 0, 100)
 	if err != nil {
 		f.t.Fatalf("read history: %v", err)
 	}
