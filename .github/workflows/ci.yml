@@ -1575,7 +1575,7 @@ jobs:
             kubectl apply --dry-run=client --validate=false \
               --filename "deploy/k8s/$manifest"
           done
-kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
             deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
           kubectl apply --filename deploy/k8s/base/namespace.yaml >/dev/null
           kubectl create --dry-run=server \
