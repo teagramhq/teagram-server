@@ -93,6 +93,8 @@ type Conn struct {
 	clock        clock.Clock
 	writeTimeout time.Duration
 	log          *slog.Logger
+	connectionID string
+	openedAt     time.Time
 
 	// pushDeliveryMu forms a barrier between update delivery and state snapshots.
 	// Pushes take its read lock before writeMu; updates.getState holds its write

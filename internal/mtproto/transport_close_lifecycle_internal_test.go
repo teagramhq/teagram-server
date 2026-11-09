@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
 
@@ -67,7 +70,581 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 		t.Fatal("serveSocket did not return after EOF during codec detection")
 	}
 
+	var opened, closed *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		switch record.message {
+		case "transport connection opened":
+			opened = record
+		case "transport connection closed":
+			closed = record
+		}
+	}
+	if opened == nil {
+		t.Fatalf("no transport open record in %+v", sink.records)
+	}
+	if closed == nil {
+		t.Fatalf("no transport close record in %+v", sink.records)
+	}
+	connectionID, ok := opened.attrs["connection_id"].(string)
+	if !ok || connectionID == "" {
+		t.Fatalf("open record connection_id = %v, want non-empty string", opened.attrs["connection_id"])
+	}
+	if got := closed.attrs["connection_id"]; got != connectionID {
+		t.Fatalf("close record connection_id = %v, want open record id %q", got, connectionID)
+	}
+	for _, record := range []*serverErrorLogRecord{opened, closed} {
+		for _, key := range []string{"peer_addr", "client_addr"} {
+			if _, ok := record.attrs[key]; ok {
+				t.Errorf("%s record contains raw address attribute %q: %+v", record.message, key, record.attrs)
+			}
+		}
+	}
 	assertSingleTransportCloseRecord(t, sink.records, "TCP", "none", "client close")
+}
+
+func TestServeLogsOpenAndCloseWithAcceptedConnectionID(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(ctx, listener) }()
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		cancel()
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	if _, err := client.Write([]byte{0x01}); err != nil {
+		t.Fatalf("write non-discovery prefix: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+
+	var opened, closed *serverErrorLogRecord
+	deadline := time.After(3 * time.Second)
+	for opened == nil || closed == nil {
+		select {
+		case record := <-sink.events:
+			switch record.message {
+			case "transport connection opened":
+				opened = &record
+			case "transport connection closed":
+				closed = &record
+			}
+		case <-deadline:
+			cancel()
+			t.Fatalf("timed out waiting for open and close records; opened=%+v closed=%+v", opened, closed)
+		}
+	}
+	connectionID, ok := opened.attrs["connection_id"].(string)
+	if !ok || connectionID == "" {
+		t.Fatalf("open record connection_id = %v, want non-empty string", opened.attrs["connection_id"])
+	}
+	if got := closed.attrs["connection_id"]; got != connectionID {
+		t.Errorf("close record connection_id = %v, want accepted connection id %q", got, connectionID)
+	}
+	openedAt, ok := opened.attrs["opened_at"].(time.Time)
+	if !ok || openedAt.IsZero() {
+		t.Fatalf("open record opened_at = %v, want a timestamp", opened.attrs["opened_at"])
+	}
+	closedOpenedAt, ok := closed.attrs["opened_at"].(time.Time)
+	if !ok || !openedAt.Equal(closedOpenedAt) {
+		t.Errorf("close record opened_at = %v, want open timestamp %s", closed.attrs["opened_at"], openedAt)
+	}
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not stop after cancellation")
+	}
+}
+
+func TestServeSamplesOpenRecordsDuringConnectCloseFlood(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(ctx, listener) }()
+
+	const connections = 25
+	for i := range connections {
+		conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial connection %d: %v", i, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close connection %d: %v", i, err)
+		}
+		waitForLogSamplerDrops(t, &server.preAuthCloseLog, int64(i))
+	}
+	if got := server.preAuthOpenLog.dropped.Load(); got != int64(connections-1) {
+		t.Fatalf("suppressed open records = %d, want %d", got, connections-1)
+	}
+
+	// Let the sampler emit the accumulated count at the next interval without
+	// making the regression test wait for the production sampling window.
+	server.preAuthOpenLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial connection after sample interval: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection after sample interval: %v", err)
+	}
+	waitForLogSamplerDrops(t, &server.preAuthCloseLog, connections)
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not stop after cancellation")
+	}
+
+	var opens []serverErrorLogRecord
+	for _, record := range sink.snapshot() {
+		if record.message == "transport connection opened" {
+			opens = append(opens, record)
+		}
+	}
+	if len(opens) != 2 {
+		t.Fatalf("connect-close flood wrote %d open records, want one per sample window: %+v", len(opens), opens)
+	}
+	if got := opens[1].attrs["suppressed"]; got != int64(connections-1) {
+		t.Errorf("suppressed open records = %v, want %d", got, connections-1)
+	}
+}
+
+func waitForLogSamplerDrops(t *testing.T, sampler *logSampler, want int64) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(3 * time.Second)
+	defer timeout.Stop()
+	for {
+		if sampler.last.Load() != 0 && sampler.dropped.Load() >= want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("log sampler dropped %d records, want at least %d", sampler.dropped.Load(), want)
+		}
+	}
+}
+
+func TestServeSocketLogsAuthenticatedIdleTimeoutContext(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(t.Context(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.authenticatedReadTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+
+	clientConn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := idleReadPingFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send authenticated ping: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after the authenticated idle timeout")
+	}
+
+	var records []serverErrorLogRecord
+drain:
+	for {
+		select {
+		case record := <-sink.events:
+			records = append(records, record)
+		default:
+			break drain
+		}
+	}
+	var opened, failure, closed *serverErrorLogRecord
+	for i := range records {
+		record := &records[i]
+		switch record.message {
+		case "transport connection opened":
+			opened = record
+		case "server operation failed":
+			if record.attrs["category"] == "idle_timeout" {
+				failure = record
+			}
+		case "transport connection closed":
+			closed = record
+		}
+	}
+	if opened == nil || failure == nil || closed == nil {
+		t.Fatalf("expected open, idle-timeout, and close records; got %+v", records)
+	}
+	connectionID, ok := opened.attrs["connection_id"].(string)
+	if !ok || connectionID == "" {
+		t.Fatalf("open record connection_id = %v, want non-empty string", opened.attrs["connection_id"])
+	}
+	openedAt, ok := opened.attrs["opened_at"].(time.Time)
+	if !ok || openedAt.IsZero() {
+		t.Fatalf("open record opened_at = %v, want a timestamp", opened.attrs["opened_at"])
+	}
+	for _, record := range []*serverErrorLogRecord{failure, closed} {
+		if got := record.attrs["connection_id"]; got != connectionID {
+			t.Errorf("%s connection_id = %v, want open record id %q", record.message, got, connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want open timestamp %v", record.message, record.attrs["opened_at"], openedAt)
+		}
+		for _, key := range []string{"peer_addr", "client_addr"} {
+			if _, ok := record.attrs[key]; ok {
+				t.Errorf("%s record contains raw address attribute %q: %+v", record.message, key, record.attrs)
+			}
+		}
+	}
+	for key, want := range map[string]any{
+		"category":        "idle_timeout",
+		"auth_key_id":     hex.EncodeToString(key.ID[:]),
+		"session_id":      int64(42),
+		"deadline_source": "default_timeout",
+	} {
+		if got := failure.attrs[key]; got != want {
+			t.Errorf("idle-timeout field %s = %v, want %v", key, got, want)
+		}
+	}
+	lastFrame, ok := failure.attrs["last_frame_received_at"].(time.Time)
+	if !ok || lastFrame.IsZero() {
+		t.Fatalf("last_frame_received_at = %v, want a timestamp", failure.attrs["last_frame_received_at"])
+	}
+	readDeadline, ok := failure.attrs["read_deadline"].(time.Time)
+	if !ok || !readDeadline.After(lastFrame) {
+		t.Fatalf("read_deadline = %v, want after last frame %s", failure.attrs["read_deadline"], lastFrame)
+	}
+	if delay := readDeadline.Sub(lastFrame); delay < 200*time.Millisecond || delay > 300*time.Millisecond {
+		t.Errorf("read deadline is %s after the last frame, want about 250 ms", delay)
+	}
+	closedAt, ok := failure.attrs["closed_at"].(time.Time)
+	if !ok || closedAt.Before(readDeadline) {
+		t.Fatalf("closed_at = %v, want at or after read deadline %s", failure.attrs["closed_at"], readDeadline)
+	}
+	assertTransportCloseRecord(t, *closed, "TCP", "none", "timeout")
+}
+
+func TestServeSocketLogsLatestUnknownAuthKeyFrameBeforeIdleTimeout(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(t.Context(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.authenticatedReadTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+
+	clientConn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := idleReadPingFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send authenticated ping: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var unknownRaw crypto.Key
+	for i := range unknownRaw {
+		unknownRaw[i] = byte(i + 91)
+	}
+	unknownKey := unknownRaw.WithID()
+	unknownSentAt := time.Now()
+	unknownFrame := idleReadPingFrame(t, unknownKey, 42, 2<<32, &mt.PingRequest{PingID: 2})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: unknownFrame}); err != nil {
+		t.Fatalf("send unknown-auth-key frame: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after the idle timeout")
+	}
+
+	var failure *serverErrorLogRecord
+drain:
+	for {
+		select {
+		case record := <-sink.events:
+			if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {
+				failure = &record
+			}
+		default:
+			break drain
+		}
+	}
+	if failure == nil {
+		t.Fatalf("no idle-timeout record in logs")
+	}
+	lastFrame, ok := failure.attrs["last_frame_received_at"].(time.Time)
+	if !ok || lastFrame.Before(unknownSentAt.Add(-10*time.Millisecond)) {
+		t.Errorf("last_frame_received_at = %v, want the later unknown-key read near %s", failure.attrs["last_frame_received_at"], unknownSentAt)
+	}
+	if failure.attrs["auth_key_id"] != hex.EncodeToString(key.ID[:]) {
+		t.Errorf("idle-timeout auth_key_id = %v, want authenticated key %s", failure.attrs["auth_key_id"], hex.EncodeToString(key.ID[:]))
+	}
+}
+
+func TestServeSocketLogsPingDelayDisconnectDeadlineSource(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(t.Context(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.authenticatedReadTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+	clientConn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := idleReadPingFrame(t, key, 42, 1<<32, &mt.PingDelayDisconnectRequest{PingID: 1, DisconnectDelay: 1})
+	if err := clientConn.Send(t.Context(), &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send ping_delay_disconnect: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after ping_delay_disconnect deadline")
+	}
+
+	var failure *serverErrorLogRecord
+drain:
+	for {
+		select {
+		case record := <-sink.events:
+			if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {
+				failure = &record
+			}
+		default:
+			break drain
+		}
+	}
+	if failure == nil {
+		t.Fatalf("no idle-timeout record in logs")
+	}
+	if got := failure.attrs["deadline_source"]; got != "client_ping_delay_disconnect" {
+		t.Errorf("deadline_source = %v, want client_ping_delay_disconnect", got)
+	}
+	readDeadline, ok := failure.attrs["read_deadline"].(time.Time)
+	if !ok || readDeadline.IsZero() {
+		t.Errorf("read_deadline = %v, want a timestamp", failure.attrs["read_deadline"])
+	}
+	lastFrame, ok := failure.attrs["last_frame_received_at"].(time.Time)
+	if !ok || readDeadline.Sub(lastFrame) < 900*time.Millisecond || readDeadline.Sub(lastFrame) > 1100*time.Millisecond {
+		t.Errorf("read_deadline = %v, want about one second after last_frame_received_at %v", readDeadline, lastFrame)
+	}
+}
+
+func TestReadReqDHTimeoutLogsStageTiming(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	connectionID := server.newConnectionID()
+	openedAt := time.Now()
+	diagnostics := newTransportCloseDiagnostics(transportTCP, connectionID, openedAt)
+	server.logConnectionOpened(transportTCP, connectionID, openedAt)
+	conn := &serverLoopFailureConn{err: context.DeadlineExceeded}
+	first := &bin.Buffer{Buf: exchangeRequestFrame(t)}
+	var attempts int
+	err = server.runExchangeWithCloseDiagnostics(
+		context.Background(), conn, first, netip.Addr{}, diagnostics, &attempts, store.RateLimitListenerTailnet,
+	)
+	if err == nil {
+		t.Fatal("key exchange succeeded after req_DH_params read timed out")
+	}
+	server.logConnectionFailure(err, diagnostics)
+	server.logTransportClose(diagnostics, err)
+
+	var opened, failure, closed *serverErrorLogRecord
+	for i := range sink.records {
+		record := &sink.records[i]
+		switch record.message {
+		case "transport connection opened":
+			opened = record
+		case "server operation failed":
+			failure = record
+		case "transport connection closed":
+			closed = record
+		}
+	}
+	if opened == nil || failure == nil || closed == nil {
+		t.Fatalf("expected open, exchange failure, and transport close records, got %+v", sink.records)
+	}
+	if opened.attrs["connection_id"] != connectionID {
+		t.Fatalf("open record connection_id = %v, want %q", opened.attrs["connection_id"], connectionID)
+	}
+	for _, record := range []*serverErrorLogRecord{failure, closed} {
+		if record.attrs["connection_id"] != connectionID {
+			t.Errorf("%s connection_id = %v, want %q", record.message, record.attrs["connection_id"], connectionID)
+		}
+		recordOpenedAt, ok := record.attrs["opened_at"].(time.Time)
+		if !ok || !openedAt.Equal(recordOpenedAt) {
+			t.Errorf("%s opened_at = %v, want %s", record.message, record.attrs["opened_at"], openedAt)
+		}
+	}
+	for key, want := range map[string]any{
+		"category": "exchange",
+		"stage":    "read_req_dh",
+		"cause":    "timeout",
+	} {
+		if got := failure.attrs[key]; got != want {
+			t.Errorf("exchange field %s = %v, want %v", key, got, want)
+		}
+	}
+	stageStartedAt, ok := failure.attrs["stage_started_at"].(time.Time)
+	if !ok || stageStartedAt.IsZero() {
+		t.Fatalf("stage_started_at = %v, want a timestamp", failure.attrs["stage_started_at"])
+	}
+	gaveUpAt, ok := failure.attrs["gave_up_at"].(time.Time)
+	if !ok || gaveUpAt.Before(stageStartedAt) {
+		t.Fatalf("gave_up_at = %v, want at or after stage start %s", failure.attrs["gave_up_at"], stageStartedAt)
+	}
+	if closed.attrs["stage"] != "read_req_dh" || closed.attrs["stage_started_at"] != stageStartedAt || closed.attrs["gave_up_at"] != gaveUpAt {
+		t.Errorf("transport close exchange timing = %+v, want read_req_dh with matching stage timestamps", closed.attrs)
+	}
+	for _, record := range []*serverErrorLogRecord{failure, closed} {
+		for _, key := range []string{"peer_addr", "client_addr", "auth_key", "payload"} {
+			if _, ok := record.attrs[key]; ok {
+				t.Errorf("%s record contains forbidden attribute %q: %+v", record.message, key, record.attrs)
+			}
+		}
+	}
 }
 
 func TestServeSocketLogsPreAuthDrainAsServerClose(t *testing.T) {
@@ -790,8 +1367,17 @@ func assertTransportCloseRecord(t *testing.T, record serverErrorLogRecord, trans
 	if record.attrs["transport"] != transport || record.attrs["step"] != step || record.attrs["reason"] != reason {
 		t.Fatalf("transport close record = %+v, want %s/%s/%s", record, transport, step, reason)
 	}
+	allowed := map[string]struct{}{
+		"transport": {}, "step": {}, "reason": {}, "suppressed": {},
+		"connection_id": {}, "opened_at": {}, "closed_at": {},
+		"stage": {}, "stage_started_at": {}, "gave_up_at": {},
+	}
+	if transport == websocketPath {
+		allowed["auth_key_id"] = struct{}{}
+		allowed["peer_addr"] = struct{}{}
+	}
 	for key := range record.attrs {
-		if key != "transport" && key != "step" && key != "reason" && key != "suppressed" {
+		if _, ok := allowed[key]; !ok {
 			t.Errorf("transport close record contains unexpected attribute %q: %+v", key, record)
 		}
 	}

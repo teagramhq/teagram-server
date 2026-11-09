@@ -441,8 +441,8 @@ func TestConnectionObservationsCountOnlyPersistedKeysAndEveryNegotiationFailure(
 	if err := server.persistAuthKey(context.Background(), crypto.AuthKey{}); err != nil {
 		t.Fatalf("persist auth key: %v", err)
 	}
-	server.logNegotiation(errors.New("first negotiation failure"))
-	server.logNegotiation(errors.New("second negotiation failure"))
+	server.logNegotiation(errors.New("first negotiation failure"), nil)
+	server.logNegotiation(errors.New("second negotiation failure"), nil)
 
 	snapshot, err := tracer.ProgressSnapshot(testRPCProgressIdentity(), RPCProgressBoundaryArtifactReady)
 	if err != nil {

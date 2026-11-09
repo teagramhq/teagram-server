@@ -83,6 +83,9 @@ func TestRefusedConnectionsDoNotFloodTheLog(t *testing.T) {
 	if !strings.Contains(logOutput, "suppressed") {
 		t.Errorf("the emitted line does not say how many refusals it stands for:\n%s", logOutput)
 	}
+	if lines := strings.Count(logOutput, "transport connection opened"); lines != 0 {
+		t.Errorf("%d refused connections wrote %d open records, want none:\n%s", refusals, lines, logOutput)
+	}
 }
 
 // syncBuffer collects log output written from the per-connection goroutines,

@@ -289,7 +289,7 @@ func (l *webSocketListener) acceptLoop() {
 
 		slot, ok := l.server.preAuth.admit(l.rateLimitListener)
 		if !ok {
-			l.server.dropRefused(sock)
+			l.server.dropRefused(sock, "", time.Time{})
 			if dropped, allow := l.server.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
 				l.server.log.Info("WebSocket connection refused at the pre-auth cap",
 					"cap", l.server.preAuth.limits.MaxConns, "suppressed", dropped)
@@ -303,7 +303,7 @@ func (l *webSocketListener) acceptLoop() {
 			deadline: time.Now().Add(l.server.handshakeTimeout),
 		}
 		if err := accepted.SetDeadline(accepted.deadline); err != nil {
-			l.server.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
+			l.server.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err), nil)
 			l.closeAccepted(accepted)
 			continue
 		}
@@ -342,7 +342,7 @@ func (l *webSocketListener) prepare(accepted *webSocketAcceptedConn) {
 		var err error
 		addr, err = l.server.clientAddrUntil(accepted, accepted.deadline)
 		if err != nil {
-			l.server.logNegotiation(err)
+			l.server.logNegotiation(err, nil)
 			l.closeAccepted(accepted)
 			l.untrack(accepted)
 			return
@@ -356,7 +356,7 @@ func (l *webSocketListener) prepare(accepted *webSocketAcceptedConn) {
 	}
 	if l.clientAddrHeader == "" && !accepted.slot.keyAddr(addr) {
 		accepted.state.Unlock()
-		l.server.dropRefused(accepted)
+		l.server.dropRefused(accepted, "", time.Time{})
 		accepted.slot.clear()
 		l.untrack(accepted)
 		if dropped, ok := l.server.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
@@ -751,10 +751,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		OriginPatterns:  originPatterns,
 	})
 	if err != nil {
-		s.logNegotiation(err)
+		s.logNegotiation(err, nil)
 		return
 	}
-	closeDiagnostics := newTransportCloseDiagnostics(websocketPath)
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, "", time.Time{})
 	var closeErr error
 	defer func() {
 		if cause, set := state.socket.lifecycleCloseCauseValue(); set {
@@ -777,7 +777,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// detection succeeds.
 	if err := state.socket.SetDeadline(state.deadline); err != nil {
 		closeErr = err
-		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
+		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err), nil)
 		return
 	}
 	stream := &webSocketDrainReadDeadlineConn{
@@ -800,12 +800,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}
 	if err != nil {
 		closeErr = err
-		s.logNegotiation(err)
+		s.logNegotiation(err, nil)
 		return
 	}
 	if err := state.socket.SetDeadline(time.Time{}); err != nil {
 		closeErr = err
-		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
+		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err), nil)
 		return
 	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
@@ -813,7 +813,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return state.socket.markServing()
 	}, websocketPath, handler, closeDiagnostics)
 	if closeErr != nil && !isWebSocketDisconnect(closeErr) {
-		s.logConnectionFailure(closeErr)
+		s.logConnectionFailure(closeErr, closeDiagnostics)
 	}
 }
 

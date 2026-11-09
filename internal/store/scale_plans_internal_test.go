@@ -122,6 +122,9 @@ func (p scalePlan) accessSummary() []string {
 }
 
 func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtScale(t *testing.T) {
+	// Sample the entire 40k-row fixture so estimate variance cannot change the plan.
+	const statsTarget = 1_000
+
 	t.Parallel()
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
@@ -210,6 +213,14 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{hiddenChannelID, peerID}},
 		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: fmt.Sprintf(
+			"ALTER INDEX messages_owner_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
+			statsTarget,
+		)},
+		{query: fmt.Sprintf(
+			"ALTER INDEX channel_messages_channel_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
+			statsTarget,
+		)},
 		{query: "ANALYZE messages"},
 		{query: "ANALYZE channel_messages"},
 		{query: "ANALYZE channel_participants"},
@@ -217,6 +228,23 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	for _, seed := range seeds {
 		if _, err := pool.Exec(ctx, seed.query, seed.args...); err != nil {
 			t.Fatalf("seed scaled emoji history: %v", err)
+		}
+	}
+	// Check that ANALYZE used the expression-index target set for this fixture.
+	for _, index := range []string{
+		"messages_owner_custom_emoji_document_ids_gin_idx",
+		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+	} {
+		var target int
+		if err := pool.QueryRow(ctx, `
+			SELECT COALESCE(attstattarget, -1)
+			FROM pg_attribute
+			WHERE attrelid = to_regclass($1) AND attnum = 2
+		`, index).Scan(&target); err != nil {
+			t.Fatalf("read %s statistics target: %v", index, err)
+		}
+		if target != statsTarget {
+			t.Errorf("%s expression statistics target = %d, want %d", index, target, statsTarget)
 		}
 	}
 
@@ -269,6 +297,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
+	// Exact index-name assertions keep dropped or unusable GIN indexes failing.
 	for _, index := range []string{
 		"messages_owner_custom_emoji_document_ids_gin_idx",
 		"channel_messages_channel_custom_emoji_document_ids_gin_idx",

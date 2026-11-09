@@ -7,7 +7,6 @@ resources:
   - ../prod
   - persistentvolumeclaims.yaml
   - volume-importer.yaml
-  - local-blob-migration-job.yaml
   - https://github.com/teagramhq/teagram-web//deploy/k8s/base?ref=6947c892793562a8413d59cc741a123fe728da5d&timeout=120&submodules=false
   - web-service.yaml
 
@@ -39,18 +38,8 @@ patches:
       - op: add
         path: /spec/suspend
         value: true
-  - target:
-      group: batch
-      version: v1
-      kind: Job
-      name: local-blob-migration
-    patch: |-
-      - op: add
-        path: /spec/suspend
-        value: true
-
 images:
   - name: ghcr.io/teagramhq/teagramd
-    digest: sha256:b378de8308e246f3c1ac80b3fed964d195a096f16dd25d273e340c1f75ab9a01
+    digest: sha256:3d5b698c730145ab7252c63e27bf95b9f2b5df161131773a1e752c1c65064797
   - name: ghcr.io/teagramhq/teagram-web
     digest: sha256:c8cf857aab04e01f6bc943072043359fc20792e955e2b16d73cce8ca06c5ca5e

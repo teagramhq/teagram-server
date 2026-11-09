@@ -64,6 +64,7 @@ printf '%s\n' \
   "TG_POSTGRES_DSN=$dsn" \
   'TG_PUBLIC_LINK_PREFIX=https://tgtest.example.invalid/l/' \
   'TG_ADVERTISE_ADDR=tgtest.example.invalid:443' \
+  'TG_MEDIA_KEY_CURRENT=1' \
   "TG_BLOB_S3_ACCESS_KEY_ID=$blob_access_key_id" > "$containers/teagram-teagramd-1/env"
 printf '%s\n' \
   'TG_INVITE_WEB_SIGNUP_URL=https://web.tgtest.example.invalid/signup' \
@@ -155,7 +156,7 @@ if state["pod_security_enforce_version"] != "v1.37":
 if state["token_wait_polls"] < 3 or state["ca_wait_polls"] < 3:
     raise SystemExit("the token and CA waits did not cover delayed population")
 required_data = {
-    "configmap/teagramd-runtime": {"TG_PUBLIC_LINK_PREFIX", "TG_ADVERTISE_ADDR"},
+    "configmap/teagramd-runtime": {"TG_PUBLIC_LINK_PREFIX", "TG_ADVERTISE_ADDR", "TG_MEDIA_KEY_CURRENT"},
     "configmap/link-edge-runtime": {"TG_INVITE_WEB_SIGNUP_URL", "TG_INVITE_DESKTOP_URL"},
     "secret/postgres-credentials": {"POSTGRES_PASSWORD", "TG_POSTGRES_DSN"},
     "secret/rustfs-credentials": {"RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY"},

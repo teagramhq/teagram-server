@@ -200,10 +200,38 @@ for overlay in prod prod-cutover; do
     fail "$overlay must preserve the WebSocket and admin listeners and Secret references"
   fi
 done
-[[ "$(yq -r '.spec.suspend' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == true ]] ||
-  fail 'the cutover blob migration Job must stay suspended until the source PVC is populated'
-[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "migrate") | .args | join(" ")' deploy/k8s/prod-cutover/local-blob-migration-job.yaml)" == *'--manifest discard --encrypt'* ]] ||
-  fail 'the cutover blob migration must encrypt the private manifest and migrated media'
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.name' deploy/k8s/base/teagramd-statefulset.yaml)" == teagramd-runtime &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.key' deploy/k8s/base/teagramd-statefulset.yaml)" == TG_MEDIA_KEY_CURRENT ]] ||
+  fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
+grep --fixed-strings --quiet "TG_MEDIA_KEY_CURRENT=\$TG_MEDIA_KEY_CURRENT" deploy/k8s/bootstrap-alpha.sh ||
+  fail 'bootstrap must preserve the live media encryption key version in teagramd-runtime'
+# shellcheck disable=SC2016
+runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
+[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* ]] ||
+  fail 'the documented teagramd-runtime ConfigMap keys must include TG_MEDIA_KEY_CURRENT'
+if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
+  fail 'the cutover must preserve encrypted S3 objects directly, without a local-blob migration Job'
+fi
+[[ "$(yq -r '.spec.containers[] | select(.name == "client") | .env[] | select(.name == "TG_BLOB_S3_ACCESS_KEY_ID") | .valueFrom.secretKeyRef.name' deploy/k8s/test-cutover-s3-client.yaml)" == teagramd-blob-credentials &&
+   "$(yq -r '.spec.containers[] | select(.name == "client") | .env[] | select(.name == "TG_BLOB_S3_SECRET_ACCESS_KEY") | .valueFrom.secretKeyRef.name' deploy/k8s/test-cutover-s3-client.yaml)" == teagramd-blob-credentials ]] ||
+  fail 'the disposable cutover S3 client must obtain credentials from the namespace Secret'
+[[ "$(yq -r '.spec.containers[] | select(.name == "client") | .image' deploy/k8s/test-cutover-s3-client.yaml)" == ghcr.io/teagramhq/teagramd-mc-init:ci ]] ||
+  fail 'the cutover test S3 client must use the revision-labelled mc image built in CI'
+[[ "$(yq -r '.spec.securityContext.runAsUser' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == 0 &&
+   "$(yq -r '.spec.volumes[] | select(.name == "blob-mode") | .persistentVolumeClaim.claimName' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == blob-mode-teagramd-0 ]] ||
+  fail 'the disposable blob-mode fixture must use a root-owned seed pod and the source authority PVC'
+grep --fixed-strings --quiet 'CUTOVER_TEST_CORRUPT_S3_OBJECT' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the cutover integration must fail closed on a per-object S3 checksum mismatch'
+grep --fixed-strings --quiet 'check_source_media_keys' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must verify that the target encrypted-media key set matches the source'
+grep --fixed-strings --quiet 'check_source_blob_credentials' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must verify that the target S3 credentials match the source'
+grep --fixed-strings --quiet 'preserve_media_key_version' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must preserve the source media encryption key version'
+grep --fixed-strings --quiet 'source and target S3 object counts or byte totals do not match' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must compare source and target S3 object counts and byte totals before switching routes'
+grep --fixed-strings --quiet 'source and target S3 per-object SHA-256 checksums do not match' deploy/k8s/cutover-alpha.sh ||
+  fail 'the cutover runner must reject same-size S3 object corruption by SHA-256'
 cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .command | join(" ")' "$cutover_seed_job")" == '/usr/local/bin/teagramd' ]] ||
   fail 'the cutover account seed Job must invoke teagramd directly for its distroless image'
@@ -226,18 +254,56 @@ cutover_key_reader=deploy/k8s/test-cutover-key-reader.yaml
    "$(yq -r '.spec.volumes[] | select(.name == "key-data") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'key-data-teagramd-0' &&
    "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "key-data") | .readOnly' "$cutover_key_reader")" == true &&
    "$(yq -r '.spec.volumes[] | select(.name == "legacy-blobs") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'legacy-blobs-teagramd-0' &&
-   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "legacy-blobs") | .readOnly' "$cutover_key_reader")" == true ]] ||
-  fail 'the cutover helper must mount source identity and blob PVCs read-only as their owner'
+   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "legacy-blobs") | .readOnly' "$cutover_key_reader")" == true &&
+   "$(yq -r '.spec.volumes[] | select(.name == "blob-mode") | .persistentVolumeClaim.claimName' "$cutover_key_reader")" == 'blob-mode-teagramd-0' &&
+   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "blob-mode") | .readOnly' "$cutover_key_reader")" == true &&
+   "$(yq -r '.spec.volumes[] | select(.name == "media-keys") | .secret.secretName' "$cutover_key_reader")" == 'teagramd-media-keys' &&
+   "$(yq -r '.spec.containers[] | select(.name == "reader") | .volumeMounts[] | select(.name == "media-keys") | .readOnly' "$cutover_key_reader")" == true ]] ||
+  fail 'the cutover helper must mount source identity, blob-mode and local blob PVCs read-only'
 grep --fixed-strings --quiet 'pod/cutover-key-reader -c reader --' deploy/k8s/test-cutover-alpha-incus.sh ||
   fail 'the actual cutover runner test adapter must read source identity from the BusyBox helper pod'
+grep --fixed-strings --quiet "kubectl exec --namespace \"\$SOURCE_NAMESPACE\" postgres-0 -c postgres --" \
+  deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the actual cutover runner test adapter must read the source migration version from disposable PostgreSQL'
+grep --fixed-strings --quiet '/run/teagramd/blob-mode/.' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the actual cutover runner test adapter must read blob-mode authority from the source PVC'
+fence_step=$(sed -n '/^fence_source_writes() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
+fence_verification=$(sed -n '/^verify_source_write_fence() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
+# shellcheck disable=SC2016
+[[ "$fence_step" == *'[[ $service == postgres || $service == rustfs ]] && continue'* &&
+   "$fence_verification" == *'check_source_container teagram-rustfs-1'* ]] ||
+  fail 'the source write fence must preserve and verify the RustFS Compose service'
+grep --fixed-strings --quiet 'teagram-rustfs-1|rustfs)' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the disposable source adapter must model the RustFS Compose container'
+grep --fixed-strings --quiet 'teagramd postgres rustfs linkselector linklanding' deploy/k8s/test-cutover-alpha-incus.sh ||
+  fail 'the disposable source adapter must report RustFS among running Compose services'
 grep --fixed-strings --quiet 'cutover-alpha.sh --apply --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must execute the actual apply runner in its disposable namespace'
+grep --fixed-strings --quiet 'CUTOVER_TEST_SOURCE_DOCKER_HELPER=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must exercise the source Docker helper path'
+grep --fixed-strings --quiet \
+  'for docker_event in pull run-migrations run-helper network-connect rm; do' \
+  deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must verify image pulls, both Docker runs, network attachment, and cleanup'
 grep --fixed-strings --quiet 'cutover-alpha.sh --rollback --test-mode' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must exercise the actual rollback runner'
 grep --fixed-strings --quiet 'CUTOVER_FAIL_OLD_CONNECTOR_CHECK=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must exercise failure handling after the first live route'
 grep --fixed-strings --quiet 'test-cutover-blob-seed.yaml' deploy/k8s/test-cutover-alpha-k3s.sh ||
   fail 'the k3s cutover test must seed source blobs for the actual transfer and migration'
+grep --fixed-strings --quiet 'smoke_upload_preserved_media' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must upload an encrypted media object before cutover'
+grep --fixed-strings --quiet 'smoke_download_preserved_media' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must download and compare the preserved media after cutover'
+grep --fixed-strings --quiet 'CUTOVER_TEST_CORRUPT_S3_OBJECT=true' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must overwrite an object with same-length corrupt data'
+grep --fixed-strings --quiet 'source and target S3 per-object SHA-256 checksums do not match' \
+  deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must assert a per-object checksum mismatch'
+grep --fixed-strings --quiet 'CUTOVER_TEST_PINNED_REVISION=0000000000000000000000000000000000000000' deploy/k8s/test-cutover-alpha-k3s.sh ||
+  fail 'the k3s cutover test must prove revision mismatch fails before the write fence'
+[[ "$(tr -d '\r\n' < deploy/k8s/prod/source-revision)" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'the production cutover source revision must be a full Git SHA'
 cutover_blob_seed=deploy/k8s/test-cutover-blob-seed.yaml
 [[ "$(yq -r '.spec.containers[] | select(.name == "seed") | .image' "$cutover_blob_seed")" == \
   'mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec' ]] ||

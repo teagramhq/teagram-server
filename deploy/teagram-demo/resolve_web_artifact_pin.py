@@ -27,7 +27,7 @@ PUBLICATION_RUNS_URL = (
     "?branch=master&event=push&head_sha={source_commit}&status=success&per_page=100"
 )
 LIVE_MANIFEST_URL = "https://web.teagram.io/mtproto-target.json"
-MAX_FETCH_ATTEMPTS = 3
+MAX_FETCH_ATTEMPTS = 6
 MAX_RETRY_DELAY_SECONDS = 30
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 MAX_JSON_BYTES = 1024 * 1024
@@ -396,13 +396,16 @@ def validate_release_identity(
     return resolved
 
 
-def validate_pinned_release_identity(
+def validate_published_release_identity(
     source_commit: str,
     artifact_digest: str,
     *,
     fetch: Callable[[str], Any] = fetch_json,
 ) -> dict[str, Any]:
-    """Verify a resolved publication snapshot without rereading the live pin."""
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("web release source commit is invalid")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
+        raise ValueError("web release artifact digest is invalid")
     resolved = resolve_published_identity(source_commit, artifact_digest, fetch=fetch)
     endpoint, fingerprint = fetch_reviewed_target(source_commit, fetch=fetch)
     resolved.update(endpoint=endpoint, fingerprint=fingerprint)
@@ -456,7 +459,7 @@ def main() -> None:
         metavar=("SOURCE_COMMIT", "ARTIFACT_DIGEST"),
     )
     group.add_argument(
-        "--verify-pinned-release-identity",
+        "--verify-published-release-identity",
         nargs=2,
         metavar=("SOURCE_COMMIT", "ARTIFACT_DIGEST"),
     )
@@ -473,8 +476,8 @@ def main() -> None:
         if args.verify_published_identity:
             print(json.dumps(resolve_published_identity(*args.verify_published_identity), separators=(",", ":")))
             return
-        if args.verify_pinned_release_identity:
-            result = validate_pinned_release_identity(*args.verify_pinned_release_identity)
+        if args.verify_published_release_identity:
+            result = validate_published_release_identity(*args.verify_published_release_identity)
             print(json.dumps(result, separators=(",", ":")))
             return
         if args.verify_release_identity:

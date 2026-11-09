@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -45,17 +46,20 @@ const (
 )
 
 type exchangeFailureError struct {
-	err   error
-	stage exchangeStage
-	cause exchangeFailureCause
+	err            error
+	stage          exchangeStage
+	cause          exchangeFailureCause
+	stageStartedAt time.Time
+	gaveUpAt       time.Time
 }
 
 func (e *exchangeFailureError) Error() string { return e.err.Error() }
 func (e *exchangeFailureError) Unwrap() error { return e.err }
 
 type exchangeDiagnostics struct {
-	stage     exchangeStage
-	operation exchangeOperation
+	stage          exchangeStage
+	operation      exchangeOperation
+	stageStartedAt time.Time
 }
 
 type transportCloseStep string
@@ -70,11 +74,22 @@ const (
 )
 
 type transportCloseDiagnostics struct {
-	transport    string
-	step         transportCloseStep
-	peerAddr     netip.Addr
-	authKeyID    [8]byte
-	hasAuthKeyID bool
+	transport              string
+	step                   transportCloseStep
+	connectionID           string
+	openedAt               time.Time
+	closedAt               time.Time
+	peerAddr               netip.Addr
+	authKeyID              [8]byte
+	hasAuthKeyID           bool
+	sessionID              int64
+	hasSessionID           bool
+	lastFrameReceivedAt    time.Time
+	readDeadline           time.Time
+	deadlineSource         string
+	exchangeStage          exchangeStage
+	exchangeStageStartedAt time.Time
+	exchangeGaveUpAt       time.Time
 }
 
 type transportCloseReason string
@@ -103,8 +118,10 @@ func classifyTransportCloseReason(err error) transportCloseReason {
 	return transportCloseReasonServerError
 }
 
-func newTransportCloseDiagnostics(transport string) *transportCloseDiagnostics {
-	return &transportCloseDiagnostics{transport: transport, step: transportCloseStepNone}
+func newTransportCloseDiagnostics(transport, connectionID string, openedAt time.Time) *transportCloseDiagnostics {
+	return &transportCloseDiagnostics{
+		transport: transport, step: transportCloseStepNone, connectionID: connectionID, openedAt: openedAt,
+	}
 }
 
 func (d *transportCloseDiagnostics) observeRequest(id uint32) {
@@ -124,6 +141,7 @@ func (d *transportCloseDiagnostics) observeResponse(id uint32) {
 
 func (d *transportCloseDiagnostics) markDHComplete() {
 	d.step = transportCloseStepDHComplete
+	d.clearExchangeStage()
 }
 
 func (d *transportCloseDiagnostics) markAuthorized() {
@@ -139,8 +157,43 @@ func (d *transportCloseDiagnostics) observeAuthKeyID(id [8]byte) {
 	d.hasAuthKeyID = id != ([8]byte{})
 }
 
+func (d *transportCloseDiagnostics) observeAuthenticatedFrame(authKeyID [8]byte, sessionID int64) {
+	d.observeAuthKeyID(authKeyID)
+	d.sessionID = sessionID
+	d.hasSessionID = true
+}
+
+func (d *transportCloseDiagnostics) observeReadTimeout(readDeadline time.Time, deadlineSource string, closedAt time.Time) {
+	d.readDeadline = readDeadline
+	d.deadlineSource = deadlineSource
+	d.closedAt = closedAt
+	if d.exchangeStage != "" {
+		d.exchangeGaveUpAt = closedAt
+	}
+}
+
+func (d *transportCloseDiagnostics) observeExchangeStage(stage exchangeStage, startedAt time.Time) {
+	if d.exchangeStage != stage || d.exchangeStageStartedAt.IsZero() {
+		d.exchangeStage = stage
+		d.exchangeStageStartedAt = startedAt
+		d.exchangeGaveUpAt = time.Time{}
+	}
+}
+
+func (d *transportCloseDiagnostics) clearExchangeStage() {
+	d.exchangeStage = ""
+	d.exchangeStageStartedAt = time.Time{}
+	d.exchangeGaveUpAt = time.Time{}
+}
+
+func (d *transportCloseDiagnostics) observeExchangeFailure(stage exchangeStage, startedAt, gaveUpAt time.Time) {
+	d.observeExchangeStage(stage, startedAt)
+	d.exchangeGaveUpAt = gaveUpAt
+	d.closedAt = gaveUpAt
+}
+
 func newExchangeDiagnostics() *exchangeDiagnostics {
-	return &exchangeDiagnostics{stage: exchangeStageReadReqPQ}
+	return &exchangeDiagnostics{stage: exchangeStageReadReqPQ, stageStartedAt: time.Now()}
 }
 
 // exchangeDiagnosticConn observes only fixed protocol constructor IDs from
@@ -155,11 +208,16 @@ type exchangeDiagnosticConn struct {
 
 func (c exchangeDiagnosticConn) Recv(ctx context.Context, b *bin.Buffer) error {
 	c.diagnostics.operation = exchangeOperationRead
+	if c.diagnostics.stageStartedAt.IsZero() {
+		c.diagnostics.stageStartedAt = time.Now()
+	}
+	c.syncStage()
 	if err := c.Conn.Recv(ctx, b); err != nil {
 		return err
 	}
 	id, ok := unencryptedConstructor(b)
 	if !ok {
+		c.syncStage()
 		return nil
 	}
 	if c.closeState != nil {
@@ -169,17 +227,21 @@ func (c exchangeDiagnosticConn) Recv(ctx context.Context, b *bin.Buffer) error {
 	case mt.ReqDHParamsRequestTypeID:
 		if c.diagnostics.stage == exchangeStageReadReqDH {
 			c.diagnostics.stage = exchangeStageDecodeInner
+			c.diagnostics.stageStartedAt = time.Now()
 		}
 	case mt.SetClientDHParamsRequestTypeID:
 		if c.diagnostics.stage == exchangeStageReadClientDH {
 			c.diagnostics.stage = exchangeStageDecodeClientDH
+			c.diagnostics.stageStartedAt = time.Now()
 		}
 	}
+	c.syncStage()
 	return nil
 }
 
 func (c exchangeDiagnosticConn) Send(ctx context.Context, b *bin.Buffer) error {
 	c.diagnostics.operation = exchangeOperationWrite
+	startedAt := time.Now()
 	id, ok := unencryptedConstructor(b)
 	if !ok {
 		return c.Conn.Send(ctx, b)
@@ -188,21 +250,33 @@ func (c exchangeDiagnosticConn) Send(ctx context.Context, b *bin.Buffer) error {
 	switch id {
 	case mt.ResPQTypeID:
 		c.diagnostics.stage = exchangeStageWriteResPQ
+		c.diagnostics.stageStartedAt = startedAt
 		next = exchangeStageReadReqDH
 	case mt.ServerDHParamsOkTypeID:
 		c.diagnostics.stage = exchangeStageWriteServerDH
+		c.diagnostics.stageStartedAt = startedAt
 		next = exchangeStageReadClientDH
 	case mt.DhGenOkTypeID:
 		c.diagnostics.stage = exchangeStageWriteDHGen
+		c.diagnostics.stageStartedAt = startedAt
 	}
+	c.syncStage()
 	err := c.Conn.Send(ctx, b)
 	if err == nil && next != "" {
 		c.diagnostics.stage = next
+		c.diagnostics.stageStartedAt = time.Now()
 	}
 	if err == nil && c.closeState != nil {
 		c.closeState.observeResponse(id)
 	}
+	c.syncStage()
 	return err
+}
+
+func (c exchangeDiagnosticConn) syncStage() {
+	if c.closeState != nil {
+		c.closeState.observeExchangeStage(c.diagnostics.stage, c.diagnostics.stageStartedAt)
+	}
 }
 
 func unencryptedConstructor(b *bin.Buffer) (uint32, bool) {
