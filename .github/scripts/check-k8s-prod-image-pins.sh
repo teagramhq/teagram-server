@@ -11,6 +11,13 @@ if (($# != 1)) || [[ ! -s "$1" ]]; then
 fi
 manifest="$1"
 zero_digest="$(printf '%064d' 0)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source_revision_file="$repo_root/deploy/k8s/prod/source-revision"
+[[ -s "$source_revision_file" && ! -L "$source_revision_file" ]] ||
+  fail 'missing production source revision marker'
+production_source_revision="$(tr -d '\r\n' < "$source_revision_file")"
+[[ "$production_source_revision" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'production source revision marker is invalid'
 
 image_digest() {
   local image="$1"
@@ -116,6 +123,13 @@ validate_required_migrations() {
 
 teagramd_revision="$(image_revision ghcr.io/teagramhq/teagramd "$teagramd_digest")"
 migrations_revision="$(image_revision ghcr.io/teagramhq/teagram-migrations "$migrations_digest")"
+rustfs_init_revision="$(image_revision ghcr.io/teagramhq/teagramd-mc-init "$rustfs_init_digest")"
+[[ "$teagramd_revision" == "$production_source_revision" ]] ||
+  fail "pinned teagramd image source $teagramd_revision does not match production source revision $production_source_revision"
+[[ "$migrations_revision" == "$production_source_revision" ]] ||
+  fail "pinned migration image source $migrations_revision does not match production source revision $production_source_revision"
+[[ "$rustfs_init_revision" == "$production_source_revision" ]] ||
+  fail "pinned S3 client image source $rustfs_init_revision does not match production source revision $production_source_revision"
 teagramd_migration_tree="$(migration_tree_at_revision "$teagramd_revision")"
 migrations_image_tree="$(migration_tree_at_revision "$migrations_revision")"
 migrations_image_version="$(latest_migration_version "$migrations_image_tree" "$migrations_revision")"

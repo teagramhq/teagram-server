@@ -78,7 +78,7 @@ PIN_SOURCE_SHA=${QA_WEB_SOURCE_SHA:-}
 PIN_ARTIFACT_DIGEST=${QA_WEB_ARTIFACT_DIGEST:-}
 [[ "$PIN_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'demo Web source identity is invalid'
 [[ "$PIN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'demo Web artifact identity is invalid'
-WEB_IDENTITY=$(python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
+WEB_IDENTITY=$(python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-published-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
   fail 'demo Web release identity does not match the published pin'
 WEB_EXPECTED_ENDPOINT=$(jq -er '.endpoint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web endpoint is invalid'
 WEB_EXPECTED_FINGERPRINT=$(jq -er '.fingerprint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web fingerprint is invalid'

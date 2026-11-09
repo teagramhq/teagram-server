@@ -62,6 +62,9 @@ func main() {
 	discoveryFile := flag.String("discovery-file", "", "read client discovery JSON from a local file")
 	usernameFile := flag.String("username-file", "", "sign in using the username in this protected file")
 	passwordFile := flag.String("password-file", "", "sign in using the password in this protected file")
+	mediaUploadFile := flag.String("media-upload-file", "", "upload a document after sign-in and save its reference to --media-manifest-file")
+	mediaDownloadFile := flag.String("media-download-file", "", "download the document in --media-manifest-file after sign-in")
+	mediaManifestFile := flag.String("media-manifest-file", "", "read or write the protected media reference used by a cutover smoke")
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
 	flag.Parse()
 	quotaExpectationSet := false
@@ -82,22 +85,41 @@ func main() {
 	if (*usernameFile == "") != (*passwordFile == "") {
 		log.Fatal("--username-file and --password-file must be used together")
 	}
+	if (*mediaUploadFile != "" && *mediaDownloadFile != "") ||
+		((*mediaUploadFile != "" || *mediaDownloadFile != "") != (*mediaManifestFile != "")) {
+		log.Fatal("use exactly one of --media-upload-file or --media-download-file with --media-manifest-file")
+	}
 	if *usernameFile != "" && (*discoveryFile == "" || quotaExpectationSet) {
 		log.Fatal("credential sign-in requires --discovery-file and cannot use --expect-user-invite-quota")
 	}
-	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota, *usernameFile, *passwordFile); err != nil {
+	if (*mediaUploadFile != "" || *mediaDownloadFile != "") && *usernameFile == "" {
+		log.Fatal("media smoke requires --username-file and --password-file")
+	}
+	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota,
+		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaManifestFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int, usernameFile, passwordFile string) error {
+func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int,
+	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaManifestFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	if usernameFile != "" {
-		if err := probeSignInFile(ctx, endpoint, discoveryFile, usernameFile, passwordFile); err != nil {
+		var action func(context.Context, *telegram.Client, *tg.User) error
+		if mediaUploadFile != "" {
+			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
+				return uploadMediaSmoke(ctx, client.API(), mediaUploadFile, mediaManifestFile)
+			}
+		} else if mediaDownloadFile != "" {
+			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
+				return downloadMediaSmoke(ctx, client.API(), mediaManifestFile, mediaDownloadFile)
+			}
+		}
+		if err := probeSignInFile(ctx, endpoint, discoveryFile, usernameFile, passwordFile, action); err != nil {
 			return fmt.Errorf("MTProto username/password sign-in on %s failed: %w", endpoint, err)
 		}
 		if _, err := fmt.Printf("MTProto username/password sign-in passed on %s\n", endpoint); err != nil {
@@ -277,7 +299,8 @@ func readIdentityFile(path string) (identity serverIdentity, returnErr error) {
 	return parseIdentity(body)
 }
 
-func probeSignInFile(ctx context.Context, endpoint, discoveryFile, usernameFile, passwordFile string) error {
+func probeSignInFile(ctx context.Context, endpoint, discoveryFile, usernameFile, passwordFile string,
+	action func(context.Context, *telegram.Client, *tg.User) error) error {
 	if err := discovery.ValidateEndpoint(endpoint); err != nil {
 		return fmt.Errorf("validate target endpoint: %w", err)
 	}
@@ -307,7 +330,7 @@ func probeSignInFile(ctx context.Context, endpoint, discoveryFile, usernameFile,
 	}
 	defer clear(username)
 	defer clear(password)
-	return signIn(ctx, endpoint, identity, string(username), password)
+	return signIn(ctx, endpoint, identity, string(username), password, action)
 }
 
 func readSmokeCredential(path, name string) (value []byte, returnErr error) {
@@ -371,7 +394,8 @@ func expectPasswordChallenge(err error) error {
 	return nil
 }
 
-func signIn(ctx context.Context, endpoint string, identity serverIdentity, username string, password []byte) error {
+func signIn(ctx context.Context, endpoint string, identity serverIdentity, username string,
+	password []byte, action func(context.Context, *telegram.Client, *tg.User) error) error {
 	host, portText, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		return errors.New("split sign-in endpoint")
@@ -430,6 +454,11 @@ func signIn(ctx context.Context, endpoint string, identity serverIdentity, usern
 		status, err := client.Auth().Status(ctx)
 		if err != nil || !status.Authorized {
 			return errors.New("client did not retain the restored account authorization")
+		}
+		if action != nil {
+			if err := action(ctx, client, user); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

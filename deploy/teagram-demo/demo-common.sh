@@ -847,6 +847,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
     and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
     and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+    and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+    and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
     and .services.teagramd.environment.GOMAXPROCS == "1"
     and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
     and (.services.teagramd.mem_limit | tostring) == "469762048"

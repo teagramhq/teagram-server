@@ -338,6 +338,7 @@ TG_POSTGRES_DSN=$(container_env teagram-teagramd-1 TG_POSTGRES_DSN)
   fail 'live Postgres password and DSN do not match the k8s workload layout'
 TG_PUBLIC_LINK_PREFIX=$(container_env teagram-teagramd-1 TG_PUBLIC_LINK_PREFIX)
 TG_ADVERTISE_ADDR=$(container_env teagram-teagramd-1 TG_ADVERTISE_ADDR false)
+TG_MEDIA_KEY_CURRENT=$(container_env teagram-teagramd-1 TG_MEDIA_KEY_CURRENT)
 TG_INVITE_WEB_SIGNUP_URL=$(container_env teagram-link-edge-selector-1 TG_INVITE_WEB_SIGNUP_URL)
 TG_INVITE_DESKTOP_URL=$(container_env teagram-link-edge-selector-1 TG_INVITE_DESKTOP_URL false)
 RUSTFS_ACCESS_KEY=$(container_file_value teagram-rustfs-1 "$ROOT_ACCESS_KEY_PATH")
@@ -359,6 +360,7 @@ assert_env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
 assert_env_line TG_POSTGRES_DSN "$TG_POSTGRES_DSN"
 assert_env_line TG_PUBLIC_LINK_PREFIX "$TG_PUBLIC_LINK_PREFIX"
 assert_env_line TG_ADVERTISE_ADDR "$TG_ADVERTISE_ADDR"
+[[ $TG_MEDIA_KEY_CURRENT =~ ^[1-9][0-9]*$ ]] || fail 'live media encryption key version is invalid'
 assert_env_line TG_INVITE_WEB_SIGNUP_URL "$TG_INVITE_WEB_SIGNUP_URL"
 assert_env_line TG_INVITE_DESKTOP_URL "$TG_INVITE_DESKTOP_URL"
 assert_env_line CLOUDFLARED_TOKEN "$CLOUDFLARED_TOKEN"
@@ -390,6 +392,8 @@ if len(names) != len(set(names)):
 print("\n".join(sorted(names, key=lambda name: int(name.split(".", 1)[0]))))
 ')
 [[ -n $MEDIA_KEY_NAMES ]] || fail 'no live media key files were found'
+grep --fixed-strings --line-regexp --quiet "$TG_MEDIA_KEY_CURRENT.key" <<< "$MEDIA_KEY_NAMES" ||
+  fail 'live media encryption key version does not match the mounted key set'
 
 existing_instance=false
 if incus info "$INSTANCE" >/dev/null 2>&1; then
@@ -565,7 +569,8 @@ apply_manifest 'deployer RBAC and token manifest' < "$REPO_ROOT/deploy/k8s/deplo
 
 apply_env_resource configmap teagramd-runtime \
   "TG_PUBLIC_LINK_PREFIX=$TG_PUBLIC_LINK_PREFIX" \
-  "TG_ADVERTISE_ADDR=$TG_ADVERTISE_ADDR"
+  "TG_ADVERTISE_ADDR=$TG_ADVERTISE_ADDR" \
+  "TG_MEDIA_KEY_CURRENT=$TG_MEDIA_KEY_CURRENT"
 apply_env_resource configmap link-edge-runtime \
   "TG_INVITE_WEB_SIGNUP_URL=$TG_INVITE_WEB_SIGNUP_URL" \
   "TG_INVITE_DESKTOP_URL=$TG_INVITE_DESKTOP_URL"

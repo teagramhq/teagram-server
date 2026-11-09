@@ -25,11 +25,13 @@ fi
 readonly PHASE_FILE=$EVIDENCE_DIR/phase
 readonly LINKSELECTOR_PORT_FORWARD_UNIT=teagram-linkselector-port-forward.service
 readonly TEAGRAMD_PORT_FORWARD_UNIT=teagramd-port-forward.service
+readonly RUSTFS_PORT_FORWARD_UNIT=teagram-rustfs-port-forward.service
 readonly LINKSELECTOR_PORT=18081
 readonly WEBSOCKET_PORT=18444
 readonly ADMIN_PORT=18445
 readonly MTPROTO_PORT=2443
 readonly BOT_API_PORT=2447
+readonly RUSTFS_PORT=19000
 readonly POSTGRES_DUMP_DIR=/var/lib/postgresql/cutover-backups
 readonly CLOUDFLARE_BEFORE=http://selector:8081
 readonly CLOUDFLARE_AFTER=http://linkselector:8081
@@ -38,6 +40,20 @@ readonly MAX_LEGACY_BLOB_BYTES=$((20 * 1024 * 1024 * 1024))
 readonly MAX_ENCRYPTED_BLOB_BYTES=$((18 * 1024 * 1024 * 1024))
 readonly POSTGRES_PVC_BYTES=$((8 * 1024 * 1024 * 1024))
 readonly MIN_STORAGE_RESERVE_BYTES=$((1024 * 1024 * 1024))
+MC_HELPER_CONTAINER=''
+APP_IMAGE=''
+MIGRATIONS_IMAGE=''
+MC_IMAGE=''
+K8S_MC_IMAGE=''
+LINK_LANDING_IMAGE=''
+LINK_SELECTOR_IMAGE=''
+MIGRATIONS_JOB_NAME=''
+RUSTFS_INIT_JOB_NAME=''
+REQUIRED_MIGRATION_VERSION=''
+LIVE_SOURCE_REVISION=''
+target_lxc_ip=''
+MC_CLIENT_POD_CREATED=false
+S3_INVENTORY_SCRATCH=''
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -46,6 +62,11 @@ SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
 fail() {
   printf 'k3s cutover: %s\n' "$*" >&2
   exit 1
+}
+
+require_release_auth() {
+  [[ -n ${GH_TOKEN:-} && -n ${GHCR_USERNAME:-} ]] ||
+    fail 'set GH_TOKEN and GHCR_USERNAME for main image provenance verification; see deploy/k8s/README.md'
 }
 
 usage() {
@@ -61,22 +82,24 @@ EOF
 
 dry_run() {
   cat <<'EOF'
-Would verify alpha, the root-only cutover kubeconfig, source Compose containers, the local blob backend (TG_BLOB_DIR=/var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset), the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
-Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database and encrypted blob migrations, the web Service, and the state PVCs.
+Would verify alpha, the root-only cutover kubeconfig, source Compose containers and encrypted S3 authority, the live teagramd and migration image revisions, matching immutable k8s images, required migration version and Job names, the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
+Would verify main-branch build provenance for all five resolved image digests and the exact live revision before source writes are fenced.
+Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database migrations, the web Service, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
 Would keep private phase, Serve route, and recovery evidence under /var/lib/teagram-k3s-cutover.
-Would wait for PostgreSQL and RustFS, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL, plus teagram-web-cloudflared, and verify no PostgreSQL client connections remain.
-Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before that switch restarts every stopped Compose service.
+Would wait for PostgreSQL and RustFS, install a target-only RustFS port-forward, then fence writes before the final PostgreSQL snapshot: stop all running Compose services except PostgreSQL and RustFS, plus teagram-web-cloudflared; keep source RustFS available for the post-fence S3 listing and mirror, and verify no PostgreSQL client connections remain.
+Would recheck the stopped Compose containers, PostgreSQL client count, RustFS availability, and live teagramd revision immediately before the first live edge switch.
+Would treat the planned downtime from the write fence until all edges switch as a maintenance window; any failure before the first live edge switch restarts only the Compose services stopped by the runner, while PostgreSQL and RustFS stay running.
 Would save a mode-0600 pg_dump on the PostgreSQL PVC (spooled through a private root-only file, sent over a temporary loopback port-forward, and checked by SHA-256 before the restore, then the spool is removed), restore it into k3s, then run the pinned Atlas migration Job.
 Would check that the 8 GiB PostgreSQL PVC can hold both the protected dump and restored database with at least 1 GiB of free space left.
-Would stream server_key.pem, enc_key.hex, and local blobs from the old container into the new PVCs without a host-side plaintext copy; key hashes are compared silently.
-Would verify the old blob tree and its encrypted envelopes fit their PVCs and the target disk can hold both copies, encrypt and checksum-copy its objects to RustFS with the migrated media key, and keep a read-only source copy for recovery.
+Would stream server_key.pem, enc_key.hex, the blob-mode authority, and the retained local blob volume from the old container into the new PVCs without a host-side plaintext copy; compare the target Secret against the live encrypted-media key set without printing key values.
+Would mirror the already-encrypted source S3 objects into the new RustFS bucket without changing their bytes, then compare the object count, total bytes, and SHA-256 of every source and target object before switching routes.
 Would start teagramd, teagram-web, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, MTProto TCP, WebSocket, admin, and Bot API Services, then verify them from both LXCs.
 Would save the five tailnet-only HTTPS handlers, the advertised MTProto TCP route on port 2443, and the Bot API TCP route on port 2447; route / to linkselector, preserve the WebSocket, admin, and discovery paths, and enable PROXY protocol on the k3s Bot API relay. Funnel remains off.
 Would keep k8s cloudflared at zero until the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081; then start and verify the k3s connector.
-Would keep all old Compose services stopped after cutover without modifying their volumes; retain the database dump and recovery evidence for at least seven days.
-Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five HTTPS handlers, both TCP routes including the old Bot API route, and Cloudflare to the old targets, restart the stopped Compose services, then stop both port-forwards. k3s writes since the switch are not carried back.
+Would leave the old Compose application and edge services stopped after cutover; PostgreSQL and source RustFS stay running with their existing data. Retain the source RustFS bucket, old Compose volumes, database dump, and recovery evidence for at least seven days; the runner does not stop or remove PostgreSQL or RustFS.
+Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five HTTPS handlers, both TCP routes including the old Bot API route, and Cloudflare to the old targets, restart only the Compose services stopped by apply, then stop both port-forwards. PostgreSQL and source RustFS are already running; k3s writes since the switch are not copied back to the source bucket.
 After the first live Serve route, a failure requires explicit rollback after the first live Serve route; automatic recovery will not switch clients back to Compose and discard k3s writes.
 EOF
   printf 'Rollback command after review: sudo bash %q --rollback\n' "$SCRIPT_PATH"
@@ -99,9 +122,15 @@ if [[ $TEST_MODE == false ]]; then
   [[ -t 0 ]] || fail "$ACTION requires an interactive terminal for the manual Cloudflare route change"
 fi
 
-for command_name in incus kubectl readlink stat install sha256sum python3 awk grep sed tar flock date sleep; do
+for command_name in incus kubectl readlink stat install sha256sum python3 awk grep sed tar flock date sleep wc; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
+if [[ $TEST_MODE == false && $ACTION == --apply ]]; then
+  command -v gh >/dev/null 2>&1 || fail 'required command is missing: gh'
+  require_release_auth
+  gh attestation verify --help >/dev/null 2>&1 ||
+    fail 'GitHub CLI does not support build provenance verification'
+fi
 
 export KUBECONFIG=$KUBECONFIG_PATH
 [[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] || fail 'root-only cutover kubeconfig is missing or not a regular file'
@@ -235,6 +264,28 @@ verify_no_source_postgres_clients() {
   fail 'source PostgreSQL still has client connections after the Compose write fence'
 }
 
+verify_source_write_fence() {
+  local container_name status fenced_revision
+  [[ -f $COMPOSE_STOPPED_FILE && ! -L $COMPOSE_STOPPED_FILE ]] ||
+    fail 'stopped Compose service evidence is missing while the source write fence is active'
+  verify_private_file "$COMPOSE_STOPPED_FILE" 600 ||
+    fail 'stopped Compose service evidence is not root-owned mode 0600'
+  check_source_container teagram-postgres-1
+  check_source_container teagram-rustfs-1
+  while IFS= read -r container_name; do
+    [[ -z $container_name ]] && continue
+    status=$(container_status "$container_name") ||
+      fail "could not verify stopped Compose service state: $container_name"
+    [[ $status == exited ]] ||
+      fail "Compose service $container_name restarted while source writes were fenced"
+  done < "$COMPOSE_STOPPED_FILE"
+  verify_no_source_postgres_clients
+  fenced_revision=$(source_container_revision) ||
+    fail 'could not verify the live teagramd revision while source writes were fenced'
+  [[ $fenced_revision == "$LIVE_SOURCE_REVISION" ]] ||
+    fail "live teagramd revision changed from $LIVE_SOURCE_REVISION to $fenced_revision while source writes were fenced"
+}
+
 fence_source_writes() {
   local running_ids container_id service container_name
   ensure_private_dir "$EVIDENCE_DIR"
@@ -253,7 +304,7 @@ fence_source_writes() {
       --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id") ||
       fail 'could not identify a running teagram Compose service'
     [[ -n $service ]] || fail 'a running teagram Compose container has no service label'
-    [[ $service == postgres ]] && continue
+    [[ $service == postgres || $service == rustfs ]] && continue
     container_name=$(incus exec "$SOURCE_INSTANCE" -- docker inspect --format '{{.Name}}' "$container_id" | sed 's#^/##') ||
       fail 'could not read a running teagram Compose container name'
     [[ $container_name =~ ^[[:alnum:]_.-]+$ ]] || fail 'a running teagram Compose container has an invalid name'
@@ -262,15 +313,7 @@ fence_source_writes() {
       fail 'could not stop every running Compose writer before the PostgreSQL snapshot'
   done <<< "$running_ids"
 
-  check_source_container teagram-postgres-1
-  [[ $(container_status teagram-web-cloudflared) == exited ]] ||
-    fail 'the old Cloudflare connector is not stopped'
-  while IFS= read -r container_name; do
-    [[ -z $container_name ]] && continue
-    [[ $(container_status "$container_name") == exited ]] ||
-      fail 'a Compose service restarted unexpectedly while the source write fence is active'
-  done < "$COMPOSE_STOPPED_FILE"
-  verify_no_source_postgres_clients
+  verify_source_write_fence
   record_phase fenced
 }
 
@@ -294,18 +337,871 @@ validate_source_blob_backend() {
   source_environment=$(capture_compose_environment) ||
     fail 'could not inspect the old teagramd blob configuration'
   if ! awk -F= '
-    $1 == "TG_BLOB_DIR" {
-      blob_dir_count++
-      blob_dir = substr($0, index($0, "=") + 1)
-    }
-    $1 == "TG_BLOB_S3_ENDPOINT" { s3_endpoint_count++ }
+    $1 == "TG_BLOB_S3_ENDPOINT" { endpoint = substr($0, index($0, "=") + 1); endpoint_count++ }
+    $1 == "TG_BLOB_S3_BUCKET" { bucket = substr($0, index($0, "=") + 1); bucket_count++ }
+    $1 == "TG_BLOB_S3_PREFIX" { prefix = substr($0, index($0, "=") + 1); prefix_count++ }
+    $1 == "TG_BLOB_S3_ACCESS_KEY_ID" { access_key = substr($0, index($0, "=") + 1); access_key_count++ }
+    $1 == "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE" { secret_file = substr($0, index($0, "=") + 1); secret_file_count++ }
+    $1 == "TG_MEDIA_KEY_CURRENT" { media_key_current = substr($0, index($0, "=") + 1); media_key_current_count++ }
     END {
-      exit !(blob_dir_count == 1 && blob_dir == "/var/lib/teagramd-blobs" &&
-        s3_endpoint_count == 0)
+      exit !(endpoint_count == 1 && endpoint == "http://rustfs:9000" &&
+        bucket_count == 1 && bucket == "teagram" && prefix_count == 1 && prefix == "teagramd/" &&
+        access_key_count == 1 && length(access_key) == 20 && access_key !~ /[^0-9a-f]/ &&
+        secret_file_count == 1 && secret_file ~ /^\// &&
+        media_key_current_count == 1 && media_key_current ~ /^[1-9][0-9]*$/)
     }
   ' <<< "$source_environment"; then
-    fail 'source teagramd must use local blobs at /var/lib/teagramd-blobs with TG_BLOB_S3_ENDPOINT unset'
+    fail 'source teagramd must use encrypted S3 at http://rustfs:9000 with bucket teagram and prefix teagramd/'
   fi
+}
+
+source_container_revision() {
+  incus exec "$SOURCE_INSTANCE" -- docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' teagram-teagramd-1
+}
+
+prod_image_digest() {
+  local image_name=$1 digest
+  digest=$(awk -v name="$image_name" '
+    $1 == "-" && $2 == "name:" { in_image = ($3 == name); next }
+    in_image && $1 == "digest:" { print $2; exit }
+  ' "$REPO_ROOT/deploy/k8s/prod/kustomization.yaml")
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || fail "production image pin is invalid: $image_name"
+  printf '%s' "$digest"
+}
+
+prod_literal() {
+  local generator=$1 literal_prefix=$2 value
+  value=$(awk -v generator="$generator" -v prefix="$literal_prefix" '
+    $1 == "-" && $2 == "name:" { in_generator = ($3 == generator); next }
+    in_generator && $1 == "-" && index($2, prefix) == 1 {
+      sub("^" prefix, "", $2)
+      print $2
+      exit
+    }
+  ' "$REPO_ROOT/deploy/k8s/prod/kustomization.yaml")
+  [[ -n $value ]] || fail "production $generator pin is missing"
+  printf '%s' "$value"
+}
+
+source_docker_helper_enabled() {
+  [[ $TEST_MODE == false || ${CUTOVER_TEST_SOURCE_DOCKER_HELPER:-} == true ]]
+}
+
+verify_main_release_image() {
+  local image_name=$1 revision=$2 digest=$3 auth_dir auth_config
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "published image $image_name has an invalid immutable registry digest: $digest"
+  require_release_auth
+  auth_dir=$(mktemp -d "${TMPDIR:-/tmp}/teagram-cutover-ghcr-auth.XXXXXX") ||
+    fail 'could not create a private temporary GHCR authentication directory'
+  chmod 0700 "$auth_dir" || {
+    rm -rf -- "$auth_dir"
+    fail 'could not protect the temporary GHCR authentication directory'
+  }
+  auth_config=$(GH_TOKEN="$GH_TOKEN" python3 -c '
+import base64
+import json
+import os
+import sys
+
+credential = (sys.argv[1] + ":" + os.environ["GH_TOKEN"]).encode()
+auth = base64.b64encode(credential).decode()
+print(json.dumps({"auths": {"ghcr.io": {"auth": auth}}}))
+' "$GHCR_USERNAME") || {
+    rm -rf -- "$auth_dir"
+    fail 'could not prepare private GHCR authentication'
+  }
+  if ! printf '%s\n' "$auth_config" > "$auth_dir/config.json" ||
+    ! chmod 0600 "$auth_dir/config.json"; then
+    rm -rf -- "$auth_dir"
+    fail 'could not write private GHCR authentication'
+  fi
+  if ! GH_TOKEN="$GH_TOKEN" DOCKER_CONFIG="$auth_dir" gh attestation verify "oci://$image_name@$digest" \
+    --repo teagramhq/teagram-server \
+    --source-ref refs/heads/main \
+    --source-digest "$revision" \
+    --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml \
+    --format json >/dev/null 2>&1; then
+    rm -rf -- "$auth_dir"
+    fail "published image $image_name resolved digest $digest has no valid main CI attestation for live revision $revision; check GH_TOKEN permissions and GHCR access"
+  fi
+  rm -rf -- "$auth_dir" || fail 'could not remove temporary GHCR authentication'
+}
+
+resolve_image_revision() {
+  local image=$1 revision
+  if source_docker_helper_enabled; then
+    incus exec "$SOURCE_INSTANCE" -- docker pull --quiet --platform linux/amd64 "$image" >/dev/null 2>&1 ||
+      fail "could not resolve pinned image $image"
+  fi
+  revision=$(incus exec "$SOURCE_INSTANCE" -- docker image inspect "$image" \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}') ||
+    fail "could not read pinned image revision: $image"
+  [[ $revision =~ ^[0-9a-f]{40}$ ]] || fail "pinned image has an invalid source revision: $image"
+  printf '%s' "$revision"
+}
+
+resolve_release_image() {
+  local image_name=$1 revision=$2 tagged_image image_revision repo_digests reference digest=''
+  tagged_image="$image_name:sha-$revision"
+  incus exec "$SOURCE_INSTANCE" -- docker pull --quiet --platform linux/amd64 "$tagged_image" >/dev/null 2>&1 ||
+    fail "could not resolve published image $tagged_image"
+  image_revision=$(incus exec "$SOURCE_INSTANCE" -- docker image inspect "$tagged_image" \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}') ||
+    fail "could not read published image revision: $tagged_image"
+  [[ $image_revision == "$revision" ]] ||
+    fail "published image $tagged_image has source revision ${image_revision:-<empty>}, expected $revision"
+  repo_digests=$(incus exec "$SOURCE_INSTANCE" -- docker image inspect "$tagged_image" \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}') ||
+    fail "could not read published image digest: $tagged_image"
+  while IFS= read -r reference; do
+    if [[ $reference == "$image_name@sha256:"* ]]; then
+      digest=${reference##*@}
+      break
+    fi
+  done <<< "$repo_digests"
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "published image $tagged_image has no valid immutable registry digest"
+  verify_main_release_image "$image_name" "$revision" "$digest"
+  printf '%s@%s' "$image_name" "$digest"
+}
+
+image_latest_migration() {
+  local image=$1 version
+  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_MIGRATION_VERSION:-} ]] &&
+    ! source_docker_helper_enabled; then
+    version=$CUTOVER_TEST_MIGRATION_VERSION
+  else
+    version=$(incus exec "$SOURCE_INSTANCE" -- docker run --rm --network none \
+      --entrypoint /bin/sh "$image" -ec \
+      'ls -1 /migrations | sed -nE "s/^([0-9]{14})_.+\\.sql$/\\1/p" | sort | tail -n 1' \
+      2>/dev/null) || fail "could not inspect the migration version in $image"
+  fi
+  [[ $version =~ ^[0-9]{14}$ ]] || fail 'pinned migration image has no valid newest migration version'
+  printf '%s' "$version"
+}
+
+validate_release_for_source() {
+  local live_revision app_digest migrations_digest helper_digest landing_digest selector_digest
+  local migrations_validation_image helper_validation_image
+  local app_revision migrations_revision helper_revision required_version latest_version
+  local migration_job rustfs_init_job expected_job_suffix expected_helper_suffix
+  live_revision=$(source_container_revision) || fail 'could not read the live teagramd image revision'
+  [[ $live_revision =~ ^[0-9a-f]{40}$ ]] || fail "live teagramd image has an invalid source revision: ${live_revision:-<empty>}"
+  if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_PINNED_REVISION:-} &&
+    $live_revision != "$CUTOVER_TEST_PINNED_REVISION" ]]; then
+    fail "live teagramd revision $live_revision does not match test revision $CUTOVER_TEST_PINNED_REVISION"
+  fi
+  LIVE_SOURCE_REVISION=$live_revision
+  if [[ $TEST_MODE == true ]]; then
+    app_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd)
+    migrations_digest=$(prod_image_digest ghcr.io/teagramhq/teagram-migrations)
+    helper_digest=$(prod_image_digest ghcr.io/teagramhq/teagramd-mc-init)
+    landing_digest=$(prod_image_digest ghcr.io/teagramhq/link-edge-landing)
+    selector_digest=$(prod_image_digest ghcr.io/teagramhq/link-edge-selector)
+    APP_IMAGE=${CUTOVER_TEST_TEAGRAMD_IMAGE:-ghcr.io/teagramhq/teagramd@$app_digest}
+    MIGRATIONS_IMAGE="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
+    K8S_MC_IMAGE="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
+    LINK_LANDING_IMAGE="ghcr.io/teagramhq/link-edge-landing@$landing_digest"
+    LINK_SELECTOR_IMAGE="ghcr.io/teagramhq/link-edge-selector@$selector_digest"
+    migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$MIGRATIONS_IMAGE}
+    helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$K8S_MC_IMAGE}
+
+    app_revision=$(resolve_image_revision "$APP_IMAGE")
+    migrations_revision=$(resolve_image_revision "$migrations_validation_image")
+    helper_revision=$(resolve_image_revision "$helper_validation_image")
+    [[ $app_revision == "$live_revision" ]] ||
+      fail "test teagramd image revision $app_revision does not match live revision $live_revision"
+    [[ $migrations_revision == "$live_revision" ]] ||
+      fail "test migration image revision $migrations_revision does not match live revision $live_revision"
+    [[ $helper_revision == "$live_revision" ]] ||
+      fail "test S3 client image revision $helper_revision does not match live revision $live_revision"
+
+    required_version=$(prod_literal required-migration-version migration-version=)
+    migration_job=$(prod_literal db-migrations-job-revision job-name=)
+    rustfs_init_job=$(prod_literal rustfs-init-job-revision job-name=)
+    expected_job_suffix=${migrations_digest#sha256:}
+    expected_helper_suffix=${helper_digest#sha256:}
+    [[ $migration_job == "db-migrations-${expected_job_suffix:0:16}" ]] ||
+      fail 'production migration Job name does not match its pinned migration image digest'
+    [[ $rustfs_init_job == "rustfs-init-${expected_helper_suffix:0:16}" ]] ||
+      fail 'production RustFS initializer Job name does not match its pinned helper image digest'
+    if [[ -n ${CUTOVER_TEST_MIGRATIONS_JOB_NAME:-} && $CUTOVER_TEST_MIGRATIONS_JOB_NAME != "$migration_job" ]]; then
+      fail 'CI migration Job name does not match the committed production Job'
+    fi
+  else
+    APP_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd "$live_revision") || return $?
+    MIGRATIONS_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagram-migrations "$live_revision") || return $?
+    K8S_MC_IMAGE=$(resolve_release_image ghcr.io/teagramhq/teagramd-mc-init "$live_revision") || return $?
+    LINK_LANDING_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-landing "$live_revision") || return $?
+    LINK_SELECTOR_IMAGE=$(resolve_release_image ghcr.io/teagramhq/link-edge-selector "$live_revision") || return $?
+    migrations_validation_image=$MIGRATIONS_IMAGE
+    helper_validation_image=$K8S_MC_IMAGE
+
+    app_digest=${APP_IMAGE##*@}
+    migrations_digest=${MIGRATIONS_IMAGE##*@}
+    helper_digest=${K8S_MC_IMAGE##*@}
+
+    app_revision=$(resolve_image_revision "$APP_IMAGE") || return $?
+    migrations_revision=$(resolve_image_revision "$migrations_validation_image") || return $?
+    helper_revision=$(resolve_image_revision "$helper_validation_image") || return $?
+    [[ $app_revision == "$live_revision" ]] ||
+      fail "published teagramd image revision $app_revision does not match live revision $live_revision"
+    [[ $migrations_revision == "$live_revision" ]] ||
+      fail "published migration image revision $migrations_revision does not match live revision $live_revision"
+    [[ $helper_revision == "$live_revision" ]] ||
+      fail "published S3 client image revision $helper_revision does not match live revision $live_revision"
+
+    migrations_digest=${MIGRATIONS_IMAGE##*@}
+    helper_digest=${K8S_MC_IMAGE##*@}
+    expected_job_suffix=${migrations_digest#sha256:}
+    expected_helper_suffix=${helper_digest#sha256:}
+    migration_job="db-migrations-${expected_job_suffix:0:16}"
+    rustfs_init_job="rustfs-init-${expected_helper_suffix:0:16}"
+    latest_version=$(image_latest_migration "$migrations_validation_image") || return $?
+    required_version=$latest_version
+  fi
+  if [[ $TEST_MODE == true ]]; then
+    latest_version=$(image_latest_migration "$migrations_validation_image")
+  fi
+  if [[ $TEST_MODE == true ]]; then
+    [[ $required_version == "$latest_version" ]] ||
+      fail "production migration version $required_version does not match the newest migration in the pinned image $latest_version"
+  fi
+  MC_IMAGE=$helper_validation_image
+  MIGRATIONS_JOB_NAME=$migration_job
+  RUSTFS_INIT_JOB_NAME=$rustfs_init_job
+  REQUIRED_MIGRATION_VERSION=$latest_version
+}
+
+render_cutover_manifest() {
+  local destination=$1
+  # The Job-name and revision patterns are anchored to the full 16-digit
+  # suffix so they do not rewrite names that merely start with the same prefix
+  # (for example the rustfs-init-secrets volume or job-revision ConfigMaps).
+  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
+    sed \
+      -e "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" \
+      -e "s|ghcr.io/teagramhq/teagramd@sha256:[0-9a-f]*|$APP_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/teagram-migrations@sha256:[0-9a-f]*|$MIGRATIONS_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/teagramd-mc-init@sha256:[0-9a-f]*|$K8S_MC_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/link-edge-landing@sha256:[0-9a-f]*|$LINK_LANDING_IMAGE|g" \
+      -e "s|ghcr.io/teagramhq/link-edge-selector@sha256:[0-9a-f]*|$LINK_SELECTOR_IMAGE|g" \
+      -e "s|name: db-migrations-[0-9a-f]\{16\}$|name: $MIGRATIONS_JOB_NAME|" \
+      -e "s|job-name: db-migrations-[0-9a-f]\{16\}$|job-name: $MIGRATIONS_JOB_NAME|" \
+      -e "s|name: rustfs-init-[0-9a-f]\{16\}$|name: $RUSTFS_INIT_JOB_NAME|" \
+      -e "s|job-name: rustfs-init-[0-9a-f]\{16\}$|job-name: $RUSTFS_INIT_JOB_NAME|" \
+      -e "s|job-revision: db-migrations-[0-9a-f]\{16\}$|job-revision: $MIGRATIONS_JOB_NAME|" \
+      -e "s|job-revision: rustfs-init-[0-9a-f]\{16\}$|job-revision: $RUSTFS_INIT_JOB_NAME|" \
+      -e "s|migration-version: \"[0-9]*\"|migration-version: \"$REQUIRED_MIGRATION_VERSION\"|g" \
+      > "$destination"
+}
+
+check_source_migration_version() {
+  local expected_version=$1 live_version
+  live_version=$(incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
+    psql --username=postgres --dbname=teagram --tuples-only --no-align \
+      --command="SELECT COALESCE(MAX(version)::text, '') FROM atlas_schema_revisions.atlas_schema_revisions") ||
+    fail 'could not read the live database migration version'
+  [[ $live_version == "$expected_version" ]] ||
+    fail "live database migration version $live_version does not match pinned migration version $expected_version"
+}
+
+check_source_blob_authority() {
+  incus exec "$SOURCE_INSTANCE" -- docker cp \
+    teagram-teagramd-1:/run/teagramd/blob-mode/. - |
+    python3 -c '
+import json
+import pathlib
+import re
+import sys
+import tarfile
+
+files = {}
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+try:
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+        for member in archive:
+            path = pathlib.PurePosixPath(member.name)
+            parts = tuple(part for part in path.parts if part not in (".", ""))
+            if path.is_absolute() or any(part == ".." for part in parts):
+                raise ValueError("unsafe path")
+            if member.isdir():
+                continue
+            if not member.isfile() or not parts:
+                raise ValueError("unsupported entry")
+            if parts == ("mode.json",):
+                pass
+            elif len(parts) == 2 and parts[0] == "journal" and re.fullmatch(r"[0-9]{10}\.json", parts[1]):
+                pass
+            else:
+                raise ValueError("unsupported entry")
+            if member.size <= 0 or member.size > 4096:
+                raise ValueError("invalid record size")
+            name = "/".join(parts)
+            if name in files:
+                raise ValueError("duplicate authority file")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("unreadable record")
+            content = stream.read()
+            if len(content) != member.size:
+                raise ValueError("short authority record")
+            files[name] = content
+    mode = files.get("mode.json")
+    journals = sorted(name for name in files if name.startswith("journal/"))
+    if mode is None or not journals or len(journals) > 1000:
+        raise ValueError("authority records are incomplete")
+    records = []
+    for index, name in enumerate(journals, 1):
+        if name != f"journal/{index:010d}.json":
+            raise ValueError("journal sequence is invalid")
+        records.append(json.loads(files[name], object_pairs_hook=strict_object))
+    current = json.loads(mode, object_pairs_hook=strict_object)
+    if not isinstance(current, dict) or any(not isinstance(record, dict) for record in records):
+        raise ValueError("authority record is not an object")
+    if mode != files[journals[-1]] or current != records[-1]:
+        raise ValueError("authority head is stale")
+    if (current.get("outcome") != "encrypted" or
+            current.get("backend") != {"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"}):
+        raise ValueError("authority does not match encrypted S3")
+except (tarfile.TarError, OSError, ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit("k3s cutover: source blob-mode authority is unavailable or does not describe encrypted S3")
+print("encrypted S3 authority verified")
+' || fail 'could not verify the live encrypted S3 blob-mode authority'
+}
+
+check_source_media_keys() {
+  local source_keys target_keys current_version
+  current_version=$(capture_compose_value TG_MEDIA_KEY_CURRENT)
+  [[ $current_version =~ ^[1-9][0-9]*$ ]] || fail 'source media encryption key version is invalid'
+  source_keys=$(incus exec "$SOURCE_INSTANCE" -- docker cp \
+    teagram-teagramd-1:/run/teagramd/media-keys/. - |
+    python3 -c '
+import hashlib
+import re
+import sys
+import tarfile
+
+keys = {}
+try:
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+        for member in archive:
+            name = member.name.rsplit("/", 1)[-1]
+            if not member.isfile() or not re.fullmatch(r"[0-9]+\.key", name):
+                continue
+            if member.size < 1 or member.size > 65536 or name in keys:
+                raise ValueError("invalid key file")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("unreadable key file")
+            keys[name] = hashlib.sha256(stream.read()).hexdigest()
+    if "1.key" not in keys:
+        raise ValueError("current key is missing")
+except (tarfile.TarError, OSError, ValueError):
+    raise SystemExit("k3s cutover: source encrypted-media keys are unavailable or invalid")
+for name in sorted(keys, key=lambda entry: int(entry.split(".", 1)[0])):
+    print(f"{name}\t{keys[name]}")
+') || fail 'could not inventory source encrypted-media keys'
+  awk -F '\t' -v current="$current_version.key" '$1 == current { found = 1 } END { exit !found }' \
+    <<< "$source_keys" || fail 'source media encryption key version is missing from the mounted key set'
+  target_keys=$(kubectl get secret teagramd-media-keys --namespace "$NAMESPACE" --output json |
+    python3 -c '
+import base64
+import hashlib
+import json
+import re
+import sys
+
+try:
+    secret = json.load(sys.stdin)
+    data = secret.get("data")
+    if not isinstance(data, dict) or "1.key" not in data:
+        raise ValueError("current key is missing")
+    keys = {}
+    for name, encoded in data.items():
+        if not re.fullmatch(r"[0-9]+\.key", name):
+            raise ValueError("invalid key name")
+        value = base64.b64decode(encoded, validate=True)
+        if not value or len(value) > 65536:
+            raise ValueError("invalid key size")
+        keys[name] = hashlib.sha256(value).hexdigest()
+except (ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit("k3s cutover: target encrypted-media Secret is invalid")
+for name in sorted(keys, key=lambda entry: int(entry.split(".", 1)[0])):
+    print(f"{name}\t{keys[name]}")
+') || fail 'could not inventory target encrypted-media keys'
+  [[ $source_keys == "$target_keys" ]] || fail 'target encrypted-media keys do not match the live Compose key set'
+}
+
+check_source_blob_credentials() {
+  local source_access_key source_secret_file source_secret source_digest target_digest
+  source_access_key=$(capture_compose_value TG_BLOB_S3_ACCESS_KEY_ID)
+  source_secret_file=$(capture_compose_value TG_BLOB_S3_SECRET_ACCESS_KEY_FILE)
+  [[ $source_access_key =~ ^[0-9a-f]{20}$ && $source_secret_file == /* ]] ||
+    fail 'source S3 credentials are not available in the expected form'
+  source_secret=$(capture_source_blob_secret "$source_secret_file") || fail 'could not read the source S3 secret'
+  source_digest=$(printf '%s\0%s' "$source_access_key" "$source_secret" | sha256sum | awk '{print $1}')
+  target_digest=$(kubectl get secret teagramd-blob-credentials --namespace "$NAMESPACE" --output json |
+    python3 -c '
+import base64
+import hashlib
+import json
+import re
+import sys
+
+try:
+    secret = json.load(sys.stdin)
+    data = secret.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("missing Secret data")
+    access_key = base64.b64decode(data["TG_BLOB_S3_ACCESS_KEY_ID"], validate=True)
+    secret_key = base64.b64decode(data["TG_BLOB_S3_SECRET_ACCESS_KEY"], validate=True)
+    if (re.fullmatch(rb"[0-9a-f]{20}", access_key) is None or
+            re.fullmatch(rb"[0-9a-f]{64}", secret_key) is None):
+        raise ValueError("invalid S3 credential format")
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit("k3s cutover: target S3 credentials are invalid")
+sys.stdout.write(hashlib.sha256(access_key + b"\0" + secret_key).hexdigest())
+') || fail 'could not inventory target S3 credentials'
+  source_secret=''
+  [[ $source_digest == "$target_digest" ]] || fail 'target S3 credentials do not match the live Compose credentials'
+}
+
+preserve_media_key_version() {
+  local current_version configured_version
+  current_version=$(capture_compose_value TG_MEDIA_KEY_CURRENT)
+  [[ $current_version =~ ^[1-9][0-9]*$ ]] || fail 'source media encryption key version is invalid'
+  kubectl patch configmap teagramd-runtime --namespace "$NAMESPACE" --type=merge \
+    --patch "{\"data\":{\"TG_MEDIA_KEY_CURRENT\":\"$current_version\"}}" >/dev/null ||
+    fail 'could not preserve the live media encryption key version in the target runtime ConfigMap'
+  configured_version=$(kubectl get configmap teagramd-runtime --namespace "$NAMESPACE" \
+    --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}') || fail 'could not verify the target media encryption key version'
+  [[ $configured_version == "$current_version" ]] ||
+    fail 'target media encryption key version does not match the live Compose version'
+}
+
+capture_compose_value() {
+  local name=$1
+  capture_compose_environment |
+    awk -F= -v name="$name" '$1 == name { print substr($0, index($0, "=") + 1) }'
+}
+
+capture_source_blob_secret() {
+  local path=$1
+  incus exec "$SOURCE_INSTANCE" -- docker cp "teagram-teagramd-1:$path" - |
+    python3 -c '
+import sys
+import tarfile
+
+value = None
+try:
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            if value is not None or member.size != 64:
+                raise ValueError("invalid source secret")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("unreadable source secret")
+            value = stream.read().decode("ascii")
+    if value is None:
+        raise ValueError("invalid source secret")
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("invalid source secret")
+except (tarfile.TarError, OSError, ValueError, UnicodeDecodeError):
+    raise SystemExit("k3s cutover: source S3 secret is unavailable or invalid")
+sys.stdout.write(value)
+'
+}
+
+source_compose_networks() {
+  local container=$1
+  # shellcheck disable=SC2016 # Docker expands this Go template remotely.
+  incus exec "$SOURCE_INSTANCE" -- docker inspect \
+    --format '{{range $name, $network := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$container"
+}
+
+install_port_forward_unit() {
+  local unit=$1 description=$2 target=$3 ports=$4
+  unit_file=$(mktemp)
+  cat > "$unit_file" <<EOF
+[Unit]
+Description=$description
+After=k3s.service
+Requires=k3s.service
+
+[Service]
+Type=simple
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+ExecStart=/usr/local/bin/k3s kubectl port-forward --namespace $NAMESPACE --address $target_lxc_ip $target $ports
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  incus exec "$TARGET_INSTANCE" -- install -o root -g root -m 0644 /dev/stdin \
+    "/etc/systemd/system/$unit" < "$unit_file"
+  rm -f -- "$unit_file"
+  unit_file=''
+  incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
+  incus exec "$TARGET_INSTANCE" -- systemctl enable --now "$unit" >/dev/null
+}
+
+discover_target_lxc_ip() {
+  # shellcheck disable=SC2016 # This command is interpreted by the target LXC's shell.
+  target_lxc_ip=$(incus exec "$TARGET_INSTANCE" -- sh -ec \
+    'ip -o -4 addr show dev eth0 scope global | awk "NR == 1 {split(\$4, a, \"/\"); print a[1]}"')
+  [[ $target_lxc_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
+    fail 'could not identify the private teagram-k3s LXC address'
+}
+
+wait_for_tcp_forward() {
+  local ip=$1 port=$2 attempt
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if python3 - "$ip" "$port" <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=1):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+mc_client_exec() {
+  if [[ -n $MC_HELPER_CONTAINER ]]; then
+    incus exec "$SOURCE_INSTANCE" -- docker exec --interactive "$MC_HELPER_CONTAINER" mc "$@"
+  else
+    kubectl exec --namespace "$SOURCE_INSTANCE" --stdin pod/cutover-s3-client -- mc "$@"
+  fi
+}
+
+setup_mc_client() {
+  local target_endpoint=$1 access_key secret_key secret_path target_listing
+  local app_network_output rustfs_network_output network app_network common_network=''
+  local -a app_networks=() rustfs_networks=()
+  access_key=$(capture_compose_value TG_BLOB_S3_ACCESS_KEY_ID)
+  secret_path=$(capture_compose_value TG_BLOB_S3_SECRET_ACCESS_KEY_FILE)
+  [[ $access_key =~ ^[0-9a-f]{20}$ && $secret_path == /* ]] ||
+    fail 'source S3 credentials are not available in the expected form'
+
+  if [[ $TEST_MODE == true ]]; then
+    target_endpoint=${CUTOVER_TEST_TARGET_S3_ENDPOINT:-$target_endpoint}
+    kubectl apply --filename "$SCRIPT_DIR/test-cutover-s3-client.yaml" >/dev/null ||
+      fail 'could not create the disposable S3 client pod'
+    MC_CLIENT_POD_CREATED=true
+    kubectl wait --for=condition=Ready pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" --timeout=180s >/dev/null ||
+      fail 'the disposable S3 client pod is unavailable'
+  fi
+
+  if source_docker_helper_enabled; then
+    secret_key=$(capture_source_blob_secret "$secret_path") || fail 'could not read the source S3 secret'
+    app_network_output=$(source_compose_networks teagram-teagramd-1) ||
+      fail 'could not inspect the source Compose networks'
+    rustfs_network_output=$(source_compose_networks teagram-rustfs-1) ||
+      fail 'could not inspect the source RustFS network'
+    [[ -n $app_network_output && -n $rustfs_network_output ]] ||
+      fail 'source Compose and RustFS networks are unavailable'
+    mapfile -t app_networks < <(printf '%s' "$app_network_output")
+    mapfile -t rustfs_networks < <(printf '%s' "$rustfs_network_output")
+    ((${#app_networks[@]} >= 2 && ${#rustfs_networks[@]} == 1)) ||
+      fail 'source teagramd must share its RustFS network and a separate target route'
+    for network in "${rustfs_networks[@]}"; do
+      [[ $network =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail 'source RustFS network name is invalid'
+      for app_network in "${app_networks[@]}"; do
+        if [[ $network == "$app_network" ]]; then
+          [[ -z $common_network ]] || fail 'source teagramd shares multiple networks with RustFS'
+          common_network=$network
+        fi
+      done
+    done
+    [[ -n $common_network ]] || fail 'source teagramd is not attached to the live RustFS network'
+    MC_HELPER_CONTAINER="teagram-cutover-mc-$$"
+    incus exec "$SOURCE_INSTANCE" -- docker run --detach --name "$MC_HELPER_CONTAINER" \
+      --network "$common_network" --env HOME=/tmp --env MC_CONFIG_DIR=/tmp/mc \
+      --entrypoint /bin/sh "$MC_IMAGE" -ec 'mkdir -p /tmp/mc; exec sleep 21600' >/dev/null ||
+      fail 'could not start the temporary S3 client on the source Compose network'
+    for network in "${app_networks[@]}"; do
+      [[ $network == "$common_network" ]] && continue
+      [[ $network =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail 'source Compose network name is invalid'
+      incus exec "$SOURCE_INSTANCE" -- docker network connect "$network" "$MC_HELPER_CONTAINER" >/dev/null ||
+        fail 'could not connect the temporary S3 client to the target route network'
+    done
+    incus exec "$SOURCE_INSTANCE" -- docker exec "$MC_HELPER_CONTAINER" mc alias set \
+      source http://rustfs:9000 "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1 ||
+      fail 'could not configure the source S3 client'
+    incus exec "$SOURCE_INSTANCE" -- docker exec "$MC_HELPER_CONTAINER" mc alias set \
+      target "$target_endpoint" "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1 ||
+      fail 'could not configure the target S3 client'
+    secret_key=''
+  else
+    # shellcheck disable=SC2016 # The client pod's shell expands these variables.
+    kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec \
+      'mkdir -p "$MC_CONFIG_DIR"; mc alias set source http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1; mc alias set target "$1" "$TG_BLOB_S3_ACCESS_KEY_ID" "$TG_BLOB_S3_SECRET_ACCESS_KEY" --api S3v4 >/dev/null 2>&1' \
+      -- "$target_endpoint" || fail 'could not configure the disposable S3 client'
+  fi
+  source_s3_listing source >/dev/null
+  target_listing=$(source_s3_listing target)
+  [[ -z $target_listing ]] || fail 'target RustFS already contains objects under the encrypted S3 prefix'
+}
+
+stop_mc_client() {
+  if [[ -n $MC_HELPER_CONTAINER ]]; then
+    incus exec "$SOURCE_INSTANCE" -- docker rm --force "$MC_HELPER_CONTAINER" >/dev/null 2>&1 ||
+      fail 'could not remove the temporary S3 client container'
+    MC_HELPER_CONTAINER=''
+  fi
+  if [[ $TEST_MODE == true && $MC_CLIENT_POD_CREATED == true ]]; then
+    kubectl delete pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" \
+      --ignore-not-found --wait=true --timeout=180s >/dev/null ||
+      fail 'could not remove the disposable S3 client pod'
+    MC_CLIENT_POD_CREATED=false
+  fi
+}
+
+source_s3_listing() {
+  local alias=$1 output
+  output=$(mc_client_exec --json ls --recursive "$alias/teagram/teagramd/" 2>/dev/null) ||
+    fail "could not list the $alias encrypted S3 object prefix"
+  python3 -c '
+import json
+import re
+import sys
+
+prefix = "teagramd/"
+objects = {}
+try:
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if item.get("status") != "success":
+            raise ValueError("listing returned an error")
+        if item.get("type") == "folder":
+            continue
+        if item.get("type") != "file":
+            raise ValueError("listing returned an unsupported entry")
+        key = item.get("key")
+        size = item.get("size")
+        if not isinstance(key, str) or not isinstance(size, int) or size < 0:
+            raise ValueError("listing entry is incomplete")
+        if key.startswith("teagram/"):
+            key = key[len("teagram/"):]
+        if not key.startswith(prefix):
+            key = prefix + key
+        parts = key.split("/")
+        if (not key.startswith(prefix) or not re.fullmatch(r"[A-Za-z0-9._/-]+", key) or
+                any(part in ("", ".", "..") for part in parts) or "\t" in key or "\n" in key):
+            raise ValueError("listing key is invalid")
+        if key in objects:
+            raise ValueError("listing contains a duplicate object")
+        objects[key] = size
+except (json.JSONDecodeError, ValueError, TypeError):
+    raise SystemExit("k3s cutover: S3 inventory is invalid or incomplete")
+for key in sorted(objects):
+    print(f"{key}\t{objects[key]}")
+' <<< "$output" || fail "the $alias encrypted S3 object inventory is invalid"
+}
+
+record_source_s3_size() {
+  local listing
+  listing=$(source_s3_listing source)
+  if [[ -z $listing ]]; then
+    S3_OBJECTS=0
+    S3_BYTES=0
+    return
+  fi
+  S3_OBJECTS=$(wc -l <<< "$listing")
+  S3_BYTES=$(awk -F '\t' '{ total += $2 } END { print total + 0 }' <<< "$listing")
+  [[ $S3_OBJECTS =~ ^[0-9]+$ && $S3_BYTES =~ ^[0-9]+$ ]] || fail 'source S3 object totals are invalid'
+  (( S3_BYTES <= MAX_ENCRYPTED_BLOB_BYTES )) ||
+    fail 'source encrypted S3 prefix exceeds the 18 GiB cutover budget for the 20 GiB RustFS PVC'
+}
+
+s3_object_hashes() {
+  local alias=$1 listing_file=$2
+  local -a keys=()
+  mapfile -t keys < <(awk -F '\t' 'NF == 2 { print $1 }' "$listing_file")
+  ((${#keys[@]} == 0)) && return 0
+  if [[ $TEST_MODE == true && -z $MC_HELPER_CONTAINER ]]; then
+    # shellcheck disable=SC2016 # The disposable client's shell expands the variables.
+    printf '%s\n' "${keys[@]}" | kubectl exec --stdin --namespace "$SOURCE_INSTANCE" \
+      pod/cutover-s3-client -- /bin/sh -ec '
+        set -o pipefail
+        alias_name=$1
+        while IFS= read -r key; do
+          digest=$(mc cat "$alias_name/teagram/$key" | sha256sum)
+          digest=${digest%% *}
+          printf "%s\\t%s\\n" "$key" "$digest"
+        done
+      ' -- "$alias" 2>/dev/null || fail "could not checksum the $alias S3 objects"
+  else
+    # shellcheck disable=SC2016 # The helper container's shell expands the variables.
+    printf '%s\n' "${keys[@]}" | incus exec "$SOURCE_INSTANCE" -- docker exec --interactive \
+      "$MC_HELPER_CONTAINER" /bin/sh -ec '
+        set -o pipefail
+        alias_name=$1
+        while IFS= read -r key; do
+          digest=$(mc cat "$alias_name/teagram/$key" | sha256sum)
+          digest=${digest%% *}
+          printf "%s\\t%s\\n" "$key" "$digest"
+        done
+      ' -- "$alias" 2>/dev/null || fail "could not checksum the $alias S3 objects"
+  fi
+}
+
+inventory_s3_prefix() {
+  local alias=$1 listing=$2 scratch listing_file hashes_file inventory_hash status=0
+  scratch=$(mktemp -d "$EVIDENCE_DIR/s3-inventory.XXXXXX")
+  S3_INVENTORY_SCRATCH=$scratch
+  listing_file=$scratch/listing
+  hashes_file=$scratch/hashes
+  printf '%s\n' "$listing" > "$listing_file"
+  s3_object_hashes "$alias" "$listing_file" > "$hashes_file" || status=$?
+  if (( status == 0 )); then
+    inventory_hash=$(python3 -c '
+import re
+import sys
+
+sizes = {}
+with open(sys.argv[1], encoding="utf-8") as listing:
+    for line in listing:
+        if not line.strip():
+            continue
+        key, size = line.rstrip("\n").split("\t", 1)
+        sizes[key] = int(size)
+hashes = {}
+with open(sys.argv[2], encoding="utf-8") as inventory:
+    for line in inventory:
+        key, digest = line.rstrip("\n").split("\t", 1)
+        if key in hashes or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise SystemExit("k3s cutover: S3 checksum inventory is invalid")
+        hashes[key] = digest
+if set(sizes) != set(hashes):
+    raise SystemExit("k3s cutover: S3 checksum inventory is incomplete")
+for key in sorted(sizes):
+    print(f"{key}\t{sizes[key]}\t{hashes[key]}")
+' "$listing_file" "$hashes_file" | sha256sum | awk '{print $1}') || status=$?
+  fi
+  rm -f -- "$listing_file" "$hashes_file"
+  rmdir -- "$scratch"
+  S3_INVENTORY_SCRATCH=''
+  (( status == 0 )) || fail "could not inventory the $alias S3 object checksums"
+  [[ $inventory_hash =~ ^[0-9a-f]{64}$ ]] || fail "the $alias S3 checksum inventory is invalid"
+  printf '%s' "$inventory_hash"
+}
+
+mirror_encrypted_s3_prefix() {
+  local source_listing target_listing source_inventory target_inventory
+  local source_total target_total source_objects target_objects
+  source_listing=$(source_s3_listing source)
+  target_listing=$(source_s3_listing target)
+  [[ -z $target_listing ]] || fail 'target RustFS already contains objects under the encrypted S3 prefix'
+  source_inventory=$(inventory_s3_prefix source "$source_listing")
+  if [[ -z $source_listing ]]; then source_objects=0; else source_objects=$(wc -l <<< "$source_listing"); fi
+  source_total=$(awk -F '\t' '{ total += $2 } END { print total + 0 }' <<< "$source_listing")
+  [[ $source_total =~ ^[0-9]+$ && $source_objects =~ ^[0-9]+$ ]] || fail 'source S3 object totals are invalid'
+  [[ $source_objects == "$S3_OBJECTS" && $source_total == "$S3_BYTES" ]] ||
+    fail 'source encrypted S3 inventory changed after the write fence'
+  (( source_total <= MAX_ENCRYPTED_BLOB_BYTES )) ||
+    fail 'source encrypted S3 prefix exceeds the 18 GiB cutover budget for the 20 GiB RustFS PVC'
+
+  if ! mc_client_exec mirror --overwrite "source/teagram/teagramd/" "target/teagram/teagramd/" \
+    >/dev/null 2>&1; then
+    fail 'could not mirror encrypted S3 objects to target RustFS'
+  fi
+  if [[ ${CUTOVER_TEST_CORRUPT_S3_OBJECT:-} == true && $TEST_MODE == true && -n $source_listing ]]; then
+    first_key=$(awk -F '\t' 'NR == 1 { print $1 }' <<< "$source_listing")
+    first_size=$(awk -F '\t' 'NR == 1 { print $2 }' <<< "$source_listing")
+    [[ $first_size =~ ^[1-9][0-9]*$ ]] || fail 'could not determine the disposable S3 object size for checksum injection'
+    python3 -c '
+import sys
+
+remaining = int(sys.argv[1])
+chunk = b"x" * min(1024 * 1024, remaining)
+while remaining:
+    part = chunk[:remaining]
+    sys.stdout.buffer.write(part)
+    remaining -= len(part)
+' "$first_size" |
+      mc_client_exec pipe "target/teagram/$first_key" >/dev/null 2>&1 ||
+      fail 'could not inject a same-size disposable S3 checksum mismatch'
+  fi
+  target_listing=$(source_s3_listing target)
+  target_inventory=$(inventory_s3_prefix target "$target_listing")
+  if [[ -z $target_listing ]]; then target_objects=0; else target_objects=$(wc -l <<< "$target_listing"); fi
+  target_total=$(awk -F '\t' '{ total += $2 } END { print total + 0 }' <<< "$target_listing")
+  [[ $source_objects == "$target_objects" && $source_total == "$target_total" ]] ||
+    fail 'source and target S3 object counts or byte totals do not match'
+  [[ $source_inventory == "$target_inventory" ]] ||
+    fail 'source and target S3 per-object SHA-256 checksums do not match'
+  S3_OBJECTS=$source_objects
+  S3_BYTES=$source_total
+  stop_mc_client
+}
+
+blob_mode_tar_hash() {
+  python3 -c '
+import hashlib
+import pathlib
+import sys
+import tarfile
+
+files = {}
+try:
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+        for member in archive:
+            path = pathlib.PurePosixPath(member.name)
+            parts = tuple(part for part in path.parts if part not in (".", ""))
+            if path.is_absolute() or any(part == ".." for part in parts):
+                raise ValueError("unsafe path")
+            if member.isdir():
+                continue
+            if not member.isfile() or not parts:
+                raise ValueError("unsupported entry")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("unreadable file")
+            content = stream.read()
+            if len(content) != member.size:
+                raise ValueError("short file")
+            files["/".join(parts)] = content
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        content = files[name]
+        digest.update(name.encode("utf-8") + b"\\0" + str(len(content)).encode("ascii") + b"\\0")
+        digest.update(hashlib.sha256(content).digest())
+        digest.update(b"\\n")
+except (tarfile.TarError, OSError, ValueError):
+    raise SystemExit("k3s cutover: blob-mode state archive is invalid")
+print(digest.hexdigest())
+'
 }
 
 install_admin_secret() {
@@ -482,7 +1378,11 @@ confirm() {
   local expected=$1 prompt=$2 response
   printf '%s\n' "$prompt" >&2
   printf 'Type %s to continue: ' "$expected" >&2
-  IFS= read -r response
+  if [[ $TEST_MODE == true ]]; then
+    IFS= read -r response <&3
+  else
+    IFS= read -r response
+  fi
   [[ $response == "$expected" ]] || fail 'operator did not confirm the exact route state'
 }
 
@@ -492,7 +1392,7 @@ print_rollback_command() {
 
 stop_port_forward_units() {
   local unit load_state failed=false
-  for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT"; do
+  for unit in "$LINKSELECTOR_PORT_FORWARD_UNIT" "$TEAGRAMD_PORT_FORWARD_UNIT" "$RUSTFS_PORT_FORWARD_UNIT"; do
     if ! load_state=$(incus exec "$TARGET_INSTANCE" -- systemctl show -p LoadState --value "$unit"); then
       failed=true
       continue
@@ -504,6 +1404,14 @@ stop_port_forward_units() {
     fi
   done
   [[ $failed == false ]]
+}
+
+stop_rustfs_copy_forward() {
+  [[ $TEST_MODE == false ]] || return 0
+  incus exec "$TARGET_INSTANCE" -- systemctl disable --now "$RUSTFS_PORT_FORWARD_UNIT" >/dev/null ||
+    fail 'could not stop the temporary RustFS copy port-forward'
+  incus exec "$TARGET_INSTANCE" -- rm -f "/etc/systemd/system/$RUSTFS_PORT_FORWARD_UNIT"
+  incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
 }
 
 recover_before_edge_switch() {
@@ -581,6 +1489,22 @@ handle_exit() {
   [[ -z ${admin_origin_file:-} ]] || rm -f -- "$admin_origin_file"
   [[ -z ${cutover_manifest:-} ]] || rm -f -- "$cutover_manifest"
   [[ -z ${dump_spool:-} ]] || rm -f -- "$dump_spool"
+  if [[ -n ${S3_INVENTORY_SCRATCH:-} ]]; then
+    rm -f -- "$S3_INVENTORY_SCRATCH/listing" "$S3_INVENTORY_SCRATCH/hashes"
+    rmdir -- "$S3_INVENTORY_SCRATCH" 2>/dev/null || true
+    S3_INVENTORY_SCRATCH=''
+  fi
+  if [[ -n ${MC_HELPER_CONTAINER:-} ]]; then
+    incus exec "$SOURCE_INSTANCE" -- docker rm --force "$MC_HELPER_CONTAINER" >/dev/null 2>&1 ||
+      printf 'k3s cutover: could not remove the temporary S3 client container\n' >&2
+    MC_HELPER_CONTAINER=''
+  fi
+  if [[ ${MC_CLIENT_POD_CREATED:-false} == true ]]; then
+    kubectl delete pod/cutover-s3-client --namespace "$SOURCE_INSTANCE" \
+      --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
+      printf 'k3s cutover: could not remove the disposable S3 client pod\n' >&2
+    MC_CLIENT_POD_CREATED=false
+  fi
   if (( status != 0 )) && [[ -f $PHASE_FILE ]]; then
     phase=$(<"$PHASE_FILE")
     case "$phase" in
@@ -714,7 +1638,7 @@ for resource in \
     [[ $lookup_status == 1 ]] || fail "could not determine whether $resource exists"
   fi
 done
-for selector in app.kubernetes.io/name=db-migrations app.kubernetes.io/name=rustfs-init app.kubernetes.io/name=local-blob-migration; do
+for selector in app.kubernetes.io/name=db-migrations app.kubernetes.io/name=rustfs-init; do
   existing_jobs=$(kubectl get jobs --namespace "$NAMESPACE" --selector="$selector" --output name)
   [[ -z $existing_jobs ]] || fail "target production Job already exists: $selector"
 done
@@ -749,6 +1673,11 @@ done
 check_source_container teagram-teagramd-1
 validate_source_blob_backend
 check_source_container teagram-postgres-1
+validate_release_for_source
+check_source_migration_version "$REQUIRED_MIGRATION_VERSION"
+check_source_blob_authority
+check_source_media_keys
+check_source_blob_credentials
 check_source_container teagram-link-edge-selector-1
 check_source_container teagram-web-cloudflared
 check_source_key() {
@@ -789,22 +1718,17 @@ install_admin_secret "$admin_hash_file" "$admin_origin_file"
 rm -f -- "$admin_hash_file" "$admin_origin_file"
 admin_hash_file=''
 admin_origin_file=''
+cutover_manifest=$(mktemp "$EVIDENCE_DIR/cutover-alpha.XXXXXX.yaml")
+render_cutover_manifest "$cutover_manifest"
+kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
+record_phase applying
+kubectl apply --filename "$cutover_manifest" >/dev/null
 if [[ $TEST_MODE == true ]]; then
-  cutover_manifest=$(mktemp "$RUNNER_TEMP/cutover-alpha.XXXXXX.yaml")
-  kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" |
-    sed "s/^\( *\)namespace: teagram$/\1namespace: $NAMESPACE/" > "$cutover_manifest"
-  kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
-  record_phase applying
-  kubectl apply --filename "$cutover_manifest" >/dev/null
   kubectl patch deployment/cloudflared --namespace "$NAMESPACE" --type=strategic \
     --patch-file "$SCRIPT_DIR/test-cutover-cloudflared-patch.yaml" >/dev/null
-  rm -f -- "$cutover_manifest"
-  cutover_manifest=''
-else
-  kubectl apply --dry-run=server --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
-  record_phase applying
-  kubectl apply --kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
 fi
+rm -f -- "$cutover_manifest"
+cutover_manifest=''
 
 kubectl rollout status statefulset/postgres --namespace "$NAMESPACE" --timeout=600s >/dev/null
 kubectl rollout status statefulset/rustfs --namespace "$NAMESPACE" --timeout=600s >/dev/null
@@ -816,7 +1740,22 @@ kubectl wait --for=condition=complete jobs \
 [[ $(kubectl get deployment cloudflared --namespace "$NAMESPACE" -o jsonpath='{.spec.replicas}') == 0 ]] ||
   fail 'k8s cloudflared must remain at zero replicas until the edge switch'
 
+discover_target_lxc_ip
+if [[ $TEST_MODE == false ]]; then
+  install_port_forward_unit "$RUSTFS_PORT_FORWARD_UNIT" \
+    'Source-only encrypted S3 copy port-forward' service/rustfs "$RUSTFS_PORT:9000"
+  wait_for_tcp_forward "$target_lxc_ip" "$RUSTFS_PORT" ||
+    fail 'target RustFS port-forward did not become ready'
+fi
+target_s3_endpoint="http://$target_lxc_ip:$RUSTFS_PORT"
+setup_mc_client "$target_s3_endpoint"
+
 fence_source_writes
+verify_source_write_fence
+check_source_migration_version "$REQUIRED_MIGRATION_VERSION"
+check_source_blob_authority
+check_source_media_keys
+check_source_blob_credentials
 if [[ $TEST_MODE == true && ${CUTOVER_TEST_FAIL_AFTER_SOURCE_FENCE:-} == true ]]; then
   fail 'injected disposable-cluster failure after the source write fence'
 fi
@@ -829,9 +1768,6 @@ import tarfile
 from pathlib import PurePosixPath
 
 total = 0
-encrypted_total = 0
-objects = 0
-chunk_size = 16 * 1024
 try:
     with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
         for member in archive:
@@ -843,19 +1779,16 @@ try:
             if not member.isfile() or member.size < 0:
                 raise ValueError("non-regular entry")
             total += member.size
-            chunks = max(1, (member.size + chunk_size - 1) // chunk_size)
-            encrypted_total += 102 + member.size + 16 * chunks
-            objects += 1
     while sys.stdin.buffer.read(1024 * 1024):
         pass
 except (tarfile.TarError, OSError, ValueError):
     raise SystemExit("k3s cutover: legacy blob tree contains an unsupported entry")
-print(f"{total}\t{encrypted_total}\t{objects}")
+print(total)
 ') || fail 'could not inspect the source blob volume safely after the write fence'
-[[ $blob_sizes =~ ^[0-9]+$'\t'[0-9]+$'\t'[0-9]+$ ]] || fail 'source blob size is unavailable'
-IFS=$'\t' read -r blob_bytes encrypted_blob_bytes blob_objects <<< "$blob_sizes"
+[[ $blob_sizes =~ ^[0-9]+$ ]] || fail 'source blob size is unavailable'
+blob_bytes=$blob_sizes
 (( blob_bytes <= MAX_LEGACY_BLOB_BYTES )) || fail 'source blob volume exceeds the 20 GiB retained PVC'
-(( encrypted_blob_bytes <= MAX_ENCRYPTED_BLOB_BYTES )) || fail 'encrypted blob volume exceeds the 18 GiB cutover budget for the 20 GiB RustFS PVC'
+record_source_s3_size
 
 kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- pg_isready -U postgres -d teagram >/dev/null
 source_database_bytes=$(incus exec "$SOURCE_INSTANCE" -- docker exec teagram-postgres-1 \
@@ -936,8 +1869,8 @@ record_phase database-restored
 target_available_bytes=$(kubectl exec --namespace "$NAMESPACE" postgres-0 -c postgres -- \
   df -Pk /var/lib/postgresql | awk 'END { print $4 * 1024 }')
 [[ $target_available_bytes =~ ^[0-9]+$ ]] || fail 'could not inspect target disk space before importing blobs'
-(( blob_bytes + encrypted_blob_bytes + MIN_STORAGE_RESERVE_BYTES <= target_available_bytes )) ||
-  fail 'target disk cannot hold both the retained local blobs and encrypted RustFS copies with 1 GiB free'
+(( blob_bytes + S3_BYTES + MIN_STORAGE_RESERVE_BYTES <= target_available_bytes )) ||
+  fail 'target disk cannot hold both the retained local blobs and encrypted RustFS copy with 1 GiB free'
 
 for claim in key-data-teagramd-0 legacy-blobs-teagramd-0 blob-mode-teagramd-0; do
   kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/$claim" \
@@ -949,7 +1882,7 @@ kubectl wait --for=condition=Ready pod/cutover-volume-importer --namespace "$NAM
 # importer. Make the private destination root traversable to its restricted
 # root process before extracting, and keep archive owners from replacing it.
 kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
-  sh -ec 'chown 0:0 /target/legacy-blobs; chmod 0700 /target/legacy-blobs' >/dev/null
+  sh -ec 'chown 0:0 /target/legacy-blobs /target/blob-mode; chmod 0700 /target/legacy-blobs /target/blob-mode' >/dev/null
 
 # Run a pipeline consumer and then drain whatever it left unread. A consumer
 # such as tar stops at the end-of-archive marker; without the drain the
@@ -981,8 +1914,18 @@ copy_secret_file /var/lib/teagramd/enc_key.hex enc_key.hex
 incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:/var/lib/teagramd-blobs/. - |
   drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
     tar -xopf - -C /target/legacy-blobs
+source_blob_mode_hash=$(incus exec "$SOURCE_INSTANCE" -- docker cp \
+  teagram-teagramd-1:/run/teagramd/blob-mode/. - | drain_after blob_mode_tar_hash) ||
+  fail 'could not inventory the source blob-mode authority'
+incus exec "$SOURCE_INSTANCE" -- docker cp teagram-teagramd-1:/run/teagramd/blob-mode/. - |
+  drain_after kubectl exec --namespace "$NAMESPACE" --stdin pod/cutover-volume-importer -c importer -- \
+    tar -xopf - -C /target/blob-mode
+target_blob_mode_hash=$(kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
+  tar -cf - -C /target/blob-mode . | blob_mode_tar_hash) || fail 'could not inventory the copied blob-mode authority'
+[[ $source_blob_mode_hash == "$target_blob_mode_hash" ]] ||
+  fail 'copied blob-mode authority does not match the live Compose state'
 kubectl exec --namespace "$NAMESPACE" pod/cutover-volume-importer -c importer -- \
-  sh -ec 'chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex; chown -R 65532:65532 /target/key-data /target/legacy-blobs /target/blob-mode; chmod 0700 /target/key-data /target/blob-mode' >/dev/null
+  sh -ec 'chmod 0600 /target/key-data/server_key.pem /target/key-data/enc_key.hex; chown -R 65532:65532 /target/key-data /target/legacy-blobs; chown -R 0:0 /target/blob-mode; chmod 0755 /target/blob-mode' >/dev/null
 kubectl delete pod/cutover-volume-importer --namespace "$NAMESPACE" --wait=true --timeout=300s >/dev/null
 
 migration_jobs=()
@@ -994,20 +1937,9 @@ done < <(kubectl get jobs --namespace "$NAMESPACE" \
 kubectl patch "${migration_jobs[0]}" --namespace "$NAMESPACE" --type=merge \
   --patch '{"spec":{"suspend":false}}' >/dev/null
 wait_for_job "${migration_jobs[0]}" 900
-
-kubectl patch job/local-blob-migration --namespace "$NAMESPACE" --type=merge \
-  --patch '{"spec":{"suspend":false}}' >/dev/null
-blob_migration_timeout=21600
-[[ $TEST_MODE == false ]] || blob_migration_timeout=900
-wait_for_job job/local-blob-migration "$blob_migration_timeout"
-migration_summary=$(kubectl logs --namespace "$NAMESPACE" job/local-blob-migration -c migrate |
-  sed -n '/^blob_copy=pass mode=encrypted /p')
-[[ $migration_summary == blob_copy=pass\ mode=encrypted\ objects=* ]] ||
-  fail 'encrypted legacy blob migration did not report a verified copy'
-[[ $migration_summary =~ ^blob_copy=pass\ mode=encrypted\ objects=([0-9]+)\ bytes=([0-9]+)\  ]] ||
-  fail 'encrypted legacy blob migration returned an invalid copy summary'
-[[ ${BASH_REMATCH[1]} == "$blob_objects" && ${BASH_REMATCH[2]} == "$blob_bytes" ]] ||
-  fail 'encrypted legacy blob migration totals do not match the fenced source tree'
+mirror_encrypted_s3_prefix
+stop_rustfs_copy_forward
+preserve_media_key_version
 
 kubectl scale statefulset/teagramd --replicas=1 --namespace "$NAMESPACE" >/dev/null
 kubectl rollout status statefulset/teagramd --namespace "$NAMESPACE" --timeout=900s >/dev/null
@@ -1148,6 +2080,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
 printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
+verify_source_write_fence
 record_phase serve-switch-started
 incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
   "http://$linkselector_ip:$LINKSELECTOR_PORT" >/dev/null
@@ -1178,6 +2111,6 @@ check_source_container teagram-postgres-1
 record_phase k8s-connector-started
 
 record_phase complete
-printf 'k3s cutover complete: postgres_dump=%s legacy_blob_bytes=%s encrypted_blob_bytes=%s blob_objects=%s evidence=%s\n' \
-  "$dump_path" "$blob_bytes" "$encrypted_blob_bytes" "$blob_objects" "$EVIDENCE_DIR"
+printf 'k3s cutover complete: postgres_dump=%s legacy_blob_bytes=%s encrypted_blob_bytes=%s s3_objects=%s evidence=%s\n' \
+  "$dump_path" "$blob_bytes" "$S3_BYTES" "$S3_OBJECTS" "$EVIDENCE_DIR"
 print_rollback_command

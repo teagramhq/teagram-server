@@ -43,6 +43,15 @@ class ValidateEnvTurnstileTests(unittest.TestCase):
     def test_missing_signin_flag_keeps_false_default(self) -> None:
         self.validate(self.values)
 
+    def test_browser_only_is_required(self) -> None:
+        values = {key: value for key, value in self.values.items() if key != "TG_WEBSOCKET_BROWSER_ONLY"}
+        with self.assertRaises(SystemExit):
+            self.validate(values)
+
+    def test_browser_only_cannot_be_disabled(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.validate({**self.values, "TG_WEBSOCKET_BROWSER_ONLY": "false"})
+
     def test_signin_flag_accepts_both_boolean_values(self) -> None:
         for value in ("false", "true"):
             with self.subTest(value=value):

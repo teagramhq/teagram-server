@@ -77,7 +77,7 @@ func (r *peerFrameReader) run() {
 					r.conn.observePeerDisconnect()
 					if r.conn.closeSource.Load() == closeSourcePeer {
 						if closeErr := r.conn.closeUnderlying(); closeErr != nil && !isDisconnect(closeErr) {
-							r.server.log.Info("close transport after peer disconnect", "err", closeErr)
+							r.conn.log.Info("close transport after peer disconnect", "err", closeErr)
 						}
 					}
 				}
@@ -142,7 +142,7 @@ func (r *peerFrameReader) next(drainCtx context.Context, readDeadline time.Time,
 		return nil, time.Time{}, errServerDraining
 	case <-timer.C:
 		if err := r.conn.closeServer(); err != nil && !isDisconnect(err) {
-			r.server.log.Info("close connection at read deadline", "err", err)
+			r.conn.log.Info("close connection at read deadline", "err", err)
 		}
 		r.join()
 		if idleDeadline {

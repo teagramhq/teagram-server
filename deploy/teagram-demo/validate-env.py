@@ -14,6 +14,7 @@ EXPECTED = {
     "TG_PUBLIC_LINK_PREFIX": "https://demo.teagram.io/",
     "TG_ADVERTISE_ADDR": "demo.teagram.io:443",
     "TG_WEBSOCKET_LISTEN_ADDR": ":2446",
+    "TG_WEBSOCKET_BROWSER_ONLY": "true",
     "TG_REGISTRATION": "open",
     "TG_LOG_LOGIN_CODES": "false",
     "TG_MAX_FILE_BYTES": "16777216",

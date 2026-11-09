@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add the demo origin to the prepared demo environment without touching secrets."""
+"""Update fixed WebSocket and upload settings without touching secrets."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import tempfile
 OLD_ORIGINS = "https://web.teagram.io"
 NEW_ORIGINS = "https://web.teagram.io,https://demo.teagram.io"
 VARIABLE = "TG_WEBSOCKET_ALLOWED_ORIGINS"
+BROWSER_ONLY_VARIABLE = "TG_WEBSOCKET_BROWSER_ONLY"
 UPLOADS_DISABLED_VARIABLE = "TG_UPLOADS_DISABLED"
 
 
@@ -51,6 +52,23 @@ def update(path: pathlib.Path) -> None:
         changed = True
     else:
         reject("unexpected-origin-list")
+
+    browser_only_matches = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n").startswith(f"{BROWSER_ONLY_VARIABLE}=")
+    ]
+    if len(browser_only_matches) > 1:
+        reject("browser-only-assignment-count")
+    if browser_only_matches:
+        browser_only_value = lines[browser_only_matches[0]].rstrip("\r\n").partition("=")[2]
+        if browser_only_value != "true":
+            reject("browser-only-must-remain-enabled")
+    else:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] = lines[-1] + "\n"
+        lines.append(f"{BROWSER_ONLY_VARIABLE}=true\n")
+        changed = True
 
     uploads_matches = [
         index
@@ -101,7 +119,10 @@ def main() -> None:
     if len(sys.argv) != 2:
         reject("usage")
     update(pathlib.Path(sys.argv[1]))
-    print("demo env updated: TG_WEBSOCKET_ALLOWED_ORIGINS, TG_UPLOADS_DISABLED")
+    print(
+        "demo env updated: TG_WEBSOCKET_ALLOWED_ORIGINS, "
+        "TG_WEBSOCKET_BROWSER_ONLY, TG_UPLOADS_DISABLED"
+    )
 
 
 if __name__ == "__main__":

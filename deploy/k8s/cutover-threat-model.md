@@ -7,6 +7,17 @@ to create workloads or exec into pods in the teagram namespace. Compromise of
 any of these can expose or replace the copied identity or data. The separate
 [identity threat model](identity-threat-model.md) covers key storage and backup.
 
+The `sha-<revision>` image tags are mutable because same-repository pull
+requests can publish packages. The cutover treats those tags only as lookup
+handles: before fencing source writes, it resolves each tag to a registry
+digest and verifies its GitHub build provenance against the exact live source
+commit, `refs/heads/main`, and `.github/workflows/ci.yml` as signer. Main CI
+emits attestations only on successful main pushes; a PR-produced attestation
+cannot satisfy the source and signer checks. A PR image, an un-attested digest,
+or provenance for a different revision fails closed before the fence. The
+rendered workloads use the verified digest references rather than the mutable
+tags.
+
 The runner and recovery commands use the root-owned, mode-0600
 `/root/teagram-k3s-cutover.kubeconfig`, which contains the k3s admin client
 certificate. It is separate from the restricted `teagram-deployer` token and
@@ -22,6 +33,18 @@ Only trusted operators may create or exec into it. The runner deletes it after
 copying, on failure and on rollback; an API or node failure can prevent removal,
 so operators must inspect and remove any remaining importer before granting
 additional namespace access. Its one-day sleep is not a security boundary.
+
+The encrypted S3 copy uses a temporary client with the source blob credential.
+It lists and reads the source `teagram/teagramd/` prefix and writes only to the
+new RustFS Service. The client joins the source RustFS network and the
+teagramd Compose network so it keeps access to RustFS after the source server is
+stopped and can reach the target port-forward. The runner checks source and target object counts, byte
+totals and per-object SHA-256 values before switching routes, then deletes the
+client. The target-only RustFS port-forward is bound to the k3s LXC bridge
+address and removed after the copy. The source credential can technically
+write or delete objects under its policy, so the copy command and its helper
+image are part of the trusted cutover path; source aliases are used only for
+listing and reads.
 
 The teagramd ClusterIP Service exposes MTProto, WebSocket and admin ports to
 cluster workloads. The cutover also binds port-forwards to the k3s LXC's bridge

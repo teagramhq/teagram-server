@@ -66,17 +66,21 @@ The CI workflow sets its disposable overlay to the newest migration before
 rendering and applying it, so teagramd waits until that migration has run.
 
 After a migration merges and CI publishes the corresponding images, update the
-production teagramd and migration image digests, required migration version,
-and migration Job name together. The production pin check must pass before
-applying that overlay. This keeps a server image that needs a new migration
-from being deployed with an older migration image.
+production teagramd, migration and mc-init image digests, required migration
+version, migration Job name, and `prod/source-revision` together. The production
+pin check must pass before applying that overlay. The cutover reads the live
+Compose image revision, resolves that revision's published `sha-<revision>`
+images to immutable digests, and derives the migration version and both Job
+names from those images. It checks the live database migration version against
+the resolved migration image before creating target workloads or fencing
+source writes.
 
 The production overlay expects these namespace-scoped resources to be supplied
 by the cluster's secret and configuration management before it is applied:
 
 | Resource | Required keys or values |
 | --- | --- |
-| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR` |
+| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_MEDIA_KEY_CURRENT` |
 | `link-edge-runtime` ConfigMap | `TG_INVITE_WEB_SIGNUP_URL`; optional `TG_INVITE_DESKTOP_URL` |
 | `web` Service | ClusterIP endpoint on port 8080 for ordinary web traffic |
 | `postgres-credentials` Secret | `POSTGRES_PASSWORD`, `TG_POSTGRES_DSN` |
@@ -172,25 +176,68 @@ credentials, run the cutover from a reviewed checkout on `alpha`:
 
 ```sh
 sudo deploy/k8s/cutover-alpha.sh --dry-run
-sudo deploy/k8s/cutover-alpha.sh --apply
+sudo --preserve-env=GH_TOKEN,GHCR_USERNAME deploy/k8s/cutover-alpha.sh --apply
 ```
 
+The alpha host needs the GitHub CLI (`gh`) for the image-provenance check. Before
+`--apply`, load a read-only GitHub token from the approved secret store into the
+invoking shell as `GH_TOKEN` and set `GHCR_USERNAME` to the token owner's GitHub
+username. The token needs read access to repository attestations and the GHCR
+packages. Run the apply command with
+`sudo --preserve-env=GH_TOKEN,GHCR_USERNAME`; the runner uses the token for
+GitHub API and GHCR verification, writes GHCR auth to a mode-0600 temporary
+Docker config, then removes it on exit. It does not persist the token or
+registry credentials.
+
+Before applying workloads, the runner reads the live teagramd revision and
+pulls the five published k8s images tagged for that SHA and resolves their
+immutable registry digests. For each digest it verifies GitHub build provenance
+with `gh attestation verify`, using the temporary GHCR credentials. It requires
+source ref `refs/heads/main`, the exact live source commit, and
+`.github/workflows/ci.yml` as the signer. Main CI emits
+these attestations only on successful main pushes; a PR-produced attestation
+cannot satisfy the source and signer checks. It pins only verified digests in
+the rendered manifest and derives migration versions and immutable Job names
+from those images. Missing provenance, a digest from a PR build, a label
+mismatch, or a database mismatch stops the run before source writes are fenced.
+Immediately before the first Serve route changes, the runner verifies that
+every fenced Compose container is still stopped, PostgreSQL has no client
+connections, RustFS is running, and the teagramd revision has not changed.
+
 The script keeps the k8s app and tunnel connector at zero replicas while it
-restores PostgreSQL, copies `server_key.pem`, `enc_key.hex`, and the local blob
-tree into the new PVCs, applies the pinned Atlas migration, then encrypts and
-checksums the copied blobs into RustFS with the current media key. It saves a
-mode-0600 custom-format database dump on the PostgreSQL PVC and keeps a
-read-only local-blob copy in `legacy-blobs`. The database dump and old Compose
-volumes are recovery points for at least seven days. A fresh smoke test dumps
-and restores a provisioned account, then completes a new SRP login with the
-same password and RSA identity; CI runs it in `test: smoke`.
+restores PostgreSQL and applies the matching Atlas migration. It copies
+`server_key.pem`, `enc_key.hex`, the blob-mode authority, and the retained local
+blob tree into the new PVCs; it also verifies the k3s media-key Secret against
+the live key set and sets `TG_MEDIA_KEY_CURRENT` to the source runtime's active
+key version. It mirrors the source RustFS `teagram/teagramd/` prefix into
+the new RustFS PVC with object bytes unchanged. The source bucket and Compose
+volumes are read-only. Before the route switch, the runner checks object count,
+total bytes, and each object's SHA-256 against the target. The source S3
+credential is used only by a temporary client, which is removed after the
+copy. A target-only port-forward is removed when the copy completes.
+
+The runner saves a mode-0600 custom-format database dump on the PostgreSQL PVC
+and keeps a read-only local-blob copy in `legacy-blobs`. The database dump and
+old Compose volumes are recovery points for at least seven days. CI uploads a
+document through the source S3-backed teagramd before cutover and downloads
+the same document through the target after cutover, comparing the bytes.
 
 Before the final snapshot, the script stops every running Compose service other
-than PostgreSQL, including `teagramd` and any active database or blob writer,
-and stops `teagram-web-cloudflared`. It verifies PostgreSQL has no remaining
-client connections. Compose volumes and PostgreSQL data are left intact. The
-fence-to-switch interval is planned downtime; a failure before the complete
-edge switch restarts the stopped Compose services.
+than PostgreSQL and RustFS, including `teagramd` and any active database or blob
+writer, and stops `teagram-web-cloudflared`. PostgreSQL and RustFS are verified
+to remain running, and PostgreSQL has no remaining client connections. RustFS
+must stay online because the post-fence source S3 listing, per-object checksum
+reads, and mirror use `http://rustfs:9000`. Compose volumes and PostgreSQL data
+are left intact. The fence-to-switch interval is planned downtime; a failure
+before the first live edge switch restarts only the Compose services the runner
+stopped. PostgreSQL and RustFS are not stopped during recovery.
+
+After a successful cutover, the old Compose application and edge services stay
+stopped, while PostgreSQL and source RustFS remain running with their existing
+data. The k8s application uses the copied objects in target RustFS; the source
+bucket remains the pre-switch recovery copy for at least seven days. Apply and
+rollback leave the source PostgreSQL and RustFS services and their data in
+place. Retiring them requires a separate cleanup after the recovery period.
 
 The cutover keeps the k8s app and connector at zero while it restores the
 database, identity and blobs. It applies teagram-web's pinned k8s base and adds
@@ -214,9 +261,11 @@ not automatically restart Compose and discard writes accepted by k3s. Rollback
 requires confirmation of that data loss, scales the k8s app and connector to
 zero, and verifies their pods have stopped before restoring the Cloudflare
 route, all five Serve paths, the MTProto TCP route, and the old Bot API route.
-It then restarts the stopped Compose services and stops both port-forwards.
-PostgreSQL and PVC data remain intact. Writes made on k3s after the switch are
-not carried back to Compose.
+It then restarts only the Compose services stopped by apply and stops both
+port-forwards. PostgreSQL and source RustFS were already running, so the restored
+Compose teagramd reconnects to the original bucket. PostgreSQL and PVC data
+remain intact. Writes made on k3s after the switch are not copied to the source
+RustFS bucket or carried back to Compose.
 
 ### Retry after a pre-switch failure
 
@@ -258,9 +307,10 @@ The explicit PVC command also removes the PostgreSQL and RustFS claims from the
 base production manifests. Once the commands complete, a fresh `--apply` can
 run from the same reviewed checkout.
 
-CI runs the actual cutover runner with a disposable source namespace and a
-separate target namespace in k3s. The source database, identity files, and a
-blob fixture pass through the runner's fence, snapshot, transfer, and pinned
-migration Job; CI signs into the restored account on the target, invokes the
-runner's explicit rollback, then signs into the untouched source. No production
-namespace or live cluster is used.
+CI runs the actual cutover runner with a disposable S3-backed source namespace
+and a separate target namespace in k3s. The source database, encrypted S3
+object, identity files, blob-mode authority, and retained local blob fixture
+pass through the runner's fence, snapshot, transfer, and revision-matched
+migration Job. CI downloads the pre-cutover document through target teagramd,
+invokes the runner's explicit rollback, then signs into the untouched source.
+No production namespace or live cluster is used.

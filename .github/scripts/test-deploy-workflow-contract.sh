@@ -176,7 +176,10 @@ check_ci_contract() {
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with."if-no-files-found"')" == 'error' ]] ||
     ci_fail 'publishing must fail if the trusted image digest artifact is missing'
 
-  local manifest_start deploy_start
+  local manifest_download manifest_start deploy_start
+  manifest_download="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Install pinned kubectl and kubeconform") | .run')"
+  [[ "$(grep --fixed-strings --count -- '--retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60' <<< "$manifest_download")" == 2 ]] ||
+    ci_fail 'pinned Kubernetes tool downloads must retry transient upstream gateway failures'
   manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
   [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
      "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||

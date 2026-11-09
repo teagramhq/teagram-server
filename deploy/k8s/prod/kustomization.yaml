@@ -13,15 +13,15 @@ configMapGenerator:
   - name: required-migration-version
     behavior: replace
     literals:
-      - migration-version=20261102000002
+      - migration-version=20261105000021
   - name: db-migrations-job-revision
     behavior: merge
     literals:
-      - job-name=db-migrations-c4d3c2f5019f87c0
+      - job-name=db-migrations-16f5dc851e0c073c
   - name: rustfs-init-job-revision
     behavior: merge
     literals:
-      - job-name=rustfs-init-e811a35bbe001c12
+      - job-name=rustfs-init-a28950e3aedfe596
 
 replacements:
   - source:
@@ -36,6 +36,8 @@ replacements:
           name: db-migrations
         fieldPaths:
           - metadata.name
+          - spec.selector.matchLabels.job-revision
+          - spec.template.metadata.labels.job-revision
   - source:
       kind: ConfigMap
       name: rustfs-init-job-revision
@@ -48,14 +50,16 @@ replacements:
           name: rustfs-init
         fieldPaths:
           - metadata.name
+          - spec.selector.matchLabels.job-revision
+          - spec.template.metadata.labels.job-revision
 
 images:
   - name: ghcr.io/teagramhq/teagramd
-    digest: sha256:e20ef26b80cf3ce1a3ff1cc501111c3403befa7b2a0e94506ab14fa24ed474eb
+    digest: sha256:3d5b698c730145ab7252c63e27bf95b9f2b5df161131773a1e752c1c65064797
   - name: ghcr.io/teagramhq/teagram-migrations
-    digest: sha256:c4d3c2f5019f87c0971427cb9a3842ae372f542b2020a26024461c4ee7dc130d
+    digest: sha256:16f5dc851e0c073cc2c101bb6cf13ebfef7befa802aec6b8edae6ccc989f9678
   - name: ghcr.io/teagramhq/teagramd-mc-init
-    digest: sha256:e811a35bbe001c12264a88f86538d1ded695970328a960f364644c50ac529fbd
+    digest: sha256:a28950e3aedfe596d97cf3eab3fa199855bf43ca9736cd5f81af5eb47650b966
   - name: ghcr.io/teagramhq/link-edge-landing
     digest: sha256:9d23a84630fff7e4052e3e3bf1fb3a549bc65ca2404f3786835bf6584373414d
   - name: ghcr.io/teagramhq/link-edge-selector
