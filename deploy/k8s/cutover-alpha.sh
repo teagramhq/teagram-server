@@ -64,6 +64,11 @@ fail() {
   exit 1
 }
 
+require_release_auth() {
+  [[ -n ${GH_TOKEN:-} && -n ${GHCR_USERNAME:-} ]] ||
+    fail 'set GH_TOKEN and GHCR_USERNAME for main image provenance verification; see deploy/k8s/README.md'
+}
+
 usage() {
   cat <<'EOF'
 Usage: cutover-alpha.sh --dry-run | --apply | --rollback
@@ -122,6 +127,7 @@ for command_name in incus kubectl readlink stat install sha256sum python3 awk gr
 done
 if [[ $TEST_MODE == false && $ACTION == --apply ]]; then
   command -v gh >/dev/null 2>&1 || fail 'required command is missing: gh'
+  require_release_auth
   gh attestation verify --help >/dev/null 2>&1 ||
     fail 'GitHub CLI does not support build provenance verification'
 fi
@@ -383,16 +389,44 @@ source_docker_helper_enabled() {
 }
 
 verify_main_release_image() {
-  local image_name=$1 revision=$2 digest=$3
+  local image_name=$1 revision=$2 digest=$3 auth_dir auth_config
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
     fail "published image $image_name has an invalid immutable registry digest: $digest"
-  gh attestation verify "oci://$image_name@$digest" \
+  require_release_auth
+  auth_dir=$(mktemp -d "${TMPDIR:-/tmp}/teagram-cutover-ghcr-auth.XXXXXX") ||
+    fail 'could not create a private temporary GHCR authentication directory'
+  chmod 0700 "$auth_dir" || {
+    rm -rf -- "$auth_dir"
+    fail 'could not protect the temporary GHCR authentication directory'
+  }
+  auth_config=$(GH_TOKEN="$GH_TOKEN" python3 -c '
+import base64
+import json
+import os
+import sys
+
+credential = (sys.argv[1] + ":" + os.environ["GH_TOKEN"]).encode()
+auth = base64.b64encode(credential).decode()
+print(json.dumps({"auths": {"ghcr.io": {"auth": auth}}}))
+' "$GHCR_USERNAME") || {
+    rm -rf -- "$auth_dir"
+    fail 'could not prepare private GHCR authentication'
+  }
+  if ! printf '%s\n' "$auth_config" > "$auth_dir/config.json" ||
+    ! chmod 0600 "$auth_dir/config.json"; then
+    rm -rf -- "$auth_dir"
+    fail 'could not write private GHCR authentication'
+  fi
+  if ! GH_TOKEN="$GH_TOKEN" DOCKER_CONFIG="$auth_dir" gh attestation verify "oci://$image_name@$digest" \
     --repo teagramhq/teagram-server \
     --source-ref refs/heads/main \
     --source-digest "$revision" \
     --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml \
-    --format json >/dev/null 2>&1 ||
-    fail "published image $image_name resolved digest $digest has no valid main CI attestation for live revision $revision"
+    --format json >/dev/null 2>&1; then
+    rm -rf -- "$auth_dir"
+    fail "published image $image_name resolved digest $digest has no valid main CI attestation for live revision $revision; check GH_TOKEN permissions and GHCR access"
+  fi
+  rm -rf -- "$auth_dir" || fail 'could not remove temporary GHCR authentication'
 }
 
 resolve_image_revision() {

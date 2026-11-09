@@ -176,18 +176,25 @@ credentials, run the cutover from a reviewed checkout on `alpha`:
 
 ```sh
 sudo deploy/k8s/cutover-alpha.sh --dry-run
-sudo deploy/k8s/cutover-alpha.sh --apply
+sudo --preserve-env=GH_TOKEN,GHCR_USERNAME deploy/k8s/cutover-alpha.sh --apply
 ```
 
-The alpha host needs the GitHub CLI (`gh`) for the public image-provenance
-check. The repository is public, so verification does not require a stored
-GitHub credential.
+The alpha host needs the GitHub CLI (`gh`) for the image-provenance check. Before
+`--apply`, load a read-only GitHub token from the approved secret store into the
+invoking shell as `GH_TOKEN` and set `GHCR_USERNAME` to the token owner's GitHub
+username. The token needs read access to repository attestations and the GHCR
+packages. Run the apply command with
+`sudo --preserve-env=GH_TOKEN,GHCR_USERNAME`; the runner uses the token for
+GitHub API and GHCR verification, writes GHCR auth to a mode-0600 temporary
+Docker config, then removes it on exit. It does not persist the token or
+registry credentials.
 
 Before applying workloads, the runner reads the live teagramd revision and
 pulls the five published k8s images tagged for that SHA and resolves their
 immutable registry digests. For each digest it verifies GitHub build provenance
-with `gh attestation verify`, requiring source ref `refs/heads/main`, the exact
-live source commit, and `.github/workflows/ci.yml` as the signer. Main CI emits
+with `gh attestation verify`, using the temporary GHCR credentials. It requires
+source ref `refs/heads/main`, the exact live source commit, and
+`.github/workflows/ci.yml` as the signer. Main CI emits
 these attestations only on successful main pushes; a PR-produced attestation
 cannot satisfy the source and signer checks. It pins only verified digests in
 the rendered manifest and derives migration versions and immutable Job names

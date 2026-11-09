@@ -50,6 +50,11 @@ for required_runbook in \
   'bucket remains the pre-switch recovery copy for at least seven days' \
   'PostgreSQL and source RustFS were already running' \
   'GitHub CLI (`gh`)' \
+  'GH_TOKEN' \
+  'GHCR_USERNAME' \
+  'sudo --preserve-env=GH_TOKEN,GHCR_USERNAME' \
+  'writes GHCR auth to a mode-0600 temporary' \
+  'Docker config' \
   'gh attestation verify' \
   'source ref `refs/heads/main`' \
   '`.github/workflows/ci.yml` as the signer'; do
@@ -307,7 +312,13 @@ test_release_helper_digest="sha256:$(printf '%016x%048x' 0xc2c2c2c2c2c2c2c2 0)"
 test_release_landing_digest="sha256:$(printf '%016x%048x' 0xd3d3d3d3d3d3d3d3 0)"
 test_release_selector_digest="sha256:$(printf '%016x%048x' 0xe4e4e4e4e4e4e4e4 0)"
 run_production_release_case() (
-  local mode=$1 rendered_manifest=$2
+  local mode=$1 rendered_manifest=$2 auth_config_dir
+  unset GH_TOKEN GHCR_USERNAME
+  AUTH_CONFIG_LOG=$fixture_dir/production-auth-config-paths
+  export AUTH_CONFIG_LOG
+  if [[ $mode != missing-auth ]]; then
+    export GH_TOKEN=cutover-test-token GHCR_USERNAME=cutover-test-user
+  fi
   export SOURCE_INSTANCE=teagram
   export TEST_MODE=false
   export LIVE_REVISION=$live_revision
@@ -336,6 +347,7 @@ run_production_release_case() (
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   eval "$(sed -n '/^source_docker_helper_enabled() {/,/^resolve_image_revision() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
+  eval "$(sed -n '/^require_release_auth() {/,/^}/p' deploy/k8s/cutover-alpha.sh)"
   eval "$(sed -n '/^verify_main_release_image() {/,/^resolve_image_revision() {/p' \
     deploy/k8s/cutover-alpha.sh | sed '$d')"
   eval "$(sed -n '/^resolve_image_revision() {/,/^resolve_release_image() {/p' \
@@ -349,6 +361,20 @@ run_production_release_case() (
   fail() { printf 'k3s cutover: %s\n' "$*" >&2; exit 1; }
   # shellcheck disable=SC2329 # This test invokes the stub through eval'd source.
   gh() {
+    [[ -n ${GH_TOKEN:-} && ${DOCKER_CONFIG:-} == /* &&
+      -d $DOCKER_CONFIG && $(stat -c '%a' "$DOCKER_CONFIG") == 700 &&
+      -f $DOCKER_CONFIG/config.json &&
+      $(stat -c '%a' "$DOCKER_CONFIG/config.json") == 600 ]] || return 91
+    python3 -c '
+import base64
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as config_file:
+    auth = json.load(config_file)["auths"]["ghcr.io"]["auth"]
+assert base64.b64decode(auth).decode() == sys.argv[2] + ":" + sys.argv[3]
+' "$DOCKER_CONFIG/config.json" "$GHCR_USERNAME" "$GH_TOKEN" || return 91
+    printf '%s\n' "$DOCKER_CONFIG" >> "$AUTH_CONFIG_LOG"
     [[ $1 == attestation && $2 == verify && $4 == --repo &&
       $5 == teagramhq/teagram-server && $6 == --source-ref &&
       $7 == refs/heads/main && $8 == --source-digest &&
@@ -412,7 +438,17 @@ run_production_release_case() (
   }
   incus exec "$SOURCE_INSTANCE" -- docker inspect --format revision teagram-teagramd-1 >/dev/null
   kubectl kustomize "$REPO_ROOT/deploy/k8s/prod-cutover" >/dev/null
+  if [[ $mode == missing-auth ]]; then
+    require_release_auth
+  fi
   validate_release_for_source || return $?
+  if [[ $mode == matching ]]; then
+    [[ -s $AUTH_CONFIG_LOG ]] || fail 'production provenance validation did not authenticate GHCR'
+    while IFS= read -r auth_config_dir; do
+      [[ ! -e $auth_config_dir ]] ||
+        fail 'production provenance validation did not remove its temporary GHCR credentials'
+    done < "$AUTH_CONFIG_LOG"
+  fi
   if [[ $mode == mismatch || $mode == digest-mismatch ]]; then
     fence_source_writes
     return 0
@@ -465,6 +501,17 @@ if [[ $mismatch_output != *'published image ghcr.io/teagramhq/teagramd:sha-'* ]]
 fi
 if [[ $mismatch_output == *'fence reached'* ]]; then
   printf 'production release mismatch reached the write fence: %s\n' "$mismatch_output" >&2
+  exit 1
+fi
+if missing_auth_output=$(run_production_release_case missing-auth \
+  "$fixture_dir/release-missing-auth.yaml" 2>&1); then
+  printf 'production release validation proceeded without its required registry credentials\n' >&2
+  exit 1
+fi
+if [[ $missing_auth_output != *'set GH_TOKEN and GHCR_USERNAME'* ||
+  $missing_auth_output == *'fence reached'* ]]; then
+  printf 'production release validation did not reject missing GHCR credentials before fencing: %s\n' \
+    "$missing_auth_output" >&2
   exit 1
 fi
 if digest_mismatch_output=$(run_production_release_case digest-mismatch \
