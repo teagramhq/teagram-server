@@ -598,6 +598,12 @@ grep --fixed-strings --quiet 'postgres-backup' deploy/k8s/base/kustomization.yam
   fail 'the production and CI base must include the backup resources'
 grep --fixed-strings --quiet 'suspend: false' deploy/k8s/prod/postgres-backup-cronjob.yaml ||
   fail 'the production overlay must activate nightly backups after cutover'
+for overlay in prod-cutover ci; do
+  backup_suspend="$(kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -r 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend' -)"
+  [[ "$backup_suspend" == true ]] ||
+    fail "$overlay overlay must keep nightly backups suspended until production cutover is complete"
+done
 grep --fixed-strings --quiet '../base/postgres-backup' deploy/k8s/backup-bootstrap/kustomization.yaml ||
   fail 'the pre-deploy overlay must provision only the suspended backup resources'
 for rbac_line in \

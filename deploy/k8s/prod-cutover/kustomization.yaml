@@ -38,6 +38,7 @@ patches:
       - op: add
         path: /spec/suspend
         value: true
+  - path: postgres-backup-cronjob.yaml
 images:
   - name: ghcr.io/teagramhq/teagramd
     digest: sha256:3d5b698c730145ab7252c63e27bf95b9f2b5df161131773a1e752c1c65064797
