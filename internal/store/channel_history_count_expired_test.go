@@ -92,6 +92,39 @@ func (f *expiredCountFixture) seedTTLChannelLayout(title string, live, expired i
 	return group.ID
 }
 
+// seedHealthyTTLChannel creates a group with live unexpired TTL posts and no
+// backlog, writing only the root summary nodes the history count reads at floor
+// 0. Rebuilding every node for 100,000 posts costs tens of seconds of shared
+// database CPU, which starves timing-sensitive tests running in parallel; node
+// maintenance and rebuilds are covered by the smaller fixtures above.
+func (f *expiredCountFixture) seedHealthyTTLChannel(title string, live int) int64 {
+	f.t.Helper()
+	ctx := context.Background()
+	group, err := f.s.CreateChannel(ctx, f.owner.ID, title, "", true)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.exec(`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`)
+	f.exec(`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`)
+	f.exec(`
+		INSERT INTO channel_messages (channel_id, local_id, from_id, message, ttl_period, expires_at)
+		SELECT $1, post_id, $2, 'seeded ttl post', 86400, now() + interval '1 day'
+		  FROM generate_series(2::bigint, $3::bigint) AS post_id
+	`, group.ID, f.owner.ID, live+1)
+	f.exec(`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`)
+	f.exec(`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`)
+	// Content posts and expiring posts are both the seeded live posts; the
+	// creation service row at local ID 1 is counted separately.
+	f.exec(`
+		INSERT INTO channel_post_summaries (channel_id, scope_kind, author_id, depth, prefix, live_count)
+		VALUES ($1, 0, 0, 0, 0, $2), ($1, 2, 0, 0, 0, $3)
+		ON CONFLICT (channel_id, scope_kind, author_id, depth, prefix)
+		DO UPDATE SET live_count = EXCLUDED.live_count
+	`, group.ID, live, live)
+	f.exec(`ANALYZE channel_messages`)
+	return group.ID
+}
+
 // historyCost reads one history page and returns the number of statements it
 // issued, the rows every traced history statement read from channel_messages
 // and the summary nodes (measured by replaying each one under EXPLAIN
@@ -224,8 +257,8 @@ func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 func TestChannelHistoryCountCostIgnoresLiveTTLPostsWithoutBacklog(t *testing.T) {
 	t.Parallel()
 	f := newExpiredCountFixture(t, "+15551290011")
-	small := f.seedTTLChannel("TTL channel with 1,000 live posts", 1_000, 0)
-	large := f.seedTTLChannel("TTL channel with 100,000 live posts", 100_000, 0)
+	small := f.seedHealthyTTLChannel("TTL channel with 1,000 live posts", 1_000)
+	large := f.seedHealthyTTLChannel("TTL channel with 100,000 live posts", 100_000)
 
 	smallStatements, smallRows, smallCount, _ := f.historyCost(small)
 	largeStatements, largeRows, largeCount, largeIDs := f.historyCost(large)
