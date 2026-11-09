@@ -938,12 +938,13 @@ func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
 	const connectionID = "tcp-test-connection"
 	key := shutdownTestAuthKey()
 	sink := &serverErrorLogSink{}
+	serverFailureLogged := make(chan struct{}, 1)
 	handler := ConcurrentRPCs(HandlerFunc(func(*Conn, *Request) error {
 		return errors.New("injected concurrent RPC failure")
 	}), tg.MessagesGetSearchCountersRequestTypeID)
 	server, frameConn := asyncRPCBatchServer(t, key, handler,
 		shutdownClientFrame(t, key, 42, 1<<32, &tg.MessagesGetSearchCountersRequest{Peer: &tg.InputPeerEmpty{}}))
-	server.log = slog.New(&asyncRPCContextLogHandler{sink: sink})
+	server.log = slog.New(&asyncRPCContextLogHandler{sink: sink, serverFailureLogged: serverFailureLogged})
 	closeErr := errors.New("injected connection close failure")
 	conn := &asyncRPCFrameCloseErrorConn{asyncRPCFrameConn: frameConn, closeErr: closeErr}
 	openedAt := time.Now()
@@ -955,6 +956,11 @@ func TestConcurrentRPCFailureLogsConnectionID(t *testing.T) {
 		context.Background(), context.Background(), conn, netip.Addr{}, nil, nil, false, server.handler, diagnostics,
 	); err == nil {
 		t.Fatal("serve connection succeeded after a concurrent RPC failure")
+	}
+	select {
+	case <-serverFailureLogged:
+	case <-time.After(time.Second):
+		t.Fatal("server operation failure log was not written after a concurrent RPC failure")
 	}
 
 	want := map[string]bool{
@@ -997,19 +1003,33 @@ func (c *asyncRPCFrameCloseErrorConn) Close() error {
 }
 
 type asyncRPCContextLogHandler struct {
-	sink  *serverErrorLogSink
-	attrs []slog.Attr
+	sink                *serverErrorLogSink
+	serverFailureLogged chan<- struct{}
+	attrs               []slog.Attr
 }
 
 func (h *asyncRPCContextLogHandler) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *asyncRPCContextLogHandler) Handle(ctx context.Context, record slog.Record) error {
 	record.AddAttrs(h.attrs...)
-	return h.sink.Handle(ctx, record)
+	if err := h.sink.Handle(ctx, record); err != nil {
+		return err
+	}
+	if record.Message == "server operation failed" && h.serverFailureLogged != nil {
+		select {
+		case h.serverFailureLogged <- struct{}{}:
+		default:
+		}
+	}
+	return nil
 }
 
 func (h *asyncRPCContextLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &asyncRPCContextLogHandler{sink: h.sink, attrs: append(slices.Clone(h.attrs), attrs...)}
+	return &asyncRPCContextLogHandler{
+		sink:                h.sink,
+		serverFailureLogged: h.serverFailureLogged,
+		attrs:               append(slices.Clone(h.attrs), attrs...),
+	}
 }
 
 func (h *asyncRPCContextLogHandler) WithGroup(string) slog.Handler { return h }
