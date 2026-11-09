@@ -247,6 +247,12 @@ if yq --exit-status 'select(.kind == "Job" and .metadata.name == "mtproto-smoke"
   <<<"$ci_overlay" >/dev/null 2>&1; then
   fail 'the MTProto smoke Job must be created after its generated client ConfigMap'
 fi
+# A fresh pod is admitted by the label-based NetworkPolicy only after the
+# policy controller syncs it, so its first connection can be refused. The Job
+# must therefore be allowed to start a replacement pod.
+mtproto_smoke_backoff="$(yq -r '.spec.backoffLimit' deploy/k8s/ci/mtproto-probe-job.yaml)"
+[[ "$mtproto_smoke_backoff" =~ ^[0-9]+$ && "$mtproto_smoke_backoff" -ge 3 ]] ||
+  fail 'the MTProto smoke Job must retry so a new pod survives the NetworkPolicy sync delay'
 mtproto_smoke_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Smoke the MTProto Service through the in-cluster proxy path") | .run' .github/workflows/ci.yml)"
 if [[ "$mtproto_smoke_step" != *'kubectl create configmap mtproto-probe-client'*'kubectl apply --dry-run=server --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'*'kubectl apply --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'* ]]; then
   fail 'k8s-deploy must create the MTProto client ConfigMap before starting its smoke Job'

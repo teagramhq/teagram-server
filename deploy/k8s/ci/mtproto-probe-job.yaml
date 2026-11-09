@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: tailscale-proxy
     app.kubernetes.io/component: ci-probe
 spec:
-  backoffLimit: 0
+  backoffLimit: 4
   activeDeadlineSeconds: 120
   template:
     metadata:
