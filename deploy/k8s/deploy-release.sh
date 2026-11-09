@@ -18,6 +18,7 @@ rollout_timeout="${ROLLOUT_TIMEOUT:-300s}"
 apply_started=false
 declare -A baseline_revisions=()
 declare -A baseline_statefulset_hashes=()
+declare -A baseline_templates=()
 readonly controllers=(
   statefulset/postgres
   statefulset/rustfs
@@ -39,6 +40,13 @@ controller_revision() {
     kubectl get "$resource" --namespace "$namespace" \
       --output 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}'
   fi
+}
+
+controller_template() {
+  local resource="$1"
+  kubectl get "$resource" --namespace "$namespace" --output json |
+    jq --compact-output --sort-keys --exit-status \
+      '.spec.template | select(type == "object")'
 }
 
 wait_for_statefulset_revision() {
@@ -89,24 +97,32 @@ delete_stale_statefulset_pods() {
 }
 
 rollback() {
-  local status=$? resource kind baseline current rollback_failed=0
+  local status=$? resource kind baseline baseline_template current_template
+  local restored_template rollback_failed=0
   trap - EXIT
   if ((status != 0)) && [[ "$apply_started" == true ]]; then
     printf 'deploy=failed sha=%s; restoring previous workload revisions\n' "$revision" >&2
     for resource in "${controllers[@]}"; do
       kind="${resource%%/*}"
       baseline="${baseline_revisions[$resource]:-}"
+      baseline_template="${baseline_templates[$resource]:-}"
       if [[ -z "$baseline" ]]; then
         printf 'rollback=unavailable resource=%s reason=no-baseline\n' "$resource" >&2
         rollback_failed=1
         continue
       fi
-      if ! current="$(controller_revision "$resource" "$kind" 2>/dev/null)"; then
-        printf 'rollback=failed resource=%s reason=revision-unreadable\n' "$resource" >&2
+      if [[ -z "$baseline_template" ]]; then
+        printf 'rollback=unavailable resource=%s reason=no-template-baseline\n' \
+          "$resource" >&2
         rollback_failed=1
         continue
       fi
-      if [[ "$current" == "$baseline" ]]; then
+      if ! current_template="$(controller_template "$resource" 2>/dev/null)"; then
+        printf 'rollback=failed resource=%s reason=template-unreadable\n' "$resource" >&2
+        rollback_failed=1
+        continue
+      fi
+      if [[ "$current_template" == "$baseline_template" ]]; then
         continue
       fi
       if ! kubectl rollout undo "$resource" --namespace "$namespace" \
@@ -130,9 +146,21 @@ rollback() {
         --timeout="$rollout_timeout"; then
         printf 'rollback=failed resource=%s reason=rollout-not-ready\n' "$resource" >&2
         rollback_failed=1
-      else
-        printf 'rollback=verified resource=%s revision=%s\n' "$resource" "$baseline" >&2
+        continue
       fi
+      if ! restored_template="$(controller_template "$resource" 2>/dev/null)"; then
+        printf 'rollback=failed resource=%s reason=restored-template-unreadable\n' \
+          "$resource" >&2
+        rollback_failed=1
+        continue
+      fi
+      if [[ "$restored_template" != "$baseline_template" ]]; then
+        printf 'rollback=failed resource=%s reason=template-not-restored\n' \
+          "$resource" >&2
+        rollback_failed=1
+        continue
+      fi
+      printf 'rollback=verified resource=%s revision=%s\n' "$resource" "$baseline" >&2
     done
     if ((rollback_failed != 0)); then
       printf '::error::automatic rollback did not restore every changed controller\n' >&2
@@ -155,6 +183,11 @@ for resource in "${controllers[@]}"; do
     }
     baseline_statefulset_hashes["$resource"]="$baseline_hash"
   fi
+  if ! baseline_template="$(controller_template "$resource")"; then
+    printf 'deploy-release: no stable prior template for %s\n' "$resource" >&2
+    exit 1
+  fi
+  baseline_templates["$resource"]="$baseline_template"
   baseline="$(controller_revision "$resource" "$kind")"
   [[ "$baseline" =~ ^[1-9][0-9]*$ ]] || {
     printf 'deploy-release: no stable prior revision for %s\n' "$resource" >&2

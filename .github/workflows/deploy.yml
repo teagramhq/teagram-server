@@ -195,7 +195,7 @@ jobs:
 
       - name: Take and verify a pre-deploy PostgreSQL backup
         env:
-          BACKUP_JOB: postgres-backup-predeploy-${{ github.run_id }}
+          BACKUP_JOB: postgres-backup-predeploy-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           kubectl apply -k deploy/k8s/backup-bootstrap
