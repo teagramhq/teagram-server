@@ -130,8 +130,8 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 	return statements, rows, count, pageIDs
 }
 
-// assertCostWithin1_5x reports whether the history cost of got stays within
-// 1.5x of want in both statements and rows read.
+// assertCostWithin1_5x checks that got stays within 1.5x of the baseline in
+// both statements and rows read.
 func assertCostWithin1_5x(t *testing.T, label string, gotStatements int, gotRows int64, wantStatements int, wantRows int64) {
 	t.Helper()
 	if float64(gotStatements) > 1.5*float64(wantStatements) {
@@ -142,34 +142,44 @@ func assertCostWithin1_5x(t *testing.T, label string, gotStatements int, gotRows
 	}
 }
 
-// Cost may grow with the smaller of the expired backlog and the live expiring
-// posts. With few live posts a huge backlog must not show up in the cost.
+// With a 10,000-post expired backlog, statements equal the same channel's with
+// no backlog, and rows read stay within 1.5x of (its no-backlog rows plus the
+// smaller of the backlog and the live expiring posts): cost may grow only with
+// that minimum.
 func TestChannelHistoryCountCostIgnoresExpiredUnsweptPosts(t *testing.T) {
 	t.Parallel()
 	f := newExpiredCountFixture(t, "+15551290001")
-	const live = 50
-	clean := f.seedTTLChannel("TTL channel without expired posts", live, 0)
-	backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
+	for _, live := range []int{50, 1_000, 10_000} {
+		clean := f.seedTTLChannel("TTL channel without expired posts", live, 0)
+		backlog := f.seedTTLChannel("TTL channel with unswept expired posts", live, expiredCountExpiredPosts)
 
-	cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
-	backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
-	t.Logf("live %d: clean statements/rows = %d/%d, %d expired unswept statements/rows = %d/%d",
-		live, cleanStatements, cleanRows, expiredCountExpiredPosts, backlogStatements, backlogRows)
+		cleanStatements, cleanRows, cleanCount, cleanIDs := f.historyCost(clean)
+		backlogStatements, backlogRows, backlogCount, backlogIDs := f.historyCost(backlog)
+		bound := cleanRows + int64(min(expiredCountExpiredPosts, live))
+		t.Logf("live %d: clean statements/rows = %d/%d, %d expired unswept statements/rows = %d/%d (row bound %d)",
+			live, cleanStatements, cleanRows, expiredCountExpiredPosts, backlogStatements, backlogRows, bound)
 
-	if len(backlogIDs) != live+1 || !slices.Equal(backlogIDs, cleanIDs) {
-		t.Fatalf("page with expired unswept posts = %v, want the clean channel's live page %v", backlogIDs, cleanIDs)
-	}
-	for _, id := range backlogIDs {
-		if id > live+1 {
-			t.Fatalf("page contains expired post %d", id)
+		wantPage := min(live+1, 100)
+		if len(backlogIDs) != wantPage || !slices.Equal(backlogIDs, cleanIDs) {
+			t.Fatalf("live %d: page with expired unswept posts = %v, want the clean channel's live page %v", live, backlogIDs, cleanIDs)
+		}
+		for _, id := range backlogIDs {
+			if id > int64(live)+1 {
+				t.Fatalf("live %d: page contains expired post %d", live, id)
+			}
+		}
+		// The service row at local ID 1 plus the live TTL posts; expired posts
+		// never count.
+		if want := live + 1; cleanCount != want || backlogCount != want {
+			t.Fatalf("live %d: history counts clean/backlog = %d/%d, want %d", live, cleanCount, backlogCount, want)
+		}
+		if backlogStatements != cleanStatements {
+			t.Fatalf("live %d: statements with backlog = %d, no backlog = %d, want equal", live, backlogStatements, cleanStatements)
+		}
+		if float64(backlogRows) > 1.5*float64(bound) {
+			t.Fatalf("live %d: rows read with backlog = %d, want within 1.5x of %d (no-backlog rows %d + min(backlog, live))", live, backlogRows, bound, cleanRows)
 		}
 	}
-	// The service row at local ID 1 plus the live TTL posts; expired posts
-	// never count.
-	if want := live + 1; cleanCount != want || backlogCount != want {
-		t.Fatalf("history counts clean/backlog = %d/%d, want %d", cleanCount, backlogCount, want)
-	}
-	assertCostWithin1_5x(t, "10,000 expired unswept posts", backlogStatements, backlogRows, cleanStatements, cleanRows)
 }
 
 // A healthy TTL group (no backlog) does not pay per open for its live posts.
