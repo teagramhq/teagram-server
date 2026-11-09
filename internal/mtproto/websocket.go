@@ -125,9 +125,9 @@ type webSocketAcceptedConn struct {
 	handlerTracked  atomic.Bool
 	handlerStarted  atomic.Bool
 	handlerDoneOnce sync.Once
-	// Lock order: prepare may hold state while keyAddr acquires the pre-auth
-	// limiter mutex. Close releases state before slot.clear(), so no path takes
-	// those two locks in the reverse order.
+	// Lock order: lockForUpgrade takes pendingMu before state. prepare may hold
+	// state while keyAddr acquires the pre-auth limiter mutex. Close releases
+	// state before slot.clear and untrack, so neither order is reversed.
 	state  sync.Mutex
 	closed bool
 	// preAuthClosing is protected by webSocketListener.pendingMu. It prevents
@@ -177,11 +177,26 @@ func (c *webSocketAcceptedConn) lifecycleCloseCauseValue() (error, bool) {
 	return c.lifecycleCloseCause, c.lifecycleCloseCauseSet
 }
 
-func (c *webSocketAcceptedConn) setConnectionIdentity(connectionID string, openedAt time.Time) {
-	c.state.Lock()
-	c.connectionID = connectionID
-	c.openedAt = openedAt
-	c.state.Unlock()
+// lockForUpgrade serializes a successful HTTP upgrade and its open record with
+// the pre-auth lifetime callback. It returns with state locked so the caller
+// can publish the identity before an expiry closes the accepted socket.
+func (c *webSocketAcceptedConn) lockForUpgrade() bool {
+	if c.listener != nil {
+		c.listener.pendingMu.Lock()
+		if _, tracked := c.listener.pending[c]; !tracked || c.preAuthClosing {
+			c.listener.pendingMu.Unlock()
+			return false
+		}
+		c.state.Lock()
+		c.listener.pendingMu.Unlock()
+	} else {
+		c.state.Lock()
+	}
+	if c.closed {
+		c.state.Unlock()
+		return false
+	}
+	return true
 }
 
 func (c *webSocketAcceptedConn) identityLogAttrs() []any {
@@ -222,9 +237,9 @@ type webSocketListener struct {
 	acceptDone        chan struct{}
 	closeOnce         sync.Once
 
-	// pendingMu is a leaf bookkeeping lock. It is never held while calling
-	// pre-auth, socket or server methods, so it cannot order against any other
-	// lock in the connection path.
+	// pendingMu protects pending and preAuthClosing. lockForUpgrade nests
+	// accepted.state beneath it; no path acquires pendingMu while holding state.
+	// It is released before pre-auth, socket, or server operations.
 	pendingMu sync.Mutex
 	pending   map[*webSocketAcceptedConn]struct{}
 	live      sync.WaitGroup
@@ -762,19 +777,33 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return
 	}
 
-	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		Subprotocols:    []string{"binary"},
-		CompressionMode: websocket.CompressionDisabled,
-		OriginPatterns:  originPatterns,
-	})
+	if !state.socket.lockForUpgrade() {
+		return
+	}
+	var ws *websocket.Conn
+	var err error
+	var connectionID string
+	var openedAt time.Time
+	func() {
+		defer state.socket.state.Unlock()
+		ws, err = websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols:    []string{"binary"},
+			CompressionMode: websocket.CompressionDisabled,
+			OriginPatterns:  originPatterns,
+		})
+		if err != nil {
+			return
+		}
+		connectionID = s.newConnectionID()
+		openedAt = time.Now()
+		state.socket.connectionID = connectionID
+		state.socket.openedAt = openedAt
+		s.logConnectionOpened(websocketPath, connectionID, openedAt)
+	}()
 	if err != nil {
 		s.logNegotiation(err, nil)
 		return
 	}
-	connectionID := s.newConnectionID()
-	openedAt := time.Now()
-	state.socket.setConnectionIdentity(connectionID, openedAt)
-	s.logConnectionOpened(websocketPath, connectionID, openedAt)
 	closeDiagnostics := newTransportCloseDiagnostics(websocketPath, connectionID, openedAt)
 	var closeErr error
 	defer func() {

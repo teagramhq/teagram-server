@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -1515,6 +1516,187 @@ func TestServeWebSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 				t.Errorf("pre-auth lifetime record opened_at = %v, want open timestamp %s", ceilingRecord.attrs["opened_at"], openedAt)
 			}
 			return
+		}
+	}
+}
+
+type delayedWebSocketResponseListener struct {
+	net.Listener
+
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+	releaseOnce  sync.Once
+}
+
+func (l *delayedWebSocketResponseListener) release() {
+	l.releaseOnce.Do(func() { close(l.releaseWrite) })
+}
+
+func (l *delayedWebSocketResponseListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &delayedWebSocketResponseConn{
+		Conn:         conn,
+		writeStarted: l.writeStarted,
+		releaseWrite: l.releaseWrite,
+	}, nil
+}
+
+type delayedWebSocketResponseConn struct {
+	net.Conn
+
+	writeStarted chan struct{}
+	releaseWrite <-chan struct{}
+	writeOnce    sync.Once
+}
+
+func (c *delayedWebSocketResponseConn) Write(p []byte) (int, error) {
+	c.writeOnce.Do(func() {
+		close(c.writeStarted)
+		<-c.releaseWrite
+	})
+	return c.Conn.Write(p)
+}
+
+func TestServeWebSocketLifetimeExpiryRacesSuccessfulUpgrade(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	const lifetime = 2 * time.Second
+	if err := server.SetPreAuthLimits(PreAuthLimits{Lifetime: lifetime}); err != nil {
+		t.Fatalf("set pre-auth lifetime: %v", err)
+	}
+	baseListener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	listener := &delayedWebSocketResponseListener{
+		Listener:     baseListener,
+		writeStarted: make(chan struct{}),
+		releaseWrite: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	serverReturned := false
+	t.Cleanup(func() {
+		listener.release()
+		cancel()
+		if serverReturned {
+			return
+		}
+		select {
+		case err := <-served:
+			serverReturned = true
+			if err != nil {
+				t.Errorf("serve WebSocket: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("ServeWebSocket did not stop")
+		}
+	})
+
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	dialCtx, stopDial := context.WithTimeout(t.Context(), 3*time.Second)
+	defer stopDial()
+	dialed := make(chan dialResult, 1)
+	go func() {
+		conn, response, err := websocket.Dial(dialCtx, "ws://"+baseListener.Addr().String()+"/apiws", &websocket.DialOptions{
+			Subprotocols: []string{"binary"},
+		})
+		if response != nil && response.Body != nil {
+			if closeErr := response.Body.Close(); closeErr != nil {
+				t.Errorf("close WebSocket response body: %v", closeErr)
+			}
+		}
+		dialed <- dialResult{conn: conn, err: err}
+	}()
+	select {
+	case <-listener.writeStarted:
+	case <-dialCtx.Done():
+		t.Fatal("WebSocket upgrade did not reach its response write")
+	}
+	select {
+	case <-time.After(lifetime + 100*time.Millisecond):
+	case <-dialCtx.Done():
+		t.Fatal("WebSocket upgrade did not remain blocked for the pre-auth lifetime")
+	}
+	listener.release()
+	var dialedConn *websocket.Conn
+	select {
+	case result := <-dialed:
+		if result.err != nil {
+			t.Fatalf("WebSocket upgrade failed after releasing response write: %v", result.err)
+		}
+		dialedConn = result.conn
+	case <-dialCtx.Done():
+		t.Fatal("WebSocket upgrade did not complete after releasing response write")
+	}
+	t.Cleanup(func() {
+		if err := dialedConn.CloseNow(); err != nil && !isDisconnect(err) {
+			t.Errorf("close WebSocket client: %v", err)
+		}
+	})
+
+	var records []serverErrorLogRecord
+	for {
+		select {
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message != "WebSocket connection closed at the pre-auth lifetime ceiling" {
+				continue
+			}
+			var openRecord, ceilingRecord *serverErrorLogRecord
+			openIndex, closeIndex := -1, -1
+			for i := range records {
+				record := &records[i]
+				switch record.message {
+				case "transport connection opened":
+					openRecord = record
+					openIndex = i
+				case "WebSocket connection closed at the pre-auth lifetime ceiling":
+					ceilingRecord = record
+					closeIndex = i
+				}
+			}
+			if openRecord == nil || ceilingRecord == nil {
+				t.Fatalf("expected open and pre-auth lifetime records; got %+v", records)
+			}
+			connectionID, ok := openRecord.attrs["connection_id"].(string)
+			if !ok || connectionID == "" {
+				t.Fatalf("open record connection_id = %v, want a non-empty ID", openRecord.attrs["connection_id"])
+			}
+			if got := ceilingRecord.attrs["connection_id"]; got != connectionID {
+				t.Errorf("pre-auth lifetime record connection_id = %v, want open record ID %q", got, connectionID)
+			}
+			openedAt, ok := openRecord.attrs["opened_at"].(time.Time)
+			if !ok || openedAt.IsZero() {
+				t.Fatalf("open record opened_at = %v, want a timestamp", openRecord.attrs["opened_at"])
+			}
+			lifetimeOpenedAt, ok := ceilingRecord.attrs["opened_at"].(time.Time)
+			if !ok || !openedAt.Equal(lifetimeOpenedAt) {
+				t.Errorf("pre-auth lifetime record opened_at = %v, want open timestamp %s", ceilingRecord.attrs["opened_at"], openedAt)
+			}
+			if openIndex < 0 || closeIndex < 0 || openIndex >= closeIndex {
+				t.Errorf("pre-auth lifetime record preceded the open record: %+v", records)
+			}
+			cancel()
+			select {
+			case err := <-served:
+				serverReturned = true
+				if err != nil {
+					t.Fatalf("serve WebSocket: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("ServeWebSocket did not stop after the pre-auth lifetime close")
+			}
+			return
+		case <-dialCtx.Done():
+			t.Fatal("WebSocket pre-auth lifetime did not expire after the upgrade")
 		}
 	}
 }
