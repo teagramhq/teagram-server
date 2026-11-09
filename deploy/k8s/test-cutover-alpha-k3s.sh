@@ -117,6 +117,9 @@ create_target_namespace() {
   for configmap in teagramd-runtime link-edge-runtime; do
     copy_configmap "$configmap"
   done
+  printf 'ci-turnstile-secret-key' > "$tmp_dir/turnstile-secret-key"
+  kubectl create secret generic teagramd-turnstile --namespace "$TARGET_NAMESPACE" \
+    --from-file=secret-key="$tmp_dir/turnstile-secret-key" >/dev/null
   printf 'ci-placeholder-token' > "$tmp_dir/cloudflared-token"
   kubectl create secret generic cloudflared-token --namespace "$TARGET_NAMESPACE" \
     --from-file=token="$tmp_dir/cloudflared-token" >/dev/null

@@ -1718,7 +1718,7 @@ if kubectl_resource_exists "namespace/$NAMESPACE"; then :; else
   [[ $lookup_status == 1 ]] && fail 'the bootstrap teagram namespace is missing'
   fail 'could not determine whether the bootstrap teagram namespace exists'
 fi
-for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys cloudflared-token; do
+for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys teagramd-turnstile cloudflared-token; do
   if kubectl_resource_exists "secret/$secret"; then :; else
     lookup_status=$?
     [[ $lookup_status == 1 ]] && fail "required namespace Secret is missing: $secret"
@@ -1789,6 +1789,10 @@ kubectl apply --filename "$cutover_manifest" >/dev/null
 if [[ $TEST_MODE == true ]]; then
   kubectl patch deployment/cloudflared --namespace "$NAMESPACE" --type=strategic \
     --patch-file "$SCRIPT_DIR/test-cutover-cloudflared-patch.yaml" >/dev/null
+  # The disposable source generates its own RSA identity, so the production
+  # fingerprint pin cannot match it.
+  kubectl patch statefulset/teagramd --namespace "$NAMESPACE" --type=strategic \
+    --patch-file "$SCRIPT_DIR/test-cutover-teagramd-patch.yaml" >/dev/null
 fi
 rm -f -- "$cutover_manifest"
 cutover_manifest=''

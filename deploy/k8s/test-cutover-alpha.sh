@@ -134,6 +134,7 @@ if ! grep --fixed-strings --quiet 'test-cutover-alpha-k3s.sh' .github/workflows/
   printf 'k3s cutover integration does not execute the actual apply and rollback runner\n' >&2
   exit 1
 fi
+# shellcheck disable=SC2016
 if ! grep --fixed-strings --quiet \
   'LINK_SELECTOR_IMAGE=${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-ghcr.io/teagramhq/link-edge-selector@$selector_digest}' \
   deploy/k8s/cutover-alpha.sh ||
