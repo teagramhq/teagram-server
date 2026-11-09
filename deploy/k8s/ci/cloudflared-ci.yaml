@@ -7,12 +7,19 @@ spec:
     spec:
       containers:
         - name: cloudflared
-          image: mirror.gcr.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
           imagePullPolicy: IfNotPresent
-          command: ["sh", "-ec"]
-          args: ["exec sleep 3600"]
+          command: ["socat"]
+          args:
+            - TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork
+            - TCP:teagramd:2446
           env:
             - $patch: replace
+          ports:
+            - $patch: replace
+            - name: connector
+              containerPort: 8080
+              protocol: TCP
           startupProbe:
             $patch: replace
             exec:

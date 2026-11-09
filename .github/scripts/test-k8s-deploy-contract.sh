@@ -191,24 +191,84 @@ for overlay in prod prod-cutover; do
     yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
       .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
       select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
+             .name == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR" or
+             .name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR" or
+             .name == "TG_PUBLIC_REGISTRATION" or
+             .name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" or
+             .name == "TG_CLIENT_ADDR_TRUST" or
              .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
-    jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+    jq -e 'length == 9 and (map({key: .name, value: .}) | from_entries |
       .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
+      .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR.value == ":2446" and
+      .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR.valueFrom.configMapKeyRef ==
+        {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"} and
+      .TG_PUBLIC_REGISTRATION.valueFrom.configMapKeyRef ==
+        {name: "teagramd-runtime", key: "TG_PUBLIC_REGISTRATION"} and
+      .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS.valueFrom.configMapKeyRef ==
+        {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"} and
+      .TG_CLIENT_ADDR_TRUST.value == "cf-connecting-ip" and
       .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
       .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
       .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
-    fail "$overlay must preserve the WebSocket and admin listeners and Secret references"
+    fail "$overlay must preserve both WebSocket listeners, public policy, address trust, and admin Secret references"
   fi
 done
+for overlay in prod prod-cutover ci; do
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+      .spec.template.spec.containers[] | select(.name == "teagramd") | .ports[] |
+      select(.name == "public-ws")]' - |
+    jq -e 'length == 1 and .[0].containerPort == 2446 and .[0].protocol == "TCP"' >/dev/null; then
+    fail "$overlay must expose the public WebSocket listener on container port 2446"
+  fi
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "Service" and .metadata.name == "teagramd") |
+      .spec.ports[] | select(.name == "public-ws")]' - |
+    jq -e 'length == 1 and .[0].port == 2446 and .[0].targetPort == "public-ws"' >/dev/null; then
+    fail "$overlay must route ClusterIP port 2446 to the public WebSocket listener"
+  fi
+  if ! kubectl kustomize "deploy/k8s/$overlay" |
+    yq eval-all -o=json '[select(.kind == "Service" and .metadata.name == "teagramd")]' - |
+    jq -e 'length == 1 and .[0].spec.type == "ClusterIP" and
+      (all(.[0].spec.ports[]; .name != "public-ws" or (has("nodePort") | not)))' >/dev/null; then
+    fail "$overlay must keep the public WebSocket listener internal to the cluster"
+  fi
+done
+[[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.runAsNonRoot' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.runAsUser' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == 65532 &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.runAsGroup' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == 65532 &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.allowPrivilegeEscalation' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == false &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.readOnlyRootFilesystem' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == true &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .securityContext.capabilities.drop | join(",")' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" == ALL ]] ||
+  fail 'the public listener must retain the Compose container security controls'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.name' deploy/k8s/base/teagramd-statefulset.yaml)" == teagramd-runtime &&
    "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.key' deploy/k8s/base/teagramd-statefulset.yaml)" == TG_MEDIA_KEY_CURRENT ]] ||
   fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
 grep --fixed-strings --quiet "TG_MEDIA_KEY_CURRENT=\$TG_MEDIA_KEY_CURRENT" deploy/k8s/bootstrap-alpha.sh ||
   fail 'bootstrap must preserve the live media encryption key version in teagramd-runtime'
+for setting in TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS; do
+  grep --fixed-strings --quiet "$setting=\$$setting" deploy/k8s/bootstrap-alpha.sh ||
+    fail "bootstrap must preserve the live Compose setting $setting"
+done
+grep --fixed-strings --quiet 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR == :2446' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'bootstrap must verify that live Compose exposes the public WebSocket listener on :2446'
 # shellcheck disable=SC2016
 runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
-[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* ]] ||
-  fail 'the documented teagramd-runtime ConfigMap keys must include TG_MEDIA_KEY_CURRENT'
+[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* &&
+   "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
+   "$runtime_configmap_row" == *TG_PUBLIC_REGISTRATION* &&
+   "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
+  fail 'the documented teagramd-runtime ConfigMap keys must include the public listener settings'
+grep --fixed-strings --quiet 'test-k8s-public-websocket.py' .github/workflows/ci.yml ||
+  fail 'the k3s deployment test must exercise public discovery and a WebSocket session through its connector'
+grep --fixed-strings --quiet 'TCP:teagramd:2446' deploy/k8s/ci/cloudflared-ci.yaml ||
+  fail 'the deployment test connector must route to the public WebSocket Service port'
 if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
   fail 'the cutover must preserve encrypted S3 objects directly, without a local-blob migration Job'
 fi

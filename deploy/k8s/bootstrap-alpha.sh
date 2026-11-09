@@ -338,6 +338,10 @@ TG_POSTGRES_DSN=$(container_env teagram-teagramd-1 TG_POSTGRES_DSN)
   fail 'live Postgres password and DSN do not match the k8s workload layout'
 TG_PUBLIC_LINK_PREFIX=$(container_env teagram-teagramd-1 TG_PUBLIC_LINK_PREFIX)
 TG_ADVERTISE_ADDR=$(container_env teagram-teagramd-1 TG_ADVERTISE_ADDR false)
+TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=$(container_env teagram-teagramd-1 TG_PUBLIC_WEBSOCKET_LISTEN_ADDR)
+TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=$(container_env teagram-teagramd-1 TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR)
+TG_PUBLIC_REGISTRATION=$(container_env teagram-teagramd-1 TG_PUBLIC_REGISTRATION)
+TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=$(container_env teagram-teagramd-1 TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
 TG_MEDIA_KEY_CURRENT=$(container_env teagram-teagramd-1 TG_MEDIA_KEY_CURRENT)
 TG_INVITE_WEB_SIGNUP_URL=$(container_env teagram-link-edge-selector-1 TG_INVITE_WEB_SIGNUP_URL)
 TG_INVITE_DESKTOP_URL=$(container_env teagram-link-edge-selector-1 TG_INVITE_DESKTOP_URL false)
@@ -360,6 +364,11 @@ assert_env_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
 assert_env_line TG_POSTGRES_DSN "$TG_POSTGRES_DSN"
 assert_env_line TG_PUBLIC_LINK_PREFIX "$TG_PUBLIC_LINK_PREFIX"
 assert_env_line TG_ADVERTISE_ADDR "$TG_ADVERTISE_ADDR"
+[[ $TG_PUBLIC_WEBSOCKET_LISTEN_ADDR == :2446 ]] ||
+  fail 'live public WebSocket listener must be :2446'
+assert_env_line TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR "$TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"
+assert_env_line TG_PUBLIC_REGISTRATION "$TG_PUBLIC_REGISTRATION"
+assert_env_line TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS "$TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
 [[ $TG_MEDIA_KEY_CURRENT =~ ^[1-9][0-9]*$ ]] || fail 'live media encryption key version is invalid'
 assert_env_line TG_INVITE_WEB_SIGNUP_URL "$TG_INVITE_WEB_SIGNUP_URL"
 assert_env_line TG_INVITE_DESKTOP_URL "$TG_INVITE_DESKTOP_URL"
@@ -570,6 +579,9 @@ apply_manifest 'deployer RBAC and token manifest' < "$REPO_ROOT/deploy/k8s/deplo
 apply_env_resource configmap teagramd-runtime \
   "TG_PUBLIC_LINK_PREFIX=$TG_PUBLIC_LINK_PREFIX" \
   "TG_ADVERTISE_ADDR=$TG_ADVERTISE_ADDR" \
+  "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=$TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR" \
+  "TG_PUBLIC_REGISTRATION=$TG_PUBLIC_REGISTRATION" \
+  "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=$TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" \
   "TG_MEDIA_KEY_CURRENT=$TG_MEDIA_KEY_CURRENT"
 apply_env_resource configmap link-edge-runtime \
   "TG_INVITE_WEB_SIGNUP_URL=$TG_INVITE_WEB_SIGNUP_URL" \

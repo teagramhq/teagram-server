@@ -80,7 +80,7 @@ by the cluster's secret and configuration management before it is applied:
 
 | Resource | Required keys or values |
 | --- | --- |
-| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_MEDIA_KEY_CURRENT` |
+| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_REGISTRATION`, `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS`, `TG_MEDIA_KEY_CURRENT` |
 | `link-edge-runtime` ConfigMap | `TG_INVITE_WEB_SIGNUP_URL`; optional `TG_INVITE_DESKTOP_URL` |
 | `web` Service | ClusterIP endpoint on port 8080 for ordinary web traffic |
 | `postgres-credentials` Secret | `POSTGRES_PASSWORD`, `TG_POSTGRES_DSN` |
@@ -158,12 +158,17 @@ the persistent volumes. An application rollback restores the prior image
 digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
 
-The Cloudflare Tunnel's remotely managed route for links should target
-`http://linkselector:8081`. The selector sends teagramd links to
+The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
+target `http://linkselector:8081`. The selector sends teagramd links to
 `http://linklanding:8082` and ordinary web traffic to the `web` Service on
-port 8080. `teagramd` is exposed only by a ClusterIP Service here. Configure
-its external TCP route separately before setting `TG_ADVERTISE_ADDR`; the
-Cloudflare HTTP hostname route does not expose the MTProto listener. The
+port 8080. For `server.teagram.io`, route `^/apiws` and
+`^/\.well-known/teagramd/client` to `http://teagramd:2446`. The public
+listener is a ClusterIP Service port, accepts the Compose origin allowlist,
+registration policy, and discovery endpoint from `teagramd-runtime`, and uses
+`cf-connecting-ip` because Cloudflare Tunnel is its only public path. It is
+separate from the tailnet WebSocket listener on 2444. Configure the external
+MTProto TCP route separately before setting `TG_ADVERTISE_ADDR`; the Cloudflare
+HTTP hostname route does not expose the MTProto listener. The
 Cloudflared metrics endpoint is exposed only inside the cluster at
 `cloudflared-metrics:2000/metrics`. Prometheus-compatible scrapers can use the
 service annotations. Container logs are written to stdout and stderr for the
@@ -248,12 +253,15 @@ teagramd Service and installs restartable `systemd` port-forwards in
 and TCP relay arrangement as Compose, preserving Tailscale's PROXY protocol.
 Tailscale Serve keeps all five existing paths and sends `/` to linkselector,
 `/apiws`, both client discovery paths, and `/admin` to the matching teagramd
-Service ports. It forwards the existing raw MTProto TCP listener on port
-`2443` and Bot API on `2447` to their k3s Service ports, verifying both before
-changing Serve. Funnel remains off. The Cloudflare connector stays at zero
-until the dashboard route changes from `http://selector:8081` to
-`http://linkselector:8081`; confirm that change before the k8s connector starts.
-No Cloudflare API credential is provisioned.
+Service ports. The Cloudflare routes for `server.teagram.io` use the separate
+public WebSocket Service port 2446. It forwards the existing raw MTProto TCP
+listener on port `2443` and Bot API on `2447` to their k3s Service ports,
+verifying both before changing Serve. Funnel remains off. The Cloudflare
+connector stays at zero until the dashboard routes change from `web.teagram.io`
+`http://127.0.0.1:8081` to `http://linkselector:8081`, and `server.teagram.io`
+paths `^/apiws` and `^/\.well-known/teagramd/client` from
+`http://127.0.0.1:2446` to `http://teagramd:2446`; confirm those changes before
+the k8s connector starts. No Cloudflare API credential is provisioned.
 
 The first live Serve route is the switch boundary. A failure after that point
 leaves k3s serving and requires the printed explicit rollback command; it will

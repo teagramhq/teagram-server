@@ -30,7 +30,10 @@ for required in \
   'the old MTProto and Bot API TCP routes' \
   'enable PROXY protocol on the k3s Bot API relay' \
   'planned downtime from the write fence until all edges switch' \
-  'Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081' \
+  'Cloudflare tunnel route changes:' \
+  'web.teagram.io: http://127.0.0.1:8081 -> http://linkselector:8081' \
+  'server.teagram.io ^/apiws: http://127.0.0.1:2446 -> http://teagramd:2446' \
+  'server.teagram.io ^/\.well-known/teagramd/client: http://127.0.0.1:2446 -> http://teagramd:2446' \
   'verify every k8s cloudflared pod has stopped before restoring routes' \
   'advertised MTProto TCP route on port 2443' \
   'explicit rollback after the first live Serve route' \
@@ -39,6 +42,17 @@ for required in \
   'k3s writes since the switch are not copied back to the source bucket'; do
   if [[ $plan != *"$required"* ]]; then
     printf 'alpha cutover dry-run omitted: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+for required_rollback in \
+  'confirm ROUTE-RESTORED "Restore these Cloudflare tunnel routes (after -> before):' \
+  'rollback)' \
+  'server.teagram.io $CLOUDFLARE_APIWS_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE' \
+  'server.teagram.io $CLOUDFLARE_DISCOVERY_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE'; do
+  if ! grep --fixed-strings --quiet -- "$required_rollback" deploy/k8s/cutover-alpha.sh; then
+    printf 'alpha cutover rollback route plan omitted: %s\n' "$required_rollback" >&2
     exit 1
   fi
 done
