@@ -41,10 +41,13 @@ fi
 query=$(cat <<'SQL'
 WITH targets(handle) AS (VALUES ('test1'), ('test2'))
 SELECT targets.handle,
-       COALESCE(
-           TO_CHAR(up.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-           'NULL'
-       )
+       CASE
+           WHEN username.owner_id IS NULL THEN 'MISSING_ACCOUNT'
+           ELSE COALESCE(
+               TO_CHAR(up.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+               'NULL'
+           )
+       END
 FROM targets
 LEFT JOIN usernames AS username
   ON username.handle = targets.handle AND username.owner_type = 'user'
@@ -59,7 +62,7 @@ if ! result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
 fi
 
 mapfile -t rows <<< "$result"
-timestamp_pattern='(NULL|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z)'
+timestamp_pattern='(MISSING_ACCOUNT|NULL|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z)'
 tab=$'\t'
 [[ "${#rows[@]}" == 2 && "${rows[0]}" =~ ^test1${tab}${timestamp_pattern}$ && \
   "${rows[1]}" =~ ^test2${tab}${timestamp_pattern}$ ]] || {

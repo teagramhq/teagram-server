@@ -22,11 +22,12 @@ secrets in arguments, logs, or output.
 
 `qa-password-timestamps` is a no-argument, read-only query for the `test1` and
 `test2` accounts. It checks the running server and Postgres container identities
-and the live S3 Compose selection before querying `user_passwords.updated_at`.
-Its output contains only each fixed handle and its UTC timestamp, or `NULL` if
-the account has no password row. The schema has no separate password-change
-timestamp; `updated_at` is refreshed when the password row is updated. The
-operation never selects or prints salts, verifiers, or other password fields.
+and the expected Compose file set before querying `user_passwords.updated_at`.
+Each output row contains one fixed handle and either its UTC timestamp, `NULL`
+if the account has no password row, or `MISSING_ACCOUNT` if no matching user
+account exists. The schema has no separate password-change timestamp;
+`updated_at` is refreshed when the password row is updated. The operation never
+selects or prints salts, verifiers, or other password fields.
 
 Run it from its merged `main` commit:
 
