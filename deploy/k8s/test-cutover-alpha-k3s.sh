@@ -430,6 +430,7 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
   CUTOVER_TEST_TEAGRAMD_IMAGE=ghcr.io/teagramhq/teagramd:ci \
   CUTOVER_TEST_MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations:ci \
   CUTOVER_TEST_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init:ci \
+  CUTOVER_TEST_LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector:ci \
   CUTOVER_TEST_TARGET_S3_ENDPOINT=http://rustfs.teagram-cutover.svc.cluster.local:9000)
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash

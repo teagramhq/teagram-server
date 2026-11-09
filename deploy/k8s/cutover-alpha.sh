@@ -532,7 +532,7 @@ image_migration_versions() {
 validate_release_for_source() {
   local live_revision app_digest migrations_digest helper_digest landing_digest selector_digest
   local migrations_validation_image helper_validation_image
-  local app_revision migrations_revision helper_revision required_version latest_version
+  local app_revision migrations_revision helper_revision selector_revision required_version latest_version
   local migration_job rustfs_init_job expected_job_suffix expected_helper_suffix
   local migration_versions listed_latest
   live_revision=$(source_container_revision) || fail 'could not read the live teagramd image revision'
@@ -552,7 +552,7 @@ validate_release_for_source() {
     MIGRATIONS_IMAGE="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
     K8S_MC_IMAGE="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
     LINK_LANDING_IMAGE="ghcr.io/teagramhq/link-edge-landing@$landing_digest"
-    LINK_SELECTOR_IMAGE="ghcr.io/teagramhq/link-edge-selector@$selector_digest"
+    LINK_SELECTOR_IMAGE=${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-ghcr.io/teagramhq/link-edge-selector@$selector_digest}
     migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$MIGRATIONS_IMAGE}
     helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$K8S_MC_IMAGE}
 
@@ -565,6 +565,11 @@ validate_release_for_source() {
       fail "test migration image revision $migrations_revision does not match live revision $live_revision"
     [[ $helper_revision == "$live_revision" ]] ||
       fail "test S3 client image revision $helper_revision does not match live revision $live_revision"
+    if [[ -n ${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-} ]]; then
+      selector_revision=$(resolve_image_revision "$LINK_SELECTOR_IMAGE")
+      [[ $selector_revision == "$live_revision" ]] ||
+        fail "test link selector image revision $selector_revision does not match live revision $live_revision"
+    fi
 
     required_version=$(prod_literal required-migration-version migration-version=)
     migration_job=$(prod_literal db-migrations-job-revision job-name=)
