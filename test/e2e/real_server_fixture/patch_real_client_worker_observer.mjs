@@ -165,28 +165,30 @@ export function patchRealClientObserver(webRoot) {
   return false;
 }
 `;
-  browser = replaceOnce(browser,
-    'async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {',
-    `${directMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
-    'direct message settle helper');
   const legacyDirectMessageAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
   const currentDirectMessageAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
   const settledDirectMessageAssertion = '    const messageStage = `${stage}_message_count`;\n    const settled = await waitForDirectMessageCount(page, message, messageStage, timeoutMs);\n    if(!settled) failStage(messageStage);';
   if(browser.includes(legacyDirectMessageAssertion)) {
+    browser = replaceOnce(browser,
+      'async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {',
+      `${directMessageWaiter}\nasync function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {`,
+      'legacy direct message settle helper');
     browser = replaceOnce(browser, legacyDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
-  } else {
-    browser = replaceOnce(browser, currentDirectMessageAssertion, settledDirectMessageAssertion, 'direct message settle assertion');
-  }
-  const legacyDirectMessageExport = 'waitForGroupMessageCount, waitForPollMessage';
-  const currentDirectMessageExport = 'waitForGroupMessageCount, waitForSingleSentMessage,';
-  if(browser.includes(legacyDirectMessageExport)) {
-    browser = replaceOnce(browser, legacyDirectMessageExport,
-      'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
-      'direct message settle helper export');
-  } else {
-    browser = replaceOnce(browser, currentDirectMessageExport,
-      'waitForGroupMessageCount, waitForDirectMessageCount, waitForSingleSentMessage,',
-      'direct message settle helper export');
+    const legacyDirectMessageExport = 'waitForGroupMessageCount, waitForPollMessage';
+    const currentDirectMessageExport = 'waitForGroupMessageCount, waitForSingleSentMessage,';
+    if(browser.includes(legacyDirectMessageExport)) {
+      browser = replaceOnce(browser, legacyDirectMessageExport,
+        'waitForGroupMessageCount, waitForDirectMessageCount, waitForPollMessage',
+        'direct message settle helper export');
+    } else if(browser.includes(currentDirectMessageExport)) {
+      browser = replaceOnce(browser, currentDirectMessageExport,
+        'waitForGroupMessageCount, waitForDirectMessageCount, waitForSingleSentMessage,',
+        'direct message settle helper export');
+    } else {
+      throw new Error('pinned web runner has no direct message helper export insertion point');
+    }
+  } else if(!browser.includes(currentDirectMessageAssertion)) {
+    throw new Error('pinned web runner has no supported direct message assertion');
   }
 
   const originalWorkerMethods = `const WORKER_CDP_METHODS = Object.freeze([
