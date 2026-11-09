@@ -111,6 +111,16 @@ var (
 // pruning, the mutation budget, the cap and the owner-only nudge share one
 // transaction so a refused write has no partial state.
 func (s *Store) UpdateNotifySettings(ctx context.Context, ownerID int64, key NotifySettingsKey, value NotifySettingsValue) (bool, error) {
+	return s.updateNotifySettings(ctx, ownerID, key, value, true)
+}
+
+// UpdateNotifySettingsUnmetered performs the same mutation without the
+// per-owner request rate limit. Listener policy decides when this is allowed.
+func (s *Store) UpdateNotifySettingsUnmetered(ctx context.Context, ownerID int64, key NotifySettingsKey, value NotifySettingsValue) (bool, error) {
+	return s.updateNotifySettings(ctx, ownerID, key, value, false)
+}
+
+func (s *Store) updateNotifySettings(ctx context.Context, ownerID int64, key NotifySettingsKey, value NotifySettingsValue, rateLimited bool) (bool, error) {
 	if ownerID <= 0 || !validNotifySettingsKey(key) {
 		return false, ErrNotifySettingsPeerInvalid
 	}
@@ -135,17 +145,19 @@ func (s *Store) UpdateNotifySettings(ctx context.Context, ownerID int64, key Not
 	if err != nil {
 		return false, err
 	}
-	_, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
-		SubjectID:      ownerID,
-		Surface:        notifySettingsRateSurface,
-		Cost:           1,
-		WindowDuration: pgtype.Interval{Microseconds: time.Minute.Microseconds(), Valid: true},
-		LimitCount:     notifySettingsRateLimit,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrNotifySettingsRateLimited
-	} else if err != nil {
-		return false, fmt.Errorf("consume notification settings rate limit: %w", err)
+	if rateLimited {
+		_, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
+			SubjectID:      ownerID,
+			Surface:        notifySettingsRateSurface,
+			Cost:           1,
+			WindowDuration: pgtype.Interval{Microseconds: time.Minute.Microseconds(), Valid: true},
+			LimitCount:     notifySettingsRateLimit,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrNotifySettingsRateLimited
+		} else if err != nil {
+			return false, fmt.Errorf("consume notification settings rate limit: %w", err)
+		}
 	}
 
 	currentEmpty := !currentFound || emptyNotifySettings(current)

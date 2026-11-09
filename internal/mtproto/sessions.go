@@ -15,6 +15,7 @@ import (
 type SessionRegistry struct {
 	mu                sync.Mutex
 	m                 map[int64][]*Conn
+	limitedUserConns  map[int64]int
 	onStatusChange    func(context.Context, int64, bool)
 	statusChangeTails map[int64]*StatusChange
 	maxUserConns      int
@@ -76,6 +77,7 @@ type deliveryLagHead struct {
 func NewSessionRegistry() *SessionRegistry {
 	return &SessionRegistry{
 		m:                       map[int64][]*Conn{},
+		limitedUserConns:        map[int64]int{},
 		createdSessions:         map[createdSessionKey]*createdSessionEntry{},
 		createdSessionsByKey:    map[[8]byte]*list.List{},
 		inFlightCreatedSessions: map[createdSessionKey]chan struct{}{},
@@ -243,9 +245,9 @@ func (r *SessionRegistry) setMaxUserConns(limit int) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for userID, conns := range r.m {
-		if len(conns) > limit {
-			return fmt.Errorf("per-user connection cap %d is below user %d's current count %d", limit, userID, len(conns))
+	for userID, count := range r.limitedUserConns {
+		if count > limit {
+			return fmt.Errorf("per-user connection cap %d is below user %d's current count %d", limit, userID, count)
 		}
 	}
 	r.maxUserConns = limit
@@ -276,10 +278,16 @@ func (r *SessionRegistry) AddWithStatus(userID int64, c *Conn) (bool, *StatusCha
 func (r *SessionRegistry) add(userID int64, c *Conn, trackStatus bool) (bool, *StatusChange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.m[userID]) >= r.maxUserConns {
+	if !c.tailnetPath && r.limitedUserConns[userID] >= r.maxUserConns {
 		return false, nil
 	}
 	r.m[userID] = append(r.m[userID], c)
+	if !c.tailnetPath {
+		if r.limitedUserConns == nil {
+			r.limitedUserConns = make(map[int64]int)
+		}
+		r.limitedUserConns[userID]++
+	}
 	r.recoveryConns = append(r.recoveryConns, c)
 	r.totalConns.Add(1)
 	if trackStatus {
@@ -311,6 +319,13 @@ func (r *SessionRegistry) remove(userID int64, c *Conn, trackStatus bool) (bool,
 	for i, x := range conns {
 		if x == c {
 			r.m[userID] = append(conns[:i], conns[i+1:]...)
+			if !c.tailnetPath {
+				if n := r.limitedUserConns[userID] - 1; n > 0 {
+					r.limitedUserConns[userID] = n
+				} else {
+					delete(r.limitedUserConns, userID)
+				}
+			}
 			r.totalConns.Add(-1)
 			removed = true
 			break

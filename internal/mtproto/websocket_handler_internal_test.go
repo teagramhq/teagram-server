@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,14 @@ type shutdownTestAddr string
 
 func (a shutdownTestAddr) Network() string { return string(a) }
 func (a shutdownTestAddr) String() string  { return string(a) }
+
+type websocketHandlerPeerConn struct {
+	net.Conn
+
+	peer net.Addr
+}
+
+func (c websocketHandlerPeerConn) RemoteAddr() net.Addr { return c.peer }
 
 func TestWebSocketWaitTracksHandlerAfterSocketClose(t *testing.T) {
 	listener := newWebSocketListener(shutdownTestListener{}, nil, store.RateLimitListenerTailnet, "")
@@ -101,8 +110,9 @@ func TestHandleWebSocketDoesNotKeyAddressAfterAcceptedSocketCloses(t *testing.T)
 func TestHandleWebSocketLogsInvalidCFConnectingIPThrottled(t *testing.T) {
 	var logs bytes.Buffer
 	server := &Server{
-		preAuth: newPreAuthLimiter(PreAuthLimits{MaxConnsPerNet: 1}),
-		log:     slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		preAuth:               newPreAuthLimiter(PreAuthLimits{MaxConnsPerNet: 1}),
+		cfConnectingIPProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+		log:                   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
 	tests := []struct {
 		name     string
@@ -131,8 +141,11 @@ func TestHandleWebSocketLogsInvalidCFConnectingIPThrottled(t *testing.T) {
 				t.Fatal("failed to admit test socket")
 			}
 			state := &webSocketConnState{
-				socket: &webSocketAcceptedConn{Conn: serverConn, slot: slot},
-				slot:   slot,
+				socket: &webSocketAcceptedConn{
+					Conn: websocketHandlerPeerConn{Conn: serverConn, peer: &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}},
+					slot: slot,
+				},
+				slot: slot,
 			}
 			request := httptest.NewRequestWithContext(
 				context.WithValue(context.Background(), webSocketConnKey{}, state),

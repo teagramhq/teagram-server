@@ -169,6 +169,17 @@ func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (b
 	return denied == nil, nil
 }
 
+func (l *discoveryLimiter) allowContextForPath(ctx context.Context, addr netip.Addr, path ListenerPath) (bool, error) {
+	switch path {
+	case ListenerPathTailnet:
+		return true, nil
+	case ListenerPathLimited:
+		return l.allowContext(ctx, addr)
+	default:
+		return false, fmt.Errorf("unknown listener path %q", path)
+	}
+}
+
 func (l *discoveryLimiter) prune(now time.Time) {
 	for bucket, window := range l.perNet {
 		if window.start.IsZero() || !now.Before(window.start.Add(l.limits.PerNetWindow)) {

@@ -46,6 +46,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"CreateUsernameUser":                {"CreateUsernameUser": true},
 			"CreateUsernameAccountWithPassword": {"CreateUsernameUser": true, "ClaimUsername": true},
 			"UpdateUsername":                    {"ClaimUsername": true},
+			"updateUsername":                    {"ClaimUsername": true},
 			"ClaimUsername":                     {"ClaimUsername": true},
 			"ClaimChannelUsername":              {"ClaimUsername": true},
 		},

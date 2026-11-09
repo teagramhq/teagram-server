@@ -100,6 +100,41 @@ func TestExchangeBudgetRefusesBeforeExchange(t *testing.T) {
 	}
 }
 
+func TestTailnetPathBypassesEveryExchangeLimit(t *testing.T) {
+	limits := ExchangeLimits{
+		PerConnection:     1,
+		PerNetwork:        store.RateLimitConfig{Limit: 1, Window: time.Minute},
+		TailnetPerNetwork: store.RateLimitConfig{Limit: 1, Window: time.Minute},
+		GlobalRate:        1,
+		GlobalBurst:       1,
+	}
+	budget := newKeyExchangeBudget(limits)
+	keys := &exchangeBudgetTestStore{
+		rateResult: &store.RateLimitResult{Wait: time.Minute},
+		rateErr:    context.DeadlineExceeded,
+	}
+	var attempts int
+	addr := netip.MustParseAddr("192.0.2.57")
+	for i := range 50 {
+		layer, err := budget.chargeForPath(context.Background(), keys, &attempts, addr, ListenerPathTailnet, store.RateLimitListenerTailnet, time.Now())
+		if layer != "" || err != nil {
+			t.Fatalf("tailnet exchange %d = (%q, %v), want admitted", i+1, layer, err)
+		}
+	}
+	keys.mu.Lock()
+	rateCalls := keys.rateCalls
+	keys.mu.Unlock()
+	if rateCalls != 0 {
+		t.Fatalf("tailnet network rate checks = %d, want none", rateCalls)
+	}
+	if attempts != 0 {
+		t.Fatalf("tailnet per-connection attempts = %d, want no charge", attempts)
+	}
+	if budget.ceiling.tokens != 1 {
+		t.Fatalf("tailnet global tokens = %v, want untouched burst of 1", budget.ceiling.tokens)
+	}
+}
+
 func TestExchangeBudgetServerRefusesWhenRateLimitStoreFails(t *testing.T) {
 	keys := &exchangeBudgetTestStore{rateErr: context.DeadlineExceeded}
 	rsaKey, err := rsa.GenerateKey(crand.Reader, crypto.RSAKeyBits)

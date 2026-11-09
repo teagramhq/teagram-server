@@ -108,9 +108,14 @@ func (h *handlers) keepGetFileLeaseAlive(
 // the same allowance: giving a second lane its own budget would double what one
 // account may read out of the blob store.
 func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
-	reservation, denied, err := h.store.ReserveRateLimit(
-		r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
-	)
+	var reservation *store.RateLimitReservation
+	var denied *store.RateLimitResult
+	var err error
+	if !r.TailnetPath {
+		reservation, denied, err = h.store.ReserveRateLimit(
+			r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
+		)
+	}
 	if err != nil {
 		h.log.Error("get file rate limit")
 		return errInternal

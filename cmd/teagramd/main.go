@@ -1238,6 +1238,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	cfg.WarnClientAddrTrust(log)
 
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
+	if err := server.SetTCPListenerPath(cfg.ListenPath); err != nil {
+		return err
+	}
+	if err := server.SetWebSocketListenerPath(cfg.WebSocketListenPath); err != nil {
+		return err
+	}
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
 	server.SetWebSocketBrowserOnly(cfg.WebSocketBrowserOnly)
 	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
@@ -1522,7 +1528,9 @@ func trustClientAddr(server *mtproto.Server, cfg config.Config, log *slog.Logger
 	case config.ClientAddrCFConnectingIP:
 		log.Info("public WebSocket client addresses are read from CF-Connecting-IP",
 			"trust", string(cfg.ClientAddrTrust),
+			"forwarders", cfg.CFConnectingIPProxies,
 			"other_listeners", "socket")
+		server.TrustCFConnectingIPProxies(cfg.CFConnectingIPProxies)
 		return nil
 	default:
 		return fmt.Errorf("unsupported client address trust mode %q", cfg.ClientAddrTrust)

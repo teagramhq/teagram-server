@@ -316,12 +316,18 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		return nil, err
 	}
 	if username != "" {
-		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+		if err := h.checkUsernameClaimQuota(r, username); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := h.store.UpdateUsername(r.Ctx, r.UserID, username); err != nil {
+	var updateErr error
+	if r.TailnetPath {
+		updateErr = h.store.UpdateUsernameUnmetered(r.Ctx, r.UserID, username)
+	} else {
+		updateErr = h.store.UpdateUsername(r.Ctx, r.UserID, username)
+	}
+	if err := updateErr; err != nil {
 		switch {
 		case errors.Is(err, store.ErrUsernameOccupied):
 			return nil, errUsernameOccupied
@@ -380,7 +386,7 @@ func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) 
 		if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
 			return nil, err
 		}
-		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+		if err := h.checkUsernameClaimQuota(r, username); err != nil {
 			return nil, err
 		}
 	}

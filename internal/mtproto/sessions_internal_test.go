@@ -34,3 +34,34 @@ func TestSessionRegistrySampleDeliveryLagLockContention(t *testing.T) {
 		t.Fatalf("account-head calls = %d, want 0 under lock contention", calls.Load())
 	}
 }
+
+func TestSessionRegistryTailnetConnectionsDoNotUseLimitedPathCap(t *testing.T) {
+	r := NewSessionRegistry()
+	if err := r.setMaxUserConns(1); err != nil {
+		t.Fatalf("set user connection cap: %v", err)
+	}
+
+	limited := &Conn{}
+	if !r.Add(7, limited) {
+		t.Fatal("first limited connection was refused")
+	}
+	tailnet := &Conn{tailnetPath: true}
+	if !r.Add(7, tailnet) {
+		t.Fatal("tailnet connection was refused by the limited-path cap")
+	}
+	if got := len(r.Conns(7)); got != 2 {
+		t.Fatalf("registered connections = %d, want both public and tailnet connections", got)
+	}
+
+	if r.Add(7, &Conn{}) {
+		t.Fatal("second limited connection passed the public-path cap")
+	}
+	r.Remove(7, tailnet)
+	if r.Add(7, &Conn{}) {
+		t.Fatal("removing a tailnet connection freed a public-path slot")
+	}
+	r.Remove(7, limited)
+	if !r.Add(7, &Conn{}) {
+		t.Fatal("limited connection was refused after the limited connection left")
+	}
+}

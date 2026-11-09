@@ -69,8 +69,12 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_POSTGRES_DSN` | required | Postgres connection string |
 | `TG_AUTHKEY_ENC_KEY` or `TG_AUTHKEY_ENC_KEY_FILE` | required | AES-256-GCM master key for stored auth keys |
 | `TG_LISTEN_ADDR` | `:2443` | MTProto listener address |
+| `TG_LISTEN_PATH` | `limited` | Set to `tailnet` only when the raw listener is tailnet-only |
 | `TG_WEBSOCKET_LISTEN_ADDR` | unset | Optional WebSocket MTProto listener |
+| `TG_WEBSOCKET_LISTEN_PATH` | `limited` | Set to `tailnet` only when the WebSocket listener is tailnet-only |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | unset | Optional separate public WebSocket MTProto listener |
+| `TG_PUBLIC_WEBSOCKET_LISTEN_PATH` | `limited` | Public WebSocket listener cannot use tailnet policy |
+| `TG_CLIENT_ADDR_CF_PROXY_CIDRS` | loopback | Forwarder addresses trusted to supply public WebSocket `CF-Connecting-IP` |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Public-listener account registration policy |
 | `TG_ADVERTISE_ADDR` | derived | Public `host:port` advertised to clients |
 | `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |

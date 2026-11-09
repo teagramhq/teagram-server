@@ -298,6 +298,62 @@ func TestDiscoveryLimiterFullyDisabled(t *testing.T) {
 	}
 }
 
+func TestTailnetDiscoveryBypassesCallerBudgets(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	})
+	addr := mustAddr("192.0.2.56")
+	for i := range 50 {
+		allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathTailnet)
+		if err != nil || !allowed {
+			t.Fatalf("tailnet discovery request %d allowed=%t err=%v, want allowed", i+1, allowed, err)
+		}
+	}
+	if allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathLimited); err != nil || !allowed {
+		t.Fatalf("first limited discovery request allowed=%t err=%v, want allowed after tailnet traffic", allowed, err)
+	}
+	if allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathLimited); err != nil || allowed {
+		t.Fatalf("second limited discovery request allowed=%t err=%v, want caller budget exhausted", allowed, err)
+	}
+}
+
+func TestTailnetPathBypassesPreAuthCapsAndLifetime(t *testing.T) {
+	t.Parallel()
+
+	limiter := newPreAuthLimiter(PreAuthLimits{
+		MaxConns:       1,
+		MaxConnsPerNet: 1,
+		Lifetime:       time.Millisecond,
+	})
+	limited, ok := limiter.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("limited listener was refused its only slot")
+	}
+	defer limited.clear()
+
+	tailnet, ok := limiter.admitForPath(store.RateLimitListenerTailnet, ListenerPathTailnet)
+	if !ok {
+		t.Fatal("tailnet listener was refused while the limited listener held the global slot")
+	}
+	defer tailnet.clear()
+	if !tailnet.keyAddr(mustAddr("192.0.2.55")) {
+		t.Fatal("tailnet listener was refused while the same network held the per-network slot")
+	}
+	fired := make(chan struct{}, 1)
+	tailnet.armLifetime(func() { fired <- struct{}{} })
+	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-fired:
+		t.Fatal("tailnet pre-auth lifetime ceiling fired")
+	default:
+	}
+}
+
 func TestSetDiscoveryLimitsRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 

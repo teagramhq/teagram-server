@@ -162,7 +162,11 @@ func (c *Conn) observePeerDisconnect() {
 			break
 		}
 	}
-	reservation, denial := c.peerCancels.reserve(userID)
+	path := ListenerPathLimited
+	if c.tailnetPath {
+		path = ListenerPathTailnet
+	}
+	reservation, denial := c.peerCancels.reserveForPath(userID, path)
 	if denial != peerCancelAllowed {
 		return
 	}

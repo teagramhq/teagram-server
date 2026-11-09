@@ -428,7 +428,7 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 // two together are exactly the join the short-lived limiter rows exist to avoid
 // keeping, and a log line would outlive them by whatever the retention is.
 func (h *handlers) checkSendCodeIP(r *mtproto.Request, phone string) error {
-	if !h.rateLimitSendCodeIP.Enabled() {
+	if r.TailnetPath || !h.rateLimitSendCodeIP.Enabled() {
 		return nil
 	}
 	res, err := h.store.CheckAndChargeSendCodeIPForListener(r.Ctx, r.ClientAddr, phone, h.rateLimitSendCodeIP, r.RateLimitListener)

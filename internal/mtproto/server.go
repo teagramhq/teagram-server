@@ -152,6 +152,12 @@ type Server struct {
 	// Written once before Serve and only read after, so the accept path needs
 	// no synchronisation to see it.
 	proxyV2 *proxyV2Source
+	// cfConnectingIPProxies is the source allowlist for the public WebSocket's
+	// CF-Connecting-IP header. It is written once before ServeWebSocket.
+	cfConnectingIPProxies []netip.Prefix
+	// Listener paths are assigned by the process configuration before serving.
+	tcpListenerPath       ListenerPath
+	webSocketListenerPath ListenerPath
 	// webSocketOriginPatterns names the browser origins allowed to cross from
 	// their page into the WebSocket endpoint. An empty list still permits
 	// clients that carry no Origin header, but no cross-origin browser request.
@@ -267,6 +273,48 @@ func (s *Server) TrustProxyV2Headers(allow []netip.Prefix) {
 	// Cloned: the allowlist is the trust decision, and it must not change under
 	// the server because a caller reused the slice it passed in.
 	s.proxyV2 = &proxyV2Source{allow: slices.Clone(allow)}
+}
+
+// TrustCFConnectingIPProxies sets which socket peers may assert the
+// CF-Connecting-IP header on the public WebSocket listener. Call it before
+// serving that listener.
+func (s *Server) TrustCFConnectingIPProxies(allow []netip.Prefix) {
+	s.cfConnectingIPProxies = slices.Clone(allow)
+}
+
+// SetTCPListenerPath assigns the policy for the raw MTProto listener. A tailnet
+// path is trusted only because of this listener configuration, never because
+// of data on an accepted connection.
+func (s *Server) SetTCPListenerPath(path ListenerPath) error {
+	if err := validateListenerPath(path); err != nil {
+		return fmt.Errorf("raw MTProto listener: %w", err)
+	}
+	s.tcpListenerPath = path
+	return nil
+}
+
+// SetWebSocketListenerPath assigns the policy for the default WebSocket
+// listener. The public WebSocket listener has a separate API and stays limited.
+func (s *Server) SetWebSocketListenerPath(path ListenerPath) error {
+	if err := validateListenerPath(path); err != nil {
+		return fmt.Errorf("WebSocket listener: %w", err)
+	}
+	s.webSocketListenerPath = path
+	return nil
+}
+
+func validateListenerPath(path ListenerPath) error {
+	if path != ListenerPathLimited && path != ListenerPathTailnet {
+		return fmt.Errorf("path %q must be %q or %q", path, ListenerPathLimited, ListenerPathTailnet)
+	}
+	return nil
+}
+
+func (s *Server) trustsCFConnectingIP(peer netip.Addr) bool {
+	if !peer.IsValid() {
+		return false
+	}
+	return slices.ContainsFunc(s.cfConnectingIPProxies, func(p netip.Prefix) bool { return p.Contains(peer) })
 }
 
 // SetPreAuthLimits replaces the bounds on what connections that have not
@@ -450,18 +498,24 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		writeTimeout:             defaultWriteTimeout,
 		handshakeTimeout:         defaultHandshakeTimeout,
 		rpcDeadline:              DefaultRPCDeadline,
-		preAuth:                  newPreAuthLimiter(DefaultPreAuthLimits()),
-		preAuthLimits:            DefaultPreAuthLimits(),
-		exchangeLimits:           DefaultExchangeLimits(),
-		exchangeBudget:           newKeyExchangeBudget(DefaultExchangeLimits()),
-		replicaCount:             1,
-		discovery:                discovery,
-		unboundKeys:              newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
-		maxConnsPerUnboundKey:    DefaultMaxConnsPerUnboundKey,
-		pendingLogins:            newPendingLoginLimiter(DefaultMaxPendingLoginConns),
-		pendingLoginLeases:       leases,
-		pendingLoginLifetime:     DefaultPendingLoginLifetime,
-		log:                      log,
+		tcpListenerPath:          ListenerPathLimited,
+		webSocketListenerPath:    ListenerPathLimited,
+		cfConnectingIPProxies: []netip.Prefix{
+			netip.MustParsePrefix("127.0.0.0/8"),
+			netip.MustParsePrefix("::1/128"),
+		},
+		preAuth:               newPreAuthLimiter(DefaultPreAuthLimits()),
+		preAuthLimits:         DefaultPreAuthLimits(),
+		exchangeLimits:        DefaultExchangeLimits(),
+		exchangeBudget:        newKeyExchangeBudget(DefaultExchangeLimits()),
+		replicaCount:          1,
+		discovery:             discovery,
+		unboundKeys:           newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
+		maxConnsPerUnboundKey: DefaultMaxConnsPerUnboundKey,
+		pendingLogins:         newPendingLoginLimiter(DefaultMaxPendingLoginConns),
+		pendingLoginLeases:    leases,
+		pendingLoginLifetime:  DefaultPendingLoginLifetime,
+		log:                   log,
 	}
 }
 
@@ -547,7 +601,7 @@ acceptLoop:
 		}
 		// The global pre-auth cap is applied here, before a socket costs a
 		// goroutine, deadline, or read.
-		slot, ok := s.preAuth.admit(store.RateLimitListenerTailnet)
+		slot, ok := s.preAuth.admitForPath(store.RateLimitListenerTailnet, s.tcpListenerPath)
 		if !ok {
 			s.dropRefused(sock, connectionID, openedAt)
 			if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
@@ -752,7 +806,7 @@ func (s *Server) serveSocketWithIdentity(sock net.Conn, slot *preAuthSlot, conne
 	if probe.matched {
 		logCloseDiagnostics = false
 		discoveryCtx, cancel := context.WithDeadline(readCtx, handshakeDeadline)
-		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
+		allowed, err := s.discovery.allowContextForPath(discoveryCtx, addr, slot.path)
 		cancel()
 		if err != nil {
 			closeErr = err
@@ -1454,6 +1508,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, connLog)
 	conn.connectionID = closeDiagnostics.connectionID
 	conn.openedAt = closeDiagnostics.openedAt
+	conn.tailnetPath = slot != nil && slot.path == ListenerPathTailnet
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
@@ -1570,9 +1625,13 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	// under the per-user cap only once someone signs in on that key. The hold is
 	// what counts it in between, and it is given back whatever ends the
 	// connection.
-	hold := &unboundKeyHold{lim: s.unboundKeys}
+	path := ListenerPathLimited
+	if slot != nil && slot.path == ListenerPathTailnet {
+		path = ListenerPathTailnet
+	}
+	hold := &unboundKeyHold{lim: s.unboundKeys, path: path}
 	defer hold.release()
-	pending := s.newPendingLoginHold()
+	pending := s.newPendingLoginHold(path)
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), 5*time.Second)
 		defer cancel()
@@ -1759,7 +1818,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
 			}
 			failureStage = "key_exchange"
-			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics, &exchangeAttempts, slot.rateLimitListener()); err != nil {
+			if err := s.runExchangeWithCloseDiagnosticsForPath(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics, &exchangeAttempts, slot.rateLimitListener(), path); err != nil {
 				if errors.Is(err, errKeyExchangeRateLimited) {
 					return nil
 				}
@@ -2005,9 +2064,22 @@ func (s *Server) runExchangeWithCloseDiagnostics(
 	attempts *int,
 	listener store.RateLimitListener,
 ) error {
+	return s.runExchangeWithCloseDiagnosticsForPath(ctx, tconn, first, clientAddr, closeDiagnostics, attempts, listener, ListenerPathLimited)
+}
+
+func (s *Server) runExchangeWithCloseDiagnosticsForPath(
+	ctx context.Context,
+	tconn transport.Conn,
+	first *bin.Buffer,
+	clientAddr netip.Addr,
+	closeDiagnostics *transportCloseDiagnostics,
+	attempts *int,
+	listener store.RateLimitListener,
+	path ListenerPath,
+) error {
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
-	if layer, err := s.exchangeBudget.charge(ctx, s.keys, attempts, clientAddr, listener, time.Now()); layer != "" {
+	if layer, err := s.exchangeBudget.chargeForPath(ctx, s.keys, attempts, clientAddr, path, listener, time.Now()); layer != "" {
 		s.logExchangeBudgetRefusal(layer, listener, err, closeDiagnostics)
 		if sendErr := s.sendProtoError(ctx, bc, codec.CodeTransportFlood); sendErr != nil {
 			return sendErr

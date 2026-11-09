@@ -239,6 +239,22 @@ func TestLoadClientAddrProxyCIDRsRejectedWithCFConnectingIP(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMalformedCFConnectingIPForwarders(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS", "not-a-cidr")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a malformed CF-Connecting-IP forwarder")
+	}
+	if !strings.Contains(err.Error(), "TG_CLIENT_ADDR_CF_PROXY_CIDRS") {
+		t.Fatalf("Load error = %q, want it to name TG_CLIENT_ADDR_CF_PROXY_CIDRS", err)
+	}
+}
+
 func TestLoadClientAddrTrustCFConnectingIPRequiresPublicWebSocket(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

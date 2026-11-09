@@ -138,7 +138,7 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 	}
 
 	gAHash := sha256.Sum256(req.GA)
-	chat, isDedup, err := h.store.CreateSecretChatRequest(r.Ctx, r.UserID, participantID, req.GA, gAHash[:], int64(req.RandomID), h.rateLimitRequestEncryption)
+	chat, isDedup, err := h.store.CreateSecretChatRequest(r.Ctx, r.UserID, participantID, req.GA, gAHash[:], int64(req.RandomID), callerRateLimitForRequest(r, h.rateLimitRequestEncryption))
 	var flooded *store.RateLimitedError
 	switch {
 	case errors.As(err, &flooded):
@@ -301,7 +301,7 @@ func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, err
 	}
 
 	discarded := &tg.EncryptedChatDiscarded{ID: int(existing.ID)}
-	chat, err := h.store.DiscardSecretChat(r.Ctx, existing.ID, r.UserID, h.rateLimitDiscardEncryption)
+	chat, err := h.store.DiscardSecretChat(r.Ctx, existing.ID, r.UserID, callerRateLimitForRequest(r, h.rateLimitDiscardEncryption))
 	var flooded *store.RateLimitedError
 	switch {
 	case errors.As(err, &flooded):

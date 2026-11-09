@@ -131,13 +131,23 @@ func newPreAuthLimiter(limits PreAuthLimits) *preAuthLimiter {
 // one was free. Above the cap nothing is allocated and nothing is counted, so a
 // refusal costs the caller a close and nothing else.
 func (l *preAuthLimiter) admit(listener store.RateLimitListener) (*preAuthSlot, bool) {
+	return l.admitForPath(listener, ListenerPathLimited)
+}
+
+func (l *preAuthLimiter) admitForPath(listener store.RateLimitListener, path ListenerPath) (*preAuthSlot, bool) {
+	if path == ListenerPathTailnet {
+		return &preAuthSlot{listener: listener, path: path}, true
+	}
+	if path != ListenerPathLimited {
+		return nil, false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.limits.MaxConns > 0 && l.conns >= l.limits.MaxConns {
 		return nil, false
 	}
 	l.conns++
-	return &preAuthSlot{lim: l, listener: listener}, true
+	return &preAuthSlot{lim: l, listener: listener, path: path}, true
 }
 
 // acquireNet takes the slot for one client network, reporting whether one was
@@ -182,6 +192,7 @@ func (l *preAuthLimiter) release(bucket preAuthNetwork) {
 type preAuthSlot struct {
 	lim      *preAuthLimiter
 	listener store.RateLimitListener
+	path     ListenerPath
 	// bucket is the client network this slot is charged to, invalid when the
 	// connection carries no address the server may key on.
 	bucket preAuthNetwork
@@ -213,6 +224,9 @@ func (s *preAuthSlot) rateLimitListener() store.RateLimitListener {
 // bucket with every transport fault. Those connections stay bounded by the
 // global cap and the lifetime ceiling.
 func (s *preAuthSlot) keyAddr(addr netip.Addr) bool {
+	if s.path == ListenerPathTailnet {
+		return true
+	}
 	network, ok := store.IPBucketKey(addr)
 	if !ok {
 		return true
@@ -228,7 +242,7 @@ func (s *preAuthSlot) keyAddr(addr netip.Addr) bool {
 // armLifetime starts the pre-auth lifetime ceiling, calling fire once it
 // elapses. A zero Lifetime arms nothing.
 func (s *preAuthSlot) armLifetime(fire func()) {
-	if s.lim.limits.Lifetime <= 0 {
+	if s.lim == nil || s.path == ListenerPathTailnet || s.lim.limits.Lifetime <= 0 {
 		return
 	}
 	s.timer = time.AfterFunc(s.lim.limits.Lifetime, fire)
@@ -254,6 +268,9 @@ func (s *preAuthSlot) clear() {
 		return
 	}
 	s.once.Do(func() {
+		if s.lim == nil {
+			return
+		}
 		if s.timer != nil {
 			s.timer.Stop()
 		}

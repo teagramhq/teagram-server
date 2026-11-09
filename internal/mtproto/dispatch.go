@@ -39,6 +39,9 @@ type Request struct {
 	// RateLimitListener is the immutable listener scope assigned at accept.
 	// It is never selected from Host, Origin, forwarded headers, or RPC input.
 	RateLimitListener store.RateLimitListener
+	// TailnetPath is true only when the socket was accepted by a listener
+	// configured for the tailnet path. It is copied to nested RPC requests.
+	TailnetPath bool
 	// ClientAddrFromProxyV2 is true when ClientAddr came from an allowlisted
 	// PROXY v2 header rather than the socket peer.
 	ClientAddrFromProxyV2 bool
