@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -140,5 +141,36 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 	}
 	if compared == 0 {
 		t.Fatal("compared no pages")
+	}
+}
+
+// A group with no expiring posts, such as every group without a TTL policy,
+// never takes the unexpired-post read: its backlog is not larger than zero
+// unexpired expiring posts, so the page comes from the primary-key walk.
+func TestChannelHistoryPageUsesWalkWithoutBacklog(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newExpiredCountFixture(t, "+15551290041")
+	group, err := f.s.CreateChannel(ctx, f.owner.ID, "plain group", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.trace.reset()
+	if _, _, err := f.s.ChannelHistoryWithOffset(ctx, group.ID, f.owner.ID, 0, 0, 0, 0, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	f.trace.mu.Lock()
+	defer f.trace.mu.Unlock()
+	var walk, unexpired int
+	for _, query := range f.trace.queries {
+		switch {
+		case strings.Contains(query.sql, "-- name: ChannelHistoryPageWithOffset"):
+			walk++
+		case strings.Contains(query.sql, "-- name: ChannelHistoryPageUnexpired"):
+			unexpired++
+		}
+	}
+	if walk != 1 || unexpired != 0 {
+		t.Fatalf("page statements: walk %d, unexpired %d, want 1 and 0", walk, unexpired)
 	}
 }
