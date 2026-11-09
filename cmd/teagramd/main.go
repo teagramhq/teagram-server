@@ -504,6 +504,7 @@ func runClientConfigCommand(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	doc.WebSocket.BrowserOnly = cfg.WebSocketBrowserOnly
 	if cfg.TurnstileEnabled && cfg.PublicWebSocketListenAddr == "" {
 		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
 	}
@@ -1438,6 +1439,7 @@ func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGener
 	if err != nil {
 		return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate discovery identity: %w", err)
 	}
+	clientDiscovery.WebSocket.BrowserOnly = cfg.WebSocketBrowserOnly
 	if cfg.PublicWebSocketListenAddr == "" {
 		if cfg.Turnstile.Enabled() {
 			clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
@@ -1455,6 +1457,7 @@ func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGener
 			return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate public WebSocket discovery identity: %w", err)
 		}
 	}
+	publicClientDiscovery.WebSocket.BrowserOnly = cfg.PublicWebSocketBrowserOnly
 	if cfg.Turnstile.Enabled() {
 		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
 	}

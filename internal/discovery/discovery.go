@@ -71,7 +71,8 @@ type MTProtoBinding struct {
 
 // WebSocketBinding is the public browser transport endpoint.
 type WebSocketBinding struct {
-	Endpoint string `json:"endpoint"`
+	Endpoint    string `json:"endpoint"`
+	BrowserOnly bool   `json:"browser_only,omitempty"`
 }
 
 // NewDocument constructs the canonical public document from the exact

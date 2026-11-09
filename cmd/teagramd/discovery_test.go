@@ -76,6 +76,69 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	}
 }
 
+func TestListenerDiscoveryDocumentsAdvertiseBrowserOnlyPolicyPerListener(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	cfg := config.Config{
+		AdvertiseHost:             "demo.example.test",
+		AdvertisePort:             443,
+		DCID:                      2,
+		PublicWebSocketListenAddr: "127.0.0.1:2446",
+		WebSocketBrowserOnly:      true,
+	}
+	defaultDocument, publicDocument, err := listenerDiscoveryDocuments(
+		cfg,
+		&key.PublicKey,
+		strings.Repeat("f", 64),
+	)
+	if err != nil {
+		t.Fatalf("build listener discovery: %v", err)
+	}
+	defaultJSON, err := discovery.MarshalDocument(defaultDocument)
+	if err != nil {
+		t.Fatalf("marshal default listener discovery: %v", err)
+	}
+	publicJSON, err := discovery.MarshalDocument(publicDocument)
+	if err != nil {
+		t.Fatalf("marshal public listener discovery: %v", err)
+	}
+	if !strings.Contains(string(defaultJSON), `"browser_only":true`) {
+		t.Errorf("default discovery = %s, want browser_only true", defaultJSON)
+	}
+	if strings.Contains(string(publicJSON), `"browser_only"`) {
+		t.Errorf("public discovery = %s, want browser_only omitted", publicJSON)
+	}
+
+	cfg.WebSocketBrowserOnly = false
+	cfg.PublicWebSocketBrowserOnly = true
+	defaultDocument, publicDocument, err = listenerDiscoveryDocuments(
+		cfg,
+		&key.PublicKey,
+		strings.Repeat("f", 64),
+	)
+	if err != nil {
+		t.Fatalf("build public-only browser-only discovery: %v", err)
+	}
+	defaultJSON, err = discovery.MarshalDocument(defaultDocument)
+	if err != nil {
+		t.Fatalf("marshal default listener discovery: %v", err)
+	}
+	publicJSON, err = discovery.MarshalDocument(publicDocument)
+	if err != nil {
+		t.Fatalf("marshal public listener discovery: %v", err)
+	}
+	if strings.Contains(string(defaultJSON), `"browser_only"`) {
+		t.Errorf("default discovery = %s, want browser_only omitted", defaultJSON)
+	}
+	if !strings.Contains(string(publicJSON), `"browser_only":true`) {
+		t.Errorf("public discovery = %s, want browser_only true", publicJSON)
+	}
+}
+
 func TestListenerDiscoveryDocumentsRequireValidWipeGenerationWhenDemoAdvertisingIsEnabled(t *testing.T) {
 	t.Parallel()
 

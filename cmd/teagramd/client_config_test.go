@@ -24,6 +24,7 @@ func TestRunClientConfigIsIndependentAndAtomicOnWriterFailure(t *testing.T) {
 	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "2")
+	t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "true")
 	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
 	t.Setenv("TG_RSA_KEY_PATH", keyPath)
 	var bootstrapOutput bytes.Buffer
@@ -37,6 +38,9 @@ func TestRunClientConfigIsIndependentAndAtomicOnWriterFailure(t *testing.T) {
 	}
 	if stdout.Len() == 0 || !strings.Contains(stdout.String(), `"rsa_spki":"`) {
 		t.Fatalf("client-config output = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"browser_only":true`) {
+		t.Fatalf("client-config omitted browser-only WebSocket policy: %s", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "PRIVATE KEY") {
 		t.Fatalf("client-config output contains private-key material: %q", stdout.String())

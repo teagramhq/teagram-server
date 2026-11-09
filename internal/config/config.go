@@ -416,6 +416,7 @@ func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 type ClientConfig struct {
 	ListenAddr                string
 	PublicWebSocketListenAddr string
+	WebSocketBrowserOnly      bool
 	RSAKeyPath                string
 	AdvertiseHost             string
 	AdvertisePort             int
@@ -720,6 +721,13 @@ const ProfileIdentifierRetentionFloor = ProfileRestoreCeiling + ProfileBackupCle
 // the auth-key master secret, blob storage, or any other service resource.
 func LoadClientConfig() (ClientConfig, error) {
 	cfg, err := loadClientIdentityConfig()
+	if err != nil {
+		return ClientConfig{}, err
+	}
+	cfg.WebSocketBrowserOnly, err = parseWebSocketBrowserOnly(
+		os.Getenv("TG_WEBSOCKET_BROWSER_ONLY"),
+		"TG_WEBSOCKET_BROWSER_ONLY",
+	)
 	if err != nil {
 		return ClientConfig{}, err
 	}
