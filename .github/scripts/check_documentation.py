@@ -1,6 +1,7 @@
 import argparse
 import html
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -8,7 +9,7 @@ from urllib.parse import unquote, urlsplit
 
 CONFIG_REFERENCE = Path("docs/configuration.md")
 CONFIG_ROW = re.compile(r"^\|\s*`(TG_[A-Z0-9_]+)`\s*\|", re.MULTILINE)
-GO_ENVIRONMENT_STRING = re.compile(r'(["`])(TG_[A-Z0-9]+(?:_[A-Z0-9]+)*)\1')
+ENVIRONMENT_NAME_EXTRACTOR = Path(__file__).with_name("config_environment_names.go")
 INLINE_LINK = re.compile(r"!?\[[^\]\n]*\]\(\s*(<[^>]+>|[^\s)]+)")
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
 HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
@@ -16,62 +17,17 @@ FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 INLINE_CODE = re.compile(r"`+[^`]*`+")
 
 
-def strip_go_comments(source):
-    """Remove Go comments while keeping string literals available to scan."""
-    output = []
-    index = 0
-    quote = None
-    while index < len(source):
-        char = source[index]
-        following = source[index : index + 2]
-        if quote is not None:
-            output.append(char)
-            if quote == "`":
-                if char == "`":
-                    quote = None
-            elif char == "\\" and index + 1 < len(source):
-                index += 1
-                output.append(source[index])
-            elif char == quote:
-                quote = None
-        elif following == "//":
-            while index < len(source) and source[index] != "\n":
-                index += 1
-            if index < len(source):
-                output.append("\n")
-        elif following == "/*":
-            index += 2
-            while index < len(source) and source[index : index + 2] != "*/":
-                if source[index] == "\n":
-                    output.append("\n")
-                index += 1
-            index += 1
-        else:
-            if char in ('"', "'", "`"):
-                quote = char
-            output.append(char)
-        index += 1
-    return "".join(output)
-
-
 def config_environment_names(root):
-    names = set()
-    source_dirs = (root / "internal/config", root / "internal/linklanding", root / "cmd/teagramd")
-    for source_dir in source_dirs:
-        if not source_dir.exists():
-            continue
-        for path in sorted(source_dir.rglob("*.go")):
-            if path.name.endswith("_test.go"):
-                continue
-            if "fixture" in path.name.lower() or "perf" in path.name.lower():
-                continue
-            source = strip_go_comments(path.read_text(encoding="utf-8"))
-            names.update(
-                match.group(2)
-                for match in GO_ENVIRONMENT_STRING.finditer(source)
-                if not match.group(2).startswith(("TG_FIXTURE_", "TG_PERF_"))
-            )
-    return names
+    result = subprocess.run(
+        ["go", "run", str(ENVIRONMENT_NAME_EXTRACTOR), "--root", str(root)],
+        cwd=ENVIRONMENT_NAME_EXTRACTOR.parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "failed to inspect Go environment reads")
+    return set(result.stdout.splitlines())
 
 
 def configuration_reference_errors(root):
@@ -80,7 +36,10 @@ def configuration_reference_errors(root):
         return [f"missing configuration reference: {CONFIG_REFERENCE.as_posix()}"]
 
     documented = set(CONFIG_ROW.findall(reference.read_text(encoding="utf-8")))
-    read_by_server = config_environment_names(root)
+    try:
+        read_by_server = config_environment_names(root)
+    except RuntimeError as error:
+        return [f"could not inspect server environment reads: {error}"]
     errors = [
         f"configuration reference is missing {name}"
         for name in sorted(read_by_server - documented)

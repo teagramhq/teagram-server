@@ -45,7 +45,8 @@ class DocumentationCheckTests(unittest.TestCase):
 
     def test_unused_config_variable_is_named(self):
         (self.root / "internal/config/config.go").write_text(
-            'package config\nfunc load() { _ = os.Getenv("TG_CURRENT_SETTING") }\n'
+            'package config\nfunc load() { _ = os.Getenv("TG_CURRENT_SETTING"); '
+            '_ = errors.New("TG_REMOVED_SETTING") }\n'
         )
         (self.root / "docs/configuration.md").write_text(
             "| Variable | Default | Notes |\n|---|---|---|\n"
@@ -89,6 +90,7 @@ class DocumentationCheckTests(unittest.TestCase):
         (self.root / "internal/linklanding/landing.go").write_text(
             'package linklanding\nconst web = "TG_INVITE_WEB_SIGNUP_URL"\n'
             'const desktop = "TG_INVITE_DESKTOP_URL"\n'
+            'func load() { _ = os.Getenv(web); _ = os.Getenv(desktop) }\n'
         )
         (self.root / "docs/configuration.md").write_text(
             "| Variable | Default | Notes |\n|---|---|---|\n"
