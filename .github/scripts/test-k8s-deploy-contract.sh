@@ -55,6 +55,13 @@ base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f
    "$overlay_render_line" -lt "$cutover_overlay_check_line" ]] ||
   fail 'manifest validation must preserve migration checks and validate the cutover overlay'
 
+namespace_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename deploy/k8s/base/namespace.yaml' <<< "$manifest_step" | cut -d: -f1)"
+maintenance_server_dry_run_line="$(grep -n -m 1 -F 'kubectl create --dry-run=server' <<< "$manifest_step" | cut -d: -f1)"
+[[ "$namespace_apply_line" =~ ^[0-9]+$ &&
+   "$maintenance_server_dry_run_line" =~ ^[0-9]+$ &&
+   "$namespace_apply_line" -lt "$maintenance_server_dry_run_line" ]] ||
+  fail 'the manifest check must create its namespace before server-dry-running the maintenance Job'
+
 migration_fixture="$(mktemp -d)"
 trap 'rm -rf "$migration_fixture"' EXIT
 mkdir -p "$migration_fixture/migrations"
@@ -671,6 +678,7 @@ for restore_line in \
   'kubectl create job "$backup_job" --from=cronjob/postgres-backup' \
   'dropdb --username=postgres --force teagram' \
   'kubectl apply --filename deploy/k8s/test-postgres-backup-restore-job.yaml' \
+  '--user "$(id -u):$(id -g)"' \
   '--username-file /username' \
   'backup=restore-sign-in-verified'; do
   grep --fixed-strings --quiet -- "$restore_line" "$backup_restore_test" ||

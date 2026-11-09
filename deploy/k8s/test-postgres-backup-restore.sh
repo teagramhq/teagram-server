@@ -10,6 +10,8 @@ tmp_dir="$(mktemp -d "$RUNNER_TEMP/postgres-backup-restore.XXXXXX")"
 port_forward_pid=''
 backup_job="postgres-backup-test-${GITHUB_RUN_ID:-$$}"
 
+# cleanup is called by the EXIT trap, which ShellCheck cannot follow.
+# shellcheck disable=SC2329
 cleanup() {
   local status=$?
   trap - EXIT
@@ -85,8 +87,9 @@ chmod 0644 "$tmp_dir/client.json"
 kubectl port-forward --address 127.0.0.1 --namespace teagram \
   service/teagramd 12443:2443 > "$tmp_dir/port-forward.log" 2>&1 &
 port_forward_pid=$!
-for attempt in $(seq 1 30); do
+for ((attempt = 0; attempt < 30; attempt++)); do
   if docker run --rm --network host \
+    --user "$(id -u):$(id -g)" \
     --volume "$tmp_dir/client.json:/client.json:ro" \
     --volume "$tmp_dir/username:/username:ro" \
     --volume "$tmp_dir/password:/password:ro" \

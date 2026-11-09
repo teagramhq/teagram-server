@@ -1577,6 +1577,7 @@ jobs:
           done
 kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
             deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
+          kubectl apply --filename deploy/k8s/base/namespace.yaml >/dev/null
           kubectl create --dry-run=server \
             --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml >/dev/null
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
