@@ -402,6 +402,19 @@ PY
 real_kubectl=$(command -v kubectl)
 test_migration_version=$(kubectl get configmap "$(source_configmap_name required-migration-version)" \
   --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.data.migration-version}')
+test_migration_versions=$(docker run --rm --network none --entrypoint /bin/sh \
+  ghcr.io/teagramhq/teagram-migrations:ci -ec \
+  'ls -1 /migrations | sed -nE "s/^([0-9]{14})_.+\\.sql$/\\1/p" | sort')
+test_migration_image_latest=$(tail -n 1 <<< "$test_migration_versions")
+[[ -n $test_migration_image_latest && $test_migration_image_latest == "$test_migration_version" ]] || {
+  printf 'CI migration ConfigMap version %s does not match the built image version %s\n' \
+    "$test_migration_version" "$test_migration_image_latest" >&2
+  exit 1
+}
+production_migration_version=$(yq -r \
+  '.configMapGenerator[] | select(.name == "required-migration-version").literals[] | sub("^migration-version="; "")' \
+  deploy/k8s/prod/kustomization.yaml)
+[[ $production_migration_version =~ ^[0-9]{14}$ ]]
 test_media_key_current=$(kubectl get configmap "$(source_configmap_name teagramd-runtime)" \
   --namespace "$SOURCE_NAMESPACE" --output 'jsonpath={.data.TG_MEDIA_KEY_CURRENT}')
 test_migrations_job=$(kubectl get jobs --namespace "$SOURCE_NAMESPACE" \
@@ -412,6 +425,7 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
   REAL_KUBECTL="$real_kubectl" CUTOVER_FORWARD_DELAY_SECONDS=2 \
   CUTOVER_TEST_PINNED_REVISION="$K8S_IMAGE_REVISION" \
   CUTOVER_TEST_MIGRATION_VERSION="$test_migration_version" \
+  CUTOVER_TEST_MIGRATION_VERSIONS="$test_migration_versions" \
   CUTOVER_TEST_MIGRATIONS_JOB_NAME="$test_migrations_job" \
   CUTOVER_TEST_TEAGRAMD_IMAGE=ghcr.io/teagramhq/teagramd:ci \
   CUTOVER_TEST_MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations:ci \
@@ -420,6 +434,11 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${CUTOVER_TEST_FAIL_AFTER_MIGRATION_VALIDATION:-} == true &&
+  " $* " == *'MAX(version)'* ]]; then
+  printf 'injected database read after migration validation\n' >&2
+  exit 42
+fi
 if [[ -n ${CUTOVER_FAIL_PREFLIGHT_RESOURCE:-} &&
   " $* " == *" get $CUTOVER_FAIL_PREFLIGHT_RESOURCE "* && " $* " == *' --ignore-not-found '* ]]; then
   printf 'injected preflight API failure\n' >&2
@@ -602,6 +621,58 @@ expect_log "live teagramd revision $K8S_IMAGE_REVISION does not match test revis
   --ignore-not-found --output name) ]]
 [[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
 printf 'revision mismatch named both SHAs and failed before fencing or applying target resources\n'
+
+ahead_migration_version=$(printf '%014d' "$((10#$production_migration_version + 1))")
+ahead_migration_versions=$(awk -v pin="$production_migration_version" '$0 <= pin' \
+  <<< "$test_migration_versions")
+if ! grep --fixed-strings --line-regexp --quiet -- "$production_migration_version" \
+  <<< "$ahead_migration_versions"; then
+  ahead_migration_versions+=$'\n'"$production_migration_version"
+fi
+if ! grep --fixed-strings --line-regexp --quiet -- "$ahead_migration_version" \
+  <<< "$ahead_migration_versions"; then
+  ahead_migration_versions+=$'\n'"$ahead_migration_version"
+fi
+if env "${incus_test_env[@]}" CUTOVER_TEST_MIGRATION_VERSION="$ahead_migration_version" \
+  CUTOVER_TEST_MIGRATION_VERSIONS="$ahead_migration_versions" \
+  CUTOVER_TEST_FAIL_AFTER_MIGRATION_VALIDATION=true \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/migration-pin-one-ahead.log" 2>&1; then
+  printf 'cutover runner unexpectedly passed the injected post-validation database read failure\n' >&2
+  exit 1
+fi
+expect_log 'injected database read after migration validation' "$tmp_dir/migration-pin-one-ahead.log"
+expect_log 'could not read the live database migration version' "$tmp_dir/migration-pin-one-ahead.log"
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+printf 'test mode accepted a CI migration image one migration ahead of the production pin\n'
+
+missing_pin_migration_versions=$(awk -v pin="$production_migration_version" '$0 != pin' \
+  <<< "$ahead_migration_versions")
+if env "${incus_test_env[@]}" CUTOVER_TEST_MIGRATION_VERSION="$ahead_migration_version" \
+  CUTOVER_TEST_MIGRATION_VERSIONS="$missing_pin_migration_versions" \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/migration-pin-missing.log" 2>&1; then
+  printf 'cutover runner accepted a production migration pin missing from the CI image\n' >&2
+  exit 1
+fi
+expect_log "production migration version $production_migration_version is missing from the pinned image" \
+  "$tmp_dir/migration-pin-missing.log"
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
+
+previous_migration_version=$(awk -v pin="$production_migration_version" \
+  '$0 < pin { previous = $0 } END { print previous }' <<< "$test_migration_versions")
+previous_migration_versions=$(awk -v latest="$previous_migration_version" \
+  '$0 <= latest' <<< "$test_migration_versions")
+if env "${incus_test_env[@]}" CUTOVER_TEST_MIGRATION_VERSION="$previous_migration_version" \
+  CUTOVER_TEST_MIGRATION_VERSIONS="$previous_migration_versions" \
+  bash deploy/k8s/cutover-alpha.sh --apply --test-mode \
+  > "$tmp_dir/migration-pin-newer.log" 2>&1; then
+  printf 'cutover runner accepted a production migration pin newer than the CI image\n' >&2
+  exit 1
+fi
+expect_log "production migration version $production_migration_version is newer than the newest migration in the pinned image $previous_migration_version" \
+  "$tmp_dir/migration-pin-newer.log"
+[[ ! -e $RUNNER_TEMP/teagram-cutover-runner/phase ]]
 
 for resource in statefulset/postgres pvc/key-data-teagramd-0 secret/teagramd-admin; do
   if env "${incus_test_env[@]}" CUTOVER_FAIL_PREFLIGHT_RESOURCE="$resource" \

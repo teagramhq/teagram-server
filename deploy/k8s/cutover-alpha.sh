@@ -482,11 +482,32 @@ image_latest_migration() {
   printf '%s' "$version"
 }
 
+image_migration_versions() {
+  local image=$1 versions version previous=''
+  if [[ $TEST_MODE == true && ${CUTOVER_TEST_MIGRATION_VERSIONS+x} ]]; then
+    versions=$CUTOVER_TEST_MIGRATION_VERSIONS
+  else
+    versions=$(incus exec "$SOURCE_INSTANCE" -- docker run --rm --network none \
+      --entrypoint /bin/sh "$image" -ec \
+      'ls -1 /migrations | sed -nE "s/^([0-9]{14})_.+\\.sql$/\\1/p" | sort' \
+      2>/dev/null) || fail "could not inspect the migrations in $image"
+  fi
+  [[ -n $versions ]] || fail 'pinned migration image has no migrations'
+  while IFS= read -r version; do
+    [[ $version =~ ^[0-9]{14}$ ]] || fail 'pinned migration image has an invalid migration version'
+    [[ -z $previous || $version > $previous ]] ||
+      fail 'pinned migration image versions are not unique and sorted'
+    previous=$version
+  done <<< "$versions"
+  printf '%s' "$versions"
+}
+
 validate_release_for_source() {
   local live_revision app_digest migrations_digest helper_digest landing_digest selector_digest
   local migrations_validation_image helper_validation_image
   local app_revision migrations_revision helper_revision required_version latest_version
   local migration_job rustfs_init_job expected_job_suffix expected_helper_suffix
+  local migration_versions listed_latest
   live_revision=$(source_container_revision) || fail 'could not read the live teagramd image revision'
   [[ $live_revision =~ ^[0-9a-f]{40}$ ]] || fail "live teagramd image has an invalid source revision: ${live_revision:-<empty>}"
   if [[ $TEST_MODE == true && -n ${CUTOVER_TEST_PINNED_REVISION:-} &&
@@ -566,8 +587,17 @@ validate_release_for_source() {
     latest_version=$(image_latest_migration "$migrations_validation_image")
   fi
   if [[ $TEST_MODE == true ]]; then
-    [[ $required_version == "$latest_version" ]] ||
-      fail "production migration version $required_version does not match the newest migration in the pinned image $latest_version"
+    # Migration PRs can put the CI image ahead of the unchanged production pin.
+    migration_versions=$(image_migration_versions "$migrations_validation_image")
+    listed_latest=$(awk 'END { print }' <<< "$migration_versions")
+    [[ $listed_latest == "$latest_version" ]] ||
+      fail "newest migration in pinned image inventory $listed_latest does not match image version $latest_version"
+    [[ $required_version =~ ^[0-9]{14}$ ]] || fail 'production migration version is invalid'
+    if [[ $required_version > $latest_version ]]; then
+      fail "production migration version $required_version is newer than the newest migration in the pinned image $latest_version"
+    fi
+    grep --fixed-strings --line-regexp --quiet -- "$required_version" <<< "$migration_versions" ||
+      fail "production migration version $required_version is missing from the pinned image"
   fi
   MC_IMAGE=$helper_validation_image
   MIGRATIONS_JOB_NAME=$migration_job
