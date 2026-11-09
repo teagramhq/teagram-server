@@ -60,14 +60,17 @@ chmod +x "$tmp/bin/id" "$tmp/bin/docker"
 export PATH="$tmp/bin:$PATH"
 export OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export MOCK_DOCKER_LOG="$tmp/docker.log" MOCK_SQL_PATH="$tmp/query.sql"
-export MOCK_PSQL_OUTPUT=$'test1\t2026-01-02T03:04:05.123456Z\ntest2\tNULL'
+export MOCK_PSQL_OUTPUT=$'qa\tUNRESOLVED_BY_HANDLE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tPRESENT\tABSENT\tNONE\tNOT_STORED\t2026-01-02T03:04:05.123456Z\ntest1\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-02-03T04:05:06.123456Z\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\tNULL'
 
 output=$("$script")
 [[ "$output" == "$MOCK_PSQL_OUTPUT" ]]
 grep -Fq 'up.updated_at' "$MOCK_SQL_PATH"
 grep -Fq 'username.owner_type' "$MOCK_SQL_PATH"
-grep -Fq 'username.owner_id IS NULL' "$MOCK_SQL_PATH"
-grep -Fq "'MISSING_ACCOUNT'" "$MOCK_SQL_PATH"
+grep -Fq 'username.owner_id' "$MOCK_SQL_PATH"
+grep -Fq "users.username = targets.handle" "$MOCK_SQL_PATH"
+grep -Fq "VALUES ('qa'), ('qa2'), ('test1'), ('test2')" "$MOCK_SQL_PATH"
+grep -Fq "'UNRESOLVED_BY_HANDLE'" "$MOCK_SQL_PATH"
+grep -Fq "'NOT_STORED'" "$MOCK_SQL_PATH"
 if grep -Eiq 'salt1|salt2|verifier' "$MOCK_SQL_PATH"; then
   printf '%s\n' 'timestamp query contains a forbidden password field' >&2
   exit 1
@@ -106,12 +109,12 @@ export MOCK_PG_NOT_READY
 expect_failure 1
 unset MOCK_PG_NOT_READY
 
-MOCK_PSQL_OUTPUT=$'test1\tNULL\ntest2\t2026-11-09T04:39:00.000001Z'
+MOCK_PSQL_OUTPUT=$'qa\tMISSING_TARGET_USER\tPRESENT\tNO\tNOT_STORED\tUNKNOWN\nqa2\tNOT_A_USER_HANDLE\tPRESENT\tNO\tNOT_STORED\tUNKNOWN\ntest1\tMULTIPLE\tPRESENT\tYES\tNOT_STORED\tAMBIGUOUS\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-11-09T04:39:00.000001Z'
 export MOCK_PSQL_OUTPUT
 output=$("$script")
 [[ "$output" == "$MOCK_PSQL_OUTPUT" ]]
 
-MOCK_PSQL_OUTPUT=$'test1\tMISSING_ACCOUNT\ntest2\t2026-11-09T04:39:00.000001Z'
+MOCK_PSQL_OUTPUT=$'qa\tUNRESOLVED_BY_HANDLE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tPRESENT\tABSENT\tNONE\tNOT_STORED\t2026-11-09T04:39:00.000001Z\ntest1\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-11-09T04:39:00.000001Z\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\tNULL'
 export MOCK_PSQL_OUTPUT
 output=$("$script")
 [[ "$output" == "$MOCK_PSQL_OUTPUT" ]]
@@ -123,7 +126,7 @@ export MOCK_PSQL_FAIL
 expect_failure 1
 unset MOCK_PSQL_FAIL
 
-MOCK_PSQL_OUTPUT=$'test1\t2026-01-02T03:04:05Z\ntest2\tNULL'
+MOCK_PSQL_OUTPUT=$'qa\tUNRESOLVED_BY_HANDLE\tABSENT\tNONE\tNOT_STORED\tUNKNOWN\nqa2\tPRESENT\tABSENT\tNONE\tNOT_STORED\t2026-01-02T03:04:05Z\ntest1\tPRESENT\tPRESENT\tYES\tNOT_STORED\t2026-01-02T03:04:05.123456Z\ntest2\tPRESENT\tPRESENT\tYES\tNOT_STORED\tNULL'
 export MOCK_PSQL_OUTPUT
 expect_failure 1
 

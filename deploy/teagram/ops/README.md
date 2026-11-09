@@ -18,16 +18,23 @@ at an older main SHA. Keep every operation narrowly scoped to its named
 purpose. Validate arguments before using them, fail closed, and never put
 secrets in arguments, logs, or output.
 
-## QA password timestamps
+## QA account state and password timestamps
 
-`qa-password-timestamps` is a no-argument, read-only query for the `test1` and
-`test2` accounts. It checks the running server and Postgres container identities
-and the expected Compose file set before querying `user_passwords.updated_at`.
-Each output row contains one fixed handle and either its UTC timestamp, `NULL`
-if the account has no password row, or `MISSING_ACCOUNT` if no matching user
-account exists. The schema has no separate password-change timestamp;
-`updated_at` is refreshed when the password row is updated. The operation never
-selects or prints salts, verifiers, or other password fields.
+`qa-password-timestamps` is a no-argument, read-only query for the fixed
+`qa`, `qa2`, `test1`, and `test2` handles. It checks the running server and
+Postgres container identities and the expected Compose file set before
+querying user, username, and password-row state. Each tab-separated output row
+contains the handle, user-row state, username-row state, whether that row
+points to a user, the username timestamp, and the password row's UTC
+`updated_at`.
+
+`UNRESOLVED_BY_HANDLE` means neither the username row nor `users.username`
+currently identifies a user row for that handle; it does not establish whether
+an unlinked user row remains. The `usernames` schema stores no row timestamp, so
+the timestamp field is `NOT_STORED`. A password timestamp is `NULL` when the
+associated user has no password row, `UNKNOWN` when no unique user row can be
+identified, and `AMBIGUOUS` when multiple rows match. The operation never
+selects or prints salts, verifiers, or password values.
 
 Run it from its merged `main` commit:
 

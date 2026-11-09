@@ -280,7 +280,7 @@ for help in help -h --help; do
   [[ "$help_output" == *'cleanup-media --acceptance-passed removes plaintext media'* ]]
   [[ "$help_output" == *'attest-blob-mode-reports preserves missing reports after a live S3 census'* ]]
   [[ "$help_output" == *'quarantine-unaccounted-media --check previews, --apply quarantines, --restore <run-id> restores'* ]]
-  [[ "$help_output" == *'qa-password-timestamps reads only test1 and test2 password row timestamps'* ]]
+  [[ "$help_output" == *'qa-password-timestamps reads account and password-row status for qa, qa2, test1, and test2'* ]]
 done
 
 active_operation_count=0
