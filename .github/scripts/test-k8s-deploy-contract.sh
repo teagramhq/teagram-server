@@ -226,24 +226,39 @@ jq --exit-status '
    "$(yq -r 'select(.kind == "Role" and .metadata.name == "teagram-deployer-networkpolicy") | .rules[0].resources | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == networkpolicies &&
    "$(yq -r 'select(.kind == "Role" and .metadata.name == "teagram-deployer-networkpolicy") | .rules[0].verbs | join(",")' deploy/k8s/tailscale-proxy-access.yaml)" == 'get,list,watch,create,patch' ]] ||
   fail 'Tailscale state and deployer NetworkPolicy RBAC must remain resource- and namespace-scoped'
-grep --fixed-strings --quiet -- '--dry-run' deploy/k8s/install-tailnet-proxy-access.sh &&
-grep --fixed-strings --quiet -- '--rollback' deploy/k8s/install-tailnet-proxy-access.sh ||
+if ! grep --fixed-strings --quiet -- '--dry-run' deploy/k8s/install-tailnet-proxy-access.sh; then
   fail 'the one-time tailnet installer must provide a dry-run and exact rollback'
+fi
+if ! grep --fixed-strings --quiet -- '--rollback' deploy/k8s/install-tailnet-proxy-access.sh; then
+  fail 'the one-time tailnet installer must provide a dry-run and exact rollback'
+fi
 grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
   fail 'the shared discovery probe must send the v1 half-close request'
 ingress_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Probe Tailscale, cloudflared, and denied in-cluster ingress") | .run' .github/workflows/ci.yml)"
 [[ "$ingress_step" == *'test-service-ingress.py'* &&
    "$ingress_step" != *'kubectl port-forward'* ]] ||
   fail 'k8s-deploy must exercise ingress from in-cluster identities without port-forward'
+ci_overlay="$(kubectl kustomize deploy/k8s/ci)"
+if yq --exit-status 'select(.kind == "Job" and .metadata.name == "mtproto-smoke")' \
+  <<<"$ci_overlay" >/dev/null 2>&1; then
+  fail 'the MTProto smoke Job must be created after its generated client ConfigMap'
+fi
+mtproto_smoke_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Smoke the MTProto Service through the in-cluster proxy path") | .run' .github/workflows/ci.yml)"
+if [[ "$mtproto_smoke_step" != *'kubectl create configmap mtproto-probe-client'*'kubectl apply --dry-run=server --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'*'kubectl apply --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'* ]]; then
+  fail 'k8s-deploy must create the MTProto client ConfigMap before starting its smoke Job'
+fi
 if yq -r '.jobs."test-k8s-deploy".steps[].run // ""' .github/workflows/ci.yml |
   grep --fixed-strings --quiet 'kubectl port-forward'; then
   fail 'k8s-deploy must not use port-forward for any smoke test'
 fi
 grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet Bot API check must send a PROXY v1 header'
-grep --fixed-strings --quiet 'status_line' deploy/k8s/test-networkpolicy.py &&
-grep --fixed-strings --quiet '401' deploy/k8s/test-networkpolicy.py ||
+if ! grep --fixed-strings --quiet 'status_line' deploy/k8s/test-networkpolicy.py; then
   fail 'the Bot API probe must exercise an unauthenticated request and inspect its response'
+fi
+if ! grep --fixed-strings --quiet '401' deploy/k8s/test-networkpolicy.py; then
+  fail 'the Bot API probe must exercise an unauthenticated request and inspect its response'
+fi
 [[ "$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "tailscale-proxy") | .spec.replicas' deploy/k8s/ci/tailscale-proxy-ci.yaml)" == 0 ]] ||
   fail 'the disposable k3s lane must not authenticate a production Tailscale device'
 cutover_plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"

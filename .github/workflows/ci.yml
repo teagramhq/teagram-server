@@ -2037,6 +2037,10 @@ jobs:
             --from-file=client.json="$RUNNER_TEMP/client.json" \
             --dry-run=client --output yaml \
             | kubectl apply --filename=-
+          kubectl apply --dry-run=server --namespace=teagram \
+            --filename=deploy/k8s/ci/mtproto-probe-job.yaml
+          kubectl apply --namespace=teagram \
+            --filename=deploy/k8s/ci/mtproto-probe-job.yaml
           kubectl wait --for=condition=complete job/mtproto-smoke \
             --namespace teagram --timeout=120s
           kubectl logs job/mtproto-smoke --namespace teagram
