@@ -15,9 +15,9 @@ and the agent operations menu, and writes the
 restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
 `0600`. Store that file in the designated GitHub environment secret. It also
 writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
-certificate, root-owned mode `0600`; use it only for the root-run cutover,
-rollback, and target reset on alpha. Never store this admin kubeconfig in GitHub
-or give it to the deploy job. The API and operations SSH menu are exposed
+certificate, root-owned mode `0600`; use it only for root-run cutover, rollback,
+target reset, and the one-time deployer-role refresh documented below on alpha.
+Never store this admin kubeconfig in GitHub or give it to the deploy job. The API and operations SSH menu are exposed
 through Tailscale Serve only; the Incus proxy listeners bind to host loopback.
 The bootstrap also installs a cluster-scoped ValidatingAdmissionPolicy and
 binding. Rerunning the bootstrap reapplies the same manifests without changing
@@ -47,6 +47,17 @@ sudo incus exec teagram-k3s -- k3s kubectl delete role teagram-agent \
 This removes the agent credential path without changing workloads or their
 data. Reverting the code and rerunning the bootstrap restores the configured
 access path.
+
+The deploy job cannot update its own Role. When its allowed resource kinds
+change, reapply `deployer-access.yaml` with the root-only cutover kubeconfig
+before the next release; the workflow checks its required backup permissions
+before creating any resources. After this change merges, refresh the role from
+the reviewed checkout on alpha before the first `Deploy.` run:
+
+```sh
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
+  kubectl apply --filename deploy/k8s/deployer-access.yaml
+```
 
 Before workloads have written production data, rollback on `alpha` with:
 
@@ -128,6 +139,37 @@ not read Docker credentials or create a registry Secret; this also keeps the
 cutover usable on an LXC with no Docker registry configuration. Public utility
 images such as BusyBox are pinned from `mirror.gcr.io`.
 
+## PostgreSQL backups
+
+The production overlay enables a daily 03:17 UTC PostgreSQL custom-format dump.
+`Deploy.` first applies the `backup-bootstrap/` overlay with the CronJob
+suspended, runs and verifies a fresh dump, and only then applies the production
+release. The nightly CronJob becomes active when `prod/` is applied. Both paths
+write to the `postgres-backups` 20 GiB PVC and keep the newest seven verified
+dumps. Each Job runs `pg_restore --list` before publishing a dump by an atomic
+rename; its log records the path, byte count, and SHA-256 without credentials.
+
+The backup PVC is local to the k3s node, unencrypted, and has no off-cluster
+copy. It is a release recovery point, not protection against loss of the host
+or its disk. The deploy job checks the pre-deploy Job result and stops before
+changing application workloads if the dump does not verify. Nightly status is
+visible through the CronJob's `lastSuccessfulTime`, retained Job records, pod
+logs, and Kubernetes warning events:
+
+```sh
+kubectl get cronjob postgres-backup --namespace teagram \
+  --output 'custom-columns=NAME:.metadata.name,SUSPENDED:.spec.suspend,LAST-SCHEDULE:.status.lastScheduleTime,LAST-SUCCESS:.status.lastSuccessfulTime'
+kubectl get jobs --namespace teagram \
+  --selector=app.kubernetes.io/name=postgres-backup --sort-by=.status.startTime
+kubectl get events --namespace teagram --sort-by=.lastTimestamp
+kubectl logs --namespace teagram job/<failed-backup-job> --all-containers=true
+```
+
+`test: k8s-deploy` creates a disposable account, takes a dump, recreates the
+throwaway database from that dump, and signs in with the restored account. Do
+not restore a production dump into the live database as a deploy step; schema
+recovery requires the matching database snapshot and the recovery procedure.
+
 The alpha cutover runner creates the `teagramd-admin` Secret from the existing
 Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
 either value. Subsequent production deployments use the same Secret.
@@ -194,6 +236,12 @@ version has been applied. Before a production change, snapshot PostgreSQL and
 the persistent volumes. An application rollback restores the prior image
 digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
+`Deploy.` records the prior revisions of PostgreSQL, RustFS, teagramd, the link
+edge Deployments, and cloudflared. If apply, a Job, rollout, or smoke fails, its
+release runner issues `kubectl rollout undo` for each changed controller and
+waits for the previous revision to become ready. If an Atlas migration already
+completed, use the matching pre-deploy dump on the `postgres-backups` PVC before
+resuming application traffic.
 
 The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
 target `http://linkselector:8081`. The selector sends the exact public API paths
@@ -212,7 +260,9 @@ HTTP hostname route does not expose the MTProto listener. The
 Cloudflared metrics endpoint is exposed only inside the cluster at
 `cloudflared-metrics:2000/metrics`. Prometheus-compatible scrapers can use the
 service annotations. Container logs are written to stdout and stderr for the
-cluster's node or central log collector.
+cluster's node or central log collector. After cutover, `Deploy.` requires the
+k3s `cloudflared` Deployment to have exactly one ready replica; the cutover
+must leave the old Compose connector stopped before enabling that replica.
 
 ## Alpha production cutover
 

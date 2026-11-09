@@ -2,13 +2,9 @@ name: Deploy.
 
 run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
-# Deploys the exact commit whose CI passed on a push to main to the
-# teagram-server LXC. The SSH command is the tested commit's SHA, and the key's
-# forced command runs the stable deploy/telegram-server/deploy-main.sh bridge
-# to that commit's canonical script. The canonical script runs the MTProto
-# smoke from the deployed image on the host after readiness; the runner does
-# not check out or run the smoke code. Its auth-key storage model is documented
-# with the command. .github/scripts/test-deploy-workflow-contract.sh guards this flow.
+# Deploys the exact successful main CI commit to teagram-k3s. The test run's
+# immutable image digest artifact and attestations are verified before the
+# restricted cluster kubeconfig is used. The workflow contract guards this flow.
 on:
   workflow_run:
     workflows: [CI]
@@ -25,7 +21,6 @@ on:
 permissions:
   contents: read
 
-# One deploy at a time; GitHub keeps only the newest pending run.
 concurrency:
   group: deploy-teagram-server
   cancel-in-progress: false
@@ -38,11 +33,11 @@ jobs:
     timeout-minutes: 60
     environment: production
     permissions:
-      contents: read
       actions: read
+      attestations: read
+      contents: read
 
     steps:
-      # Late CI completions must not displace a newer successful descendant.
       - name: Resolve the tested commit
         id: target
         env:
@@ -50,6 +45,7 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
+          set -euo pipefail
           sha="$RUN_HEAD_SHA"
           ci_run_id="$RUN_ID"
           latest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0] | [.head_sha, (.id | tostring)] | @tsv')
@@ -80,7 +76,85 @@ jobs:
           echo "deploying $sha from CI run $ci_run_id"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
-          printf '{"deploy_sha":"%s","ci_run_id":"%s"}\n' "$sha" "$ci_run_id" > "$RUNNER_TEMP/demo-deploy-target.json"
+          printf '{"deploy_sha":"%s","ci_run_id":"%s"}\n' \
+            "$sha" "$ci_run_id" > "$RUNNER_TEMP/demo-deploy-target.json"
+
+      - name: Download the trusted K8s image digests
+        id: digest-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.target.outputs.ci_run_id }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/k8s-image-digests"
+          mkdir -p "$destination"
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "k8s-image-digests-$DEPLOY_SHA" --dir "$destination"
+          test -s "$destination/k8s-image-digests.json"
+          echo "path=$destination/k8s-image-digests.json" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tested source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+
+      - name: Install pinned kubectl
+        env:
+          KUBECTL_VERSION: v1.37.1
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/k8s-tools"
+          mkdir -p "$tools_dir"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60 \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+            --output "$tools_dir/kubectl"
+          printf '%s  %s\n' 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8 "$tools_dir/kubectl" \
+            | sha256sum --check --status
+          chmod 0755 "$tools_dir/kubectl"
+          echo "$tools_dir" >> "$GITHUB_PATH"
+
+      - name: Resolve and validate production image pins
+        id: pins
+        env:
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+          DIGEST_FILE: ${{ steps.digest-artifact.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/update-k8s-prod-pins.py \
+            --digest-file "$DIGEST_FILE" --expected-sha "$DEPLOY_SHA" \
+            >> "$GITHUB_OUTPUT"
+          kubectl kustomize deploy/k8s/prod > "$RUNNER_TEMP/k8s-prod.yaml"
+          bash .github/scripts/check-k8s-prod-image-pins.sh \
+            "$RUNNER_TEMP/k8s-prod.yaml"
+
+      - name: Verify build provenance for every production image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+          TEAGRAMD_DIGEST: ${{ steps.pins.outputs.teagramd }}
+          MIGRATIONS_DIGEST: ${{ steps.pins.outputs.migrations }}
+          MC_INIT_DIGEST: ${{ steps.pins.outputs.mc_init }}
+          LINK_LANDING_DIGEST: ${{ steps.pins.outputs.link_landing }}
+          LINK_SELECTOR_DIGEST: ${{ steps.pins.outputs.link_selector }}
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r image digest; do
+            gh attestation verify "oci://${image}@${digest}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --source-ref refs/heads/main \
+              --source-digest "$DEPLOY_SHA" \
+              --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml \
+              --format json >/dev/null
+          done <<EOF
+          ghcr.io/teagramhq/teagramd $TEAGRAMD_DIGEST
+          ghcr.io/teagramhq/teagram-migrations $MIGRATIONS_DIGEST
+          ghcr.io/teagramhq/teagramd-mc-init $MC_INIT_DIGEST
+          ghcr.io/teagramhq/link-edge-landing $LINK_LANDING_DIGEST
+          ghcr.io/teagramhq/link-edge-selector $LINK_SELECTOR_DIGEST
+          EOF
 
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
@@ -90,30 +164,63 @@ jobs:
           tags: tag:ci-deploy
           ping: 100.124.236.66
 
-      - name: Install the deploy key
+      - name: Install the restricted cluster kubeconfig
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}
         run: |
-          install -d -m 700 "$RUNNER_TEMP/ssh"
-          (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/id_deploy")
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          set -euo pipefail
+          install -m 0600 /dev/null "$RUNNER_TEMP/teagram-k3s.kubeconfig"
+          printf '%s\n' "$KUBECONFIG_CONTENT" > "$RUNNER_TEMP/teagram-k3s.kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/teagram-k3s.kubeconfig" >> "$GITHUB_ENV"
 
-      - name: Deploy the tested commit
+      - name: Validate the production release manifest
+        run: |
+          set -euo pipefail
+          kubectl auth can-i create jobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i create cronjobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i get cronjobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i create persistentvolumeclaims --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i patch persistentvolumeclaims --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-prod.yaml"
+          kubectl apply --dry-run=server -k deploy/k8s/backup-bootstrap
+
+      - name: Take and verify a pre-deploy PostgreSQL backup
+        env:
+          BACKUP_JOB: postgres-backup-predeploy-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          kubectl apply -k deploy/k8s/backup-bootstrap
+          kubectl create job "$BACKUP_JOB" --from=cronjob/postgres-backup \
+            --namespace teagram
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/postgres-backups \
+            --namespace teagram --timeout=300s
+          if ! kubectl wait --for=condition=complete "job/$BACKUP_JOB" \
+            --namespace teagram --timeout=900s; then
+            kubectl logs "job/$BACKUP_JOB" --namespace teagram \
+              --all-containers=true || true
+            exit 1
+          fi
+          kubectl logs "job/$BACKUP_JOB" --namespace teagram \
+            --all-containers=true | tee "$RUNNER_TEMP/predeploy-backup.log"
+          grep --extended-regexp --quiet \
+            '^backup=verified path=/backups/teagram-[A-Za-z0-9TZ._-]+\.dump bytes=[1-9][0-9]* sha256=[0-9a-f]{64}$' \
+            "$RUNNER_TEMP/predeploy-backup.log"
+
+      - name: Deploy, wait for workloads, and smoke the tested release
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-        run: |
-          ssh -T -i "$RUNNER_TEMP/ssh/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            root@100.124.236.66 "$DEPLOY_SHA" </dev/null
+          TEAGRAMD_IMAGE: ghcr.io/teagramhq/teagramd@${{ steps.pins.outputs.teagramd }}
+          MT_PROTO_ENDPOINT: teagram.tailaa4918.ts.net:2443
+          DISCOVERY_URL: https://teagram.tailaa4918.ts.net/.well-known/teagramd/client
+          LINK_SMOKE_URL: https://teagram.tailaa4918.ts.net/+k3s-smoke
+        run: bash deploy/k8s/deploy-release.sh "$RUNNER_TEMP/k8s-prod.yaml" "$DEPLOY_SHA"
 
-      - name: Remove the deploy key
+      - name: Remove the restricted cluster kubeconfig
         if: ${{ always() }}
-        run: rm -rf "$RUNNER_TEMP/ssh"
+        run: rm -f "$RUNNER_TEMP/teagram-k3s.kubeconfig"
 
       - name: Upload the demo deployment target
+        if: ${{ success() }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

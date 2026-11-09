@@ -30,7 +30,7 @@ fi
 manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Render and validate production and CI overlays") | .run' .github/workflows/ci.yml)"
 base_migration_check_line="$(grep -n -m 1 -F '.github/scripts/check-k8s-migration-version.sh' <<< "$manifest_step" | cut -d: -f1)"
 ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$manifest_step" | cut -d: -f1)"
-overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod prod-cutover ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod prod-cutover ci bootstrap bootstrap/ci backup-bootstrap' <<< "$manifest_step" | cut -d: -f1)"
 cutover_overlay_check_pattern="if [[ \"\$overlay\" == prod-cutover ]]"
 cutover_overlay_check_line="$(grep -n -m 1 -F "$cutover_overlay_check_pattern" <<< "$manifest_step" | cut -d: -f1)"
 base_sha_else_line="$(grep -n -m 1 -F 'else' <<< "$manifest_step" | cut -d: -f1)"
@@ -566,5 +566,84 @@ grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod \"\$linkselect
 grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod postgres-0 --dry-run=server" \
   .github/scripts/test-k8s-agent-access.sh ||
   fail 'the agent admission test must server-side dry-run a denied postgres delete'
+
+backup_cronjob=deploy/k8s/base/postgres-backup/cronjob.yaml
+backup_script=deploy/k8s/base/postgres-backup/backup.sh
+backup_pvc=deploy/k8s/base/postgres-backup/pvc.yaml
+[[ "$(yq -r '.spec.schedule' "$backup_cronjob")" == '17 3 * * *' &&
+   "$(yq -r '.spec.timeZone' "$backup_cronjob")" == 'Etc/UTC' &&
+   "$(yq -r '.spec.suspend' "$backup_cronjob")" == true &&
+   "$(yq -r '.spec.concurrencyPolicy' "$backup_cronjob")" == Forbid &&
+   "$(yq -r '.spec.successfulJobsHistoryLimit' "$backup_cronjob")" == 7 &&
+   "$(yq -r '.spec.failedJobsHistoryLimit' "$backup_cronjob")" == 3 ]] ||
+  fail 'the base backup CronJob must be suspended, UTC scheduled, serialized, and retain bounded history'
+[[ "$(yq -r '.spec.resources.requests.storage' "$backup_pvc")" == 20Gi &&
+   "$(yq -r '.spec.storageClassName' "$backup_pvc")" == local-path &&
+   "$(yq -r '.spec.accessModes[0]' "$backup_pvc")" == ReadWriteOnce ]] ||
+  fail 'the backup PVC must use the selected single-node local storage policy'
+[[ "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .image' "$backup_cronjob")" == \
+   'mirror.gcr.io/library/postgres:18-alpine@sha256:3b0ef735388b2cb097fc29b8bb421d86d57d0ddbe7aa1fbd6493e06d65028503' &&
+   "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .securityContext.runAsUser' "$backup_cronjob")" == 70 &&
+   "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .securityContext.readOnlyRootFilesystem' "$backup_cronjob")" == true ]] ||
+  fail 'the backup Job must use its pinned PostgreSQL image with a read-only, non-root container'
+for required_backup_line in \
+  'pg_dump --format=custom --no-owner --no-acl' \
+  'pg_restore --list' \
+  'backup=verified path=%s bytes=%s sha256=%s' \
+  'tail -n +8'; do
+  grep --fixed-strings --quiet -- "$required_backup_line" "$backup_script" ||
+    fail 'the backup command must verify each dump and prune files to seven'
+done
+grep --fixed-strings --quiet 'postgres-backup' deploy/k8s/base/kustomization.yaml ||
+  fail 'the production and CI base must include the backup resources'
+grep --fixed-strings --quiet 'suspend: false' deploy/k8s/prod/postgres-backup-cronjob.yaml ||
+  fail 'the production overlay must activate nightly backups after cutover'
+grep --fixed-strings --quiet '../base/postgres-backup' deploy/k8s/backup-bootstrap/kustomization.yaml ||
+  fail 'the pre-deploy overlay must provision only the suspended backup resources'
+for rbac_line in \
+  'resources: ["cronjobs", "jobs"]' \
+  'resources: ["persistentvolumeclaims"]' \
+  'verbs: ["create", "patch"]'; do
+  grep --fixed-strings --quiet -- "$rbac_line" deploy/k8s/deployer-access.yaml ||
+    fail 'the restricted deployer Role must manage backup Jobs and their PVC'
+done
+grep --fixed-strings --quiet 'expect_deployer_can_i yes create cronjobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify backup CronJob permissions'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes create persistentvolumeclaims' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify backup PVC permissions'
+
+release_script=deploy/k8s/deploy-release.sh
+release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$manifest"' "$release_script" | cut -d: -f1)"
+release_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename "$manifest"' "$release_script" | cut -d: -f1)"
+release_marker_line="$(grep -n -m 1 -F 'rollout=verified sha=%s' "$release_script" | cut -d: -f1)"
+release_smoke_line="$(grep -n -m 1 -F 'smoke-production.sh' "$release_script" | cut -d: -f1)"
+[[ "$release_dry_run_line" =~ ^[0-9]+$ && "$release_apply_line" =~ ^[0-9]+$ &&
+   "$release_smoke_line" =~ ^[0-9]+$ && "$release_marker_line" =~ ^[0-9]+$ &&
+   "$release_dry_run_line" -lt "$release_apply_line" &&
+   "$release_apply_line" -lt "$release_smoke_line" &&
+   "$release_smoke_line" -lt "$release_marker_line" ]] ||
+  fail 'the deploy runner must dry-run, apply, smoke, then emit the verified rollout marker'
+grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script" ||
+  fail 'the release runner must automatically undo changed workload revisions on failure'
+grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
+  fail 'the release runner must wait for every production workload rollout'
+grep --fixed-strings --quiet 'expected exactly one ready k3s tunnel connector' "$release_script" ||
+  fail 'the production release must leave exactly one ready k3s tunnel connector'
+
+backup_restore_test=deploy/k8s/test-postgres-backup-restore.sh
+for restore_line in \
+  'kubectl create job "$backup_job" --from=cronjob/postgres-backup' \
+  'dropdb --username=postgres --force teagram' \
+  'kubectl apply --filename deploy/k8s/test-postgres-backup-restore-job.yaml' \
+  '--username-file /username' \
+  'backup=restore-sign-in-verified'; do
+  grep --fixed-strings --quiet -- "$restore_line" "$backup_restore_test" ||
+    fail 'the throwaway backup regression must restore a dump and sign in with the restored account'
+done
+release_test_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Verify successful release and automatic bad-image rollback") | .run' .github/workflows/ci.yml)"
+[[ "$release_test_step" == *'deploy/k8s/deploy-release.sh'* &&
+   "$release_test_step" == *'rollback=verified resource=statefulset/teagramd'* &&
+   "$release_test_step" == *'test "$restored_image" = "$previous_image"'* ]] ||
+  fail 'the K3s integration must force a bad deploy and verify automatic revision restoration'
 
 printf 'K8s deployment contract passed\n'
