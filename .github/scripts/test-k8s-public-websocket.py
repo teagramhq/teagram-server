@@ -58,7 +58,7 @@ def test_discovery(host, port):
     request = urllib.request.Request(
         f"http://{host}:{port}/.well-known/teagramd/client",
         headers={
-            "Host": "server.example.test",
+            "Host": "web.example.test",
             "CF-Connecting-IP": "192.0.2.1",
         },
     )
@@ -80,7 +80,7 @@ def test_websocket(host, port, origin, expected_status):
     ).decode("ascii")
     request = (
         "GET /apiws HTTP/1.1\r\n"
-        "Host: server.example.test\r\n"
+        "Host: web.example.test\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"

@@ -12,7 +12,7 @@ spec:
           command: ["socat"]
           args:
             - TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork
-            - TCP:teagramd:2446
+            - TCP:linkselector:8081
           env:
             - $patch: replace
           ports:

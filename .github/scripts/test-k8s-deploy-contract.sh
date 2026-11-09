@@ -328,8 +328,10 @@ grep --fixed-strings --quiet 'test-k8s-public-websocket.py' .github/workflows/ci
   fail 'the k3s deployment test must exercise public discovery and a WebSocket session through its connector'
 grep --fixed-strings --quiet 'foreign.example.test", 403' .github/scripts/test-k8s-public-websocket.py ||
   fail 'the public WebSocket connector test must reject a foreign origin with HTTP 403'
-grep --fixed-strings --quiet 'TCP:teagramd:2446' deploy/k8s/ci/cloudflared-ci.yaml ||
-  fail 'the deployment test connector must route to the public WebSocket Service port'
+grep --fixed-strings --quiet 'TCP:linkselector:8081' deploy/k8s/ci/cloudflared-ci.yaml ||
+  fail 'the deployment test connector must exercise the Web selector and its public API routes'
+grep --fixed-strings --quiet -- 'http://teagramd:2446' deploy/k8s/base/linkselector-deployment.yaml ||
+  fail 'the Web selector must route the exact public API paths to teagramd'
 if grep --fixed-strings --quiet 'local-blob-migration' deploy/k8s/prod-cutover/kustomization.yaml; then
   fail 'the cutover must preserve encrypted S3 objects directly, without a local-blob migration Job'
 fi

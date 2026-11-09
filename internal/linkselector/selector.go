@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"strings"
@@ -32,6 +34,7 @@ const (
 	inviteRouteClass      = "invite"
 	usernameRouteClass    = "username"
 	messageRouteClass     = "message"
+	serverAPIRouteClass   = "server_api"
 	webRouteClass         = "web"
 	unavailableRouteClass = "unavailable"
 
@@ -60,10 +63,12 @@ var (
 )
 
 type selector struct {
+	serverURL        *url.URL
 	webURL           *url.URL
 	landingURL       *url.URL
 	inviteTargets    linklanding.InviteTargets
 	client           *http.Client
+	serverTransport  *http.Transport
 	logger           *slog.Logger
 	stagedWebBodies  *semaphore.Weighted
 	admissionTimeout time.Duration // Production uses upstreamTimeout; in-package tests shorten it.
@@ -77,9 +82,9 @@ type requestOutcome struct {
 	upstreamStatus int
 }
 
-// NewHandler builds a selector that forwards only allowlisted Web paths and
-// sends every other request to the isolated landing service.
-func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.Handler, error) {
+// NewHandler builds a selector that forwards only allowlisted Web and server
+// API paths and sends every other request to the isolated landing service.
+func NewHandler(serverUpstream, webUpstream, landingUpstream string, logger *slog.Logger) (http.Handler, error) {
 	inviteTargets, err := linklanding.InviteTargetsFromEnvironment()
 	if err != nil {
 		return nil, fmt.Errorf("configure invite landing targets: %w", err)
@@ -91,6 +96,13 @@ func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.
 	landingURL, err := parseUpstream(landingUpstream)
 	if err != nil {
 		return nil, errors.New("invalid landing upstream")
+	}
+	var serverURL *url.URL
+	if serverUpstream != "" {
+		serverURL, err = parseUpstream(serverUpstream)
+		if err != nil {
+			return nil, errors.New("invalid server upstream")
+		}
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -110,6 +122,18 @@ func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.
 		ExpectContinueTimeout:  time.Second,
 		DisableCompression:     true,
 	}
+	serverTransport := &http.Transport{
+		Proxy:                  nil,
+		DialContext:            dialer.DialContext,
+		MaxIdleConns:           16,
+		MaxIdleConnsPerHost:    8,
+		MaxResponseHeaderBytes: 8192,
+		IdleConnTimeout:        30 * time.Second,
+		TLSHandshakeTimeout:    upstreamDialTimeout,
+		ResponseHeaderTimeout:  upstreamDialTimeout,
+		ExpectContinueTimeout:  time.Second,
+		DisableCompression:     true,
+	}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   upstreamTimeout,
@@ -119,10 +143,12 @@ func NewHandler(webUpstream, landingUpstream string, logger *slog.Logger) (http.
 	}
 
 	return &selector{
+		serverURL:        serverURL,
 		webURL:           webURL,
 		landingURL:       landingURL,
 		inviteTargets:    inviteTargets,
 		client:           client,
+		serverTransport:  serverTransport,
 		logger:           logger,
 		stagedWebBodies:  semaphore.NewWeighted(maxStagedWebBodyBytes),
 		admissionTimeout: upstreamTimeout,
@@ -146,12 +172,19 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response := &statusWriter{ResponseWriter: w}
 	class := target.class
 	var outcome requestOutcome
-	if target.web {
+	switch {
+	case target.serverAPI && s.serverURL != nil:
+		outcome = s.serveServerAPI(response, r)
+	case target.serverAPI:
+		target = requestTarget{class: defaultRouteClass, landingPath: "/"}
+		class = target.class
+		outcome = s.serveLanding(response, r, target.landingPath)
+	case target.web:
 		outcome = s.serveWeb(response, r, target)
-	} else {
+	default:
 		outcome = s.serveLanding(response, r, target.landingPath)
 	}
-	if outcome.failed || (target.web && response.writeErr) {
+	if outcome.failed || ((target.web || target.serverAPI) && response.writeErr) {
 		class = unavailableRouteClass
 	}
 	status := response.status
@@ -173,6 +206,29 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
 	}
 	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
+}
+
+func (s *selector) serveServerAPI(w http.ResponseWriter, incoming *http.Request) requestOutcome {
+	failed := false
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.SetURL(s.serverURL)
+			request.Out.Header.Del("Authorization")
+			request.Out.Header.Del("Cookie")
+			request.Out.Header.Del("Referer")
+		},
+		Transport: s.serverTransport,
+		ErrorLog:  log.New(io.Discard, "", 0),
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			failed = true
+			writeUnavailable(w, webErrorStatus)
+		},
+	}
+	proxy.ServeHTTP(w, incoming)
+	if failed {
+		return requestOutcome{failed: true, reason: reasonTransport}
+	}
+	return requestOutcome{reason: reasonOK}
 }
 
 func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, path string) requestOutcome {
@@ -399,6 +455,7 @@ func writeUnavailable(w http.ResponseWriter, status int) {
 
 type requestTarget struct {
 	class       string
+	serverAPI   bool
 	web         bool
 	path        string
 	query       string
@@ -417,6 +474,9 @@ func classifyTarget(method, requestURI string) requestTarget {
 	if isAdminPath(rawPath) {
 		return requestTarget{class: defaultRouteClass, landingPath: "/admin"}
 	}
+	if isServerAPIPath(rawPath) {
+		return requestTarget{class: serverAPIRouteClass, serverAPI: true}
+	}
 	if rawPath == linklanding.InviteLandingPath {
 		return requestTarget{class: inviteRouteClass, landingPath: linklanding.InviteLandingPath}
 	}
@@ -433,6 +493,15 @@ func classifyTarget(method, requestURI string) requestTarget {
 		}
 	}
 	return requestTarget{class: defaultRouteClass, landingPath: "/"}
+}
+
+func isServerAPIPath(path string) bool {
+	switch path {
+	case "/apiws", "/.well-known/teagramd/client", "/.well-known/telegramd/client":
+		return true
+	default:
+		return false
+	}
 }
 
 func splitRequestTarget(requestURI string) (path, query string, hasQuery, valid bool) {

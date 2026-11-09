@@ -164,9 +164,11 @@ digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
 
 The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
-target `http://linkselector:8081`. The selector sends teagramd links to
-`http://linklanding:8082` and ordinary web traffic to the `web` Service on
-port 8080. For `server.teagram.io`, route `^/apiws` and
+target `http://linkselector:8081`. The selector sends the exact public API paths
+`/apiws`, `/.well-known/teagramd/client`, and the legacy
+`/.well-known/telegramd/client` to `http://teagramd:2446`; it sends teagramd
+links to `http://linklanding:8082` and ordinary web traffic to the `web`
+Service on port 8080. For `server.teagram.io`, route `^/apiws` and
 `^/\.well-known/teagramd/client` to `http://teagramd:2446`. The public
 listener is a ClusterIP Service port, accepts the Compose origin allowlist,
 uses the live `TG_PUBLIC_REGISTRATION=invite` policy, and reads its discovery

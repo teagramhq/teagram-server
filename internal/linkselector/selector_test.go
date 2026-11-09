@@ -89,6 +89,70 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 	}
 }
 
+func TestPublicServerAPIPathsUseServerUpstream(t *testing.T) {
+	var serverRequests, webRequests, landingRequests []observedRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverRequests = append(serverRequests, observeRequest(t, r))
+		w.Header().Set("Content-Type", "application/json")
+		writeTestResponse(t, w, `{"version":1}`)
+	}))
+	t.Cleanup(server.Close)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests = append(webRequests, observeRequest(t, r))
+		writeTestResponse(t, w, webBody)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(recordingLanding(t, &landingRequests))
+	t.Cleanup(landing.Close)
+	handler := newSelectorWithServer(t, server.URL, web.URL, landing.URL, slog.New(slog.DiscardHandler))
+
+	discoveryRequest := rawRequest(http.MethodGet, "/.well-known/teagramd/client?cache=1", "")
+	discoveryRequest.URL = &url.URL{Path: "/.well-known/teagramd/client", RawQuery: "cache=1"}
+	discoveryRequest.Host = "web.example.test"
+	discoveryRequest.Header.Set("Origin", "https://web.example.test")
+	discoveryRequest.Header.Set("Authorization", "Bearer private-marker")
+	discoveryRequest.Header.Set("Cookie", "session=private-marker")
+	discoveryRequest.Header.Set("Referer", "https://web.example.test/private-marker")
+	discoveryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(discoveryResponse, discoveryRequest)
+	if discoveryResponse.Code != http.StatusOK || discoveryResponse.Header().Get("Content-Type") != "application/json" || discoveryResponse.Body.String() != `{"version":1}` {
+		t.Fatalf("public discovery response = %d %q %q, want server JSON", discoveryResponse.Code, discoveryResponse.Header().Get("Content-Type"), discoveryResponse.Body.String())
+	}
+
+	websocketRequest := rawRequest(http.MethodGet, "/apiws", "")
+	websocketRequest.URL = &url.URL{Path: "/apiws"}
+	websocketResponse := httptest.NewRecorder()
+	handler.ServeHTTP(websocketResponse, websocketRequest)
+	if websocketResponse.Code != http.StatusOK || websocketResponse.Body.String() != `{"version":1}` {
+		t.Fatalf("public API path response = %d %q, want server response", websocketResponse.Code, websocketResponse.Body.String())
+	}
+	for _, target := range []string{"/.well-known/teagramd/client/extra", "/apiws/extra"} {
+		response := serveTarget(handler, http.MethodGet, target, "")
+		if response.Code != http.StatusOK || response.Body.String() != landingBody {
+			t.Errorf("GET %s = %d %q, want landing fallback", target, response.Code, response.Body.String())
+		}
+	}
+	if len(serverRequests) != 2 || serverRequests[0].requestURI != "/.well-known/teagramd/client?cache=1" || serverRequests[1].requestURI != "/apiws" {
+		t.Errorf("server requests = %+v, want only the exact discovery and WebSocket paths", serverRequests)
+	}
+	if len(serverRequests) > 0 && serverRequests[0].header.Get("Origin") != "https://web.example.test" {
+		t.Errorf("discovery Origin = %q, want the public Web origin", serverRequests[0].header.Get("Origin"))
+	}
+	if len(serverRequests) > 0 {
+		for _, header := range []string{"Authorization", "Cookie", "Referer"} {
+			if got := serverRequests[0].header.Get(header); got != "" {
+				t.Errorf("server discovery request forwarded %s %q", header, got)
+			}
+		}
+	}
+	if len(webRequests) != 0 {
+		t.Errorf("server API paths reached Web: %+v", webRequests)
+	}
+	if len(landingRequests) != 2 {
+		t.Errorf("non-allowlisted API paths reached landing %d times, want 2", len(landingRequests))
+	}
+}
+
 func TestInvitePathUsesLandingAndDropsQuery(t *testing.T) {
 	var webRequests, landingRequests []observedRequest
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -514,11 +578,16 @@ func TestNewHandlerRejectsUpstreamsWithRequestData(t *testing.T) {
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	for _, badURL := range []string{"", "/relative", "ftp://web.example", "http://user:pass@web.example", "http://web.example/base", "http://web.example/?secret=1", "http://web.example/#fragment"} {
-		if _, err := linkselector.NewHandler(badURL, "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
+		if _, err := linkselector.NewHandler("http://server:2446", badURL, "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("NewHandler accepted unsafe Web upstream %q", badURL)
 		}
 	}
-	if _, err := linkselector.NewHandler("http://web:8080/", "http://landing:8082", nil); err != nil {
+	for _, badURL := range []string{"/relative", "ftp://server.example", "http://user:pass@server.example", "http://server.example/base", "http://server.example/?secret=1", "http://server.example/#fragment"} {
+		if _, err := linkselector.NewHandler(badURL, "http://web:8080", "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
+			t.Errorf("NewHandler accepted unsafe server upstream %q", badURL)
+		}
+	}
+	if _, err := linkselector.NewHandler("http://server:2446", "http://web:8080/", "http://landing:8082", nil); err != nil {
 		t.Errorf("NewHandler rejected plain service origins: %v", err)
 	}
 }
@@ -554,9 +623,14 @@ func TestSelectorSmokeHappyPath(t *testing.T) {
 
 func newSelector(t *testing.T, webURL, landingURL string, logger *slog.Logger) http.Handler {
 	t.Helper()
+	return newSelectorWithServer(t, "", webURL, landingURL, logger)
+}
+
+func newSelectorWithServer(t *testing.T, serverURL, webURL, landingURL string, logger *slog.Logger) http.Handler {
+	t.Helper()
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
-	handler, err := linkselector.NewHandler(webURL, landingURL, logger)
+	handler, err := linkselector.NewHandler(serverURL, webURL, landingURL, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
