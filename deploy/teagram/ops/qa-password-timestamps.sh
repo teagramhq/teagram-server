@@ -39,34 +39,128 @@ if ! docker exec "$POSTGRES_CONTAINER" pg_isready --quiet --username postgres --
 fi
 
 query=$(cat <<'SQL'
-WITH targets(handle) AS (VALUES ('test1'), ('test2'))
+WITH targets(handle) AS (VALUES ('qa'), ('qa2'), ('test1'), ('test2')),
+username_rows AS (
+    SELECT targets.handle,
+           username.handle AS username_handle,
+           username.owner_type,
+           username.owner_id
+    FROM targets
+    LEFT JOIN usernames AS username ON username.handle = targets.handle
+),
+user_links AS (
+    SELECT username_rows.handle, users.id AS user_id
+    FROM username_rows
+    JOIN users ON username_rows.owner_type = 'user' AND users.id = username_rows.owner_id
+
+    UNION
+
+    SELECT targets.handle, users.id
+    FROM targets
+    JOIN users ON users.username = targets.handle
+),
+user_summary AS (
+    SELECT targets.handle,
+           COUNT(user_links.user_id) AS user_count,
+           MIN(user_links.user_id) AS user_id
+    FROM targets
+    LEFT JOIN user_links ON user_links.handle = targets.handle
+    GROUP BY targets.handle
+)
 SELECT targets.handle,
        CASE
-           WHEN username.owner_id IS NULL THEN 'MISSING_ACCOUNT'
-           ELSE COALESCE(
+           WHEN user_summary.user_count = 1 THEN 'PRESENT'
+           WHEN user_summary.user_count > 1 THEN 'MULTIPLE'
+           WHEN username_rows.username_handle IS NULL THEN 'UNRESOLVED_BY_HANDLE'
+           WHEN username_rows.owner_type = 'user' THEN 'MISSING_TARGET_USER'
+           ELSE 'NOT_A_USER_HANDLE'
+       END,
+       CASE WHEN username_rows.username_handle IS NULL THEN 'ABSENT' ELSE 'PRESENT' END,
+       CASE
+           WHEN username_rows.username_handle IS NULL THEN 'NONE'
+           WHEN username_rows.owner_type = 'user' AND username_owner.id IS NOT NULL THEN 'YES'
+           ELSE 'NO'
+       END,
+       'NOT_STORED',
+       CASE
+           WHEN user_summary.user_count = 1 THEN COALESCE(
                TO_CHAR(up.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                'NULL'
            )
+           WHEN user_summary.user_count > 1 THEN 'AMBIGUOUS'
+           ELSE 'UNKNOWN'
        END
 FROM targets
-LEFT JOIN usernames AS username
-  ON username.handle = targets.handle AND username.owner_type = 'user'
+JOIN username_rows ON username_rows.handle = targets.handle
+JOIN user_summary ON user_summary.handle = targets.handle
+LEFT JOIN users AS username_owner
+  ON username_rows.owner_type = 'user' AND username_owner.id = username_rows.owner_id
 LEFT JOIN user_passwords AS up
-  ON up.user_id = username.owner_id
+  ON user_summary.user_count = 1 AND up.user_id = user_summary.user_id
 ORDER BY targets.handle;
 SQL
 )
 if ! result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
-  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$query" 2>/dev/null); then
-  fail 'password timestamp query failed'
+  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$query"); then
+  fail 'account status query failed'
+fi
+
+orphan_query=$(cat <<'SQL'
+-- username_mode_orphans
+SELECT users.id,
+       TO_CHAR(users.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+       CASE WHEN up.user_id IS NULL THEN 'ABSENT' ELSE 'PRESENT' END,
+       COALESCE(
+           TO_CHAR(up.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'NOT_APPLICABLE'
+       )
+FROM users
+LEFT JOIN user_passwords AS up ON up.user_id = users.id
+WHERE users.login_mode = 'username'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM usernames AS username
+      WHERE username.owner_type = 'user' AND username.owner_id = users.id
+  )
+ORDER BY users.id;
+SQL
+)
+if ! orphan_result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
+  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$orphan_query"); then
+  fail 'orphan account query failed'
 fi
 
 mapfile -t rows <<< "$result"
-timestamp_pattern='(MISSING_ACCOUNT|NULL|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z)'
+user_row_pattern='(PRESENT|MULTIPLE|MISSING_TARGET_USER|NOT_A_USER_HANDLE|UNRESOLVED_BY_HANDLE)'
+username_row_pattern='(PRESENT|ABSENT)'
+username_owner_pattern='(YES|NO|NONE)'
+timestamp_pattern='(UNKNOWN|AMBIGUOUS|NULL|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z)'
 tab=$'\t'
-[[ "${#rows[@]}" == 2 && "${rows[0]}" =~ ^test1${tab}${timestamp_pattern}$ && \
-  "${rows[1]}" =~ ^test2${tab}${timestamp_pattern}$ ]] || {
-  fail 'password timestamp query returned an invalid result shape'
-}
+if [[ "${#rows[@]}" == 4 && \
+  "${rows[0]}" =~ ^qa${tab}${user_row_pattern}${tab}${username_row_pattern}${tab}${username_owner_pattern}${tab}NOT_STORED${tab}${timestamp_pattern}$ && \
+  "${rows[1]}" =~ ^qa2${tab}${user_row_pattern}${tab}${username_row_pattern}${tab}${username_owner_pattern}${tab}NOT_STORED${tab}${timestamp_pattern}$ && \
+  "${rows[2]}" =~ ^test1${tab}${user_row_pattern}${tab}${username_row_pattern}${tab}${username_owner_pattern}${tab}NOT_STORED${tab}${timestamp_pattern}$ && \
+  "${rows[3]}" =~ ^test2${tab}${user_row_pattern}${tab}${username_row_pattern}${tab}${username_owner_pattern}${tab}NOT_STORED${tab}${timestamp_pattern}$ ]]; then
+  :
+else
+  fail 'account status query returned an invalid result shape'
+fi
+
+orphan_rows=()
+if [[ -n "$orphan_result" ]]; then
+  mapfile -t orphan_rows <<< "$orphan_result"
+fi
+orphan_timestamp_pattern='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z'
+for row in "${orphan_rows[@]}"; do
+  [[ "$row" =~ ^[0-9]+${tab}${orphan_timestamp_pattern}${tab}(PRESENT|ABSENT)${tab}(NOT_APPLICABLE|${orphan_timestamp_pattern})$ ]] || {
+    fail 'orphan account query returned an invalid result shape'
+  }
+done
 
 printf '%s\n' "${rows[@]}"
+printf '%s\n' 'unlinked_username_users (id, created_at, password_row, password_updated_at):'
+if [[ "${#orphan_rows[@]}" == 0 ]]; then
+  printf '%s\n' 'NONE'
+else
+  printf '%s\n' "${orphan_rows[@]}"
+fi

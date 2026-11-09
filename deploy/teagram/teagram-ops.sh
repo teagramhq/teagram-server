@@ -37,7 +37,7 @@ teagram-ops verbs (read-only unless noted):
                             cleanup-media --acceptance-passed removes plaintext media
                             attest-blob-mode-reports preserves missing reports after a live S3 census
                             quarantine-unaccounted-media --check previews, --apply quarantines, --restore <run-id> restores
-                            qa-password-timestamps reads only test1 and test2 password row timestamps
+                            qa-password-timestamps reads account and password-row status for qa, qa2, test1, and test2
 EOF
 }
 
