@@ -239,6 +239,10 @@ ingress_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Probe 
    "$ingress_step" != *'kubectl port-forward'* ]] ||
   fail 'k8s-deploy must exercise ingress from in-cluster identities without port-forward'
 ci_overlay="$(kubectl kustomize deploy/k8s/ci)"
+ci_advertise_addr="$(yq -r 'select(.kind == "ConfigMap" and (.metadata.name | test("^teagramd-runtime-"))) | .data.TG_ADVERTISE_ADDR' <<<"$ci_overlay")"
+mtproto_smoke_endpoint="$(yq -r '.spec.template.spec.containers[] | select(.name == "smoke") | .command[2]' deploy/k8s/ci/mtproto-probe-job.yaml)"
+[[ "$ci_advertise_addr" == 'teagramd:2443' && "$mtproto_smoke_endpoint" == "$ci_advertise_addr" ]] ||
+  fail 'the in-cluster MTProto smoke must use the endpoint advertised by the CI server'
 if yq --exit-status 'select(.kind == "Job" and .metadata.name == "mtproto-smoke")' \
   <<<"$ci_overlay" >/dev/null 2>&1; then
   fail 'the MTProto smoke Job must be created after its generated client ConfigMap'

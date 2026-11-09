@@ -12,7 +12,7 @@ configMapGenerator:
   - name: teagramd-runtime
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
-      - TG_ADVERTISE_ADDR=127.0.0.1:12443
+      - TG_ADVERTISE_ADDR=teagramd:2443
       - TG_MEDIA_KEY_CURRENT=1
   - name: link-edge-runtime
     literals:
