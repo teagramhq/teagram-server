@@ -22,7 +22,7 @@ teagram-ops verbs (read-only unless noted):
   logs <since>              teagramd logs since an RFC3339 UTC time (same as teagram-logs)
   env-names                 names of keys in /opt/teagram/.env, never values
   fingerprints              sha256 of .env, override, rollout-env record and compose files
-  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media> [args]
+  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
                             runs an allowlisted script from that commit only if
                             the commit is on origin/main
                             apply-user-invite-quota default mutates live state;
@@ -37,6 +37,7 @@ teagram-ops verbs (read-only unless noted):
                             cleanup-media --acceptance-passed removes plaintext media
                             attest-blob-mode-reports preserves missing reports after a live S3 census
                             quarantine-unaccounted-media --check previews, --apply quarantines, --restore <run-id> restores
+                            qa-password-timestamps reads only test1 and test2 password row timestamps
 EOF
 }
 
@@ -70,7 +71,7 @@ case "$VERB" in
     case "$NAME" in [a-z0-9]*) ;; *) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in *[!a-z0-9-]*) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in
-      target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media) ;;
+      target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps) ;;
       *)
         logger -t teagram-ops "refused operation: $NAME"
         echo "teagram-ops: operation is not allowlisted" >&2
