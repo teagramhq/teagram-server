@@ -1018,8 +1018,10 @@ WITH member AS MATERIALIZED (
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
 ), expiring_bound AS MATERIALIZED (
     -- The unexpired expiring total at this statement's timestamp, or NULL (no
-    -- limit) when the nodes are not initialized or contradict each other, so a
-    -- bad summary can only cost rows, never drop posts.
+    -- limit) when the nodes are not initialized or detectably contradictory
+    -- (more expired than total); those cases cost rows. Otherwise the total is
+    -- trusted like the history count: a self-consistent undercount drops the
+    -- unexpired posts with the earliest expiry.
     SELECT CASE WHEN counts.expiring_ready
                  AND counts.expiring_expired <= counts.expiring_total
                 THEN counts.expiring_total - counts.expiring_expired
@@ -1156,8 +1158,8 @@ type ChannelHistoryPageUnexpiredRow struct {
 // Cost follows the unexpired expiring posts, so the caller picks this statement
 // only when the expired backlog is larger. The expiring stream is bounded by
 // the channel's unexpired expiring total, read from the summary in this
-// statement; when the summary is not ready or is inconsistent the bound is
-// dropped and the stream is limited only by the expiry predicate.
+// statement; when the summary is not ready or detectably contradictory the
+// bound is dropped and the stream is limited only by the expiry predicate.
 func (q *Queries) ChannelHistoryPageUnexpired(ctx context.Context, arg ChannelHistoryPageUnexpiredParams) ([]ChannelHistoryPageUnexpiredRow, error) {
 	rows, err := q.db.Query(ctx, channelHistoryPageUnexpired,
 		arg.MaxID,
