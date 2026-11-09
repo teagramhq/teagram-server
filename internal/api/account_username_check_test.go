@@ -118,7 +118,7 @@ func TestCheckAccountUsernameAvailabilityAndValidation(t *testing.T) {
 	}
 
 	pool := usernameLookupPool(t, dsn)
-	invalidUsernames := []string{"bad-name", "admin", "bot", "bots", "xbot", "x_Bot", "WeatherBOT"}
+	invalidUsernames := []string{"bad-name", "admin", "bot", "bots", "xbot", "x_Bot", "WeatherBOT", "tdhbcfiles", "TDHBCFiles"}
 	before := 0
 	for _, username := range invalidUsernames {
 		before += usernameLookupCount(t, pool, caller.ID, username)
@@ -169,7 +169,7 @@ func TestCheckPreAuthUsernameAvailabilityAndValidation(t *testing.T) {
 		}
 	}
 
-	for _, username := range []string{"bad-name", "ADMIN", "ApIwS", "a", "1start", strings.Repeat("a", 33)} {
+	for _, username := range []string{"bad-name", "ADMIN", "ApIwS", "tdhbcfiles", "TDHBCFiles", "a", "1start", strings.Repeat("a", 33)} {
 		if _, rpc := checkAccountUsernameWithAddr(t, h, 0, netip.Addr{}, username); rpc == nil || rpc.ErrorMessage != "USERNAME_INVALID" {
 			t.Errorf("pre-auth check invalid %q error = %v, want USERNAME_INVALID", username, rpc)
 		}

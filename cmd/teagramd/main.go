@@ -711,6 +711,9 @@ func runBotCommandWithIO(args []string, log *slog.Logger, stdin io.Reader, stdou
 			return botUsageError()
 		}
 		username, firstName = args[1], args[2]
+		if api.IsReservedUsername(username) {
+			return errors.New("reserved username handle")
+		}
 	case "rotate", "revoke":
 		if len(args) != 2 {
 			return botUsageError()

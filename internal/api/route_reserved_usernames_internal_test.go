@@ -4,6 +4,7 @@ import "testing"
 
 func TestRouteConflictingUsernamesAreReserved(t *testing.T) {
 	for _, username := range []string{
+		"tdhbcfiles", "TDHBCFiles",
 		"apiws", "ApIwS",
 		"share", "ShArE",
 		"stream", "StReAm",
