@@ -179,6 +179,7 @@ func TestSmoke(t *testing.T) {
 		testSmokeDefaultDialogFilter(t)
 	})
 	t.Run("dialog-pins", func(t *testing.T) {
+		t.Parallel()
 		testSmokeDialogPins(t)
 	})
 	t.Run("dialog-filters", func(t *testing.T) {
