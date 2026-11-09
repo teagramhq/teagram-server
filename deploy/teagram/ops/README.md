@@ -26,38 +26,46 @@ Postgres container identities and the expected Compose file set before
 querying user, username, and password-row state. Each tab-separated output row
 contains the handle, user-row state, username-row state, whether that row
 points to a user, the username timestamp, and the password row's UTC
-`updated_at`.
+`updated_at`. After those four rows, a second result lists every
+`login_mode = 'username'` user with no user-owned `usernames` row. It contains
+only the user ID, account creation time, password-row presence, and password
+row `updated_at`; `NOT_APPLICABLE` means there is no password row. This list is
+not handle-keyed and cannot by itself attribute an orphan to one of the four
+handles.
 
 `UNRESOLVED_BY_HANDLE` means neither the username row nor `users.username`
-currently identifies a user row for that handle; it does not establish whether
-an unlinked user row remains. The `usernames` schema stores no row timestamp, so
-the timestamp field is `NOT_STORED`. A password timestamp is `NULL` when the
-associated user has no password row, `UNKNOWN` when no unique user row can be
-identified, and `AMBIGUOUS` when multiple rows match. The operation never
-selects or prints salts, verifiers, or password values.
+currently identifies a user row for that handle; check the second result for
+username-mode user rows without a user-owned username mapping. The
+`usernames` schema stores no row timestamp, so the timestamp field is
+`NOT_STORED`. A password timestamp is `NULL` when the associated user has no
+password row, `UNKNOWN` when no unique user row can be identified, and
+`AMBIGUOUS` when multiple rows match. The operation never selects or prints
+names, phone numbers, salts, verifiers, or password values.
 
 ### Threat model
 
 The protected data is the existence and current owner of these four QA handles
-and the associated password-row update times. The invoker controls the SSH menu
-request, but the forced-command dispatcher accepts only an allowlisted operation
-from a full commit SHA on `origin/main`, builds the script path itself, and
-`qa-password-timestamps` accepts no arguments. Any agent runtime holding the
-`teagram-ops` SSH key can invoke this bounded read; key custody, the dispatcher,
-and reviewed `main` are trusted. A stolen key or malicious reviewed script could
-expose QA account metadata, while this operation cannot change account rows or
-expand its fixed handle set.
+and their password-row update times, plus the IDs, creation times, and password
+row state/timestamps of all username-mode users without a user-owned username
+row. The invoker controls the SSH menu request, but the forced-command
+dispatcher accepts only an allowlisted operation from a full commit SHA on
+`origin/main`, builds the script path itself, and `qa-password-timestamps`
+accepts no arguments. Any agent runtime holding the `teagram-ops` SSH key can
+invoke this read; key custody, the dispatcher, and reviewed `main` are trusted.
+A stolen key or malicious reviewed script could expose this account metadata,
+while the operation cannot change account rows or read names, phone numbers, or
+credential material.
 
 The script verifies the existing server and Postgres containers and Compose
-selection, runs a fixed `SELECT`, validates its four-row output, and stores no
-result. Query output and Postgres diagnostics are returned to the caller's
-terminal. If reported, keep the metadata in the issue that requested it and
-include no credential material; do not copy raw output into CI logs, PR text,
-repository files, or general logs. Issue readers can see account existence,
-ownership, and password-row timing. Because the operation remains allowlisted
-after merge, this is a standing disclosure risk for every authorized key
-holder; remove the operation from the dispatcher and allowlist when it is no
-longer needed.
+selection, runs two fixed `SELECT`s, validates the four handle rows and every
+orphan row, and stores no result. Query output and Postgres diagnostics are
+returned to the caller's terminal. If reported, keep the metadata in the issue
+that requested it and include no credential material; do not copy raw output
+into CI logs, PR text, repository files, or general logs. Issue readers can see
+the account existence, ownership, creation times, and password-row state/timing
+described above. Because the operation remains allowlisted after merge, this
+is a standing disclosure risk for every authorized key holder; remove the
+operation from the dispatcher and allowlist when it is no longer needed.
 
 Run it from its merged `main` commit:
 

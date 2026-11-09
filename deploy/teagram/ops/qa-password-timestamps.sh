@@ -105,6 +105,31 @@ if ! result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
   fail 'account status query failed'
 fi
 
+orphan_query=$(cat <<'SQL'
+-- username_mode_orphans
+SELECT users.id,
+       TO_CHAR(users.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+       CASE WHEN up.user_id IS NULL THEN 'ABSENT' ELSE 'PRESENT' END,
+       COALESCE(
+           TO_CHAR(up.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'NOT_APPLICABLE'
+       )
+FROM users
+LEFT JOIN user_passwords AS up ON up.user_id = users.id
+WHERE users.login_mode = 'username'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM usernames AS username
+      WHERE username.owner_type = 'user' AND username.owner_id = users.id
+  )
+ORDER BY users.id;
+SQL
+)
+if ! orphan_result=$(docker exec "$POSTGRES_CONTAINER" psql -X -A -t -q -F $'\t' \
+  -U postgres -d teagram -v ON_ERROR_STOP=1 -c "$orphan_query"); then
+  fail 'orphan account query failed'
+fi
+
 mapfile -t rows <<< "$result"
 user_row_pattern='(PRESENT|MULTIPLE|MISSING_TARGET_USER|NOT_A_USER_HANDLE|UNRESOLVED_BY_HANDLE)'
 username_row_pattern='(PRESENT|ABSENT)'
@@ -121,4 +146,21 @@ else
   fail 'account status query returned an invalid result shape'
 fi
 
+orphan_rows=()
+if [[ -n "$orphan_result" ]]; then
+  mapfile -t orphan_rows <<< "$orphan_result"
+fi
+orphan_timestamp_pattern='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z'
+for row in "${orphan_rows[@]}"; do
+  [[ "$row" =~ ^[0-9]+${tab}${orphan_timestamp_pattern}${tab}(PRESENT|ABSENT)${tab}(NOT_APPLICABLE|${orphan_timestamp_pattern})$ ]] || {
+    fail 'orphan account query returned an invalid result shape'
+  }
+done
+
 printf '%s\n' "${rows[@]}"
+printf '%s\n' 'unlinked_username_users (id, created_at, password_row, password_updated_at):'
+if [[ "${#orphan_rows[@]}" == 0 ]]; then
+  printf '%s\n' 'NONE'
+else
+  printf '%s\n' "${orphan_rows[@]}"
+fi
