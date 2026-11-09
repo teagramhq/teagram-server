@@ -14,6 +14,13 @@ import urllib.request
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
+def validate_discovery_document(discovery):
+    mtproto = discovery.get("mtproto") if isinstance(discovery, dict) else None
+    rsa_spki = mtproto.get("rsa_spki") if isinstance(mtproto, dict) else None
+    if not isinstance(rsa_spki, str) or not rsa_spki:
+        raise RuntimeError("public discovery response has no mtproto.rsa_spki")
+
+
 def receive_headers(connection):
     response = bytearray()
     while b"\r\n\r\n" not in response:
@@ -69,8 +76,7 @@ def test_discovery(host, port):
             discovery = json.loads(response.read())
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"public discovery returned HTTP {error.code}") from error
-    if not isinstance(discovery, dict) or not discovery.get("rsa_spki"):
-        raise RuntimeError("public discovery response has no rsa_spki")
+    validate_discovery_document(discovery)
 
 
 def test_websocket(host, port, origin, expected_status):

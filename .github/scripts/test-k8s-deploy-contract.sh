@@ -332,6 +332,8 @@ grep --fixed-strings --quiet 'test-k8s-public-websocket.py' .github/workflows/ci
   fail 'the k3s deployment test must exercise public discovery and a WebSocket session through its connector'
 grep --fixed-strings --quiet 'foreign.example.test", 403' .github/scripts/test-k8s-public-websocket.py ||
   fail 'the public WebSocket connector test must reject a foreign origin with HTTP 403'
+python3 .github/scripts/test_k8s_public_websocket_contract.py ||
+  fail 'the public discovery smoke check must validate the nested MTProto rsa_spki field'
 grep --fixed-strings --quiet 'TCP:linkselector:8081' deploy/k8s/ci/cloudflared-ci.yaml ||
   fail 'the deployment test connector must exercise the Web selector and its public API routes'
 grep --fixed-strings --quiet -- 'http://teagramd:2446' deploy/k8s/base/linkselector-deployment.yaml ||

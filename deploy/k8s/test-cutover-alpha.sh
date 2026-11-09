@@ -46,6 +46,7 @@ for required in \
   fi
 done
 
+# shellcheck disable=SC2016
 for required_rollback in \
   'confirm ROUTE-RESTORED "Restore these Cloudflare tunnel routes (after -> before):' \
   'rollback)' \
