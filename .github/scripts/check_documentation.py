@@ -103,6 +103,28 @@ def unescape_markdown(text):
     return "".join(unescaped)
 
 
+class MarkdownLinkParseError(ValueError):
+    def __init__(self, offset):
+        self.offset = offset
+
+
+def line_ending_end(text, index):
+    if text[index] == "\r":
+        return index + 2 if index + 1 < len(text) and text[index + 1] == "\n" else index + 1
+    if text[index] == "\n":
+        return index + 1
+    return None
+
+
+def starts_blank_line(text, index):
+    next_index = line_ending_end(text, index)
+    if next_index is None:
+        return False
+    while next_index < len(text) and text[next_index] in " \t":
+        next_index += 1
+    return next_index < len(text) and line_ending_end(text, next_index) is not None
+
+
 def matching_link_parenthesis(text, start):
     index = start + 1
     while index < len(text) and text[index].isspace():
@@ -154,7 +176,7 @@ def matching_link_parenthesis(text, start):
     if title_opening in "\"'":
         index += 1
         while index < len(text):
-            if text[index] in "\r\n":
+            if starts_blank_line(text, index):
                 return None
             if text[index] == title_opening and not escaped_at(text, index):
                 index += 1
@@ -231,7 +253,7 @@ def inline_destination(contents):
     return contents[:index] or None
 
 
-def inline_link_destinations(text):
+def inline_link_destinations(text, base_offset=0):
     destinations = []
     index = 0
     while index < len(text):
@@ -250,13 +272,19 @@ def inline_link_destinations(text):
         destination_start = label_end + 1
         if destination_start < len(text) and text[destination_start] == "(":
             destination_end = matching_delimiter(text, destination_start, "(", ")")
-            if destination_end is not None:
-                destination = inline_destination(text[destination_start + 1 : destination_end])
-                if destination is not None:
-                    destinations.append(html.unescape(unescape_markdown(destination)))
-                destinations.extend(inline_link_destinations(text[label_start + 1 : label_end]))
-                index = destination_end + 1
-                continue
+            if destination_end is None:
+                raise MarkdownLinkParseError(base_offset + destination_start)
+            destination = inline_destination(text[destination_start + 1 : destination_end])
+            if destination is not None:
+                destinations.append(html.unescape(unescape_markdown(destination)))
+            destinations.extend(
+                inline_link_destinations(
+                    text[label_start + 1 : label_end],
+                    base_offset + label_start + 1,
+                )
+            )
+            index = destination_end + 1
+            continue
 
         index = label_start + 1
     return destinations
@@ -275,19 +303,25 @@ def markdown_destinations(text):
 
 
 def missing_markdown_links(root):
-    missing = []
+    errors = []
     for source in markdown_files(root):
-        for destination in markdown_destinations(source.read_text(encoding="utf-8")):
-            parsed = urlsplit(destination)
-            if parsed.scheme or parsed.netloc or destination.startswith("//") or parsed.path.startswith("/"):
-                continue
-            target = unquote(parsed.path)
-            if not target:
-                continue
-            resolved = source.parent / target
-            if not resolved.exists():
-                missing.append((source.relative_to(root).as_posix(), destination))
-    return missing
+        text = source.read_text(encoding="utf-8")
+        relative_source = source.relative_to(root).as_posix()
+        try:
+            for destination in markdown_destinations(text):
+                parsed = urlsplit(destination)
+                if parsed.scheme or parsed.netloc or destination.startswith("//") or parsed.path.startswith("/"):
+                    continue
+                target = unquote(parsed.path)
+                if not target:
+                    continue
+                resolved = source.parent / target
+                if not resolved.exists():
+                    errors.append(f"{relative_source} links to missing path {destination}")
+        except MarkdownLinkParseError as error:
+            line = text.count("\n", 0, error.offset) + 1
+            errors.append(f"{relative_source}:{line} has an unclosed Markdown link")
+    return errors
 
 
 def main():
@@ -297,10 +331,7 @@ def main():
     root = args.root.resolve()
 
     errors = configuration_reference_errors(root)
-    errors.extend(
-        f"{source} links to missing path {destination}"
-        for source, destination in missing_markdown_links(root)
-    )
+    errors.extend(missing_markdown_links(root))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

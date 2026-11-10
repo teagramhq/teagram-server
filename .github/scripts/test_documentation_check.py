@@ -223,6 +223,33 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_wrapped_link_title_does_not_hide_missing_destination(self):
+        (self.root / "README.md").write_text('[x](docs/gone.md "a\ntitle")\n')
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md", result.stdout + result.stderr)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
+    def test_unclosed_inline_link_reports_source_line(self):
+        (self.root / "README.md").write_text("Intro.\n[broken](docs/gone.md\n")
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md:2", result.stdout + result.stderr)
+        self.assertIn("unclosed Markdown link", result.stdout + result.stderr)
+
+    def test_link_title_stops_at_blank_line(self):
+        (self.root / "README.md").write_text('[broken](docs/gone.md "a\n\ncontinued")\n')
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md:1", result.stdout + result.stderr)
+        self.assertIn("unclosed Markdown link", result.stdout + result.stderr)
+
     def test_angle_bracket_markdown_destination_is_checked(self):
         (self.root / "README.md").write_text("[x](<docs/nope.md>)\n")
 
