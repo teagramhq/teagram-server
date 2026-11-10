@@ -300,7 +300,7 @@ func (pkg *packageSource) walkFile(file *ast.File, visit func(ast.Node, *functio
 				functions = functions[:len(functions)-1]
 			}
 			depth--
-			return visitErr == nil
+			return true
 		}
 		depth++
 		if function, ok := pkg.functionByNode[node]; ok {
@@ -310,8 +310,10 @@ func (pkg *packageSource) walkFile(file *ast.File, visit func(ast.Node, *functio
 		if len(functions) > 0 {
 			function = functions[len(functions)-1].context
 		}
-		visitErr = visit(node, function)
-		return visitErr == nil
+		if visitErr == nil {
+			visitErr = visit(node, function)
+		}
+		return true
 	})
 	return visitErr
 }

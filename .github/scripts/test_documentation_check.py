@@ -137,6 +137,7 @@ class DocumentationCheckTests(unittest.TestCase):
         (self.root / "internal/config/config.go").write_text(
             'package config\nimport "os"\n'
             'func load(key string) { _ = os.Getenv(key) }\n'
+            'func other() {}\n'
         )
 
         result = self.run_checker()
@@ -149,6 +150,7 @@ class DocumentationCheckTests(unittest.TestCase):
         declarations = ['package config', 'import "os"', 'const key0 = "TG_DEEP_SETTING"']
         declarations.extend(f"const key{index} = key{index - 1}" for index in range(1, 20))
         declarations.append("func load() { _ = os.Getenv(key19) }")
+        declarations.append("func other() {}")
         (self.root / "internal/config/config.go").write_text("\n".join(declarations) + "\n")
 
         result = self.run_checker()
