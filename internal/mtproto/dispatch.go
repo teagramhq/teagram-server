@@ -102,8 +102,9 @@ func (r *Request) Tailnet() bool {
 	return r != nil && r.conn != nil && r.conn.listenerPath == ListenerPathTailnet
 }
 
-// MarkRequestTailnetForTesting marks a synthetic request for internal API tests.
-// Served production requests get this value only from their accepted Conn.
+// MarkRequestTailnetForTesting is a test-only helper that marks a synthetic
+// request for internal API tests. Served production requests get this value
+// only from their accepted Conn.
 func MarkRequestTailnetForTesting(r *Request) {
 	if r != nil {
 		r.conn = &Conn{listenerPath: ListenerPathTailnet}

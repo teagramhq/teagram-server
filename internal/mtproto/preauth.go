@@ -190,6 +190,8 @@ func (l *preAuthLimiter) release(bucket preAuthNetwork) {
 // proves the key, and once by the deferred cleanup that runs whatever ends the
 // connection.
 type preAuthSlot struct {
+	// lim is nil only for ListenerPathTailnet slots. Limited slots always own
+	// a limiter slot and therefore have a non-nil limiter.
 	lim      *preAuthLimiter
 	listener store.RateLimitListener
 	path     ListenerPath
@@ -249,7 +251,14 @@ func (s *preAuthSlot) keyAddr(addr netip.Addr) bool {
 // armLifetime starts the pre-auth lifetime ceiling, calling fire once it
 // elapses. A zero Lifetime arms nothing.
 func (s *preAuthSlot) armLifetime(fire func()) {
-	if s.lim == nil || s.path == ListenerPathTailnet || s.lim.limits.Lifetime <= 0 {
+	switch s.path {
+	case ListenerPathTailnet:
+		return
+	case ListenerPathLimited:
+	default:
+		panic("invalid pre-auth listener path")
+	}
+	if s.lim.limits.Lifetime <= 0 {
 		return
 	}
 	s.timer = time.AfterFunc(s.lim.limits.Lifetime, fire)
@@ -275,8 +284,12 @@ func (s *preAuthSlot) clear() {
 		return
 	}
 	s.once.Do(func() {
-		if s.lim == nil {
+		switch s.path {
+		case ListenerPathTailnet:
 			return
+		case ListenerPathLimited:
+		default:
+			panic("invalid pre-auth listener path")
 		}
 		if s.timer != nil {
 			s.timer.Stop()
