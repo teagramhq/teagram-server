@@ -37,10 +37,41 @@ def indented_code_line(line, minimum=4):
     return indentation_columns(line) >= minimum
 
 
-def table_row_cells(line):
-    if indentation_columns(line) > 3:
+def remove_indentation_columns(line, columns):
+    consumed = 0
+    index = 0
+    while index < len(line) and consumed < columns:
+        if line[index] == " ":
+            consumed += 1
+        elif line[index] == "\t":
+            next_column = consumed + 4 - consumed % 4
+            if next_column > columns:
+                return " " * (next_column - columns) + line[index + 1 :]
+            consumed = next_column
+        else:
+            break
+        index += 1
+    return line[index:]
+
+
+def list_item_indents(line):
+    match = LIST_ITEM_START.match(line)
+    if match is None:
         return None
-    line = line.strip()
+
+    marker_start = match.end(1)
+    padding_start = match.start(2)
+    marker_width = len(line[marker_start:padding_start])
+    marker_indent = indentation_columns(match.group(1))
+    content_indent = indentation_columns(match.group(2), marker_indent + marker_width)
+    return marker_indent, content_indent
+
+
+def table_row_cells(line, container_indent=0):
+    indentation = indentation_columns(line)
+    if indentation < container_indent or indentation - container_indent > 3:
+        return None
+    line = remove_indentation_columns(line, container_indent).strip()
     cells = []
     cell_start = 0
     for index, char in enumerate(line):
@@ -75,14 +106,31 @@ def gfm_table_line_starts(text):
         lines.append((line_start, text[line_start:content_end]))
         line_start = line_end
 
+    container_indents = []
+    list_stack = []
+    for _, line in lines:
+        if line.strip():
+            list_indents = list_item_indents(line)
+            if list_indents is not None:
+                marker_indent, _ = list_indents
+                while list_stack and marker_indent <= list_stack[-1][0]:
+                    list_stack.pop()
+                list_stack.append(list_indents)
+            else:
+                indentation = indentation_columns(line)
+                while list_stack and indentation < list_stack[-1][1]:
+                    list_stack.pop()
+        container_indents.append(list_stack[-1][1] if list_stack else 0)
+
     table_lines = set()
     index = 0
     while index + 1 < len(lines):
-        header_cells = table_row_cells(lines[index][1])
-        delimiter_cells = table_row_cells(lines[index + 1][1])
+        header_cells = table_row_cells(lines[index][1], container_indents[index])
+        delimiter_cells = table_row_cells(lines[index + 1][1], container_indents[index + 1])
         if (
             header_cells is None
             or delimiter_cells is None
+            or container_indents[index] != container_indents[index + 1]
             or len(header_cells) != len(delimiter_cells)
             or not all(TABLE_DELIMITER_CELL.fullmatch(cell) for cell in delimiter_cells)
         ):
@@ -91,7 +139,7 @@ def gfm_table_line_starts(text):
 
         table_lines.update((lines[index][0], lines[index + 1][0]))
         index += 2
-        while index < len(lines) and table_row_cells(lines[index][1]) is not None:
+        while index < len(lines) and table_row_cells(lines[index][1], container_indents[index]) is not None:
             table_lines.add(lines[index][0])
             index += 1
     return table_lines
@@ -227,18 +275,12 @@ def without_code(text):
                 in_blockquote = False
                 allow_indented_code = True
                 last_block_was_list_item = False
-            elif (list_item := LIST_ITEM_START.match(line)):
+            elif (list_indents := list_item_indents(line)) is not None:
                 block_boundaries.add(line_start)
                 in_blockquote = False
                 allow_indented_code = False
                 last_block_was_list_item = True
-                marker_start = list_item.end(1)
-                padding_start = list_item.start(2)
-                marker_width = len(line[marker_start:padding_start])
-                list_content_indent = indentation_columns(
-                    list_item.group(2),
-                    indentation_columns(list_item.group(1)) + marker_width,
-                )
+                list_content_indent = list_indents[1]
             else:
                 allow_indented_code = False
                 if not line.startswith((" ", "\t")):
