@@ -238,6 +238,8 @@ fi
   fail 'the disposable cutover S3 client must obtain credentials from the namespace Secret'
 [[ "$(yq -r '.spec.containers[] | select(.name == "client") | .image' deploy/k8s/test-cutover-s3-client.yaml)" == ghcr.io/teagramhq/teagramd-mc-init:ci ]] ||
   fail 'the cutover test S3 client must use the revision-labelled mc image built in CI'
+[[ "$(yq -r '.spec.containers[] | select(.name == "client") | .resources.limits.memory' deploy/k8s/test-cutover-s3-client.yaml)" == 512Mi ]] ||
+  fail 'the disposable cutover S3 client must have enough memory for streamed object uploads'
 [[ "$(yq -r '.spec.securityContext.runAsUser' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == 0 &&
    "$(yq -r '.spec.volumes[] | select(.name == "blob-mode") | .persistentVolumeClaim.claimName' deploy/k8s/test-cutover-blob-mode-seed.yaml)" == blob-mode-teagramd-0 ]] ||
   fail 'the disposable blob-mode fixture must use a root-owned seed pod and the source authority PVC'
