@@ -73,11 +73,12 @@ type discoveryLimiter struct {
 	limits DiscoveryLimits
 	store  discoveryRateLimitStore
 
-	mu     sync.Mutex
-	global discoveryWindow
-	perNet map[netip.Prefix]discoveryWindow
-	// maxBuckets prevents an operator who disables the global limit from
-	// making memory proportional to the number of distinct source networks.
+	mu           sync.Mutex
+	global       discoveryWindow
+	perNet       map[netip.Prefix]discoveryWindow
+	publicPerNet map[netip.Prefix]discoveryWindow
+	// maxBuckets bounds each per-network table so memory stays bounded even
+	// when an operator disables the caller budgets.
 	maxBuckets int
 }
 
@@ -94,9 +95,10 @@ const maxDiscoveryBuckets = 4096
 
 func newDiscoveryLimiter(limits DiscoveryLimits) *discoveryLimiter {
 	return &discoveryLimiter{
-		limits:     limits,
-		perNet:     make(map[netip.Prefix]discoveryWindow),
-		maxBuckets: maxDiscoveryBuckets,
+		limits:       limits,
+		perNet:       make(map[netip.Prefix]discoveryWindow),
+		publicPerNet: make(map[netip.Prefix]discoveryWindow),
+		maxBuckets:   maxDiscoveryBuckets,
 	}
 }
 
@@ -169,9 +171,11 @@ func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (b
 	return denied == nil, nil
 }
 
-// allowPerNet applies only the in-memory per-network discovery budget. Public
-// WebSocket discovery serves a static document and does not need a store call
-// or the deployment-wide discovery budget.
+// allowPerNet applies the in-memory per-network budget for public WebSocket
+// discovery. It uses a separate table from raw discovery, which has a global
+// budget in front of its own table. When this table remains full after pruning,
+// admit the static document request without recording it so new client
+// networks cannot lock out one another or raw discovery.
 func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if l.limits.MaxRequestsPerNet <= 0 {
 		return true
@@ -182,7 +186,7 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	}
 	now := time.Now()
 	l.mu.Lock()
-	network := l.perNet[bucket]
+	network := l.publicPerNet[bucket]
 	if network.start.IsZero() || !now.Before(network.start.Add(l.limits.PerNetWindow)) {
 		network = discoveryWindow{start: now}
 	}
@@ -190,15 +194,15 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 		l.mu.Unlock()
 		return false
 	}
-	if len(l.perNet) >= l.maxBuckets && l.perNet[bucket].start.IsZero() {
-		l.prune(now)
-		if len(l.perNet) >= l.maxBuckets {
+	if len(l.publicPerNet) >= l.maxBuckets && l.publicPerNet[bucket].start.IsZero() {
+		pruneDiscoveryBuckets(l.publicPerNet, l.limits.PerNetWindow, now)
+		if len(l.publicPerNet) >= l.maxBuckets {
 			l.mu.Unlock()
-			return false
+			return true
 		}
 	}
 	network.calls++
-	l.perNet[bucket] = network
+	l.publicPerNet[bucket] = network
 	l.mu.Unlock()
 	return true
 }
@@ -215,9 +219,13 @@ func (l *discoveryLimiter) allowContextForPath(ctx context.Context, addr netip.A
 }
 
 func (l *discoveryLimiter) prune(now time.Time) {
-	for bucket, window := range l.perNet {
-		if window.start.IsZero() || !now.Before(window.start.Add(l.limits.PerNetWindow)) {
-			delete(l.perNet, bucket)
+	pruneDiscoveryBuckets(l.perNet, l.limits.PerNetWindow, now)
+}
+
+func pruneDiscoveryBuckets(buckets map[netip.Prefix]discoveryWindow, windowLength time.Duration, now time.Time) {
+	for bucket, window := range buckets {
+		if window.start.IsZero() || !now.Before(window.start.Add(windowLength)) {
+			delete(buckets, bucket)
 		}
 	}
 }

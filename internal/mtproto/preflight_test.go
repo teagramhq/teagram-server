@@ -322,11 +322,13 @@ func TestTailnetDiscoveryBypassesCallerBudgets(t *testing.T) {
 	}
 }
 
-func TestDiscoveryPerNetworkTableRefusesNewNetworksWhenFull(t *testing.T) {
+func TestRawDiscoveryPerNetworkTablePrunesExpiredEntries(t *testing.T) {
 	t.Parallel()
 
 	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       10,
 		MaxRequestsPerNet: 3,
+		Window:            time.Minute,
 		PerNetWindow:      time.Minute,
 	})
 	limiter.maxBuckets = 2
@@ -334,20 +336,21 @@ func TestDiscoveryPerNetworkTableRefusesNewNetworksWhenFull(t *testing.T) {
 	first := mustAddr("192.0.2.1")
 	second := mustAddr("192.0.2.2")
 	third := mustAddr("192.0.2.3")
-	if !limiter.allowPerNet(first) {
+	now := time.Now()
+	if !limiter.allow(first, now) {
 		t.Fatal("first network was refused")
 	}
-	if !limiter.allowPerNet(second) {
+	if !limiter.allow(second, now) {
 		t.Fatal("second network was refused")
 	}
-	if limiter.allowPerNet(third) {
-		t.Fatal("third network was admitted after the per-network table filled")
+	if limiter.allow(third, now) {
+		t.Fatal("raw path admitted a third network while the per-network table was full")
 	}
-	if !limiter.allowPerNet(first) {
+	if !limiter.allow(first, now) {
 		t.Fatal("an already tracked network was refused while the table was full")
 	}
 
-	expiredAt := time.Now().Add(-2 * time.Minute)
+	expiredAt := now.Add(-2 * time.Minute)
 	firstBucket, ok := store.IPBucketKey(first)
 	if !ok {
 		t.Fatal("first address has no per-network bucket")
@@ -358,28 +361,38 @@ func TestDiscoveryPerNetworkTableRefusesNewNetworksWhenFull(t *testing.T) {
 	}
 	limiter.perNet[firstBucket] = discoveryWindow{start: expiredAt, calls: 1}
 	limiter.perNet[secondBucket] = discoveryWindow{start: expiredAt, calls: 1}
-	if !limiter.allowPerNet(third) {
-		t.Fatal("new network was refused after expired per-network buckets should have been pruned")
+	if !limiter.allow(third, time.Now()) {
+		t.Fatal("raw path refused a new network after expired buckets should have been pruned")
 	}
+}
 
-	rawLimiter := newDiscoveryLimiter(DiscoveryLimits{
+func TestPublicDiscoveryFullTableAdmitsUncountedWithoutAffectingRawLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
 		MaxRequests:       10,
-		MaxRequestsPerNet: 3,
+		MaxRequestsPerNet: 1,
 		Window:            time.Minute,
 		PerNetWindow:      time.Minute,
 	})
-	rawLimiter.maxBuckets = 2
-	now := time.Now()
-	if !rawLimiter.allow(first, now) || !rawLimiter.allow(second, now) {
-		t.Fatal("raw path refused one of the first two networks")
+	limiter.maxBuckets = 2
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
 	}
-	if rawLimiter.allow(third, now) {
-		t.Fatal("raw path admitted a third network while the per-network table was full")
+	if !limiter.allowPerNet(second) {
+		t.Fatal("public discovery refused the second network")
 	}
-	rawLimiter.perNet[firstBucket] = discoveryWindow{start: expiredAt, calls: 1}
-	rawLimiter.perNet[secondBucket] = discoveryWindow{start: expiredAt, calls: 1}
-	if !rawLimiter.allow(third, time.Now()) {
-		t.Fatal("raw path refused a new network after expired per-network buckets should have been pruned")
+	for i := range 2 {
+		if !limiter.allowPerNet(third) {
+			t.Fatalf("public discovery refused untracked request %d while its table was full", i+1)
+		}
+	}
+	if !limiter.allow(third, time.Now()) {
+		t.Fatal("full public table prevented the raw limiter from admitting a new network")
 	}
 }
 
