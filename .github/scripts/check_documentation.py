@@ -14,7 +14,7 @@ ENVIRONMENT_NAME_EXTRACTOR = Path(__file__).with_name("config_environment_names.
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
 HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
 FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-INLINE_CODE = re.compile(r"`+[^`\n]*`+")
+INLINE_CODE = re.compile(r"`+[^`\r\n]*`+")
 
 
 def config_environment_names(root):
@@ -60,25 +60,41 @@ def markdown_files(root):
 
 
 def without_code(text):
-    lines = []
+    characters = list(text)
     fence_char = None
     fence_length = 0
-    for line in text.splitlines():
+    line_start = 0
+    while line_start < len(text):
+        line_end = text.find("\n", line_start)
+        if line_end == -1:
+            line_end = len(text)
+        else:
+            line_end += 1
+        content_end = line_end
+        if content_end > line_start and text[content_end - 1] == "\n":
+            content_end -= 1
+        if content_end > line_start and text[content_end - 1] == "\r":
+            content_end -= 1
+        line = text[line_start:content_end]
         start = FENCE_START.match(line)
         if fence_char is None and start:
             fence_char = start.group(1)[0]
             fence_length = len(start.group(1))
-            lines.append("")
-            continue
-        if fence_char is not None:
+            for index in range(line_start, content_end):
+                characters[index] = " "
+        elif fence_char is not None:
             closing = re.match(r"^\s{0,3}" + re.escape(fence_char) + r"{" + str(fence_length) + r",}\s*$", line)
             if closing:
                 fence_char = None
                 fence_length = 0
-            lines.append("")
-            continue
-        lines.append(line)
-    return INLINE_CODE.sub("", "\n".join(lines))
+            for index in range(line_start, content_end):
+                characters[index] = " "
+        line_start = line_end
+
+    def blank_code_span(match):
+        return "".join(" " if char not in "\r\n" else char for char in match.group(0))
+
+    return INLINE_CODE.sub(blank_code_span, "".join(characters))
 
 
 def escaped_at(text, index):
@@ -274,7 +290,14 @@ def inline_link_destinations(text, base_offset=0, parse_errors=None):
         if destination_start < len(text) and text[destination_start] == "(":
             destination_end = matching_delimiter(text, destination_start, "(", ")")
             if destination_end is None:
-                parse_errors.append(base_offset + destination_start)
+                parse_errors.append((base_offset + destination_start, text[label_start : label_end + 1]))
+                destinations.extend(
+                    inline_link_destinations(
+                        text[label_start + 1 : label_end],
+                        base_offset + label_start + 1,
+                        parse_errors,
+                    )
+                )
                 index = destination_start + 1
                 continue
             destination = inline_destination(text[destination_start + 1 : destination_end])
@@ -322,9 +345,9 @@ def missing_markdown_links(root):
             resolved = source.parent / target
             if not resolved.exists():
                 errors.append(f"{relative_source} links to missing path {destination}")
-        for offset in parse_errors:
+        for offset, link_text in parse_errors:
             line = text.count("\n", 0, offset) + 1
-            errors.append(f"{relative_source}:{line} has an unclosed Markdown link")
+            errors.append(f"{relative_source}:{line} has an unclosed Markdown link {link_text}")
     return errors
 
 

@@ -241,6 +241,27 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md:2", result.stdout + result.stderr)
         self.assertIn("unclosed Markdown link", result.stdout + result.stderr)
 
+    def test_unclosed_nested_link_reports_raw_line_and_nested_destination(self):
+        (self.root / "README.md").write_text(
+            "`abcdefghijklmnopqrstuvwxyz`\n"
+            "Intro.\n"
+            "Details.\n"
+            "```text\n"
+            "A long fenced line that shifts an offset when code is removed.\n"
+            "Another fenced line keeps the broken link far beyond the shortened text.\n"
+            "```\n"
+            "[broken [nested](docs/nested-gone.md)](docs/gone.md\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md:8", output)
+        self.assertIn("unclosed Markdown link", output)
+        self.assertIn("[broken [nested](docs/nested-gone.md)]", output)
+        self.assertIn("docs/nested-gone.md", output)
+
     def test_link_title_stops_at_blank_line(self):
         (self.root / "README.md").write_text('[broken](docs/gone.md "a\n\ncontinued")\n')
 
