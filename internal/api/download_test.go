@@ -153,6 +153,31 @@ func assertFixedRateLimitLog(t *testing.T, h *captureHandler, message, sentinel 
 	}
 }
 
+func assertSanitizedRateLimitErrorLog(t *testing.T, h *captureHandler, message, errorSummary, sentinel string) {
+	t.Helper()
+	if len(h.records) != 1 {
+		t.Fatalf("captured %d records, want one rate-limit error record", len(h.records))
+	}
+	record := h.records[0]
+	if record.Message != message {
+		t.Errorf("message = %q, want %q", record.Message, message)
+	}
+	if record.NumAttrs() != 1 {
+		t.Errorf("record has %d attrs, want only the sanitized error", record.NumAttrs())
+	}
+	var gotErr slog.Attr
+	record.Attrs(func(attr slog.Attr) bool {
+		gotErr = attr
+		return true
+	})
+	if gotErr.Key != "err" || gotErr.Value.Kind() != slog.KindString || gotErr.Value.String() != errorSummary {
+		t.Errorf("error attr = %#v, want err=%q", gotErr, errorSummary)
+	}
+	if strings.Contains(gotErr.Value.String(), sentinel) {
+		t.Errorf("error attr contains sentinel %q", sentinel)
+	}
+}
+
 func TestGetFileRateLimitReserveErrorDoesNotLogDynamicDetails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -187,7 +212,7 @@ func TestGetFileRateLimitReserveErrorDoesNotLogDynamicDetails(t *testing.T) {
 	if strings.Contains(err.Error(), sentinel) {
 		t.Fatalf("returned error contains sentinel %q: %v", sentinel, err)
 	}
-	assertFixedRateLimitLog(t, logs, "get file rate limit", sentinel)
+	assertSanitizedRateLimitErrorLog(t, logs, "get file rate limit", "PostgreSQL SQLSTATE 23514", sentinel)
 }
 
 func TestGetFileRateLimitRefundErrorDoesNotLogDynamicDetails(t *testing.T) {
