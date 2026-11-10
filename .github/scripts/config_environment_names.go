@@ -13,21 +13,32 @@ import (
 	"strings"
 )
 
+const maxResolutionDepth = 32
+
 type callSite struct {
 	args   []ast.Expr
-	caller *ast.FuncDecl
+	caller *functionContext
+}
+
+type functionContext struct {
+	name    string
+	params  *ast.FieldList
+	body    *ast.BlockStmt
+	literal *ast.FuncLit
 }
 
 type packageSource struct {
-	files     []*ast.File
-	functions map[string]*ast.FuncDecl
-	values    map[string][]ast.Expr
-	calls     map[string][]callSite
+	files        []*ast.File
+	functions    []*functionContext
+	values       map[string][]ast.Expr
+	calls        map[string][]callSite
+	literalCalls map[*ast.FuncLit][]callSite
+	fset         *token.FileSet
 }
 
 type resolutionKey struct {
 	expr ast.Expr
-	fn   *ast.FuncDecl
+	fn   *functionContext
 }
 
 func main() {
@@ -79,9 +90,10 @@ func environmentNames(root string) ([]string, error) {
 
 		fset := token.NewFileSet()
 		pkg := &packageSource{
-			functions: make(map[string]*ast.FuncDecl),
-			values:    make(map[string][]ast.Expr),
-			calls:     make(map[string][]callSite),
+			values:       make(map[string][]ast.Expr),
+			calls:        make(map[string][]callSite),
+			literalCalls: make(map[*ast.FuncLit][]callSite),
+			fset:         fset,
 		}
 		for _, path := range paths {
 			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
@@ -90,28 +102,28 @@ func environmentNames(root string) ([]string, error) {
 			}
 			pkg.files = append(pkg.files, file)
 			for _, declaration := range file.Decls {
-				switch declaration := declaration.(type) {
-				case *ast.FuncDecl:
-					if declaration.Recv == nil {
-						pkg.functions[declaration.Name.Name] = declaration
+				values, ok := declaration.(*ast.GenDecl)
+				if !ok {
+					continue
+				}
+				for _, spec := range values.Specs {
+					valueSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
 					}
-				case *ast.GenDecl:
-					for _, spec := range declaration.Specs {
-						values, ok := spec.(*ast.ValueSpec)
-						if !ok {
-							continue
-						}
-						for i, name := range values.Names {
-							if i < len(values.Values) {
-								pkg.values[name.Name] = append(pkg.values[name.Name], values.Values[i])
-							}
+					for i, name := range valueSpec.Names {
+						if i < len(valueSpec.Values) {
+							pkg.values[name.Name] = append(pkg.values[name.Name], valueSpec.Values[i])
 						}
 					}
 				}
 			}
 		}
+		pkg.collectFunctions()
 		pkg.collectCalls()
-		pkg.collectEnvironmentReads(names)
+		if err := pkg.collectEnvironmentReads(names); err != nil {
+			return nil, err
+		}
 	}
 
 	result := make([]string, 0, len(names))
@@ -122,58 +134,158 @@ func environmentNames(root string) ([]string, error) {
 	return result, nil
 }
 
-func (pkg *packageSource) collectCalls() {
-	for _, fn := range pkg.functions {
-		if fn.Body == nil {
-			continue
-		}
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
+func (pkg *packageSource) collectFunctions() {
+	for _, file := range pkg.files {
+		literalNames := make(map[*ast.FuncLit]string)
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch node := node.(type) {
+			case *ast.ValueSpec:
+				for i, value := range node.Values {
+					if i < len(node.Names) {
+						if literal := functionLiteral(value); literal != nil {
+							literalNames[literal] = node.Names[i].Name
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for i, value := range node.Rhs {
+					if i < len(node.Lhs) {
+						if name, ok := node.Lhs[i].(*ast.Ident); ok {
+							if literal := functionLiteral(value); literal != nil {
+								literalNames[literal] = name.Name
+							}
+						}
+					}
+				}
 			}
-			if ident, ok := call.Fun.(*ast.Ident); ok {
-				pkg.calls[ident.Name] = append(pkg.calls[ident.Name], callSite{args: call.Args, caller: fn})
+			return true
+		})
+
+		for _, declaration := range file.Decls {
+			if function, ok := declaration.(*ast.FuncDecl); ok && function.Body != nil {
+				pkg.functions = append(pkg.functions, &functionContext{
+					name:   function.Name.Name,
+					params: function.Type.Params,
+					body:   function.Body,
+				})
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if ok {
+				pkg.functions = append(pkg.functions, &functionContext{
+					name:    literalNames[literal],
+					params:  literal.Type.Params,
+					body:    literal.Body,
+					literal: literal,
+				})
 			}
 			return true
 		})
 	}
 }
 
-func (pkg *packageSource) collectEnvironmentReads(names map[string]struct{}) {
-	for _, file := range pkg.files {
-		for _, declaration := range file.Decls {
-			fn, ok := declaration.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok || len(call.Args) == 0 {
-					return true
-				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || selector.Sel.Name != "Getenv" && selector.Sel.Name != "LookupEnv" {
-					return true
-				}
-				pkgName, ok := selector.X.(*ast.Ident)
-				if !ok || pkgName.Name != "os" {
-					return true
-				}
-				pkg.resolve(call.Args[0], fn, names, make(map[resolutionKey]bool), 0)
-				return true
-			})
+func functionLiteral(expr ast.Expr) *ast.FuncLit {
+	for {
+		parenthesized, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
 		}
+		expr = parenthesized.X
+	}
+	literal, ok := expr.(*ast.FuncLit)
+	if !ok {
+		return nil
+	}
+	return literal
+}
+
+func (pkg *packageSource) collectCalls() {
+	for _, function := range pkg.functions {
+		visitFunctionBody(function.body, func(node ast.Node) {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return
+			}
+			switch callee := call.Fun.(type) {
+			case *ast.Ident:
+				pkg.calls[callee.Name] = append(pkg.calls[callee.Name], callSite{args: call.Args, caller: function})
+			case *ast.SelectorExpr:
+				pkg.calls[callee.Sel.Name] = append(pkg.calls[callee.Sel.Name], callSite{args: call.Args, caller: function})
+			case *ast.FuncLit:
+				pkg.literalCalls[callee] = append(pkg.literalCalls[callee], callSite{args: call.Args, caller: function})
+			}
+		})
 	}
 }
 
-func (pkg *packageSource) resolve(expr ast.Expr, fn *ast.FuncDecl, names map[string]struct{}, seen map[resolutionKey]bool, depth int) {
-	if expr == nil || depth > 32 {
+func (pkg *packageSource) collectEnvironmentReads(names map[string]struct{}) error {
+	for _, function := range pkg.functions {
+		var visitErr error
+		visitFunctionBody(function.body, func(node ast.Node) {
+			if visitErr != nil {
+				return
+			}
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Getenv" && selector.Sel.Name != "LookupEnv" {
+				return
+			}
+			pkgName, ok := selector.X.(*ast.Ident)
+			if !ok || pkgName.Name != "os" {
+				return
+			}
+
+			position := pkg.fset.Position(call.Args[0].Pos())
+			resolved, err := pkg.resolve(call.Args[0], function, names, make(map[resolutionKey]bool), position, 0)
+			if err != nil {
+				visitErr = err
+				return
+			}
+			if !resolved {
+				visitErr = fmt.Errorf("%s:%d: cannot resolve environment key to a string literal", position.Filename, position.Line)
+				return
+			}
+		})
+		if visitErr != nil {
+			return visitErr
+		}
+	}
+	return nil
+}
+
+func visitFunctionBody(body *ast.BlockStmt, visit func(ast.Node)) {
+	if body == nil {
 		return
 	}
-	key := resolutionKey{expr: expr, fn: fn}
+	ast.Inspect(body, func(node ast.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node != body {
+			switch node.(type) {
+			case *ast.FuncDecl, *ast.FuncLit:
+				return false
+			}
+		}
+		visit(node)
+		return true
+	})
+}
+
+func (pkg *packageSource) resolve(expr ast.Expr, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if expr == nil {
+		return false, nil
+	}
+	if depth >= maxResolutionDepth {
+		return false, fmt.Errorf("%s:%d: environment key resolution exceeded depth %d", origin.Filename, origin.Line, maxResolutionDepth)
+	}
+	key := resolutionKey{expr: expr, fn: function}
 	if seen[key] {
-		return
+		return false, nil
 	}
 	seen[key] = true
 	defer delete(seen, key)
@@ -181,133 +293,238 @@ func (pkg *packageSource) resolve(expr ast.Expr, fn *ast.FuncDecl, names map[str
 	switch expr := expr.(type) {
 	case *ast.BasicLit:
 		if expr.Kind != token.STRING {
-			return
+			return false, nil
 		}
 		value, err := strconv.Unquote(expr.Value)
-		if err == nil && isEnvironmentName(value) {
+		if err != nil {
+			return false, fmt.Errorf("%s:%d: cannot parse environment key: %w", origin.Filename, origin.Line, err)
+		}
+		if isEnvironmentName(value) {
 			names[value] = struct{}{}
 		}
+		return true, nil
 	case *ast.ParenExpr:
-		pkg.resolve(expr.X, fn, names, seen, depth+1)
+		return pkg.resolve(expr.X, function, names, seen, origin, depth+1)
 	case *ast.Ident:
-		if fn != nil {
-			if rangeExpressions := rangeSources(fn, expr.Name); len(rangeExpressions) > 0 {
-				for _, source := range rangeExpressions {
-					pkg.resolve(source, fn, names, seen, depth+1)
-				}
-				return
+		if function != nil {
+			if sources := rangeSources(function, expr.Name); len(sources) > 0 {
+				return pkg.resolveAll(sources, function, names, seen, origin, depth+1)
 			}
-			if index, ok := parameterIndex(fn, expr.Name); ok {
-				for _, site := range pkg.calls[fn.Name.Name] {
-					if index < len(site.args) {
-						pkg.resolve(site.args[index], site.caller, names, seen, depth+1)
-					}
+			if index, ok := parameterIndex(function, expr.Name); ok {
+				sites := pkg.callSites(function)
+				if len(sites) == 0 {
+					return false, nil
 				}
-				return
+				return pkg.resolveCallSites(sites, index, names, seen, origin, depth+1)
 			}
-			if definitions := localDefinitions(fn, expr.Name); len(definitions) > 0 {
-				for _, definition := range definitions {
-					pkg.resolve(definition, fn, names, seen, depth+1)
-				}
-				return
+			if definitions := localDefinitions(function, expr.Name); len(definitions) > 0 {
+				return pkg.resolveAll(definitions, function, names, seen, origin, depth+1)
 			}
 		}
-		for _, value := range pkg.values[expr.Name] {
-			pkg.resolve(value, nil, names, seen, depth+1)
+		if values := pkg.values[expr.Name]; len(values) > 0 {
+			return pkg.resolveAll(values, nil, names, seen, origin, depth+1)
 		}
 	case *ast.SelectorExpr:
-		if fn == nil {
-			return
+		if function == nil {
+			return false, nil
 		}
 		base, ok := expr.X.(*ast.Ident)
 		if !ok {
-			return
+			return false, nil
 		}
-		for _, source := range rangeSources(fn, base.Name) {
-			pkg.resolveRangeField(source, expr.Sel.Name, fn, names, seen, depth+1)
+		sources := rangeSources(function, base.Name)
+		if len(sources) == 0 {
+			return false, nil
 		}
+		return pkg.resolveRangeFields(sources, expr.Sel.Name, function, names, seen, origin, depth+1)
 	case *ast.CompositeLit:
+		var elements []ast.Expr
 		for _, element := range expr.Elts {
 			if keyed, ok := element.(*ast.KeyValueExpr); ok {
-				pkg.resolve(keyed.Value, fn, names, seen, depth+1)
+				elements = append(elements, keyed.Value)
 			} else {
-				pkg.resolve(element, fn, names, seen, depth+1)
+				elements = append(elements, element)
 			}
 		}
+		return pkg.resolveAll(elements, function, names, seen, origin, depth+1)
 	case *ast.KeyValueExpr:
-		pkg.resolve(expr.Value, fn, names, seen, depth+1)
+		return pkg.resolve(expr.Value, function, names, seen, origin, depth+1)
 	}
+	return false, nil
 }
 
-func (pkg *packageSource) resolveRangeField(expr ast.Expr, field string, fn *ast.FuncDecl, names map[string]struct{}, seen map[resolutionKey]bool, depth int) {
-	if expr == nil || depth > 32 {
-		return
+func (pkg *packageSource) resolveAll(expressions []ast.Expr, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(expressions) == 0 {
+		return false, nil
 	}
-	key := resolutionKey{expr: expr, fn: fn}
+	allResolved := true
+	for _, expression := range expressions {
+		resolved, err := pkg.resolve(expression, function, names, seen, origin, depth+1)
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveCallSites(sites []callSite, index int, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(sites) == 0 {
+		return false, nil
+	}
+	allResolved := true
+	for _, site := range sites {
+		if index >= len(site.args) {
+			allResolved = false
+			continue
+		}
+		resolved, err := pkg.resolve(site.args[index], site.caller, names, seen, origin, depth+1)
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveRangeFields(expressions []ast.Expr, field string, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(expressions) == 0 {
+		return false, nil
+	}
+	allResolved := true
+	for _, expression := range expressions {
+		resolved, err := pkg.resolveRangeField(expression, field, function, names, seen, origin, depth+1)
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveRangeField(expr ast.Expr, field string, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if expr == nil {
+		return false, nil
+	}
+	if depth >= maxResolutionDepth {
+		return false, fmt.Errorf("%s:%d: environment key resolution exceeded depth %d", origin.Filename, origin.Line, maxResolutionDepth)
+	}
+	key := resolutionKey{expr: expr, fn: function}
 	if seen[key] {
-		return
+		return false, nil
 	}
 	seen[key] = true
 	defer delete(seen, key)
 
 	switch expr := expr.(type) {
 	case *ast.ParenExpr:
-		pkg.resolveRangeField(expr.X, field, fn, names, seen, depth+1)
+		return pkg.resolveRangeField(expr.X, field, function, names, seen, origin, depth+1)
 	case *ast.Ident:
-		if fn != nil {
-			if definitions := localDefinitions(fn, expr.Name); len(definitions) > 0 {
-				for _, definition := range definitions {
-					pkg.resolveRangeField(definition, field, fn, names, seen, depth+1)
+		if function != nil {
+			if sources := rangeSources(function, expr.Name); len(sources) > 0 {
+				return pkg.resolveRangeFields(sources, field, function, names, seen, origin, depth+1)
+			}
+			if index, ok := parameterIndex(function, expr.Name); ok {
+				sites := pkg.callSites(function)
+				if len(sites) == 0 {
+					return false, nil
 				}
-				return
+				allResolved := true
+				for _, site := range sites {
+					if index >= len(site.args) {
+						allResolved = false
+						continue
+					}
+					resolved, err := pkg.resolveRangeField(site.args[index], field, site.caller, names, seen, origin, depth+1)
+					if err != nil {
+						return false, err
+					}
+					allResolved = allResolved && resolved
+				}
+				return allResolved, nil
+			}
+			if definitions := localDefinitions(function, expr.Name); len(definitions) > 0 {
+				return pkg.resolveRangeFields(definitions, field, function, names, seen, origin, depth+1)
 			}
 		}
-		for _, value := range pkg.values[expr.Name] {
-			pkg.resolveRangeField(value, field, nil, names, seen, depth+1)
+		if values := pkg.values[expr.Name]; len(values) > 0 {
+			return pkg.resolveRangeFields(values, field, nil, names, seen, origin, depth+1)
 		}
 	case *ast.CompositeLit:
-		var structType *ast.StructType
-		switch typ := expr.Type.(type) {
-		case *ast.ArrayType:
-			if elementType, ok := typ.Elt.(*ast.StructType); ok {
-				structType = elementType
-			}
-		case *ast.StructType:
-			structType = typ
+		return pkg.resolveCompositeField(expr, field, function, names, seen, origin, depth+1)
+	}
+	return false, nil
+}
+
+func (pkg *packageSource) resolveCompositeField(expr *ast.CompositeLit, field string, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	var structType *ast.StructType
+	switch typ := expr.Type.(type) {
+	case *ast.ArrayType:
+		if elementType, ok := typ.Elt.(*ast.StructType); ok {
+			structType = elementType
 		}
-		fieldIndex := -1
-		if structType != nil {
-			index := 0
-			for _, item := range structType.Fields.List {
-				for _, name := range item.Names {
-					if name.Name == field {
-						fieldIndex = index
-					}
-					index++
+	case *ast.StructType:
+		structType = typ
+	}
+	fieldIndex := -1
+	if structType != nil {
+		index := 0
+		for _, item := range structType.Fields.List {
+			for _, name := range item.Names {
+				if name.Name == field {
+					fieldIndex = index
 				}
-				if len(item.Names) == 0 {
-					index++
-				}
+				index++
 			}
-		}
-		for _, element := range expr.Elts {
-			row, ok := element.(*ast.CompositeLit)
-			if !ok {
-				continue
-			}
-			for index, value := range row.Elts {
-				if keyed, ok := value.(*ast.KeyValueExpr); ok {
-					if key, ok := keyed.Key.(*ast.Ident); ok && key.Name == field {
-						pkg.resolve(keyed.Value, fn, names, seen, depth+1)
-					}
-					continue
-				}
-				if index == fieldIndex {
-					pkg.resolve(value, fn, names, seen, depth+1)
-				}
+			if len(item.Names) == 0 {
+				index++
 			}
 		}
 	}
+
+	var expressions []ast.Expr
+	allRowsResolved := true
+	for _, element := range expr.Elts {
+		rowExpr := element
+		if keyed, ok := element.(*ast.KeyValueExpr); ok {
+			rowExpr = keyed.Value
+		}
+		row, ok := rowExpr.(*ast.CompositeLit)
+		if !ok {
+			allRowsResolved = false
+			continue
+		}
+		rowResolved := false
+		for index, value := range row.Elts {
+			if keyed, ok := value.(*ast.KeyValueExpr); ok {
+				if key, ok := keyed.Key.(*ast.Ident); ok && key.Name == field {
+					expressions = append(expressions, keyed.Value)
+					rowResolved = true
+				}
+				continue
+			}
+			if index == fieldIndex {
+				expressions = append(expressions, value)
+				rowResolved = true
+			}
+		}
+		allRowsResolved = allRowsResolved && rowResolved
+	}
+	if len(expressions) == 0 || !allRowsResolved {
+		return false, nil
+	}
+	return pkg.resolveAll(expressions, function, names, seen, origin, depth+1)
+}
+
+func (pkg *packageSource) callSites(function *functionContext) []callSite {
+	var sites []callSite
+	if function.name != "" {
+		sites = append(sites, pkg.calls[function.name]...)
+	}
+	if function.literal != nil {
+		sites = append(sites, pkg.literalCalls[function.literal]...)
+	}
+	return sites
 }
 
 func isEnvironmentName(value string) bool {
@@ -325,15 +542,15 @@ func isEnvironmentName(value string) bool {
 	return true
 }
 
-func rangeSources(fn *ast.FuncDecl, name string) []ast.Expr {
+func rangeSources(function *functionContext, name string) []ast.Expr {
 	var sources []ast.Expr
-	if fn.Body == nil {
+	if function.body == nil {
 		return sources
 	}
-	ast.Inspect(fn.Body, func(node ast.Node) bool {
+	visitFunctionBody(function.body, func(node ast.Node) {
 		rangeStmt, ok := node.(*ast.RangeStmt)
 		if !ok {
-			return true
+			return
 		}
 		if ident, ok := rangeStmt.Key.(*ast.Ident); ok && ident.Name == name {
 			sources = append(sources, rangeStmt.X)
@@ -341,17 +558,16 @@ func rangeSources(fn *ast.FuncDecl, name string) []ast.Expr {
 		if ident, ok := rangeStmt.Value.(*ast.Ident); ok && ident.Name == name {
 			sources = append(sources, rangeStmt.X)
 		}
-		return true
 	})
 	return sources
 }
 
-func parameterIndex(fn *ast.FuncDecl, name string) (int, bool) {
-	if fn.Type.Params == nil {
+func parameterIndex(function *functionContext, name string) (int, bool) {
+	if function.params == nil {
 		return 0, false
 	}
 	index := 0
-	for _, field := range fn.Type.Params.List {
+	for _, field := range function.params.List {
 		for _, ident := range field.Names {
 			if ident.Name == name {
 				return index, true
@@ -365,12 +581,12 @@ func parameterIndex(fn *ast.FuncDecl, name string) (int, bool) {
 	return 0, false
 }
 
-func localDefinitions(fn *ast.FuncDecl, name string) []ast.Expr {
+func localDefinitions(function *functionContext, name string) []ast.Expr {
 	var definitions []ast.Expr
-	if fn.Body == nil {
+	if function.body == nil {
 		return definitions
 	}
-	ast.Inspect(fn.Body, func(node ast.Node) bool {
+	visitFunctionBody(function.body, func(node ast.Node) {
 		switch node := node.(type) {
 		case *ast.ValueSpec:
 			for index, ident := range node.Names {
@@ -391,7 +607,6 @@ func localDefinitions(fn *ast.FuncDecl, name string) []ast.Expr {
 				}
 			}
 		}
-		return true
 	})
 	return definitions
 }

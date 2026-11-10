@@ -1,6 +1,6 @@
-# teagramd configuration
+# teagramd and invite landing configuration
 
-This reference describes the environment variables that configure the `teagramd` server. Defaults, accepted values, validation and purpose reflect the code at this revision.
+This reference describes environment variables used by the `teagramd` server and its invite landing commands. Defaults, accepted values, validation and purpose reflect the code at this revision.
 
 ## Server configuration
 
@@ -123,9 +123,9 @@ Rate-limit counts use integer syntax and windows use Go duration syntax. A zero 
 | `TG_MEDIA_ERASURE_INTERVAL_MIN` | `0` | Non-negative Go duration forming the lower end of the randomized media-erasure sweep interval. Set this and `TG_MEDIA_ERASURE_INTERVAL_MAX` together; a zero minimum disables the sweep. |
 | `TG_MEDIA_ERASURE_INTERVAL_MAX` | `0` | Non-negative Go duration forming the upper end of the randomized media-erasure sweep interval. Set this and `TG_MEDIA_ERASURE_INTERVAL_MIN` together; the maximum must exceed the minimum. |
 | `TG_MEDIA_ERASURE_DESTRUCTIVE` | `false` | Go boolean. When `true`, the enabled media-erasure sweep removes eligible blobs; it requires both interval bounds. When unset or false, the sweep does not delete files. |
-| `TG_PROFILE_DELETE_OP_RETENTION` | `97d` | Go duration at least 97 days (the 90-day restore horizon plus 7 days of backup cleanup grace). Retention promise for local profile-delete operation deduplication records. |
-| `TG_PROFILE_GALLERY_RETENTION` | `97d` | Go duration at least 97 days (the 90-day restore horizon plus 7 days of backup cleanup grace). Retention promise for identifier-only profile-gallery mutation records. |
-| `TG_PROFILE_RECEIPT_RETENTION` | `max(97d, gallery retention, upload-part TTL + RPC deadline)` | Go duration at least 97 days and long enough to outlive both profile-gallery retention and the upload-part TTL plus RPC deadline. Retention promise for terminal upload receipts. |
+| `TG_PROFILE_DELETE_OP_RETENTION` | `2328h` | Go duration at least 2328 hours (97 days: the 90-day restore horizon plus 7 days of backup cleanup grace). Retention promise for local profile-delete operation deduplication records. |
+| `TG_PROFILE_GALLERY_RETENTION` | `2328h` | Go duration at least 2328 hours (97 days: the 90-day restore horizon plus 7 days of backup cleanup grace). Retention promise for identifier-only profile-gallery mutation records. |
+| `TG_PROFILE_RECEIPT_RETENTION` | `max(2328h, gallery retention, upload-part TTL + RPC deadline)` | Go duration at least 2328 hours (97 days) and long enough to outlive both profile-gallery retention and the upload-part TTL plus RPC deadline. Retention promise for terminal upload receipts. |
 | `TG_RATE_LIMIT_ADD_CHAT_USER` | `120` | Integer count per account per window for adding chat members. `0` disables this bound. |
 | `TG_RATE_LIMIT_ADD_CHAT_USER_WINDOW` | `24h` | Go duration for the per-account chat-member-add bound. |
 | `TG_RATE_LIMIT_CHECK_PASSWORD` | `5` | Integer failed `auth.checkPassword` attempts per account per window. `0` disables this bound. |
@@ -175,6 +175,8 @@ The `TG_DISCOVERY_*` spellings are alternatives to the corresponding `TG_RATE_LI
 | `TG_DISCOVERY_RATE_LIMIT_PER_IP_WINDOW` | *(unset)* | Go duration alias for `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW`, the per-network preflight window. |
 
 ## Invite landing URLs
+
+`cmd/linklanding` and `cmd/linkselector` read these settings through `internal/linklanding`; `teagramd` does not read them.
 
 | Variable | Default | Notes |
 |---|---|---|

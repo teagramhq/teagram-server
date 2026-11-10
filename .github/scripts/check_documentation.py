@@ -14,7 +14,7 @@ INLINE_LINK = re.compile(r"!?\[[^\]\n]*\]\(\s*(<[^>]+>|[^\s)]+)")
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
 HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
 FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-INLINE_CODE = re.compile(r"`+[^`]*`+")
+INLINE_CODE = re.compile(r"`+[^`\n]*`+")
 
 
 def config_environment_names(root):

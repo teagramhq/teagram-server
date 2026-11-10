@@ -58,8 +58,94 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TG_REMOVED_SETTING", result.stdout + result.stderr)
 
+    def test_helper_parameter_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func read(key string) string { return os.Getenv(key) }\n'
+            'func load() { _ = read("TG_HELPER_ONLY") }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_HELPER_ONLY", result.stdout + result.stderr)
+
+    def test_method_call_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func read(key string) string { return os.Getenv(key) }\n'
+            'type loader struct{}\n'
+            'func (loader) load() string { return read("TG_HELPER_ONLY") }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_HELPER_ONLY", result.stdout + result.stderr)
+
+    def test_closure_parameter_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func load() { read := func(key string) string { return os.Getenv(key) }; '
+            '_ = read("TG_CLOSURE_ONLY") }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_CLOSURE_ONLY", result.stdout + result.stderr)
+
+    def test_range_table_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func load() { for _, setting := range []struct { name string }{'
+            '{name: "TG_TABLE_ONLY"}, {"TG_TABLE_POSITIONAL"}} {'
+            '_ = os.Getenv(setting.name) } }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_TABLE_ONLY", result.stdout + result.stderr)
+        self.assertIn("TG_TABLE_POSITIONAL", result.stdout + result.stderr)
+
+    def test_unresolved_environment_key_reports_source_location(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func load(key string) { _ = os.Getenv(key) }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("config.go:3", result.stdout + result.stderr)
+        self.assertIn("cannot resolve environment key", result.stdout + result.stderr)
+
+    def test_environment_key_depth_limit_reports_source_location(self):
+        declarations = ['package config', 'import "os"', 'const key0 = "TG_DEEP_SETTING"']
+        declarations.extend(f"const key{index} = key{index - 1}" for index in range(1, 20))
+        declarations.append("func load() { _ = os.Getenv(key19) }")
+        (self.root / "internal/config/config.go").write_text("\n".join(declarations) + "\n")
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("config.go:", result.stdout + result.stderr)
+        self.assertIn("resolution exceeded depth", result.stdout + result.stderr)
+
     def test_missing_relative_markdown_target_names_file_and_target(self):
         (self.root / "README.md").write_text("[missing](docs/nope.md)\n")
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md", result.stdout + result.stderr)
+        self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
+    def test_broken_markdown_link_after_stray_backtick_is_checked(self):
+        (self.root / "README.md").write_text(
+            "` stray\n[missing](docs/nope.md) and `valid code`\n"
+        )
 
         result = self.run_checker()
 
