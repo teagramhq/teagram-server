@@ -10,6 +10,10 @@ spec:
           env:
             - name: TG_WEBSOCKET_ALLOWED_ORIGINS
               value: https://web.example.test
+            - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
+              value: server.example.test:443
+            - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
+              value: https://web.example.test
             - name: TG_TURNSTILE_SIGNIN_ENABLED
               value: "false"
             - name: TG_TURNSTILE_TEST_MODE
