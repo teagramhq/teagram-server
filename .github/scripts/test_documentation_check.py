@@ -190,6 +190,43 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/nope.md", result.stdout + result.stderr)
 
+    def test_link_title_with_angle_bracket_does_not_hide_destination(self):
+        (self.root / "README.md").write_text('[x](docs/nope.md "a<b")\n')
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md", result.stdout + result.stderr)
+        self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
+    def test_link_title_with_angle_bracket_does_not_hide_following_links(self):
+        (self.root / "docs/a.md").write_text("Guide.\n")
+        (self.root / "README.md").write_text(
+            '[x](docs/a.md "a<b")\n[y](docs/gone.md)\n<br> done)\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md", result.stdout + result.stderr)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
+    def test_angle_bracket_markdown_destination_is_checked(self):
+        (self.root / "README.md").write_text("[x](<docs/nope.md>)\n")
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
+    def test_escaped_parentheses_in_markdown_destination_resolve(self):
+        (self.root / "docs/guide(quick).md").write_text("Guide.\n")
+        (self.root / "README.md").write_text("[guide](docs/guide\\(quick\\).md)\n")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_missing_relative_html_asset_names_file_and_target(self):
         (self.root / "docs/guide.md").write_text('<img src="missing.svg">\n')
 

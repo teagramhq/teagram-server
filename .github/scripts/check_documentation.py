@@ -1,6 +1,7 @@
 import argparse
 import html
 import re
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -89,20 +90,40 @@ def escaped_at(text, index):
     return backslashes % 2 == 1
 
 
+def unescape_markdown(text):
+    unescaped = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in string.punctuation:
+            unescaped.append(text[index + 1])
+            index += 2
+        else:
+            unescaped.append(text[index])
+            index += 1
+    return "".join(unescaped)
+
+
 def matching_delimiter(text, start, opening, closing):
-    depth = 0
-    in_angle = False
-    for index in range(start, len(text)):
+    depth = 1
+    in_angle_destination = False
+    if opening == "(":
+        destination_start = start + 1
+        while destination_start < len(text) and text[destination_start].isspace():
+            destination_start += 1
+        in_angle_destination = (
+            destination_start < len(text)
+            and text[destination_start] == "<"
+            and not escaped_at(text, destination_start)
+        )
+    for index in range(start + 1, len(text)):
         char = text[index]
         if escaped_at(text, index):
             continue
-        if opening == "(" and char == "<":
-            in_angle = True
-        elif opening == "(" and char == ">":
-            in_angle = False
-        elif not in_angle and char == opening:
+        if in_angle_destination and char == ">":
+            in_angle_destination = False
+        elif not in_angle_destination and char == opening:
             depth += 1
-        elif not in_angle and char == closing:
+        elif not in_angle_destination and char == closing:
             depth -= 1
             if depth == 0:
                 return index
@@ -158,7 +179,7 @@ def inline_link_destinations(text):
             if destination_end is not None:
                 destination = inline_destination(text[destination_start + 1 : destination_end])
                 if destination is not None:
-                    destinations.append(html.unescape(destination))
+                    destinations.append(html.unescape(unescape_markdown(destination)))
                 destinations.extend(inline_link_destinations(text[label_start + 1 : label_end]))
                 index = destination_end + 1
                 continue
@@ -174,7 +195,7 @@ def markdown_destinations(text):
         destination = match.group(1)
         if destination.startswith("<") and destination.endswith(">"):
             destination = destination[1:-1]
-        yield html.unescape(destination)
+        yield html.unescape(unescape_markdown(destination))
     for match in HTML_LINK.finditer(cleaned):
         yield html.unescape(match.group(2))
 
