@@ -74,10 +74,19 @@ YAML
     kubectl apply --filename "$ACCESS_MANIFEST"
     ;;
   --rollback)
-    if kubectl get statefulset tailscale-proxy --namespace "$NAMESPACE" >/dev/null 2>&1; then
+    if ! proxy_statefulset=$(kubectl get statefulset tailscale-proxy --namespace "$NAMESPACE" \
+      --ignore-not-found --output=name); then
+      fail 'could not determine whether StatefulSet tailscale-proxy exists'
+    fi
+    if [[ -n "$proxy_statefulset" ]]; then
       kubectl scale statefulset/tailscale-proxy --replicas=0 --namespace "$NAMESPACE"
       kubectl wait --for=delete pod/tailscale-proxy-0 --namespace "$NAMESPACE" --timeout=180s
     fi
+    if ! proxy_pods=$(kubectl get pods --namespace "$NAMESPACE" \
+      --selector=app.kubernetes.io/name=tailscale-proxy --output=name); then
+      fail 'could not determine whether tailnet proxy pods remain'
+    fi
+    [[ -z "$proxy_pods" ]] || fail 'tailnet proxy pods remain; refusing to remove access'
     kubectl delete rolebinding tailscale-proxy-state teagram-deployer-networkpolicy \
       --namespace "$NAMESPACE" --ignore-not-found=true
     kubectl delete role tailscale-proxy-state teagram-deployer-networkpolicy \

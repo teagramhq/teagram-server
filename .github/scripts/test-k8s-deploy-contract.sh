@@ -544,4 +544,116 @@ grep --fixed-strings --quiet "kubectl --as=\"\$agent\" delete pod postgres-0 --d
   .github/scripts/test-k8s-agent-access.sh ||
   fail 'the agent admission test must server-side dry-run a denied postgres delete'
 
+rollback_fixture="$migration_fixture/tailnet-proxy-rollback"
+mkdir -p "$rollback_fixture/bin"
+cat > "$rollback_fixture/bin/kubectl" <<'KUBECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$KUBECTL_CALLS"
+case "${1:-} ${2:-}" in
+  'config current-context')
+    printf 'rollback-test\n'
+    ;;
+  'get namespace')
+    ;;
+  'get statefulset')
+    if [[ " $* " != *' --ignore-not-found '* ]]; then
+      printf 'StatefulSet lookup must ignore only NotFound\n' >&2
+      exit 64
+    fi
+    case "$TAILNET_ROLLBACK_CASE" in
+      api-error)
+        printf 'simulated Kubernetes API timeout\n' >&2
+        exit 1
+        ;;
+      absent|orphan-pod)
+        ;;
+      running|wait-error|pods-error|pods-remain)
+        printf 'statefulset.apps/tailscale-proxy\n'
+        ;;
+      *)
+        printf 'unknown test case: %s\n' "$TAILNET_ROLLBACK_CASE" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  'scale statefulset/tailscale-proxy')
+    ;;
+  'wait --for=delete')
+    if [[ "$TAILNET_ROLLBACK_CASE" == wait-error ]]; then
+      printf 'simulated pod deletion timeout\n' >&2
+      exit 1
+    fi
+    ;;
+  'get pods')
+    if [[ "$TAILNET_ROLLBACK_CASE" == pods-error ]]; then
+      printf 'simulated Kubernetes API timeout while listing pods\n' >&2
+      exit 1
+    fi
+    if [[ "$TAILNET_ROLLBACK_CASE" == pods-remain || "$TAILNET_ROLLBACK_CASE" == orphan-pod ]]; then
+      printf 'pod/tailscale-proxy-0\n'
+    fi
+    ;;
+  'delete rolebinding'|'delete role'|'delete serviceaccount')
+    ;;
+  *)
+    printf 'unexpected kubectl call: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+KUBECTL
+chmod 0700 "$rollback_fixture/bin/kubectl"
+
+run_tailnet_proxy_rollback() {
+  local scenario="$1"
+  env "PATH=$rollback_fixture/bin:$PATH" \
+    "TAILNET_ROLLBACK_CASE=$scenario" \
+    "KUBECTL_CALLS=$rollback_fixture/$scenario.calls" \
+    bash deploy/k8s/install-tailnet-proxy-access.sh --rollback
+}
+
+assert_no_rollback_access_removal() {
+  local calls_file="$1"
+  if grep --extended-regexp --quiet '^delete (rolebinding|role|serviceaccount) ' "$calls_file"; then
+    fail 'the rollback must keep RBAC in place until the proxy is confirmed stopped'
+  fi
+}
+
+if run_tailnet_proxy_rollback api-error >"$rollback_fixture/api-error.log" 2>&1; then
+  fail 'the rollback accepted a failed StatefulSet lookup'
+fi
+grep --fixed-strings --quiet 'could not determine whether StatefulSet tailscale-proxy exists' \
+  "$rollback_fixture/api-error.log" ||
+  fail 'the rollback must report an ambiguous StatefulSet lookup'
+assert_no_rollback_access_removal "$rollback_fixture/api-error.calls"
+if grep --fixed-strings --quiet 'scale statefulset/tailscale-proxy' "$rollback_fixture/api-error.calls"; then
+  fail 'the rollback must not claim it stopped the proxy after an API lookup failure'
+fi
+
+if ! run_tailnet_proxy_rollback absent >"$rollback_fixture/absent.log" 2>&1; then
+  fail 'the rollback must allow NotFound when no proxy pods remain'
+fi
+if grep --fixed-strings --quiet 'scale statefulset/tailscale-proxy' "$rollback_fixture/absent.calls"; then
+  fail 'the rollback must not scale a StatefulSet that is absent'
+fi
+grep --fixed-strings --quiet 'delete rolebinding' "$rollback_fixture/absent.calls" ||
+  fail 'the rollback must remove access after confirming no proxy pods remain'
+
+for unsafe_case in wait-error pods-error pods-remain orphan-pod; do
+  if run_tailnet_proxy_rollback "$unsafe_case" >"$rollback_fixture/$unsafe_case.log" 2>&1; then
+    fail "the rollback accepted an unconfirmed proxy stop: $unsafe_case"
+  fi
+  assert_no_rollback_access_removal "$rollback_fixture/$unsafe_case.calls"
+done
+
+if ! run_tailnet_proxy_rollback running >"$rollback_fixture/running.log" 2>&1; then
+  fail 'the rollback must complete after the proxy pod is deleted'
+fi
+grep --fixed-strings --quiet 'scale statefulset/tailscale-proxy' "$rollback_fixture/running.calls" ||
+  fail 'the rollback must scale an existing proxy StatefulSet to zero'
+grep --fixed-strings --quiet 'wait --for=delete pod/tailscale-proxy-0' "$rollback_fixture/running.calls" ||
+  fail 'the rollback must wait for the proxy pod to stop before removing access'
+grep --fixed-strings --quiet 'delete rolebinding' "$rollback_fixture/running.calls" ||
+  fail 'the rollback must remove access after confirming the proxy pod stopped'
+
 printf 'K8s deployment contract passed\n'
