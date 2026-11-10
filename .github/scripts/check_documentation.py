@@ -146,7 +146,7 @@ def matching_link_parenthesis(text, start):
             if escaped_at(text, index):
                 index += 1
                 continue
-            if char.isspace() and depth == 0:
+            if char.isspace():
                 break
             if char == "(":
                 depth += 1
@@ -189,7 +189,7 @@ def matching_link_parenthesis(text, start):
                 index += 1
                 continue
             if text[index] == "(":
-                depth += 1
+                return None
             elif text[index] == ")":
                 depth -= 1
             index += 1
