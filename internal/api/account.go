@@ -238,6 +238,7 @@ var reservedUsernames = map[string]bool{
 	"apiws":            true,
 	"backgrounds":      true,
 	"download":         true,
+	"tdhbcfiles":       true,
 	"hls":              true,
 	"hls_quality_file": true,
 	"invite":           true,

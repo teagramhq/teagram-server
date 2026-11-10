@@ -35,10 +35,22 @@ test('the pinned guest browser runner exercises the signup QA bypass token', (t)
 
 test('CI keeps the gate-off Turnstile challenge flow beside the QA bypass flow', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/real-client-browser-flow.yml'), 'utf8');
-  const challengeStep = workflow.match(/- name: Run gate-off fresh-browser guest signup with the real challenge([\s\S]*?)(?=\n      - name: |$)/);
+  assert.match(workflow, /REAL_CLIENT_GUEST_WEB_REVISION: [0-9a-f]{40}/);
+  assert.match(workflow, /path: guest-web-source/);
+  const guestStepNames = [
+    'Run fresh-browser guest signup with the sign-in gate enabled',
+    'Run gate-off fresh-browser guest signup with the real challenge',
+    'Run gate-off fresh-browser guest signup with the QA bypass'
+  ];
+  for(const name of guestStepNames) {
+    const step = workflow.match(new RegExp(`- name: ${name}([\\s\\S]*?)(?=\\n {6}- name: |$)`));
+    assert.ok(step, `${name} must remain in CI`);
+    assert.match(step[1], /REAL_CLIENT_WEB_REVISION: \$\{\{ env\.REAL_CLIENT_GUEST_WEB_REVISION \}\}/);
+    assert.match(step[1], /REAL_CLIENT_WEB_ROOT: \$\{\{ env\.REAL_CLIENT_GUEST_WEB_ROOT \}\}/);
+  }
+  const challengeStep = workflow.match(/- name: Run gate-off fresh-browser guest signup with the real challenge([\s\S]*?)(?=\n {6}- name: |$)/);
   assert.ok(challengeStep, 'the gate-off real-challenge browser scenario must remain in CI');
   assert.match(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'/);
   assert.match(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_GATE_OFF: '1'/);
   assert.doesNotMatch(challengeStep[1], /REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS/);
-  assert.match(workflow, /Run gate-off fresh-browser guest signup with the QA bypass/);
 });

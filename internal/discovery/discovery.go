@@ -71,20 +71,21 @@ type MTProtoBinding struct {
 
 // WebSocketBinding is the public browser transport endpoint.
 type WebSocketBinding struct {
-	Endpoint string `json:"endpoint"`
+	Endpoint    string `json:"endpoint"`
+	BrowserOnly bool   `json:"browser_only,omitempty"`
 }
 
 // NewDocument constructs the canonical public document from the exact
 // endpoint, DC and key used by the server.
 func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool, wipeGeneration string) (Document, error) {
-	return NewDocumentWithWebSocketAdvertiseAddr(endpoint, endpoint, dcID, pub, advertiseDemoGuestSignUp, wipeGeneration)
+	return NewDocumentWithWebSocketAdvertiseAddr(endpoint, endpoint, dcID, pub, advertiseDemoGuestSignUp, wipeGeneration, false)
 }
 
 // NewDocumentWithWebSocketAdvertiseAddr constructs a discovery document whose
 // MTProto and browser transports may advertise different hosts. The WebSocket
 // address is listener-scoped; the MTProto address remains the deployment's
 // canonical endpoint.
-func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool, wipeGeneration string) (Document, error) {
+func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool, wipeGeneration string, browserOnly bool) (Document, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Document{}, fmt.Errorf("validate advertised endpoint: %w", err)
 	}
@@ -109,7 +110,7 @@ func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr stri
 			DCID:     dcID,
 			RSASPKI:  base64.StdEncoding.EncodeToString(der),
 		},
-		WebSocket: WebSocketBinding{Endpoint: wsEndpoint},
+		WebSocket: WebSocketBinding{Endpoint: wsEndpoint, BrowserOnly: browserOnly},
 	}
 	if advertiseDemoGuestSignUp {
 		if err := ValidateWipeGeneration(wipeGeneration); err != nil {

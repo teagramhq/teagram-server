@@ -441,11 +441,13 @@ func TestServeWebSocketBrowserOnlyPolicy(t *testing.T) {
 			server := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), handler, nil)
 			server.SetWebSocketOriginPatterns(tt.patterns)
 			if tt.browserOnly {
-				setter, ok := any(server).(interface{ SetWebSocketBrowserOnly(bool) })
+				setter, ok := any(server).(interface{ SetWebSocketBrowserOnly(bool) error })
 				if !ok {
 					t.Fatal("server does not support browser-only WebSocket policy")
 				}
-				setter.SetWebSocketBrowserOnly(true)
+				if err := setter.SetWebSocketBrowserOnly(true); err != nil {
+					t.Fatalf("set browser-only WebSocket policy: %v", err)
+				}
 			}
 			served := make(chan error, 1)
 			go func() { served <- server.ServeWebSocket(ctx, ln) }()
@@ -531,6 +533,36 @@ func TestServePublicWebSocketBrowserOnlyPolicy(t *testing.T) {
 			t.Errorf("serve public websocket: %v", err)
 		}
 	})
+
+	discoveryRequest, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"http://"+ln.Addr().String()+"/.well-known/teagramd/client",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("build public discovery request: %v", err)
+	}
+	discoveryRequest.Header.Set("Cf-Connecting-Ip", "203.0.113.7")
+	discoveryResponse, err := http.DefaultClient.Do(discoveryRequest)
+	if err != nil {
+		t.Fatalf("get public discovery: %v", err)
+	}
+	var servedDocument discovery.Document
+	decodeErr := json.NewDecoder(discoveryResponse.Body).Decode(&servedDocument)
+	closeErr := discoveryResponse.Body.Close()
+	if decodeErr != nil {
+		t.Fatalf("decode public discovery: %v", decodeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close public discovery response: %v", closeErr)
+	}
+	if discoveryResponse.StatusCode != http.StatusOK {
+		t.Fatalf("public discovery status = %d, want %d", discoveryResponse.StatusCode, http.StatusOK)
+	}
+	if !servedDocument.WebSocket.BrowserOnly || servedDocument.MTProto.Endpoint != "configured.example.test:443" {
+		t.Fatalf("public discovery document = %+v, want browser-only with the MTProto binding", servedDocument)
+	}
 
 	ws, resp, err := websocket.Dial(ctx, "ws://"+ln.Addr().String()+"/apiws", &websocket.DialOptions{
 		Subprotocols: []string{"binary"},
@@ -1479,19 +1511,28 @@ func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build default discovery document: %v", err)
 	}
+	wantDefaultDoc := defaultDoc
+	wantDefaultDoc.WebSocket.BrowserOnly = true
 	publicDoc := defaultDoc
 	publicDoc.WebSocket.Endpoint = "wss://server.teagram.io/apiws"
+	wantPublicDoc := publicDoc
+	wantPublicDoc.WebSocket.BrowserOnly = true
 	publicDoc.Demo = &discovery.DemoCapabilities{GuestSignUp: true, WipeGeneration: strings.Repeat("e", 64)}
+	wantPublicDoc.Demo = publicDoc.Demo
 	publicDoc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
+	wantPublicDoc.Turnstile = publicDoc.Turnstile
 	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
 	if err := srv.SetClientDiscoveryDocument(defaultDoc); err != nil {
 		t.Fatalf("set default discovery document: %v", err)
+	}
+	if err := srv.SetWebSocketBrowserOnly(true); err != nil {
+		t.Fatalf("set default browser-only policy: %v", err)
 	}
 	publicHandler := mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil })
 	served := make(chan error, 2)
 	go func() { served <- srv.ServeWebSocket(ctx, defaultListener) }()
 	go func() {
-		served <- srv.ServeWebSocketWithHandlerAndDiscovery(ctx, publicListener, publicHandler, nil, publicDoc)
+		served <- srv.ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly(ctx, publicListener, publicHandler, nil, publicDoc, true)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -1507,8 +1548,8 @@ func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 		listener net.Listener
 		wantDoc  discovery.Document
 	}{
-		{name: "tailnet", listener: defaultListener, wantDoc: defaultDoc},
-		{name: "public", listener: publicListener, wantDoc: publicDoc},
+		{name: "tailnet", listener: defaultListener, wantDoc: wantDefaultDoc},
+		{name: "public", listener: publicListener, wantDoc: wantPublicDoc},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, requestPath := range []string{

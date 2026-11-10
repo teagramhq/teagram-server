@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+source deploy/k8s/alpha-incus.sh
 
 plan="$(deploy/k8s/cutover-alpha.sh --dry-run)"
 for required in \
@@ -579,6 +580,7 @@ write("serve-invalid-funnel.json", {**base, "AllowFunnel": None})
 write("serve-bad-https.json", {**base, "TCP": {**base["TCP"], "443": {"HTTPS": False}}})
 write("serve-extra-port.json", {**base, "TCP": {**base["TCP"], "444": {"TCPForward": "127.0.0.1:1"}}})
 write("serve-missing-bot-api.json", {**base, "TCP": {k: v for k, v in base["TCP"].items() if k != "2447"}})
+write("serve-missing-mtproto.json", {**base, "TCP": {k: v for k, v in base["TCP"].items() if k != "2443"}})
 write("serve-bad-bot-api-proxy-protocol.json", {**base, "TCP": {**base["TCP"], "2447": {"TCPForward": "127.0.0.1:2447"}}})
 PY
 serve_args=(http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
@@ -586,12 +588,22 @@ serve_args=(http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
 check_serve_status "$fixture_dir/serve-valid.json" "${serve_args[@]}"
 check_serve_status "$fixture_dir/serve-funnel-off.json" "${serve_args[@]}"
 for invalid in serve-funnel serve-invalid-funnel serve-bad-https serve-extra-port \
-  serve-missing-bot-api serve-bad-bot-api-proxy-protocol; do
+  serve-missing-bot-api serve-missing-mtproto serve-bad-bot-api-proxy-protocol; do
   if check_serve_status "$fixture_dir/$invalid.json" "${serve_args[@]}" 2>/dev/null; then
     printf 'cutover accepted unsafe Serve state: %s\n' "$invalid" >&2
     exit 1
   fi
 done
+missing_mtproto_output=$(check_serve_status "$fixture_dir/serve-missing-mtproto.json" \
+  "${serve_args[@]}" 2>&1) && {
+  printf 'cutover accepted source Serve state without TCP route 2443\n' >&2
+  exit 1
+}
+if [[ $missing_mtproto_output != *'source Tailscale Serve TCP route 2443 is missing; refusing to cut over without a rollback route'* ]]; then
+  printf 'missing source TCP 2443 route did not produce a clear precheck error: %s\n' \
+    "$missing_mtproto_output" >&2
+  exit 1
+fi
 cat > "$fixture_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

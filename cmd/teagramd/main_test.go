@@ -1221,6 +1221,26 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 	}
 }
 
+func TestRunBotCommandRejectsReservedUsernames(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "not a postgres DSN")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	for _, username := range []string{"tdhbcfiles", "TDHBCFiles"} {
+		var stdout, stderr bytes.Buffer
+		err := runBotCommandWithEUID(
+			[]string{"create", username, "Files"},
+			slog.New(slog.DiscardHandler), &stdout, &stderr, 0,
+		)
+		if err == nil || err.Error() != "reserved username handle" {
+			t.Errorf("create bot %q error = %v, want reserved username handle", username, err)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Errorf("create bot %q output = stdout %q stderr %q, want empty", username, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestRunBotEncryptCommandArmorsTokenWithoutExposingIt(t *testing.T) {
 	identity, err := age.GenerateX25519Identity()
 	if err != nil {

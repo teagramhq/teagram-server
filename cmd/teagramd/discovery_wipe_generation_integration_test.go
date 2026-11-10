@@ -221,11 +221,12 @@ func fetchDemoWipeDiscovery(t *testing.T, ctx context.Context, st *store.Store, 
 		t.Fatalf("read stored wipe generation: %v", err)
 	}
 	cfg := config.Config{
-		AdvertiseHost:             "demo.example.test",
-		AdvertisePort:             443,
-		DCID:                      2,
-		AdvertiseDemoGuestSignUp:  true,
-		PublicWebSocketListenAddr: "127.0.0.1:0",
+		AdvertiseHost:              "demo.example.test",
+		AdvertisePort:              443,
+		DCID:                       2,
+		AdvertiseDemoGuestSignUp:   true,
+		PublicWebSocketListenAddr:  "127.0.0.1:0",
+		PublicWebSocketBrowserOnly: true,
 	}
 	_, publicDocument, err := listenerDiscoveryDocuments(cfg, &key.PublicKey, generation)
 	if err != nil {
@@ -246,12 +247,13 @@ func fetchDemoWipeDiscovery(t *testing.T, ctx context.Context, st *store.Store, 
 	serveCtx, cancel := context.WithCancel(ctx)
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- server.ServeWebSocketWithHandlerAndDiscovery(
+		serveErr <- server.ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly(
 			serveCtx,
 			listener,
 			mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }),
 			nil,
 			publicDocument,
+			cfg.PublicWebSocketBrowserOnly,
 		)
 	}()
 	var stopOnce sync.Once
@@ -303,6 +305,9 @@ func fetchDemoWipeDiscovery(t *testing.T, ctx context.Context, st *store.Store, 
 	}
 	if document.Demo == nil || document.Demo.WipeGeneration != generation {
 		t.Fatalf("public discovery demo = %+v, want wipe generation %q", document.Demo, generation)
+	}
+	if !document.WebSocket.BrowserOnly || document.MTProto.Endpoint != "demo.example.test:443" {
+		t.Fatalf("public discovery = %+v, want browser-only with the advertised MTProto binding", document)
 	}
 	return document
 }

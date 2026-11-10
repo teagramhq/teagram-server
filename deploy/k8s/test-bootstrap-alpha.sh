@@ -21,6 +21,12 @@ for path in "$kubeconfig_path" "$cutover_kubeconfig_path"; do
     fail "$path exists; move it aside before running this test"
 done
 
+dry_run_output=$("$bootstrap" --dry-run)
+grep -Fq 'ServiceAccount teagram-agent with token automount disabled' <<< "$dry_run_output" ||
+  fail 'bootstrap dry-run did not show the dedicated agent ServiceAccount'
+grep -Fq 'cluster-scoped ValidatingAdmissionPolicy teagram-agent-pod-delete' <<< "$dry_run_output" ||
+  fail 'bootstrap dry-run did not show the cluster-scoped pod-delete policy'
+
 work=$(mktemp -d)
 cleanup() {
   rm -rf -- "$work" "$kubeconfig_path" "$cutover_kubeconfig_path"
@@ -169,6 +175,18 @@ if missing_resources:
     raise SystemExit(f"bootstrap did not apply expected resources: {sorted(missing_resources)}")
 if "secret/teagram-deployer-token" not in state["objects"]:
     raise SystemExit("bootstrap did not apply the deployer token Secret")
+required_agent_objects = {
+    "serviceaccount/teagram-agent",
+    "role/teagram-agent",
+    "rolebinding/teagram-agent",
+    "validatingadmissionpolicy/teagram-agent-pod-delete",
+    "validatingadmissionpolicybinding/teagram-agent-pod-delete",
+}
+missing_agent_objects = required_agent_objects - state["objects"].keys()
+if missing_agent_objects:
+    raise SystemExit(f"bootstrap did not apply agent access resources: {sorted(missing_agent_objects)}")
+if "secret/teagram-agent-token" in state["objects"]:
+    raise SystemExit("bootstrap must not create an agent token Secret")
 if "secret/ghcr-pull" in state["objects"]:
     raise SystemExit("bootstrap must not create a GHCR pull Secret for public images")
 for resource, expected_keys in required_data.items():
@@ -242,7 +260,7 @@ if [[ $(grep -Fc 'mock kubectl create first diagnostic' "$work/create-failure.ou
   fail 'kubectl create failure printed its stderr outside the named error'
 fi
 # Namespace, RBAC, and the two ConfigMaps are applied before the first Secret create.
-if [[ $(grep -Fc 'kubectl-apply-attempt' "$work/create-failure-actions") -ne 4 ]]; then
+if [[ $(grep -Fc 'kubectl-apply-attempt' "$work/create-failure-actions") -ne 6 ]]; then
   fail 'kubectl apply did not stop at the failed create'
 fi
 for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustfs_secret_key" \

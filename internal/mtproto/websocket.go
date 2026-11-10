@@ -2,6 +2,7 @@ package mtproto
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -624,6 +625,7 @@ func (s *Server) serveWebSocketWithDiscovery(ctx context.Context, l net.Listener
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
+	doc.WebSocket.BrowserOnly = browserOnly
 	data, err := discovery.MarshalDocument(doc)
 	if err != nil {
 		return fmt.Errorf("marshal listener client discovery document: %w", err)
@@ -745,14 +747,29 @@ func (s *Server) SetWebSocketOriginPatterns(patterns []string) {
 }
 
 // SetWebSocketBrowserOnly requires an allow-listed Origin on the WebSocket
-// endpoint. Call it before ServeWebSocket.
-func (s *Server) SetWebSocketBrowserOnly(browserOnly bool) {
+// endpoint and keeps its discovery document in sync. Call it before
+// ServeWebSocket.
+func (s *Server) SetWebSocketBrowserOnly(browserOnly bool) error {
+	if len(s.clientDiscoveryDocument) > 0 {
+		var doc discovery.Document
+		if err := json.Unmarshal(s.clientDiscoveryDocument, &doc); err != nil {
+			return fmt.Errorf("decode client discovery document: %w", err)
+		}
+		doc.WebSocket.BrowserOnly = browserOnly
+		data, err := discovery.MarshalDocument(doc)
+		if err != nil {
+			return fmt.Errorf("marshal client discovery document: %w", err)
+		}
+		s.clientDiscoveryDocument = append([]byte(nil), data...)
+	}
 	s.webSocketBrowserOnly = browserOnly
+	return nil
 }
 
 // SetClientDiscoveryDocument configures the public identity served beside the
 // WebSocket endpoint. Call it before ServeWebSocket.
 func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
+	doc.WebSocket.BrowserOnly = s.webSocketBrowserOnly
 	data, err := discovery.MarshalDocument(doc)
 	if err != nil {
 		return fmt.Errorf("marshal client discovery document: %w", err)

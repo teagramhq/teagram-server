@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -34,7 +34,7 @@ function loadBrowserModule(browserPath, observation, globals = {}) {
   return module.exports;
 }
 
-function patchBrowserForTest(t, globals) {
+function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
   const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
   assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
   const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
@@ -45,9 +45,21 @@ function patchBrowserForTest(t, globals) {
     copyFileSync(join(sourceRoot, 'scripts/real-client', name), join(scripts, name));
   }
 
+  const browserPath = join(scripts, 'browser.cjs');
+  if(legacyDirectMessage) {
+    const currentAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
+    const legacyAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
+    let browserSource = readFileSync(browserPath, 'utf8');
+    assert.equal(browserSource.split(currentAssertion).length - 1, 1);
+    browserSource = browserSource.replace(currentAssertion, legacyAssertion);
+    const currentExport = 'waitForGroupMessageCount, waitForSingleSentMessage,';
+    assert.equal(browserSource.split(currentExport).length - 1, 1);
+    browserSource = browserSource.replace(currentExport, 'waitForGroupMessageCount,');
+    writeFileSync(browserPath, browserSource);
+  }
+
   patchRealClientObserver(webRoot);
   const observation = createRequire(join(scripts, 'test.cjs'))(join(scripts, 'observation.cjs'));
-  const browserPath = join(scripts, 'browser.cjs');
   const browser = loadBrowserModule(browserPath, observation, globals);
   return {browser, browserPath, observation};
 }
@@ -112,9 +124,24 @@ class FakeBrowserSession extends EventEmitter {
   }
 }
 
-test('the patched direct-message assertion settles idless and pending/sent bubble transients by element identity', async (t) => {
+test('the pinned web direct-message assertion retains exact text and sent-state checks', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const {browser, browserPath} = patchBrowserForTest(t);
+  const browserSource = readFileSync(browserPath, 'utf8');
+  const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
+    browserSource.indexOf('async function waitForMessageReaction'));
+  assert.match(sendTextSource,
+    /await waitForSingleSentMessage\(message, text, timeoutMs\)\.catch\(\(\) => failStage\(`\$\{stage\}_message_count`\)\);/);
+  assert.match(sendTextSource,
+    /if\(chat\)\s*\{\s*await waitForGroupMessageCount\(page, chat, groupTitle, message, `\$\{stage\}_message_count`, timeoutMs\);/);
+  assert.doesNotMatch(sendTextSource, /waitForDirectMessageCount/);
+  assert.equal(typeof browser.waitForSingleSentMessage, 'function');
+  assert.equal(browser.waitForDirectMessageCount, undefined);
+});
+
+test('the patched legacy direct-message assertion settles idless and pending/sent bubble transients by element identity', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const {browser, browserPath} = patchBrowserForTest(t, undefined, {legacyDirectMessage: true});
   const browserSource = readFileSync(browserPath, 'utf8');
   const sendTextSource = browserSource.slice(browserSource.indexOf('async function sendText'),
     browserSource.indexOf('async function waitForMessageReaction'));
@@ -148,9 +175,9 @@ test('the patched direct-message assertion settles idless and pending/sent bubbl
   ]);
 });
 
-test('the patched direct-message assertion fails if idless duplicate bubbles persist through settling', async (t) => {
+test('the patched legacy direct-message assertion fails if idless duplicate bubbles persist through settling', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
-  const {browser} = patchBrowserForTest(t);
+  const {browser} = patchBrowserForTest(t, undefined, {legacyDirectMessage: true});
   const page = messagePage();
   const message = messageLocator([
     [messageBubble(null, 'sent'), messageBubble(null, 'sent')],
@@ -163,9 +190,9 @@ test('the patched direct-message assertion fails if idless duplicate bubbles per
   assert.ok(trace.samples.every((sample) => sample.count === 2));
 });
 
-test('the patched direct-message assertion rejects two bubble elements with one id', async (t) => {
+test('the patched legacy direct-message assertion rejects two bubble elements with one id', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
-  const {browser} = patchBrowserForTest(t);
+  const {browser} = patchBrowserForTest(t, undefined, {legacyDirectMessage: true});
   const page = messagePage();
   const message = messageLocator([
     [messageBubble('8', 'sent'), messageBubble('8', 'sent')],

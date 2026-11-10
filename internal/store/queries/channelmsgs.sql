@@ -467,6 +467,144 @@ WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
   AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
 ORDER BY local_id DESC;
 
+-- ChannelHistoryPageAroundUnexpired keeps the negative add_offset ordinal and
+-- page read on the same live history streams used by ChannelHistoryPageUnexpired.
+-- The expiring stream is bounded by the member-floor summary when it is ready;
+-- otherwise the expiry predicate still excludes expired unswept posts.
+-- name: ChannelHistoryPageAroundUnexpired :many
+WITH member AS MATERIALIZED (
+    SELECT cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c
+      ON c.id = cp.channel_id
+     AND c.deleted_at IS NULL
+    WHERE cp.channel_id = sqlc.arg(channel_id)::bigint
+      AND cp.user_id = sqlc.arg(owner_id)::bigint
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+), expiring_bound AS MATERIALIZED (
+    -- The total unexpired expiring posts at this statement's timestamp, or
+    -- NULL when the nodes are not ready or are detectably contradictory.
+    SELECT CASE WHEN counts.expiring_ready
+                 AND counts.expiring_expired <= counts.expiring_total
+                THEN counts.expiring_total - counts.expiring_expired
+           END AS unexpired_total
+    FROM member
+    CROSS JOIN LATERAL channel_post_expiring_counts(
+        sqlc.arg(channel_id)::bigint,
+        member.available_min_id,
+        statement_timestamp()
+    ) AS counts
+), expiring AS MATERIALIZED (
+    -- The newest unexpired_total expiring posts by expiry are exactly the
+    -- unexpired ones. The expiry predicate excludes the expired backlog even
+    -- when the summary bound is unavailable.
+    SELECT window_post.local_id
+    FROM (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+          AND cm.deleted = false
+          AND cm.action_type = 0
+          AND cm.expires_at IS NOT NULL
+          AND cm.expires_at > statement_timestamp()
+        ORDER BY cm.expires_at DESC
+        LIMIT (SELECT expiring_bound.unexpired_total FROM expiring_bound)
+    ) AS window_post
+    WHERE window_post.local_id > (SELECT member.available_min_id FROM member)
+), page_offset AS MATERIALIZED (
+    -- Compute offset_id's ordinal from the same three disjoint live streams
+    -- used below, instead of filtering expired posts during a full channel
+    -- walk.
+    SELECT GREATEST(
+        (SELECT count(*)
+         FROM channel_messages cm
+         CROSS JOIN member
+         WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+           AND cm.deleted = false
+           AND cm.ttl_period = 0
+           AND cm.expires_at IS NULL
+           AND cm.local_id > member.available_min_id
+           AND cm.local_id >= sqlc.arg(offset_id)::bigint)
+        + (SELECT count(*)
+           FROM channel_messages cm
+           CROSS JOIN member
+           WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+             AND cm.deleted = false
+             AND cm.action_type <> 0
+             AND cm.ttl_period <> 0
+             AND cm.expires_at IS NULL
+             AND cm.local_id > member.available_min_id
+             AND cm.local_id >= sqlc.arg(offset_id)::bigint)
+        + (SELECT count(*)
+           FROM expiring
+           WHERE expiring.local_id >= sqlc.arg(offset_id)::bigint)
+        + sqlc.arg(add_offset)::bigint,
+        0::bigint
+    ) AS skip
+), visible AS (
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        CROSS JOIN member
+        WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+          AND cm.deleted = false
+          AND cm.ttl_period = 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > member.available_min_id
+        ORDER BY cm.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + sqlc.arg(lim)::int
+    )
+    UNION ALL
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        CROSS JOIN member
+        WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+          AND cm.deleted = false
+          AND cm.action_type <> 0
+          AND cm.ttl_period <> 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > member.available_min_id
+        ORDER BY cm.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + sqlc.arg(lim)::int
+    )
+    UNION ALL
+    (
+        SELECT expiring.local_id
+        FROM expiring
+        ORDER BY expiring.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + sqlc.arg(lim)::int
+    )
+), page_ids AS (
+    SELECT visible.local_id
+    FROM visible
+    ORDER BY visible.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+    OFFSET (SELECT page_offset.skip FROM page_offset)
+), page AS (
+    SELECT hydrated.channel_id, hydrated.local_id, hydrated.from_id, hydrated.date, hydrated.message,
+           hydrated.edit_date, hydrated.deleted, hydrated.random_id, hydrated.grouped_id,
+           hydrated.file_id, hydrated.sticker_document_id, hydrated.reply_to_msg_id,
+           hydrated.action_type, hydrated.ttl_period, hydrated.post_author, hydrated.entities
+    FROM page_ids
+    CROSS JOIN LATERAL (
+        SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+               cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+               cm.action_type, cm.ttl_period, cm.post_author, cm.entities
+        FROM channel_messages cm
+        WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+          AND cm.local_id = page_ids.local_id
+        LIMIT 1
+    ) AS hydrated
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
+FROM page
+WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
+  AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
+ORDER BY local_id DESC;
+
 -- ChannelHistoryPageByDate resolves the date to the closest visible history
 -- boundary, then seeks by local_id for the add_offset and result page.
 -- name: ChannelHistoryPageByDate :many

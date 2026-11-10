@@ -28,6 +28,8 @@ type expiredCountFixture struct {
 	lastCountRows int64
 	// lastPageRows is the rows the history page statement alone read.
 	lastPageRows int64
+	// lastAroundRows is the rows the around-page statement alone read.
+	lastAroundRows int64
 }
 
 func newExpiredCountFixture(t *testing.T, phone string) *expiredCountFixture {
@@ -137,13 +139,18 @@ func (f *expiredCountFixture) historyCost(channelID int64) (statements int, rows
 
 // historyCostAt is historyCost for the page below offsetID (0 reads the newest).
 func (f *expiredCountFixture) historyCostAt(channelID, offsetID int64) (statements int, rows int64, count int, pageIDs []int64) {
+	return f.historyCostRequest(channelID, offsetID, 0)
+}
+
+func (f *expiredCountFixture) historyCostRequest(channelID, offsetID, addOffset int64) (statements int, rows int64, count int, pageIDs []int64) {
 	f.lastMillis = 0
 	f.lastCountRows = 0
 	f.lastPageRows = 0
+	f.lastAroundRows = 0
 	f.t.Helper()
 	ctx := context.Background()
 	f.trace.reset()
-	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, offsetID, 0, 0, 0, 0, 100)
+	page, count, err := f.s.ChannelHistoryWithOffset(ctx, channelID, f.owner.ID, offsetID, 0, addOffset, 0, 0, 100)
 	if err != nil {
 		f.t.Fatalf("read history: %v", err)
 	}
@@ -184,6 +191,9 @@ func (f *expiredCountFixture) historyCostAt(channelID, offsetID int64) (statemen
 				}
 				if strings.Contains(query.sql, "-- name: ChannelHistoryPage") {
 					f.lastPageRows += read
+				}
+				if strings.Contains(query.sql, "-- name: ChannelHistoryPageAround") {
+					f.lastAroundRows += read
 				}
 			}
 		})
