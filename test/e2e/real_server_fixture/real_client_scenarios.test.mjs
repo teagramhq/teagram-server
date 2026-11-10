@@ -8,18 +8,25 @@ try {
   if(error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
 }
 
-test('selects the scenarios supported by the pinned web contract', () => {
+test('selects the pre-custom-emoji contract while keeping group required', () => {
   assert.deepEqual(selectRealClientScenarios({
     required: ['sign-in', 'first-message', 'message', 'group'],
     optional: ['channel', 'poll']
   }), ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
 });
 
-test('includes custom emoji when the pinned web contract requires it', () => {
+test('selects the scenarios supported by the pinned web contract', () => {
   assert.deepEqual(selectRealClientScenarios({
     required: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group'],
     optional: ['channel', 'poll']
   }), ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']);
+});
+
+test('fails when the pinned web contract omits the required group scenario', () => {
+  assert.throws(() => selectRealClientScenarios({
+    required: ['sign-in', 'first-message', 'message', 'custom-emoji'],
+    optional: ['channel', 'poll']
+  }), /web contract omits required scenarios: group/);
 });
 
 test('fails when the pinned web contract requires an unsupported scenario', () => {
