@@ -33,3 +33,64 @@ export function createMessageAckTraceEvidence(report) {
       : {})
   };
 }
+
+export function createRealClientBrowserReportCollector() {
+  let pendingLine = '';
+  let droppingOversizedLine = false;
+  let report;
+
+  const consumeLine = (line) => {
+    const candidate = parseRealClientBrowserReport(line.endsWith('\r') ? line.slice(0, -1) : line);
+    if(candidate) report = candidate;
+  };
+
+  return {
+    write(chunk) {
+      if(typeof chunk !== 'string') throw new TypeError('browser runner stdout chunks must be strings');
+      let offset = 0;
+      while(offset < chunk.length) {
+        const newline = chunk.indexOf('\n', offset);
+        const end = newline < 0 ? chunk.length : newline;
+        const segment = chunk.slice(offset, end);
+
+        if(droppingOversizedLine) {
+          if(newline >= 0) droppingOversizedLine = false;
+        } else {
+          const line = pendingLine + segment;
+          pendingLine = '';
+          if(line.length > MAX_BROWSER_REPORT_LINE_LENGTH) {
+            droppingOversizedLine = newline < 0;
+          } else if(newline < 0) {
+            pendingLine = line;
+          } else {
+            consumeLine(line);
+          }
+        }
+
+        if(newline < 0) break;
+        offset = newline + 1;
+      }
+    },
+    finish() {
+      if(!droppingOversizedLine && pendingLine) consumeLine(pendingLine);
+      pendingLine = '';
+      return report;
+    }
+  };
+}
+
+export function collectMessageAckTraceEvidence({guestSignupOnly, runnerError, browserReport}) {
+  const evidence = createMessageAckTraceEvidence(browserReport);
+  if(guestSignupOnly || runnerError) return evidence;
+  if(browserReport?.status !== 'passed' || !evidence || evidence.traces.alice.length === 0) {
+    throw new Error('successful browser flow omitted Alice acknowledgement trace records');
+  }
+  return evidence;
+}
+
+export function configureAckTraceBuildEnvironment(environment, guestSignupOnly) {
+  const configuredEnvironment = {...environment};
+  delete configuredEnvironment.VITE_REAL_CLIENT_ACK_TRACE;
+  if(!guestSignupOnly) configuredEnvironment.VITE_REAL_CLIENT_ACK_TRACE = '1';
+  return configuredEnvironment;
+}

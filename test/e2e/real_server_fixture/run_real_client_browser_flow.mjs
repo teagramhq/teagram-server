@@ -7,7 +7,11 @@ import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 import {selectRealClientScenarios} from './real_client_scenarios.mjs';
-import {createMessageAckTraceEvidence, parseRealClientBrowserReport} from './real_client_ack_trace_report.mjs';
+import {
+  collectMessageAckTraceEvidence,
+  configureAckTraceBuildEnvironment,
+  createRealClientBrowserReportCollector
+} from './real_client_ack_trace_report.mjs';
 
 const GUEST_SIGNUP_SCENARIOS = 'guest-signup';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -109,25 +113,18 @@ function cleanEnvironment(extra = {}) {
   return {...env, ...extra};
 }
 
-function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeoutMs, captureStdout = false, onStdoutLine}) {
-  if(captureStdout && typeof onStdoutLine !== 'function') {
-    return Promise.reject(new FlowError(stage, `${command} stdout capture has no line handler`));
+function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeoutMs, captureStdout = false, onStdoutChunk}) {
+  if(captureStdout && typeof onStdoutChunk !== 'function') {
+    return Promise.reject(new FlowError(stage, `${command} stdout capture has no chunk handler`));
   }
   if(requestedSignal) return Promise.reject(new FlowError('cancelled', `workflow received ${requestedSignal}`));
   const child = spawnTracked(command, args, {cwd, env, stdio: captureStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit'});
   commandChildren.add(child);
   if(captureStdout) {
     child.stdout.setEncoding('utf8');
-    let pendingLine = '';
     child.stdout.on('data', (chunk) => {
       process.stdout.write(chunk);
-      const lines = `${pendingLine}${chunk}`.split(/\r?\n/);
-      pendingLine = lines.pop() || '';
-      lines.forEach(onStdoutLine);
-      if(pendingLine.length > 2 * 1024 * 1024) pendingLine = '';
-    });
-    child.stdout.on('end', () => {
-      if(pendingLine) onStdoutLine(pendingLine);
+      onStdoutChunk(chunk);
     });
   }
   return new Promise((resolvePromise, rejectPromise) => {
@@ -450,12 +447,11 @@ async function main() {
     writeFileSync(keyPath, serverReady.mtprotoPublicKeyPEM, {mode: 0o600});
 
     runStage = 'private-artifact-build';
-    const buildEnvironment = cleanEnvironment({
+    const buildEnvironment = configureAckTraceBuildEnvironment(cleanEnvironment({
       MTPROTO_TARGET_MODE: 'private',
       MTPROTO_PRIVATE_ENDPOINT: 'wss://teagramd.test/apiws',
-      MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: keyPath,
-      ...(guestSignupOnly ? {} : {VITE_REAL_CLIENT_ACK_TRACE: '1'})
-    });
+      MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: keyPath
+    }), guestSignupOnly);
     await runCommand('corepack', ['pnpm', 'exec', 'vite', 'build', '--outDir', artifactDirectory], {
       cwd: webRoot,
       env: buildEnvironment,
@@ -485,6 +481,7 @@ async function main() {
       ...(guestSignupQaBypassToken ? {REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken} : {})
     });
     let runnerError;
+    const browserReportCollector = createRealClientBrowserReportCollector();
     try {
       await runCommand('corepack', ['pnpm', 'run', 'test:real-client', '--',
         '--readiness-file', readinessPath,
@@ -499,18 +496,17 @@ async function main() {
         stage: runStage,
         timeoutMs: stageTimeout(startedAt, TOTAL_BUDGET_MS, runStage),
         captureStdout: true,
-        onStdoutLine: (line) => {
-          const report = parseRealClientBrowserReport(line);
-          if(report) browserReport = report;
-        }
+        onStdoutChunk: (chunk) => browserReportCollector.write(chunk)
       });
     } catch(error) {
       runnerError = error;
     }
 
-    messageAckTraceEvidence = createMessageAckTraceEvidence(browserReport);
-    if(!guestSignupOnly && browserReport?.status === 'passed' && !messageAckTraceEvidence) {
-      throw new FlowError('browser-report-validation', 'browser report omitted Alice or Bob acknowledgement traces');
+    browserReport = browserReportCollector.finish();
+    try {
+      messageAckTraceEvidence = collectMessageAckTraceEvidence({guestSignupOnly, runnerError, browserReport});
+    } catch(error) {
+      throw new FlowError('browser-report-validation', error.message);
     }
 
     const traceManifest = join(traceDirectory, 'trace-manifest.json');

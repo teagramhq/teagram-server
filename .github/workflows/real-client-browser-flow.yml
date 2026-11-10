@@ -122,7 +122,7 @@ jobs:
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
       - name: Test real-client worker source observation
-        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs test/e2e/real_server_fixture/real_client_ack_trace_report.test.mjs
 
       - name: Test the pinned guest signup runner patch
         env:
