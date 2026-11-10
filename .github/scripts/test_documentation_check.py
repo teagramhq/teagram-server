@@ -261,6 +261,18 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_code_span_does_not_cross_table_rows_inside_blockquote(self):
+        (self.root / "README.md").write_text(
+            "> | `x | [a](docs/gone.md) |\n"
+            "> | --- | --- |\n"
+            "> | y ` | z |\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
     def test_indented_table_shaped_code_block_hides_markdown_links(self):
         (self.root / "README.md").write_text(
             "Example:\n\n"

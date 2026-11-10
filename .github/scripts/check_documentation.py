@@ -67,11 +67,23 @@ def list_item_indents(line):
     return marker_indent, content_indent
 
 
+def strip_blockquote_prefixes(line):
+    while match := BLOCKQUOTE_START.match(line):
+        line = line[match.end() :]
+        if line.startswith((" ", "\t")):
+            line = line[1:]
+    return line
+
+
 def table_row_cells(line, container_indent=0):
     indentation = indentation_columns(line)
     if indentation < container_indent or indentation - container_indent > 3:
         return None
-    line = remove_indentation_columns(line, container_indent).strip()
+    line = remove_indentation_columns(line, container_indent)
+    line = strip_blockquote_prefixes(line)
+    if indentation_columns(line) > 3:
+        return None
+    line = line.strip()
     cells = []
     cell_start = 0
     for index, char in enumerate(line):
