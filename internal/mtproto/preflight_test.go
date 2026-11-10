@@ -366,7 +366,7 @@ func TestRawDiscoveryPerNetworkTablePrunesExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestPublicDiscoveryFullTableAdmitsUncountedWithoutAffectingRawLimiter(t *testing.T) {
+func TestPublicDiscoveryFullTableUsesBoundedOverflowSeparateFromRawLimiter(t *testing.T) {
 	t.Parallel()
 
 	limiter := newDiscoveryLimiter(DiscoveryLimits{
@@ -386,10 +386,13 @@ func TestPublicDiscoveryFullTableAdmitsUncountedWithoutAffectingRawLimiter(t *te
 	if !limiter.allowPerNet(second) {
 		t.Fatal("public discovery refused the second network")
 	}
-	for i := range 2 {
+	for i := range maxDiscoveryBuckets {
 		if !limiter.allowPerNet(third) {
 			t.Fatalf("public discovery refused untracked request %d while its table was full", i+1)
 		}
+	}
+	if limiter.allowPerNet(third) {
+		t.Fatal("public discovery admitted an untracked request after exhausting its overflow budget")
 	}
 	if !limiter.allow(third, time.Now()) {
 		t.Fatal("full public table prevented the raw limiter from admitting a new network")

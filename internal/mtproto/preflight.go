@@ -73,10 +73,11 @@ type discoveryLimiter struct {
 	limits DiscoveryLimits
 	store  discoveryRateLimitStore
 
-	mu           sync.Mutex
-	global       discoveryWindow
-	perNet       map[netip.Prefix]discoveryWindow
-	publicPerNet map[netip.Prefix]discoveryWindow
+	mu             sync.Mutex
+	global         discoveryWindow
+	perNet         map[netip.Prefix]discoveryWindow
+	publicPerNet   map[netip.Prefix]discoveryWindow
+	publicOverflow discoveryWindow
 	// maxBuckets bounds each per-network table so memory stays bounded even
 	// when an operator disables the caller budgets.
 	maxBuckets int
@@ -92,6 +93,11 @@ type discoveryWindow struct {
 }
 
 const maxDiscoveryBuckets = 4096
+
+// maxPublicDiscoveryOverflowRequests caps untracked public WebSocket
+// discovery while its per-network table is full. It is separate from the raw
+// listener's global request budget.
+const maxPublicDiscoveryOverflowRequests = maxDiscoveryBuckets
 
 func newDiscoveryLimiter(limits DiscoveryLimits) *discoveryLimiter {
 	return &discoveryLimiter{
@@ -174,8 +180,8 @@ func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (b
 // allowPerNet applies the in-memory per-network budget for public WebSocket
 // discovery. It uses a separate table from raw discovery, which has a global
 // budget in front of its own table. When this table remains full after pruning,
-// admit the static document request without recording it so new client
-// networks cannot lock out one another or raw discovery.
+// admit a bounded overflow budget without recording per-network state, so new
+// client networks cannot lock out raw discovery.
 func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if l.limits.MaxRequestsPerNet <= 0 {
 		return true
@@ -197,13 +203,29 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if len(l.publicPerNet) >= l.maxBuckets && l.publicPerNet[bucket].start.IsZero() {
 		pruneDiscoveryBuckets(l.publicPerNet, l.limits.PerNetWindow, now)
 		if len(l.publicPerNet) >= l.maxBuckets {
+			allowed := l.allowPublicOverflowLocked(now)
 			l.mu.Unlock()
-			return true
+			return allowed
 		}
 	}
 	network.calls++
 	l.publicPerNet[bucket] = network
 	l.mu.Unlock()
+	return true
+}
+
+// allowPublicOverflowLocked admits a bounded number of public discovery
+// requests that cannot be assigned per-network state. The caller holds l.mu.
+func (l *discoveryLimiter) allowPublicOverflowLocked(now time.Time) bool {
+	overflow := l.publicOverflow
+	if overflow.start.IsZero() || !now.Before(overflow.start.Add(l.limits.PerNetWindow)) {
+		overflow = discoveryWindow{start: now}
+	}
+	if overflow.calls >= maxPublicDiscoveryOverflowRequests {
+		return false
+	}
+	overflow.calls++
+	l.publicOverflow = overflow
 	return true
 }
 
