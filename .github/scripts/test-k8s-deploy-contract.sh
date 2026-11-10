@@ -317,20 +317,18 @@ for overlay in prod bootstrap bootstrap/ci ci; do
     fail "$overlay must not require a registry pull Secret"
   fi
 done
-for overlay in prod; do
-  if ! kubectl kustomize "deploy/k8s/$overlay" |
-    yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
-      .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
-      select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
-             .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
-    jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
-      .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
-      .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
-      .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
-      .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
-    fail "$overlay must preserve the WebSocket and admin listeners and Secret references"
-  fi
-done
+if ! kubectl kustomize deploy/k8s/prod |
+  yq eval-all -o=json '[select(.kind == "StatefulSet" and .metadata.name == "teagramd") |
+    .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] |
+    select(.name == "TG_WEBSOCKET_LISTEN_ADDR" or .name == "TG_ADMIN_LISTEN_ADDR" or
+           .name == "TG_ADMIN_TOKEN_HASH" or .name == "TG_ADMIN_ORIGIN")]' - |
+  jq -e 'length == 4 and (map({key: .name, value: .}) | from_entries |
+    .TG_WEBSOCKET_LISTEN_ADDR.value == ":2444" and
+    .TG_ADMIN_LISTEN_ADDR.value == ":2445" and
+    .TG_ADMIN_TOKEN_HASH.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_TOKEN_HASH"} and
+    .TG_ADMIN_ORIGIN.valueFrom.secretKeyRef == {name: "teagramd-admin", key: "TG_ADMIN_ORIGIN", optional: true})' >/dev/null; then
+  fail 'prod must preserve the WebSocket and admin listeners and Secret references'
+fi
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.name' deploy/k8s/base/teagramd-statefulset.yaml)" == teagramd-runtime &&
    "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_MEDIA_KEY_CURRENT") | .valueFrom.configMapKeyRef.key' deploy/k8s/base/teagramd-statefulset.yaml)" == TG_MEDIA_KEY_CURRENT ]] ||
   fail 'the workload must read its active media encryption key version from the runtime ConfigMap'
