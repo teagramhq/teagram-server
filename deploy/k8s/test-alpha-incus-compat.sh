@@ -3,13 +3,11 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-for script in deploy/k8s/bootstrap-alpha.sh; do
-  if grep -En '/dev/stdin|incus exec .*-- command -v' "$repo_root/$script"; then
-    printf 'alpha host script still relies on an unsupported Incus command form: %s\n' \
-      "$script" >&2
-    exit 1
-  fi
-done
+if grep -En '/dev/stdin|incus exec .*-- command -v' \
+  "$repo_root/deploy/k8s/bootstrap-alpha.sh"; then
+  printf 'alpha bootstrap still relies on an unsupported Incus command form\n' >&2
+  exit 1
+fi
 if grep -En 'mktemp.*XXXXXX\.[[:alpha:]]' "$repo_root/deploy/k8s/bootstrap-alpha.sh"; then
   printf 'alpha bootstrap places a suffix after BusyBox mktemp XXXXXX\n' >&2
   exit 1
