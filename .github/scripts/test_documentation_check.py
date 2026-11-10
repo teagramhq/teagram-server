@@ -247,6 +247,18 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_indented_table_shaped_code_block_hides_markdown_links(self):
+        (self.root / "README.md").write_text(
+            "Example:\n\n"
+            "    | header | guide |\n"
+            "    | --- | --- |\n"
+            "    | [missing](docs/nope.md) | sample |\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_pipe_line_inside_multiline_code_span_is_not_a_table_boundary(self):
         (self.root / "README.md").write_text(
             "``example\n"

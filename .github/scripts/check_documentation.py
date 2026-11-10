@@ -38,6 +38,8 @@ def indented_code_line(line, minimum=4):
 
 
 def table_row_cells(line):
+    if indentation_columns(line) > 3:
+        return None
     line = line.strip()
     cells = []
     cell_start = 0
