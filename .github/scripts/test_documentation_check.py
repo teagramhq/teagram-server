@@ -188,6 +188,17 @@ class DocumentationCheckTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_indented_code_block_hides_markdown_links(self):
+        (self.root / "README.md").write_text(
+            "Example:\n\n"
+            "    [missing](docs/nope.md)\n"
+            "    more example\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_code_span_does_not_cross_blank_paragraph_boundary(self):
         (self.root / "README.md").write_text(
             "` unfinished paragraph\n\n"

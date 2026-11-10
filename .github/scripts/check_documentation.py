@@ -21,6 +21,20 @@ LIST_ITEM_START = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)")
 BLOCKQUOTE_START = re.compile(r"^ {0,3}>")
 
 
+def indented_code_line(line):
+    columns = 0
+    for char in line:
+        if char == " ":
+            columns += 1
+        elif char == "\t":
+            columns += 4 - columns % 4
+        else:
+            break
+        if columns >= 4:
+            return True
+    return False
+
+
 def config_environment_names(root):
     result = subprocess.run(
         ["go", "run", str(ENVIRONMENT_NAME_EXTRACTOR), "--root", str(root)],
@@ -69,6 +83,8 @@ def without_code(text):
     fence_char = None
     fence_length = 0
     in_blockquote = False
+    in_indented_code = False
+    allow_indented_code = True
     line_start = 0
     while line_start < len(text):
         line_end = text.find("\n", line_start)
@@ -82,36 +98,61 @@ def without_code(text):
         if content_end > line_start and text[content_end - 1] == "\r":
             content_end -= 1
         line = text[line_start:content_end]
-        start = FENCE_START.match(line)
-        if fence_char is None and start:
-            block_boundaries.add(line_start)
-            in_blockquote = False
-            fence_char = start.group(1)[0]
-            fence_length = len(start.group(1))
-            for index in range(line_start, content_end):
-                characters[index] = " "
-        elif fence_char is not None:
+        if fence_char is not None:
             closing = re.match(r"^\s{0,3}" + re.escape(fence_char) + r"{" + str(fence_length) + r",}\s*$", line)
             if closing:
                 fence_char = None
                 fence_length = 0
                 block_boundaries.add(line_end)
                 in_blockquote = False
+                allow_indented_code = True
             for index in range(line_start, content_end):
                 characters[index] = " "
-        elif not line.strip():
+        elif in_indented_code and not line.strip():
             block_boundaries.update((line_start, line_end))
-            in_blockquote = False
-        elif BLOCKQUOTE_START.match(line):
-            if not in_blockquote:
+        elif in_indented_code and indented_code_line(line):
+            for index in range(line_start, content_end):
+                characters[index] = " "
+        else:
+            if in_indented_code:
+                in_indented_code = False
                 block_boundaries.add(line_start)
-            in_blockquote = True
-        elif ATX_HEADING.match(line) or SETEXT_HEADING.match(line) or THEMATIC_BREAK.match(line) or REFERENCE_LINK.match(line):
-            block_boundaries.update((line_start, line_end))
-            in_blockquote = False
-        elif LIST_ITEM_START.match(line):
-            block_boundaries.add(line_start)
-            in_blockquote = False
+
+            start = FENCE_START.match(line)
+            if start:
+                block_boundaries.add(line_start)
+                in_blockquote = False
+                fence_char = start.group(1)[0]
+                fence_length = len(start.group(1))
+                allow_indented_code = False
+                for index in range(line_start, content_end):
+                    characters[index] = " "
+            elif not line.strip():
+                block_boundaries.update((line_start, line_end))
+                in_blockquote = False
+                allow_indented_code = True
+            elif allow_indented_code and indented_code_line(line):
+                block_boundaries.add(line_start)
+                in_indented_code = True
+                in_blockquote = False
+                allow_indented_code = False
+                for index in range(line_start, content_end):
+                    characters[index] = " "
+            elif BLOCKQUOTE_START.match(line):
+                if not in_blockquote:
+                    block_boundaries.add(line_start)
+                in_blockquote = True
+                allow_indented_code = False
+            elif ATX_HEADING.match(line) or SETEXT_HEADING.match(line) or THEMATIC_BREAK.match(line) or REFERENCE_LINK.match(line):
+                block_boundaries.update((line_start, line_end))
+                in_blockquote = False
+                allow_indented_code = True
+            elif LIST_ITEM_START.match(line):
+                block_boundaries.add(line_start)
+                in_blockquote = False
+                allow_indented_code = False
+            else:
+                allow_indented_code = False
         line_start = line_end
 
     cleaned = "".join(characters)
