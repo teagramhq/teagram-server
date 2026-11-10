@@ -322,6 +322,14 @@ ci_linkselector_selector="$(yq -r 'select(.kind == "Deployment" and .metadata.na
    "$(yq -r 'select(.kind == "Service" and .metadata.name == "linkselector") | .spec.selector."app.kubernetes.io/component"' <<<"$ci_linkselector_overlay")" == server &&
    "$(yq -r 'select(.kind == "Pod" and .metadata.name == "linkselector-policy-probe") | .metadata.labels."app.kubernetes.io/component"' deploy/k8s/ci/tailnet-policy-probes.yaml)" == ci-probe ]] ||
   fail 'the CI linkselector probe must keep its identity separate from the real Deployment and Service'
+# linkselector exits on SIGTERM without draining, so a terminating pod must stay
+# in service long enough for Service endpoints to drop it, or a rollout refuses
+# connections for the pod's last moments.
+linkselector_prestop="$(yq -r '.spec.template.spec.containers[] | select(.name == "linkselector") | .lifecycle.preStop.sleep.seconds // 0' deploy/k8s/base/linkselector-deployment.yaml)"
+linkselector_grace="$(yq -r '.spec.template.spec.terminationGracePeriodSeconds // 30' deploy/k8s/base/linkselector-deployment.yaml)"
+[[ "$linkselector_prestop" =~ ^[0-9]+$ && "$linkselector_prestop" -ge 5 &&
+   "$linkselector_grace" =~ ^[0-9]+$ && "$linkselector_grace" -gt "$linkselector_prestop" ]] ||
+  fail 'linkselector must sleep in preStop (at least 5 s, below its termination grace) so rollouts do not refuse connections'
 grep --fixed-strings --quiet 'LINKSELECTOR_PROBE' deploy/k8s/test-service-ingress.py ||
   fail 'the linkselector-labelled pod must exercise both denied listener groups'
 grep --fixed-strings --quiet 'old_uid' deploy/k8s/test-service-ingress.py ||
