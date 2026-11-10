@@ -261,6 +261,12 @@ and stall the rollback. If an Atlas migration already completed, use the
 matching pre-deploy dump on the `postgres-backups` PVC before resuming
 application traffic.
 
+Before applying, `Deploy.` checks the digest-named migration and RustFS Jobs.
+If one is still present with `Failed=True` from an earlier attempt, it prints
+that Job's logs, sets its TTL to zero, and waits for the TTL controller to
+remove it so the same SHA can recreate the Job. Newly failed Jobs are detected
+within the polling interval and their logs are included in the failed run.
+
 The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
 target `http://linkselector:8081`. The selector sends the exact public API paths
 `/apiws`, `/.well-known/teagramd/client`, and the legacy

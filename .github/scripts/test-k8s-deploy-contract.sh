@@ -630,6 +630,10 @@ for rbac_line in \
 done
 grep --fixed-strings --quiet 'expect_deployer_can_i yes create cronjobs.batch' deploy/k8s/bootstrap-alpha.sh ||
   fail 'alpha bootstrap must verify backup CronJob permissions'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes patch jobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify Job patch permission for failed migration retries'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes get jobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify Job inspection permission for deploy status checks'
 grep --fixed-strings --quiet 'expect_deployer_can_i yes create persistentvolumeclaims' deploy/k8s/bootstrap-alpha.sh ||
   fail 'alpha bootstrap must verify backup PVC permissions'
 grep --fixed-strings --quiet 'expect_deployer_can_i yes delete pods --namespace teagram' deploy/k8s/bootstrap-alpha.sh ||
@@ -641,6 +645,10 @@ grep --fixed-strings --quiet 'verbs: ["delete"]' deploy/k8s/deployer-access.yaml
 rbac_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verify deployer RBAC and Pod Security boundaries") | .run' .github/workflows/ci.yml)"
 [[ "$rbac_step" == *'expect_deployer_can_i yes delete pods --namespace teagram'* ]] ||
   fail 'the k3s integration must verify the deployer can delete recovery Pods'
+[[ "$rbac_step" == *'expect_deployer_can_i yes patch jobs.batch --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can expire a failed Job for retry'
+[[ "$rbac_step" == *'expect_deployer_can_i yes get jobs.batch --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can inspect failed Jobs'
 
 release_script=deploy/k8s/deploy-release.sh
 release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$manifest"' "$release_script" | cut -d: -f1)"
@@ -662,10 +670,14 @@ grep --fixed-strings --quiet 'currentRevision == .status.updateRevision' "$relea
   fail 'the release runner must refuse an unstable StatefulSet rollback baseline'
 grep --fixed-strings --quiet 'status.updatedReplicas' "$release_script" ||
   fail 'the release runner must require all workload replicas to be updated and ready before apply'
-grep --fixed-strings --quiet 'kubectl wait --for=condition=complete "job/$migration_job"' "$release_script" ||
+grep --fixed-strings --quiet 'wait_for_job "$migration_job" 900' "$release_script" ||
   fail 'the release runner must wait for the exact migration Job created by this apply'
-grep --fixed-strings --quiet 'kubectl wait --for=condition=complete "job/$rustfs_job"' "$release_script" ||
+grep --fixed-strings --quiet 'wait_for_job "$rustfs_job" 600' "$release_script" ||
   fail 'the release runner must wait for the exact RustFS initializer Job created by this apply'
+grep --fixed-strings --quiet 'Failed" and .status == "True"' "$release_script" ||
+  fail 'the release runner must detect a failed Job immediately and recycle failed prior Jobs'
+grep --fixed-strings --quiet 'kubectl logs "job/$job"' "$release_script" ||
+  fail 'the release runner must include failed migration and initializer logs in the Deploy. run'
 grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
   fail 'the release runner must wait for every production workload rollout'
 grep --fixed-strings --quiet 'kubectl delete pod "$pod"' "$release_script" ||

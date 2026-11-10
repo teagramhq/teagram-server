@@ -875,6 +875,8 @@ for history_resource in replicasets.apps controllerrevisions.apps; do
   done
 done
 expect_deployer_can_i yes create jobs.batch --namespace teagram
+expect_deployer_can_i yes get jobs.batch --namespace teagram
+expect_deployer_can_i yes patch jobs.batch --namespace teagram
 expect_deployer_can_i yes create cronjobs.batch --namespace teagram
 expect_deployer_can_i yes patch cronjobs.batch --namespace teagram
 expect_deployer_can_i yes patch services --namespace teagram

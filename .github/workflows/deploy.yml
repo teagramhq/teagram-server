@@ -184,6 +184,8 @@ jobs:
         run: |
           set -euo pipefail
           kubectl auth can-i create jobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i get jobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
+          kubectl auth can-i patch jobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
           kubectl auth can-i delete pods --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
           kubectl auth can-i create cronjobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes
           kubectl auth can-i get cronjobs.batch --namespace teagram | grep --fixed-strings --line-regexp --quiet yes

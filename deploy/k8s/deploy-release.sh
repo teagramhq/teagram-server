@@ -73,6 +73,92 @@ controller_is_stable() {
     ' >/dev/null
 }
 
+rendered_job_name() {
+  local resources="$1" prefix="$2" matches
+  matches="$(grep --extended-regexp --only-matching \
+    "^job(\\.batch)?/${prefix}-[a-z0-9]+$" <<< "$resources" || true)"
+  if [[ -z "$matches" || "$matches" == *$'\n'* ]]; then
+    printf 'deploy-release: expected exactly one rendered %s Job\n' "$prefix" >&2
+    return 1
+  fi
+  printf '%s\n' "${matches#*/}"
+}
+
+print_job_logs() {
+  local job="$1"
+  kubectl logs "job/$job" --namespace "$namespace" --all-containers=true >&2 || true
+}
+
+prepare_failed_job_retry() {
+  local job="$1" job_json
+  if ! job_json="$(kubectl get "job/$job" --namespace "$namespace" \
+    --ignore-not-found=true --output json)"; then
+    printf 'deploy-release: could not inspect existing Job %s before apply\n' "$job" >&2
+    return 1
+  fi
+  [[ -n "$job_json" ]] || return 0
+  if ! jq --exit-status 'type == "object" and .kind == "Job"' \
+    <<< "$job_json" >/dev/null; then
+    printf 'deploy-release: invalid API response while inspecting Job %s\n' "$job" >&2
+    return 1
+  fi
+  if ! jq --exit-status \
+    'any(.status.conditions[]?; .type == "Failed" and .status == "True")' \
+    <<< "$job_json" >/dev/null; then
+    return 0
+  fi
+
+  printf 'deploy-release: previous Job %s failed; logs follow before retry cleanup\n' \
+    "$job" >&2
+  print_job_logs "$job"
+  # Use the existing patch permission; the deployer does not need Job delete access.
+  if ! kubectl patch "job/$job" --namespace "$namespace" --type=merge \
+    --patch '{"spec":{"ttlSecondsAfterFinished":0}}'; then
+    printf 'deploy-release: could not expire failed Job %s for retry\n' "$job" >&2
+    return 1
+  fi
+  if ! kubectl wait --for=delete "job/$job" --namespace "$namespace" \
+    --timeout=60s; then
+    printf 'deploy-release: failed Job %s did not expire for retry\n' "$job" >&2
+    return 1
+  fi
+  printf 'deploy-release: expired failed Job %s; the next apply can recreate it\n' \
+    "$job" >&2
+}
+
+wait_for_job() {
+  local job="$1" timeout_seconds="$2" deadline job_json
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if ! job_json="$(kubectl get "job/$job" --namespace "$namespace" \
+      --output json 2>&1)"; then
+      printf 'deploy-release: could not inspect Job %s: %s\n' "$job" "$job_json" >&2
+      return 1
+    fi
+    if ! jq --exit-status 'type == "object" and .kind == "Job"' \
+      <<< "$job_json" >/dev/null; then
+      printf 'deploy-release: invalid API response while waiting for Job %s\n' "$job" >&2
+      return 1
+    fi
+    if jq --exit-status \
+      'any(.status.conditions[]?; .type == "Complete" and .status == "True")' \
+      <<< "$job_json" >/dev/null; then
+      return 0
+    fi
+    if jq --exit-status \
+      'any(.status.conditions[]?; .type == "Failed" and .status == "True")' \
+      <<< "$job_json" >/dev/null; then
+      printf 'deploy-release: Job %s failed; logs follow\n' "$job" >&2
+      print_job_logs "$job"
+      return 1
+    fi
+    sleep 5
+  done
+  printf 'deploy-release: timed out waiting for Job %s; logs follow\n' "$job" >&2
+  print_job_logs "$job"
+  return 1
+}
+
 wait_for_statefulset_revision() {
   local resource="$1" expected_revision="$2" revision deadline=$((SECONDS + 60))
   while ((SECONDS < deadline)); do
@@ -225,7 +311,9 @@ rollback() {
 trap rollback EXIT
 trap 'printf "deploy-release failed at line %s: %s\\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
-kubectl apply --dry-run=server --filename "$manifest"
+rendered_resources="$(kubectl apply --dry-run=server --filename "$manifest" --output name)"
+migration_job="$(rendered_job_name "$rendered_resources" db-migrations)"
+rustfs_job="$(rendered_job_name "$rendered_resources" rustfs-init)"
 for resource in "${controllers[@]}"; do
   kind="${resource%%/*}"
   if ! controller_is_stable "$resource" "$kind"; then
@@ -260,25 +348,18 @@ for resource in "${controllers[@]}"; do
   baseline_revisions["$resource"]="$baseline"
 done
 
+prepare_failed_job_retry "$migration_job"
+prepare_failed_job_retry "$rustfs_job"
 apply_started=true
 applied_resources="$(kubectl apply --filename "$manifest" --output name)"
-migration_jobs="$(grep --extended-regexp --only-matching \
-  '^job(\.batch)?/db-migrations-[a-z0-9]+$' <<< "$applied_resources" || true)"
-rustfs_jobs="$(grep --extended-regexp --only-matching \
-  '^job(\.batch)?/rustfs-init-[a-z0-9]+$' <<< "$applied_resources" || true)"
-mapfile -t migration_job_matches <<< "$migration_jobs"
-mapfile -t rustfs_job_matches <<< "$rustfs_jobs"
-[[ -n "$migration_jobs" && "${#migration_job_matches[@]}" == 1 &&
-  -n "$rustfs_jobs" && "${#rustfs_job_matches[@]}" == 1 ]] || {
-  printf 'deploy-release: apply did not report exactly one migration and RustFS Job\n' >&2
+applied_migration_job="$(rendered_job_name "$applied_resources" db-migrations)"
+applied_rustfs_job="$(rendered_job_name "$applied_resources" rustfs-init)"
+[[ "$applied_migration_job" == "$migration_job" && "$applied_rustfs_job" == "$rustfs_job" ]] || {
+  printf 'deploy-release: applied Job names did not match the server dry-run\n' >&2
   exit 1
 }
-migration_job="${migration_jobs#*/}"
-rustfs_job="${rustfs_jobs#*/}"
-kubectl wait --for=condition=complete "job/$migration_job" \
-  --namespace "$namespace" --timeout=900s
-kubectl wait --for=condition=complete "job/$rustfs_job" \
-  --namespace "$namespace" --timeout=600s
+wait_for_job "$migration_job" 900
+wait_for_job "$rustfs_job" 600
 for resource in "${controllers[@]}"; do
   kubectl rollout status "$resource" --namespace "$namespace" \
     --timeout="$rollout_timeout"

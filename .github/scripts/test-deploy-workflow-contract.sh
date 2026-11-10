@@ -639,7 +639,8 @@ check_contract() {
   deploy_preflight_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Validate the production release manifest") | .run')"
   [[ "$deploy_preflight_run" == *'kubectl create --dry-run=server --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml'* ]] ||
     fail 'the restricted deployer must server-dry-run the maintenance Job before applying resources'
-  for permission in 'delete pods' 'create cronjobs.batch' 'get cronjobs.batch' \
+  for permission in 'delete pods' 'create jobs.batch' 'get jobs.batch' 'patch jobs.batch' \
+    'create cronjobs.batch' 'get cronjobs.batch' \
     'create persistentvolumeclaims' 'patch persistentvolumeclaims'; do
     grep -Fq "kubectl auth can-i $permission --namespace teagram" <<< "$deploy_preflight_run" ||
       fail 'the restricted deployer must verify its required namespace permissions before applying'
