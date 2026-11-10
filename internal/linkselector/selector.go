@@ -48,6 +48,7 @@ const (
 	reasonBodyClose             completionReason = "body_close"
 	reasonStagingBudget         completionReason = "staging_budget_exhausted"
 	reasonDownstreamWrite       completionReason = "downstream_write"
+	reasonPanic                 completionReason = "panic"
 )
 
 // Keep every request's reservation within the aggregate budget.
@@ -179,9 +180,14 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outcome := requestOutcome{reason: reasonOK}
 	defer func() {
 		recovered := recover()
+		unexpectedPanic := recovered != nil
 		if recoveredErr, ok := recovered.(error); ok && errors.Is(recoveredErr, http.ErrAbortHandler) {
+			unexpectedPanic = false
 			outcome.failed = true
 			outcome.reason = reasonTransport
+		} else if unexpectedPanic {
+			outcome.failed = true
+			outcome.reason = reasonPanic
 		}
 		if outcome.failed || ((target.kind == routeKindWeb || target.kind == routeKindServerAPI) && response.writeErr) {
 			class = unavailableRouteClass
@@ -189,6 +195,17 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status := response.status
 		if status == 0 {
 			status = http.StatusOK
+			if unexpectedPanic {
+				status = http.StatusInternalServerError
+			}
+		}
+		if unexpectedPanic {
+			s.logger.Error("selector handler panicked",
+				"route_class", class,
+				"status", status,
+				"reason", string(reasonPanic),
+				"panic_type", fmt.Sprintf("%T", recovered),
+			)
 		}
 		if response.writeErr {
 			outcome.reason = reasonDownstreamWrite
