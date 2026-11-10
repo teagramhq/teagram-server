@@ -33,8 +33,12 @@ readonly MTPROTO_PORT=2443
 readonly BOT_API_PORT=2447
 readonly RUSTFS_PORT=19000
 readonly POSTGRES_DUMP_DIR=/var/lib/postgresql/cutover-backups
-readonly CLOUDFLARE_BEFORE=http://selector:8081
-readonly CLOUDFLARE_AFTER=http://linkselector:8081
+readonly CLOUDFLARE_WEB_BEFORE=http://127.0.0.1:8081
+readonly CLOUDFLARE_WEB_AFTER=http://linkselector:8081
+readonly CLOUDFLARE_APIWS_PATH='^/apiws'
+readonly CLOUDFLARE_DISCOVERY_PATH='^/\.well-known/teagramd/client'
+readonly CLOUDFLARE_SERVER_BEFORE=http://127.0.0.1:2446
+readonly CLOUDFLARE_SERVER_AFTER=http://teagramd:2446
 readonly COMPOSE_STOPPED_FILE=$EVIDENCE_DIR/source-compose-stopped
 readonly MAX_LEGACY_BLOB_BYTES=$((20 * 1024 * 1024 * 1024))
 readonly MAX_ENCRYPTED_BLOB_BYTES=$((18 * 1024 * 1024 * 1024))
@@ -100,12 +104,35 @@ Would stream server_key.pem, enc_key.hex, the blob-mode authority, and the retai
 Would mirror the already-encrypted source S3 objects into the new RustFS bucket without changing their bytes, then compare the object count, total bytes, and SHA-256 of every source and target object before switching routes.
 Would start teagramd, teagram-web, linklanding, and linkselector; install restartable, journal-logged port-forwards to linkselector, MTProto TCP, WebSocket, admin, and Bot API Services, then verify them from both LXCs.
 Would save the five tailnet-only HTTPS handlers, the advertised MTProto TCP route on port 2443, and the Bot API TCP route on port 2447; route / to linkselector, preserve the WebSocket, admin, and discovery paths, and enable PROXY protocol on the k3s Bot API relay. Funnel remains off.
-Would keep k8s cloudflared at zero until the Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081; then start and verify the k3s connector.
+Would keep k8s cloudflared at zero until both Cloudflare hostnames use the after values shown below; then start and verify the k3s connector.
 Would leave the old Compose application and edge services stopped after cutover; PostgreSQL and source RustFS stay running with their existing data. Retain the source RustFS bucket, old Compose volumes, database dump, and recovery evidence for at least seven days; the runner does not stop or remove PostgreSQL or RustFS.
 Rollback order: stop k3s teagramd and cloudflared and verify every k8s cloudflared pod has stopped before restoring routes; restore all five HTTPS handlers, both TCP routes including the old Bot API route, and Cloudflare to the old targets, restart only the Compose services stopped by apply, then stop both port-forwards. PostgreSQL and source RustFS are already running; k3s writes since the switch are not copied back to the source bucket.
 After the first live Serve route, a failure requires explicit rollback after the first live Serve route; automatic recovery will not switch clients back to Compose and discard k3s writes.
 EOF
+  printf 'Cloudflare tunnel route changes:\n%s\n' "$(cloudflare_route_plan switch)"
   printf 'Rollback command after review: sudo bash %q --rollback\n' "$SCRIPT_PATH"
+}
+
+cloudflare_route_plan() {
+  case "$1" in
+    switch)
+      cat <<EOF
+web.teagram.io: $CLOUDFLARE_WEB_BEFORE -> $CLOUDFLARE_WEB_AFTER
+server.teagram.io $CLOUDFLARE_APIWS_PATH: $CLOUDFLARE_SERVER_BEFORE -> $CLOUDFLARE_SERVER_AFTER
+server.teagram.io $CLOUDFLARE_DISCOVERY_PATH: $CLOUDFLARE_SERVER_BEFORE -> $CLOUDFLARE_SERVER_AFTER
+EOF
+      ;;
+    rollback)
+      cat <<EOF
+web.teagram.io: $CLOUDFLARE_WEB_AFTER -> $CLOUDFLARE_WEB_BEFORE
+server.teagram.io $CLOUDFLARE_APIWS_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE
+server.teagram.io $CLOUDFLARE_DISCOVERY_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE
+EOF
+      ;;
+    *)
+      fail "unknown Cloudflare route plan: $1"
+      ;;
+  esac
 }
 
 if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && ${2:-} != --test-mode ) ]]; then
@@ -514,7 +541,7 @@ image_migration_versions() {
 validate_release_for_source() {
   local live_revision app_digest migrations_digest helper_digest landing_digest selector_digest
   local migrations_validation_image helper_validation_image
-  local app_revision migrations_revision helper_revision required_version latest_version
+  local app_revision migrations_revision helper_revision selector_revision required_version latest_version
   local migration_job rustfs_init_job expected_job_suffix expected_helper_suffix
   local migration_versions listed_latest
   live_revision=$(source_container_revision) || fail 'could not read the live teagramd image revision'
@@ -534,7 +561,7 @@ validate_release_for_source() {
     MIGRATIONS_IMAGE="ghcr.io/teagramhq/teagram-migrations@$migrations_digest"
     K8S_MC_IMAGE="ghcr.io/teagramhq/teagramd-mc-init@$helper_digest"
     LINK_LANDING_IMAGE="ghcr.io/teagramhq/link-edge-landing@$landing_digest"
-    LINK_SELECTOR_IMAGE="ghcr.io/teagramhq/link-edge-selector@$selector_digest"
+    LINK_SELECTOR_IMAGE=${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-ghcr.io/teagramhq/link-edge-selector@$selector_digest}
     migrations_validation_image=${CUTOVER_TEST_MIGRATIONS_IMAGE:-$MIGRATIONS_IMAGE}
     helper_validation_image=${CUTOVER_TEST_MC_IMAGE:-$K8S_MC_IMAGE}
 
@@ -547,6 +574,11 @@ validate_release_for_source() {
       fail "test migration image revision $migrations_revision does not match live revision $live_revision"
     [[ $helper_revision == "$live_revision" ]] ||
       fail "test S3 client image revision $helper_revision does not match live revision $live_revision"
+    if [[ -n ${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-} ]]; then
+      selector_revision=$(resolve_image_revision "$LINK_SELECTOR_IMAGE")
+      [[ $selector_revision == "$live_revision" ]] ||
+        fail "test link selector image revision $selector_revision does not match live revision $live_revision"
+    fi
 
     required_version=$(prod_literal required-migration-version migration-version=)
     migration_job=$(prod_literal db-migrations-job-revision job-name=)
@@ -1632,8 +1664,9 @@ rollback() {
     http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
   rm -f -- "$serve_after"
 
-  printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_AFTER" "$CLOUDFLARE_BEFORE" >&2
-  confirm ROUTE-RESTORED 'If the route is already on the before value, leave it there. Otherwise restore the before value now.'
+  confirm ROUTE-RESTORED "Restore these Cloudflare tunnel routes (after -> before):
+$(cloudflare_route_plan rollback)
+If they are already on the before values, leave them there."
   if [[ -f $COMPOSE_STOPPED_FILE ]]; then
     restart_stopped_compose_services || fail 'one or more Compose services need manual restart; rollback incomplete'
   fi
@@ -1697,7 +1730,7 @@ if kubectl_resource_exists "namespace/$NAMESPACE"; then :; else
   [[ $lookup_status == 1 ]] && fail 'the bootstrap teagram namespace is missing'
   fail 'could not determine whether the bootstrap teagram namespace exists'
 fi
-for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys cloudflared-token; do
+for secret in postgres-credentials rustfs-credentials teagramd-blob-credentials teagramd-media-keys teagramd-turnstile cloudflared-token; do
   if kubectl_resource_exists "secret/$secret"; then :; else
     lookup_status=$?
     [[ $lookup_status == 1 ]] && fail "required namespace Secret is missing: $secret"
@@ -1768,6 +1801,10 @@ kubectl apply --filename "$cutover_manifest" >/dev/null
 if [[ $TEST_MODE == true ]]; then
   kubectl patch deployment/cloudflared --namespace "$NAMESPACE" --type=strategic \
     --patch-file "$SCRIPT_DIR/test-cutover-cloudflared-patch.yaml" >/dev/null
+  # The disposable source generates its own RSA identity, so the production
+  # fingerprint pin cannot match it.
+  kubectl patch statefulset/teagramd --namespace "$NAMESPACE" --type=strategic \
+    --patch-file "$SCRIPT_DIR/test-cutover-teagramd-patch.yaml" >/dev/null
 fi
 rm -f -- "$cutover_manifest"
 cutover_manifest=''
@@ -2120,7 +2157,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
   "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" > "$EVIDENCE_DIR/serve-target"
 chmod 0600 "$EVIDENCE_DIR/serve-target"
-printf 'Cloudflare dashboard route: %s -> %s\n' "$CLOUDFLARE_BEFORE" "$CLOUDFLARE_AFTER" >&2
+printf 'Cloudflare tunnel route changes (before -> after):\n%s\n' "$(cloudflare_route_plan switch)" >&2
 verify_source_write_fence
 record_phase serve-switch-started
 incus exec "$SOURCE_INSTANCE" -- tailscale serve --bg --https=443 --set-path=/ \
@@ -2143,7 +2180,9 @@ record_phase serve-switched
 wait_for_no_pods app.kubernetes.io/name=cloudflared 1 ||
   fail 'k8s Cloudflare connector pods exist before the Cloudflare route switch'
 record_phase route-change-requested
-confirm ROUTE-SWITCHED "Change the Cloudflare tunnel route from $CLOUDFLARE_BEFORE to $CLOUDFLARE_AFTER. The old Compose connector is stopped; this change is manual because no API credential is provisioned."
+confirm ROUTE-SWITCHED "Change these Cloudflare tunnel routes (before -> after):
+$(cloudflare_route_plan switch)
+The old Compose connector is stopped. This change is manual because no API credential is provisioned."
 record_phase route-switched
 kubectl scale deployment/cloudflared --replicas=1 --namespace "$NAMESPACE" >/dev/null
 kubectl rollout status deployment/cloudflared --namespace "$NAMESPACE" --timeout=600s >/dev/null

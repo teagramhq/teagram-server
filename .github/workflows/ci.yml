@@ -1929,9 +1929,18 @@ jobs:
             --from-file=TG_ADMIN_TOKEN_HASH="$RUNNER_TEMP/admin-token-hash" \
             --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
           rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
+          umask 077
+          printf '%s' 1x0000000000000000000000000000000AA \
+            > "$RUNNER_TEMP/turnstile-secret-key"
+          kubectl create secret generic teagramd-turnstile --namespace teagram \
+            --from-file=secret-key="$RUNNER_TEMP/turnstile-secret-key"
+          rm -f "$RUNNER_TEMP/turnstile-secret-key"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-            --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443
+            --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443 \
+            --from-literal=TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443 \
+            --from-literal=TG_PUBLIC_REGISTRATION=closed \
+            --from-literal=TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
 
       - name: Apply the rendered CI overlay to k3s
         run: |
@@ -2050,7 +2059,8 @@ jobs:
               --volume "$RUNNER_TEMP/client.json:/client.json:ro" \
               --entrypoint /usr/local/bin/mtproto-smoke \
               ghcr.io/teagramhq/teagramd:ci \
-              --endpoint 127.0.0.1:12443 --discovery-file /client.json; then
+              --endpoint 127.0.0.1:12443 --discovery-file /client.json \
+              --expect-registration-mode open; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then
@@ -2059,6 +2069,37 @@ jobs:
             fi
             sleep 2
           done
+
+      - name: Test public WebSocket and discovery through the connector
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          connector_pod=$(kubectl get pods --namespace teagram \
+            --selector app.kubernetes.io/name=cloudflared \
+            --output jsonpath='{.items[0].metadata.name}')
+          test -n "$connector_pod"
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            "pod/$connector_pod" 18080:8080 \
+            > "$RUNNER_TEMP/cloudflared-connector-port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          cleanup() {
+            kill "$port_forward_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if python3 .github/scripts/test-k8s-public-websocket.py \
+              --host 127.0.0.1 --port 18080; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "Public WebSocket or discovery failed through the k3s connector" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          kill "$port_forward_pid"
+          wait "$port_forward_pid" 2>/dev/null || true
+          trap - EXIT
 
       - name: Exercise the pinned alpha cutover migration and rollback
         run: |
@@ -2094,6 +2135,7 @@ jobs:
             kubectl logs --namespace teagram-cutover "$pod" --all-containers --tail=100
           done
           docker logs --tail 100 teagram-k3s
+          cat "$RUNNER_TEMP/cloudflared-connector-port-forward.log" 2>/dev/null || true
 
       - name: Upload images used by this deployment check
         uses: actions/upload-artifact@v7.0.1

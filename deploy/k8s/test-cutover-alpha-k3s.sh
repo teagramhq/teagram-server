@@ -117,6 +117,9 @@ create_target_namespace() {
   for configmap in teagramd-runtime link-edge-runtime; do
     copy_configmap "$configmap"
   done
+  printf 'ci-turnstile-secret-key' > "$tmp_dir/turnstile-secret-key"
+  kubectl create secret generic teagramd-turnstile --namespace "$TARGET_NAMESPACE" \
+    --from-file=secret-key="$tmp_dir/turnstile-secret-key" >/dev/null
   printf 'ci-placeholder-token' > "$tmp_dir/cloudflared-token"
   kubectl create secret generic cloudflared-token --namespace "$TARGET_NAMESPACE" \
     --from-file=token="$tmp_dir/cloudflared-token" >/dev/null
@@ -430,6 +433,7 @@ incus_test_env=(PATH="$tmp_dir/bin:$PATH" INCUS_STATE_DIR="$tmp_dir/incus-state"
   CUTOVER_TEST_TEAGRAMD_IMAGE=ghcr.io/teagramhq/teagramd:ci \
   CUTOVER_TEST_MIGRATIONS_IMAGE=ghcr.io/teagramhq/teagram-migrations:ci \
   CUTOVER_TEST_MC_IMAGE=ghcr.io/teagramhq/teagramd-mc-init:ci \
+  CUTOVER_TEST_LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector:ci \
   CUTOVER_TEST_TARGET_S3_ENDPOINT=http://rustfs.teagram-cutover.svc.cluster.local:9000)
 cat > "$tmp_dir/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
@@ -1036,7 +1040,12 @@ prod_digest=$(yq -r '.images[] | select(.name == "ghcr.io/teagramhq/teagramd") |
 kubectl kustomize deploy/k8s/prod |
   sed -e "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" \
     -e "s|ghcr.io/teagramhq/teagramd@$prod_digest|$CUTOVER_IMAGE|g" |
-  yq 'select(.kind != "Deployment" or .metadata.name != "cloudflared")' - > "$tmp_dir/normal-prod.yaml"
+  yq 'select(.kind != "Deployment" or .metadata.name != "cloudflared")' - |
+  # The disposable source generates its own RSA identity, so the production
+  # fingerprint pin cannot match it.
+  yq '(select(.kind == "StatefulSet" and .metadata.name == "teagramd")
+    | .spec.template.spec.containers[] | select(.name == "teagramd") | .env)
+    |= map(select(.name != "TG_RSA_KEY_FINGERPRINT"))' - > "$tmp_dir/normal-prod.yaml"
 printf '\n---\n' >> "$tmp_dir/normal-prod.yaml"
 kubectl kustomize deploy/k8s/ci |
   sed "s/^\( *\)namespace: teagram$/\1namespace: $TARGET_NAMESPACE/" |

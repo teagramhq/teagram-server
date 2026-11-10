@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: teagramd
+spec:
+  template:
+    spec:
+      containers:
+        - name: teagramd
+          env:
+            - name: TG_WEBSOCKET_ALLOWED_ORIGINS
+              value: https://web.example.test
+            - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
+              value: server.example.test:443
+            - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
+              value: https://web.example.test
+            - name: TG_TURNSTILE_SIGNIN_ENABLED
+              value: "false"
+            - name: TG_TURNSTILE_TEST_MODE
+              value: "true"
+            - name: TG_TURNSTILE_HOSTNAMES
+              value: web.example.test
+            - name: TG_TURNSTILE_SITE_KEY
+              value: 1x00000000000000000000AA
+            - name: TG_RSA_KEY_FINGERPRINT
+              $patch: delete

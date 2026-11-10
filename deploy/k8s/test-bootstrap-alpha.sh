@@ -70,6 +70,10 @@ printf '%s\n' \
   "TG_POSTGRES_DSN=$dsn" \
   'TG_PUBLIC_LINK_PREFIX=https://tgtest.example.invalid/l/' \
   'TG_ADVERTISE_ADDR=tgtest.example.invalid:443' \
+  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446' \
+  'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.tgtest.example.invalid:443' \
+  'TG_PUBLIC_REGISTRATION=closed' \
+  'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.tgtest.example.invalid' \
   'TG_MEDIA_KEY_CURRENT=1' \
   "TG_BLOB_S3_ACCESS_KEY_ID=$blob_access_key_id" > "$containers/teagram-teagramd-1/env"
 printf '%s\n' \
@@ -162,7 +166,10 @@ if state["pod_security_enforce_version"] != "v1.37":
 if state["token_wait_polls"] < 3 or state["ca_wait_polls"] < 3:
     raise SystemExit("the token and CA waits did not cover delayed population")
 required_data = {
-    "configmap/teagramd-runtime": {"TG_PUBLIC_LINK_PREFIX", "TG_ADVERTISE_ADDR", "TG_MEDIA_KEY_CURRENT"},
+    "configmap/teagramd-runtime": {
+        "TG_PUBLIC_LINK_PREFIX", "TG_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
+        "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_MEDIA_KEY_CURRENT",
+    },
     "configmap/link-edge-runtime": {"TG_INVITE_WEB_SIGNUP_URL", "TG_INVITE_DESKTOP_URL"},
     "secret/postgres-credentials": {"POSTGRES_PASSWORD", "TG_POSTGRES_DSN"},
     "secret/rustfs-credentials": {"RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY"},
@@ -193,6 +200,13 @@ for resource, expected_keys in required_data.items():
     actual_keys = set(state.get("resource_data", {}).get(resource, {}))
     if actual_keys != expected_keys:
         raise SystemExit(f"{resource} data keys differ: {sorted(actual_keys)}")
+runtime = state.get("resource_data", {}).get("configmap/teagramd-runtime", {})
+if runtime.get("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR") != "server.tgtest.example.invalid:443":
+    raise SystemExit("bootstrap did not preserve the public WebSocket discovery endpoint")
+if runtime.get("TG_PUBLIC_REGISTRATION") != "closed":
+    raise SystemExit("bootstrap did not preserve the public registration policy")
+if runtime.get("TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") != "https://web.tgtest.example.invalid":
+    raise SystemExit("bootstrap did not preserve the public WebSocket origin allowlist")
 if "pod/teagram-deployer-escape-check" in state["objects"]:
     raise SystemExit("the server-side escape probe created a pod")
 PY

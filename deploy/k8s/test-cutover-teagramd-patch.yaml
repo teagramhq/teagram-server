@@ -1,0 +1,8 @@
+spec:
+  template:
+    spec:
+      containers:
+        - name: teagramd
+          env:
+            - name: TG_RSA_KEY_FINGERPRINT
+              $patch: delete

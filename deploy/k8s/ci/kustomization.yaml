@@ -12,6 +12,9 @@ configMapGenerator:
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
       - TG_ADVERTISE_ADDR=127.0.0.1:12443
+      - TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443
+      - TG_PUBLIC_REGISTRATION=closed
+      - TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
       - TG_MEDIA_KEY_CURRENT=1
   - name: link-edge-runtime
     literals:
@@ -28,4 +31,5 @@ images:
   - name: ghcr.io/teagramhq/link-edge-selector
     newTag: ci
 patches:
+  - path: teagramd-ci-settings.yaml
   - path: cloudflared-ci.yaml

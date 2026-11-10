@@ -27,6 +27,8 @@ spec:
             - "0.0.0.0"
             - "-port"
             - "8081"
+            - "-server-upstream"
+            - "http://teagramd:2446"
             - "-web-upstream"
             - "http://web:8080"
             - "-landing-upstream"

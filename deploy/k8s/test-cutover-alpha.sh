@@ -31,7 +31,10 @@ for required in \
   'the old MTProto and Bot API TCP routes' \
   'enable PROXY protocol on the k3s Bot API relay' \
   'planned downtime from the write fence until all edges switch' \
-  'Cloudflare dashboard change http://selector:8081 -> http://linkselector:8081' \
+  'Cloudflare tunnel route changes:' \
+  'web.teagram.io: http://127.0.0.1:8081 -> http://linkselector:8081' \
+  'server.teagram.io ^/apiws: http://127.0.0.1:2446 -> http://teagramd:2446' \
+  'server.teagram.io ^/\.well-known/teagramd/client: http://127.0.0.1:2446 -> http://teagramd:2446' \
   'verify every k8s cloudflared pod has stopped before restoring routes' \
   'advertised MTProto TCP route on port 2443' \
   'explicit rollback after the first live Serve route' \
@@ -40,6 +43,19 @@ for required in \
   'k3s writes since the switch are not copied back to the source bucket'; do
   if [[ $plan != *"$required"* ]]; then
     printf 'alpha cutover dry-run omitted: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+# shellcheck disable=SC2016
+for required_rollback in \
+  'confirm ROUTE-RESTORED "Restore these Cloudflare tunnel routes (after -> before):' \
+  'rollback)' \
+  'web.teagram.io: $CLOUDFLARE_WEB_AFTER -> $CLOUDFLARE_WEB_BEFORE' \
+  'server.teagram.io $CLOUDFLARE_APIWS_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE' \
+  'server.teagram.io $CLOUDFLARE_DISCOVERY_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE'; do
+  if ! grep --fixed-strings --quiet -- "$required_rollback" deploy/k8s/cutover-alpha.sh; then
+    printf 'alpha cutover rollback route plan omitted: %s\n' "$required_rollback" >&2
     exit 1
   fi
 done
@@ -118,6 +134,16 @@ if ! grep --fixed-strings --quiet 'test-cutover-alpha-k3s.sh' .github/workflows/
   ! grep --fixed-strings --quiet 'cutover-alpha.sh --apply' deploy/k8s/test-cutover-alpha-k3s.sh ||
   ! grep --fixed-strings --quiet 'cutover-alpha.sh --rollback' deploy/k8s/test-cutover-alpha-k3s.sh; then
   printf 'k3s cutover integration does not execute the actual apply and rollback runner\n' >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+if ! grep --fixed-strings --quiet \
+  'LINK_SELECTOR_IMAGE=${CUTOVER_TEST_LINK_SELECTOR_IMAGE:-ghcr.io/teagramhq/link-edge-selector@$selector_digest}' \
+  deploy/k8s/cutover-alpha.sh ||
+  ! grep --fixed-strings --quiet \
+    'CUTOVER_TEST_LINK_SELECTOR_IMAGE=ghcr.io/teagramhq/link-edge-selector:ci' \
+    deploy/k8s/test-cutover-alpha-k3s.sh; then
+  printf 'k3s cutover integration does not run the selector image built for this revision\n' >&2
   exit 1
 fi
 
