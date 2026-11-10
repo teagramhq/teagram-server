@@ -14,7 +14,6 @@ ENVIRONMENT_NAME_EXTRACTOR = Path(__file__).with_name("config_environment_names.
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
 HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
 FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-INLINE_CODE = re.compile(r"`+[^`\r\n]*`+")
 
 
 def config_environment_names(root):
@@ -91,13 +90,48 @@ def without_code(text):
                 characters[index] = " "
         line_start = line_end
 
-    def blank_code_span(match):
-        return "".join(" " if char not in "\r\n" else char for char in match.group(0))
+    cleaned = "".join(characters)
+    characters = list(cleaned)
+    index = 0
+    while index < len(cleaned):
+        if cleaned[index] != "`":
+            index += 1
+            continue
+        if escaped_at(cleaned, index):
+            index += 1
+            continue
 
-    return INLINE_CODE.sub(blank_code_span, "".join(characters))
+        run_end = index + 1
+        while run_end < len(cleaned) and cleaned[run_end] == "`":
+            run_end += 1
+        run_length = run_end - index
+        search = run_end
+        closing_end = None
+        while search < len(cleaned) and cleaned[search] not in "\r\n":
+            if cleaned[search] != "`" or escaped_at(cleaned, search):
+                search += 1
+                continue
+            candidate_end = search + 1
+            while candidate_end < len(cleaned) and cleaned[candidate_end] == "`":
+                candidate_end += 1
+            if candidate_end - search == run_length:
+                closing_end = candidate_end
+                break
+            search = candidate_end
+
+        if closing_end is None:
+            index = run_end
+            continue
+        for span_index in range(index, closing_end):
+            characters[span_index] = " "
+        index = closing_end
+
+    return "".join(characters)
 
 
 def escaped_at(text, index):
+    if text[index] not in string.punctuation:
+        return False
     backslashes = 0
     index -= 1
     while index >= 0 and text[index] == "\\":

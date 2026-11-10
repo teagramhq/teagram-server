@@ -179,6 +179,17 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/nope.md", result.stdout + result.stderr)
 
+    def test_mismatched_backtick_runs_do_not_hide_broken_link(self):
+        (self.root / "README.md").write_text(
+            "``foo`bar`` [missing](docs/nope.md) and `code`\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
+
     def test_broken_markdown_link_wrapping_external_badge_is_checked(self):
         (self.root / "README.md").write_text(
             "[![guide](https://example.com/badge.svg)](docs/nope.md)\n"
@@ -317,6 +328,17 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
+    def test_backslash_space_does_not_escape_bare_destination_whitespace(self):
+        (self.root / "README.md").write_text(
+            "[x](https://example.com/a\\ and[y](docs/nope.md))\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
 
     def test_angle_bracket_markdown_destination_is_checked(self):
         (self.root / "README.md").write_text("[x](<docs/nope.md>)\n")
