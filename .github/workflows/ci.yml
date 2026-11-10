@@ -1293,6 +1293,11 @@ jobs:
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
 
+      - name: Pull PostgreSQL image for QA password timestamp check
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image mirror.gcr.io/library/postgres:18-alpine
+
       - name: Check QA password timestamp operation
         run: deploy/teagram/test-qa-password-timestamps.sh
 
