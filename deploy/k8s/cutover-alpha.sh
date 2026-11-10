@@ -1224,6 +1224,7 @@ while remaining:
         mc_client_exec pipe "target/teagram/$first_key" >/dev/null ||
         fail 'could not inject a same-size disposable S3 checksum mismatch'
     else
+      # shellcheck disable=SC2016 # The client pod's shell expands these parameters.
       kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec '
         set -o pipefail
         head -c "$1" /dev/zero | tr "\\000" x | mc pipe "target/teagram/$2"
