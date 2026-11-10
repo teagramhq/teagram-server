@@ -85,6 +85,7 @@ def without_code(text):
     in_blockquote = False
     in_indented_code = False
     allow_indented_code = True
+    last_block_was_list_item = False
     line_start = 0
     while line_start < len(text):
         line_end = text.find("\n", line_start)
@@ -106,6 +107,7 @@ def without_code(text):
                 block_boundaries.add(line_end)
                 in_blockquote = False
                 allow_indented_code = True
+                last_block_was_list_item = False
             for index in range(line_start, content_end):
                 characters[index] = " "
         elif in_indented_code and not line.strip():
@@ -122,6 +124,7 @@ def without_code(text):
             if start:
                 block_boundaries.add(line_start)
                 in_blockquote = False
+                last_block_was_list_item = False
                 fence_char = start.group(1)[0]
                 fence_length = len(start.group(1))
                 allow_indented_code = False
@@ -131,7 +134,12 @@ def without_code(text):
                 block_boundaries.update((line_start, line_end))
                 in_blockquote = False
                 allow_indented_code = True
-            elif allow_indented_code and indented_code_line(line):
+            elif line.startswith("|"):
+                block_boundaries.update((line_start, line_end))
+                in_blockquote = False
+                allow_indented_code = False
+                last_block_was_list_item = False
+            elif allow_indented_code and not last_block_was_list_item and indented_code_line(line):
                 block_boundaries.add(line_start)
                 in_indented_code = True
                 in_blockquote = False
@@ -143,16 +151,21 @@ def without_code(text):
                     block_boundaries.add(line_start)
                 in_blockquote = True
                 allow_indented_code = False
+                last_block_was_list_item = False
             elif ATX_HEADING.match(line) or SETEXT_HEADING.match(line) or THEMATIC_BREAK.match(line) or REFERENCE_LINK.match(line):
                 block_boundaries.update((line_start, line_end))
                 in_blockquote = False
                 allow_indented_code = True
+                last_block_was_list_item = False
             elif LIST_ITEM_START.match(line):
                 block_boundaries.add(line_start)
                 in_blockquote = False
                 allow_indented_code = False
+                last_block_was_list_item = True
             else:
                 allow_indented_code = False
+                if not line.startswith((" ", "\t")):
+                    last_block_was_list_item = False
         line_start = line_end
 
     cleaned = "".join(characters)
