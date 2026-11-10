@@ -8,8 +8,8 @@ import {test} from 'node:test';
 import {patchRealClientGuestSignup} from './patch_real_client_guest_signup.mjs';
 
 test('the pinned guest browser runner exercises the signup QA bypass token', (t) => {
-  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
-  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
+  const sourceRoot = process.env.REAL_CLIENT_GUEST_WEB_ROOT || process.env.REAL_CLIENT_WEB_ROOT;
+  assert.ok(sourceRoot, 'REAL_CLIENT_GUEST_WEB_ROOT or REAL_CLIENT_WEB_ROOT must name the pinned guest checkout');
   const webRoot = mkdtempSync(join(tmpdir(), 'real-client-guest-signup-test-'));
   t.after(() => rmSync(webRoot, {recursive: true, force: true}));
   const scripts = join(webRoot, 'scripts/real-client');
