@@ -73,11 +73,12 @@ type discoveryLimiter struct {
 	limits DiscoveryLimits
 	store  discoveryRateLimitStore
 
-	mu             sync.Mutex
-	global         discoveryWindow
-	perNet         map[netip.Prefix]discoveryWindow
-	publicPerNet   map[netip.Prefix]discoveryWindow
-	publicOverflow discoveryWindow
+	mu                  sync.Mutex
+	global              discoveryWindow
+	perNet              map[netip.Prefix]discoveryWindow
+	publicPerNet        map[netip.Prefix]discoveryWindow
+	publicOverflow      map[netip.Prefix]discoveryWindow
+	publicOverflowTotal discoveryWindow
 	// maxBuckets bounds each per-network table so memory stays bounded even
 	// when an operator disables the caller budgets.
 	maxBuckets int
@@ -99,12 +100,17 @@ const maxDiscoveryBuckets = 4096
 // listener's global request budget.
 const maxPublicDiscoveryOverflowRequests = maxDiscoveryBuckets
 
+// maxPublicDiscoveryOverflowBuckets retains per-network windows across the
+// overlap between consecutive aggregate overflow windows.
+const maxPublicDiscoveryOverflowBuckets = 2 * maxPublicDiscoveryOverflowRequests
+
 func newDiscoveryLimiter(limits DiscoveryLimits) *discoveryLimiter {
 	return &discoveryLimiter{
-		limits:       limits,
-		perNet:       make(map[netip.Prefix]discoveryWindow),
-		publicPerNet: make(map[netip.Prefix]discoveryWindow),
-		maxBuckets:   maxDiscoveryBuckets,
+		limits:         limits,
+		perNet:         make(map[netip.Prefix]discoveryWindow),
+		publicPerNet:   make(map[netip.Prefix]discoveryWindow),
+		publicOverflow: make(map[netip.Prefix]discoveryWindow),
+		maxBuckets:     maxDiscoveryBuckets,
 	}
 }
 
@@ -180,8 +186,8 @@ func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (b
 // allowPerNet applies the in-memory per-network budget for public WebSocket
 // discovery. It uses a separate table from raw discovery, which has a global
 // budget in front of its own table. When this table remains full after pruning,
-// admit a bounded overflow budget without recording per-network state, so new
-// client networks cannot lock out raw discovery.
+// admit requests through a separately bounded per-network overflow table, so
+// new client networks cannot lock out raw discovery or share one client's quota.
 func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if l.limits.MaxRequestsPerNet <= 0 {
 		return true
@@ -192,6 +198,11 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	}
 	now := time.Now()
 	l.mu.Lock()
+	if overflow := l.publicOverflow[bucket]; !overflow.start.IsZero() && now.Before(overflow.start.Add(l.limits.PerNetWindow)) {
+		allowed := l.allowPublicOverflowLocked(bucket, now)
+		l.mu.Unlock()
+		return allowed
+	}
 	network := l.publicPerNet[bucket]
 	if network.start.IsZero() || !now.Before(network.start.Add(l.limits.PerNetWindow)) {
 		network = discoveryWindow{start: now}
@@ -203,7 +214,7 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if len(l.publicPerNet) >= l.maxBuckets && l.publicPerNet[bucket].start.IsZero() {
 		pruneDiscoveryBuckets(l.publicPerNet, l.limits.PerNetWindow, now)
 		if len(l.publicPerNet) >= l.maxBuckets {
-			allowed := l.allowPublicOverflowLocked(now)
+			allowed := l.allowPublicOverflowLocked(bucket, now)
 			l.mu.Unlock()
 			return allowed
 		}
@@ -215,17 +226,33 @@ func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 }
 
 // allowPublicOverflowLocked admits a bounded number of public discovery
-// requests that cannot be assigned per-network state. The caller holds l.mu.
-func (l *discoveryLimiter) allowPublicOverflowLocked(now time.Time) bool {
-	overflow := l.publicOverflow
+// requests that cannot be assigned to the primary per-network table. The
+// caller holds l.mu.
+func (l *discoveryLimiter) allowPublicOverflowLocked(bucket netip.Prefix, now time.Time) bool {
+	total := l.publicOverflowTotal
+	if total.start.IsZero() || !now.Before(total.start.Add(l.limits.PerNetWindow)) {
+		total = discoveryWindow{start: now}
+	}
+	if total.calls >= maxPublicDiscoveryOverflowRequests {
+		return false
+	}
+	overflow := l.publicOverflow[bucket]
 	if overflow.start.IsZero() || !now.Before(overflow.start.Add(l.limits.PerNetWindow)) {
 		overflow = discoveryWindow{start: now}
 	}
-	if overflow.calls >= maxPublicDiscoveryOverflowRequests {
+	if overflow.calls >= l.limits.MaxRequestsPerNet {
 		return false
 	}
+	if l.publicOverflow[bucket].start.IsZero() && len(l.publicOverflow) >= maxPublicDiscoveryOverflowBuckets {
+		pruneDiscoveryBuckets(l.publicOverflow, l.limits.PerNetWindow, now)
+		if len(l.publicOverflow) >= maxPublicDiscoveryOverflowBuckets {
+			return false
+		}
+	}
 	overflow.calls++
-	l.publicOverflow = overflow
+	l.publicOverflow[bucket] = overflow
+	total.calls++
+	l.publicOverflowTotal = total
 	return true
 }
 

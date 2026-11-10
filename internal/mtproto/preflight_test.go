@@ -366,12 +366,12 @@ func TestRawDiscoveryPerNetworkTablePrunesExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestPublicDiscoveryFullTableUsesBoundedOverflowSeparateFromRawLimiter(t *testing.T) {
+func TestPublicDiscoveryFullTablePreservesIndependentOverflowBudgets(t *testing.T) {
 	t.Parallel()
 
 	limiter := newDiscoveryLimiter(DiscoveryLimits{
 		MaxRequests:       10,
-		MaxRequestsPerNet: 1,
+		MaxRequestsPerNet: 2,
 		Window:            time.Minute,
 		PerNetWindow:      time.Minute,
 	})
@@ -380,22 +380,61 @@ func TestPublicDiscoveryFullTableUsesBoundedOverflowSeparateFromRawLimiter(t *te
 	first := mustAddr("192.0.2.1")
 	second := mustAddr("192.0.2.2")
 	third := mustAddr("192.0.2.3")
+	fourth := mustAddr("198.51.100.3")
 	if !limiter.allowPerNet(first) {
 		t.Fatal("public discovery refused the first network")
 	}
 	if !limiter.allowPerNet(second) {
 		t.Fatal("public discovery refused the second network")
 	}
-	for i := range maxDiscoveryBuckets {
+	for i := range limiter.limits.MaxRequestsPerNet {
 		if !limiter.allowPerNet(third) {
-			t.Fatalf("public discovery refused untracked request %d while its table was full", i+1)
+			t.Fatalf("public discovery refused overflow request %d while its table was full", i+1)
 		}
 	}
 	if limiter.allowPerNet(third) {
-		t.Fatal("public discovery admitted an untracked request after exhausting its overflow budget")
+		t.Fatal("public discovery admitted a request beyond one overflow network's budget")
+	}
+	for i := range limiter.limits.MaxRequestsPerNet {
+		if !limiter.allowPerNet(fourth) {
+			t.Fatalf("public discovery refused independent overflow request %d", i+1)
+		}
+	}
+	if limiter.allowPerNet(fourth) {
+		t.Fatal("public discovery admitted a request beyond the second overflow network's budget")
 	}
 	if !limiter.allow(third, time.Now()) {
 		t.Fatal("full public table prevented the raw limiter from admitting a new network")
+	}
+}
+
+func TestPublicDiscoveryOverflowKeepsAggregateCapSeparateFromRawLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       10,
+		MaxRequestsPerNet: maxPublicDiscoveryOverflowRequests + 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 2
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	if !limiter.allowPerNet(first) || !limiter.allowPerNet(second) {
+		t.Fatal("public discovery refused a network while filling its table")
+	}
+	for i := range maxPublicDiscoveryOverflowRequests {
+		if !limiter.allowPerNet(third) {
+			t.Fatalf("public discovery refused overflow request %d before its aggregate cap", i+1)
+		}
+	}
+	if limiter.allowPerNet(third) {
+		t.Fatal("public discovery admitted overflow after its aggregate cap")
+	}
+	if !limiter.allow(third, time.Now()) {
+		t.Fatal("public overflow cap prevented raw discovery from admitting a new network")
 	}
 }
 
