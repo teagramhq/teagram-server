@@ -24,7 +24,7 @@ spec:
             - TCP-LISTEN:2449,bind=0.0.0.0,reuseaddr,fork,max-children=128
             - TCP:127.0.0.1:2447
           ports:
-            - name: public-bot-api-probe
+            - name: public-bot-api
               containerPort: 2449
               protocol: TCP
           readinessProbe:
