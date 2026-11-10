@@ -1828,6 +1828,14 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if trust == ClientAddrProxyV2 {
+		if listenPath == mtproto.ListenerPathTailnet {
+			return Config{}, errors.New("TG_LISTEN_PATH=tailnet cannot be combined with TG_CLIENT_ADDR_TRUST=proxy-v2")
+		}
+		if webSocketListenPath == mtproto.ListenerPathTailnet {
+			return Config{}, errors.New("TG_WEBSOCKET_LISTEN_PATH=tailnet cannot be combined with TG_CLIENT_ADDR_TRUST=proxy-v2")
+		}
+	}
 	if trust == ClientAddrCFConnectingIP && cfg.PublicWebSocketListenAddr == "" {
 		return Config{}, errors.New("TG_CLIENT_ADDR_TRUST=cf-connecting-ip requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR")
 	}
