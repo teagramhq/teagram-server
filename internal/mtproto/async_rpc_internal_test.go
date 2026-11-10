@@ -894,14 +894,9 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("failed active counter did not close the connection")
 	}
-	handler.releaseCounters()
-	conn.end()
-	select {
-	case <-served:
-		serveDone = true
-	case <-time.After(2 * time.Second):
-		t.Fatal("serve loop did not finish after counter failure")
-	}
+	// Keep the other active counter blocked until the failure worker has
+	// discarded the queue. Releasing both workers here lets the successful one
+	// drain queued work first, making the discarded count scheduler-dependent.
 	logDeadline := time.NewTimer(time.Second)
 	defer logDeadline.Stop()
 	for {
@@ -920,6 +915,14 @@ func TestConcurrentRPCFailureReleasesQueuedContainerAdmissions(t *testing.T) {
 		case <-logDeadline.C:
 			t.Fatalf("counter failure logs did not report two discarded queued requests: %+v", sink.snapshot())
 		}
+	}
+	handler.releaseCounters()
+	conn.end()
+	select {
+	case <-served:
+		serveDone = true
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not finish after counter failure")
 	}
 	server.shutdown.beginDrain()
 	drained := make(chan struct{})

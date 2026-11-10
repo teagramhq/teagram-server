@@ -32,6 +32,15 @@ class DiscoveryDocumentContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "mtproto.rsa_spki"):
             SMOKE.validate_discovery_document({"version": 1, "rsa_spki": "top-level-only"})
 
+    def test_rejects_discovery_for_a_different_public_host(self):
+        with self.assertRaisesRegex(RuntimeError, "wrong WebSocket endpoint"):
+            SMOKE.validate_discovery_document(
+                {
+                    "mtproto": {"rsa_spki": "canonical-spki"},
+                    "websocket": {"endpoint": "wss://other.example.test/apiws"},
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,62 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tailscale-proxy-egress
+  labels:
+    app.kubernetes.io/name: tailscale-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tailscale-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: teagramd
+      ports:
+        - protocol: TCP
+          port: 2443
+        - protocol: TCP
+          port: 2444
+        - protocol: TCP
+          port: 2445
+        - protocol: TCP
+          port: 2448
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: linkselector
+      ports:
+        - protocol: TCP
+          port: 8081
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: UDP
+          port: 3478
+        - protocol: UDP
+          port: 41641

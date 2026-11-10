@@ -15,6 +15,7 @@ spec:
         app.kubernetes.io/name: linkselector
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -27,8 +28,6 @@ spec:
             - "0.0.0.0"
             - "-port"
             - "8081"
-            - "-server-upstream"
-            - "http://teagramd:2446"
             - "-web-upstream"
             - "http://web:8080"
             - "-landing-upstream"
@@ -49,6 +48,10 @@ spec:
             - name: http
               containerPort: 8081
               protocol: TCP
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           startupProbe:
             tcpSocket:
               port: http

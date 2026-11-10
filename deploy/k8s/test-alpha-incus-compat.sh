@@ -3,26 +3,19 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-for script in deploy/k8s/bootstrap-alpha.sh deploy/k8s/cutover-alpha.sh; do
-  if grep -En '/dev/stdin|incus exec .*-- command -v' "$repo_root/$script"; then
-    printf 'alpha host script still relies on an unsupported Incus command form: %s\n' \
-      "$script" >&2
-    exit 1
-  fi
-done
-if grep -En 'mktemp.*XXXXXX\.[[:alpha:]]' \
-  "$repo_root/deploy/k8s/bootstrap-alpha.sh" "$repo_root/deploy/k8s/cutover-alpha.sh"; then
-  printf 'alpha host scripts place a suffix after BusyBox mktemp XXXXXX\n' >&2
+if grep -En '/dev/stdin|incus exec .*-- command -v' \
+  "$repo_root/deploy/k8s/bootstrap-alpha.sh"; then
+  printf 'alpha bootstrap still relies on an unsupported Incus command form\n' >&2
+  exit 1
+fi
+if grep -En 'mktemp.*XXXXXX\.[[:alpha:]]' "$repo_root/deploy/k8s/bootstrap-alpha.sh"; then
+  printf 'alpha bootstrap places a suffix after BusyBox mktemp XXXXXX\n' >&2
   exit 1
 fi
 grep --fixed-strings --quiet 'alpha_install_remote_file' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh"
-grep --fixed-strings --quiet 'alpha_install_remote_file' \
-  "$repo_root/deploy/k8s/cutover-alpha.sh"
 grep --fixed-strings --quiet 'alpha_ensure_sshd_runtime_dir' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh"
-grep --fixed-strings --quiet 'alpha_for_each_line' \
-  "$repo_root/deploy/k8s/cutover-alpha.sh"
 
 readonly TEST_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 container_output=$(docker run --rm -i \
@@ -89,29 +82,6 @@ if alpha_remote_file_matches "$test_instance" /tmp/alpha-compat/config \
   printf 'remote file comparison accepted different stdin\n' >&2
   exit 1
 fi
-alpha_remote_command_exists "$test_instance" sh
-if alpha_remote_command_exists "$test_instance" command-that-does-not-exist; then
-  printf 'remote command check accepted an absent command\n' >&2
-  exit 1
-fi
-
-# Show that an exec which reads stdin consumes the old loop's input, then prove
-# the shared fd-3 iterator keeps all records available across those execs.
-old_records=()
-while IFS= read -r record; do
-  old_records+=("$record")
-  incus exec "$test_instance" -- sh -c 'cat >/dev/null'
-done <<< $'one\ntwo\nthree'
-[[ ${#old_records[@]} == 1 ]]
-new_records=()
-record_with_exec() {
-  new_records+=("$1")
-  incus exec "$test_instance" -- sh -c 'cat >/dev/null'
-}
-alpha_for_each_line $'one\ntwo\nthree' record_with_exec <<< 'consumed-by-exec'
-[[ ${#new_records[@]} == 3 && ${new_records[0]} == one &&
-  ${new_records[1]} == two && ${new_records[2]} == three ]]
-
 if incus exec "$test_instance" -- sshd -t >/tmp/sshd-before.log 2>&1; then
   printf 'sshd -t unexpectedly passed without /run/sshd\n' >&2
   exit 1

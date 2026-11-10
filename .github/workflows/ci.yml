@@ -1144,11 +1144,10 @@ jobs:
           bash -n deploy/k8s/alpha-incus.sh deploy/k8s/bootstrap-alpha.sh
           bash -n deploy/k8s/test-bootstrap-alpha.sh
           bash -n deploy/k8s/test-alpha-incus-compat.sh
+          bash -n deploy/k8s/install-tailnet-proxy-access.sh
           sh -n deploy/k8s/teagram-k3s-ops.sh
           ./deploy/k8s/cutover-alpha.sh --dry-run
-          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
-            deploy/k8s/test-cutover-alpha-k3s.sh deploy/k8s/test-cutover-alpha-incus.sh \
-            deploy/k8s/cutover-dump-upload.sh deploy/k8s/test-cutover-dump-upload.sh
+          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1218,13 +1217,10 @@ jobs:
             deploy/k8s/alpha-incus.sh \
             deploy/k8s/test-bootstrap-alpha.sh \
             deploy/k8s/test-alpha-incus-compat.sh \
+            deploy/k8s/install-tailnet-proxy-access.sh \
             deploy/k8s/teagram-k3s-ops.sh \
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \
-            deploy/k8s/test-cutover-alpha-k3s.sh \
-            deploy/k8s/test-cutover-alpha-incus.sh \
-            deploy/k8s/cutover-dump-upload.sh \
-            deploy/k8s/test-cutover-dump-upload.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1302,7 +1298,7 @@ jobs:
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
 
-      - name: Check alpha k3s cutover contract
+      - name: Verify retired cutover refuses production actions
         run: deploy/k8s/test-cutover-alpha.sh
 
       - name: Check user invite quota operation
@@ -1563,16 +1559,11 @@ jobs:
           bash .github/scripts/check-k8s-migration-version.sh \
             migrations deploy/k8s/base/migration-version "$previous_migration_version"
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
-          for overlay in prod prod-cutover ci bootstrap bootstrap/ci backup-bootstrap; do
+          for overlay in prod ci bootstrap bootstrap/ci backup-bootstrap; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
-            if [[ "$overlay" == prod-cutover ]]; then
-              yq -e 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.replicas == 0' "$rendered" >/dev/null
-              yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
-              yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
-            fi
-            if [[ "$overlay" == prod-cutover || "$overlay" == ci ]]; then
+            if [[ "$overlay" == ci ]]; then
               yq -e 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend == true' "$rendered" >/dev/null
             fi
             if [[ "$overlay" == prod || "$overlay" == backup-bootstrap ]]; then
@@ -1979,19 +1970,27 @@ jobs:
           rm -f "$RUNNER_TEMP/turnstile-secret-key"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-            --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443 \
-            --from-literal=TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443 \
-            --from-literal=TG_PUBLIC_REGISTRATION=closed \
-            --from-literal=TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
+            --from-literal=TG_ADVERTISE_ADDR=teagramd:2443 \
+            --from-literal=TG_MEDIA_KEY_CURRENT=1
 
       - name: Apply the rendered CI overlay to k3s
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl create configmap k8s-ingress-probes --namespace teagram \
+            --from-file=probe_discovery.py=deploy/k8s/probe-discovery.py \
+            --from-file=test-networkpolicy.py=deploy/k8s/test-networkpolicy.py \
+            --from-file=test-k8s-public-websocket.py=.github/scripts/test-k8s-public-websocket.py \
+            --dry-run=client --output yaml \
+            | kubectl apply --filename=-
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl apply --filename deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl get endpoints kubernetes --namespace default --output=json \
+            | python3 deploy/k8s/render-tailnet-proxy-api-egress.py \
+            | kubectl apply --filename=-
 
       - name: Verify agent RBAC and pod-delete admission
         run: |
@@ -2059,71 +2058,48 @@ jobs:
           kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
           kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s
 
-      - name: Smoke link routing and perform a real MTProto key exchange
+      - name: Probe Tailscale, cloudflared, and denied in-cluster ingress
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl get pods --namespace teagram --selector=app.kubernetes.io/name=teagramd \
+            --output=jsonpath='{.items[0].metadata.name}' >/dev/null
+          python3 deploy/k8s/test-service-ingress.py
 
-          kubectl port-forward --address 127.0.0.1 --namespace teagram \
-            service/linkselector 18081:8081 > "$RUNNER_TEMP/linkselector-port-forward.log" 2>&1 &
-          port_forward_pid=$!
-          cleanup() {
-            kill "$port_forward_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error --max-time 2 \
-              http://127.0.0.1:18081/+k3s-smoke \
-              --output "$RUNNER_TEMP/link-smoke.html"; then
-              break
-            fi
-            sleep 2
-          done
-          grep --fixed-strings --quiet 'Open this in Teagram' "$RUNNER_TEMP/link-smoke.html"
-          kill "$port_forward_pid"
-          wait "$port_forward_pid" 2>/dev/null || true
-          trap - EXIT
-
+      - name: Smoke the MTProto Service through the in-cluster proxy path
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           app_pod=$(kubectl get pods --namespace teagram \
             --selector app.kubernetes.io/name=teagramd \
             --output jsonpath='{.items[0].metadata.name}')
           test -n "$app_pod"
           kubectl exec --namespace teagram "$app_pod" -- \
             /usr/local/bin/teagramd client-config > "$RUNNER_TEMP/client.json"
-          chmod 0644 "$RUNNER_TEMP/client.json"
-
-          kubectl port-forward --address 127.0.0.1 --namespace teagram \
-            service/teagramd 12443:2443 > "$RUNNER_TEMP/mtproto-port-forward.log" 2>&1 &
-          port_forward_pid=$!
-          trap cleanup EXIT
-          for attempt in $(seq 1 30); do
-            if docker run --rm --network host \
-              --volume "$RUNNER_TEMP/client.json:/client.json:ro" \
-              --entrypoint /usr/local/bin/mtproto-smoke \
-              ghcr.io/teagramhq/teagramd:ci \
-              --endpoint 127.0.0.1:12443 --discovery-file /client.json \
-              --expect-registration-mode open; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              echo "MTProto smoke did not complete through the k3s Service" >&2
-              exit 1
-            fi
-            sleep 2
-          done
+          kubectl create configmap mtproto-probe-client --namespace teagram \
+            --from-file=client.json="$RUNNER_TEMP/client.json" \
+            --dry-run=client --output yaml \
+            | kubectl apply --filename=-
+          kubectl apply --dry-run=server --namespace=teagram \
+            --filename=deploy/k8s/ci/mtproto-probe-job.yaml
+          kubectl apply --namespace=teagram \
+            --filename=deploy/k8s/ci/mtproto-probe-job.yaml
+          kubectl wait --for=condition=complete job/mtproto-smoke \
+            --namespace teagram --timeout=120s
+          kubectl logs job/mtproto-smoke --namespace teagram
 
       - name: Verify successful release and automatic bad-image rollback
         env:
           DEPLOY_SHA: ${{ env.K8S_IMAGE_REVISION }}
           TEAGRAMD_IMAGE: ghcr.io/teagramhq/teagramd:ci
-          MT_PROTO_ENDPOINT: 127.0.0.1:12443
+          MT_PROTO_ENDPOINT: 127.0.0.1:2443
           DISCOVERY_URL: http://127.0.0.1:12444/.well-known/teagramd/client
           LINK_SMOKE_URL: http://127.0.0.1:18081/+k3s-smoke
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl port-forward --address 127.0.0.1 --namespace teagram \
-            service/teagramd 12443:2443 12444:2444 \
+            service/teagramd 2443:2443 12444:2444 \
             > "$RUNNER_TEMP/release-mtproto-port-forward.log" 2>&1 &
           mtproto_forward_pid=$!
           kubectl port-forward --address 127.0.0.1 --namespace teagram \
@@ -2185,7 +2161,7 @@ jobs:
           test "$restored_image" = "$previous_image"
           kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
 
-      - name: Test public WebSocket and discovery through the connector
+      - name: Test public WebSocket and discovery through the CI connector
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
@@ -2193,34 +2169,18 @@ jobs:
             --selector app.kubernetes.io/name=cloudflared \
             --output jsonpath='{.items[0].metadata.name}')
           test -n "$connector_pod"
-          kubectl port-forward --address 127.0.0.1 --namespace teagram \
-            "pod/$connector_pod" 18080:8080 \
-            > "$RUNNER_TEMP/cloudflared-connector-port-forward.log" 2>&1 &
-          port_forward_pid=$!
-          cleanup() {
-            kill "$port_forward_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT
           for attempt in $(seq 1 30); do
-            if python3 .github/scripts/test-k8s-public-websocket.py \
-              --host 127.0.0.1 --port 18080; then
+            if kubectl exec --namespace teagram "$connector_pod" \
+              --container=ingress-probe -- python3 \
+              /tests/test-k8s-public-websocket.py --host 127.0.0.1 --port 8080; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then
-              echo "Public WebSocket or discovery failed through the k3s connector" >&2
+              echo "Public WebSocket or discovery failed through the CI connector" >&2
               exit 1
             fi
             sleep 2
           done
-          kill "$port_forward_pid"
-          wait "$port_forward_pid" 2>/dev/null || true
-          trap - EXIT
-
-      - name: Exercise the pinned alpha cutover migration and rollback
-        run: |
-          set -euo pipefail
-          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          bash deploy/k8s/test-cutover-alpha-k3s.sh
 
       - name: Test PostgreSQL backup restore and account sign-in
         run: |
@@ -2249,14 +2209,7 @@ jobs:
           for pod in $(kubectl get pods --namespace teagram --output name); do
             kubectl logs --namespace teagram "$pod" --all-containers --tail=100
           done
-          kubectl get pods,jobs,persistentvolumeclaims --namespace teagram-cutover --output wide
-          kubectl get events --namespace teagram-cutover --sort-by=.lastTimestamp
-          kubectl describe pods --namespace teagram-cutover
-          for pod in $(kubectl get pods --namespace teagram-cutover --output name); do
-            kubectl logs --namespace teagram-cutover "$pod" --all-containers --tail=100
-          done
           docker logs --tail 100 teagram-k3s
-          cat "$RUNNER_TEMP/cloudflared-connector-port-forward.log" 2>/dev/null || true
 
       - name: Upload images used by this deployment check
         uses: actions/upload-artifact@v7.0.1

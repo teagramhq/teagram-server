@@ -19,6 +19,10 @@ def validate_discovery_document(discovery):
     rsa_spki = mtproto.get("rsa_spki") if isinstance(mtproto, dict) else None
     if not isinstance(rsa_spki, str) or not rsa_spki:
         raise RuntimeError("public discovery response has no mtproto.rsa_spki")
+    websocket = discovery.get("websocket") if isinstance(discovery, dict) else None
+    endpoint = websocket.get("endpoint") if isinstance(websocket, dict) else None
+    if endpoint != "wss://server.example.test/apiws":
+        raise RuntimeError("public discovery has the wrong WebSocket endpoint")
 
 
 def receive_headers(connection):
@@ -65,7 +69,7 @@ def test_discovery(host, port):
     request = urllib.request.Request(
         f"http://{host}:{port}/.well-known/teagramd/client",
         headers={
-            "Host": "web.example.test",
+            "Host": "server.example.test",
             "CF-Connecting-IP": "192.0.2.1",
         },
     )
@@ -86,7 +90,7 @@ def test_websocket(host, port, origin, expected_status):
     ).decode("ascii")
     request = (
         "GET /apiws HTTP/1.1\r\n"
-        "Host: web.example.test\r\n"
+        "Host: server.example.test\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"

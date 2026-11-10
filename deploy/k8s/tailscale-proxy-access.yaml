@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tailscale-proxy
+  namespace: teagram
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tailscale-proxy-state
+  namespace: teagram
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["teagram-tailscale-state"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tailscale-proxy-state
+  namespace: teagram
+subjects:
+  - kind: ServiceAccount
+    name: tailscale-proxy
+    namespace: teagram
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tailscale-proxy-state
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: teagram-deployer-networkpolicy
+  namespace: teagram
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: teagram-deployer-networkpolicy
+  namespace: teagram
+subjects:
+  - kind: ServiceAccount
+    name: teagram-deployer
+    namespace: teagram
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: teagram-deployer-networkpolicy

@@ -1,35 +1,37 @@
-## Alpha cluster bootstrap
+## Alpha cluster and deployment access
 
-On `alpha`, review the host changes and then apply the bootstrap:
+The `teagram-k3s` cluster was provisioned on alpha by MAIN-3278. The former
+application `teagram` LXC has been deleted after its database dump and key
+archive were copied to the external backup drive. Do not rerun the old
+Compose-to-k3s cutover or configure application routes on an LXC host.
 
-```sh
-sudo deploy/k8s/bootstrap-alpha.sh --dry-run
-sudo deploy/k8s/bootstrap-alpha.sh --apply
-```
+`Deploy.` is owned by MAIN-3281 (#1126). GitHub Actions joins the tailnet with
+`tailscale/github-action` and uses the namespace-scoped `KUBECONFIG` from the
+`k3s-prod` environment to reach the Kubernetes API at alpha's tailnet TCP
+6443. The application Tailscale proxy carries application traffic only; it
+does not carry Kubernetes API traffic. This PR leaves `.github/workflows/deploy.yml`
+and its contract test unchanged.
 
-The script
-creates the `teagram` namespace, transfers only the production credentials and
-runtime values described below from the live `teagram` LXC, installs the
-namespace-scoped deploy account, the restricted `teagram-agent` read account,
-and the agent operations menu, and writes the
-restricted deploy kubeconfig to `/root/teagram-k3s-deploy.kubeconfig` with mode
-`0600`. Store that file as the `KUBECONFIG` secret in the `k3s-prod` GitHub
-environment, restricted to deployments from `main`. It also
-writes `/root/teagram-k3s-cutover.kubeconfig` with the k3s admin client
-certificate, root-owned mode `0600`; use it only for root-run cutover, rollback,
-target reset, and the one-time deployer-role refresh documented below on alpha.
-Never store this admin kubeconfig in GitHub or give it to the deploy job. The API and operations SSH menu are exposed
-through Tailscale Serve only; the Incus proxy listeners bind to host loopback.
-The bootstrap also installs a cluster-scoped ValidatingAdmissionPolicy and
-binding. Rerunning the bootstrap reapplies the same manifests without changing
-them. The policy limits pod deletion by `teagram-agent` to controller-owned
-teagramd, linkselector, linklanding, and cloudflared pods.
+Keep the cluster admin kubeconfig root-owned with mode `0600`; never store it
+in GitHub or give it to the deployment job. The one-time tailnet proxy access
+installer below requires that admin kubeconfig. Normal releases use the
+namespace-scoped deployment credential.
+
+The alpha bootstrap also installs the restricted `teagram-agent` read account
+and a cluster-scoped ValidatingAdmissionPolicy that limits its pod deletion to
+the approved stateless controllers.
+
+`bootstrap-alpha.sh` provisions only the k3s host and namespace access. It does
+not read application values or keys from the deleted `teagram` LXC and does
+not create workload ConfigMaps or Secrets. Restore those resources from the
+external secret and configuration store listed below before applying `prod/`.
+The forced-command SSH key is read from alpha's `/root/.ssh/authorized_keys`
+for a first install; on reruns, the bootstrap can retain the already-installed
+key on `teagram-k3s` if that host file is unavailable.
 
 To roll back only agent access after bootstrap, run this whole block in one
 shell. It deletes the ServiceAccount first to revoke its TokenRequest tokens,
-then removes its RoleBinding. `set -euo pipefail` stops the sequence on either
-failure, leaving admission protection in place until the agent identity and
-its permissions are revoked:
+then removes its RoleBinding and admission protection:
 
 ```sh
 set -euo pipefail
@@ -60,36 +62,22 @@ run:
 sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
   kubectl apply --filename deploy/k8s/deployer-access.yaml
 ```
-
-Before workloads have written production data, rollback on `alpha` with:
-
-```sh
-sudo tailscale serve --yes --tcp=6443 off
-sudo tailscale serve --yes --tcp=2222 off
-sudo incus delete --force teagram-k3s
-sudo rm -f /root/teagram-k3s-deploy.kubeconfig
-sudo rm -f /root/teagram-k3s-cutover.kubeconfig
-```
-
-The old `teagram` LXC remains untouched. After production data is written,
-first restore the matching PostgreSQL and PVC snapshot using the recovery
-procedure below before removing the cluster.
-
 ## Kustomize layouts
 
 `base/` contains the single-replica teagramd, PostgreSQL, and RustFS workloads,
 the RustFS initialization and Atlas migration Jobs, the link landing and
-selector services, and the Cloudflare Tunnel connector. `prod/` pins the
-application images by digest. `ci/` supplies disposable runtime settings and
-replaces cloudflared with a local process so the deployment can be exercised
-without a tunnel credential. `bootstrap/` contains a separate, explicitly
-applied first-install Job for the server RSA identity; it is not included in
-the production workload overlay.
+selector services, the Cloudflare Tunnel connector, the in-cluster Tailscale
+proxy, and the default-deny teagramd ingress policy. `prod/` pins application
+images by digest. `ci/` supplies disposable runtime settings, replaces
+cloudflared with a local probe pod, and disables the real Tailscale proxy so
+CI never registers a production tailnet device. `bootstrap/` contains a
+separate, explicitly applied first-install Job for the server RSA identity; it
+is not included in the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
-Read the [alpha cutover threat model](cutover-threat-model.md) before moving
-production state or exposing the cutover listeners.
+The [alpha cutover threat model](cutover-threat-model.md) is retained as
+historical context only; the Compose cutover and its listeners are retired.
 Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a
@@ -112,15 +100,12 @@ rendering and applying it, so teagramd waits until that migration has run.
 After a migration merges and CI publishes the corresponding images, update the
 production teagramd, migration and mc-init image digests, required migration
 version, migration Job name, and `prod/source-revision` together. The production
-pin check must pass before applying that overlay. The cutover reads the live
-Compose image revision, resolves that revision's published `sha-<revision>`
-images to immutable digests, and derives the migration version and both Job
-names from those images. It checks the live database migration version against
-the resolved migration image before creating target workloads or fencing
-source writes.
+pin check must pass before applying that overlay. The retired Compose cutover
+does not select images or modify the live database.
 
-The production overlay expects these namespace-scoped resources to be supplied
-by the cluster's secret and configuration management before it is applied:
+The production overlay expects these namespace-scoped resources to be restored
+from the external secret and configuration management before it is applied.
+The bootstrap deliberately leaves them untouched:
 
 | Resource | Required keys or values |
 | --- | --- |
@@ -134,12 +119,13 @@ by the cluster's secret and configuration management before it is applied:
 | `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
 | `teagramd-turnstile` Secret | `secret-key`, mounted read-only at `/run/secrets/teagramd-turnstile/secret-key` with mode `0440` |
 | `cloudflared-token` Secret | `token` |
-| Agent token (external credential, not a Kubernetes resource) | The Steward mints a TokenRequest token inside the LXC with the root-only admin credential and `kubectl create token teagram-agent --namespace teagram --duration=2160h` (expires in 90 days or less; record its exact expiry). Never store it in a `kubernetes.io/service-account-token` Secret or commit it. To rotate or revoke it, delete and recreate the `teagram-agent` ServiceAccount, then mint a replacement token. |
+| `tailscale-auth` Secret | `authkey`; one-use auth key supplied through the external secret store |
+| `teagram-tailscale-state` Secret | Persistent node state created once by the access installer |
+| Agent token (external credential, not a Kubernetes resource) | Mint a TokenRequest token inside the `teagram-k3s` LXC using the root-only admin credential and `kubectl create token teagram-agent --namespace teagram --duration=2160h` (expires in 90 days or less; record its exact expiry). Never store it in a `kubernetes.io/service-account-token` Secret or commit it. To rotate or revoke it, delete and recreate the `teagram-agent` ServiceAccount, then mint a replacement token. |
 
-All images used by the production overlays are publicly pullable. Bootstrap does
-not read Docker credentials or create a registry Secret; this also keeps the
-cutover usable on an LXC with no Docker registry configuration. Public utility
-images such as BusyBox are pinned from `mirror.gcr.io`.
+All images used by the production overlays are publicly pullable. Bootstrap
+does not read Docker credentials or create a registry Secret. Public utility
+images are pinned from their configured registries.
 
 ## PostgreSQL backups
 
@@ -185,13 +171,9 @@ throwaway database from that dump, and signs in with the restored account. Do
 not restore a production dump into the live database as a deploy step; schema
 recovery requires the matching database snapshot and the recovery procedure.
 
-The alpha cutover runner creates the `teagramd-admin` Secret from the existing
-Compose `TG_ADMIN_TOKEN_HASH` and optional `TG_ADMIN_ORIGIN`, without printing
-either value. Subsequent production deployments use the same Secret.
-
-The Turnstile secret is supplied externally as `teagramd-turnstile`; its value
-is never stored in the repository. The teagramd container reads the mounted
-`secret-key` file through `TG_TURNSTILE_SECRET_KEY_FILE`.
+Supply the Turnstile secret externally as `teagramd-turnstile`; its value is
+never stored in the repository. Teagramd reads the mounted `secret-key` file
+through `TG_TURNSTILE_SECRET_KEY_FILE`.
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha
@@ -267,172 +249,205 @@ that Job's logs, sets its TTL to zero, and waits for the TTL controller to
 remove it so the same SHA can recreate the Job. Newly failed Jobs are detected
 within the polling interval and their logs are included in the failed run.
 
-The Cloudflare Tunnel's remotely managed route for `web.teagram.io` should
-target `http://linkselector:8081`. The selector sends the exact public API paths
-`/apiws`, `/.well-known/teagramd/client`, and the legacy
-`/.well-known/telegramd/client` to `http://teagramd:2446`; it sends teagramd
-links to `http://linklanding:8082` and ordinary web traffic to the `web`
-Service on port 8080. For `server.teagram.io`, route `^/apiws` and
-`^/\.well-known/teagramd/client` to `http://teagramd:2446`. The public
-listener is a ClusterIP Service port, advertises `server.teagram.io:443`, allows
-the `https://web.teagram.io` origin, and uses the live
-`TG_PUBLIC_REGISTRATION=invite` policy. It keeps `TG_CLIENT_ADDR_TRUST=socket` while
-Cloudflare client-address trust is disabled. It is separate from the tailnet
-WebSocket listener on 2444. Configure the external
-MTProto TCP route separately before setting `TG_ADVERTISE_ADDR`; the Cloudflare
-HTTP hostname route does not expose the MTProto listener. The
-Cloudflared metrics endpoint is exposed only inside the cluster at
-`cloudflared-metrics:2000/metrics`. Prometheus-compatible scrapers can use the
-service annotations. Container logs are written to stdout and stderr for the
-cluster's node or central log collector. After cutover, `Deploy.` requires the
-k3s `cloudflared` Deployment to have exactly one ready replica; the cutover
-must leave the old Compose connector stopped before enabling that replica.
+The Cloudflare Tunnel's remotely managed route for `web.teagram.io` targets
+`http://linkselector:8081`. The selector sends teagramd links to
+`http://linklanding:8082` and ordinary web traffic to the `web` Service on
+port 8080. Route `server.teagram.io` `/apiws` and discovery paths directly to
+`http://teagramd:2446`; it advertises `server.teagram.io:443` and allows the
+`https://web.teagram.io` origin. The public Bot API uses `teagramd:2449`.
+`teagramd` remains ClusterIP-only, and the public listener does not expose
+MTProto port 2443.
 
-## Alpha production cutover
+## In-cluster ingress paths
 
-After `bootstrap-alpha.sh` has created `teagram-k3s` and its namespace
-credentials, run the cutover from a reviewed checkout on `alpha`:
+| Path | Route | Listener |
+| --- | --- | --- |
+| Public web, `web.teagram.io` | cloudflared to `linkselector:8081` | linkselector routes to `web:8080` and `linklanding:8082` |
+| Public desktop, `server.teagram.io` | cloudflared to `teagramd:2446` for `/apiws` and both discovery aliases | public WebSocket listener |
+| Public Bot API | cloudflared to `teagramd:2449` | public Bot API listener |
+| Tailnet web, `https://teagram.tailaa4918.ts.net/` | in-cluster Tailscale proxy to `linkselector:8081` | linkselector |
+| Tailnet desktop and discovery | Tailscale proxy to `teagramd:2444` | tailnet WebSocket listener |
+| Tailnet admin | Tailscale proxy to `teagramd:2445` | admin listener |
+| Tailnet MTProto | Tailscale userspace forwarding to the proxy pod's loopback `socat` listener on 2443, then `teagramd:2443` | Half-close-preserving MTProto listener |
+| Tailnet Bot API | TCP 2447 through Tailscale proxy with PROXY v1 to `teagramd:2447` | Bot API relay on pod port 2448 |
+
+Tailscale Serve's TCP forward closes both sockets on the first EOF. Tailnet
+Bot API clients must keep the write side open until they receive the HTTP
+response.
+
+The public `server.teagram.io` and Bot API routes remain behind `hold-merge`
+until MAIN-3599 and MAIN-3600 are live. Funnel stays disabled. The tunnel and
+Tailscale Serve configuration target Kubernetes Service names only; neither
+path depends on the deleted application LXC.
+
+`teagramd-networkpolicy` selects teagramd pods and defaults ingress to deny.
+It admits ports 2443, 2444, 2445, and 2448 only from the Tailscale proxy pod
+identity, and ports 2446 and 2449 only from cloudflared. It does not trust pod
+CIDRs or request headers. Linkselector and other application pods have a
+separate source identity and are refused by both listener groups; CI probes
+check the tailnet-labelled, linkselector-labelled, and untrusted sources.
+Public traffic cannot assert tailnet identity because cloudflared has no access
+to tailnet-only ports and caller input cannot change the in-cluster source pod
+identity. The proxy also has default-deny egress with
+only the teagramd and linkselector Service ports, cluster DNS, the k3s API,
+and Tailscale control/relay UDP and HTTPS destinations allowed. The API
+Service at `kubernetes.default.svc:443` is translated to the node endpoint at
+port `6443`. The one-time access installer reads the ready addresses from the
+`kubernetes` Endpoints object and creates a separate `/32` egress rule for each
+API endpoint on TCP 6443. Its dry-run shows the exact policy, and rerunning it
+refreshes the allowlist if an endpoint address changes. Rollback removes this
+policy after confirming the proxy is stopped. CI builds the same policy from
+its disposable cluster's API endpoints and verifies access from the
+proxy-labelled probe pod.
+The external egress rule still excludes private, tailnet, and link-local IPv4
+ranges, so the proxy cannot open connections to PostgreSQL, RustFS, or other
+application pods. MAIN-3598 exempts tailnet
+traffic from teagramd rate and connection limits; public per-client limits use
+the real client address supplied through `CF-Connecting-IP` by cloudflared
+only.
+
+The CI-only `bot-api-public-ci-stand-in` exercises cloudflared's public-path
+reachability on port 2449. It relays to the loopback Bot API only in the
+disposable test overlay; MAIN-3600 replaces it with the direct public listener.
+
+The `Deploy.` runner joins the tailnet with `tailscale/github-action` and uses
+the namespace-scoped `KUBECONFIG` in GitHub environment `k3s-prod` to connect to
+the Kubernetes API on alpha's tailnet TCP 6443 (MAIN-3278). MAIN-3281 (#1126)
+owns the stale API reachability check. The application proxy does not carry
+deploy traffic. The Cloudflare metrics endpoint and Tailscale proxy metrics
+service expose scrape targets inside the cluster; container logs go to stdout
+and stderr for the cluster log collector. Alert on a non-Ready Tailscale proxy
+or an increase in its restart count.
+
+## Tailscale identity and one-time installation
+
+The single-replica `tailscale-proxy` StatefulSet uses the pinned
+`ghcr.io/tailscale/tailscale:v1.104.4` image. It runs userspace networking
+without host networking, added capabilities, subnet routes, exit-node
+advertising, Tailscale SSH, or Funnel. `TS_HOSTNAME=teagram` and the
+pre-created `teagram-tailscale-state` Secret preserve the node identity across
+pod restarts and node reboots. If state is lost, the one-use auth key cannot
+register a replacement device.
+
+Before the first install, the tailnet administrator must:
+
+1. Enable MagicDNS and HTTPS certificates.
+2. Before the in-cluster proxy starts, delete the old `teagram` device left by
+   the removed application LXC, if it still appears in the tailnet admin
+   console. Confirm that device is gone so the new proxy can register as
+   `teagram` instead of receiving a suffixed name.
+3. Create a one-use, non-ephemeral, pre-approved auth key tagged only
+   `tag:teagram`, with a one-day expiry. Auth keys have no OAuth scopes; no
+   OAuth client is needed. Store it as external Secret `teagram/tailscale-auth`,
+   key `authkey`.
+4. Add this tag owner and grant to the tailnet policy, replacing
+   `autogroup:member` with the chosen human user/group identities if that group
+   includes non-human devices:
+
+   ```json
+   {
+     "tagOwners": {"tag:teagram": ["autogroup:admin"]},
+     "grants": [
+       {"src": ["autogroup:member"], "dst": ["tag:teagram"],
+        "ip": ["tcp:443", "tcp:2443", "tcp:2447"]}
+     ]
+   }
+   ```
+
+   Keep the grant limited to TCP 443, 2443, and 2447. The proxy metrics
+   listener on 9002 is reachable through userspace forwarding but has no
+   Tailscale grant.
+
+5. Remove wildcard source grants. Do not add `tag:teagram` as a grant source,
+   an `autoApprovers` entry, a Funnel `nodeAttrs` rule, or a node share.
+6. After storing the key in the external Secret, run the reviewed installer
+   with the admin kubeconfig:
+
+   ```sh
+   sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
+     deploy/k8s/install-tailnet-proxy-access.sh --dry-run
+   sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
+     deploy/k8s/install-tailnet-proxy-access.sh --apply
+   ```
+
+The installer creates the proxy ServiceAccount, a Role limited to `get`,
+`update`, and `patch` on only `teagram-tailscale-state`, and the deployer's
+namespace-scoped NetworkPolicy Role (`get`, `list`, `watch`, `create`, and
+`patch`; no `delete`). It creates the empty state Secret only when absent and
+never replaces existing state. It also creates or refreshes the proxy's
+API-only egress policy from the current `kubernetes` Endpoints addresses;
+rerun it if the cluster API endpoint changes. `tailscale-auth` remains
+externally managed.
+The deploy ServiceAccount keeps this NetworkPolicy Role and RoleBinding so
+future `Deploy.` runs can update ingress policies. The proxy access rollback
+removes its API egress policy, state Role/RoleBinding, and ServiceAccount. The
+deploy ServiceAccount receives no Secret, ServiceAccount, Role, or RoleBinding access
+outside its namespaced NetworkPolicy rule.
+
+The proxy health and metrics endpoints listen on port 9002. The metrics Service
+has Prometheus scrape annotations; collect container logs with
+`kubectl logs statefulset/tailscale-proxy --namespace teagram`. Alert when the
+proxy is not Ready or either the `tailscale` or `mtproto-forwarder` container's
+restart count increases. Do not add a liveness probe: transient tailnet
+connectivity must not force re-registration.
+
+## One-time cleanup, post-check, and rollback
+
+The retired cutover script performs no production actions. Before installing
+the new proxy, remove the old forwarding units from the surviving `teagram-k3s`
+LXC once:
 
 ```sh
-sudo deploy/k8s/cutover-alpha.sh --dry-run
-sudo --preserve-env=GH_TOKEN,GHCR_USERNAME deploy/k8s/cutover-alpha.sh --apply
+sudo incus exec teagram-k3s -- systemctl disable --now \
+  teagram-linkselector-port-forward.service teagramd-port-forward.service
+sudo incus exec teagram-k3s -- rm -f \
+  /etc/systemd/system/teagram-linkselector-port-forward.service \
+  /etc/systemd/system/teagramd-port-forward.service
+sudo incus exec teagram-k3s -- systemctl daemon-reload
 ```
 
-The alpha host needs the GitHub CLI (`gh`) for the image-provenance check. Before
-`--apply`, load a read-only GitHub token from the approved secret store into the
-invoking shell as `GH_TOKEN` and set `GHCR_USERNAME` to the token owner's GitHub
-username. The token needs read access to repository attestations and the GHCR
-packages. Run the apply command with
-`sudo --preserve-env=GH_TOKEN,GHCR_USERNAME`; the runner uses the token for
-GitHub API and GHCR verification, writes GHCR auth to a mode-0600 temporary
-Docker config, then removes it on exit. It does not persist the token or
-registry credentials.
+After the proxy is Ready, verify the tailnet HTTPS routes, an unauthenticated
+Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
+`teagram.tailaa4918.ts.net:2443` followed by a write half-close returns a
+`telegramd-key-r1` response. In the tailnet admin console, confirm that the
+new in-cluster device is named `teagram` and that
+`teagram.tailaa4918.ts.net` resolves to that device. CI runs the same discovery
+probe through the same `socat` loopback forwarder configured in the proxy pod,
+and fails when it returns zero bytes. Both socat forwarders use a 30-second
+closing wait so a delayed discovery response is not cut off after the client's
+half-close. Tailscale Serve does not handle TCP 2443: the userspace netstack
+forwards it to the pod loopback listener, which preserves the client's write
+half-close while waiting for the server response. CI keeps the real Tailscale
+daemon scaled to zero, so it verifies the forwarder and half-close exchange
+without registering a tailnet device.
 
-Before applying workloads, the runner reads the live teagramd revision and
-pulls the five published k8s images tagged for that SHA and resolves their
-immutable registry digests. For each digest it verifies GitHub build provenance
-with `gh attestation verify`, using the temporary GHCR credentials. It requires
-source ref `refs/heads/main`, the exact live source commit, and
-`.github/workflows/ci.yml` as the signer. Main CI emits
-these attestations only on successful main pushes; a PR-produced attestation
-cannot satisfy the source and signer checks. It pins only verified digests in
-the rendered manifest and derives migration versions and immutable Job names
-from those images. Missing provenance, a digest from a PR build, a label
-mismatch, or a database mismatch stops the run before source writes are fenced.
-Immediately before the first Serve route changes, the runner verifies that
-every fenced Compose container is still stopped, PostgreSQL has no client
-connections, RustFS is running, and the teagramd revision has not changed.
-
-The script keeps the k8s app and tunnel connector at zero replicas while it
-restores PostgreSQL and applies the matching Atlas migration. It copies
-`server_key.pem`, `enc_key.hex`, the blob-mode authority, and the retained local
-blob tree into the new PVCs; it also verifies the k3s media-key Secret against
-the live key set and sets `TG_MEDIA_KEY_CURRENT` to the source runtime's active
-key version. It mirrors the source RustFS `teagram/teagramd/` prefix into
-the new RustFS PVC with object bytes unchanged. The source bucket and Compose
-volumes are read-only. Before the route switch, the runner checks object count,
-total bytes, and each object's SHA-256 against the target. The source S3
-credential is used only by a temporary client, which is removed after the
-copy. A target-only port-forward is removed when the copy completes.
-
-The runner saves a mode-0600 custom-format database dump on the PostgreSQL PVC
-and keeps a read-only local-blob copy in `legacy-blobs`. The database dump and
-old Compose volumes are recovery points for at least seven days. CI uploads a
-document through the source S3-backed teagramd before cutover and downloads
-the same document through the target after cutover, comparing the bytes.
-
-Before the final snapshot, the script stops every running Compose service other
-than PostgreSQL and RustFS, including `teagramd` and any active database or blob
-writer, and stops `teagram-web-cloudflared`. PostgreSQL and RustFS are verified
-to remain running, and PostgreSQL has no remaining client connections. RustFS
-must stay online because the post-fence source S3 listing, per-object checksum
-reads, and mirror use `http://rustfs:9000`. Compose volumes and PostgreSQL data
-are left intact. The fence-to-switch interval is planned downtime; a failure
-before the first live edge switch restarts only the Compose services the runner
-stopped. PostgreSQL and RustFS are not stopped during recovery.
-
-After a successful cutover, the old Compose application and edge services stay
-stopped, while PostgreSQL and source RustFS remain running with their existing
-data. The k8s application uses the copied objects in target RustFS; the source
-bucket remains the pre-switch recovery copy for at least seven days. Apply and
-rollback leave the source PostgreSQL and RustFS services and their data in
-place. Retiring them requires a separate cleanup after the recovery period.
-
-The cutover keeps the k8s app and connector at zero while it restores the
-database, identity and blobs. It applies teagram-web's pinned k8s base and adds
-the `web` Service on port `8080`, which lets linkselector reach the app inside
-the cluster. It then starts the WebSocket and admin listeners on the k3s
-teagramd Service and installs restartable `systemd` port-forwards in
-`teagram-k3s`. The Bot API binds to pod loopback and uses the same Unix socket
-and TCP relay arrangement as Compose, preserving Tailscale's PROXY protocol.
-Tailscale Serve keeps all five existing paths and sends `/` to linkselector,
-`/apiws`, both client discovery paths, and `/admin` to the matching teagramd
-Service ports. The Cloudflare routes for `server.teagram.io` use the separate
-public WebSocket Service port 2446. It forwards the existing raw MTProto TCP
-listener on port `2443` and Bot API on `2447` to their k3s Service ports,
-verifying both before changing Serve. Funnel remains off. The Cloudflare
-connector stays at zero until the dashboard routes change from `web.teagram.io`
-`http://127.0.0.1:8081` to `http://linkselector:8081`, and `server.teagram.io`
-paths `^/apiws` and `^/\.well-known/teagramd/client` from
-`http://127.0.0.1:2446` to `http://teagramd:2446`; confirm those changes before
-the k8s connector starts. No Cloudflare API credential is provisioned.
-
-The first live Serve route is the switch boundary. A failure after that point
-leaves k3s serving and requires the printed explicit rollback command; it will
-not automatically restart Compose and discard writes accepted by k3s. Rollback
-requires confirmation of that data loss, scales the k8s app and connector to
-zero, and verifies their pods have stopped before restoring the Cloudflare
-route, all five Serve paths, the MTProto TCP route, and the old Bot API route.
-It then restarts only the Compose services stopped by apply and stops both
-port-forwards. PostgreSQL and source RustFS were already running, so the restored
-Compose teagramd reconnects to the original bucket. PostgreSQL and PVC data
-remain intact. Writes made on k3s after the switch are not copied to the source
-RustFS bucket or carried back to Compose.
-
-### Retry after a pre-switch failure
-
-An apply failure before the first live Serve route attempts to restart the
-stopped Compose services; if recovery reports incomplete, resolve that state
-before continuing. It leaves the cutover phase and target resources for
-diagnosis. The printed `--rollback` command restores the old routes and records
-`rolled-back`; it does not remove the imported target data. Do not reset the
-target until rollback has completed, the old Compose services and edges are
-healthy, and no cutover or rollback command is running. This reset deletes the
-failed target copy, so use it only after a pre-switch failure, when k3s has not
-served production traffic. A rollback after the first live Serve route warns
-that k3s writes are not copied back; preserve any such data before removing the
-target.
-
-After accepting that the failed target copy can be discarded, remove the
-resources from the cutover overlay and its separately-created admin Secret and
-PVCs, then remove the phase and recovery evidence directory. The namespace and
-bootstrap credentials are retained. The first command removes the importer and
-waits for its volume mounts to be released:
+During a proxy incident, run the reviewed access rollback with the admin
+kubeconfig. It stops the proxy and removes its API egress policy, state
+Role/RoleBinding, and ServiceAccount. It preserves both Tailscale Secrets and
+the deployer's NetworkPolicy Role/RoleBinding for recovery and future deployments:
 
 ```sh
-set -e
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete pod/cutover-volume-importer \
-  --namespace teagram --ignore-not-found=true --wait=true --timeout=300s
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
-  -k deploy/k8s/prod-cutover --ignore-not-found=true --wait=true
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
-  secret teagramd-admin --namespace teagram --ignore-not-found=true
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig kubectl delete \
-  pvc data-postgres-0 data-rustfs-0 key-data-teagramd-0 \
-  legacy-blobs-teagramd-0 blob-mode-teagramd-0 \
-  --namespace teagram --ignore-not-found=true --wait=true
-sudo rm -rf -- /var/lib/teagram-k3s-cutover
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
+  deploy/k8s/install-tailnet-proxy-access.sh --rollback
 ```
 
-The overlay deletion removes the workloads, Services, Jobs and overlay PVCs.
-The explicit PVC command also removes the PostgreSQL and RustFS claims from the
-base production manifests. Once the commands complete, a fresh `--apply` can
-run from the same reviewed checkout.
+There is no LXC fallback. Restore the cluster from matching PostgreSQL and PVC
+backups before changing persistent data or replacing the Tailscale identity.
+The archived database dump and key archive are on the external backup drive.
 
-CI runs the actual cutover runner with a disposable S3-backed source namespace
-and a separate target namespace in k3s. The source database, encrypted S3
-object, identity files, blob-mode authority, and retained local blob fixture
-pass through the runner's fence, snapshot, transfer, and revision-matched
-migration Job. CI downloads the pre-cutover document through target teagramd,
-invokes the runner's explicit rollback, then signs into the untouched source.
-No production namespace or live cluster is used.
+`test: k8s-deploy` exercises trusted and denied in-cluster sources, Kubernetes
+API access, the unauthenticated Bot API response, discovery half-close, and
+one-second probes during linkselector and teagramd rollouts. It requires all
+linkselector replicas and a Ready pod with a new UID before that rollout probe
+ends; teagramd also requires its StatefulSet generation to complete. The
+disposable overlay scales the real Tailscale proxy to zero and uses no
+production credential; its policy probe uses a keyless `tailscale-proxy`
+ServiceAccount token for `/version` and the proxy label for source-identity
+rules. CI does not claim to sample real Tailscale daemon
+restarts; the first production teagramd rollout records the `tailscale` and
+`mtproto-forwarder` container restartCounts before and after, and production
+alerts monitor both. Its `mtproto-smoke` Job runs the 48-byte discovery
+half-close probe through the same loopback forwarder used by the production
+proxy. The ingress probes run from in-cluster identities; only the disposable
+release rollback integration test uses short-lived `kubectl port-forward`
+connections.

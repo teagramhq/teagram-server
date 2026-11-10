@@ -15,15 +15,18 @@ spec:
     - name: websocket
       port: 2444
       targetPort: websocket
-    - name: public-ws
-      port: 2446
-      targetPort: public-ws
     - name: admin
       port: 2445
       targetPort: admin
+    - name: public-ws
+      port: 2446
+      targetPort: public-ws
     - name: bot-api
       port: 2447
       targetPort: bot-api-ingress
+    - name: public-bot-api
+      port: 2449
+      targetPort: 2449
 ---
 apiVersion: v1
 kind: Service
