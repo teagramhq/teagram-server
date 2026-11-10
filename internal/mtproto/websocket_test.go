@@ -864,6 +864,91 @@ func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
 	}
 }
 
+func TestWebSocketRequestTailnetPathComesFromListenerConfiguration(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		path        mtproto.ListenerPath
+		publicAPI   bool
+		wantTailnet bool
+	}{
+		{name: "configured limited listener", path: mtproto.ListenerPathLimited},
+		{name: "configured tailnet listener", path: mtproto.ListenerPathTailnet, wantTailnet: true},
+		{name: "public listener stays limited", path: mtproto.ListenerPathTailnet, publicAPI: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+
+			listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+			key := rebindTestKey()
+			keys := mtproto.NewMemoryAuthKeyStore()
+			if err := keys.Save(ctx, key); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+			seen := make(chan bool, 1)
+			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+				seen <- req.TailnetPath
+				return nil
+			})
+			server := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
+			serverCtx, stopServer := context.WithCancel(ctx)
+			served := make(chan error, 1)
+			if tt.publicAPI {
+				if err := server.SetWebSocketListenerPath(tt.path); err != nil {
+					t.Fatalf("set default WebSocket listener path: %v", err)
+				}
+				rsaKey := cloudflareTestRSAKey(t)
+				doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+				if err != nil {
+					t.Fatalf("build public discovery document: %v", err)
+				}
+				go func() {
+					served <- server.ServePublicWebSocketWithCFConnectingIP(serverCtx, listener, handler, nil, doc)
+				}()
+			} else {
+				if err := server.SetWebSocketListenerPath(tt.path); err != nil {
+					t.Fatalf("set WebSocket listener path: %v", err)
+				}
+				go func() { served <- server.ServeWebSocket(serverCtx, listener) }()
+			}
+			t.Cleanup(func() {
+				stopServer()
+				if err := <-served; err != nil {
+					t.Errorf("serve WebSocket: %v", err)
+				}
+			})
+
+			ws, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{
+				"CF-Connecting-IP": []string{"198.51.100.41"},
+			})
+			if err != nil {
+				t.Fatalf("dial WebSocket: %v", err)
+			}
+			t.Cleanup(func() { closeWebSocket(t, ws) })
+			client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+			if err != nil {
+				t.Fatalf("transport handshake: %v", err)
+			}
+			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.HelpGetConfigRequest{})
+			if err := client.Send(ctx, &bin.Buffer{Buf: slices.Clone(frame)}); err != nil {
+				t.Fatalf("send frame: %v", err)
+			}
+
+			select {
+			case got := <-seen:
+				if got != tt.wantTailnet {
+					t.Errorf("handler saw TailnetPath=%t, want %t from the listener configuration", got, tt.wantTailnet)
+				}
+			case <-ctx.Done():
+				t.Fatal("request did not reach handler")
+			}
+		})
+	}
+}
+
 func TestPublicWebSocketRejectsInvalidCFConnectingIP(t *testing.T) {
 	t.Parallel()
 

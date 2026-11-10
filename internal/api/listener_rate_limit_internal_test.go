@@ -2,18 +2,21 @@ package api
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
-	"log/slog"
 	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
+	gotdsrp "github.com/gotd/td/crypto/srp"
+	gotdauth "github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -90,7 +93,7 @@ func TestTailnetRPCDoesNotSpendPublicAccountRateLimit(t *testing.T) {
 	}
 }
 
-func TestTailnetStillEnforcesTargetAccountPasswordFailureBudget(t *testing.T) {
+func TestTailnetUsernameSignInEnforcesTargetAccountPasswordFailureBudget(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -104,54 +107,21 @@ func TestTailnetStillEnforcesTargetAccountPasswordFailureBudget(t *testing.T) {
 		}
 	})
 
-	user, err := s.CreateUser(ctx, "+15551298002")
-	if err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	if err := s.UpsertPassword(ctx, store.UserPassword{
-		UserID: user.ID, Salt1: []byte("salt1"), Salt2: []byte("salt2"), Verifier: make([]byte, 256),
-	}); err != nil {
-		t.Fatalf("set password: %v", err)
-	}
-	var authKeyID [8]byte
-	authKeyID[7] = 1
-	keyID := mtproto.AuthKeyIDInt64(authKeyID)
-	if err := s.SaveAuthKey(ctx, keyID, []byte("key")); err != nil {
-		t.Fatalf("save auth key: %v", err)
-	}
-	if err := s.SetPendingUser(ctx, keyID, user.ID); err != nil {
-		t.Fatalf("set pending user: %v", err)
-	}
-
-	h := &handlers{
-		store:                  s,
-		log:                    slog.New(slog.DiscardHandler),
-		rateLimitCheckPassword: store.RateLimitConfig{Limit: 1, Window: time.Minute},
-		rateLimitCheckPasswordIP: store.RateLimitConfig{
-			Limit: 1, Window: time.Minute,
-		},
-	}
-	check := func() error {
-		var body bin.Buffer
-		if err := (&tg.AuthCheckPasswordRequest{Password: &tg.InputCheckPasswordSRP{
-			A: make([]byte, 256), M1: make([]byte, 256),
-		}}).Encode(&body); err != nil {
-			t.Fatalf("encode request: %v", err)
+	fixture := newTailnetUsernameLogin(t, ctx, s, "tailnetcheck", "right-password", store.RateLimitConfig{Limit: 1, Window: time.Minute}, store.RateLimitConfig{})
+	for attempt := 1; attempt <= 2; attempt++ {
+		challenge := issueTailnetPasswordChallenge(t, fixture.handler, ctx, fixture.authKeyID, 0)
+		proof := tailnetPasswordProof(t, challenge, "wrong-password")
+		err := callTailnetCheckPassword(t, fixture.handler, ctx, fixture.authKeyID, proof)
+		if attempt == 1 && !tgerr.Is(err, "PASSWORD_HASH_INVALID") {
+			t.Fatalf("first tailnet username password proof = %v, want PASSWORD_HASH_INVALID for a real challenge", err)
 		}
-		_, err := h.handleCheckPassword(&mtproto.Request{
-			Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.Addr{}, TailnetPath: true, Buf: &body,
-		})
-		return err
-	}
-	if err := check(); err == nil || tgerr.Is(err, "FLOOD_WAIT") {
-		t.Fatalf("first tailnet password proof = %v, want proof failure after admission", err)
-	}
-	if err := check(); !tgerr.Is(err, "FLOOD_WAIT") {
-		t.Fatalf("second tailnet password proof = %v, want target-account FLOOD_WAIT", err)
+		if attempt == 2 && !tgerr.Is(err, "FLOOD_WAIT") {
+			t.Fatalf("second tailnet username password proof = %v, want target-account FLOOD_WAIT", err)
+		}
 	}
 }
 
-func TestTailnetStillEnforcesTargetAccountPasswordProofBudget(t *testing.T) {
+func TestTailnetUsernameAccountEnforcesTargetAccountPasswordProofBudget(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -165,53 +135,136 @@ func TestTailnetStillEnforcesTargetAccountPasswordProofBudget(t *testing.T) {
 		}
 	})
 
-	publicUser, err := s.CreateUser(ctx, "+15551298003")
-	if err != nil {
-		t.Fatalf("create public user: %v", err)
-	}
-	tailnetUser, err := s.CreateUser(ctx, "+15551298004")
-	if err != nil {
-		t.Fatalf("create tailnet user: %v", err)
-	}
-	for _, user := range []store.User{publicUser, tailnetUser} {
-		if err := s.UpsertPassword(ctx, store.UserPassword{
-			UserID: user.ID, Salt1: []byte("salt1"), Salt2: []byte("salt2"), Verifier: make([]byte, 256),
-		}); err != nil {
-			t.Fatalf("set password for user %d: %v", user.ID, err)
-		}
+	fixture := newTailnetUsernameLogin(t, ctx, s, "tailnetproof", "right-password", store.RateLimitConfig{}, store.RateLimitConfig{Limit: 1, Window: time.Minute})
+	pendingChallenge := issueTailnetPasswordChallenge(t, fixture.handler, ctx, fixture.authKeyID, 0)
+	goodProof := tailnetPasswordProof(t, pendingChallenge, fixture.password)
+	if err := callTailnetCheckPassword(t, fixture.handler, ctx, fixture.authKeyID, goodProof); err != nil {
+		t.Fatalf("complete username login before account.getPasswordSettings: %v", err)
 	}
 
-	h := &handlers{
-		store:                  s,
-		log:                    slog.New(slog.DiscardHandler),
-		rateLimitPasswordProof: store.RateLimitConfig{Limit: 1, Window: time.Minute},
-	}
-	check := func(userID int64, tailnet bool) error {
+	for attempt := 1; attempt <= 2; attempt++ {
+		challenge := issueTailnetPasswordChallenge(t, fixture.handler, ctx, fixture.authKeyID, fixture.user.ID)
+		proof := tailnetPasswordProof(t, challenge, "wrong-password")
 		var body bin.Buffer
-		if err := (&tg.AccountGetPasswordSettingsRequest{Password: &tg.InputCheckPasswordSRP{
-			A: make([]byte, 256), M1: make([]byte, 256),
-		}}).Encode(&body); err != nil {
-			t.Fatalf("encode request: %v", err)
+		if err := (&tg.AccountGetPasswordSettingsRequest{Password: proof}).Encode(&body); err != nil {
+			t.Fatalf("encode password settings request: %v", err)
 		}
-		_, err := h.handleGetPasswordSettings(&mtproto.Request{
-			Ctx: ctx, UserID: userID, TailnetPath: tailnet, Buf: &body,
+		_, err := fixture.handler.handleGetPasswordSettings(&mtproto.Request{
+			Ctx: ctx, UserID: fixture.user.ID, AuthKeyID: fixture.authKeyID, TailnetPath: true, Buf: &body,
 		})
-		return err
+		if attempt == 1 && !tgerr.Is(err, "PASSWORD_HASH_INVALID") {
+			t.Fatalf("first tailnet password settings proof = %v, want PASSWORD_HASH_INVALID for a real challenge", err)
+		}
+		if attempt == 2 && !tgerr.Is(err, "FLOOD_WAIT") {
+			t.Fatalf("second tailnet password settings proof = %v, want target-account FLOOD_WAIT", err)
+		}
+	}
+}
+
+type tailnetUsernameLoginFixture struct {
+	user      store.User
+	authKeyID [8]byte
+	password  string
+	handler   *handlers
+}
+
+func newTailnetUsernameLogin(
+	t *testing.T,
+	ctx context.Context,
+	s *store.Store,
+	username, password string,
+	checkPasswordLimit, passwordProofLimit store.RateLimitConfig,
+) tailnetUsernameLoginFixture {
+	t.Helper()
+
+	salt1 := make([]byte, 32)
+	salt2 := make([]byte, 32)
+	for i := range salt1 {
+		salt1[i] = byte(i + 1)
+		salt2[i] = byte(255 - i)
+	}
+	verifier, augmentedSalt1, err := gotdsrp.NewSRP(cryptorand.Reader).NewHash([]byte(password), gotdsrp.Input{
+		Salt1: salt1,
+		Salt2: salt2,
+		G:     tsrp.G,
+		P:     tsrp.PBytes(),
+	})
+	if err != nil {
+		t.Fatalf("generate username account verifier: %v", err)
+	}
+	user, err := s.CreateUsernameAccountWithPassword(ctx, username, augmentedSalt1, salt2, verifier)
+	clear(verifier)
+	if err != nil {
+		t.Fatalf("create username account: %v", err)
 	}
 
-	for _, tc := range []struct {
-		name    string
-		userID  int64
-		tailnet bool
-	}{
-		{name: "public", userID: publicUser.ID},
-		{name: "tailnet", userID: tailnetUser.ID, tailnet: true},
-	} {
-		if err := check(tc.userID, tc.tailnet); !tgerr.Is(err, "SRP_ID_INVALID") {
-			t.Fatalf("first %s password proof = %v, want SRP_ID_INVALID after admission", tc.name, err)
-		}
-		if err := check(tc.userID, tc.tailnet); !tgerr.Is(err, "FLOOD_WAIT") {
-			t.Fatalf("second %s password proof = %v, want target-account FLOOD_WAIT", tc.name, err)
-		}
+	authKeyID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	if err := s.SaveAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID), make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
 	}
+	hash, _, err := s.IssueCodeForUsername(ctx, username)
+	if err != nil {
+		t.Fatalf("issue username sign-in code: %v", err)
+	}
+	h := testHandlers(s)
+	h.rateLimitCheckPassword = checkPasswordLimit
+	h.rateLimitPasswordProof = passwordProofLimit
+	var signInBody bin.Buffer
+	if err := (&tg.AuthSignInRequest{PhoneNumber: username, PhoneCodeHash: hash}).Encode(&signInBody); err != nil {
+		t.Fatalf("encode username sign-in: %v", err)
+	}
+	_, err = h.handleSignIn(nil, &mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, TailnetPath: true, Buf: &signInBody,
+	})
+	if !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+		t.Fatalf("username sign-in = %v, want SESSION_PASSWORD_NEEDED", err)
+	}
+	return tailnetUsernameLoginFixture{user: user, authKeyID: authKeyID, password: password, handler: h}
+}
+
+func issueTailnetPasswordChallenge(t *testing.T, h *handlers, ctx context.Context, authKeyID [8]byte, userID int64) *tg.AccountPassword {
+	t.Helper()
+	var body bin.Buffer
+	if err := (&tg.AccountGetPasswordRequest{}).Encode(&body); err != nil {
+		t.Fatalf("encode getPassword request: %v", err)
+	}
+	result, err := h.handleGetPassword(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, UserID: userID, TailnetPath: true, Buf: &body,
+	})
+	if err != nil {
+		t.Fatalf("getPassword: %v", err)
+	}
+	challenge, ok := result.(*tg.AccountPassword)
+	if !ok || !challenge.HasPassword || challenge.SRPID == 0 {
+		t.Fatalf("getPassword result = %#v, want a password account with an issued SRP challenge", result)
+	}
+	if srpB, ok := challenge.GetSRPB(); !ok || len(srpB) == 0 {
+		t.Fatal("getPassword returned no SRP B")
+	}
+	return challenge
+}
+
+func tailnetPasswordProof(t *testing.T, challenge *tg.AccountPassword, password string) *tg.InputCheckPasswordSRP {
+	t.Helper()
+	srpB, ok := challenge.GetSRPB()
+	if !ok {
+		t.Fatal("SRP challenge has no B")
+	}
+	proof, err := gotdauth.PasswordHash([]byte(password), challenge.SRPID, srpB, challenge.SecureRandom, challenge.CurrentAlgo)
+	if err != nil {
+		t.Fatalf("compute SRP proof: %v", err)
+	}
+	return proof
+}
+
+func callTailnetCheckPassword(t *testing.T, h *handlers, ctx context.Context, authKeyID [8]byte, proof *tg.InputCheckPasswordSRP) error {
+	t.Helper()
+	var body bin.Buffer
+	if err := (&tg.AuthCheckPasswordRequest{Password: proof}).Encode(&body); err != nil {
+		t.Fatalf("encode checkPassword request: %v", err)
+	}
+	_, err := h.handleCheckPassword(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.Addr{}, TailnetPath: true, Buf: &body,
+	})
+	return err
 }
