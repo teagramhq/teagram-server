@@ -1865,6 +1865,19 @@ jobs:
           docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl wait --for=condition=Ready node --all --timeout=180s
+          flannel_cni_ready=false
+          for attempt in $(seq 1 90); do
+            if docker exec teagram-k3s sh -c \
+              'grep -q "^FLANNEL_SUBNET=[0-9]" /run/flannel/subnet.env' 2>/dev/null; then
+              flannel_cni_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$flannel_cni_ready" != true ]]; then
+            echo "k3s flannel CNI did not publish /run/flannel/subnet.env within 180 seconds" >&2
+            exit 1
+          fi
           required_images=(
             ghcr.io/teagramhq/teagramd:ci
             ghcr.io/teagramhq/link-edge-landing:ci

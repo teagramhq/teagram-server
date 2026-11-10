@@ -87,6 +87,19 @@ bash .github/scripts/check-k8s-migration-version.sh \
   "$migration_fixture/migrations" "$migration_fixture/migration-version" 20261102000002 >/dev/null ||
   fail 'an intentional base migration-version update to the newest migration must pass'
 
+k3s_start_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run' .github/workflows/ci.yml)"
+k3s_node_ready_line="$(grep -n -F 'kubectl wait --for=condition=Ready node --all --timeout=180s' <<< "$k3s_start_step" | tail -n 1 | cut -d: -f1)"
+k3s_flannel_gate_line="$(grep -n -m 1 -F 'flannel_cni_ready=false' <<< "$k3s_start_step" | cut -d: -f1)"
+k3s_workload_start_line="$(grep -n -m 1 -F 'kubectl create namespace teagram' <<< "$k3s_start_step" | cut -d: -f1)"
+[[ "$k3s_node_ready_line" =~ ^[0-9]+$ &&
+   "$k3s_flannel_gate_line" =~ ^[0-9]+$ &&
+   "$k3s_workload_start_line" =~ ^[0-9]+$ &&
+   "$k3s_start_step" == *'grep -q "^FLANNEL_SUBNET=[0-9]" /run/flannel/subnet.env'* &&
+   "$k3s_start_step" == *'k3s flannel CNI did not publish /run/flannel/subnet.env within 180 seconds'* &&
+   "$k3s_node_ready_line" -lt "$k3s_flannel_gate_line" &&
+   "$k3s_flannel_gate_line" -lt "$k3s_workload_start_line" ]] ||
+  fail 'the k3s deployment lane must wait for flannel CNI readiness before applying workloads'
+
 mkdir -p "$migration_fixture/ci"
 cat > "$migration_fixture/ci/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
