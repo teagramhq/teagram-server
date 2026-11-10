@@ -179,6 +179,17 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/nope.md", result.stdout + result.stderr)
 
+    def test_broken_markdown_link_wrapping_external_badge_is_checked(self):
+        (self.root / "README.md").write_text(
+            "[![guide](https://example.com/badge.svg)](docs/nope.md)\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md", result.stdout + result.stderr)
+        self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
     def test_missing_relative_html_asset_names_file_and_target(self):
         (self.root / "docs/guide.md").write_text('<img src="missing.svg">\n')
 
