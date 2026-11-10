@@ -1071,6 +1071,9 @@ jobs:
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh
 
+      - name: Exercise production deploy runtime preflight steps
+        run: .github/scripts/test-deploy-runtime-preflight.sh
+
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
 
@@ -1080,8 +1083,14 @@ jobs:
       - name: Test immutable K8s image digest publication
         run: .github/scripts/test-k8s-image-digests.sh
 
+      - name: Test production image pin resolution
+        run: python3 -B .github/scripts/test-update-k8s-prod-pins.py
+
       - name: Test bounded K8s workload checks
         run: .github/scripts/test-k8s-deploy-contract.sh
+
+      - name: Test early post-apply release rollback
+        run: python3 -B deploy/k8s/test-deploy-release-early-rollback.py
 
       - name: Check RPC performance workflow contract
         env:
@@ -1097,8 +1106,23 @@ jobs:
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
           shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
+          bash -n deploy/k8s/deploy-release.sh \
+            deploy/k8s/initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-postgres-backup-restore.sh \
+            deploy/k8s/test-postgres-backup-retention.sh \
+            deploy/k8s/test-postgres-backup-restore-guard.sh
+          shellcheck deploy/k8s/deploy-release.sh \
+            deploy/k8s/initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
+            deploy/k8s/test-postgres-backup-restore.sh \
+            deploy/k8s/test-postgres-backup-retention.sh \
+            deploy/k8s/test-postgres-backup-restore-guard.sh
+          shellcheck --shell=sh deploy/k8s/base/postgres-backup/backup.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/test-deploy-runtime-preflight.sh
+          shellcheck .github/scripts/test-deploy-runtime-preflight.sh
           bash -n .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
           shellcheck .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
           bash -n .github/scripts/check-k8s-migration-version.sh
@@ -1539,7 +1563,7 @@ jobs:
           bash .github/scripts/check-k8s-migration-version.sh \
             migrations deploy/k8s/base/migration-version "$previous_migration_version"
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
-          for overlay in prod prod-cutover ci bootstrap bootstrap/ci; do
+          for overlay in prod prod-cutover ci bootstrap bootstrap/ci backup-bootstrap; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
@@ -1547,6 +1571,12 @@ jobs:
               yq -e 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.replicas == 0' "$rendered" >/dev/null
               yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
               yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
+            fi
+            if [[ "$overlay" == prod-cutover || "$overlay" == ci ]]; then
+              yq -e 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend == true' "$rendered" >/dev/null
+            fi
+            if [[ "$overlay" == prod || "$overlay" == backup-bootstrap ]]; then
+              yq -e 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend == false' "$rendered" >/dev/null
             fi
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
@@ -1557,6 +1587,11 @@ jobs:
             kubectl apply --dry-run=client --validate=false \
               --filename "deploy/k8s/$manifest"
           done
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+            deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
+          kubectl apply --filename deploy/k8s/base/namespace.yaml >/dev/null
+          kubectl create --dry-run=server \
+            --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml >/dev/null
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
 
       - name: Verify deployer RBAC and Pod Security boundaries
@@ -1600,11 +1635,18 @@ jobs:
             done
           done
           expect_deployer_can_i yes create jobs.batch --namespace teagram
+          expect_deployer_can_i yes get jobs.batch --namespace teagram
+          expect_deployer_can_i yes patch jobs.batch --namespace teagram
+          expect_deployer_can_i yes create cronjobs.batch --namespace teagram
+          expect_deployer_can_i yes patch cronjobs.batch --namespace teagram
           expect_deployer_can_i yes patch services --namespace teagram
           expect_deployer_can_i yes create configmaps --namespace teagram
           expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
+          expect_deployer_can_i yes create persistentvolumeclaims --namespace teagram
+          expect_deployer_can_i yes patch persistentvolumeclaims --namespace teagram
           expect_deployer_can_i yes list pods --namespace teagram
           expect_deployer_can_i yes get pods --subresource=log --namespace teagram
+          expect_deployer_can_i yes delete pods --namespace teagram
           expect_deployer_can_i yes list events --namespace teagram
           expect_deployer_can_i no create pods --namespace teagram
           for secret_verb in get list watch create update patch delete; do
@@ -1761,7 +1803,7 @@ jobs:
     # Nested k3s/containerd volume provisioning has stalled on the Ubuntu 26.04
     # runner image; keep this integration lane on the stable Ubuntu 24.04 image.
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
@@ -2070,6 +2112,79 @@ jobs:
             sleep 2
           done
 
+      - name: Verify successful release and automatic bad-image rollback
+        env:
+          DEPLOY_SHA: ${{ env.K8S_IMAGE_REVISION }}
+          TEAGRAMD_IMAGE: ghcr.io/teagramhq/teagramd:ci
+          MT_PROTO_ENDPOINT: 127.0.0.1:12443
+          DISCOVERY_URL: http://127.0.0.1:12444/.well-known/teagramd/client
+          LINK_SMOKE_URL: http://127.0.0.1:18081/+k3s-smoke
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            service/teagramd 12443:2443 12444:2444 \
+            > "$RUNNER_TEMP/release-mtproto-port-forward.log" 2>&1 &
+          mtproto_forward_pid=$!
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            service/linkselector 18081:8081 \
+            > "$RUNNER_TEMP/release-link-port-forward.log" 2>&1 &
+          link_forward_pid=$!
+          cleanup() {
+            kill "$mtproto_forward_pid" "$link_forward_pid" 2>/dev/null || true
+            wait "$mtproto_forward_pid" "$link_forward_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null --max-time 2 "$DISCOVERY_URL" && \
+              curl --fail --silent --output /dev/null --max-time 2 "$LINK_SMOKE_URL"; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              cat "$RUNNER_TEMP/release-mtproto-port-forward.log" >&2
+              cat "$RUNNER_TEMP/release-link-port-forward.log" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          bash deploy/k8s/deploy-release.sh \
+            "$RUNNER_TEMP/k8s-ci.yaml" "$DEPLOY_SHA" \
+            | tee "$RUNNER_TEMP/release-success.log"
+          grep --fixed-strings --quiet "rollout=verified sha=$DEPLOY_SHA" \
+            "$RUNNER_TEMP/release-success.log"
+
+          previous_image=$(kubectl get statefulset teagramd --namespace teagram \
+            --output 'jsonpath={.spec.template.spec.containers[?(@.name=="teagramd")].image}')
+          test "$previous_image" = ghcr.io/teagramhq/teagramd:ci
+          python3 - "$RUNNER_TEMP/k8s-ci.yaml" "$RUNNER_TEMP/k8s-ci-bad-image.yaml" <<'PY'
+          import pathlib
+          import sys
+
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          manifest = source.read_text(encoding="utf-8")
+          needle = "image: ghcr.io/teagramhq/teagramd:ci"
+          if manifest.count(needle) != 1:
+              raise SystemExit("expected exactly one teagramd workload image to corrupt")
+          destination.write_text(
+              manifest.replace(needle, "image: ghcr.io/teagramhq/teagramd:rollback-fixture-missing"),
+              encoding="utf-8",
+          )
+          PY
+          if ROLLOUT_TIMEOUT=30s bash deploy/k8s/deploy-release.sh \
+            "$RUNNER_TEMP/k8s-ci-bad-image.yaml" "$DEPLOY_SHA" \
+            > "$RUNNER_TEMP/release-rollback.log" 2>&1; then
+            echo 'the forced bad-image deploy unexpectedly succeeded' >&2
+            exit 1
+          fi
+          grep --fixed-strings --quiet \
+            'rollback=verified resource=statefulset/teagramd' \
+            "$RUNNER_TEMP/release-rollback.log"
+          restored_image=$(kubectl get statefulset teagramd --namespace teagram \
+            --output 'jsonpath={.spec.template.spec.containers[?(@.name=="teagramd")].image}')
+          test "$restored_image" = "$previous_image"
+          kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
+
       - name: Test public WebSocket and discovery through the connector
         run: |
           set -euo pipefail
@@ -2106,6 +2221,12 @@ jobs:
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           bash deploy/k8s/test-cutover-alpha-k3s.sh
+
+      - name: Test PostgreSQL backup restore and account sign-in
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash deploy/k8s/test-postgres-backup-restore.sh
 
       - name: Collect k3s diagnostics on failure
         if: failure()

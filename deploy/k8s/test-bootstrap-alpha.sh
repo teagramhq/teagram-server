@@ -110,6 +110,16 @@ exec python3 "$mock" k3s "\$@"
 EOF
 chmod 0755 "$bin/incus" "$bin/tailscale" "$bin/hostname" "$bin/k3s"
 
+# The fake API server answers `auth can-i` from the Role the bootstrap applies,
+# so the bootstrap's boundary checks test deployer-access.yaml itself.
+command -v yq >/dev/null || fail 'yq is required to read the deployer Role'
+deployer_rules="$work/deployer-rules.json"
+yq -o=json 'select(.kind == "Role" and .metadata.name == "teagram-deployer") | .rules' \
+  "$repo_root/deploy/k8s/deployer-access.yaml" > "$deployer_rules"
+python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))' "$deployer_rules" ||
+  fail 'the deployer Role has no rules'
+export MOCK_DEPLOYER_RULES="$deployer_rules"
+
 export MOCK_STATE="$work/state"
 export MOCK_SRC="$src"
 export MOCK_ACTIONS="$work/actions.log"
@@ -283,5 +293,25 @@ for secret in "$pg_password" "$dsn" "$tunnel_token" "$rustfs_access_key" "$rustf
     fail 'the script printed a secret value on a create failure'
   fi
 done
+
+# A Role missing a grant the deploy needs must fail the boundary check.
+python3 - "$deployer_rules" "$work/narrow-rules.json" <<'PY'
+import json
+import sys
+
+rules = json.load(open(sys.argv[1]))
+narrowed = [rule for rule in rules if "cronjobs" not in rule.get("resources", [])]
+if len(narrowed) == len(rules):
+    raise SystemExit("the deployer Role grants no cronjobs access to remove")
+json.dump(narrowed, open(sys.argv[2], "w"))
+PY
+mkdir -p "$work/narrow-state"
+if MOCK_STATE="$work/narrow-state" MOCK_ACTIONS="$work/narrow-actions" \
+  MOCK_DEPLOYER_RULES="$work/narrow-rules.json" PATH="$bin:$PATH" \
+  "$bootstrap" --apply > "$work/narrow.out" 2>&1; then
+  fail 'a deployer Role without cronjobs access passed the boundary check'
+fi
+grep -Fq 'the deploy ServiceAccount RBAC boundary is incorrect' "$work/narrow.out" ||
+  fail 'a narrowed deployer Role failed for a reason other than the boundary check'
 
 printf 'bootstrap-alpha apply test passed: first apply, no-op rerun, no secret output\n'

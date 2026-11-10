@@ -33,3 +33,4 @@ images:
 patches:
   - path: teagramd-ci-settings.yaml
   - path: cloudflared-ci.yaml
+  - path: postgres-backup-cronjob.yaml

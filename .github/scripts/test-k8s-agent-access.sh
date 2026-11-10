@@ -45,15 +45,13 @@ grep --fixed-strings --quiet 'teagram-agent may delete only controller-owned' <<
   fail 'postgres-0 was denied for a reason other than the agent admission policy'
 }
 
-# The username condition keeps the policy out of deployer and administrator requests.
-if output=$(kubectl --as=system:serviceaccount:teagram:teagram-deployer \
+# The deployer needs namespace pod deletion to recover failed StatefulSet rollouts.
+# The agent-only admission policy must not block that recovery permission.
+if ! output=$(kubectl --as=system:serviceaccount:teagram:teagram-deployer \
   delete pod postgres-0 --dry-run=server --namespace "$namespace" 2>&1); then
-  fail 'the deployer unexpectedly gained pod-delete access'
-fi
-grep --fixed-strings --quiet 'cannot delete resource "pods"' <<< "$output" || {
   printf '%s\n' "$output" >&2
-  fail 'the deployer request was denied by the agent admission policy instead of RBAC'
-}
+  fail 'the agent admission policy must not deny the deployer pod-recovery permission'
+fi
 if grep --fixed-strings --quiet 'teagram-agent may delete only' <<< "$output"; then
   fail 'the agent admission policy affected a deployer request'
 fi

@@ -54,7 +54,7 @@ Would create ServiceAccount teagram-agent with token automount disabled and a na
 Would install the cluster-scoped ValidatingAdmissionPolicy teagram-agent-pod-delete and binding, restricting agent pod deletes to controller-owned teagramd, linkselector, linklanding, or cloudflared pods.
 Would apply ConfigMaps teagramd-runtime and link-edge-runtime, plus Secrets postgres-credentials, rustfs-credentials, teagramd-blob-credentials, teagramd-media-keys, and cloudflared-token from the live teagram LXC (values are not displayed).
 Would configure Tailscale Serve TCP routes on alpha ports 6443 and 2222 to the loopback proxies; no public listener is configured.
-Would write /root/teagram-k3s-deploy.kubeconfig with the namespace-restricted deployer token, plus /root/teagram-k3s-cutover.kubeconfig with the k3s admin client certificate for root-only cutover, rollback, and reset. Both files use mode 0600; the deployer Role remains restricted.
+Would write /root/teagram-k3s-deploy.kubeconfig with the namespace-restricted deployer token, plus /root/teagram-k3s-cutover.kubeconfig with the k3s admin client certificate for root-only cutover, rollback, reset, and the one-time deployer-role refresh. Both files use mode 0600; the deployer Role remains restricted.
 Would verify the k3s node, disabled components, namespace boundary, Serve routes, and both kubeconfig permissions.
 Would verify Pod Security Admission rejects a privileged pod that mounts a hostPath.
 EOF
@@ -875,11 +875,18 @@ for history_resource in replicasets.apps controllerrevisions.apps; do
   done
 done
 expect_deployer_can_i yes create jobs.batch --namespace teagram
+expect_deployer_can_i yes get jobs.batch --namespace teagram
+expect_deployer_can_i yes patch jobs.batch --namespace teagram
+expect_deployer_can_i yes create cronjobs.batch --namespace teagram
+expect_deployer_can_i yes patch cronjobs.batch --namespace teagram
 expect_deployer_can_i yes patch services --namespace teagram
 expect_deployer_can_i yes create configmaps --namespace teagram
 expect_deployer_can_i yes get persistentvolumeclaims --namespace teagram
+expect_deployer_can_i yes create persistentvolumeclaims --namespace teagram
+expect_deployer_can_i yes patch persistentvolumeclaims --namespace teagram
 expect_deployer_can_i yes list pods --namespace teagram
 expect_deployer_can_i yes get pods --subresource=log --namespace teagram
+expect_deployer_can_i yes delete pods --namespace teagram
 expect_deployer_can_i yes list events --namespace teagram
 expect_deployer_can_i no create pods --namespace teagram
 for secret_verb in get list watch create update patch delete; do

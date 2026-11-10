@@ -1210,7 +1210,8 @@ mirror_encrypted_s3_prefix() {
     first_key=$(awk -F '\t' 'NR == 1 { print $1 }' <<< "$source_listing")
     first_size=$(awk -F '\t' 'NR == 1 { print $2 }' <<< "$source_listing")
     [[ $first_size =~ ^[1-9][0-9]*$ ]] || fail 'could not determine the disposable S3 object size for checksum injection'
-    python3 -c '
+    if [[ -n $MC_HELPER_CONTAINER ]]; then
+      python3 -c '
 import sys
 
 remaining = int(sys.argv[1])
@@ -1220,8 +1221,16 @@ while remaining:
     sys.stdout.buffer.write(part)
     remaining -= len(part)
 ' "$first_size" |
-      mc_client_exec pipe "target/teagram/$first_key" >/dev/null 2>&1 ||
-      fail 'could not inject a same-size disposable S3 checksum mismatch'
+        mc_client_exec pipe "target/teagram/$first_key" >/dev/null ||
+        fail 'could not inject a same-size disposable S3 checksum mismatch'
+    else
+      # shellcheck disable=SC2016 # The client pod's shell expands these parameters.
+      kubectl exec --namespace "$SOURCE_INSTANCE" pod/cutover-s3-client -- /bin/sh -ec '
+        set -o pipefail
+        head -c "$1" /dev/zero | tr "\\000" x | mc pipe "target/teagram/$2"
+      ' -- "$first_size" "$first_key" >/dev/null ||
+        fail 'could not inject a same-size disposable S3 checksum mismatch'
+    fi
   fi
   target_listing=$(source_s3_listing target)
   target_inventory=$(inventory_s3_prefix target "$target_listing")

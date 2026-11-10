@@ -210,6 +210,18 @@ def create_from_env(args, text):
     return obj
 
 
+def deployer_role_allows(verb, group, resource):
+    """Evaluate the deployer Role rules from deployer-access.yaml like RBAC does."""
+    with open(os.environ["MOCK_DEPLOYER_RULES"]) as handle:
+        rules = json.load(handle)
+    for rule in rules:
+        if (verb in rule.get("verbs", []) or "*" in rule.get("verbs", [])) and (
+                group in rule.get("apiGroups", []) or "*" in rule.get("apiGroups", [])) and (
+                resource in rule.get("resources", []) or "*" in rule.get("resources", [])):
+            return True
+    return False
+
+
 def kubectl(args, state):
     if args[0].startswith("--as="):
         args = args[1:]
@@ -295,18 +307,8 @@ def kubectl(args, state):
         allowed = False
         if (namespace == NAMESPACE and
                 subject == "system:serviceaccount:teagram:teagram-deployer"):
-            if group == "apps" and resource in ("deployments", "statefulsets"):
-                allowed = verb in {"create", "get", "list", "patch", "watch"}
-            elif group == "apps" and resource in ("replicasets", "controllerrevisions"):
-                allowed = verb in {"get", "list"}
-            elif group == "batch" and resource == "jobs":
-                allowed = verb in {"create", "get", "list", "patch", "watch"}
-            elif group == "" and resource in ("configmaps", "services"):
-                allowed = verb in {"create", "get", "list", "patch", "watch"}
-            elif group == "" and resource in ("persistentvolumeclaims", "pods", "events"):
-                allowed = verb in {"get", "list", "watch"}
-            elif group == "" and resource == "pods" and subresource == "log":
-                allowed = verb == "get"
+            allowed = deployer_role_allows(
+                verb, group, resource + ("/" + subresource if subresource else ""))
         elif (namespace == NAMESPACE and
               subject == "system:serviceaccount:teagram:teagram-agent"):
             if group == "" and resource == "pods" and subresource == "log":
