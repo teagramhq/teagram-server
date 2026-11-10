@@ -20,6 +20,7 @@ resources:
   - linkselector-service.yaml
   - linkselector-deployment.yaml
   - cloudflared-deployment.yaml
+  - postgres-backup
 
 configMapGenerator:
   - name: postgres-config

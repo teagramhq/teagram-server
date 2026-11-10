@@ -51,6 +51,17 @@ This removes the agent credential path without changing workloads or their
 data. Reverting the code and rerunning the bootstrap restores the configured
 access path.
 
+The deploy job cannot update its own Role. When its allowed resource kinds
+change, reapply `deployer-access.yaml` with the root-only cutover kubeconfig
+before the next release; the workflow checks the permissions required for
+backup and rollback before creating any resources. After this change merges,
+refresh the role from the reviewed checkout on alpha before the first `Deploy.`
+run:
+
+```sh
+sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
+  kubectl apply --filename deploy/k8s/deployer-access.yaml
+```
 ## Kustomize layouts
 
 `base/` contains the single-replica teagramd, PostgreSQL, and RustFS workloads,
@@ -116,6 +127,50 @@ All images used by the production overlays are publicly pullable. Bootstrap
 does not read Docker credentials or create a registry Secret. Public utility
 images are pinned from their configured registries.
 
+## PostgreSQL backups
+
+The production overlay enables a daily 03:17 UTC PostgreSQL custom-format dump.
+`Deploy.` first applies the `backup-bootstrap/` overlay, runs and verifies a
+fresh dump, and only then applies the production release. The bootstrap overlay
+keeps the nightly CronJob active so a failed deployment cannot leave scheduled
+backups disabled. Both paths write to the `postgres-backups` 20 GiB PVC and
+keep the newest seven verified dumps. Each Job runs `pg_restore --list` before
+publishing a dump by an atomic rename; its log records the path, byte count,
+and SHA-256 without credentials.
+
+The backup PVC is local to the k3s node, unencrypted, and has no off-cluster
+copy. It is a release recovery point, not protection against loss of the host
+or its disk. The deploy job checks the pre-deploy Job result and stops before
+changing application workloads if the dump does not verify. Nightly status is
+visible through the CronJob's `lastSuccessfulTime`, retained Job records, pod
+logs, and Kubernetes warning events:
+
+```sh
+kubectl get cronjob postgres-backup --namespace teagram \
+  --output 'custom-columns=NAME:.metadata.name,SUSPENDED:.spec.suspend,LAST-SCHEDULE:.status.lastScheduleTime,LAST-SUCCESS:.status.lastSuccessfulTime'
+kubectl get jobs --namespace teagram \
+  --selector=app.kubernetes.io/name=postgres-backup --sort-by=.status.startTime
+kubectl get events --namespace teagram --sort-by=.lastTimestamp
+kubectl logs --namespace teagram job/<failed-backup-job> --all-containers=true
+```
+
+## Expiring channel-post summary initialization
+
+After the production rollout is ready and smoke checks pass, `Deploy.` runs
+`teagramd maintenance initialize-channel-post-expiring-summaries` in a
+restricted, short-lived Job using the tested teagramd image. Each Job reads
+`TG_POSTGRES_DSN` from `postgres-credentials` and mounts the server key PVC
+read-only so the maintenance command can load its required auth-key key. The
+runner starts another batch until the command reports `0 remaining`; a failed,
+unreadable, or non-progressing batch fails the deployment and triggers workload
+rollback. Completed batches are safe to resume, as described in
+`docs/migrations.md`.
+
+`test: k8s-deploy` creates a disposable account, takes a dump, recreates the
+throwaway database from that dump, and signs in with the restored account. Do
+not restore a production dump into the live database as a deploy step; schema
+recovery requires the matching database snapshot and the recovery procedure.
+
 Supply the Turnstile secret externally as `teagramd-turnstile`; its value is
 never stored in the repository. Teagramd reads the mounted `secret-key` file
 through `TG_TURNSTILE_SECRET_KEY_FILE`.
@@ -178,6 +233,21 @@ version has been applied. Before a production change, snapshot PostgreSQL and
 the persistent volumes. An application rollback restores the prior image
 digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
+`Deploy.` records the prior revisions of PostgreSQL, RustFS, teagramd, the link
+edge Deployments, and cloudflared. If apply, a Job, rollout, or smoke fails, its
+release runner issues `kubectl rollout undo` for each changed controller and
+waits for the previous revision to become ready. After a StatefulSet rollback,
+it deletes only Pods whose `controller-revision-hash` differs from the restored
+revision; Kubernetes can otherwise leave an unready Pod on the failed template
+and stall the rollback. If an Atlas migration already completed, use the
+matching pre-deploy dump on the `postgres-backups` PVC before resuming
+application traffic.
+
+Before applying, `Deploy.` checks the digest-named migration and RustFS Jobs.
+If one is still present with `Failed=True` from an earlier attempt, it prints
+that Job's logs, sets its TTL to zero, and waits for the TTL controller to
+remove it so the same SHA can recreate the Job. Newly failed Jobs are detected
+within the polling interval and their logs are included in the failed run.
 
 The Cloudflare Tunnel's remotely managed route for `web.teagram.io` targets
 `http://linkselector:8081`. The selector sends teagramd links to
@@ -352,5 +422,6 @@ production credential; its policy probe uses a keyless `tailscale-proxy`
 ServiceAccount token for `/version` and the proxy label for source-identity
 rules. CI does not claim to sample real Tailscale daemon
 restarts; the first production teagramd rollout records the proxy container's
-restartCount before and after, and production alerts monitor that count. No
-smoke test uses a NodePort or `kubectl port-forward`.
+restartCount before and after, and production alerts monitor that count. The
+ingress probes run from in-cluster identities; only the disposable release
+rollback integration test uses short-lived `kubectl port-forward` connections.

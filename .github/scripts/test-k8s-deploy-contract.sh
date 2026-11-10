@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Single-quoted strings match literal shell text.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,7 +31,7 @@ fi
 manifest_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Render and validate production and CI overlays") | .run' .github/workflows/ci.yml)"
 base_migration_check_line="$(grep -n -m 1 -F '.github/scripts/check-k8s-migration-version.sh' <<< "$manifest_step" | cut -d: -f1)"
 ci_migration_prepare_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$manifest_step" | cut -d: -f1)"
-overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci' <<< "$manifest_step" | cut -d: -f1)"
+overlay_render_line="$(grep -n -m 1 -F 'for overlay in prod ci bootstrap bootstrap/ci backup-bootstrap' <<< "$manifest_step" | cut -d: -f1)"
 base_sha_else_line="$(grep -n -m 1 -F 'else' <<< "$manifest_step" | cut -d: -f1)"
 base_sha_error_line="$(grep -n -m 1 -F 'K8S_MIGRATION_BASE_SHA must be a 40-character lowercase SHA' <<< "$manifest_step" | cut -d: -f1)"
 base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f1)"
@@ -50,6 +51,13 @@ base_sha_exit_line="$(grep -n -m 1 -F 'exit 1' <<< "$manifest_step" | cut -d: -f
    "$base_migration_check_line" -lt "$ci_migration_prepare_line" &&
    "$ci_migration_prepare_line" -lt "$overlay_render_line" ]] ||
   fail 'manifest validation must preserve migration checks before rendering the active overlays'
+
+namespace_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename deploy/k8s/base/namespace.yaml' <<< "$manifest_step" | cut -d: -f1)"
+maintenance_server_dry_run_line="$(grep -n -m 1 -F 'kubectl create --dry-run=server' <<< "$manifest_step" | cut -d: -f1)"
+[[ "$namespace_apply_line" =~ ^[0-9]+$ &&
+   "$maintenance_server_dry_run_line" =~ ^[0-9]+$ &&
+   "$namespace_apply_line" -lt "$maintenance_server_dry_run_line" ]] ||
+  fail 'the manifest check must create its namespace before server-dry-running the maintenance Job'
 
 migration_fixture="$(mktemp -d)"
 trap 'rm -rf "$migration_fixture"' EXIT
@@ -263,10 +271,6 @@ mtproto_smoke_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "
 if [[ "$mtproto_smoke_step" != *'kubectl create configmap mtproto-probe-client'*'kubectl apply --dry-run=server --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'*'kubectl apply --namespace=teagram'*'--filename=deploy/k8s/ci/mtproto-probe-job.yaml'* ]]; then
   fail 'k8s-deploy must create the MTProto client ConfigMap before starting its smoke Job'
 fi
-if yq -r '.jobs."test-k8s-deploy".steps[].run // ""' .github/workflows/ci.yml |
-  grep --fixed-strings --quiet 'kubectl port-forward'; then
-  fail 'k8s-deploy must not use port-forward for any smoke test'
-fi
 public_websocket_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Test public WebSocket and discovery through the CI connector") | .run' .github/workflows/ci.yml)"
 [[ "$public_websocket_step" == *'test-k8s-public-websocket.py'* &&
    "$public_websocket_step" == *'--container=ingress-probe'* &&
@@ -380,8 +384,15 @@ if grep --extended-regexp --quiet 'SOURCE_INSTANCE|docker (inspect|cp)|incus (in
 fi
 # shellcheck disable=SC2016
 runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
-[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* ]] ||
-  fail 'the documented teagramd-runtime ConfigMap keys must include TG_MEDIA_KEY_CURRENT'
+[[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* &&
+   "$runtime_configmap_row" == *TG_PUBLIC_LINK_PREFIX* &&
+   "$runtime_configmap_row" == *TG_ADVERTISE_ADDR* &&
+   "$runtime_configmap_row" != *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
+   "$runtime_configmap_row" != *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
+  fail 'the documented runtime ConfigMap keys must exclude production listener values committed in the overlay'
+# shellcheck disable=SC2016
+grep --fixed-strings --quiet '`teagramd-turnstile` Secret' deploy/k8s/README.md ||
+  fail 'the external Turnstile Secret must be documented without its value'
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do
   probe_port="$(yq -r ".spec.template.spec.containers[] | select(.name == \"teagramd\") | .${probe}.tcpSocket.port" "$statefulset")"
@@ -657,5 +668,154 @@ if grep --extended-regexp --quiet '^delete (rolebinding|role) .*teagram-deployer
   "$rollback_fixture/running.calls"; then
   fail 'the rollback must preserve Deploy. access to NetworkPolicies'
 fi
+
+backup_cronjob=deploy/k8s/base/postgres-backup/cronjob.yaml
+backup_script=deploy/k8s/base/postgres-backup/backup.sh
+backup_pvc=deploy/k8s/base/postgres-backup/pvc.yaml
+[[ "$(yq -r '.spec.schedule' "$backup_cronjob")" == '17 3 * * *' &&
+   "$(yq -r '.spec.timeZone' "$backup_cronjob")" == 'Etc/UTC' &&
+   "$(yq -r '.spec.suspend' "$backup_cronjob")" == true &&
+   "$(yq -r '.spec.concurrencyPolicy' "$backup_cronjob")" == Forbid &&
+   "$(yq -r '.spec.successfulJobsHistoryLimit' "$backup_cronjob")" == 7 &&
+   "$(yq -r '.spec.failedJobsHistoryLimit' "$backup_cronjob")" == 3 ]] ||
+  fail 'the base backup CronJob must be suspended, UTC scheduled, serialized, and retain bounded history'
+[[ "$(yq -r '.spec.resources.requests.storage' "$backup_pvc")" == 20Gi &&
+   "$(yq -r '.spec.storageClassName' "$backup_pvc")" == local-path &&
+   "$(yq -r '.spec.accessModes[0]' "$backup_pvc")" == ReadWriteOnce ]] ||
+  fail 'the backup PVC must use the selected single-node local storage policy'
+[[ "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .image' "$backup_cronjob")" == \
+   'mirror.gcr.io/library/postgres:18-alpine@sha256:3b0ef735388b2cb097fc29b8bb421d86d57d0ddbe7aa1fbd6493e06d65028503' &&
+   "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .securityContext.runAsUser' "$backup_cronjob")" == 70 &&
+   "$(yq -r '.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "backup") | .securityContext.readOnlyRootFilesystem' "$backup_cronjob")" == true ]] ||
+  fail 'the backup Job must use its pinned PostgreSQL image with a read-only, non-root container'
+for required_backup_line in \
+  'pg_dump --format=custom --no-owner --no-acl' \
+  'pg_restore --list' \
+  'backup=verified path=%s bytes=%s sha256=%s' \
+  'find "$backup_directory" -maxdepth 1 -type f' \
+  'prune_backups'; do
+  grep --fixed-strings --quiet -- "$required_backup_line" "$backup_script" ||
+    fail 'the backup command must verify each dump and prune files to seven'
+done
+grep --fixed-strings --quiet 'postgres-backup' deploy/k8s/base/kustomization.yaml ||
+  fail 'the production and CI base must include the backup resources'
+grep --fixed-strings --quiet 'suspend: false' deploy/k8s/prod/postgres-backup-cronjob.yaml ||
+  fail 'the production overlay must activate nightly backups after cutover'
+bootstrap_backup_suspend="$(kubectl kustomize deploy/k8s/backup-bootstrap |
+  yq eval-all -r 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend' -)"
+[[ "$bootstrap_backup_suspend" == false ]] ||
+  fail 'the pre-deploy overlay must leave nightly backups active if deployment fails'
+ci_backup_suspend="$(kubectl kustomize deploy/k8s/ci |
+  yq eval-all -r 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend' -)"
+[[ "$ci_backup_suspend" == true ]] ||
+  fail 'the CI overlay must keep nightly backups suspended'
+grep --fixed-strings --quiet '../base/postgres-backup' deploy/k8s/backup-bootstrap/kustomization.yaml ||
+  fail 'the pre-deploy overlay must provision the backup resources before taking its dump'
+for rbac_line in \
+  'resources: ["cronjobs", "jobs"]' \
+  'resources: ["persistentvolumeclaims"]' \
+  'verbs: ["create", "patch"]'; do
+  grep --fixed-strings --quiet -- "$rbac_line" deploy/k8s/deployer-access.yaml ||
+    fail 'the restricted deployer Role must manage backup Jobs and their PVC'
+done
+grep --fixed-strings --quiet 'expect_deployer_can_i yes create cronjobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify backup CronJob permissions'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes patch jobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify Job patch permission for failed migration retries'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes get jobs.batch' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify Job inspection permission for deploy status checks'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes create persistentvolumeclaims' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify backup PVC permissions'
+grep --fixed-strings --quiet 'expect_deployer_can_i yes delete pods --namespace teagram' deploy/k8s/bootstrap-alpha.sh ||
+  fail 'alpha bootstrap must verify the pod deletion permission needed for StatefulSet rollback'
+grep --fixed-strings --quiet 'resources: ["pods"]' deploy/k8s/deployer-access.yaml ||
+  fail 'the deployer Role must scope recovery deletion to namespace Pods'
+grep --fixed-strings --quiet 'verbs: ["delete"]' deploy/k8s/deployer-access.yaml ||
+  fail 'the deployer Role must allow deleting stuck StatefulSet Pods during rollback'
+rbac_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verify deployer RBAC and Pod Security boundaries") | .run' .github/workflows/ci.yml)"
+[[ "$rbac_step" == *'expect_deployer_can_i yes delete pods --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can delete recovery Pods'
+[[ "$rbac_step" == *'expect_deployer_can_i yes patch jobs.batch --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can expire a failed Job for retry'
+[[ "$rbac_step" == *'expect_deployer_can_i yes get jobs.batch --namespace teagram'* ]] ||
+  fail 'the k3s integration must verify the deployer can inspect failed Jobs'
+
+release_script=deploy/k8s/deploy-release.sh
+release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$manifest"' "$release_script" | cut -d: -f1)"
+release_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename "$manifest"' "$release_script" | cut -d: -f1)"
+release_marker_line="$(grep -n -m 1 -F 'rollout=verified sha=%s' "$release_script" | cut -d: -f1)"
+release_smoke_line="$(grep -n -m 1 -F 'smoke-production.sh' "$release_script" | cut -d: -f1)"
+release_maintenance_line="$(grep -n -m 1 -F 'initialize-channel-post-expiring-summaries.sh' "$release_script" | cut -d: -f1)"
+[[ "$release_dry_run_line" =~ ^[0-9]+$ && "$release_apply_line" =~ ^[0-9]+$ &&
+   "$release_smoke_line" =~ ^[0-9]+$ && "$release_maintenance_line" =~ ^[0-9]+$ &&
+   "$release_marker_line" =~ ^[0-9]+$ &&
+   "$release_dry_run_line" -lt "$release_apply_line" &&
+   "$release_apply_line" -lt "$release_smoke_line" &&
+   "$release_smoke_line" -lt "$release_maintenance_line" &&
+   "$release_maintenance_line" -lt "$release_marker_line" ]] ||
+  fail 'the deploy runner must dry-run, apply, smoke, initialize summaries, then emit the verified rollout marker'
+grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script" ||
+  fail 'the release runner must automatically undo changed workload revisions on failure'
+grep --fixed-strings --quiet 'currentRevision == .status.updateRevision' "$release_script" ||
+  fail 'the release runner must refuse an unstable StatefulSet rollback baseline'
+grep --fixed-strings --quiet 'status.updatedReplicas' "$release_script" ||
+  fail 'the release runner must require all workload replicas to be updated and ready before apply'
+grep --fixed-strings --quiet 'wait_for_job "$migration_job" 900' "$release_script" ||
+  fail 'the release runner must wait for the exact migration Job created by this apply'
+grep --fixed-strings --quiet 'wait_for_job "$rustfs_job" 600' "$release_script" ||
+  fail 'the release runner must wait for the exact RustFS initializer Job created by this apply'
+grep --fixed-strings --quiet 'Failed" and .status == "True"' "$release_script" ||
+  fail 'the release runner must detect a failed Job immediately and recycle failed prior Jobs'
+grep --fixed-strings --quiet 'kubectl logs "job/$job"' "$release_script" ||
+  fail 'the release runner must include failed migration and initializer logs in the Deploy. run'
+grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
+  fail 'the release runner must wait for every production workload rollout'
+grep --fixed-strings --quiet 'kubectl delete pod "$pod"' "$release_script" ||
+  fail 'the release runner must replace failed StatefulSet Pods after reverting their template'
+grep --fixed-strings --quiet 'controller-revision-hash' "$release_script" ||
+  fail 'the release runner must preserve Pods already on the restored StatefulSet revision'
+grep --fixed-strings --quiet 'expected exactly one ready k3s tunnel connector' "$release_script" ||
+  fail 'the production release must leave exactly one ready k3s tunnel connector'
+
+maintenance_job=deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
+[[ "$(yq -r '.kind' "$maintenance_job")" == Job &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .command | join(" ")' "$maintenance_job")" == '/usr/local/bin/teagramd' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .args | join(" ")' "$maintenance_job")" == 'maintenance initialize-channel-post-expiring-summaries' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .env[] | select(.name == "TG_POSTGRES_DSN") | .valueFrom.secretKeyRef.name' "$maintenance_job")" == postgres-credentials &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .env[] | select(.name == "TG_AUTHKEY_ENC_KEY_FILE") | .value' "$maintenance_job")" == /var/lib/teagramd/enc_key.hex &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "initialize") | .volumeMounts[] | select(.name == "key-data") | .readOnly' "$maintenance_job")" == true &&
+   "$(yq -r '.spec.template.spec.volumes[] | select(.name == "key-data") | .persistentVolumeClaim.claimName' "$maintenance_job")" == key-data-teagramd-0 &&
+   "$(yq -r '.spec.template.spec.automountServiceAccountToken' "$maintenance_job")" == false ]] ||
+  fail 'the summary maintenance Job must use the documented command with only its database secret and read-only identity PVC'
+
+bash deploy/k8s/test-initialize-channel-post-expiring-summaries.sh >/dev/null ||
+  fail 'the summary maintenance runner must continue until zero remain and fail closed on invalid batches'
+bash deploy/k8s/test-postgres-backup-retention.sh >/dev/null ||
+  fail 'backup retention must keep the seven newest verified dumps and clean stale temporary dumps'
+bash deploy/k8s/test-postgres-backup-restore-guard.sh >/dev/null ||
+  fail 'the destructive restore test must refuse non-GitHub and non-CI clusters'
+
+backup_restore_test=deploy/k8s/test-postgres-backup-restore.sh
+for restore_line in \
+  'GITHUB_ACTIONS:-' \
+  'https://127.0.0.1:6443' \
+  'kubectl create job "$backup_job" --from=cronjob/postgres-backup' \
+  'dropdb --username=postgres --force teagram' \
+  'kubectl apply --filename deploy/k8s/test-postgres-backup-restore-job.yaml' \
+  '--user "$(id -u):$(id -g)"' \
+  '--username-file /username' \
+  'backup=restore-sign-in-verified'; do
+  grep --fixed-strings --quiet -- "$restore_line" "$backup_restore_test" ||
+    fail 'the throwaway backup regression must restore a dump and sign in with the restored account'
+done
+release_test_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Verify successful release and automatic bad-image rollback") | .run' .github/workflows/ci.yml)"
+[[ "$release_test_step" == *'deploy/k8s/deploy-release.sh'* &&
+   "$release_test_step" == *'rollback=verified resource=statefulset/teagramd'* &&
+   "$release_test_step" == *'test "$restored_image" = "$previous_image"'* ]] ||
+  fail 'the K3s integration must force a bad deploy and verify automatic revision restoration'
+early_rollback_test_step="$(yq -r '.jobs."check-deploy-workflow".steps[] | select(.name == "Test early post-apply release rollback") | .run' .github/workflows/ci.yml)"
+[[ "$early_rollback_test_step" == 'python3 -B deploy/k8s/test-deploy-release-early-rollback.py' &&
+   -f deploy/k8s/test-deploy-release-early-rollback.py ]] ||
+  fail 'the deploy workflow must run the early post-apply template rollback regression'
 
 printf 'K8s deployment contract passed\n'

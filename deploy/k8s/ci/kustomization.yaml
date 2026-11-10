@@ -34,3 +34,4 @@ patches:
   - path: tailscale-proxy-ci.yaml
   - path: linkselector-ci.yaml
   - path: public-ingress-ci.yaml
+  - path: postgres-backup-cronjob.yaml
