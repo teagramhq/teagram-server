@@ -15,12 +15,13 @@ usage() {
   cat <<'EOF'
 Usage: install-tailnet-proxy-access.sh --dry-run | --apply | --rollback
 
-  --dry-run  Validate the namespace-scoped resources and print the target context.
+  --dry-run  Validate access manifests and show the API egress allowlist.
   --apply    Install the proxy ServiceAccount/RBAC and create its empty state Secret once.
-  --rollback Stop the proxy and remove proxy access; preserve state and deployer access.
+  --rollback Stop the proxy and remove proxy access; preserve Tailscale state and deployer access.
 
 Use only with the reviewed teagram k3s admin kubeconfig. This script never creates
 the external tailscale-auth Secret and never reads or prints Secret contents.
+The API egress policy is restricted to the current Kubernetes API endpoint IPs.
 EOF
 }
 
@@ -32,15 +33,26 @@ case "$1" in
 esac
 
 command -v kubectl >/dev/null 2>&1 || fail 'kubectl is required'
+command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
 [[ -f "$ACCESS_MANIFEST" ]] || fail "missing reviewed manifest: $ACCESS_MANIFEST"
+readonly API_EGRESS_RENDERER="$SCRIPT_DIR/render-tailnet-proxy-api-egress.py"
+[[ -f "$API_EGRESS_RENDERER" ]] || fail "missing reviewed renderer: $API_EGRESS_RENDERER"
 context=$(kubectl config current-context)
 [[ -n "$context" ]] || fail 'kubectl has no current context'
 printf 'Target context: %s\n' "$context"
 kubectl get namespace "$NAMESPACE" >/dev/null || fail "namespace $NAMESPACE is unavailable"
 
+api_egress_manifest() {
+  kubectl get endpoints kubernetes --namespace default --output=json |
+    python3 "$API_EGRESS_RENDERER"
+}
+
 case "$mode" in
   --dry-run)
     kubectl apply --dry-run=server --filename "$ACCESS_MANIFEST"
+    api_policy=$(api_egress_manifest) || fail 'could not render the Kubernetes API egress policy'
+    printf '%s\n' "$api_policy"
+    printf '%s\n' "$api_policy" | kubectl apply --dry-run=server --filename=-
     if ! kubectl get secret teagram-tailscale-state --namespace "$NAMESPACE" \
       --ignore-not-found --output=name | grep --quiet .; then
       cat <<'YAML' | kubectl create --dry-run=server --filename=- --output=name
@@ -59,6 +71,8 @@ YAML
       --output=jsonpath='{.data.authkey}' | grep --quiet . ||
       fail 'external Secret teagram/tailscale-auth must contain a non-empty authkey'
     kubectl apply --dry-run=server --filename "$ACCESS_MANIFEST" >/dev/null
+    api_policy=$(api_egress_manifest) || fail 'could not render the Kubernetes API egress policy'
+    printf '%s\n' "$api_policy" | kubectl apply --dry-run=server --filename=- >/dev/null
     state_secret=$(kubectl get secret teagram-tailscale-state --namespace "$NAMESPACE" \
       --ignore-not-found --output=name)
     if [[ -z "$state_secret" ]]; then
@@ -71,6 +85,7 @@ metadata:
 type: Opaque
 YAML
     fi
+    printf '%s\n' "$api_policy" | kubectl apply --filename=-
     kubectl apply --filename "$ACCESS_MANIFEST"
     ;;
   --rollback)
@@ -90,6 +105,8 @@ YAML
     kubectl delete rolebinding tailscale-proxy-state \
       --namespace "$NAMESPACE" --ignore-not-found=true
     kubectl delete role tailscale-proxy-state \
+      --namespace "$NAMESPACE" --ignore-not-found=true
+    kubectl delete networkpolicy tailscale-proxy-api-egress \
       --namespace "$NAMESPACE" --ignore-not-found=true
     kubectl delete serviceaccount tailscale-proxy --namespace "$NAMESPACE" \
       --ignore-not-found=true

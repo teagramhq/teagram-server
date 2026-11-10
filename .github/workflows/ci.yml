@@ -1988,6 +1988,9 @@ jobs:
           kubectl apply --filename deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl get endpoints kubernetes --namespace default --output=json \
+            | python3 deploy/k8s/render-tailnet-proxy-api-egress.py \
+            | kubectl apply --filename=-
 
       - name: Verify agent RBAC and pod-delete admission
         run: |

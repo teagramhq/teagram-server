@@ -114,16 +114,19 @@ render_ci_line="$(grep -n -m 1 -F 'kubectl kustomize deploy/k8s/ci' <<< "$apply_
 probe_serviceaccount_line="$(grep -n -m 1 -F 'kubectl apply --filename deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml' <<< "$apply_ci_step" | cut -d: -f1)"
 dry_run_ci_line="$(grep -n -m 1 -F "kubectl apply --dry-run=server --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
 apply_ci_line="$(grep -n -m 1 -F "kubectl apply --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
+api_egress_ci_line="$(grep -n -m 1 -F 'python3 deploy/k8s/render-tailnet-proxy-api-egress.py' <<< "$apply_ci_step" | cut -d: -f1)"
 [[ "$prepare_ci_line" =~ ^[0-9]+$ &&
    "$render_ci_line" =~ ^[0-9]+$ &&
    "$probe_serviceaccount_line" =~ ^[0-9]+$ &&
    "$dry_run_ci_line" =~ ^[0-9]+$ &&
    "$apply_ci_line" =~ ^[0-9]+$ &&
+   "$api_egress_ci_line" =~ ^[0-9]+$ &&
    "$prepare_ci_line" -lt "$render_ci_line" &&
    "$render_ci_line" -lt "$probe_serviceaccount_line" &&
    "$probe_serviceaccount_line" -lt "$dry_run_ci_line" &&
-   "$dry_run_ci_line" -lt "$apply_ci_line" ]] ||
-  fail 'the CI overlay must precreate its ServiceAccount before server dry-run and apply'
+   "$dry_run_ci_line" -lt "$apply_ci_line" &&
+   "$apply_ci_line" -lt "$api_egress_ci_line" ]] ||
+  fail 'CI must apply the generated API egress policy after the rendered probe pod exists'
 [[ "$(yq -r '.kind' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == ServiceAccount &&
    "$(yq -r '.metadata.name' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == tailscale-proxy &&
    "$(yq -r '.automountServiceAccountToken' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == true ]] ||
@@ -197,11 +200,48 @@ fi
    "$(yq -r '[.spec.egress[2].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '53,53' &&
    "$(yq -r '[.spec.egress[3].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '443,3478,41641' &&
    "$(yq -r '.spec.egress[3].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,127.0.0.0/8' &&
-   "$(yq -r '.spec.egress | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 5 &&
-   "$(yq -r '[.spec.egress[4].to[].ipBlock.cidr] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16' &&
-   "$(yq -r '.spec.egress[4].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.42.0.0/16,10.43.0.0/16' &&
-   "$(yq -r '[.spec.egress[4].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 6443 ]] ||
+   "$(yq -r '.spec.egress | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 4 &&
+   "$(yq -r '[.spec.egress[].ports[].port] | map(select(. == 6443)) | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 0 ]] ||
   fail 'the Tailscale proxy egress policy must limit cluster destinations and keep private and tailnet ranges blocked'
+python3 - <<'PY' || fail 'the API egress renderer must allow only ready endpoint IPv4 /32 addresses'
+import json
+import subprocess
+
+fixture = {
+    "subsets": [
+        {
+            "addresses": [{"ip": "10.20.30.41"}, {"ip": "10.20.30.40"}],
+            "notReadyAddresses": [{"ip": "10.20.30.42"}],
+        }
+    ]
+}
+result = subprocess.run(
+    ["python3", "deploy/k8s/render-tailnet-proxy-api-egress.py"],
+    input=json.dumps(fixture),
+    capture_output=True,
+    text=True,
+    check=True,
+)
+for cidr in ("10.20.30.40/32", "10.20.30.41/32"):
+    if f"cidr: {cidr}" not in result.stdout:
+        raise SystemExit(f"missing API endpoint allowlist entry {cidr}")
+if "0.0.0.0/0" in result.stdout or "port: 6443" not in result.stdout:
+    raise SystemExit("API egress policy has an unexpected address or port")
+if "10.20.30.42" in result.stdout:
+    raise SystemExit("API egress policy included an endpoint that is not Ready")
+try:
+    subprocess.run(
+        ["python3", "deploy/k8s/render-tailnet-proxy-api-egress.py"],
+        input=json.dumps({"subsets": []}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+except subprocess.CalledProcessError:
+    pass
+else:
+    raise SystemExit("renderer accepted an API Service without ready endpoints")
+PY
 serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
 jq --exit-status '
   .TCP["443"].HTTPS == true and
@@ -310,8 +350,17 @@ grep --fixed-strings --quiet 'kubernetes.default.svc' deploy/k8s/test-networkpol
   fail 'the proxy-labelled policy probe must verify Kubernetes API access'
 grep --fixed-strings --quiet '"Authorization": f"Bearer {token}"' deploy/k8s/test-networkpolicy.py ||
   fail 'the Kubernetes API probe must authenticate with its projected ServiceAccount token'
+grep --fixed-strings --quiet 'ca.crt' deploy/k8s/test-networkpolicy.py ||
+  fail 'the Kubernetes API probe must use the mounted service-account CA'
+grep --fixed-strings --quiet 'ssl.create_default_context' deploy/k8s/test-networkpolicy.py ||
+  fail 'the Kubernetes API probe must verify the API server certificate'
+if grep --fixed-strings --quiet '_create_unverified_context' deploy/k8s/test-networkpolicy.py; then
+  fail 'the Kubernetes API probe must not send its bearer token to an unverified endpoint'
+fi
 grep --fixed-strings --quiet 'exec_probe(TAILNET_PROBE, "kube-api")' deploy/k8s/test-service-ingress.py ||
   fail 'the proxy-labelled CI pod must test Kubernetes API access'
+grep --fixed-strings --quiet 'render-tailnet-proxy-api-egress.py' .github/workflows/ci.yml ||
+  fail 'CI must install the exact API endpoint egress allowlist before probing it'
 grep --fixed-strings --quiet 'serviceAccountName: tailscale-proxy' deploy/k8s/ci/tailnet-policy-probes.yaml ||
   fail 'the Kubernetes API probe must use the proxy ServiceAccount identity'
 grep --fixed-strings --quiet 'bot-api-public-ci-stand-in' deploy/k8s/ci/public-ingress-ci.yaml ||
@@ -363,7 +412,7 @@ fi
 if deploy/k8s/cutover-alpha.sh --apply --test-mode >/dev/null 2>&1; then
   fail 'the retired cutover script must not expose an apply path in test mode'
 fi
-python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ["deploy/k8s/probe-discovery.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ["deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
   fail 'the in-cluster ingress probe scripts must parse as Python'
 grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
   fail 'the shared discovery probe must send the v1 half-close request'
@@ -529,10 +578,24 @@ case "${1:-} ${2:-}" in
       *) printf 'unexpected Secret lookup: %s\n' "$*" >&2; exit 64 ;;
     esac
     ;;
-  'apply --dry-run=server') ;;
+  'get endpoints')
+    printf '{"subsets":[{"addresses":[{"ip":"10.20.30.40"},{"ip":"10.20.30.41"}]}]}\n'
+    ;;
+  'apply --dry-run=server')
+    if [[ " $* " == *' --filename=- '* ]]; then
+      cat >/dev/null
+    fi
+    ;;
+  'create --dry-run=server')
+    cat >/dev/null
+    printf 'secret/teagram-tailscale-state\n'
+    ;;
   'create --filename=-')
     cat > "$INSTALL_CREATED_MANIFEST"
     grep --fixed-strings --quiet 'name: teagram-tailscale-state' "$INSTALL_CREATED_MANIFEST"
+    ;;
+  'apply --filename=-')
+    cat > "$INSTALL_POLICY_MANIFEST"
     ;;
   'apply --filename') ;;
   *) printf 'unexpected kubectl call: %s\n' "$*" >&2; exit 64 ;;
@@ -546,8 +609,26 @@ run_tailnet_proxy_apply() {
     "TAILNET_INSTALL_CASE=$scenario" \
     "KUBECTL_CALLS=$install_fixture/$scenario.calls" \
     "INSTALL_CREATED_MANIFEST=$install_fixture/$scenario.manifest" \
+    "INSTALL_POLICY_MANIFEST=$install_fixture/$scenario.api-policy" \
     bash deploy/k8s/install-tailnet-proxy-access.sh --apply
 }
+
+if ! env "PATH=$install_fixture/bin:$PATH" \
+  "TAILNET_INSTALL_CASE=absent" \
+  "KUBECTL_CALLS=$install_fixture/dry-run.calls" \
+  "INSTALL_CREATED_MANIFEST=$install_fixture/dry-run.manifest" \
+  "INSTALL_POLICY_MANIFEST=$install_fixture/dry-run.api-policy" \
+  bash deploy/k8s/install-tailnet-proxy-access.sh --dry-run \
+  >"$install_fixture/dry-run.log" 2>&1; then
+  fail 'the installer dry-run must validate the exact API endpoint egress policy'
+fi
+grep --fixed-strings --quiet 'apply --dry-run=server --filename=-' "$install_fixture/dry-run.calls" ||
+  fail 'the installer dry-run must server-validate the generated API egress policy'
+grep --fixed-strings --quiet 'cidr: 10.20.30.40/32' "$install_fixture/dry-run.log" ||
+  fail 'the installer dry-run must show the exact API egress destination'
+if grep --extended-regexp --quiet '^(apply|create) --filename=-($| )' "$install_fixture/dry-run.calls"; then
+  fail 'the installer dry-run must not write the generated policy or state Secret'
+fi
 
 if ! run_tailnet_proxy_apply absent >"$install_fixture/absent.log" 2>&1; then
   fail 'the installer must create the state Secret when it is absent'
@@ -556,6 +637,12 @@ grep --fixed-strings --quiet 'create --filename=-' "$install_fixture/absent.call
   fail 'the installer did not create the missing state Secret'
 grep --fixed-strings --quiet 'name: teagram-tailscale-state' "$install_fixture/absent.manifest" ||
   fail 'the installer created an unexpected state Secret manifest'
+grep --fixed-strings --quiet 'name: tailscale-proxy-api-egress' "$install_fixture/absent.api-policy" ||
+  fail 'the installer did not apply the API egress policy'
+grep --fixed-strings --quiet 'cidr: 10.20.30.40/32' "$install_fixture/absent.api-policy" ||
+  fail 'the API egress policy did not restrict the first endpoint to a /32'
+grep --fixed-strings --quiet 'cidr: 10.20.30.41/32' "$install_fixture/absent.api-policy" ||
+  fail 'the API egress policy did not include the second ready endpoint'
 
 if ! run_tailnet_proxy_apply present >"$install_fixture/present.log" 2>&1; then
   fail 'the installer must apply proxy access when the state Secret already exists'
@@ -563,6 +650,8 @@ fi
 if grep --fixed-strings --quiet 'create --filename=-' "$install_fixture/present.calls"; then
   fail 'the installer must leave an existing Tailscale state Secret untouched'
 fi
+grep --fixed-strings --quiet 'apply --filename=-' "$install_fixture/present.calls" ||
+  fail 'the installer must refresh the API egress policy on rerun'
 
 if run_tailnet_proxy_apply empty-key >"$install_fixture/empty-key.log" 2>&1; then
   fail 'the installer must reject an empty tailscale-auth authkey'
@@ -623,7 +712,7 @@ case "${1:-} ${2:-}" in
       printf 'pod/tailscale-proxy-0\n'
     fi
     ;;
-  'delete rolebinding'|'delete role'|'delete serviceaccount')
+  'delete rolebinding'|'delete role'|'delete networkpolicy'|'delete serviceaccount')
     ;;
   *)
     printf 'unexpected kubectl call: %s\n' "$*" >&2
@@ -643,7 +732,7 @@ run_tailnet_proxy_rollback() {
 
 assert_no_rollback_access_removal() {
   local calls_file="$1"
-  if grep --extended-regexp --quiet '^delete (rolebinding|role|serviceaccount) ' "$calls_file"; then
+  if grep --extended-regexp --quiet '^delete (rolebinding|role|networkpolicy|serviceaccount) ' "$calls_file"; then
     fail 'the rollback must keep RBAC in place until the proxy is confirmed stopped'
   fi
 }
@@ -667,6 +756,8 @@ if grep --fixed-strings --quiet 'scale statefulset/tailscale-proxy' "$rollback_f
 fi
 grep --fixed-strings --quiet 'delete rolebinding' "$rollback_fixture/absent.calls" ||
   fail 'the rollback must remove access after confirming no proxy pods remain'
+grep --fixed-strings --quiet 'delete networkpolicy tailscale-proxy-api-egress' "$rollback_fixture/absent.calls" ||
+  fail 'the rollback must remove its API egress policy after confirming no proxy pods remain'
 
 for unsafe_case in wait-error pods-error pods-remain orphan-pod; do
   if run_tailnet_proxy_rollback "$unsafe_case" >"$rollback_fixture/$unsafe_case.log" 2>&1; then
@@ -684,6 +775,8 @@ grep --fixed-strings --quiet 'wait --for=delete pod/tailscale-proxy-0' "$rollbac
   fail 'the rollback must wait for the proxy pod to stop before removing access'
 grep --fixed-strings --quiet 'delete rolebinding' "$rollback_fixture/running.calls" ||
   fail 'the rollback must remove access after confirming the proxy pod stopped'
+grep --fixed-strings --quiet 'delete networkpolicy tailscale-proxy-api-egress' "$rollback_fixture/running.calls" ||
+  fail 'the rollback must remove its API egress policy after confirming the proxy pod stopped'
 if grep --extended-regexp --quiet '^delete (rolebinding|role) .*teagram-deployer-networkpolicy' \
   "$rollback_fixture/running.calls"; then
   fail 'the rollback must preserve Deploy. access to NetworkPolicies'

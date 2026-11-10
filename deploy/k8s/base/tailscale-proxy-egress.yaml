@@ -60,17 +60,3 @@ spec:
           port: 3478
         - protocol: UDP
           port: 41641
-    # kubernetes.default.svc is DNATed to the API server at node-IP:6443.
-    - to:
-        - ipBlock:
-            cidr: 10.0.0.0/8
-            except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
-        - ipBlock:
-            cidr: 172.16.0.0/12
-        - ipBlock:
-            cidr: 192.168.0.0/16
-      ports:
-        - protocol: TCP
-          port: 6443

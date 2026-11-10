@@ -120,16 +120,19 @@ def probe_public_ingress(host: str) -> None:
 
 
 def probe_kubernetes_api() -> None:
-    token = pathlib.Path(
-        "/var/run/secrets/kubernetes.io/serviceaccount/token"
-    ).read_text(encoding="utf-8").strip()
+    service_account_dir = pathlib.Path(
+        "/var/run/secrets/kubernetes.io/serviceaccount"
+    )
+    token = (service_account_dir / "token").read_text(encoding="utf-8").strip()
     if not token:
         raise RuntimeError("Kubernetes API probe has no service-account token")
     connection = http.client.HTTPSConnection(
         "kubernetes.default.svc",
         443,
         timeout=5,
-        context=ssl._create_unverified_context(),
+        context=ssl.create_default_context(
+            cafile=str(service_account_dir / "ca.crt")
+        ),
     )
     try:
         connection.request(

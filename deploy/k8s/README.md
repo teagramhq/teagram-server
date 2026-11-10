@@ -288,8 +288,13 @@ identity. The proxy also has default-deny egress with
 only the teagramd and linkselector Service ports, cluster DNS, the k3s API,
 and Tailscale control/relay UDP and HTTPS destinations allowed. The API
 Service at `kubernetes.default.svc:443` is translated to the node endpoint at
-port `6443`; the policy permits that port on RFC1918 addresses while excluding
-the default k3s Pod and Service CIDRs (`10.42.0.0/16` and `10.43.0.0/16`).
+port `6443`. The one-time access installer reads the ready addresses from the
+`kubernetes` Endpoints object and creates a separate `/32` egress rule for each
+API endpoint on TCP 6443. Its dry-run shows the exact policy, and rerunning it
+refreshes the allowlist if an endpoint address changes. Rollback removes this
+policy after confirming the proxy is stopped. CI builds the same policy from
+its disposable cluster's API endpoints and verifies access from the
+proxy-labelled probe pod.
 The external egress rule still excludes private, tailnet, and link-local IPv4
 ranges, so the proxy cannot open connections to PostgreSQL, RustFS, or other
 application pods. MAIN-3598 exempts tailnet
@@ -361,11 +366,14 @@ The installer creates the proxy ServiceAccount, a Role limited to `get`,
 `update`, and `patch` on only `teagram-tailscale-state`, and the deployer's
 namespace-scoped NetworkPolicy Role (`get`, `list`, `watch`, `create`, and
 `patch`; no `delete`). It creates the empty state Secret only when absent and
-never replaces existing state. `tailscale-auth` remains externally managed.
+never replaces existing state. It also creates or refreshes the proxy's
+API-only egress policy from the current `kubernetes` Endpoints addresses;
+rerun it if the cluster API endpoint changes. `tailscale-auth` remains
+externally managed.
 The deploy ServiceAccount keeps this NetworkPolicy Role and RoleBinding so
 future `Deploy.` runs can update ingress policies. The proxy access rollback
-removes only its own state Role/RoleBinding and ServiceAccount. The deploy
-ServiceAccount receives no Secret, ServiceAccount, Role, or RoleBinding access
+removes its API egress policy, state Role/RoleBinding, and ServiceAccount. The
+deploy ServiceAccount receives no Secret, ServiceAccount, Role, or RoleBinding access
 outside its namespaced NetworkPolicy rule.
 
 The proxy health and metrics endpoints listen on port 9002. The metrics Service
@@ -399,9 +407,9 @@ probe through the Service targeted by the proxy and fails when it returns zero
 bytes.
 
 During a proxy incident, run the reviewed access rollback with the admin
-kubeconfig. It stops the proxy and removes only its state Role/RoleBinding and
-ServiceAccount. It preserves both Tailscale Secrets and the deployer's
-NetworkPolicy Role/RoleBinding for recovery and future deployments:
+kubeconfig. It stops the proxy and removes its API egress policy, state
+Role/RoleBinding, and ServiceAccount. It preserves both Tailscale Secrets and
+the deployer's NetworkPolicy Role/RoleBinding for recovery and future deployments:
 
 ```sh
 sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \

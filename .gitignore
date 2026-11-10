@@ -18,3 +18,5 @@ node_modules/
 test-results/
 playwright-report/
 /screenshots/
+__pycache__/
+*.py[cod]
