@@ -922,65 +922,49 @@ func TestPublicWebSocketDiscoveryUsesForwardedClientBudgets(t *testing.T) {
 func TestDefaultWebSocketDiscoveryDoesNotUsePublicBudget(t *testing.T) {
 	t.Parallel()
 
-	for _, tt := range []struct {
-		name             string
-		configureTailnet bool
-	}{
-		{name: "default limited listener"},
-		{name: "tailnet listener", configureTailnet: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			rsaKey := cloudflareTestRSAKey(t)
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			listener := mustListenTCP(t, ctx, "127.0.0.1:0")
-			doc, err := discovery.NewDocument("websocket.example.test:443", 2, &rsaKey.PublicKey, false, "")
-			if err != nil {
-				t.Fatalf("build discovery document: %v", err)
-			}
-			server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
-			if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
-				MaxRequests:       1,
-				MaxRequestsPerNet: 1,
-				Window:            time.Minute,
-				PerNetWindow:      time.Minute,
-			}); err != nil {
-				t.Fatalf("set discovery limits: %v", err)
-			}
-			if tt.configureTailnet {
-				if err := server.SetWebSocketListenerPath(mtproto.ListenerPathTailnet); err != nil {
-					t.Fatalf("set WebSocket listener path: %v", err)
-				}
-			}
-			if err := server.SetClientDiscoveryDocument(doc); err != nil {
-				t.Fatalf("set discovery document: %v", err)
-			}
-			served := make(chan error, 1)
-			go func() { served <- server.ServeWebSocket(ctx, listener) }()
-			t.Cleanup(func() {
-				if err := <-served; err != nil {
-					t.Errorf("serve WebSocket: %v", err)
-				}
-			})
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("websocket.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	if err := server.SetClientDiscoveryDocument(doc); err != nil {
+		t.Fatalf("set discovery document: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	t.Cleanup(func() {
+		if err := <-served; err != nil {
+			t.Errorf("serve WebSocket: %v", err)
+		}
+	})
 
-			for i := range 50 {
-				request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
-				if err != nil {
-					t.Fatalf("build discovery request %d: %v", i+1, err)
-				}
-				response, err := http.DefaultClient.Do(request)
-				if err != nil {
-					t.Fatalf("GET discovery request %d: %v", i+1, err)
-				}
-				if err := response.Body.Close(); err != nil {
-					t.Errorf("close discovery response %d: %v", i+1, err)
-				}
-				if response.StatusCode != http.StatusOK {
-					t.Fatalf("discovery request %d status = %d, want 200", i+1, response.StatusCode)
-				}
-			}
-		})
+	for i := range 50 {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
+		if err != nil {
+			t.Fatalf("build discovery request %d: %v", i+1, err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("GET discovery request %d: %v", i+1, err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close discovery response %d: %v", i+1, err)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("discovery request %d status = %d, want 200", i+1, response.StatusCode)
+		}
 	}
 }
 

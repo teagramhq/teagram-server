@@ -1876,6 +1876,9 @@ jobs:
           done
           if [[ "$flannel_cni_ready" != true ]]; then
             echo "k3s flannel CNI did not publish /run/flannel/subnet.env within 180 seconds" >&2
+            docker ps -a --filter name=teagram-k3s || true
+            docker logs --tail 80 teagram-k3s || true
+            docker exec teagram-k3s ls -l /run/flannel || true
             exit 1
           fi
           required_images=(

@@ -127,8 +127,10 @@ func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, 7, keys, nil, nil)
 	server.SetHandshakeTimeout(time.Second)
 	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
-		MaxRequests: 1,
-		Window:      time.Minute,
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
 	}); err != nil {
 		t.Fatalf("set discovery limits: %v", err)
 	}
@@ -146,34 +148,7 @@ func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
 		}
 	})
 
-	probe := func() int {
-		t.Helper()
-		conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", listener.Addr().String())
-		if err != nil {
-			t.Fatalf("dial: %v", err)
-		}
-		defer conn.Close() //nolint:errcheck // server closes each preflight socket.
-		nonce := make([]byte, discovery.NonceSize)
-		if _, err := rand.Read(nonce); err != nil {
-			t.Fatalf("nonce: %v", err)
-		}
-		request, err := discovery.BuildPreflightRequest(nonce)
-		if err != nil {
-			t.Fatalf("build request: %v", err)
-		}
-		if _, err := conn.Write(request); err != nil {
-			t.Fatalf("write request: %v", err)
-		}
-		closeWrite(t, conn)
-		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			t.Fatalf("set read deadline: %v", err)
-		}
-		response, err := io.ReadAll(conn)
-		if err != nil && len(response) > 0 {
-			t.Fatalf("read response (%d bytes): %v", len(response), err)
-		}
-		return len(response)
-	}
+	probe := func() int { return sendRawDiscoveryProbe(t, listener.Addr().String()) }
 
 	if got := probe(); got == 0 {
 		t.Fatal("first locally admitted probe received no response")
@@ -187,6 +162,86 @@ func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
 	if !keys.sawDeadline.Load() {
 		t.Fatal("shared discovery check did not receive the handshake deadline")
 	}
+}
+
+func TestTailnetRawListenerDiscoveryBypassesCallerLimits(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	keys := &discoveryProbeStore{}
+	server := mtproto.New(exchange.PrivateKey{RSA: key}, 7, keys, nil, nil)
+	server.SetHandshakeTimeout(time.Second)
+	if err := server.SetTCPListenerPath(mtproto.ListenerPathTailnet); err != nil {
+		t.Fatalf("set TCP listener path: %v", err)
+	}
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx, listener) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	for i := range 50 {
+		if got := sendRawDiscoveryProbe(t, listener.Addr().String()); got == 0 {
+			t.Fatalf("tailnet probe %d received no response", i+1)
+		}
+	}
+	if got := keys.calls.Load(); got != 0 {
+		t.Fatalf("tailnet discovery checks = %d, want none", got)
+	}
+}
+
+func sendRawDiscoveryProbe(t *testing.T, address string) int {
+	t.Helper()
+	conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", address)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // server closes each preflight socket.
+	nonce := make([]byte, discovery.NonceSize)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	request, err := discovery.BuildPreflightRequest(nonce)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if _, err := conn.Write(request); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	closeWrite(t, conn)
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil && len(response) > 0 {
+		t.Fatalf("read response (%d bytes): %v", len(response), err)
+	}
+	return len(response)
 }
 
 func TestPartialPreflightNeverProducesDiscoveryResponse(t *testing.T) {

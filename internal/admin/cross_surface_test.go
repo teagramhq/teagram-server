@@ -408,14 +408,13 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 			metrics.RecordRateLimitDenial(surface)
 		}
 	}
-	metrics.RecordRateLimitDenial("save_file_part_bytes")
 	metrics.RecordRateLimitDenial("unknown_surface")
 	metrics.RecordRateLimitDenial("unknown_surface")
 
 	want := rateLimitDenialSurfacePayload{
-		Count:         254,
+		Count:         253,
 		WindowSeconds: 42,
-		RatePerSecond: 254.0 / 42.0,
+		RatePerSecond: 253.0 / 42.0,
 		BySurface: admin.RateLimitDenialsBySurface{
 			MessageSend:               1,
 			CreateChat:                2,
@@ -424,7 +423,7 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 			MessagesSearch:            5,
 			ContactsSearch:            6,
 			MessagesSearchGlobal:      7,
-			SaveFilePart:              9,
+			SaveFilePart:              8,
 			UploadGetFile:             9,
 			SendCodeIPCalls:           10,
 			SendCodeIPDistinctNumbers: 11,

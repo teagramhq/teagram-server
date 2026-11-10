@@ -88,9 +88,10 @@ bash .github/scripts/check-k8s-migration-version.sh \
   fail 'an intentional base migration-version update to the newest migration must pass'
 
 k3s_start_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run' .github/workflows/ci.yml)"
-k3s_node_ready_line="$(grep -n -F 'kubectl wait --for=condition=Ready node --all --timeout=180s' <<< "$k3s_start_step" | tail -n 1 | cut -d: -f1)"
-k3s_flannel_gate_line="$(grep -n -m 1 -F 'flannel_cni_ready=false' <<< "$k3s_start_step" | cut -d: -f1)"
-k3s_workload_start_line="$(grep -n -m 1 -F 'kubectl create namespace teagram' <<< "$k3s_start_step" | cut -d: -f1)"
+k3s_node_ready_line="$(grep -n -F 'kubectl wait --for=condition=Ready node --all --timeout=180s' <<< "$k3s_start_step" | tail -n 1 | cut -d: -f1 || true)"
+k3s_flannel_gate_line="$(grep -n -m 1 -F 'flannel_cni_ready=false' <<< "$k3s_start_step" | cut -d: -f1 || true)"
+k3s_workload_start_line="$(grep -n -m 1 -F 'kubectl create namespace teagram' <<< "$k3s_start_step" | cut -d: -f1 || true)"
+flannel_timeout_block="$(awk '/flannel_cni_ready/ && /!= true/ { in_timeout=1 } in_timeout { print } in_timeout && /exit 1/ { exit }' <<< "$k3s_start_step")"
 [[ "$k3s_node_ready_line" =~ ^[0-9]+$ &&
    "$k3s_flannel_gate_line" =~ ^[0-9]+$ &&
    "$k3s_workload_start_line" =~ ^[0-9]+$ &&
@@ -99,6 +100,11 @@ k3s_workload_start_line="$(grep -n -m 1 -F 'kubectl create namespace teagram' <<
    "$k3s_node_ready_line" -lt "$k3s_flannel_gate_line" &&
    "$k3s_flannel_gate_line" -lt "$k3s_workload_start_line" ]] ||
   fail 'the k3s deployment lane must wait for flannel CNI readiness before applying workloads'
+[[ "$flannel_timeout_block" == *'docker ps -a --filter name=teagram-k3s || true'* &&
+   "$flannel_timeout_block" == *'docker logs --tail 80 teagram-k3s || true'* &&
+   "$flannel_timeout_block" == *'docker exec teagram-k3s ls -l /run/flannel || true'* &&
+   "$flannel_timeout_block" == *'exit 1'* ]] ||
+  fail 'the flannel readiness timeout must include best-effort k3s diagnostics'
 
 mkdir -p "$migration_fixture/ci"
 cat > "$migration_fixture/ci/kustomization.yaml" <<'YAML'

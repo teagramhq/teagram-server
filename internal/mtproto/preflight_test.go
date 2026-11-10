@@ -322,6 +322,32 @@ func TestTailnetDiscoveryBypassesCallerBudgets(t *testing.T) {
 	}
 }
 
+func TestDiscoveryPerNetworkTableRefusesNewNetworksWhenFull(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequestsPerNet: 3,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 2
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	if !limiter.allowPerNet(first) {
+		t.Fatal("first network was refused")
+	}
+	if !limiter.allowPerNet(second) {
+		t.Fatal("second network was refused")
+	}
+	if limiter.allowPerNet(third) {
+		t.Fatal("third network was admitted after the per-network table filled")
+	}
+	if !limiter.allowPerNet(first) {
+		t.Fatal("an already tracked network was refused while the table was full")
+	}
+}
+
 func TestTailnetPathBypassesPreAuthCapsAndLifetime(t *testing.T) {
 	t.Parallel()
 
