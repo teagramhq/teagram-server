@@ -408,33 +408,101 @@ func TestPublicDiscoveryFullTablePreservesIndependentOverflowBudgets(t *testing.
 	}
 }
 
-func TestPublicDiscoveryOverflowKeepsAggregateCapSeparateFromRawLimiter(t *testing.T) {
+func TestPublicDiscoveryFullOverflowTableStillAnswersNewNetworks(t *testing.T) {
 	t.Parallel()
 
 	limiter := newDiscoveryLimiter(DiscoveryLimits{
-		MaxRequests:       10,
-		MaxRequestsPerNet: maxPublicDiscoveryOverflowRequests + 1,
-		Window:            time.Minute,
+		MaxRequestsPerNet: 1,
 		PerNetWindow:      time.Minute,
 	})
-	limiter.maxBuckets = 2
+	limiter.maxBuckets = 1
+
+	first := mustAddr("192.0.2.1")
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
+	}
+	for i := range maxPublicDiscoveryOverflowBuckets {
+		addr := netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+		if !limiter.allowPerNet(addr) {
+			t.Fatalf("public discovery refused overflow network %d while filling its table", i)
+		}
+	}
+	for _, addr := range []netip.Addr{
+		mustAddr("203.0.113.1"),
+		mustAddr("203.0.113.2"),
+	} {
+		if !limiter.allowPerNet(addr) {
+			t.Fatalf("public discovery refused untracked network %s while overflow table was full", addr)
+		}
+	}
+	if len(limiter.publicOverflow) > maxPublicDiscoveryOverflowBuckets {
+		t.Fatalf("public overflow table grew to %d entries, above its bound %d", len(limiter.publicOverflow), maxPublicDiscoveryOverflowBuckets)
+	}
+}
+
+func TestPublicDiscoverySweepsAtMostOncePerWindowAndRecoversExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequestsPerNet: 2,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 1
+	limiter.maxOverflowBuckets = 1
 
 	first := mustAddr("192.0.2.1")
 	second := mustAddr("192.0.2.2")
 	third := mustAddr("192.0.2.3")
-	if !limiter.allowPerNet(first) || !limiter.allowPerNet(second) {
-		t.Fatal("public discovery refused a network while filling its table")
+	firstBucket, ok := store.IPBucketKey(first)
+	if !ok {
+		t.Fatal("first address has no per-network bucket")
 	}
-	for i := range maxPublicDiscoveryOverflowRequests {
-		if !limiter.allowPerNet(third) {
-			t.Fatalf("public discovery refused overflow request %d before its aggregate cap", i+1)
-		}
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
 	}
-	if limiter.allowPerNet(third) {
-		t.Fatal("public discovery admitted overflow after its aggregate cap")
+	if !limiter.allowPerNet(second) {
+		t.Fatal("public discovery refused the overflow network")
 	}
-	if !limiter.allow(third, time.Now()) {
-		t.Fatal("public overflow cap prevented raw discovery from admitting a new network")
+
+	limiter.publicPerNet[firstBucket] = discoveryWindow{start: time.Now().Add(-2 * time.Minute), calls: 1}
+	if !limiter.allowPerNet(third) {
+		t.Fatal("public discovery refused a new network during the sweep interval")
+	}
+	if _, ok := limiter.publicPerNet[firstBucket]; !ok {
+		t.Fatal("public discovery rescanned its full table before the next sweep interval")
+	}
+	limiter.publicPerNetSweepAt = time.Now().Add(-time.Second)
+	fourth := mustAddr("192.0.2.4")
+	if !limiter.allowPerNet(fourth) {
+		t.Fatal("public discovery refused a new network after the sweep interval")
+	}
+	if _, ok := limiter.publicPerNet[firstBucket]; ok {
+		t.Fatal("public discovery retained an expired primary bucket after sweeping")
+	}
+
+	secondBucket, ok := store.IPBucketKey(second)
+	if !ok {
+		t.Fatal("second address has no per-network bucket")
+	}
+	thirdOverflow := mustAddr("192.0.2.5")
+	if !limiter.allowPerNet(thirdOverflow) {
+		t.Fatal("public discovery refused an untracked network while the overflow table was full")
+	}
+	limiter.publicOverflow[secondBucket] = discoveryWindow{start: time.Now().Add(-2 * time.Minute), calls: 1}
+	fifth := mustAddr("192.0.2.6")
+	if !limiter.allowPerNet(fifth) {
+		t.Fatal("public discovery refused an untracked network during the overflow sweep interval")
+	}
+	if _, ok := limiter.publicOverflow[secondBucket]; !ok {
+		t.Fatal("public discovery rescanned its overflow table before the next sweep interval")
+	}
+	limiter.publicOverflowSweepAt = time.Now().Add(-time.Second)
+	sixth := mustAddr("192.0.2.7")
+	if !limiter.allowPerNet(sixth) {
+		t.Fatal("public discovery refused an overflow network after the sweep interval")
+	}
+	if _, ok := limiter.publicOverflow[secondBucket]; ok {
+		t.Fatal("public discovery retained an expired overflow bucket after sweeping")
 	}
 }
 
