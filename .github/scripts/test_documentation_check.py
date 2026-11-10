@@ -262,6 +262,19 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("README.md:1", result.stdout + result.stderr)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_blank_line_before_parenthesized_title_is_rejected(self):
+        (self.root / "docs/a.md").write_text("Guide.\n")
+        (self.root / "README.md").write_text(
+            "[x](docs/a.md\n\n(title))\n[y](docs/gone.md)\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md:1", result.stdout + result.stderr)
+        self.assertIn("unclosed Markdown link", result.stdout + result.stderr)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
     def test_unescaped_parenthesis_in_title_does_not_hide_following_links(self):
         (self.root / "docs/a.md").write_text("Guide.\n")
         (self.root / "README.md").write_text(

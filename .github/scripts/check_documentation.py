@@ -158,6 +158,8 @@ def matching_link_parenthesis(text, start):
 
     had_whitespace = False
     while index < len(text) and text[index].isspace():
+        if starts_blank_line(text, index):
+            return None
         had_whitespace = True
         index += 1
     if index >= len(text):
