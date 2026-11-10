@@ -1123,9 +1123,7 @@ jobs:
           bash -n deploy/k8s/install-tailnet-proxy-access.sh
           sh -n deploy/k8s/teagram-k3s-ops.sh
           ./deploy/k8s/cutover-alpha.sh --dry-run
-          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh \
-            deploy/k8s/test-cutover-alpha-k3s.sh deploy/k8s/test-cutover-alpha-incus.sh \
-            deploy/k8s/cutover-dump-upload.sh deploy/k8s/test-cutover-dump-upload.sh
+          bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1199,10 +1197,6 @@ jobs:
             deploy/k8s/teagram-k3s-ops.sh \
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \
-            deploy/k8s/test-cutover-alpha-k3s.sh \
-            deploy/k8s/test-cutover-alpha-incus.sh \
-            deploy/k8s/cutover-dump-upload.sh \
-            deploy/k8s/test-cutover-dump-upload.sh \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
@@ -1280,7 +1274,7 @@ jobs:
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
 
-      - name: Check alpha k3s cutover contract
+      - name: Verify retired cutover refuses production actions
         run: deploy/k8s/test-cutover-alpha.sh
 
       - name: Check user invite quota operation
@@ -1541,15 +1535,10 @@ jobs:
           bash .github/scripts/check-k8s-migration-version.sh \
             migrations deploy/k8s/base/migration-version "$previous_migration_version"
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
-          for overlay in prod prod-cutover ci bootstrap bootstrap/ci; do
+          for overlay in prod ci bootstrap bootstrap/ci; do
             rendered_overlay="${overlay//\//-}"
             rendered="$RUNNER_TEMP/k8s-${rendered_overlay}.yaml"
             kubectl kustomize "deploy/k8s/${overlay}" > "$rendered"
-            if [[ "$overlay" == prod-cutover ]]; then
-              yq -e 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.replicas == 0' "$rendered" >/dev/null
-              yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
-              yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
-            fi
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
@@ -2065,12 +2054,6 @@ jobs:
           kubectl describe pods --namespace teagram
           for pod in $(kubectl get pods --namespace teagram --output name); do
             kubectl logs --namespace teagram "$pod" --all-containers --tail=100
-          done
-          kubectl get pods,jobs,persistentvolumeclaims --namespace teagram-cutover --output wide
-          kubectl get events --namespace teagram-cutover --sort-by=.lastTimestamp
-          kubectl describe pods --namespace teagram-cutover
-          for pod in $(kubectl get pods --namespace teagram-cutover --output name); do
-            kubectl logs --namespace teagram-cutover "$pod" --all-containers --tail=100
           done
           docker logs --tail 100 teagram-k3s
 

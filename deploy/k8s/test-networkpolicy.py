@@ -12,20 +12,21 @@ from probe_discovery import probe as probe_discovery
 
 
 TAILNET_SERVICE_PORTS = (2443, 2444, 2445, 2447)
+PUBLIC_SERVICE_PORTS = (2446, 2449)
 
 
 def connect(host: str, port: int, timeout: float = 1.5) -> socket.socket:
     return socket.create_connection((host, port), timeout=timeout)
 
 
-def require_blocked(host: str, port: int) -> None:
+def require_blocked(host: str, port: int, listener: str) -> None:
     socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     try:
         connection = connect(host, port)
     except OSError:
         return
     connection.close()
-    raise RuntimeError(f"untrusted pod reached tailnet-only listener {host}:{port}")
+    raise RuntimeError(f"pod reached denied {listener} listener {host}:{port}")
 
 
 def require_open(host: str, port: int) -> None:
@@ -62,7 +63,10 @@ def probe_bot_api(host: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("discovery", "linkselector", "bot-api", "check-listeners", "deny-tailnet"))
+    parser.add_argument(
+        "operation",
+        choices=("discovery", "linkselector", "bot-api", "check-listeners", "deny-tailnet", "deny-public", "deny-egress"),
+    )
     parser.add_argument("--host", default="teagramd")
     args = parser.parse_args()
 
@@ -77,8 +81,15 @@ def main() -> int:
         for port in (2444, 2445):
             require_open(args.host, port)
     else:
-        for port in TAILNET_SERVICE_PORTS:
-            require_blocked(args.host, port)
+        if args.operation == "deny-tailnet":
+            for port in TAILNET_SERVICE_PORTS:
+                require_blocked(args.host, port, "tailnet-only")
+        elif args.operation == "deny-public":
+            for port in PUBLIC_SERVICE_PORTS:
+                require_blocked(args.host, port, "public")
+        else:
+            require_blocked("postgres", 5432, "unapproved egress")
+            require_blocked("rustfs", 9000, "unapproved egress")
     return 0
 
 

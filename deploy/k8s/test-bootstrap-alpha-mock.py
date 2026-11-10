@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Fake incus and tailscale for test-bootstrap-alpha.sh.
 
-File operations inside the fake LXC and source roots run as real commands on
-rebased paths, so the bootstrap's permission and comparison checks are real.
-Host, LXC service and cluster state is kept in state.json. Each mutating
-action is appended to MOCK_ACTIONS so the test can assert a rerun changes
-nothing.
+File operations inside the fake k3s LXC root run as real commands on rebased
+paths, so permission and comparison checks are real. The deleted application
+LXC is unavailable. Host, LXC service and cluster state is kept in state.json.
+Each mutating action is appended to MOCK_ACTIONS so the test can assert a
+rerun changes nothing.
 """
 import base64
 import hashlib
@@ -17,21 +17,12 @@ import subprocess
 import sys
 
 STATE_DIR = os.environ["MOCK_STATE"]
-SOURCE_ROOT = os.environ["MOCK_SRC"]
 ACTIONS = os.environ["MOCK_ACTIONS"]
 LXC_ROOT = os.path.join(STATE_DIR, "lxc")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 
-SOURCE = "teagram"
 INSTANCE = "teagram-k3s"
 NAMESPACE = "teagram"
-SOURCE_CONTAINERS = [
-    "teagram-postgres-1",
-    "teagram-teagramd-1",
-    "teagram-rustfs-1",
-    "teagram-link-edge-selector-1",
-    "teagram-web-cloudflared",
-]
 TOKEN = "tgtest-deployer-token-7f3a9c"
 CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBtgtestonly\n-----END CERTIFICATE-----\n"
 ADMIN_CERT = base64.b64encode(b"tgtest-k3s-admin-client-cert").decode()
@@ -105,30 +96,6 @@ def run_rebased(root, args):
     os.makedirs(root, exist_ok=True)
     sys.stdout.flush()
     sys.exit(subprocess.run(rebase(root, args)).returncode)
-
-
-def docker(args):
-    if args[0] == "inspect":
-        if "--format" not in args:
-            missing = [name for name in args[1:]
-                       if not os.path.isdir(os.path.join(SOURCE_ROOT, "containers", name))]
-            sys.exit(1 if missing else 0)
-        if "Cmd" in args[-2]:
-            fail("cmd-based token lookup is not expected in this fixture")
-        env_file = os.path.join(SOURCE_ROOT, "containers", args[-1], "env")
-        if os.path.exists(env_file):
-            with open(env_file) as handle:
-                sys.stdout.write(handle.read())
-        sys.exit(0)
-    if args[0] == "cp":
-        container, path = args[1].split(":", 1)
-        relative = path.lstrip("/")
-        base = os.path.join(SOURCE_ROOT, "containers", container)
-        if not os.path.exists(os.path.join(base, relative)):
-            fail(f"no such path in {container}: {path}")
-        sys.stdout.flush()
-        sys.exit(subprocess.run(["tar", "-C", base, "-cf", "-", relative]).returncode)
-    fail(f"unexpected docker command: {args}")
 
 
 def install_k3s(state):
@@ -470,10 +437,6 @@ def incus_exec(args):
     separator = args.index("--")
     name = args[separator - 1]
     cmd = args[separator + 1:]
-    if name == SOURCE:
-        if cmd[0] == "docker":
-            docker(cmd[1:])
-        run_rebased(SOURCE_ROOT, cmd)
     if name == INSTANCE:
         lxc(cmd)
     fail(f"unknown instance: {name}")
@@ -482,7 +445,7 @@ def incus_exec(args):
 def incus(args):
     state = load_state()
     if args[0] == "info":
-        exists = args[1] == SOURCE or (args[1] == INSTANCE and state["instance"] is not None)
+        exists = args[1] == INSTANCE and state["instance"] is not None
         sys.exit(0 if exists else 1)
     if args[0] == "init":
         config = {}

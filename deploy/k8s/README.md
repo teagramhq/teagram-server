@@ -21,6 +21,14 @@ The alpha bootstrap also installs the restricted `teagram-agent` read account
 and a cluster-scoped ValidatingAdmissionPolicy that limits its pod deletion to
 the approved stateless controllers.
 
+`bootstrap-alpha.sh` provisions only the k3s host and namespace access. It does
+not read application values or keys from the deleted `teagram` LXC and does
+not create workload ConfigMaps or Secrets. Restore those resources from the
+external secret and configuration store listed below before applying `prod/`.
+The forced-command SSH key is read from alpha's `/root/.ssh/authorized_keys`
+for a first install; on reruns, the bootstrap can retain the already-installed
+key on `teagram-k3s` if that host file is unavailable.
+
 To roll back only agent access after bootstrap, run this whole block in one
 shell. It deletes the ServiceAccount first to revoke its TokenRequest tokens,
 then removes its RoleBinding and admission protection:
@@ -57,8 +65,8 @@ is not included in the production workload overlay.
 
 Read the [Kubernetes server-identity threat model](identity-threat-model.md)
 before bootstrapping, backing up, restoring, or replacing that identity.
-Read the [alpha cutover threat model](cutover-threat-model.md) before moving
-production state or exposing the cutover listeners.
+The [alpha cutover threat model](cutover-threat-model.md) is retained as
+historical context only; the Compose cutover and its listeners are retired.
 Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a
@@ -84,8 +92,9 @@ version, migration Job name, and `prod/source-revision` together. The production
 pin check must pass before applying that overlay. The retired Compose cutover
 does not select images or modify the live database.
 
-The production overlay expects these namespace-scoped resources to be supplied
-by the cluster's secret and configuration management before it is applied:
+The production overlay expects these namespace-scoped resources to be restored
+from the external secret and configuration management before it is applied.
+The bootstrap deliberately leaves them untouched:
 
 | Resource | Required keys or values |
 | --- | --- |
@@ -194,11 +203,19 @@ path depends on the deleted application LXC.
 `teagramd-networkpolicy` selects teagramd pods and defaults ingress to deny.
 It admits ports 2443, 2444, 2445, and 2448 only from the Tailscale proxy pod
 identity, and ports 2446 and 2449 only from cloudflared. It does not trust pod
-CIDRs or request headers. Public traffic cannot assert tailnet identity because
-cloudflared has no access to tailnet-only ports and caller input cannot change
-the in-cluster source pod identity. MAIN-3598 exempts tailnet traffic from
-teagramd rate and connection limits; public per-client limits use the real
-client address supplied through `CF-Connecting-IP` by cloudflared only.
+CIDRs or request headers. Linkselector and other application pods have a
+separate source identity and are refused by both listener groups; CI probes
+check the tailnet-labelled, linkselector-labelled, and untrusted sources.
+Public traffic cannot assert tailnet identity because cloudflared has no access
+to tailnet-only ports and caller input cannot change the in-cluster source pod
+identity. The proxy also has default-deny egress with
+only the teagramd and linkselector Service ports, cluster DNS, and Tailscale
+control/relay UDP and HTTPS destinations allowed; its policy excludes private,
+tailnet, and link-local IPv4 ranges from external egress. It cannot open
+connections to PostgreSQL, RustFS, or other application pods. MAIN-3598 exempts tailnet
+traffic from teagramd rate and connection limits; public per-client limits use
+the real client address supplied through `CF-Connecting-IP` by cloudflared
+only.
 
 The `Deploy.` runner joins the tailnet with `tailscale/github-action` and uses
 the namespace-scoped `KUBECONFIG` in GitHub environment `k3s-prod` to connect to
@@ -222,11 +239,15 @@ register a replacement device.
 Before the first install, the tailnet administrator must:
 
 1. Enable MagicDNS and HTTPS certificates.
-2. Create a one-use, non-ephemeral, pre-approved auth key tagged only
+2. Before the in-cluster proxy starts, delete the old `teagram` device left by
+   the removed application LXC, if it still appears in the tailnet admin
+   console. Confirm that device is gone so the new proxy can register as
+   `teagram` instead of receiving a suffixed name.
+3. Create a one-use, non-ephemeral, pre-approved auth key tagged only
    `tag:teagram`, with a one-day expiry. Auth keys have no OAuth scopes; no
    OAuth client is needed. Store it as external Secret `teagram/tailscale-auth`,
    key `authkey`.
-3. Add this tag owner and grant to the tailnet policy, replacing
+4. Add this tag owner and grant to the tailnet policy, replacing
    `autogroup:member` with the chosen human user/group identities if that group
    includes non-human devices:
 
@@ -240,9 +261,9 @@ Before the first install, the tailnet administrator must:
    }
    ```
 
-4. Remove wildcard source grants. Do not add `tag:teagram` as a grant source,
+5. Remove wildcard source grants. Do not add `tag:teagram` as a grant source,
    an `autoApprovers` entry, a Funnel `nodeAttrs` rule, or a node share.
-5. After storing the key in the external Secret, run the reviewed installer
+6. After storing the key in the external Secret, run the reviewed installer
    with the admin kubeconfig:
 
    ```sh
@@ -257,8 +278,11 @@ The installer creates the proxy ServiceAccount, a Role limited to `get`,
 namespace-scoped NetworkPolicy Role (`get`, `list`, `watch`, `create`, and
 `patch`; no `delete`). It creates the empty state Secret only when absent and
 never replaces existing state. `tailscale-auth` remains externally managed.
-The deploy ServiceAccount receives no Secret, ServiceAccount, Role, or
-RoleBinding access.
+The deploy ServiceAccount keeps this NetworkPolicy Role and RoleBinding so
+future `Deploy.` runs can update ingress policies. The proxy access rollback
+removes only its own state Role/RoleBinding and ServiceAccount. The deploy
+ServiceAccount receives no Secret, ServiceAccount, Role, or RoleBinding access
+outside its namespaced NetworkPolicy rule.
 
 The proxy health and metrics endpoints listen on port 9002. The metrics Service
 has Prometheus scrape annotations; collect container logs with
@@ -284,12 +308,16 @@ sudo incus exec teagram-k3s -- systemctl daemon-reload
 After the proxy is Ready, verify the tailnet HTTPS routes, an unauthenticated
 Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
 `teagram.tailaa4918.ts.net:2443` followed by a write half-close returns a
-`telegramd-key-r1` response. CI runs the same discovery probe through the
-Service targeted by the proxy and fails when it returns zero bytes.
+`telegramd-key-r1` response. In the tailnet admin console, confirm that the
+new in-cluster device is named `teagram` and that
+`teagram.tailaa4918.ts.net` resolves to that device. CI runs the same discovery
+probe through the Service targeted by the proxy and fails when it returns zero
+bytes.
 
 During a proxy incident, run the reviewed access rollback with the admin
-kubeconfig. It stops the proxy and removes its access Roles and ServiceAccount
-while preserving both Tailscale Secrets for recovery:
+kubeconfig. It stops the proxy and removes only its state Role/RoleBinding and
+ServiceAccount. It preserves both Tailscale Secrets and the deployer's
+NetworkPolicy Role/RoleBinding for recovery and future deployments:
 
 ```sh
 sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
@@ -302,6 +330,10 @@ The archived database dump and key archive are on the external backup drive.
 
 `test: k8s-deploy` exercises trusted and denied in-cluster sources, the
 unauthenticated Bot API response, discovery half-close, and one-second probes
-during linkselector and teagramd rollouts. The disposable overlay scales the
-real Tailscale proxy to zero and uses no production credential. No smoke test
-uses a NodePort or `kubectl port-forward`.
+during linkselector and teagramd rollouts. It also requires the teagramd pod UID
+to change and the StatefulSet generation to complete before the rollout probe
+ends. The disposable overlay scales the real Tailscale proxy to zero and uses
+no production credential; its policy probe pod carries the proxy label only to
+test source-identity rules. CI does not claim to sample real Tailscale daemon
+restarts; production alerts monitor the proxy restart count. No smoke test uses
+a NodePort or `kubectl port-forward`.

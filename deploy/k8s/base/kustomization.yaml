@@ -11,6 +11,7 @@ resources:
   - teagramd-service.yaml
   - teagramd-statefulset.yaml
   - teagramd-networkpolicy.yaml
+  - tailscale-proxy-egress.yaml
   - tailscale-proxy.yaml
   - rustfs-init-job.yaml
   - migrations-job.yaml

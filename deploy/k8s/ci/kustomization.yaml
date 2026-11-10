@@ -31,3 +31,4 @@ images:
 patches:
   - path: cloudflared-ci.yaml
   - path: tailscale-proxy-ci.yaml
+  - path: linkselector-ci.yaml

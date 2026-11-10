@@ -17,7 +17,7 @@ Usage: install-tailnet-proxy-access.sh --dry-run | --apply | --rollback
 
   --dry-run  Validate the namespace-scoped resources and print the target context.
   --apply    Install the proxy ServiceAccount/RBAC and create its empty state Secret once.
-  --rollback Stop the proxy and remove the installed ServiceAccount/RBAC; preserve state.
+  --rollback Stop the proxy and remove proxy access; preserve state and deployer access.
 
 Use only with the reviewed teagram k3s admin kubeconfig. This script never creates
 the external tailscale-auth Secret and never reads or prints Secret contents.
@@ -87,12 +87,12 @@ YAML
       fail 'could not determine whether tailnet proxy pods remain'
     fi
     [[ -z "$proxy_pods" ]] || fail 'tailnet proxy pods remain; refusing to remove access'
-    kubectl delete rolebinding tailscale-proxy-state teagram-deployer-networkpolicy \
+    kubectl delete rolebinding tailscale-proxy-state \
       --namespace "$NAMESPACE" --ignore-not-found=true
-    kubectl delete role tailscale-proxy-state teagram-deployer-networkpolicy \
+    kubectl delete role tailscale-proxy-state \
       --namespace "$NAMESPACE" --ignore-not-found=true
     kubectl delete serviceaccount tailscale-proxy --namespace "$NAMESPACE" \
       --ignore-not-found=true
-    printf 'Proxy access is removed. Both Tailscale Secrets were preserved for recovery.\n'
+    printf 'Proxy access is removed. Tailscale Secrets and deployer NetworkPolicy access were preserved.\n'
     ;;
 esac
