@@ -817,18 +817,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}
 	requestPath := r.URL.EscapedPath()
 	if requestPath == clientDiscoveryPath {
-		if clientAddrHeader != "" {
-			allowed, err := s.discovery.allowPerNetContext(r.Context(), state.addr)
-			if err != nil {
-				s.log.Error("check public WebSocket discovery rate limit; serving static document", "err", err, "client_addr", state.addr, "source", clientAddrHeader)
-			} else if !allowed {
-				if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("public WebSocket discovery request refused at rate limit",
-						"client_addr", state.addr, "source", clientAddrHeader, "suppressed", dropped)
-				}
-				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
-				return
+		if clientAddrHeader != "" && !s.discovery.allowPerNet(state.addr) {
+			if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
+				s.log.Info("public WebSocket discovery request refused at rate limit",
+					"client_addr", state.addr, "source", clientAddrHeader, "suppressed", dropped)
 			}
+			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			return
 		}
 		s.handleClientDiscovery(w, r, discoveryDocument)
 		return

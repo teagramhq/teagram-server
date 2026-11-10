@@ -169,16 +169,16 @@ func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (b
 	return denied == nil, nil
 }
 
-// allowPerNetContext applies only the per-network discovery budget. The
-// separate public WebSocket's static discovery document uses this compatibility
-// path so its default route does not acquire a deployment-wide store dependency.
-func (l *discoveryLimiter) allowPerNetContext(ctx context.Context, addr netip.Addr) (bool, error) {
+// allowPerNet applies only the in-memory per-network discovery budget. Public
+// WebSocket discovery serves a static document and does not need a store call
+// or the deployment-wide discovery budget.
+func (l *discoveryLimiter) allowPerNet(addr netip.Addr) bool {
 	if l.limits.MaxRequestsPerNet <= 0 {
-		return true, nil
+		return true
 	}
 	bucket, ok := store.IPBucketKey(addr)
 	if !ok {
-		return true, nil
+		return true
 	}
 	now := time.Now()
 	l.mu.Lock()
@@ -188,29 +188,19 @@ func (l *discoveryLimiter) allowPerNetContext(ctx context.Context, addr netip.Ad
 	}
 	if network.calls >= l.limits.MaxRequestsPerNet {
 		l.mu.Unlock()
-		return false, nil
+		return false
 	}
 	if len(l.perNet) >= l.maxBuckets && l.perNet[bucket].start.IsZero() {
 		l.prune(now)
 		if len(l.perNet) >= l.maxBuckets {
 			l.mu.Unlock()
-			return false, nil
+			return false
 		}
 	}
 	network.calls++
 	l.perNet[bucket] = network
 	l.mu.Unlock()
-	if l.store == nil {
-		return true, nil
-	}
-	denied, err := l.store.CheckDiscoveryRateLimit(ctx, addr,
-		store.RateLimitConfig{},
-		store.RateLimitConfig{Limit: l.limits.MaxRequestsPerNet, Window: l.limits.PerNetWindow},
-	)
-	if err != nil {
-		return false, err
-	}
-	return denied == nil, nil
+	return true
 }
 
 func (l *discoveryLimiter) allowContextForPath(ctx context.Context, addr netip.Addr, path ListenerPath) (bool, error) {
