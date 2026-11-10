@@ -255,7 +255,20 @@ def kubectl(args, state):
         print("pod/teagram-deployer-escape-check created (server dry run)")
         sys.exit(0)
     if args[0] == "create":
-        print(json.dumps(create_from_env(args, sys.stdin.read())))
+        env_file = next((arg.split("=", 1)[1] for arg in args
+                         if arg.startswith("--from-env-file=")), None)
+        if env_file is None:
+            text = sys.stdin.read()
+        else:
+            expected_env_dir = pathlib.Path(LXC_ROOT, "run").resolve()
+            if pathlib.Path(env_file).resolve().parent != expected_env_dir:
+                fail("temporary env file was created outside the LXC sandbox")
+            try:
+                with open(env_file) as handle:
+                    text = handle.read()
+            except OSError:
+                fail("kubectl could not read the temporary env file")
+        print(json.dumps(create_from_env(args, text)))
         sys.exit(0)
     if args[:2] == ["auth", "can-i"]:
         verb, resource = args[2:4]
@@ -375,14 +388,32 @@ def k3s(args):
 
 def lxc(cmd):
     state = load_state()
+    if any("/dev/stdin" in arg for arg in cmd):
+        fail("open /dev/stdin: permission denied in unprivileged LXC")
     if cmd[0] == "bash" and cmd[1:2] == ["-s"]:
         sys.stdin.read()
         sys.exit(0)
     if (cmd[0] == "bash" and cmd[1:2] == ["-c"] and
-            'manifest=$(k3s kubectl "$@")' in cmd[2]):
+            "--from-env-file=$env_file" in cmd[2]):
+        script = cmd[2].replace(
+            "/run/teagram-k3s-env.",
+            os.path.join(LXC_ROOT, "run/teagram-k3s-env."),
+        )
         sys.stdout.flush()
         sys.stderr.flush()
-        sys.exit(subprocess.run(["bash", "-c", *cmd[2:]]).returncode)
+        sys.exit(subprocess.run(["bash", "-c", script, *cmd[3:]]).returncode)
+    if (cmd[0] == "sh" and cmd[1:2] == ["-c"] and
+            'temporary=$(mktemp "${destination}.XXXXXX")' in cmd[2]):
+        destination, mode = cmd[-2:]
+        target = os.path.join(LXC_ROOT, destination.lstrip("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        temporary = target + ".test-transfer"
+        with open(temporary, "wb") as handle:
+            handle.write(sys.stdin.buffer.read())
+        os.chmod(temporary, int(mode, 8))
+        os.replace(temporary, target)
+        log_action("file-write " + destination)
+        sys.exit(0)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "command -v k3s" in cmd[2]:
         sys.exit(0 if state["k3s_installed"] else 1)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "install.sh" in cmd[2]:
@@ -419,6 +450,9 @@ def lxc(cmd):
         log_action("sysctl")
         sys.exit(0)
     if cmd[0] == "sshd":
+        runtime_dir = os.path.join(LXC_ROOT, "run/sshd")
+        if not os.path.isdir(runtime_dir):
+            fail("Missing privilege separation directory: /run/sshd")
         sys.exit(0)
     if cmd[0] == "ss":
         print("State Recv-Q Send-Q Local Address:Port Peer Address:Port")

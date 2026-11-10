@@ -270,9 +270,12 @@ grep --fixed-strings --quiet "kubectl exec --namespace \"\$SOURCE_NAMESPACE\" po
 grep --fixed-strings --quiet '/run/teagramd/blob-mode/.' deploy/k8s/test-cutover-alpha-incus.sh ||
   fail 'the actual cutover runner test adapter must read blob-mode authority from the source PVC'
 fence_step=$(sed -n '/^fence_source_writes() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
+stop_container_step=$(sed -n '/^stop_running_compose_container() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
 fence_verification=$(sed -n '/^verify_source_write_fence() {/,/^}/p' deploy/k8s/cutover-alpha.sh)
 # shellcheck disable=SC2016
-[[ "$fence_step" == *'[[ $service == postgres || $service == rustfs ]] && continue'* &&
+[[ "$fence_step" == *'alpha_for_each_line "$running_ids" stop_running_compose_container'* &&
+   "$stop_container_step" == *'[[ $service == postgres || $service == rustfs ]] && return 0'* &&
+   "$fence_verification" == *'alpha_for_each_line "$(<"$COMPOSE_STOPPED_FILE")" verify_stopped_compose_container'* &&
    "$fence_verification" == *'check_source_container teagram-rustfs-1'* ]] ||
   fail 'the source write fence must preserve and verify the RustFS Compose service'
 grep --fixed-strings --quiet 'teagram-rustfs-1|rustfs)' deploy/k8s/test-cutover-alpha-incus.sh ||

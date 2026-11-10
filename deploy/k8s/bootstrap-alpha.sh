@@ -22,6 +22,8 @@ readonly MEDIA_KEYS_PATH=/run/teagramd/media-keys
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/alpha-incus.sh"
 
 fail() {
   printf 'k3s bootstrap: %s\n' "$*" >&2
@@ -46,7 +48,7 @@ Would add or verify Incus proxies bound to alpha loopback: 16443 to LXC port 644
 Would start the LXC, install ca-certificates, curl, iptables, nftables, and OpenSSH as needed, and select only nft-backed iptables alternatives.
 Would install /etc/sysctl.d/90-teagram-k3s.conf in the LXC and enable IP forwarding plus bridge netfilter.
 Would install pinned k3s v1.37.1+k3s1 with Traefik, ServiceLB, and metrics-server disabled, then enable it and wait for a Ready node.
-Would install the agents' forced-command SSH menu and the existing Multica public key, restrict root SSH to that command, disable password login and forwarding, and restart sshd only if its files change.
+Would create /run/sshd before validating the SSH configuration, install the agents' forced-command SSH menu and the existing Multica public key, restrict root SSH to that command, disable password login and forwarding, and restart sshd only if its files change.
 Would create the teagram namespace with enforced Pod Security baseline, ServiceAccount teagram-deployer, namespace-only Role and RoleBinding, and token Secret.
 Would create ServiceAccount teagram-agent with token automount disabled and a namespace-only read Role and RoleBinding.
 Would install the cluster-scoped ValidatingAdmissionPolicy teagram-agent-pod-delete and binding, restricting agent pod deletes to controller-owned teagramd, linkselector, linklanding, or cloudflared pods.
@@ -240,16 +242,13 @@ ensure_proxy() {
 
 install_file_if_changed() {
   local source_file=$1 destination=$2 mode=$3
-  # The command string is evaluated inside the LXC, where $1 and $2 are arguments.
   # shellcheck disable=SC2016
   if incus exec --mode=non-interactive "$INSTANCE" -- bash -c \
     'test ! -L "$1" && test "$(stat -c "%a:%u:%g" "$1" 2>/dev/null)" = "$2:0:0"' -- "$destination" "$mode" && \
-    incus exec --mode=non-interactive "$INSTANCE" -- cmp -s "$destination" /dev/stdin \
-      < "$source_file"; then
+    alpha_remote_file_matches "$INSTANCE" "$destination" "$source_file"; then
     return
   fi
-  incus exec "$INSTANCE" -- install -D -o root -g root -m "$mode" /dev/stdin "$destination" \
-    < "$source_file"
+  alpha_install_remote_file "$INSTANCE" "$destination" "$mode" < "$source_file"
   INSTALL_CHANGED=true
 }
 
@@ -273,12 +272,24 @@ apply_env_resource() {
   if [[ $kind == secret ]]; then
     create_args+=(generic)
   fi
-  create_args+=("$name" --namespace "$NAMESPACE" --from-env-file=/dev/stdin --dry-run=client -o json)
-  # The remote shell keeps the generated Secret manifest in LXC memory only.
+  create_args+=("$name" --namespace "$NAMESPACE" --dry-run=client -o json)
+  # The temporary env file stays on the LXC's memory-backed /run filesystem.
   # shellcheck disable=SC2016
   if kubectl_error=$(printf '%s\n' "$@" |
     incus exec --mode=non-interactive "$INSTANCE" -- bash -c '
-      manifest=$(k3s kubectl "$@")
+      env_file=$(mktemp /run/teagram-k3s-env.XXXXXX) || {
+        status=$?
+        printf "K3S_BOOTSTRAP_FAILURE create %s\n" "$status" >&2
+        exit "$status"
+      }
+      trap '\''rm -f -- "$env_file"'\'' EXIT HUP INT TERM
+      cat > "$env_file"
+      input_status=$?
+      if (( input_status != 0 )); then
+        printf "K3S_BOOTSTRAP_FAILURE create %s\n" "$input_status" >&2
+        exit "$input_status"
+      fi
+      manifest=$(k3s kubectl "$@" "--from-env-file=$env_file")
       create_status=$?
       if (( create_status != 0 )); then
         printf "K3S_BOOTSTRAP_FAILURE create %s\n" "$create_status" >&2
@@ -480,8 +491,8 @@ then
   fail 'the k3s LXC package or kernel preflight failed'
 fi
 
-sysctl_file=$(mktemp)
-ops_ssh_config=$(mktemp)
+sysctl_file=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-k3s-sysctl)
+ops_ssh_config=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-k3s-ops-ssh)
 trap 'rm -f -- "$sysctl_file" "$ops_ssh_config"' EXIT
 cat > "$sysctl_file" <<'EOF'
 net.ipv4.ip_forward = 1
@@ -533,12 +544,13 @@ if [[ -n $remote_keys && $remote_keys != "$AGENT_AUTHORIZED_KEY" ]]; then
 fi
 if [[ $remote_keys != "$AGENT_AUTHORIZED_KEY" || $remote_key_mode != 600:0:0 ]]; then
   printf '%s\n' "$AGENT_AUTHORIZED_KEY" |
-    incus exec "$INSTANCE" -- install -o root -g root -m 0600 /dev/stdin /root/.ssh/authorized_keys
+    alpha_install_remote_file "$INSTANCE" /root/.ssh/authorized_keys 0600
   INSTALL_CHANGED=true
 fi
 install_file_if_changed "$ops_ssh_config" /etc/ssh/sshd_config.d/00-teagram-k3s-ops.conf 644
 install_file_if_changed "$REPO_ROOT/deploy/k8s/teagram-k3s-ops.sh" \
   /usr/local/sbin/teagram-ops 700
+alpha_ensure_sshd_runtime_dir "$INSTANCE"
 incus exec "$INSTANCE" -- sshd -t
 if ! incus exec "$INSTANCE" -- systemctl is-enabled --quiet ssh; then
   incus exec "$INSTANCE" -- systemctl enable ssh
