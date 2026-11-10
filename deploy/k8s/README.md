@@ -271,6 +271,10 @@ MTProto port 2443.
 | Tailnet MTProto | Tailscale userspace forwarding to the proxy pod's loopback `socat` listener on 2443, then `teagramd:2443` | Half-close-preserving MTProto listener |
 | Tailnet Bot API | TCP 2447 through Tailscale proxy with PROXY v1 to `teagramd:2447` | Bot API relay on pod port 2448 |
 
+Tailscale Serve's TCP forward closes both sockets on the first EOF. Tailnet
+Bot API clients must keep the write side open until they receive the HTTP
+response.
+
 The public `server.teagram.io` and Bot API routes remain behind `hold-merge`
 until MAIN-3599 and MAIN-3600 are live. Funnel stays disabled. The tunnel and
 Tailscale Serve configuration target Kubernetes Service names only; neither
@@ -350,6 +354,10 @@ Before the first install, the tailnet administrator must:
    }
    ```
 
+   Keep the grant limited to TCP 443, 2443, and 2447. The proxy metrics
+   listener on 9002 is reachable through userspace forwarding but has no
+   Tailscale grant.
+
 5. Remove wildcard source grants. Do not add `tag:teagram` as a grant source,
    an `autoApprovers` entry, a Funnel `nodeAttrs` rule, or a node share.
 6. After storing the key in the external Secret, run the reviewed installer
@@ -405,11 +413,13 @@ Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
 new in-cluster device is named `teagram` and that
 `teagram.tailaa4918.ts.net` resolves to that device. CI runs the same discovery
 probe through the same `socat` loopback forwarder configured in the proxy pod,
-and fails when it returns zero bytes. Tailscale Serve does not handle TCP 2443:
-the userspace netstack forwards it to the pod loopback listener, which preserves
-the client's write half-close while waiting for the server response. CI keeps
-the real Tailscale daemon scaled to zero, so it verifies the forwarder and
-half-close exchange without registering a tailnet device.
+and fails when it returns zero bytes. Both socat forwarders use a 30-second
+closing wait so a delayed discovery response is not cut off after the client's
+half-close. Tailscale Serve does not handle TCP 2443: the userspace netstack
+forwards it to the pod loopback listener, which preserves the client's write
+half-close while waiting for the server response. CI keeps the real Tailscale
+daemon scaled to zero, so it verifies the forwarder and half-close exchange
+without registering a tailnet device.
 
 During a proxy incident, run the reviewed access rollback with the admin
 kubeconfig. It stops the proxy and removes its API egress policy, state

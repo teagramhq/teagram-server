@@ -256,6 +256,10 @@ jq --exit-status '
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/admin"].Proxy == "http://teagramd:2445/admin"
 ' <<<"$serve_config" >/dev/null ||
   fail 'the Tailscale Serve config must contain only the named tailnet Service targets and ports'
+grep --fixed-strings --quiet '"ip": ["tcp:443", "tcp:2443", "tcp:2447"]' deploy/k8s/README.md ||
+  fail 'the tailnet grant must exclude the proxy metrics listener on 9002'
+grep --fixed-strings --quiet 'Bot API clients must keep the write side open' deploy/k8s/README.md ||
+  fail 'the tailnet Bot API limitation around TCP half-close must be documented'
 python3 .github/scripts/test-tailscale-serve-routes.py <<<"$serve_config" ||
   fail 'Tailscale Serve mount prefixes must resolve to the expected teagramd backend paths'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .image' deploy/k8s/base/tailscale-proxy.yaml)" == \
@@ -306,7 +310,7 @@ ci_forwarder_args="$(yq -r '.spec.template.spec.initContainers[] | select(.name 
    "$production_forwarder_command" == "$ci_forwarder_command" &&
    "$production_forwarder_command" == socat &&
    "$production_forwarder_args" == "$ci_forwarder_args" &&
-   "$production_forwarder_args" == '-d -d TCP-LISTEN:2443,bind=127.0.0.1,reuseaddr,fork TCP:teagramd:2443' &&
+   "$production_forwarder_args" == '-d -d -t 30 TCP-LISTEN:2443,bind=127.0.0.1,reuseaddr,fork TCP:teagramd:2443' &&
    "$(yq -r '.spec.template.spec.initContainers[] | select(.name == "mtproto-forwarder") | .restartPolicy' deploy/k8s/ci/mtproto-probe-job.yaml)" == Always ]] ||
   fail 'the MTProto CI job must use the same half-close forwarder as the production proxy'
 discovery_probe_command="$(yq -r '.spec.template.spec.containers[] | select(.name == "discovery") | .command | join(" ")' deploy/k8s/ci/mtproto-probe-job.yaml)"
