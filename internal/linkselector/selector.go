@@ -227,7 +227,7 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
 		}
 		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
-		if recovered != nil {
+		if recovered != nil && !unexpectedPanic {
 			panic(recovered)
 		}
 	}()

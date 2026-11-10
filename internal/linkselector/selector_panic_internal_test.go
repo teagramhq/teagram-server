@@ -2,8 +2,8 @@ package linkselector
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestUnexpectedHandlerPanicLogsFailureBeforeRepanicking(t *testing.T) {
+func TestUnexpectedHandlerPanicLogsAndReturnsHTTP500(t *testing.T) {
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	var logs bytes.Buffer
@@ -27,20 +27,28 @@ func TestUnexpectedHandlerPanicLogsFailureBeforeRepanicking(t *testing.T) {
 		panic("SENTINEL_PANIC")
 	})
 
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/main.js", nil)
-	response := httptest.NewRecorder()
-	var recovered any
-	func() {
-		defer func() {
-			recovered = recover()
-		}()
-		handler.ServeHTTP(response, request)
-	}()
-	if recovered == nil {
-		t.Fatal("ServeHTTP did not re-panic after recording the handler failure")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/main.js", nil)
+	if err != nil {
+		t.Fatalf("build panic request: %v", err)
 	}
-	if response.Code != http.StatusInternalServerError {
-		t.Errorf("panic response code = %d, want %d", response.Code, http.StatusInternalServerError)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("GET after selector panic: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	if readErr != nil {
+		t.Errorf("read panic response: %v", readErr)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Errorf("close panic response: %v", err)
+	}
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Errorf("panic response code = %d, want %d", response.StatusCode, http.StatusInternalServerError)
+	}
+	if len(body) == 0 {
+		t.Error("panic response body is empty")
 	}
 
 	var sawFailureSummary, sawPanicLog bool
