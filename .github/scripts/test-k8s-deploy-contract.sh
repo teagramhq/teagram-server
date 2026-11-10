@@ -91,7 +91,7 @@ k3s_start_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Star
 k3s_node_ready_line="$(grep -n -F 'kubectl wait --for=condition=Ready node --all --timeout=180s' <<< "$k3s_start_step" | tail -n 1 | cut -d: -f1 || true)"
 k3s_flannel_gate_line="$(grep -n -m 1 -F 'flannel_cni_ready=false' <<< "$k3s_start_step" | cut -d: -f1 || true)"
 k3s_workload_start_line="$(grep -n -m 1 -F 'kubectl create namespace teagram' <<< "$k3s_start_step" | cut -d: -f1 || true)"
-flannel_timeout_block="$(awk '/flannel_cni_ready/ && /!= true/ { in_timeout=1 } in_timeout { print } in_timeout && /exit 1/ { exit }' <<< "$k3s_start_step")"
+flannel_timeout_block="$(awk '/flannel_cni_ready/ && /!= true/ { in_timeout=1 } in_timeout { print } in_timeout && /^[[:space:]]*fi$/ { exit }' <<< "$k3s_start_step")"
 [[ "$k3s_node_ready_line" =~ ^[0-9]+$ &&
    "$k3s_flannel_gate_line" =~ ^[0-9]+$ &&
    "$k3s_workload_start_line" =~ ^[0-9]+$ &&

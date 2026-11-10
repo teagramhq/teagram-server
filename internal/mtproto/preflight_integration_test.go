@@ -127,10 +127,8 @@ func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, 7, keys, nil, nil)
 	server.SetHandshakeTimeout(time.Second)
 	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
-		MaxRequests:       1,
-		MaxRequestsPerNet: 1,
-		Window:            time.Minute,
-		PerNetWindow:      time.Minute,
+		MaxRequests: 1,
+		Window:      time.Minute,
 	}); err != nil {
 		t.Fatalf("set discovery limits: %v", err)
 	}
@@ -148,7 +146,34 @@ func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
 		}
 	})
 
-	probe := func() int { return sendRawDiscoveryProbe(t, listener.Addr().String()) }
+	probe := func() int {
+		t.Helper()
+		conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close() //nolint:errcheck // server closes each preflight socket.
+		nonce := make([]byte, discovery.NonceSize)
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatalf("nonce: %v", err)
+		}
+		request, err := discovery.BuildPreflightRequest(nonce)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if _, err := conn.Write(request); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		closeWrite(t, conn)
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		response, err := io.ReadAll(conn)
+		if err != nil && len(response) > 0 {
+			t.Fatalf("read response (%d bytes): %v", len(response), err)
+		}
+		return len(response)
+	}
 
 	if got := probe(); got == 0 {
 		t.Fatal("first locally admitted probe received no response")
