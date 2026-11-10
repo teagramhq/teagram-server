@@ -111,16 +111,23 @@ bash .github/scripts/set-k8s-ci-migration-version.sh \
 apply_ci_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Apply the rendered CI overlay to k3s") | .run' .github/workflows/ci.yml)"
 prepare_ci_line="$(grep -n -m 1 -F '.github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
 render_ci_line="$(grep -n -m 1 -F 'kubectl kustomize deploy/k8s/ci' <<< "$apply_ci_step" | cut -d: -f1)"
+probe_serviceaccount_line="$(grep -n -m 1 -F 'kubectl apply --filename deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml' <<< "$apply_ci_step" | cut -d: -f1)"
 dry_run_ci_line="$(grep -n -m 1 -F "kubectl apply --dry-run=server --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
 apply_ci_line="$(grep -n -m 1 -F "kubectl apply --filename \"\$RUNNER_TEMP/k8s-ci.yaml\"" <<< "$apply_ci_step" | cut -d: -f1)"
 [[ "$prepare_ci_line" =~ ^[0-9]+$ &&
    "$render_ci_line" =~ ^[0-9]+$ &&
+   "$probe_serviceaccount_line" =~ ^[0-9]+$ &&
    "$dry_run_ci_line" =~ ^[0-9]+$ &&
    "$apply_ci_line" =~ ^[0-9]+$ &&
    "$prepare_ci_line" -lt "$render_ci_line" &&
-   "$render_ci_line" -lt "$dry_run_ci_line" &&
+   "$render_ci_line" -lt "$probe_serviceaccount_line" &&
+   "$probe_serviceaccount_line" -lt "$dry_run_ci_line" &&
    "$dry_run_ci_line" -lt "$apply_ci_line" ]] ||
-  fail 'the CI migration version must be updated before rendering and applying the overlay'
+  fail 'the CI overlay must precreate its ServiceAccount before server dry-run and apply'
+[[ "$(yq -r '.kind' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == ServiceAccount &&
+   "$(yq -r '.metadata.name' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == tailscale-proxy &&
+   "$(yq -r '.automountServiceAccountToken' deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml)" == true ]] ||
+  fail 'the CI policy probe must use a dedicated ServiceAccount with its token mounted'
 
 check_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Check RustFS initializer secret mounts") | .run' .github/workflows/ci.yml)"
 [[ -n "$check_step" && "$check_step" != null ]] ||

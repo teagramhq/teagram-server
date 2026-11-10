@@ -4,6 +4,7 @@ namespace: teagram
 resources:
   - ../prod
   - tailnet-policy-probes.yaml
+  - tailscale-proxy-probe-serviceaccount.yaml
 configMapGenerator:
   - name: required-migration-version
     behavior: replace

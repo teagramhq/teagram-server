@@ -1985,6 +1985,7 @@ jobs:
             | kubectl apply --filename=-
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
           kubectl kustomize deploy/k8s/ci > "$RUNNER_TEMP/k8s-ci.yaml"
+          kubectl apply --filename deploy/k8s/ci/tailscale-proxy-probe-serviceaccount.yaml
           kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-ci.yaml"
           kubectl apply --filename "$RUNNER_TEMP/k8s-ci.yaml"
 
