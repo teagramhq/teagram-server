@@ -188,6 +188,44 @@ class DocumentationCheckTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_code_span_does_not_cross_blank_paragraph_boundary(self):
+        (self.root / "README.md").write_text(
+            "` unfinished paragraph\n\n"
+            "[missing](docs/nope.md) and `valid code`\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
+
+    def test_code_span_does_not_cross_heading_boundary(self):
+        (self.root / "README.md").write_text(
+            "` unfinished paragraph\n"
+            "# Heading\n"
+            "[missing](docs/nope.md) and `valid code`\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
+
+    def test_code_span_does_not_cross_fenced_block_boundary(self):
+        (self.root / "README.md").write_text(
+            "` unfinished paragraph\n"
+            "```text\nexample\n```\n"
+            "[missing](docs/nope.md) and `valid code`\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
+
     def test_escaped_backtick_closes_code_span_before_broken_link(self):
         (self.root / "README.md").write_text(
             "`code\\` [missing](docs/nope.md) and `valid`\n"

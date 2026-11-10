@@ -14,6 +14,11 @@ ENVIRONMENT_NAME_EXTRACTOR = Path(__file__).with_name("config_environment_names.
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
 HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
 FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
+SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
+THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+LIST_ITEM_START = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)")
+BLOCKQUOTE_START = re.compile(r"^ {0,3}>")
 
 
 def config_environment_names(root):
@@ -60,8 +65,10 @@ def markdown_files(root):
 
 def without_code(text):
     characters = list(text)
+    block_boundaries = set()
     fence_char = None
     fence_length = 0
+    in_blockquote = False
     line_start = 0
     while line_start < len(text):
         line_end = text.find("\n", line_start)
@@ -77,6 +84,8 @@ def without_code(text):
         line = text[line_start:content_end]
         start = FENCE_START.match(line)
         if fence_char is None and start:
+            block_boundaries.add(line_start)
+            in_blockquote = False
             fence_char = start.group(1)[0]
             fence_length = len(start.group(1))
             for index in range(line_start, content_end):
@@ -86,8 +95,23 @@ def without_code(text):
             if closing:
                 fence_char = None
                 fence_length = 0
+                block_boundaries.add(line_end)
+                in_blockquote = False
             for index in range(line_start, content_end):
                 characters[index] = " "
+        elif not line.strip():
+            block_boundaries.update((line_start, line_end))
+            in_blockquote = False
+        elif BLOCKQUOTE_START.match(line):
+            if not in_blockquote:
+                block_boundaries.add(line_start)
+            in_blockquote = True
+        elif ATX_HEADING.match(line) or SETEXT_HEADING.match(line) or THEMATIC_BREAK.match(line) or REFERENCE_LINK.match(line):
+            block_boundaries.update((line_start, line_end))
+            in_blockquote = False
+        elif LIST_ITEM_START.match(line):
+            block_boundaries.add(line_start)
+            in_blockquote = False
         line_start = line_end
 
     cleaned = "".join(characters)
@@ -108,6 +132,8 @@ def without_code(text):
         search = run_end
         closing_end = None
         while search < len(cleaned):
+            if search in block_boundaries:
+                break
             if cleaned[search] != "`":
                 search += 1
                 continue
