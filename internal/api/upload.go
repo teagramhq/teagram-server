@@ -123,7 +123,7 @@ func (h *handlers) checkUploadPartRateLimit(r *mtproto.Request, payload []byte) 
 	if len(payload) == 0 {
 		return nil
 	}
-	return h.checkRateLimitCost(r, "save_file_part", h.rateLimitUploadBytes, len(payload))
+	return h.checkRateLimitCost(r, "save_file_part_bytes", h.rateLimitUploadBytes, len(payload))
 }
 
 func (h *handlers) discardOversizedUpload(r *mtproto.Request, fileID int64) error {

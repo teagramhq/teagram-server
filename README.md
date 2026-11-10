@@ -74,7 +74,7 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_WEBSOCKET_LISTEN_PATH` | `limited` | Set to `tailnet` only when the WebSocket listener is tailnet-only |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | unset | Optional separate public WebSocket MTProto listener |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_PATH` | `limited` | Public WebSocket listener cannot use tailnet policy |
-| `TG_CLIENT_ADDR_CF_PROXY_CIDRS` | loopback | Forwarder addresses trusted to supply public WebSocket `CF-Connecting-IP` |
+| `TG_CLIENT_ADDR_CF_PROXY_CIDRS` | unset (legacy trust accepts any peer) | Comma-separated source addresses that may supply public WebSocket `CF-Connecting-IP`; set a list to restrict trust, since an unset list preserves legacy behavior and trusts any peer |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Public-listener account registration policy |
 | `TG_ADVERTISE_ADDR` | derived | Public `host:port` advertised to clients |
 | `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |
