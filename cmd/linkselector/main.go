@@ -28,12 +28,17 @@ const (
 func main() {
 	listenHost := flag.String("listen-address", defaultListenAddress, "IP address to listen on")
 	port := flag.Int("port", defaultPort, "TCP port to listen on")
-	serverUpstream := flag.String("server-upstream", "", "optional teagramd API service origin")
+	serverUpstream := flag.String("server-upstream", "", "required teagramd API service origin")
 	webUpstream := flag.String("web-upstream", defaultWebUpstream, "Web service origin")
 	landingUpstream := flag.String("landing-upstream", defaultLandingTarget, "landing service origin")
 	flag.Parse()
+	if err := validateServerUpstream(*serverUpstream); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "usage: linkselector -server-upstream origin [-listen-address ip] [-port number] [-web-upstream origin] [-landing-upstream origin]")
+		os.Exit(2)
+	}
 	if flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: linkselector [-listen-address ip] [-port number] [-server-upstream origin] [-web-upstream origin] [-landing-upstream origin]")
+		fmt.Fprintln(os.Stderr, "usage: linkselector -server-upstream origin [-listen-address ip] [-port number] [-web-upstream origin] [-landing-upstream origin]")
 		os.Exit(2)
 	}
 
@@ -68,6 +73,13 @@ func main() {
 		logger.Error("Web selector stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+func validateServerUpstream(upstream string) error {
+	if upstream == "" {
+		return errors.New("-server-upstream is required")
+	}
+	return nil
 }
 
 func addressFor(host string, port int) (string, error) {

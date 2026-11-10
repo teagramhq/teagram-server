@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -63,15 +62,19 @@ var (
 )
 
 type selector struct {
-	serverURL        *url.URL
+	serverAPI        *serverAPIUpstream
 	webURL           *url.URL
 	landingURL       *url.URL
 	inviteTargets    linklanding.InviteTargets
 	client           *http.Client
-	serverTransport  *http.Transport
 	logger           *slog.Logger
 	stagedWebBodies  *semaphore.Weighted
 	admissionTimeout time.Duration // Production uses upstreamTimeout; in-package tests shorten it.
+}
+
+type serverAPIUpstream struct {
+	url       *url.URL
+	transport *http.Transport
 }
 
 type completionReason string
@@ -97,12 +100,13 @@ func NewHandler(serverUpstream, webUpstream, landingUpstream string, logger *slo
 	if err != nil {
 		return nil, errors.New("invalid landing upstream")
 	}
-	var serverURL *url.URL
+	var serverAPI *serverAPIUpstream
 	if serverUpstream != "" {
-		serverURL, err = parseUpstream(serverUpstream)
-		if err != nil {
+		serverURL, parseErr := parseUpstream(serverUpstream)
+		if parseErr != nil {
 			return nil, errors.New("invalid server upstream")
 		}
+		serverAPI = &serverAPIUpstream{url: serverURL}
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -122,17 +126,19 @@ func NewHandler(serverUpstream, webUpstream, landingUpstream string, logger *slo
 		ExpectContinueTimeout:  time.Second,
 		DisableCompression:     true,
 	}
-	serverTransport := &http.Transport{
-		Proxy:                  nil,
-		DialContext:            dialer.DialContext,
-		MaxIdleConns:           16,
-		MaxIdleConnsPerHost:    8,
-		MaxResponseHeaderBytes: 8192,
-		IdleConnTimeout:        30 * time.Second,
-		TLSHandshakeTimeout:    upstreamDialTimeout,
-		ResponseHeaderTimeout:  upstreamDialTimeout,
-		ExpectContinueTimeout:  time.Second,
-		DisableCompression:     true,
+	if serverAPI != nil {
+		serverAPI.transport = &http.Transport{
+			Proxy:                  nil,
+			DialContext:            dialer.DialContext,
+			MaxIdleConns:           16,
+			MaxIdleConnsPerHost:    8,
+			MaxResponseHeaderBytes: 8192,
+			IdleConnTimeout:        30 * time.Second,
+			TLSHandshakeTimeout:    upstreamDialTimeout,
+			ResponseHeaderTimeout:  upstreamDialTimeout,
+			ExpectContinueTimeout:  time.Second,
+			DisableCompression:     true,
+		}
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -143,12 +149,11 @@ func NewHandler(serverUpstream, webUpstream, landingUpstream string, logger *slo
 	}
 
 	return &selector{
-		serverURL:        serverURL,
+		serverAPI:        serverAPI,
 		webURL:           webURL,
 		landingURL:       landingURL,
 		inviteTargets:    inviteTargets,
 		client:           client,
-		serverTransport:  serverTransport,
 		logger:           logger,
 		stagedWebBodies:  semaphore.NewWeighted(maxStagedWebBodyBytes),
 		admissionTimeout: upstreamTimeout,
@@ -170,55 +175,76 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	target := classifyTarget(r.Method, r.RequestURI)
 	response := &statusWriter{ResponseWriter: w}
-	class := target.class
-	var outcome requestOutcome
-	switch {
-	case target.serverAPI && s.serverURL != nil:
-		outcome = s.serveServerAPI(response, r)
-	case target.serverAPI:
-		target = requestTarget{class: defaultRouteClass, landingPath: "/"}
-		class = target.class
-		outcome = s.serveLanding(response, r, target.landingPath)
-	case target.web:
+	class := target.routeClass()
+	outcome := requestOutcome{reason: reasonOK}
+	defer func() {
+		recovered := recover()
+		if recoveredErr, ok := recovered.(error); ok && errors.Is(recoveredErr, http.ErrAbortHandler) {
+			outcome.failed = true
+			outcome.reason = reasonTransport
+		}
+		if outcome.failed || ((target.kind == routeKindWeb || target.kind == routeKindServerAPI) && response.writeErr) {
+			class = unavailableRouteClass
+		}
+		status := response.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if response.writeErr {
+			outcome.reason = reasonDownstreamWrite
+			s.logger.Error("selector response write failed", "route_class", class, "status", status)
+		}
+		elapsed := max(time.Since(started).Milliseconds(), int64(0))
+		attrs := []slog.Attr{
+			slog.String("route_class", class),
+			slog.Int("status", status),
+			slog.String("reason", string(outcome.reason)),
+			slog.Int64("elapsed_ms", elapsed),
+		}
+		if isHTTPStatus(outcome.upstreamStatus) {
+			attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
+		}
+		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	switch target.kind {
+	case routeKindServerAPI:
+		if s.serverAPI == nil {
+			s.logger.Error("selector server API upstream is not configured",
+				"route_class", serverAPIRouteClass,
+				"route", serverAPIRouteName(r.RequestURI),
+				"method", r.Method,
+			)
+			outcome = requestOutcome{failed: true, reason: reasonTransport}
+			writeUnavailable(response, http.StatusServiceUnavailable)
+		} else {
+			outcome = s.serveServerAPI(response, r, *s.serverAPI)
+		}
+	case routeKindWeb:
 		outcome = s.serveWeb(response, r, target)
 	default:
 		outcome = s.serveLanding(response, r, target.landingPath)
 	}
-	if outcome.failed || ((target.web || target.serverAPI) && response.writeErr) {
-		class = unavailableRouteClass
-	}
-	status := response.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	if response.writeErr {
-		outcome.reason = reasonDownstreamWrite
-		s.logger.Error("selector response write failed", "route_class", class, "status", status)
-	}
-	elapsed := max(time.Since(started).Milliseconds(), int64(0))
-	attrs := []slog.Attr{
-		slog.String("route_class", class),
-		slog.Int("status", status),
-		slog.String("reason", string(outcome.reason)),
-		slog.Int64("elapsed_ms", elapsed),
-	}
-	if isHTTPStatus(outcome.upstreamStatus) {
-		attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
-	}
-	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
 }
 
-func (s *selector) serveServerAPI(w http.ResponseWriter, incoming *http.Request) requestOutcome {
+func (s *selector) serveServerAPI(w http.ResponseWriter, incoming *http.Request, upstream serverAPIUpstream) requestOutcome {
 	failed := false
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(s.serverURL)
+			request.SetURL(upstream.url)
 			request.Out.Header.Del("Authorization")
 			request.Out.Header.Del("Cookie")
 			request.Out.Header.Del("Referer")
 		},
-		Transport: s.serverTransport,
-		ErrorLog:  log.New(io.Discard, "", 0),
+		Transport: upstream.transport,
+		ErrorLog: slog.NewLogLogger(s.logger.With(
+			"route_class", serverAPIRouteClass,
+			"route", serverAPIRouteName(incoming.RequestURI),
+			"method", incoming.Method,
+		).Handler(), slog.LevelError),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			failed = true
 			s.logger.Error("selector upstream request failed",
@@ -459,46 +485,84 @@ func writeUnavailable(w http.ResponseWriter, status int) {
 	}
 }
 
+type routeKind uint8
+
+const (
+	routeKindLanding routeKind = iota
+	routeKindInvite
+	routeKindUsername
+	routeKindMessage
+	routeKindServerAPI
+	routeKindWeb
+)
+
 type requestTarget struct {
-	class       string
-	serverAPI   bool
-	web         bool
+	kind        routeKind
 	path        string
 	query       string
 	hasQuery    bool
 	landingPath string
 }
 
+func (target requestTarget) routeClass() string {
+	switch target.kind {
+	case routeKindInvite:
+		return inviteRouteClass
+	case routeKindUsername:
+		return usernameRouteClass
+	case routeKindMessage:
+		return messageRouteClass
+	case routeKindServerAPI:
+		return serverAPIRouteClass
+	case routeKindWeb:
+		return webRouteClass
+	default:
+		return defaultRouteClass
+	}
+}
+
+func routeKindForLinkClass(class string) routeKind {
+	switch class {
+	case inviteRouteClass:
+		return routeKindInvite
+	case usernameRouteClass:
+		return routeKindUsername
+	case messageRouteClass:
+		return routeKindMessage
+	default:
+		return routeKindLanding
+	}
+}
+
 func classifyTarget(method, requestURI string) requestTarget {
 	if strings.EqualFold(method, http.MethodConnect) {
-		return requestTarget{class: defaultRouteClass, landingPath: "/"}
+		return requestTarget{kind: routeKindLanding, landingPath: "/"}
 	}
 	rawPath, query, hasQuery, valid := splitRequestTarget(requestURI)
 	if !valid {
-		return requestTarget{class: defaultRouteClass, landingPath: "/"}
+		return requestTarget{kind: routeKindLanding, landingPath: "/"}
 	}
 	if isAdminPath(rawPath) {
-		return requestTarget{class: defaultRouteClass, landingPath: "/admin"}
+		return requestTarget{kind: routeKindLanding, landingPath: "/admin"}
 	}
 	if isServerAPIPath(rawPath) {
-		return requestTarget{class: serverAPIRouteClass, serverAPI: true}
+		return requestTarget{kind: routeKindServerAPI}
 	}
 	if rawPath == linklanding.InviteLandingPath {
-		return requestTarget{class: inviteRouteClass, landingPath: linklanding.InviteLandingPath}
+		return requestTarget{kind: routeKindInvite, landingPath: linklanding.InviteLandingPath}
 	}
 	if class, ok := linkClass(rawPath); ok {
-		return requestTarget{class: class, landingPath: canonicalLandingPath(class)}
+		return requestTarget{kind: routeKindForLinkClass(class), landingPath: canonicalLandingPath(class)}
 	}
 	if isWebPath(rawPath) {
 		return requestTarget{
-			class:    webRouteClass,
-			web:      true,
+			kind:     routeKindWeb,
 			path:     rawPath,
 			query:    query,
 			hasQuery: hasQuery,
 		}
 	}
-	return requestTarget{class: defaultRouteClass, landingPath: "/"}
+	return requestTarget{kind: routeKindLanding, landingPath: "/"}
 }
 
 func isServerAPIPath(path string) bool {
@@ -528,13 +592,16 @@ func serverAPIRouteName(requestURI string) string {
 }
 
 func proxyErrorCause(err error) string {
+	if err == nil {
+		return "unknown"
+	}
 	if opErr, ok := errors.AsType[*net.OpError](err); ok {
 		return opErr.Error()
 	}
 	if urlErr, ok := errors.AsType[*url.Error](err); ok && urlErr.Err != nil {
 		return proxyErrorCause(urlErr.Err)
 	}
-	return fmt.Sprintf("%T", err)
+	return err.Error()
 }
 
 func splitRequestTarget(requestURI string) (path, query string, hasQuery, valid bool) {

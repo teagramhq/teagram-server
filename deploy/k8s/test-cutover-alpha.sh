@@ -50,6 +50,7 @@ done
 for required_rollback in \
   'confirm ROUTE-RESTORED "Restore these Cloudflare tunnel routes (after -> before):' \
   'rollback)' \
+  'web.teagram.io: $CLOUDFLARE_WEB_AFTER -> $CLOUDFLARE_WEB_BEFORE' \
   'server.teagram.io $CLOUDFLARE_APIWS_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE' \
   'server.teagram.io $CLOUDFLARE_DISCOVERY_PATH: $CLOUDFLARE_SERVER_AFTER -> $CLOUDFLARE_SERVER_BEFORE'; do
   if ! grep --fixed-strings --quiet -- "$required_rollback" deploy/k8s/cutover-alpha.sh; then
