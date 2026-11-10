@@ -193,7 +193,8 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if outcome.failed || ((target.kind == routeKindWeb || target.kind == routeKindServerAPI) && response.writeErr) {
 			class = unavailableRouteClass
 		}
-		if unexpectedPanic && response.status == 0 {
+		responseCommitted := response.status != 0
+		if unexpectedPanic && !responseCommitted {
 			writeUnavailable(response, http.StatusInternalServerError)
 		}
 		status := response.status
@@ -227,7 +228,7 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
 		}
 		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
-		if recovered != nil && !unexpectedPanic {
+		if recovered != nil && (!unexpectedPanic || responseCommitted) {
 			panic(recovered)
 		}
 	}()
