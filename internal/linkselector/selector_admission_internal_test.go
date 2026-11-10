@@ -859,7 +859,7 @@ func newAdmissionTestSelectorWithOrigins(t *testing.T, webOrigin, landingOrigin 
 	t.Helper()
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
-	handler, err := NewHandler(webOrigin, landingOrigin, logger)
+	handler, err := NewHandler("", webOrigin, landingOrigin, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

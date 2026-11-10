@@ -570,6 +570,66 @@ func TestLoadRejectsInvalidWebSocketBrowserOnly(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsBrowserOnlyWithoutListener(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		setting    string
+		listenName string
+	}{
+		{name: "default", setting: "TG_WEBSOCKET_BROWSER_ONLY", listenName: "TG_WEBSOCKET_LISTEN_ADDR"},
+		{name: "public", setting: "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", listenName: "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+			t.Setenv("TG_WEBSOCKET_LISTEN_ADDR", "")
+			t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "")
+			t.Setenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "")
+			t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "")
+			t.Setenv("TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "")
+			t.Setenv(tt.setting, "true")
+
+			_, err := config.Load(discardLog())
+			if err == nil || !strings.Contains(err.Error(), tt.setting+" requires "+tt.listenName) {
+				t.Fatalf("Load error = %v, want %s to require %s", err, tt.setting, tt.listenName)
+			}
+		})
+	}
+}
+
+func TestLoadClientConfigRejectsInvalidWebSocketBrowserOnly(t *testing.T) {
+	t.Setenv("TG_LISTEN_ADDR", ":2443")
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.test:2443")
+	t.Setenv("TG_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2444")
+	t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "maybe")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
+
+	_, err := config.LoadClientConfig()
+	if err == nil || !strings.Contains(err.Error(), "TG_WEBSOCKET_BROWSER_ONLY") {
+		t.Fatalf("LoadClientConfig error = %v, want it to name TG_WEBSOCKET_BROWSER_ONLY", err)
+	}
+}
+
+func TestLoadClientConfigRejectsBrowserOnlyWithoutListener(t *testing.T) {
+	t.Setenv("TG_LISTEN_ADDR", ":2443")
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.test:2443")
+	t.Setenv("TG_WEBSOCKET_LISTEN_ADDR", "")
+	t.Setenv("TG_WEBSOCKET_BROWSER_ONLY", "true")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
+
+	_, err := config.LoadClientConfig()
+	if err == nil || !strings.Contains(err.Error(), "TG_WEBSOCKET_BROWSER_ONLY requires TG_WEBSOCKET_LISTEN_ADDR") {
+		t.Fatalf("LoadClientConfig error = %v, want missing WebSocket listener", err)
+	}
+}
+
 func TestLoadWebSocketOriginPatterns(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

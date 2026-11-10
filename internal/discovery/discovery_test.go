@@ -56,6 +56,41 @@ func TestDocumentIsCanonicalAndContainsOnlyPublicIdentity(t *testing.T) {
 	}
 }
 
+func TestDocumentAdvertisesBrowserOnlyAlongsideMTProtoBinding(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocumentWithWebSocketAdvertiseAddr(
+		"mtproto.example.com:2443",
+		"browser.example.com:443",
+		2,
+		&key.PublicKey,
+		false,
+		"",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("new browser-only document: %v", err)
+	}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal browser-only document: %v", err)
+	}
+	var served discovery.Document
+	if err := json.Unmarshal(data, &served); err != nil {
+		t.Fatalf("decode browser-only document: %v", err)
+	}
+	if served.MTProto.Endpoint != "mtproto.example.com:2443" {
+		t.Fatalf("browser-only document MTProto endpoint = %q", served.MTProto.Endpoint)
+	}
+	if !served.WebSocket.BrowserOnly || served.WebSocket.Endpoint != "wss://browser.example.com/apiws" {
+		t.Fatalf("browser-only WebSocket binding = %+v", served.WebSocket)
+	}
+}
+
 func TestDocumentAdvertisesDemoGuestSignUpAsLiteralTrue(t *testing.T) {
 	t.Parallel()
 

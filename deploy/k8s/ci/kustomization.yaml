@@ -29,6 +29,7 @@ images:
   - name: ghcr.io/teagramhq/link-edge-selector
     newTag: ci
 patches:
+  - path: teagramd-ci-settings.yaml
   - path: cloudflared-ci.yaml
   - path: tailscale-proxy-ci.yaml
   - path: linkselector-ci.yaml

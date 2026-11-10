@@ -30,6 +30,8 @@ spec:
             - /usr/local/bin/mtproto-smoke
             - --endpoint
             - teagramd:2443
+            - --expect-registration-mode
+            - open
             - --discovery-file
             - /client/client.json
           volumeMounts:

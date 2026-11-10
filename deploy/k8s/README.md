@@ -106,6 +106,7 @@ The bootstrap deliberately leaves them untouched:
 | `teagramd-blob-credentials` Secret | `TG_BLOB_S3_ACCESS_KEY_ID`, `TG_BLOB_S3_SECRET_ACCESS_KEY` |
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
 | `teagramd-admin` Secret | `TG_ADMIN_TOKEN_HASH`; optional `TG_ADMIN_ORIGIN` |
+| `teagramd-turnstile` Secret | `secret-key`, mounted read-only at `/run/secrets/teagramd-turnstile/secret-key` with mode `0440` |
 | `cloudflared-token` Secret | `token` |
 | `tailscale-auth` Secret | `authkey`; one-use auth key supplied through the external secret store |
 | `teagram-tailscale-state` Secret | Persistent node state created once by the access installer |
@@ -114,6 +115,10 @@ The bootstrap deliberately leaves them untouched:
 All images used by the production overlays are publicly pullable. Bootstrap
 does not read Docker credentials or create a registry Secret. Public utility
 images are pinned from their configured registries.
+
+Supply the Turnstile secret externally as `teagramd-turnstile`; its value is
+never stored in the repository. Teagramd reads the mounted `secret-key` file
+through `TG_TURNSTILE_SECRET_KEY_FILE`.
 
 Keep the Postgres password in `TG_POSTGRES_DSN` identical to
 `POSTGRES_PASSWORD`. Do not commit the Secret objects or credentials. The alpha
@@ -174,13 +179,14 @@ the persistent volumes. An application rollback restores the prior image
 digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
 
-The Cloudflare Tunnel's remotely managed route for public web traffic targets
+The Cloudflare Tunnel's remotely managed route for `web.teagram.io` targets
 `http://linkselector:8081`. The selector sends teagramd links to
 `http://linklanding:8082` and ordinary web traffic to the `web` Service on
-port 8080. Desktop discovery and `/apiws` use `server.teagram.io` through
-cloudflared to `teagramd:2446`; public Bot API uses `teagramd:2449`. MAIN-3599
-and MAIN-3600 own those public routes and listeners. `teagramd` remains
-ClusterIP-only, and the public listener does not expose MTProto port 2443.
+port 8080. Route `server.teagram.io` `/apiws` and discovery paths directly to
+`http://teagramd:2446`; it advertises `server.teagram.io:443` and allows the
+`https://web.teagram.io` origin. The public Bot API uses `teagramd:2449`.
+`teagramd` remains ClusterIP-only, and the public listener does not expose
+MTProto port 2443.
 
 ## In-cluster ingress paths
 

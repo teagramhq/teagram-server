@@ -7,17 +7,19 @@ spec:
     spec:
       containers:
         - name: cloudflared
-          image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
           imagePullPolicy: IfNotPresent
-          command: ["python3", "-c", "import time; time.sleep(3600)"]
+          command: ["socat"]
+          args:
+            - TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork
+            - TCP:teagramd:2446
           env:
             - $patch: replace
-            - name: PYTHONDONTWRITEBYTECODE
-              value: "1"
-          volumeMounts:
-            - name: ingress-probes
-              mountPath: /tests
-              readOnly: true
+          ports:
+            - $patch: replace
+            - name: connector
+              containerPort: 8080
+              protocol: TCP
           startupProbe:
             $patch: replace
             exec:
@@ -39,6 +41,50 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
+        - name: ingress-probe
+          image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-c", "import time; time.sleep(3600)"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: ingress-probes
+              mountPath: /tests
+              readOnly: true
+          startupProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: ingress-probes
           configMap:

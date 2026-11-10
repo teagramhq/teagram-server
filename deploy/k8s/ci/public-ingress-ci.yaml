@@ -11,7 +11,7 @@ spec:
             - name: TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
               value: ":2446"
             - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
-              value: server.teagram.io:443
+              value: server.example.test:443
             - name: TG_CLIENT_ADDR_TRUST
               value: cf-connecting-ip
         # CI-only stand-in for the public Bot API listener; MAIN-3600 replaces it.

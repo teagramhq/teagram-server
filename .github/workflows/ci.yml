@@ -1920,9 +1920,16 @@ jobs:
             --from-file=TG_ADMIN_TOKEN_HASH="$RUNNER_TEMP/admin-token-hash" \
             --from-file=TG_ADMIN_ORIGIN="$RUNNER_TEMP/admin-origin"
           rm -f "$RUNNER_TEMP/admin-token-hash" "$RUNNER_TEMP/admin-origin"
+          umask 077
+          printf '%s' 1x0000000000000000000000000000000AA \
+            > "$RUNNER_TEMP/turnstile-secret-key"
+          kubectl create secret generic teagramd-turnstile --namespace teagram \
+            --from-file=secret-key="$RUNNER_TEMP/turnstile-secret-key"
+          rm -f "$RUNNER_TEMP/turnstile-secret-key"
           kubectl create configmap teagramd-runtime --namespace teagram \
             --from-literal=TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-            --from-literal=TG_ADVERTISE_ADDR=127.0.0.1:12443
+            --from-literal=TG_ADVERTISE_ADDR=teagramd:2443 \
+            --from-literal=TG_MEDIA_KEY_CURRENT=1
 
       - name: Apply the rendered CI overlay to k3s
         run: |
@@ -1931,6 +1938,7 @@ jobs:
           kubectl create configmap k8s-ingress-probes --namespace teagram \
             --from-file=probe_discovery.py=deploy/k8s/probe-discovery.py \
             --from-file=test-networkpolicy.py=deploy/k8s/test-networkpolicy.py \
+            --from-file=test-k8s-public-websocket.py=.github/scripts/test-k8s-public-websocket.py \
             --dry-run=client --output yaml \
             | kubectl apply --filename=-
           bash .github/scripts/set-k8s-ci-migration-version.sh migrations deploy/k8s/ci
@@ -2033,6 +2041,27 @@ jobs:
           kubectl wait --for=condition=complete job/mtproto-smoke \
             --namespace teagram --timeout=120s
           kubectl logs job/mtproto-smoke --namespace teagram
+
+      - name: Test public WebSocket and discovery through the CI connector
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          connector_pod=$(kubectl get pods --namespace teagram \
+            --selector app.kubernetes.io/name=cloudflared \
+            --output jsonpath='{.items[0].metadata.name}')
+          test -n "$connector_pod"
+          for attempt in $(seq 1 30); do
+            if kubectl exec --namespace teagram "$connector_pod" \
+              --container=ingress-probe -- python3 \
+              /tests/test-k8s-public-websocket.py --host 127.0.0.1 --port 8080; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "Public WebSocket or discovery failed through the CI connector" >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Collect k3s diagnostics on failure
         if: failure()

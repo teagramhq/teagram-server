@@ -72,7 +72,7 @@ def probe_public_ingress(host: str) -> None:
             "/.well-known/teagramd/client",
             headers={
                 "CF-Connecting-IP": "203.0.113.10",
-                "Host": "server.teagram.io",
+                "Host": "server.example.test",
                 "Connection": "close",
             },
         )
@@ -91,10 +91,10 @@ def probe_public_ingress(host: str) -> None:
     public_endpoint = document.get("websocket", {}).get("endpoint")
     if (
         document.get("version") != 1
-        or public_endpoint != "wss://server.teagram.io/apiws"
+        or public_endpoint != "wss://server.example.test/apiws"
     ):
         raise RuntimeError(
-            "public discovery did not advertise wss://server.teagram.io/apiws"
+            "public discovery did not advertise wss://server.example.test/apiws"
         )
 
     bot_api = http.client.HTTPConnection(host, 2449, timeout=5)
@@ -104,7 +104,7 @@ def probe_public_ingress(host: str) -> None:
             "/botbad-token/getMe",
             headers={
                 "CF-Connecting-IP": "203.0.113.10",
-                "Host": "server.teagram.io",
+                "Host": "server.example.test",
                 "Connection": "close",
             },
         )

@@ -66,21 +66,27 @@ func main() {
 	mediaDownloadFile := flag.String("media-download-file", "", "download the document in --media-manifest-file after sign-in")
 	mediaManifestFile := flag.String("media-manifest-file", "", "read or write the protected media reference used by a cutover smoke")
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
+	expectedRegistrationMode := flag.String("expect-registration-mode", "", "require help.getAppConfig to advertise the given registration mode")
 	flag.Parse()
 	quotaExpectationSet := false
+	registrationModeExpectationSet := false
 	flag.Visit(func(value *flag.Flag) {
-		if value.Name == "expect-user-invite-quota" {
+		switch value.Name {
+		case "expect-user-invite-quota":
 			quotaExpectationSet = true
+		case "expect-registration-mode":
+			registrationModeExpectationSet = true
 		}
 	})
 	if quotaExpectationSet && *expectedInviteQuota < 0 {
 		log.Fatal("expected user invite quota must be non-negative")
 	}
+	if registrationModeExpectationSet && *expectedRegistrationMode != "closed" &&
+		*expectedRegistrationMode != "invite" && *expectedRegistrationMode != "open" {
+		log.Fatal("expected registration mode must be closed, invite, or open")
+	}
 	if flag.NArg() != 0 {
 		log.Fatal("unexpected arguments")
-	}
-	if quotaExpectationSet && *discoveryFile != "" {
-		log.Fatal("--expect-user-invite-quota cannot be combined with --discovery-file")
 	}
 	if (*usernameFile == "") != (*passwordFile == "") {
 		log.Fatal("--username-file and --password-file must be used together")
@@ -89,19 +95,19 @@ func main() {
 		((*mediaUploadFile != "" || *mediaDownloadFile != "") != (*mediaManifestFile != "")) {
 		log.Fatal("use exactly one of --media-upload-file or --media-download-file with --media-manifest-file")
 	}
-	if *usernameFile != "" && (*discoveryFile == "" || quotaExpectationSet) {
-		log.Fatal("credential sign-in requires --discovery-file and cannot use --expect-user-invite-quota")
+	if *usernameFile != "" && (*discoveryFile == "" || quotaExpectationSet || registrationModeExpectationSet) {
+		log.Fatal("credential sign-in requires --discovery-file and cannot use app-config expectations")
 	}
 	if (*mediaUploadFile != "" || *mediaDownloadFile != "") && *usernameFile == "" {
 		log.Fatal("media smoke requires --username-file and --password-file")
 	}
-	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota,
+	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota, *expectedRegistrationMode,
 		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaManifestFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int,
+func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int, expectedRegistrationMode string,
 	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaManifestFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
@@ -134,14 +140,13 @@ func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int,
 			return http.ErrUseLastResponse
 		},
 	}
-	if expectedInviteQuota >= 0 {
-		settings, err := probeAppConfig(ctx, endpoint, discoveryURL, client)
+	if expectedInviteQuota >= 0 || expectedRegistrationMode != "" {
+		settings, err := probeAppConfig(ctx, endpoint, discoveryURL, discoveryFile, client)
 		if err != nil {
 			return fmt.Errorf("MTProto app-config smoke on %s: %w", endpoint, err)
 		}
-		if settings.registrationMode != "invite" || !settings.userInvitesEnabled || settings.userInviteQuota != expectedInviteQuota {
-			return fmt.Errorf("help.getAppConfig registration_mode=%q user_invites_enabled=%t user_invite_quota=%d; want invite, true, %d",
-				settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota, expectedInviteQuota)
+		if err := validateAppConfig(settings, expectedRegistrationMode, expectedInviteQuota); err != nil {
+			return err
 		}
 		if _, err := fmt.Printf("help.getAppConfig passed on %s registration_mode=%s user_invites_enabled=%t user_invite_quota=%d\n",
 			endpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
@@ -170,11 +175,17 @@ type inviteAppConfig struct {
 	userInviteQuota    int
 }
 
-func probeAppConfig(ctx context.Context, endpoint, discoveryURL string, httpClient *http.Client) (inviteAppConfig, error) {
+func probeAppConfig(ctx context.Context, endpoint, discoveryURL, discoveryFile string, httpClient *http.Client) (inviteAppConfig, error) {
 	if err := discovery.ValidateEndpoint(endpoint); err != nil {
 		return inviteAppConfig{}, fmt.Errorf("validate target endpoint: %w", err)
 	}
-	identity, err := fetchIdentity(ctx, discoveryURL, httpClient)
+	var identity serverIdentity
+	var err error
+	if discoveryFile != "" {
+		identity, err = readIdentityFile(discoveryFile)
+	} else {
+		identity, err = fetchIdentity(ctx, discoveryURL, httpClient)
+	}
 	if err != nil {
 		return inviteAppConfig{}, err
 	}
@@ -211,6 +222,19 @@ func probeAppConfig(ctx context.Context, endpoint, discoveryURL string, httpClie
 		return inviteAppConfig{}, err
 	}
 	return settings, nil
+}
+
+func validateAppConfig(settings inviteAppConfig, expectedRegistrationMode string, expectedInviteQuota int) error {
+	if expectedRegistrationMode != "" && settings.registrationMode != expectedRegistrationMode {
+		return fmt.Errorf("help.getAppConfig registration_mode=%q; want %q",
+			settings.registrationMode, expectedRegistrationMode)
+	}
+	if expectedInviteQuota >= 0 && (settings.registrationMode != "invite" ||
+		!settings.userInvitesEnabled || settings.userInviteQuota != expectedInviteQuota) {
+		return fmt.Errorf("help.getAppConfig registration_mode=%q user_invites_enabled=%t user_invite_quota=%d; want invite, true, %d",
+			settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota, expectedInviteQuota)
+	}
+	return nil
 }
 
 func parseInviteAppConfig(appConfig tg.HelpAppConfigClass) (inviteAppConfig, error) {

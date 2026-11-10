@@ -151,9 +151,9 @@ bootstrap_teagramd_digest="$(yq -r '.images[] | select(.name == "ghcr.io/teagram
 [[ -n "$prod_teagramd_digest" && "$prod_teagramd_digest" == "$bootstrap_teagramd_digest" ]] ||
   fail 'the production bootstrap Job must use the same pinned teagramd digest as the workload'
 grep --fixed-strings --quiet -- 'http://web:8080' deploy/k8s/base/linkselector-deployment.yaml ||
-  fail 'linkselector must resolve its web backend through the in-cluster web Service'
-if grep --fixed-strings --quiet 'teagramd' deploy/k8s/base/linkselector-deployment.yaml; then
-  fail 'linkselector must not forward public or tailnet requests to teagramd'
+  fail 'linkselector must route public web traffic to the in-cluster web Service'
+if grep --extended-regexp --quiet -- 'server-upstream|http://teagramd' deploy/k8s/base/linkselector-deployment.yaml; then
+  fail 'linkselector must not forward any public or tailnet path to teagramd'
 fi
 [[ "$(yq -r '.spec.type' deploy/k8s/base/linkselector-service.yaml)" == ClusterIP &&
    "$(yq -r '.spec.selector."app.kubernetes.io/name"' deploy/k8s/base/linkselector-service.yaml)" == linkselector &&
@@ -164,7 +164,7 @@ fi
 [[ "$(yq -r 'select(.metadata.name == "teagramd") | .spec.type' deploy/k8s/base/teagramd-service.yaml)" == ClusterIP &&
    "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(has("nodePort")) | .nodePort' deploy/k8s/base/teagramd-service.yaml)" == '' &&
    "$(yq -r 'select(.metadata.name == "teagramd") | [.spec.ports[] | [.name, .port] | join(":")] | join(",")' deploy/k8s/base/teagramd-service.yaml)" == \
-     'mtproto:2443,websocket:2444,admin:2445,bot-api:2447,public-websocket:2446,public-bot-api:2449' ]] ||
+     'mtproto:2443,websocket:2444,admin:2445,public-ws:2446,bot-api:2447,public-bot-api:2449' ]] ||
   fail 'teagramd Services must stay internal and expose only the reviewed listener ports'
 [[ "$(yq -r '.spec.ingress | length' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 2 &&
    "$(yq -r '[.spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/name"] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 'tailscale-proxy,cloudflared' &&
@@ -239,6 +239,13 @@ ci_advertise_addr="$(yq -r 'select(.kind == "ConfigMap" and (.metadata.name | te
 mtproto_smoke_endpoint="$(yq -r '.spec.template.spec.containers[] | select(.name == "smoke") | .command[2]' deploy/k8s/ci/mtproto-probe-job.yaml)"
 [[ "$ci_advertise_addr" == 'teagramd:2443' && "$mtproto_smoke_endpoint" == "$ci_advertise_addr" ]] ||
   fail 'the in-cluster MTProto smoke must use the endpoint advertised by the CI server'
+ci_public_advertise_addr="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR") | .value' <<<"$ci_overlay")"
+ci_public_registration="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_REGISTRATION") | .value' <<<"$ci_overlay")"
+ci_public_origin="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") | .value' <<<"$ci_overlay")"
+[[ "$ci_public_advertise_addr" == 'server.example.test:443' &&
+   "$ci_public_registration" == closed &&
+   "$ci_public_origin" == 'https://web.example.test' ]] ||
+  fail 'the CI overlay must use synthetic public discovery, registration, and origin settings'
 if yq --exit-status 'select(.kind == "Job" and .metadata.name == "mtproto-smoke")' \
   <<<"$ci_overlay" >/dev/null 2>&1; then
   fail 'the MTProto smoke Job must be created after its generated client ConfigMap'
@@ -260,11 +267,26 @@ if yq -r '.jobs."test-k8s-deploy".steps[].run // ""' .github/workflows/ci.yml |
   grep --fixed-strings --quiet 'kubectl port-forward'; then
   fail 'k8s-deploy must not use port-forward for any smoke test'
 fi
+public_websocket_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Test public WebSocket and discovery through the CI connector") | .run' .github/workflows/ci.yml)"
+[[ "$public_websocket_step" == *'test-k8s-public-websocket.py'* &&
+   "$public_websocket_step" == *'--container=ingress-probe'* &&
+   "$public_websocket_step" == *'--host 127.0.0.1 --port 8080'* &&
+   "$public_websocket_step" != *'kubectl port-forward'* ]] ||
+  fail 'the public WebSocket smoke must run inside the connector pod without port-forward'
+grep --fixed-strings --quiet 'TCP:teagramd:2446' deploy/k8s/ci/cloudflared-ci.yaml ||
+  fail 'the disposable public connector must reach the public WebSocket Service directly'
+grep --fixed-strings --quiet 'name: ingress-probe' deploy/k8s/ci/cloudflared-ci.yaml ||
+  fail 'the connector pod must include the Python ingress probe sidecar'
+grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress", "ingress-probe")' \
+  deploy/k8s/test-service-ingress.py ||
+  fail 'cloudflared public listener probes must execute from the connector pod identity'
+python3 .github/scripts/test_k8s_public_websocket_contract.py ||
+  fail 'the public WebSocket connector smoke must validate its discovery contract'
 grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet Bot API check must send a PROXY v1 header'
 grep --fixed-strings --quiet 'deny-public' deploy/k8s/test-networkpolicy.py ||
   fail 'the policy probe must reject non-cloudflared access to both public listeners'
-grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress")' deploy/k8s/test-service-ingress.py ||
+grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress", "ingress-probe")' deploy/k8s/test-service-ingress.py ||
   fail 'the cloudflared identity must prove access to both public listeners'
 grep --fixed-strings --quiet 'deny-egress' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet proxy policy probe must reject egress to PostgreSQL and RustFS'

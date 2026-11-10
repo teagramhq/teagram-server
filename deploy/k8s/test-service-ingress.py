@@ -34,18 +34,21 @@ def kubectl(*args: str) -> str:
         ) from error
 
 
-def exec_probe(pod: str, operation: str) -> None:
+def exec_probe(pod: str, operation: str, container: str | None = None) -> None:
     try:
-        kubectl(
-            "exec",
-            "--namespace",
-            NAMESPACE,
-            pod,
-            "--",
-            "python3",
-            "/tests/test-networkpolicy.py",
-            operation,
+        args = ["exec", "--namespace", NAMESPACE]
+        if container is not None:
+            args.extend(("--container", container))
+        args.extend(
+            (
+                pod,
+                "--",
+                "python3",
+                "/tests/test-networkpolicy.py",
+                operation,
+            )
         )
+        kubectl(*args)
     except RuntimeError as error:
         raise ProbeFailure(str(error)) from error
 
@@ -184,7 +187,7 @@ def rollout_linkselector(cloudflared: str) -> int:
     probes = 0
     while time.monotonic() - started < 300:
         tick = time.monotonic()
-        exec_probe(cloudflared, "linkselector")
+        exec_probe(cloudflared, "linkselector", "ingress-probe")
         probes += 1
         deployment, pods = linkselector_state()
         if linkselector_rollout_complete(deployment, pods, target_generation, old_uids):
@@ -196,7 +199,7 @@ def rollout_linkselector(cloudflared: str) -> int:
     deployment, pods = linkselector_state()
     if not linkselector_rollout_complete(deployment, pods, target_generation, old_uids):
         raise RuntimeError("linkselector rollout completed without all replicas on a new Ready pod")
-    exec_probe(cloudflared, "linkselector")
+    exec_probe(cloudflared, "linkselector", "ingress-probe")
     return probes + 1
 
 
@@ -278,8 +281,8 @@ def main() -> int:
     exec_probe(TAILNET_PROBE, "bot-api")
     exec_probe(TAILNET_PROBE, "deny-public")
     exec_probe(TAILNET_PROBE, "deny-egress")
-    exec_probe(cloudflared, "public-ingress")
-    exec_probe(cloudflared, "deny-tailnet")
+    exec_probe(cloudflared, "public-ingress", "ingress-probe")
+    exec_probe(cloudflared, "deny-tailnet", "ingress-probe")
     for pod in (UNTRUSTED_PROBE, LINKSELECTOR_PROBE):
         exec_probe(pod, "deny-tailnet")
         exec_probe(pod, "deny-public")

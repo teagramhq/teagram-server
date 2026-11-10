@@ -203,6 +203,9 @@ spec:
             - name: websocket
               containerPort: 2444
               protocol: TCP
+            - name: public-ws
+              containerPort: 2446
+              protocol: TCP
             - name: admin
               containerPort: 2445
               protocol: TCP
@@ -250,6 +253,9 @@ spec:
               readOnly: true
             - name: teagramd-blob-credentials
               mountPath: /run/secrets/teagramd-blob
+              readOnly: true
+            - name: teagramd-turnstile
+              mountPath: /run/secrets/teagramd-turnstile
               readOnly: true
             - name: teagramd-media-keys
               mountPath: /run/teagramd/media-keys
@@ -343,6 +349,13 @@ spec:
             items:
               - key: TG_BLOB_S3_SECRET_ACCESS_KEY
                 path: secret-access-key
+        - name: teagramd-turnstile
+          secret:
+            secretName: teagramd-turnstile
+            defaultMode: 288
+            items:
+              - key: secret-key
+                path: secret-key
         - name: teagramd-media-keys
           secret:
             secretName: teagramd-media-keys

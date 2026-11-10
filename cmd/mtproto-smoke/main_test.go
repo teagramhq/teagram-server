@@ -272,6 +272,30 @@ func TestParseInviteAppConfig(t *testing.T) {
 	}
 }
 
+func TestValidateAppConfigRegistrationMode(t *testing.T) {
+	t.Parallel()
+
+	settings := inviteAppConfig{registrationMode: "open"}
+	if err := validateAppConfig(settings, "open", -1); err != nil {
+		t.Fatalf("validate open registration mode: %v", err)
+	}
+	if err := validateAppConfig(settings, "invite", -1); err == nil || !strings.Contains(err.Error(), `want "invite"`) {
+		t.Fatalf("validate mismatched registration mode = %v, want mismatch error", err)
+	}
+
+	inviteSettings := inviteAppConfig{
+		registrationMode:   "invite",
+		userInvitesEnabled: true,
+		userInviteQuota:    3,
+	}
+	if err := validateAppConfig(inviteSettings, "", 3); err != nil {
+		t.Fatalf("validate invite quota 3: %v", err)
+	}
+	if err := validateAppConfig(inviteSettings, "", 2); err == nil || !strings.Contains(err.Error(), "user_invite_quota=3") {
+		t.Fatalf("validate invite quota 2 = %v, want quota mismatch error", err)
+	}
+}
+
 func TestParseInviteAppConfigRejectsIncompleteOrInvalidSettings(t *testing.T) {
 	t.Parallel()
 
