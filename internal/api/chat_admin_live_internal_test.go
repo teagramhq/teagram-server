@@ -105,6 +105,10 @@ func TestChatAdminPushLeavesPtsSlotForNextMessage(t *testing.T) {
 		t.Fatalf("notify next message: %v", err)
 	}
 	waitTransportCount(t, transport, 2)
+	watermarkDeadline := time.Now().Add(5 * time.Second)
+	for conn.LastPushedPts() < perOwner[member.ID] && time.Now().Before(watermarkDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got := conn.LastPushedPts(); got != perOwner[member.ID] || got != 1 {
 		t.Fatalf("pts watermark after next message = %d, want message pts 1", got)
 	}
