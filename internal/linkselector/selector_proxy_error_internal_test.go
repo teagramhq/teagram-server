@@ -99,7 +99,11 @@ func TestServerAPIProxyLogsMidstreamErrorAndCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	selectorServer := httptest.NewServer(handler)
+	requestComplete := make(chan struct{})
+	selectorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(requestComplete)
+		handler.ServeHTTP(w, r)
+	}))
 	t.Cleanup(selectorServer.Close)
 
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, selectorServer.URL+"/.well-known/teagramd/client?token=SENTINEL_QUERY", nil)
@@ -116,6 +120,7 @@ func TestServerAPIProxyLogsMidstreamErrorAndCompletion(t *testing.T) {
 	if err := response.Body.Close(); err != nil {
 		t.Errorf("close discovery response body: %v", err)
 	}
+	<-requestComplete
 
 	var sawProxyError, sawCompletion bool
 	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
