@@ -103,27 +103,101 @@ def unescape_markdown(text):
     return "".join(unescaped)
 
 
+def matching_link_parenthesis(text, start):
+    index = start + 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+
+    if index >= len(text):
+        return None
+
+    if text[index] == "<" and not escaped_at(text, index):
+        index += 1
+        while index < len(text):
+            if text[index] in "\r\n":
+                return None
+            if text[index] == ">" and not escaped_at(text, index):
+                break
+            index += 1
+        if index >= len(text):
+            return None
+        index += 1
+    else:
+        depth = 0
+        while index < len(text):
+            char = text[index]
+            if escaped_at(text, index):
+                index += 1
+                continue
+            if char.isspace() and depth == 0:
+                break
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    return index
+                depth -= 1
+            index += 1
+
+    had_whitespace = False
+    while index < len(text) and text[index].isspace():
+        had_whitespace = True
+        index += 1
+    if index >= len(text):
+        return None
+    if text[index] == ")" and not escaped_at(text, index):
+        return index
+    if not had_whitespace:
+        return None
+
+    title_opening = text[index]
+    if title_opening in "\"'":
+        index += 1
+        while index < len(text):
+            if text[index] in "\r\n":
+                return None
+            if text[index] == title_opening and not escaped_at(text, index):
+                index += 1
+                break
+            index += 1
+        else:
+            return None
+    elif title_opening == "(":
+        depth = 1
+        index += 1
+        while index < len(text) and depth:
+            if escaped_at(text, index):
+                index += 1
+                continue
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            return None
+    else:
+        return None
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == ")" and not escaped_at(text, index):
+        return index
+    return None
+
+
 def matching_delimiter(text, start, opening, closing):
+    if opening == "(" and closing == ")":
+        return matching_link_parenthesis(text, start)
+
     depth = 1
-    in_angle_destination = False
-    if opening == "(":
-        destination_start = start + 1
-        while destination_start < len(text) and text[destination_start].isspace():
-            destination_start += 1
-        in_angle_destination = (
-            destination_start < len(text)
-            and text[destination_start] == "<"
-            and not escaped_at(text, destination_start)
-        )
     for index in range(start + 1, len(text)):
         char = text[index]
         if escaped_at(text, index):
             continue
-        if in_angle_destination and char == ">":
-            in_angle_destination = False
-        elif not in_angle_destination and char == opening:
+        if char == opening:
             depth += 1
-        elif not in_angle_destination and char == closing:
+        elif char == closing:
             depth -= 1
             if depth == 0:
                 return index
