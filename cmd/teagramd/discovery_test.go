@@ -41,6 +41,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	withPublicHostConfig := base
 	withPublicHostConfig.PublicWebSocketAdvertiseHost = "server.teagram.io"
 	withPublicHostConfig.PublicWebSocketAdvertisePort = 443
+	withPublicHostConfig.PublicWebSocketBrowserOnly = true
 	withOverride, public, err := listenerDiscoveryDocuments(withPublicHostConfig, &key.PublicKey, wipeGeneration)
 	if err != nil {
 		t.Fatalf("build listener-scoped discovery: %v", err)
@@ -60,7 +61,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	if withoutPublic.WebSocket.Endpoint != "wss://tailnet.example.test/apiws" {
 		t.Fatalf("public discovery without override = %q, want tailnet endpoint", withoutPublic.WebSocket.Endpoint)
 	}
-	if public.MTProto.Endpoint != "tailnet.example.test:2443" || public.WebSocket.Endpoint != "wss://server.teagram.io/apiws" {
+	if public.MTProto.Endpoint != "tailnet.example.test:2443" || public.WebSocket.Endpoint != "wss://server.teagram.io/apiws" || !public.WebSocket.BrowserOnly {
 		t.Fatalf("public discovery endpoints = MTProto %q, WebSocket %q", public.MTProto.Endpoint, public.WebSocket.Endpoint)
 	}
 	if public.Demo == nil || !public.Demo.GuestSignUp || public.Demo.WipeGeneration != wipeGeneration || public.Turnstile == nil || public.Turnstile.SiteKey != "public-site-key" {
@@ -73,6 +74,75 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	enteredHost := "server.teagram.io"
 	if publicEndpoint.Hostname() != enteredHost {
 		t.Fatalf("web host-match check would reject: entered %q, endpoint host %q", enteredHost, publicEndpoint.Hostname())
+	}
+}
+
+func TestListenerDiscoveryDocumentsAdvertiseBrowserOnlyPolicyPerListener(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	cfg := config.Config{
+		AdvertiseHost:             "demo.example.test",
+		AdvertisePort:             443,
+		DCID:                      2,
+		PublicWebSocketListenAddr: "127.0.0.1:2446",
+		WebSocketBrowserOnly:      true,
+	}
+	defaultDocument, publicDocument, err := listenerDiscoveryDocuments(
+		cfg,
+		&key.PublicKey,
+		strings.Repeat("f", 64),
+	)
+	if err != nil {
+		t.Fatalf("build listener discovery: %v", err)
+	}
+	defaultJSON, err := discovery.MarshalDocument(defaultDocument)
+	if err != nil {
+		t.Fatalf("marshal default listener discovery: %v", err)
+	}
+	publicJSON, err := discovery.MarshalDocument(publicDocument)
+	if err != nil {
+		t.Fatalf("marshal public listener discovery: %v", err)
+	}
+	if !strings.Contains(string(defaultJSON), `"browser_only":true`) {
+		t.Errorf("default discovery = %s, want browser_only true", defaultJSON)
+	}
+	if defaultDocument.MTProto.Endpoint != "demo.example.test:443" {
+		t.Errorf("browser-only default discovery MTProto endpoint = %q, want demo.example.test:443", defaultDocument.MTProto.Endpoint)
+	}
+	if strings.Contains(string(publicJSON), `"browser_only"`) {
+		t.Errorf("public discovery = %s, want browser_only omitted", publicJSON)
+	}
+
+	cfg.WebSocketBrowserOnly = false
+	cfg.PublicWebSocketBrowserOnly = true
+	defaultDocument, publicDocument, err = listenerDiscoveryDocuments(
+		cfg,
+		&key.PublicKey,
+		strings.Repeat("f", 64),
+	)
+	if err != nil {
+		t.Fatalf("build public-only browser-only discovery: %v", err)
+	}
+	defaultJSON, err = discovery.MarshalDocument(defaultDocument)
+	if err != nil {
+		t.Fatalf("marshal default listener discovery: %v", err)
+	}
+	publicJSON, err = discovery.MarshalDocument(publicDocument)
+	if err != nil {
+		t.Fatalf("marshal public listener discovery: %v", err)
+	}
+	if strings.Contains(string(defaultJSON), `"browser_only"`) {
+		t.Errorf("default discovery = %s, want browser_only omitted", defaultJSON)
+	}
+	if !strings.Contains(string(publicJSON), `"browser_only":true`) {
+		t.Errorf("public discovery = %s, want browser_only true", publicJSON)
+	}
+	if publicDocument.MTProto.Endpoint != "demo.example.test:443" {
+		t.Errorf("browser-only public discovery MTProto endpoint = %q, want demo.example.test:443", publicDocument.MTProto.Endpoint)
 	}
 }
 

@@ -176,6 +176,17 @@ host and the `/apiws` path:
 {"version":1,"mtproto":{"endpoint":"mtproto.example.com:443","dc_id":2,"rsa_spki":"<standard-padded-base64-DER-SPKI>"},"websocket":{"endpoint":"wss://mtproto.example.com/apiws"}}
 ```
 
+When the listener's `TG_WEBSOCKET_BROWSER_ONLY` or
+`TG_PUBLIC_WEBSOCKET_BROWSER_ONLY` setting is true, its discovery document adds
+`"browser_only":true` inside `websocket`. The field is omitted otherwise.
+The document still advertises its `mtproto` binding, but Desktop treats this
+flag as a refusal of the whole server and stops before committing that binding.
+Enable either setting only when the advertised raw MTProto endpoint is
+unreachable to native clients; `teagramd` cannot verify reachability outside
+the process. The startup line records `browser_only` and
+`native_mtproto_endpoint_must_be_unreachable` for each WebSocket listener.
+Existing discovery documents without the field keep their current behavior.
+
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` defaults to `false`. When unset or false,
 the document omits `demo`, performs no generation lookup, and keeps the existing
 v1 wire bytes. When true, both `teagramd serve` and `client-config` read the

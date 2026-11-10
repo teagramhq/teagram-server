@@ -300,6 +300,219 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 	return items, nil
 }
 
+const channelHistoryPageAroundUnexpired = `-- name: ChannelHistoryPageAroundUnexpired :many
+WITH member AS MATERIALIZED (
+    SELECT cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c
+      ON c.id = cp.channel_id
+     AND c.deleted_at IS NULL
+    WHERE cp.channel_id = $3::bigint
+      AND cp.user_id = $4::bigint
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+), expiring_bound AS MATERIALIZED (
+    -- The total unexpired expiring posts at this statement's timestamp, or
+    -- NULL when the nodes are not ready or are detectably contradictory.
+    SELECT CASE WHEN counts.expiring_ready
+                 AND counts.expiring_expired <= counts.expiring_total
+                THEN counts.expiring_total - counts.expiring_expired
+           END AS unexpired_total
+    FROM member
+    CROSS JOIN LATERAL channel_post_expiring_counts(
+        $3::bigint,
+        member.available_min_id,
+        statement_timestamp()
+    ) AS counts
+), expiring AS MATERIALIZED (
+    -- The newest unexpired_total expiring posts by expiry are exactly the
+    -- unexpired ones. The expiry predicate excludes the expired backlog even
+    -- when the summary bound is unavailable.
+    SELECT window_post.local_id
+    FROM (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.action_type = 0
+          AND cm.expires_at IS NOT NULL
+          AND cm.expires_at > statement_timestamp()
+        ORDER BY cm.expires_at DESC
+        LIMIT (SELECT expiring_bound.unexpired_total FROM expiring_bound)
+    ) AS window_post
+    WHERE window_post.local_id > (SELECT member.available_min_id FROM member)
+), page_offset AS MATERIALIZED (
+    -- Compute offset_id's ordinal from the same three disjoint live streams
+    -- used below, instead of filtering expired posts during a full channel
+    -- walk.
+    SELECT GREATEST(
+        (SELECT count(*)
+         FROM channel_messages cm
+         CROSS JOIN member
+         WHERE cm.channel_id = $3::bigint
+           AND cm.deleted = false
+           AND cm.ttl_period = 0
+           AND cm.expires_at IS NULL
+           AND cm.local_id > member.available_min_id
+           AND cm.local_id >= $5::bigint)
+        + (SELECT count(*)
+           FROM channel_messages cm
+           CROSS JOIN member
+           WHERE cm.channel_id = $3::bigint
+             AND cm.deleted = false
+             AND cm.action_type <> 0
+             AND cm.ttl_period <> 0
+             AND cm.expires_at IS NULL
+             AND cm.local_id > member.available_min_id
+             AND cm.local_id >= $5::bigint)
+        + (SELECT count(*)
+           FROM expiring
+           WHERE expiring.local_id >= $5::bigint)
+        + $6::bigint,
+        0::bigint
+    ) AS skip
+), visible AS (
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        CROSS JOIN member
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.ttl_period = 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > member.available_min_id
+        ORDER BY cm.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + $7::int
+    )
+    UNION ALL
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        CROSS JOIN member
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.action_type <> 0
+          AND cm.ttl_period <> 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > member.available_min_id
+        ORDER BY cm.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + $7::int
+    )
+    UNION ALL
+    (
+        SELECT expiring.local_id
+        FROM expiring
+        ORDER BY expiring.local_id DESC
+        LIMIT (SELECT page_offset.skip FROM page_offset) + $7::int
+    )
+), page_ids AS (
+    SELECT visible.local_id
+    FROM visible
+    ORDER BY visible.local_id DESC
+    LIMIT $7::int
+    OFFSET (SELECT page_offset.skip FROM page_offset)
+), page AS (
+    SELECT hydrated.channel_id, hydrated.local_id, hydrated.from_id, hydrated.date, hydrated.message,
+           hydrated.edit_date, hydrated.deleted, hydrated.random_id, hydrated.grouped_id,
+           hydrated.file_id, hydrated.sticker_document_id, hydrated.reply_to_msg_id,
+           hydrated.action_type, hydrated.ttl_period, hydrated.post_author, hydrated.entities
+    FROM page_ids
+    CROSS JOIN LATERAL (
+        SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+               cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+               cm.action_type, cm.ttl_period, cm.post_author, cm.entities
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.local_id = page_ids.local_id
+        LIMIT 1
+    ) AS hydrated
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
+FROM page
+WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
+  AND ($2::bigint <= 0 OR local_id > $2::bigint)
+ORDER BY local_id DESC
+`
+
+type ChannelHistoryPageAroundUnexpiredParams struct {
+	MaxID     int64
+	MinID     int64
+	ChannelID int64
+	OwnerID   int64
+	OffsetID  int64
+	AddOffset int64
+	Lim       int32
+}
+
+type ChannelHistoryPageAroundUnexpiredRow struct {
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
+}
+
+// ChannelHistoryPageAroundUnexpired keeps the negative add_offset ordinal and
+// page read on the same live history streams used by ChannelHistoryPageUnexpired.
+// The expiring stream is bounded by the member-floor summary when it is ready;
+// otherwise the expiry predicate still excludes expired unswept posts.
+func (q *Queries) ChannelHistoryPageAroundUnexpired(ctx context.Context, arg ChannelHistoryPageAroundUnexpiredParams) ([]ChannelHistoryPageAroundUnexpiredRow, error) {
+	rows, err := q.db.Query(ctx, channelHistoryPageAroundUnexpired,
+		arg.MaxID,
+		arg.MinID,
+		arg.ChannelID,
+		arg.OwnerID,
+		arg.OffsetID,
+		arg.AddOffset,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelHistoryPageAroundUnexpiredRow
+	for rows.Next() {
+		var i ChannelHistoryPageAroundUnexpiredRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.GroupedID,
+			&i.FileID,
+			&i.StickerDocumentID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+			&i.TtlPeriod,
+			&i.PostAuthor,
+			&i.Entities,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelHistoryPageByDate = `-- name: ChannelHistoryPageByDate :many
 WITH member AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
@@ -978,6 +1191,205 @@ func (q *Queries) ChannelHistoryPageByDate(ctx context.Context, arg ChannelHisto
 	var items []ChannelHistoryPageByDateRow
 	for rows.Next() {
 		var i ChannelHistoryPageByDateRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.GroupedID,
+			&i.FileID,
+			&i.StickerDocumentID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+			&i.TtlPeriod,
+			&i.PostAuthor,
+			&i.Entities,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelHistoryPageUnexpired = `-- name: ChannelHistoryPageUnexpired :many
+WITH member AS MATERIALIZED (
+    SELECT cp.available_min_id
+    FROM channel_participants cp
+    JOIN channels c
+      ON c.id = cp.channel_id
+     AND c.deleted_at IS NULL
+    WHERE cp.channel_id = $3::bigint
+      AND cp.user_id = $4::bigint
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+), expiring_bound AS MATERIALIZED (
+    -- The unexpired expiring total at this statement's timestamp, or NULL (no
+    -- limit) when the nodes are not initialized or detectably contradictory
+    -- (more expired than total); those cases cost rows. Otherwise the total is
+    -- trusted like the history count: a self-consistent undercount drops the
+    -- unexpired posts with the earliest expiry.
+    SELECT CASE WHEN counts.expiring_ready
+                 AND counts.expiring_expired <= counts.expiring_total
+                THEN counts.expiring_total - counts.expiring_expired
+           END AS unexpired_total
+    FROM member
+    CROSS JOIN LATERAL channel_post_expiring_counts(
+        $3::bigint,
+        member.available_min_id,
+        statement_timestamp()
+    ) AS counts
+), expiring AS MATERIALIZED (
+    -- The newest unexpired_total expiring posts by expiry are exactly the
+    -- unexpired ones. The expiry predicate keeps the walk to unexpired entries
+    -- either way, and the ordered limit selects the channel's expiry index
+    -- (channel ID first) over the table-wide expiry index whatever the planner
+    -- estimates. Floor and offset filter the window afterwards, as the window
+    -- is cut by expiry, not by local ID.
+    SELECT window_post.local_id
+    FROM (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.action_type = 0
+          AND cm.expires_at IS NOT NULL
+          AND cm.expires_at > statement_timestamp()
+        ORDER BY cm.expires_at DESC
+        LIMIT (SELECT expiring_bound.unexpired_total FROM expiring_bound)
+    ) AS window_post
+    WHERE window_post.local_id > (SELECT member.available_min_id FROM member)
+      AND ($5::bigint = 0 OR window_post.local_id < $5::bigint)
+), visible AS (
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.ttl_period = 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > (SELECT member.available_min_id FROM member)
+          AND ($5::bigint = 0 OR cm.local_id < $5::bigint)
+        ORDER BY cm.local_id DESC
+        LIMIT $6::int + GREATEST(0::bigint, $7::bigint)
+    )
+    UNION ALL
+    (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.deleted = false
+          AND cm.action_type <> 0
+          AND cm.ttl_period <> 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > (SELECT member.available_min_id FROM member)
+          AND ($5::bigint = 0 OR cm.local_id < $5::bigint)
+        ORDER BY cm.local_id DESC
+        LIMIT $6::int + GREATEST(0::bigint, $7::bigint)
+    )
+    UNION ALL
+    (
+        SELECT expiring.local_id
+        FROM expiring
+        ORDER BY expiring.local_id DESC
+        LIMIT $6::int + GREATEST(0::bigint, $7::bigint)
+    )
+), page_ids AS (
+    SELECT visible.local_id
+    FROM visible
+    ORDER BY visible.local_id DESC
+    LIMIT $6::int
+    OFFSET GREATEST(0::bigint, $7::bigint)
+), page AS (
+    -- LIMIT 1 keeps each hydration a primary-key probe instead of a join over
+    -- the channel.
+    SELECT hydrated.channel_id, hydrated.local_id, hydrated.from_id, hydrated.date, hydrated.message,
+           hydrated.edit_date, hydrated.deleted, hydrated.random_id, hydrated.grouped_id,
+           hydrated.file_id, hydrated.sticker_document_id, hydrated.reply_to_msg_id,
+           hydrated.action_type, hydrated.ttl_period, hydrated.post_author, hydrated.entities
+    FROM page_ids
+    CROSS JOIN LATERAL (
+        SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+               cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+               cm.action_type, cm.ttl_period,
+               cm.post_author, cm.entities
+        FROM channel_messages cm
+        WHERE cm.channel_id = $3::bigint
+          AND cm.local_id = page_ids.local_id
+        LIMIT 1
+    ) AS hydrated
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
+FROM page
+WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
+  AND ($2::bigint <= 0 OR local_id > $2::bigint)
+ORDER BY local_id DESC
+`
+
+type ChannelHistoryPageUnexpiredParams struct {
+	MaxID     int64
+	MinID     int64
+	ChannelID int64
+	OwnerID   int64
+	OffsetID  int64
+	Lim       int32
+	AddOffset int64
+}
+
+type ChannelHistoryPageUnexpiredRow struct {
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
+}
+
+// ChannelHistoryPageUnexpired returns what ChannelHistoryPageWithOffset
+// returns without examining expired unswept posts. The visible rows are read as
+// disjoint streams, each cut at the rows the page needs: posts with no deadline
+// and no TTL policy (history TTL index), service rows with a TTL policy but no
+// deadline (service index) and the unexpired expiring posts (expiry index).
+// Cost follows the unexpired expiring posts, so the caller picks this statement
+// only when the expired backlog is larger. The expiring stream is bounded by
+// the channel's unexpired expiring total, read from the summary in this
+// statement; when the summary is not ready or detectably contradictory the
+// bound is dropped and the stream is limited only by the expiry predicate.
+func (q *Queries) ChannelHistoryPageUnexpired(ctx context.Context, arg ChannelHistoryPageUnexpiredParams) ([]ChannelHistoryPageUnexpiredRow, error) {
+	rows, err := q.db.Query(ctx, channelHistoryPageUnexpired,
+		arg.MaxID,
+		arg.MinID,
+		arg.ChannelID,
+		arg.OwnerID,
+		arg.OffsetID,
+		arg.Lim,
+		arg.AddOffset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelHistoryPageUnexpiredRow
+	for rows.Next() {
+		var i ChannelHistoryPageUnexpiredRow
 		if err := rows.Scan(
 			&i.ChannelID,
 			&i.LocalID,
@@ -2183,7 +2595,8 @@ SELECT summary.entitled::boolean AS entitled,
             WHEN plan.scan_unexpired THEN expiring.expiring_live - unexpired_scan.count
             ELSE 0
        END::bigint AS expired_post_count,
-       (expiring.expiring_ready AND expiring.corrupt)::boolean AS expiring_corrupt
+       (expiring.expiring_ready AND expiring.corrupt)::boolean AS expiring_corrupt,
+       plan.scan_unexpired::boolean AS expired_backlog_larger
 FROM summary
 CROSS JOIN service_count
 CROSS JOIN expiring
@@ -2199,14 +2612,15 @@ type CountChannelHistoryParams struct {
 }
 
 type CountChannelHistoryRow struct {
-	Entitled         bool
-	StatusExists     bool
-	SummaryVersion   int16
-	SummaryReady     bool
-	TotalLive        int64
-	ServiceCount     int64
-	ExpiredPostCount int64
-	ExpiringCorrupt  bool
+	Entitled             bool
+	StatusExists         bool
+	SummaryVersion       int16
+	SummaryReady         bool
+	TotalLive            int64
+	ServiceCount         int64
+	ExpiredPostCount     int64
+	ExpiringCorrupt      bool
+	ExpiredBacklogLarger bool
 }
 
 // Count content posts from the exact member-floor summary. Expired content
@@ -2218,7 +2632,8 @@ type CountChannelHistoryRow struct {
 // subtracted from the expiring suffix total. Cost follows the smaller of the
 // two. Channels not yet rebuilt keep the direct expired-row count. Service
 // rows are sparse relative to content posts and have their own partial history
-// index.
+// index. expired_backlog_larger reports the same comparison so the page read
+// can skip expired rows through the unexpired expiring posts instead.
 func (q *Queries) CountChannelHistory(ctx context.Context, arg CountChannelHistoryParams) (CountChannelHistoryRow, error) {
 	row := q.db.QueryRow(ctx, countChannelHistory, arg.ChannelID, arg.OwnerID)
 	var i CountChannelHistoryRow
@@ -2231,6 +2646,7 @@ func (q *Queries) CountChannelHistory(ctx context.Context, arg CountChannelHisto
 		&i.ServiceCount,
 		&i.ExpiredPostCount,
 		&i.ExpiringCorrupt,
+		&i.ExpiredBacklogLarger,
 	)
 	return i, err
 }

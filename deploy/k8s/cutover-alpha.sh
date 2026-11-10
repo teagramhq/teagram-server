@@ -58,6 +58,8 @@ S3_INVENTORY_SCRATCH=''
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/alpha-incus.sh"
 
 fail() {
   printf 'k3s cutover: %s\n' "$*" >&2
@@ -84,6 +86,7 @@ dry_run() {
   cat <<'EOF'
 Would verify alpha, the root-only cutover kubeconfig, source Compose containers and encrypted S3 authority, the live teagramd and migration image revisions, matching immutable k8s images, required migration version and Job names, the five tailnet-only HTTPS handlers, the old MTProto and Bot API TCP routes, required namespace resources, and an unused production namespace.
 Would verify main-branch build provenance for all five resolved image digests and the exact live revision before source writes are fenced.
+Would require the source server_key.pem, enc_key.hex, and Tailscale Serve TCP route 2443 before applying target resources; missing identity or rollback state fails with a specific precheck message.
 Would server-dry-run and apply deploy/k8s/prod-cutover: pinned production and teagram-web images, cloudflared=0, teagramd=0, suspended database migrations, the web Service, and the state PVCs.
 Would create the teagramd-admin Secret from the old Compose environment without printing its values.
 Would use a temporary importer pod to prepare PVC ownership and permissions, copy state, and remove the pod.
@@ -142,14 +145,14 @@ fi
 incus info "$SOURCE_INSTANCE" >/dev/null 2>&1 || fail 'the old teagram LXC is unavailable'
 incus info "$TARGET_INSTANCE" >/dev/null 2>&1 || fail 'the teagram-k3s LXC is unavailable'
 [[ $(incus list "$TARGET_INSTANCE" --format csv -c s) == RUNNING ]] || fail 'teagram-k3s is not running'
-incus exec "$SOURCE_INSTANCE" -- command -v docker >/dev/null || fail 'docker is unavailable in the old teagram LXC'
-incus exec "$SOURCE_INSTANCE" -- command -v tailscale >/dev/null || fail 'tailscale is unavailable in the old teagram LXC'
+alpha_remote_command_exists "$SOURCE_INSTANCE" docker || fail 'docker is unavailable in the old teagram LXC'
+alpha_remote_command_exists "$SOURCE_INSTANCE" tailscale || fail 'tailscale is unavailable in the old teagram LXC'
 incus exec "$SOURCE_INSTANCE" -- busybox wget --help >/dev/null 2>&1 || fail 'BusyBox wget is unavailable in the old teagram LXC'
-incus exec "$TARGET_INSTANCE" -- command -v systemctl >/dev/null || fail 'systemctl is unavailable in teagram-k3s'
-incus exec "$TARGET_INSTANCE" -- command -v k3s >/dev/null || fail 'k3s is unavailable in teagram-k3s'
-incus exec "$TARGET_INSTANCE" -- command -v ip >/dev/null || fail 'ip is unavailable in teagram-k3s'
-incus exec "$TARGET_INSTANCE" -- command -v awk >/dev/null || fail 'awk is unavailable in teagram-k3s'
-incus exec "$TARGET_INSTANCE" -- command -v curl >/dev/null || fail 'curl is unavailable in teagram-k3s'
+alpha_remote_command_exists "$TARGET_INSTANCE" systemctl || fail 'systemctl is unavailable in teagram-k3s'
+alpha_remote_command_exists "$TARGET_INSTANCE" k3s || fail 'k3s is unavailable in teagram-k3s'
+alpha_remote_command_exists "$TARGET_INSTANCE" ip || fail 'ip is unavailable in teagram-k3s'
+alpha_remote_command_exists "$TARGET_INSTANCE" awk || fail 'awk is unavailable in teagram-k3s'
+alpha_remote_command_exists "$TARGET_INSTANCE" curl || fail 'curl is unavailable in teagram-k3s'
 
 if [[ $TEST_MODE == true ]]; then
   [[ $(kubectl config view --minify --output 'jsonpath={.clusters[0].cluster.server}') == https://127.0.0.1:6443 ]] ||
@@ -169,7 +172,7 @@ flock -n 9 || fail 'another k3s cutover or rollback is running'
 record_phase() {
   local next=$1 temporary
   ensure_private_dir "$EVIDENCE_DIR"
-  temporary=$(mktemp "$EVIDENCE_DIR/.phase.XXXXXX")
+  temporary=$(alpha_mktemp_file "$EVIDENCE_DIR" .phase)
   printf '%s\n' "$next" > "$temporary"
   chmod 0600 "$temporary"
   mv -f -- "$temporary" "$PHASE_FILE"
@@ -264,21 +267,24 @@ verify_no_source_postgres_clients() {
   fail 'source PostgreSQL still has client connections after the Compose write fence'
 }
 
+verify_stopped_compose_container() {
+  local container_name=$1 status
+  [[ -z $container_name ]] && return 0
+  status=$(container_status "$container_name") ||
+    fail "could not verify stopped Compose service state: $container_name"
+  [[ $status == exited ]] ||
+    fail "Compose service $container_name restarted while source writes were fenced"
+}
+
 verify_source_write_fence() {
-  local container_name status fenced_revision
+  local fenced_revision
   [[ -f $COMPOSE_STOPPED_FILE && ! -L $COMPOSE_STOPPED_FILE ]] ||
     fail 'stopped Compose service evidence is missing while the source write fence is active'
   verify_private_file "$COMPOSE_STOPPED_FILE" 600 ||
     fail 'stopped Compose service evidence is not root-owned mode 0600'
   check_source_container teagram-postgres-1
   check_source_container teagram-rustfs-1
-  while IFS= read -r container_name; do
-    [[ -z $container_name ]] && continue
-    status=$(container_status "$container_name") ||
-      fail "could not verify stopped Compose service state: $container_name"
-    [[ $status == exited ]] ||
-      fail "Compose service $container_name restarted while source writes were fenced"
-  done < "$COMPOSE_STOPPED_FILE"
+  alpha_for_each_line "$(<"$COMPOSE_STOPPED_FILE")" verify_stopped_compose_container
   verify_no_source_postgres_clients
   fenced_revision=$(source_container_revision) ||
     fail 'could not verify the live teagramd revision while source writes were fenced'
@@ -286,8 +292,24 @@ verify_source_write_fence() {
     fail "live teagramd revision changed from $LIVE_SOURCE_REVISION to $fenced_revision while source writes were fenced"
 }
 
+stop_running_compose_container() {
+  local container_id=$1 service container_name
+  [[ -n $container_id ]] || return 0
+  service=$(incus exec "$SOURCE_INSTANCE" -- docker inspect \
+    --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id") ||
+    fail 'could not identify a running teagram Compose service'
+  [[ -n $service ]] || fail 'a running teagram Compose container has no service label'
+  [[ $service == postgres || $service == rustfs ]] && return 0
+  container_name=$(incus exec "$SOURCE_INSTANCE" -- docker inspect --format '{{.Name}}' "$container_id" | sed 's#^/##') ||
+    fail 'could not read a running teagram Compose container name'
+  [[ $container_name =~ ^[[:alnum:]_.-]+$ ]] || fail 'a running teagram Compose container has an invalid name'
+  record_stopped_compose_container "$container_name"
+  incus exec "$SOURCE_INSTANCE" -- docker stop --time 120 "$container_name" >/dev/null ||
+    fail 'could not stop every running Compose writer before the PostgreSQL snapshot'
+}
+
 fence_source_writes() {
-  local running_ids container_id service container_name
+  local running_ids
   ensure_private_dir "$EVIDENCE_DIR"
   : > "$COMPOSE_STOPPED_FILE"
   chmod 0600 "$COMPOSE_STOPPED_FILE"
@@ -298,20 +320,7 @@ fence_source_writes() {
   running_ids=$(incus exec "$SOURCE_INSTANCE" -- docker ps --quiet \
     --filter label=com.docker.compose.project=teagram) || fail 'could not enumerate running Compose services'
   [[ -n $running_ids ]] || fail 'no running teagram Compose services were found for the write fence'
-  while IFS= read -r container_id; do
-    [[ -n $container_id ]] || continue
-    service=$(incus exec "$SOURCE_INSTANCE" -- docker inspect \
-      --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id") ||
-      fail 'could not identify a running teagram Compose service'
-    [[ -n $service ]] || fail 'a running teagram Compose container has no service label'
-    [[ $service == postgres || $service == rustfs ]] && continue
-    container_name=$(incus exec "$SOURCE_INSTANCE" -- docker inspect --format '{{.Name}}' "$container_id" | sed 's#^/##') ||
-      fail 'could not read a running teagram Compose container name'
-    [[ $container_name =~ ^[[:alnum:]_.-]+$ ]] || fail 'a running teagram Compose container has an invalid name'
-    record_stopped_compose_container "$container_name"
-    incus exec "$SOURCE_INSTANCE" -- docker stop --time 120 "$container_name" >/dev/null ||
-      fail 'could not stop every running Compose writer before the PostgreSQL snapshot'
-  done <<< "$running_ids"
+  alpha_for_each_line "$running_ids" stop_running_compose_container
 
   verify_source_write_fence
   record_phase fenced
@@ -393,7 +402,7 @@ verify_main_release_image() {
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
     fail "published image $image_name has an invalid immutable registry digest: $digest"
   require_release_auth
-  auth_dir=$(mktemp -d "${TMPDIR:-/tmp}/teagram-cutover-ghcr-auth.XXXXXX") ||
+  auth_dir=$(alpha_mktemp_dir "${TMPDIR:-/tmp}" teagram-cutover-ghcr-auth) ||
     fail 'could not create a private temporary GHCR authentication directory'
   chmod 0700 "$auth_dir" || {
     rm -rf -- "$auth_dir"
@@ -863,7 +872,7 @@ source_compose_networks() {
 
 install_port_forward_unit() {
   local unit=$1 description=$2 target=$3 ports=$4
-  unit_file=$(mktemp)
+  unit_file=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-rustfs-port-forward)
   cat > "$unit_file" <<EOF
 [Unit]
 Description=$description
@@ -887,8 +896,7 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-  incus exec "$TARGET_INSTANCE" -- install -o root -g root -m 0644 /dev/stdin \
-    "/etc/systemd/system/$unit" < "$unit_file"
+  alpha_install_remote_file "$TARGET_INSTANCE" "/etc/systemd/system/$unit" 0644 < "$unit_file"
   rm -f -- "$unit_file"
   unit_file=''
   incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
@@ -1108,7 +1116,7 @@ s3_object_hashes() {
 
 inventory_s3_prefix() {
   local alias=$1 listing=$2 scratch listing_file hashes_file inventory_hash status=0
-  scratch=$(mktemp -d "$EVIDENCE_DIR/s3-inventory.XXXXXX")
+  scratch=$(alpha_mktemp_dir "$EVIDENCE_DIR" s3-inventory)
   S3_INVENTORY_SCRATCH=$scratch
   listing_file=$scratch/listing
   hashes_file=$scratch/hashes
@@ -1299,7 +1307,11 @@ for path, target in expected.items():
     if not isinstance(handler, dict) or handler.get("Proxy") not in allowed:
         raise SystemExit("k3s cutover: Tailscale Serve handler target changed: " + path)
 tcp = status.get("TCP")
-if not isinstance(tcp, dict) or set(tcp) != {"443", "2443", "2447"}:
+if not isinstance(tcp, dict):
+    raise SystemExit("k3s cutover: an advertised MTProto or Bot API TCP listener is missing or changed")
+if "2443" not in tcp:
+    raise SystemExit("k3s cutover: source Tailscale Serve TCP route 2443 is missing; refusing to cut over without a rollback route")
+if set(tcp) != {"443", "2443", "2447"}:
     raise SystemExit("k3s cutover: an advertised MTProto or Bot API TCP listener is missing or changed")
 if tcp["443"] != {"HTTPS": True}:
     raise SystemExit("k3s cutover: the HTTPS listener is missing or changed")
@@ -1545,7 +1557,7 @@ handle_exit() {
     if [[ $phase != complete && $phase != rolled-back ]]; then
       case "$phase" in
         serve-switch-started)
-          current_serve=$(mktemp)
+          current_serve=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-serve-current)
           if serve_status_file "$current_serve" && check_serve_status "$current_serve" http://127.0.0.1:8081 \
             http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" \
             "127.0.0.1:$BOT_API_PORT"; then
@@ -1582,7 +1594,7 @@ rollback() {
       confirm K3S-WRITES-LOST 'WARNING: this rollback does not copy k3s writes back to Compose. All writes accepted since the first live Serve route will be lost from the restored source. Continue only after accepting this data loss.'
       ;;
   esac
-  current_serve=$(mktemp)
+  current_serve=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-serve-current)
   serve_status_file "$current_serve"
   if ! check_serve_status "$current_serve" http://127.0.0.1:8081 \
     http://127.0.0.1:2444 http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" \
@@ -1614,7 +1626,7 @@ rollback() {
   stop_k8s_application
   set_serve_routes http://127.0.0.1:8081 http://127.0.0.1:2444 http://127.0.0.1:2445 \
     "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
-  serve_after=$(mktemp)
+  serve_after=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-serve-after)
   serve_status_file "$serve_after"
   check_serve_status "$serve_after" http://127.0.0.1:8081 http://127.0.0.1:2444 \
     http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
@@ -1722,12 +1734,12 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
         raise SystemExit("source identity file is missing or empty")
 while sys.stdin.buffer.read(1024 * 1024):
     pass
-' "$path" || fail 'could not inspect the source identity file'
+    ' "$path" || fail "source identity file is missing or unreadable: $path"
 }
 check_source_key /var/lib/teagramd/server_key.pem
 check_source_key /var/lib/teagramd/enc_key.hex
 
-SERVE_BEFORE=$(mktemp)
+SERVE_BEFORE=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-serve-before)
 serve_status_file "$SERVE_BEFORE"
 check_serve_status "$SERVE_BEFORE" http://127.0.0.1:8081 http://127.0.0.1:2444 \
   http://127.0.0.1:2445 "127.0.0.1:$MTPROTO_PORT" "127.0.0.1:$BOT_API_PORT"
@@ -1742,13 +1754,13 @@ else
   lookup_status=$?
   [[ $lookup_status == 1 ]] || fail 'could not determine whether the teagramd-admin Secret exists'
 fi
-admin_hash_file=$(mktemp)
-admin_origin_file=$(mktemp)
+admin_hash_file=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-admin-hash)
+admin_origin_file=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-admin-origin)
 install_admin_secret "$admin_hash_file" "$admin_origin_file"
 rm -f -- "$admin_hash_file" "$admin_origin_file"
 admin_hash_file=''
 admin_origin_file=''
-cutover_manifest=$(mktemp "$EVIDENCE_DIR/cutover-alpha.XXXXXX.yaml")
+cutover_manifest=$(alpha_mktemp_file "$EVIDENCE_DIR" cutover-alpha-manifest)
 render_cutover_manifest "$cutover_manifest"
 kubectl apply --dry-run=server --filename "$cutover_manifest" >/dev/null
 record_phase applying
@@ -1982,7 +1994,7 @@ linkselector_ip=$(incus exec "$TARGET_INSTANCE" -- sh -ec \
 [[ $linkselector_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail 'could not identify the private teagram-k3s LXC address'
 install_port_forward_unit() {
   local unit=$1 description=$2 target=$3 ports=$4
-  unit_file=$(mktemp)
+  unit_file=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-port-forward)
   cat > "$unit_file" <<EOF
 [Unit]
 Description=$description
@@ -2006,8 +2018,7 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-  incus exec "$TARGET_INSTANCE" -- install -o root -g root -m 0644 /dev/stdin \
-    "/etc/systemd/system/$unit" < "$unit_file"
+  alpha_install_remote_file "$TARGET_INSTANCE" "/etc/systemd/system/$unit" 0644 < "$unit_file"
   rm -f -- "$unit_file"
   unit_file=''
   incus exec "$TARGET_INSTANCE" -- systemctl daemon-reload
@@ -2118,7 +2129,7 @@ record_phase serve-switched
 set_serve_routes "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \
   "$linkselector_ip:$MTPROTO_PORT" "$linkselector_ip:$BOT_API_PORT" true
-SERVE_AFTER=$(mktemp)
+SERVE_AFTER=$(alpha_mktemp_file "${TMPDIR:-/tmp}" teagram-cutover-serve-after)
 serve_status_file "$SERVE_AFTER"
 check_serve_status "$SERVE_AFTER" "http://$linkselector_ip:$LINKSELECTOR_PORT" \
   "http://$linkselector_ip:$WEBSOCKET_PORT" "http://$linkselector_ip:$ADMIN_PORT" \

@@ -3,6 +3,8 @@ set -euo pipefail
 
 readonly SOURCE_NAMESPACE=teagram
 readonly STATE_DIR=${INCUS_STATE_DIR:?INCUS_STATE_DIR is required for the disposable cutover test}
+# shellcheck disable=SC2016
+readonly REMOTE_TEMP_COMMAND='temporary=$(mktemp "${destination}.XXXXXX")'
 mkdir -p "$STATE_DIR/units"
 
 resource_for_container() {
@@ -33,6 +35,7 @@ scale_container() {
   resource=$(resource_for_container "$container")
   [[ $action == stop ]] && replicas=0
   kubectl scale "$resource" --namespace "$SOURCE_NAMESPACE" --replicas="$replicas" >/dev/null
+  docker_event "$action $container"
 }
 
 secret_archive() {
@@ -159,6 +162,7 @@ docker_command() {
       esac
       ;;
     ps)
+      : > "$STATE_DIR/fence-list-active"
       for service in teagramd postgres rustfs linkselector linklanding; do
         if [[ $(container_status "$service") == running ]]; then
           printf '%s\n' "$service"
@@ -204,6 +208,11 @@ docker_command() {
       path=$1
       [[ $2 == - ]] || return 1
       path=${path#*:}
+      if [[ ${CUTOVER_TEST_MISSING_ENC_KEY:-} == true &&
+        $path == /var/lib/teagramd/enc_key.hex ]]; then
+        printf 'source identity file is absent: %s\n' "$path" >&2
+        return 1
+      fi
       case "$path" in
         /var/lib/teagramd-blobs/.)
           kubectl exec --namespace "$SOURCE_NAMESPACE" pod/cutover-key-reader -c reader -- \
@@ -353,8 +362,28 @@ case "${1:-}" in
     args=("$@")
     if [[ $instance == teagram ]]; then
       case "$command_name" in
-        command) exit 0 ;;
-        docker) docker_command "$@" ;;
+        command)
+          printf 'incus exec cannot execute the shell builtin command\n' >&2
+          exit 127
+          ;;
+        docker)
+          if [[ ${CUTOVER_TEST_CONSUME_STDIN_ON_FENCE:-} == true &&
+            -e $STATE_DIR/fence-list-active && ${args[0]:-} == inspect ]]; then
+            cat >/dev/null
+          fi
+          docker_command "$@"
+          ;;
+        sh)
+          if [[ ${args[1]:-} == *'command -v'* ]]; then
+            candidate=${args[-1]}
+            case "$candidate" in
+              docker|tailscale) exit 0 ;;
+              *) exit 1 ;;
+            esac
+          else
+            "$command_name" "$@"
+          fi
+          ;;
         tailscale) tailscale_command "$@" ;;
         busybox)
           [[ ${1:-} == wget ]] || exit 2
@@ -366,13 +395,25 @@ case "${1:-}" in
       esac
     elif [[ $instance == teagram-k3s ]]; then
       case "$command_name" in
-        command) exit 0 ;;
+        command)
+          printf 'incus exec cannot execute the shell builtin command\n' >&2
+          exit 127
+          ;;
         systemctl) systemctl_command "$@" ;;
         ip)
           printf '2: eth0    inet 127.0.0.2/8 scope global eth0\n'
           ;;
         sh)
-          if [[ ${2:-} == *'ip -o -4 addr show dev eth0'* ]]; then
+          if [[ ${args[1]:-} == *'command -v'* ]]; then
+            candidate=${args[-1]}
+            case "$candidate" in
+              systemctl|k3s|ip|awk|curl) exit 0 ;;
+              *) exit 1 ;;
+            esac
+          elif [[ ${args[0]:-} == -c && ${args[1]:-} == *"$REMOTE_TEMP_COMMAND"* ]]; then
+            destination=${args[-2]}
+            cat > "$STATE_DIR/units/${destination##*/}"
+          elif [[ ${args[1]:-} == *'ip -o -4 addr show dev eth0'* ]]; then
             printf '127.0.0.2\n'
           else
             "$command_name" "$@"
