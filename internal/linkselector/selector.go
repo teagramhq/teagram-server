@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -192,6 +193,9 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if outcome.failed || ((target.kind == routeKindWeb || target.kind == routeKindServerAPI) && response.writeErr) {
 			class = unavailableRouteClass
 		}
+		if unexpectedPanic && response.status == 0 {
+			writeUnavailable(response, http.StatusInternalServerError)
+		}
 		status := response.status
 		if status == 0 {
 			status = http.StatusOK
@@ -205,6 +209,7 @@ func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"status", status,
 				"reason", string(reasonPanic),
 				"panic_type", fmt.Sprintf("%T", recovered),
+				"stack", string(debug.Stack()),
 			)
 		}
 		if response.writeErr {

@@ -39,6 +39,9 @@ func TestUnexpectedHandlerPanicLogsFailureBeforeRepanicking(t *testing.T) {
 	if recovered == nil {
 		t.Fatal("ServeHTTP did not re-panic after recording the handler failure")
 	}
+	if response.Code != http.StatusInternalServerError {
+		t.Errorf("panic response code = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
 
 	var sawFailureSummary, sawPanicLog bool
 	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
@@ -52,9 +55,11 @@ func TestUnexpectedHandlerPanicLogsFailureBeforeRepanicking(t *testing.T) {
 				record["status"] == float64(http.StatusInternalServerError)
 		}
 		if record["msg"] == "selector handler panicked" {
+			stack, hasStack := record["stack"].(string)
 			sawPanicLog = record["panic_type"] == "string" &&
 				record["route_class"] == unavailableRouteClass &&
-				record["status"] == float64(http.StatusInternalServerError)
+				record["status"] == float64(http.StatusInternalServerError) &&
+				hasStack && strings.Contains(stack, "ServeHTTP")
 		}
 	}
 	if !sawFailureSummary {
