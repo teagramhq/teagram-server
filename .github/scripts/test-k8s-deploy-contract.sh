@@ -214,11 +214,9 @@ for overlay in prod prod-cutover; do
       .TG_WEBSOCKET_ALLOWED_ORIGINS.value == "https://teagram.tailaa4918.ts.net,https://web.teagram.io" and
       .TG_REGISTRATION.value == "open" and
       .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR.value == ":2446" and
-      .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR.valueFrom.configMapKeyRef ==
-        {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"} and
+      .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR.value == "server.teagram.io:443" and
       .TG_PUBLIC_REGISTRATION.value == "invite" and
-      .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS.valueFrom.configMapKeyRef ==
-        {name: "teagramd-runtime", key: "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"} and
+      .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS.value == "https://web.teagram.io" and
       .TG_TURNSTILE_SIGNIN_ENABLED.value == "true" and
       .TG_TURNSTILE_TEST_MODE.value == "false" and
       .TG_TURNSTILE_HOSTNAMES.value == "web.teagram.io" and
@@ -322,9 +320,11 @@ grep --fixed-strings --quiet 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR == :2446' deploy/k
 # shellcheck disable=SC2016
 runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' deploy/k8s/README.md)
 [[ "$runtime_configmap_row" == *TG_MEDIA_KEY_CURRENT* &&
-   "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
-   "$runtime_configmap_row" == *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
-  fail 'the documented teagramd-runtime ConfigMap keys must include the externally supplied listener settings'
+   "$runtime_configmap_row" == *TG_PUBLIC_LINK_PREFIX* &&
+   "$runtime_configmap_row" == *TG_ADVERTISE_ADDR* &&
+   "$runtime_configmap_row" != *TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR* &&
+   "$runtime_configmap_row" != *TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS* ]] ||
+  fail 'the documented runtime ConfigMap keys must exclude production listener values committed in the overlay'
 # shellcheck disable=SC2016
 grep --fixed-strings --quiet '`teagramd-turnstile` Secret' deploy/k8s/README.md ||
   fail 'the external Turnstile Secret must be documented without its value'

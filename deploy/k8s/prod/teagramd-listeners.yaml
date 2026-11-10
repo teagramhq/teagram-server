@@ -17,17 +17,11 @@ spec:
             - name: TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
               value: ":2446"
             - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
-              valueFrom:
-                configMapKeyRef:
-                  name: teagramd-runtime
-                  key: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
+              value: "server.teagram.io:443"
             - name: TG_PUBLIC_REGISTRATION
               value: invite
             - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
-              valueFrom:
-                configMapKeyRef:
-                  name: teagramd-runtime
-                  key: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
+              value: "https://web.teagram.io"
             - name: TG_TURNSTILE_SIGNIN_ENABLED
               value: "true"
             - name: TG_TURNSTILE_TEST_MODE

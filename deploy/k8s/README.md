@@ -80,7 +80,7 @@ by the cluster's secret and configuration management before it is applied:
 
 | Resource | Required keys or values |
 | --- | --- |
-| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS`, `TG_MEDIA_KEY_CURRENT` |
+| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_MEDIA_KEY_CURRENT` |
 | `link-edge-runtime` ConfigMap | `TG_INVITE_WEB_SIGNUP_URL`; optional `TG_INVITE_DESKTOP_URL` |
 | `web` Service | ClusterIP endpoint on port 8080 for ordinary web traffic |
 | `postgres-credentials` Secret | `POSTGRES_PASSWORD`, `TG_POSTGRES_DSN` |
@@ -170,9 +170,9 @@ target `http://linkselector:8081`. The selector sends the exact public API paths
 links to `http://linklanding:8082` and ordinary web traffic to the `web`
 Service on port 8080. For `server.teagram.io`, route `^/apiws` and
 `^/\.well-known/teagramd/client` to `http://teagramd:2446`. The public
-listener is a ClusterIP Service port, accepts the Compose origin allowlist,
-uses the live `TG_PUBLIC_REGISTRATION=invite` policy, and reads its discovery
-endpoint from `teagramd-runtime`. It keeps `TG_CLIENT_ADDR_TRUST=socket` while
+listener is a ClusterIP Service port, advertises `server.teagram.io:443`, allows
+the `https://web.teagram.io` origin, and uses the live
+`TG_PUBLIC_REGISTRATION=invite` policy. It keeps `TG_CLIENT_ADDR_TRUST=socket` while
 Cloudflare client-address trust is disabled. It is separate from the tailnet
 WebSocket listener on 2444. Configure the external
 MTProto TCP route separately before setting `TG_ADVERTISE_ADDR`; the Cloudflare
