@@ -1458,6 +1458,23 @@ func (s *Store) ChannelHistoryWithOffset(
 		for i, row := range rows {
 			msgs[i] = channelMessageFromFields(channelMsgFields(row))
 		}
+	case offsetID > 0 && addOffset < 0 && countRow.ExpiredBacklogLarger:
+		rows, e := qtx.ChannelHistoryPageAroundUnexpired(ctx, db.ChannelHistoryPageAroundUnexpiredParams{
+			ChannelID: channelID,
+			OwnerID:   ownerID,
+			OffsetID:  offsetID,
+			AddOffset: addOffset,
+			MaxID:     maxID,
+			MinID:     minID,
+			Lim:       int32(limit), //nolint:gosec // limit is validated and capped by the API
+		})
+		if e != nil {
+			return nil, 0, fmt.Errorf("channel history page: %w", e)
+		}
+		msgs = make([]ChannelMessage, len(rows))
+		for i, row := range rows {
+			msgs[i] = channelMessageFromFields(channelMsgFields(row))
+		}
 	case offsetID > 0 && addOffset < 0:
 		rows, e := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
 			ChannelID: channelID,

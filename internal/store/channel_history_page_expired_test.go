@@ -174,6 +174,34 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 		}
 		compared++
 	}
+	compareAround := func(owner, floor, offsetID, addOffset, maxID, minID int64, lim int32) {
+		t.Helper()
+		walk, err := q.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
+			ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		unexpired, err := q.ChannelHistoryPageAroundUnexpired(ctx, db.ChannelHistoryPageAroundUnexpiredParams{
+			ChannelID: group.ID, OwnerID: owner, OffsetID: offsetID, AddOffset: addOffset, MaxID: maxID, MinID: minID, Lim: lim,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		walkIDs := make([]int64, len(walk))
+		for i, row := range walk {
+			walkIDs[i] = row.LocalID
+		}
+		unexpiredIDs := make([]int64, len(unexpired))
+		for i, row := range unexpired {
+			unexpiredIDs[i] = row.LocalID
+		}
+		if !slices.Equal(walkIDs, unexpiredIDs) {
+			t.Fatalf("owner %d floor %d offset %d add %d max %d min %d lim %d: unexpired around page %v, walk page %v",
+				owner, floor, offsetID, addOffset, maxID, minID, lim, unexpiredIDs, walkIDs)
+		}
+		compared++
+	}
 	// Without summary nodes the statement drops its bound and reads every
 	// unexpired post; with them it is bounded by the summary total. A
 	// contradictory summary (more expired than total) also drops the bound.
@@ -200,6 +228,15 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 								for _, lim := range []int32{1, 10, 100} {
 									compare(owner, floor, offsetID, addOffset, maxID, minID, lim)
 								}
+							}
+						}
+					}
+				}
+				for _, offsetID := range []int64{5, 150, 400} {
+					for _, addOffset := range []int64{-1, -20} {
+						for _, window := range [][2]int64{{0, 0}, {200, 20}} {
+							for _, lim := range []int32{1, 10} {
+								compareAround(owner, floor, offsetID, addOffset, window[0], window[1], lim)
 							}
 						}
 					}
@@ -240,6 +277,9 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 				compare(f.owner.ID, 0, offsetID, addOffset, 0, 0, 10)
 			}
 		}
+		for _, addOffset := range []int64{-3, -40} {
+			compareAround(f.owner.ID, 0, 150, addOffset, 0, 0, 10)
+		}
 		rows, err := q.ChannelHistoryPageUnexpired(ctx, db.ChannelHistoryPageUnexpiredParams{
 			ChannelID: group.ID, OwnerID: f.owner.ID, Lim: 10,
 		})
@@ -251,6 +291,18 @@ func TestChannelHistoryPageUnexpiredMatchesWalk(t *testing.T) {
 		}
 		if !state.denied && len(rows) == 0 {
 			t.Fatalf("%s: unexpired page returned no rows, want the member's page", state.name)
+		}
+		around, err := q.ChannelHistoryPageAroundUnexpired(ctx, db.ChannelHistoryPageAroundUnexpiredParams{
+			ChannelID: group.ID, OwnerID: f.owner.ID, OffsetID: 150, AddOffset: -3, Lim: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.denied && len(around) != 0 {
+			t.Fatalf("%s: unexpired around page returned %d rows, want none", state.name, len(around))
+		}
+		if !state.denied && len(around) == 0 {
+			t.Fatalf("%s: unexpired around page returned no rows, want the member's page", state.name)
 		}
 	}
 	if compared == 0 {
@@ -286,5 +338,76 @@ func TestChannelHistoryPageUsesWalkWithoutBacklog(t *testing.T) {
 	}
 	if walk != 1 || unexpired != 0 {
 		t.Fatalf("page statements: walk %d, unexpired %d, want 1 and 0", walk, unexpired)
+	}
+}
+
+// The around page's rows examined stay within 1.5x of the same channel without
+// an expired backlog plus the smaller of the backlog and the live expiring
+// posts. The page and statement count are unchanged whether the expired posts
+// are newer or older than the target.
+func TestChannelHistoryAroundCostIgnoresExpiredUnsweptPosts(t *testing.T) {
+	t.Parallel()
+	f := newExpiredCountFixture(t, "+15551290061")
+	assertAroundQuery := func(want string) {
+		t.Helper()
+		f.trace.mu.Lock()
+		defer f.trace.mu.Unlock()
+		for _, query := range f.trace.queries {
+			if strings.Contains(query.sql, "-- name: ChannelHistoryPageAround") {
+				if strings.Contains(query.sql, "-- name: "+want+" ") {
+					return
+				}
+				t.Fatalf("around page query = %q, want %s", query.sql, want)
+			}
+		}
+		t.Fatalf("around page query %s was not traced", want)
+	}
+	for _, expiredOldest := range []bool{false, true} {
+		for _, live := range []int{50, 1_000, 10_000} {
+			clean := f.seedTTLChannelLayout("TTL channel without expired posts", live, 0, expiredOldest)
+			backlog := f.seedTTLChannelLayout("TTL channel with unswept expired posts", live, expiredCountExpiredPosts, expiredOldest)
+			cleanOffset := int64(live/2 + 2)
+			backlogOffset := cleanOffset
+			if expiredOldest {
+				backlogOffset += expiredCountExpiredPosts
+			}
+
+			cleanStatements, _, cleanCount, cleanIDs := f.historyCostRequest(clean, cleanOffset, -5)
+			cleanAroundRows := f.lastAroundRows
+			assertAroundQuery("ChannelHistoryPageAround")
+			backlogStatements, _, backlogCount, backlogIDs := f.historyCostRequest(backlog, backlogOffset, -5)
+			backlogAroundRows := f.lastAroundRows
+			wantBacklogQuery := "ChannelHistoryPageAround"
+			if expiredCountExpiredPosts > live {
+				wantBacklogQuery = "ChannelHistoryPageAroundUnexpired"
+			}
+			assertAroundQuery(wantBacklogQuery)
+			bound := cleanAroundRows + int64(min(expiredCountExpiredPosts, live))
+			t.Logf("live %d, expired oldest %v: around statement rows %d vs %d with %d expired unswept (bound %d)",
+				live, expiredOldest, cleanAroundRows, backlogAroundRows, expiredCountExpiredPosts, bound)
+
+			if expiredOldest {
+				// The live posts follow the expired ones, so their IDs are shifted;
+				// the service row at local ID 1 is not.
+				for i, id := range backlogIDs {
+					if id > 1 {
+						backlogIDs[i] = id - expiredCountExpiredPosts
+					}
+				}
+			}
+			if !slices.Equal(backlogIDs, cleanIDs) {
+				t.Fatalf("live %d, expired oldest %v: around page = %v, want the clean channel's page %v", live, expiredOldest, backlogIDs, cleanIDs)
+			}
+			if backlogCount != cleanCount {
+				t.Fatalf("live %d, expired oldest %v: history counts with and without backlog = %d/%d, want equal", live, expiredOldest, backlogCount, cleanCount)
+			}
+			if backlogStatements != cleanStatements {
+				t.Fatalf("live %d, expired oldest %v: statements with backlog = %d, no backlog = %d, want equal", live, expiredOldest, backlogStatements, cleanStatements)
+			}
+			if float64(backlogAroundRows) > 1.5*float64(bound) {
+				t.Fatalf("live %d, expired oldest %v: around statement rows with backlog = %d, want within 1.5x of %d (no-backlog %d + min(backlog, live))",
+					live, expiredOldest, backlogAroundRows, bound, cleanAroundRows)
+			}
+		}
 	}
 }
