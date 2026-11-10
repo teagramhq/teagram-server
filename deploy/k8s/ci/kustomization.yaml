@@ -3,6 +3,8 @@ kind: Kustomization
 namespace: teagram
 resources:
   - ../prod
+  - tailnet-policy-probes.yaml
+  - tailscale-proxy-probe-serviceaccount.yaml
 configMapGenerator:
   - name: required-migration-version
     behavior: replace
@@ -11,7 +13,7 @@ configMapGenerator:
   - name: teagramd-runtime
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
-      - TG_ADVERTISE_ADDR=127.0.0.1:12443
+      - TG_ADVERTISE_ADDR=teagramd:2443
       - TG_MEDIA_KEY_CURRENT=1
   - name: link-edge-runtime
     literals:
@@ -28,4 +30,9 @@ images:
   - name: ghcr.io/teagramhq/link-edge-selector
     newTag: ci
 patches:
+  - path: teagramd-ci-settings.yaml
   - path: cloudflared-ci.yaml
+  - path: tailscale-proxy-ci.yaml
+  - path: linkselector-ci.yaml
+  - path: public-ingress-ci.yaml
+  - path: postgres-backup-cronjob.yaml

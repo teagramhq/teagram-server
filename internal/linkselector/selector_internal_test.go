@@ -17,7 +17,7 @@ import (
 func TestWebPostHeaderTimeoutReturnsFixed502(t *testing.T) {
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
-	handler, err := NewHandler("http://web.example", "http://landing.example", slog.New(slog.DiscardHandler))
+	handler, err := NewHandler("", "http://web.example", "http://landing.example", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestWebStagedBodyBudgetRejectsWhenSlowReadersHoldCapacity(t *testing.T) {
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	logger, logs, validator := newDiagnosticLogger()
-	handler, err := NewHandler("http://web.example", "http://landing.example", logger)
+	handler, err := NewHandler("", "http://web.example", "http://landing.example", logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

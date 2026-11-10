@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkselector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkselector
+spec:
+  selector:
+    app.kubernetes.io/component: server

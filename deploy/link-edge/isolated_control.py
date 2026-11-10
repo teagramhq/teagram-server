@@ -526,6 +526,18 @@ class LinkEdgeControl:
         for name, names in expected_networks.items():
             if set(services[name].get("networks", {})) != names:
                 raise ControlFailure("compose_policy_failed")
+        selector_command = services["selector"].get("command")
+        if not isinstance(selector_command, list):
+            raise ControlFailure("compose_policy_failed")
+        try:
+            server_upstream_index = selector_command.index("-server-upstream")
+        except ValueError as exc:
+            raise ControlFailure("compose_policy_failed") from exc
+        if (
+            server_upstream_index + 1 >= len(selector_command)
+            or selector_command[server_upstream_index + 1] != "http://127.0.0.1:2446"
+        ):
+            raise ControlFailure("compose_policy_failed")
         if services["selector"].get("depends_on", {}).get("linklanding", {}).get("condition") != "service_healthy":
             raise ControlFailure("compose_policy_failed")
         if services["probe"].get("depends_on", {}).get("selector", {}).get("condition") != "service_started":

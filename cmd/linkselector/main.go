@@ -28,16 +28,17 @@ const (
 func main() {
 	listenHost := flag.String("listen-address", defaultListenAddress, "IP address to listen on")
 	port := flag.Int("port", defaultPort, "TCP port to listen on")
+	serverUpstream := flag.String("server-upstream", "", "optional teagramd API service origin; API routes fail closed when unset")
 	webUpstream := flag.String("web-upstream", defaultWebUpstream, "Web service origin")
 	landingUpstream := flag.String("landing-upstream", defaultLandingTarget, "landing service origin")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: linkselector [-listen-address ip] [-port number] [-web-upstream origin] [-landing-upstream origin]")
+		fmt.Fprintln(os.Stderr, "usage: linkselector [-server-upstream origin] [-listen-address ip] [-port number] [-web-upstream origin] [-landing-upstream origin]")
 		os.Exit(2)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	handler, err := linkselector.NewHandler(*webUpstream, *landingUpstream, logger)
+	handler, err := linkselector.NewHandler(*serverUpstream, *webUpstream, *landingUpstream, logger)
 	if err != nil {
 		logger.Error("configure Web selector", "err", err)
 		os.Exit(1)

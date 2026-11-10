@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guards the production deploy workflow: it may run only after CI passes on a
-# push to main (or by manual dispatch), one at a time, in the production
+# push to main (or by manual dispatch), one at a time, in the k3s-prod
 # environment. It deploys the commit whose CI run passed; the canonical host
 # script runs the MTProto smoke from that deployed image after readiness.
 # shellcheck disable=SC2016 # single-quoted strings are literal workflow text
@@ -9,7 +9,6 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
-dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
@@ -585,12 +584,12 @@ check_contract() {
     fail 'the production deploy job must use the deploy stage naming contract'
   [[ "$(query '.jobs."deploy-server".if')" == "$expected_if" ]] ||
     fail 'the dev job must run only on dispatch or a successful CI push run'
-  [[ "$(query '.jobs."deploy-server".environment')" == 'production' ]] ||
-    fail 'the dev job must use environment: production'
+  [[ "$(query '.jobs."deploy-server".environment')" == 'k3s-prod' ]] ||
+    fail 'the k3s deploy job must use environment: k3s-prod'
   [[ "$(query '.jobs."deploy-server".permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the dev job must not request write permissions'
-  [[ "$(query '.jobs."deploy-server".permissions.actions')" == 'read' ]] ||
-    fail 'the dev job must grant actions: read to resolve successful CI runs'
+  [[ "$(query '.jobs."deploy-server".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read,attestations=read,contents=read' ]] ||
+    fail 'the production deploy job must use only actions, attestation, and contents read permissions'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Upload the demo deployment target") | .uses')" == 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' ]] ||
     fail 'the production deploy must upload its selected SHA and CI run for the demo workflow'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Upload the demo deployment target") | .with.name')" == 'demo-deploy-target-${{ github.run_id }}' ]] ||
@@ -605,15 +604,60 @@ check_contract() {
     fail 'the production deploy must write the tested target for the demo workflow'
   grep -Fq '"deploy_sha":"%s","ci_run_id":"%s"' <<< "$target_run" ||
     fail 'the demo target must contain the selected server SHA and CI run ID'
-  local handoff_step_index prod_ssh_step_index cleanup_step_index
+  local handoff_step_index deploy_step_index cleanup_step_index
   handoff_step_index="$(grep -nF -m1 '      - name: Upload the demo deployment target' "$workflow" | cut -d: -f1)"
-  prod_ssh_step_index="$(grep -nF -m1 '      - name: Deploy the tested commit' "$workflow" | cut -d: -f1)"
-  cleanup_step_index="$(grep -nF -m1 '      - name: Remove the deploy key' "$workflow" | cut -d: -f1)"
-  if [[ ! "$handoff_step_index" =~ ^[0-9]+$ || ! "$prod_ssh_step_index" =~ ^[0-9]+$ ||
+  deploy_step_index="$(grep -nF -m1 '      - name: Deploy, wait for workloads, and smoke the tested release' "$workflow" | cut -d: -f1)"
+  cleanup_step_index="$(grep -nF -m1 '      - name: Remove the restricted cluster kubeconfig' "$workflow" | cut -d: -f1)"
+  if [[ ! "$handoff_step_index" =~ ^[0-9]+$ || ! "$deploy_step_index" =~ ^[0-9]+$ ||
     ! "$cleanup_step_index" =~ ^[0-9]+$ ]] ||
-    (( handoff_step_index <= prod_ssh_step_index || handoff_step_index <= cleanup_step_index )); then
-    fail 'the demo handoff must run after production deployment and key cleanup'
+    (( handoff_step_index <= deploy_step_index || handoff_step_index <= cleanup_step_index )); then
+    fail 'the demo handoff must run after production deployment and kubeconfig cleanup'
   fi
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Upload the demo deployment target") | .if')" == '${{ success() }}' ]] ||
+    fail 'the demo target artifact must be uploaded only after a verified production deployment'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Install the restricted cluster kubeconfig") | .env.KUBECONFIG_CONTENT')" == '${{ secrets.KUBECONFIG }}' ]] ||
+    fail 'the production deploy must use the dedicated restricted kubeconfig secret'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Remove the restricted cluster kubeconfig") | .if')" == '${{ always() }}' ]] ||
+    fail 'the restricted kubeconfig must be removed even when a deployment step fails'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Check out the tested source") | .with.ref')" == '${{ steps.target.outputs.sha }}' &&
+     "$(query '.jobs.deploy-server.steps[] | select(.name == "Check out the tested source") | .with."persist-credentials"')" == 'false' ]] ||
+    fail 'the deploy runner must check out the selected tested commit without persisting its token'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.id == "digest-artifact") | .env.CI_RUN_ID')" == '${{ steps.target.outputs.ci_run_id }}' &&
+     "$(query '.jobs.deploy-server.steps[] | select(.id == "digest-artifact") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'production image digests must come from the exact selected CI run and commit'
+  digest_run="$(query '.jobs.deploy-server.steps[] | select(.id == "digest-artifact") | .run')"
+  { grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$digest_run" &&
+    grep -Fq 'k8s-image-digests-$DEPLOY_SHA' <<< "$digest_run"; } ||
+    fail 'the deploy runner must download the selected run artifact named for its commit'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Verify build provenance for every production image") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'image provenance must be tied to the selected tested source SHA'
+  provenance_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Verify build provenance for every production image") | .run')"
+  for provenance_check in '--source-ref refs/heads/main' '--source-digest "$DEPLOY_SHA"' \
+    '--signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml' \
+    'ghcr.io/teagramhq/teagramd' 'ghcr.io/teagramhq/teagram-migrations' \
+    'ghcr.io/teagramhq/teagramd-mc-init' 'ghcr.io/teagramhq/link-edge-landing' \
+    'ghcr.io/teagramhq/link-edge-selector'; do
+    grep -Fq -- "$provenance_check" <<< "$provenance_run" ||
+      fail 'the production deploy must verify main CI provenance for all five images'
+  done
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Validate the production release manifest") | .run')" == *'kubectl apply --dry-run=server --filename "$RUNNER_TEMP/k8s-prod.yaml"'* ]] ||
+    fail 'the production release must pass server-side dry-run before applying changes'
+  local deploy_preflight_run
+  deploy_preflight_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Validate the production release manifest") | .run')"
+  [[ "$deploy_preflight_run" == *'kubectl create --dry-run=server --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml'* ]] ||
+    fail 'the restricted deployer must server-dry-run the maintenance Job before applying resources'
+  for permission in 'delete pods' 'create jobs.batch' 'get jobs.batch' 'patch jobs.batch' \
+    'create cronjobs.batch' 'get cronjobs.batch' \
+    'create persistentvolumeclaims' 'patch persistentvolumeclaims'; do
+    grep -Fq "kubectl auth can-i $permission --namespace teagram" <<< "$deploy_preflight_run" ||
+      fail 'the restricted deployer must verify its required namespace permissions before applying'
+  done
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Take and verify a pre-deploy PostgreSQL backup") | .run')" == *'kubectl create job "$BACKUP_JOB" --from=cronjob/postgres-backup'*'backup=verified'* ]] ||
+    fail 'the production release must verify a fresh PostgreSQL dump before deploying'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'the release runner must receive the commit whose CI passed'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .run')" == *'deploy/k8s/deploy-release.sh'* ]] ||
+    fail 'the production workflow must delegate apply, rollback, and smoke to the release runner'
 
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
@@ -801,15 +845,10 @@ check_contract() {
     fail 'a manual run must resolve the newest successful CI push run on main'
   local ssh_steps demo_ssh_steps demo_port_run
   ssh_steps="$(query '[.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
-  [[ "$ssh_steps" == 1 ]] || fail "expected one dev ssh step, found $ssh_steps"
-  [[ "$(query '.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
-    fail 'the dev ssh step must take DEPLOY_SHA from the target step'
-  query '.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
-    grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA"' ||
-    fail 'the dev ssh step must send DEPLOY_SHA as its command'
-  local checkout_steps setup_go_steps smoke_steps dev_step_names
+  [[ "$ssh_steps" == 0 ]] || fail 'the production deploy must apply to k3s instead of SSHing to the Compose host'
+  local checkout_steps dev_step_names
   checkout_steps="$(query '[.jobs."deploy-server".steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
-  [[ "$checkout_steps" == 0 ]] || fail 'the server deploy runner must not check out tested source'
+  [[ "$checkout_steps" == 1 ]] || fail 'the server deploy runner must check out only the selected tested source'
   checkout_steps="$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
   [[ "$checkout_steps" == 1 ]] || fail 'the credentialed demo job must check out only the trusted workflow source'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" ]] ||
@@ -818,19 +857,21 @@ check_contract() {
     fail 'the workflow-source checkout must not persist its credential'
   [[ "$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^pnpm/action-setup@|^actions/setup-node@"))] | length')" == 0 ]] ||
     fail 'the credentialed demo job must not install or run web build dependencies'
-  setup_go_steps="$(query '[.jobs."deploy-server".steps[] | select(.uses // "" | test("^actions/setup-go@"))] | length')"
-  [[ "$setup_go_steps" == 0 ]] || fail 'the deploy runner must not install Go for a host-side smoke'
-  smoke_steps="$(query '[.jobs."deploy-server".steps[] | select(.name == "Run MTProto smoke on port 2443")] | length')"
-  [[ "$smoke_steps" == 0 ]] || fail 'the deploy runner must not run the MTProto smoke'
-  grep -Fq 'CGO_ENABLED=0 go build -o /mtproto-smoke ./cmd/mtproto-smoke' "$dockerfile" ||
-    fail 'the deployed image must build the host-side MTProto smoke binary'
-  grep -Fq 'COPY --from=build /mtproto-smoke /usr/local/bin/mtproto-smoke' "$dockerfile" ||
-    fail 'the deployed image must contain the host-side MTProto smoke binary'
   dev_step_names="$(query '.jobs."deploy-server".steps | map(.name) | join("|")')"
-  [[ "$dev_step_names" == *'Deploy the tested commit|Remove the deploy key|Upload the demo deployment target' && "$(query '.jobs."deploy-server".steps[-2].name')" == 'Remove the deploy key' ]] ||
-    fail 'the deploy key must be removed after the host-side smoke and before demo handoff'
-  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Remove the deploy key") | .if')" == '${{ always() }}' ]] ||
-    fail 'the deploy key must be removed even when deployment fails'
+  [[ "$dev_step_names" == *'Deploy, wait for workloads, and smoke the tested release|Remove the restricted cluster kubeconfig|Upload the demo deployment target' && "$(query '.jobs."deploy-server".steps[-2].name')" == 'Remove the restricted cluster kubeconfig' ]] ||
+    fail 'the restricted cluster kubeconfig must be removed before the demo handoff'
+  grep -Fq 'KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}' "$workflow" ||
+    fail 'only the restricted cluster kubeconfig secret may be installed in the deploy runner'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ steps.kubeconfig.outputs.api_host }}' ]] ||
+    fail 'the deploy runner must ping the k3s API host taken from the kubeconfig secret'
+  kubeconfig_index="$(query '.jobs."deploy-server".steps | map(.name) | to_entries | .[] | select(.value == "Install the restricted cluster kubeconfig") | .key')"
+  tailnet_index="$(query '.jobs."deploy-server".steps | map(.name) | to_entries | .[] | select(.value == "Join the tailnet") | .key')"
+  [[ -n "$kubeconfig_index" && -n "$tailnet_index" && "$kubeconfig_index" -lt "$tailnet_index" ]] ||
+    fail 'the kubeconfig must be installed before the tailnet join that reads its API host'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.name == "Install the restricted cluster kubeconfig") | .id')" == kubeconfig ]] ||
+    fail 'the kubeconfig step must expose the API host output'
+  ! grep -Fq '100.124.236.66' "$workflow" ||
+    fail 'the deploy workflow must not name the deleted teagram LXC address'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
   [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
@@ -944,22 +985,27 @@ self_test() {
     'del(.concurrency)'
     '.concurrency.group = "deploy"'
     '.concurrency."cancel-in-progress" = true'
-    '.jobs."deploy-server".steps += [{"name":"Checkout tested source","uses":"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"}]'
-    '.jobs."deploy-server".steps += [{"name":"Set up Go","uses":"actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"}]'
-    '.jobs."deploy-server".steps += [{"name":"Run MTProto smoke on port 2443","run":"go run ./cmd/mtproto-smoke"}]'
-    '(.jobs."deploy-server".steps[] | select(.uses) | .uses) = "tailscale/github-action@v4"'
+    '(.jobs."deploy-server".steps[] | select(.name == "Check out the tested source") | .with.ref) = "main"'
+    '(.jobs."deploy-server".steps[] | select(.name == "Check out the tested source") | .with."persist-credentials") = true'
+    '(.jobs."deploy-server".steps[] | select(.name == "Upload the demo deployment target") | .with.name) = "wrong-target"'
+    '(.jobs."deploy-server".steps[] | select(.id == "digest-artifact") | .run) |= sub("k8s-image-digests-\\$DEPLOY_SHA"; "latest")'
+    '(.jobs."deploy-server".steps[] | select(.name == "Verify build provenance for every production image") | .run) |= sub("refs/heads/main"; "refs/heads/dev")'
+    '(.jobs."deploy-server".steps[] | select(.name == "Install the restricted cluster kubeconfig") | .env.KUBECONFIG_CONTENT) = "${{ secrets.ADMIN_KUBECONFIG }}"'
+    '(.jobs."deploy-server".steps[] | select(.name == "Remove the restricted cluster kubeconfig") | .if) = "${{ success() }}"'
     '.permissions.contents = "write"'
     'del(.jobs."deploy-server".permissions.actions)'
+    'del(.jobs."deploy-server".permissions.attestations)'
+    '(.jobs."deploy-server".permissions.attestations) = "write"'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("== workflow_run"; "== disabled")'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("comparison\" == ahead"; "comparison\" == behind")'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("compare/\$sha...\$latest"; "compare/$latest...$sha")'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("comparison\" == identical"; "comparison\" == diverged")'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .env.RUN_HEAD_SHA) = "${{ github.sha }}"'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("event=push&"; "")'
-    '(.jobs."deploy-server".steps[] | select(.env.DEPLOY_SHA) | .run) |= sub(" \"\$DEPLOY_SHA\""; "")'
-    '(.jobs."deploy-server".steps[] | select(.env.DEPLOY_SHA) | .env.DEPLOY_SHA) = "${{ github.sha }}"'
-    '(.jobs."deploy-server".steps[] | select(.env.DEPLOY_SHA) | .run) |= sub("\"\$DEPLOY_SHA\""; "${{ steps.target.outputs.sha }}")'
     '(.jobs."deploy-server".steps[] | select(.id == "target") | .run) |= sub("deploying \$sha"; "deploying ${{ github.sha }}")'
+    '(.jobs."deploy-server".steps[] | select(.name == "Validate the production release manifest") | .run) |= sub("--dry-run=server"; "--dry-run=client")'
+    'del(.jobs."deploy-server".steps[] | select(.name == "Take and verify a pre-deploy PostgreSQL backup"))'
+    '(.jobs."deploy-server".steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .run) = "true"'
   )
   for mutation in "${mutations[@]}"; do
     yq "$mutation" "$workflow" > "$tmp/deploy.yml"

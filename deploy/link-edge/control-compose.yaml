@@ -73,6 +73,9 @@ services:
       - "0.0.0.0"
       - "-port"
       - "8081"
+      # Keep this unused API route inside the selector container.
+      - "-server-upstream"
+      - "http://127.0.0.1:2446"
       - "-web-upstream"
       - "http://web:8080"
       - "-landing-upstream"

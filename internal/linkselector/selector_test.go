@@ -3,6 +3,7 @@ package linkselector_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -86,6 +87,189 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 	}
 	if got, want := len(webRequests), len(webTargets); got != want {
 		t.Errorf("link collision reached Web: requests = %d, want %d", got, want)
+	}
+}
+
+func TestPublicServerAPIPathsUseServerUpstream(t *testing.T) {
+	var serverRequests, webRequests, landingRequests []observedRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverRequests = append(serverRequests, observeRequest(t, r))
+		w.Header().Set("Content-Type", "application/json")
+		writeTestResponse(t, w, `{"version":1}`)
+	}))
+	t.Cleanup(server.Close)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests = append(webRequests, observeRequest(t, r))
+		writeTestResponse(t, w, webBody)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(recordingLanding(t, &landingRequests))
+	t.Cleanup(landing.Close)
+	handler := newSelectorWithServer(t, server.URL, web.URL, landing.URL, slog.New(slog.DiscardHandler))
+
+	discoveryRequest := rawRequest(http.MethodGet, "/.well-known/teagramd/client?cache=1", "")
+	discoveryRequest.URL = &url.URL{Path: "/.well-known/teagramd/client", RawQuery: "cache=1"}
+	discoveryRequest.Host = "web.example.test"
+	discoveryRequest.Header.Set("Origin", "https://web.example.test")
+	discoveryRequest.Header.Set("Authorization", "Bearer private-marker")
+	discoveryRequest.Header.Set("Cookie", "session=private-marker")
+	discoveryRequest.Header.Set("Referer", "https://web.example.test/private-marker")
+	discoveryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(discoveryResponse, discoveryRequest)
+	if discoveryResponse.Code != http.StatusOK || discoveryResponse.Header().Get("Content-Type") != "application/json" || discoveryResponse.Body.String() != `{"version":1}` {
+		t.Fatalf("public discovery response = %d %q %q, want server JSON", discoveryResponse.Code, discoveryResponse.Header().Get("Content-Type"), discoveryResponse.Body.String())
+	}
+
+	legacyDiscoveryRequest := rawRequest(http.MethodGet, "/.well-known/telegramd/client", "")
+	legacyDiscoveryRequest.URL = &url.URL{Path: "/.well-known/telegramd/client"}
+	legacyDiscoveryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(legacyDiscoveryResponse, legacyDiscoveryRequest)
+	if legacyDiscoveryResponse.Code != http.StatusOK || legacyDiscoveryResponse.Body.String() != `{"version":1}` {
+		t.Fatalf("legacy discovery response = %d %q, want server JSON", legacyDiscoveryResponse.Code, legacyDiscoveryResponse.Body.String())
+	}
+
+	websocketRequest := rawRequest(http.MethodGet, "/apiws", "")
+	websocketRequest.URL = &url.URL{Path: "/apiws"}
+	websocketResponse := httptest.NewRecorder()
+	handler.ServeHTTP(websocketResponse, websocketRequest)
+	if websocketResponse.Code != http.StatusOK || websocketResponse.Body.String() != `{"version":1}` {
+		t.Fatalf("public API path response = %d %q, want server response", websocketResponse.Code, websocketResponse.Body.String())
+	}
+	for _, target := range []string{"/.well-known/teagramd/client/extra", "/apiws/extra"} {
+		response := serveTarget(handler, http.MethodGet, target, "")
+		if response.Code != http.StatusOK || response.Body.String() != landingBody {
+			t.Errorf("GET %s = %d %q, want landing fallback", target, response.Code, response.Body.String())
+		}
+	}
+	wantServerPaths := []string{
+		"/.well-known/teagramd/client?cache=1",
+		"/.well-known/telegramd/client",
+		"/apiws",
+	}
+	if len(serverRequests) != len(wantServerPaths) {
+		t.Errorf("server requests = %+v, want exact routes %v", serverRequests, wantServerPaths)
+	} else {
+		for index, wantPath := range wantServerPaths {
+			if got := serverRequests[index].requestURI; got != wantPath {
+				t.Errorf("server request %d path = %q, want %q", index, got, wantPath)
+			}
+		}
+	}
+	if len(serverRequests) > 0 && serverRequests[0].header.Get("Origin") != "https://web.example.test" {
+		t.Errorf("discovery Origin = %q, want the public Web origin", serverRequests[0].header.Get("Origin"))
+	}
+	if len(serverRequests) > 0 {
+		for _, header := range []string{"Authorization", "Cookie", "Referer"} {
+			if got := serverRequests[0].header.Get(header); got != "" {
+				t.Errorf("server discovery request forwarded %s %q", header, got)
+			}
+		}
+	}
+	if len(webRequests) != 0 {
+		t.Errorf("server API paths reached Web: %+v", webRequests)
+	}
+	if len(landingRequests) != 2 {
+		t.Errorf("non-allowlisted API paths reached landing %d times, want 2", len(landingRequests))
+	}
+}
+
+func TestServerAPIWebSocketUpgradeThroughRealServer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apiws" {
+			t.Errorf("upstream request path = %q, want /apiws", r.URL.Path)
+		}
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
+			!strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+			http.Error(w, "missing WebSocket upgrade headers", http.StatusBadRequest)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("upstream ResponseWriter does not support hijacking")
+			return
+		}
+		connection, buffered, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack upstream connection: %v", err)
+			return
+		}
+		defer func() {
+			if err := connection.Close(); err != nil {
+				t.Errorf("close upstream WebSocket connection: %v", err)
+			}
+		}()
+		if _, err := buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"); err != nil {
+			t.Errorf("write upstream WebSocket handshake: %v", err)
+			return
+		}
+		if err := buffered.Flush(); err != nil {
+			t.Errorf("flush upstream WebSocket handshake: %v", err)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	web := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(landing.Close)
+
+	handler := newSelectorWithServer(t, upstream.URL, web.URL, landing.URL, slog.New(slog.DiscardHandler))
+	selectorServer := httptest.NewServer(handler)
+	t.Cleanup(selectorServer.Close)
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, selectorServer.URL+"/apiws", nil)
+	if err != nil {
+		t.Fatalf("build WebSocket request: %v", err)
+	}
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString([]byte("the sample nonce")))
+	request.Header.Set("Sec-WebSocket-Version", "13")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send WebSocket request through selector: %v", err)
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close WebSocket client body: %v", err)
+		}
+	}()
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("WebSocket response status = %d, want %d", response.StatusCode, http.StatusSwitchingProtocols)
+	}
+	if got := response.Header.Get("Upgrade"); !strings.EqualFold(got, "websocket") {
+		t.Errorf("WebSocket Upgrade response header = %q, want websocket", got)
+	}
+}
+
+func TestServerAPIPathsWithoutUpstreamFailClosed(t *testing.T) {
+	var webRequests, landingRequests []observedRequest
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests = append(webRequests, observeRequest(t, r))
+		writeTestResponse(t, w, webBody)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(recordingLanding(t, &landingRequests))
+	t.Cleanup(landing.Close)
+	var logs bytes.Buffer
+	handler := newSelector(t, web.URL, landing.URL, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	paths := []string{"/apiws", "/.well-known/teagramd/client", "/.well-known/telegramd/client"}
+	for _, path := range paths {
+		response := serveTarget(handler, http.MethodGet, path, "")
+		if response.Code != http.StatusServiceUnavailable {
+			t.Errorf("GET %s status = %d, want %d", path, response.Code, http.StatusServiceUnavailable)
+		}
+	}
+	if len(webRequests) != 0 || len(landingRequests) != 0 {
+		t.Errorf("unconfigured server routes reached Web or landing: web=%+v landing=%+v", webRequests, landingRequests)
+	}
+	for _, route := range []string{"websocket", "discovery", "legacy_discovery"} {
+		if !strings.Contains(logs.String(), `"route":"`+route+`"`) {
+			t.Errorf("missing upstream configuration log for route %q: %s", route, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "selector server API upstream is not configured") {
+		t.Errorf("missing unconfigured upstream error log: %s", logs.String())
 	}
 }
 
@@ -514,11 +698,16 @@ func TestNewHandlerRejectsUpstreamsWithRequestData(t *testing.T) {
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	for _, badURL := range []string{"", "/relative", "ftp://web.example", "http://user:pass@web.example", "http://web.example/base", "http://web.example/?secret=1", "http://web.example/#fragment"} {
-		if _, err := linkselector.NewHandler(badURL, "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
+		if _, err := linkselector.NewHandler("http://server:2446", badURL, "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("NewHandler accepted unsafe Web upstream %q", badURL)
 		}
 	}
-	if _, err := linkselector.NewHandler("http://web:8080/", "http://landing:8082", nil); err != nil {
+	for _, badURL := range []string{"/relative", "ftp://server.example", "http://user:pass@server.example", "http://server.example/base", "http://server.example/?secret=1", "http://server.example/#fragment"} {
+		if _, err := linkselector.NewHandler(badURL, "http://web:8080", "http://landing:8082", slog.New(slog.DiscardHandler)); err == nil {
+			t.Errorf("NewHandler accepted unsafe server upstream %q", badURL)
+		}
+	}
+	if _, err := linkselector.NewHandler("http://server:2446", "http://web:8080/", "http://landing:8082", nil); err != nil {
 		t.Errorf("NewHandler rejected plain service origins: %v", err)
 	}
 }
@@ -554,9 +743,14 @@ func TestSelectorSmokeHappyPath(t *testing.T) {
 
 func newSelector(t *testing.T, webURL, landingURL string, logger *slog.Logger) http.Handler {
 	t.Helper()
+	return newSelectorWithServer(t, "", webURL, landingURL, logger)
+}
+
+func newSelectorWithServer(t *testing.T, serverURL, webURL, landingURL string, logger *slog.Logger) http.Handler {
+	t.Helper()
 	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
 	t.Setenv("TG_INVITE_DESKTOP_URL", "")
-	handler, err := linkselector.NewHandler(webURL, landingURL, logger)
+	handler, err := linkselector.NewHandler(serverURL, webURL, landingURL, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

@@ -1,0 +1,6 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tailscale-proxy
+spec:
+  replicas: 0

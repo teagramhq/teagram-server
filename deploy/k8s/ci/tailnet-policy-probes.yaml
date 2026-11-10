@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tailnet-policy-probe
+  labels:
+    app.kubernetes.io/name: tailscale-proxy
+    app.kubernetes.io/component: ci-probe
+spec:
+  serviceAccountName: tailscale-proxy
+  automountServiceAccountToken: true
+  restartPolicy: Always
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-c", "import time; time.sleep(3600)"]
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+      volumeMounts:
+        - name: probes
+          mountPath: /tests
+          readOnly: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 24Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+  volumes:
+    - name: probes
+      configMap:
+        name: k8s-ingress-probes
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: linkselector-policy-probe
+  labels:
+    app.kubernetes.io/name: linkselector
+    app.kubernetes.io/component: ci-probe
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-c", "import time; time.sleep(3600)"]
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+      volumeMounts:
+        - name: probes
+          mountPath: /tests
+          readOnly: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 24Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+  volumes:
+    - name: probes
+      configMap:
+        name: k8s-ingress-probes
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: untrusted-policy-probe
+  labels:
+    app.kubernetes.io/name: network-policy-probe
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-c", "import time; time.sleep(3600)"]
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+      volumeMounts:
+        - name: probes
+          mountPath: /tests
+          readOnly: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 24Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+  volumes:
+    - name: probes
+      configMap:
+        name: k8s-ingress-probes

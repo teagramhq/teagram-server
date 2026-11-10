@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: teagramd
+spec:
+  template:
+    spec:
+      containers:
+        - name: teagramd
+          env:
+            - name: TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
+              value: ":2446"
+            - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
+              value: server.example.test:443
+            - name: TG_CLIENT_ADDR_TRUST
+              value: cf-connecting-ip
+        # CI-only stand-in for the public Bot API listener; MAIN-3600 replaces it.
+        - name: bot-api-public-ci-stand-in
+          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+          imagePullPolicy: IfNotPresent
+          args:
+            - -d
+            - -d
+            - -T120
+            - TCP-LISTEN:2449,bind=0.0.0.0,reuseaddr,fork,max-children=128
+            - TCP:127.0.0.1:2447
+          ports:
+            - name: public-bot-api
+              containerPort: 2449
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - socat -T2 -u /dev/null TCP:127.0.0.1:2449
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

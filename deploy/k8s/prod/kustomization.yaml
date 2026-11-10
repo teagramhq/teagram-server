@@ -8,6 +8,7 @@ resources:
 
 patches:
   - path: teagramd-listeners.yaml
+  - path: postgres-backup-cronjob.yaml
 
 configMapGenerator:
   - name: required-migration-version
