@@ -181,7 +181,10 @@ fi
    "$(yq -r '.spec.egress[1].to[0].podSelector.matchLabels."app.kubernetes.io/name"' deploy/k8s/base/tailscale-proxy-egress.yaml)" == linkselector &&
    "$(yq -r '[.spec.egress[2].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '53,53' &&
    "$(yq -r '[.spec.egress[3].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '443,3478,41641' &&
-   "$(yq -r '.spec.egress[3].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,127.0.0.0/8' ]] ||
+   "$(yq -r '.spec.egress[3].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,127.0.0.0/8' &&
+   "$(yq -r '.spec.egress | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 5 &&
+   "$(yq -r '.spec.egress[4].to[0].ipBlock.cidr' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.43.0.1/32' &&
+   "$(yq -r '[.spec.egress[4].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 443 ]] ||
   fail 'the Tailscale proxy egress policy must limit cluster destinations and keep private and tailnet ranges blocked'
 serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
 jq --exit-status '
@@ -264,6 +267,14 @@ grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress")' deploy/
   fail 'the cloudflared identity must prove access to both public listeners'
 grep --fixed-strings --quiet 'deny-egress' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet proxy policy probe must reject egress to PostgreSQL and RustFS'
+grep --fixed-strings --quiet 'kubernetes.default.svc' deploy/k8s/test-networkpolicy.py ||
+  fail 'the proxy-labelled policy probe must verify Kubernetes API access'
+grep --fixed-strings --quiet 'exec_probe(TAILNET_PROBE, "kube-api")' deploy/k8s/test-service-ingress.py ||
+  fail 'the proxy-labelled CI pod must test Kubernetes API access'
+grep --fixed-strings --quiet 'bot-api-public-ci-stand-in' deploy/k8s/ci/public-ingress-ci.yaml ||
+  fail 'the loopback public Bot API relay must be labelled as a CI-only stand-in'
+grep --fixed-strings --quiet 'MAIN-3600 replaces it' deploy/k8s/ci/public-ingress-ci.yaml ||
+  fail 'the CI Bot API stand-in must identify its replacement issue'
 [[ "$(yq eval-all -r '[.metadata.labels."app.kubernetes.io/name"] | join(",")' deploy/k8s/ci/tailnet-policy-probes.yaml)" == 'tailscale-proxy,linkselector,network-policy-probe' ]] ||
   fail 'the in-cluster probes must model tailnet, linkselector, and untrusted source identities'
 ci_linkselector_overlay="$(kubectl kustomize deploy/k8s/ci)"
@@ -279,6 +290,8 @@ grep --fixed-strings --quiet 'old_uid' deploy/k8s/test-service-ingress.py ||
   fail 'the teagramd rollout probe must require a changed pod UID'
 grep --fixed-strings --quiet 'observedGeneration' deploy/k8s/test-service-ingress.py ||
   fail 'the teagramd rollout probe must wait for the current StatefulSet generation'
+grep --fixed-strings --quiet 'availableReplicas' deploy/k8s/test-service-ingress.py ||
+  fail 'the linkselector rollout probe must wait for all replicas to be available'
 grep --fixed-strings --quiet 'error.stderr' deploy/k8s/test-service-ingress.py ||
   fail 'the rollout probe must include kubectl stderr in failure messages'
 if ! grep --fixed-strings --quiet 'status_line' deploy/k8s/test-networkpolicy.py; then

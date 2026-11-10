@@ -92,6 +92,24 @@ def teagramd_state() -> tuple[dict, list[dict]]:
     return statefulset, pod_list.get("items", [])
 
 
+def linkselector_state() -> tuple[dict, list[dict]]:
+    deployment = json.loads(
+        kubectl("get", "deployment", "linkselector", "--namespace", NAMESPACE, "--output", "json")
+    )
+    pod_list = json.loads(
+        kubectl(
+            "get",
+            "pods",
+            "--namespace",
+            NAMESPACE,
+            "--selector=app.kubernetes.io/name=linkselector,app.kubernetes.io/component=server",
+            "--output",
+            "json",
+        )
+    )
+    return deployment, pod_list.get("items", [])
+
+
 def pod_is_ready(pod: dict) -> bool:
     return any(
         condition.get("type") == "Ready" and condition.get("status") == "True"
@@ -126,29 +144,58 @@ def rollout_complete(statefulset: dict, pods: list[dict], generation: int, old_u
     )
 
 
+def linkselector_rollout_complete(
+    deployment: dict, pods: list[dict], generation: int, old_uids: set[str]
+) -> bool:
+    spec = deployment.get("spec", {})
+    status = deployment.get("status", {})
+    desired = spec.get("replicas", 1)
+    ready_uids = {
+        pod.get("metadata", {}).get("uid")
+        for pod in pods
+        if pod_is_ready(pod) and pod.get("metadata", {}).get("uid")
+    }
+    new_ready_pod = bool(ready_uids - old_uids)
+    return (
+        deployment.get("metadata", {}).get("generation", 0) >= generation
+        and status.get("observedGeneration", 0) >= generation
+        and status.get("replicas", 0) == desired
+        and status.get("updatedReplicas", 0) == desired
+        and status.get("readyReplicas", 0) == desired
+        and status.get("availableReplicas", 0) == desired
+        and new_ready_pod
+    )
+
+
 def rollout_linkselector(cloudflared: str) -> int:
+    _, before_pods = linkselector_state()
+    old_uids = {
+        pod.get("metadata", {}).get("uid")
+        for pod in before_pods
+        if pod.get("metadata", {}).get("uid")
+    }
+    if not old_uids or not any(pod_is_ready(pod) for pod in before_pods):
+        raise RuntimeError("linkselector has no Ready pod UID to verify against before restart")
+
     kubectl("rollout", "restart", "deployment/linkselector", "--namespace", NAMESPACE)
+    restarted, _ = linkselector_state()
+    target_generation = restarted["metadata"]["generation"]
     started = time.monotonic()
     probes = 0
     while time.monotonic() - started < 300:
         tick = time.monotonic()
         exec_probe(cloudflared, "linkselector")
         probes += 1
-        deployment = json.loads(
-            kubectl("get", "deployment", "linkselector", "--namespace", NAMESPACE, "--output", "json")
-        )
-        spec = deployment.get("spec", {})
-        status = deployment.get("status", {})
-        if (
-            status.get("observedGeneration", 0) >= deployment["metadata"]["generation"]
-            and status.get("readyReplicas", 0) >= spec.get("replicas", 1)
-            and status.get("updatedReplicas", 0) >= spec.get("replicas", 1)
-        ):
+        deployment, pods = linkselector_state()
+        if linkselector_rollout_complete(deployment, pods, target_generation, old_uids):
             break
         time.sleep(max(0.0, 1.0 - (time.monotonic() - tick)))
     else:
         raise TimeoutError("linkselector did not finish rolling out within 300 seconds")
     kubectl("rollout", "status", "deployment/linkselector", "--namespace", NAMESPACE, "--timeout=180s")
+    deployment, pods = linkselector_state()
+    if not linkselector_rollout_complete(deployment, pods, target_generation, old_uids):
+        raise RuntimeError("linkselector rollout completed without all replicas on a new Ready pod")
     exec_probe(cloudflared, "linkselector")
     return probes + 1
 
@@ -225,6 +272,7 @@ def main() -> int:
     for pod in (TAILNET_PROBE, UNTRUSTED_PROBE, LINKSELECTOR_PROBE):
         kubectl("wait", "--for=condition=Ready", f"pod/{pod}", "--namespace", NAMESPACE, "--timeout=180s")
     cloudflared = cloudflared_probe()
+    exec_probe(TAILNET_PROBE, "kube-api")
     exec_probe(TAILNET_PROBE, "discovery")
     exec_probe(TAILNET_PROBE, "check-listeners")
     exec_probe(TAILNET_PROBE, "bot-api")

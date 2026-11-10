@@ -60,3 +60,10 @@ spec:
           port: 3478
         - protocol: UDP
           port: 41641
+    # k3s' default ClusterIP for kubernetes.default.svc.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443

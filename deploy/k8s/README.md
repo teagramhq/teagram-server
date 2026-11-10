@@ -209,13 +209,18 @@ check the tailnet-labelled, linkselector-labelled, and untrusted sources.
 Public traffic cannot assert tailnet identity because cloudflared has no access
 to tailnet-only ports and caller input cannot change the in-cluster source pod
 identity. The proxy also has default-deny egress with
-only the teagramd and linkselector Service ports, cluster DNS, and Tailscale
-control/relay UDP and HTTPS destinations allowed; its policy excludes private,
-tailnet, and link-local IPv4 ranges from external egress. It cannot open
+only the teagramd and linkselector Service ports, cluster DNS, the k3s API
+Service at `kubernetes.default.svc:443`, and Tailscale control/relay UDP and
+HTTPS destinations allowed; its policy excludes private, tailnet, and
+link-local IPv4 ranges from external egress. It cannot open
 connections to PostgreSQL, RustFS, or other application pods. MAIN-3598 exempts tailnet
 traffic from teagramd rate and connection limits; public per-client limits use
 the real client address supplied through `CF-Connecting-IP` by cloudflared
 only.
+
+The CI-only `bot-api-public-ci-stand-in` exercises cloudflared's public-path
+reachability on port 2449. It relays to the loopback Bot API only in the
+disposable test overlay; MAIN-3600 replaces it with the direct public listener.
 
 The `Deploy.` runner joins the tailnet with `tailscale/github-action` and uses
 the namespace-scoped `KUBECONFIG` in GitHub environment `k3s-prod` to connect to
@@ -328,12 +333,14 @@ There is no LXC fallback. Restore the cluster from matching PostgreSQL and PVC
 backups before changing persistent data or replacing the Tailscale identity.
 The archived database dump and key archive are on the external backup drive.
 
-`test: k8s-deploy` exercises trusted and denied in-cluster sources, the
-unauthenticated Bot API response, discovery half-close, and one-second probes
-during linkselector and teagramd rollouts. It also requires the teagramd pod UID
-to change and the StatefulSet generation to complete before the rollout probe
-ends. The disposable overlay scales the real Tailscale proxy to zero and uses
+`test: k8s-deploy` exercises trusted and denied in-cluster sources, Kubernetes
+API access, the unauthenticated Bot API response, discovery half-close, and
+one-second probes during linkselector and teagramd rollouts. It requires all
+linkselector replicas and a Ready pod with a new UID before that rollout probe
+ends; teagramd also requires its StatefulSet generation to complete. The
+disposable overlay scales the real Tailscale proxy to zero and uses
 no production credential; its policy probe pod carries the proxy label only to
 test source-identity rules. CI does not claim to sample real Tailscale daemon
-restarts; production alerts monitor the proxy restart count. No smoke test uses
-a NodePort or `kubectl port-forward`.
+restarts; the first production teagramd rollout records the proxy container's
+restartCount before and after, and production alerts monitor that count. No
+smoke test uses a NodePort or `kubectl port-forward`.

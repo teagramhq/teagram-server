@@ -14,7 +14,8 @@ spec:
               value: server.teagram.io:443
             - name: TG_CLIENT_ADDR_TRUST
               value: cf-connecting-ip
-        - name: bot-api-public-probe
+        # CI-only stand-in for the public Bot API listener; MAIN-3600 replaces it.
+        - name: bot-api-public-ci-stand-in
           image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
           imagePullPolicy: IfNotPresent
           args:

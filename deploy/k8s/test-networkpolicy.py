@@ -7,6 +7,7 @@ import argparse
 import http.client
 import json
 import socket
+import ssl
 import sys
 
 from probe_discovery import probe as probe_discovery
@@ -117,6 +118,31 @@ def probe_public_ingress(host: str) -> None:
         )
 
 
+def probe_kubernetes_api() -> None:
+    connection = http.client.HTTPSConnection(
+        "kubernetes.default.svc",
+        443,
+        timeout=5,
+        context=ssl._create_unverified_context(),
+    )
+    try:
+        connection.request("GET", "/version", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read()
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise RuntimeError(
+            f"Kubernetes API /version returned HTTP {response.status}, want 200"
+        )
+    try:
+        version = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Kubernetes API /version returned invalid JSON") from error
+    if not isinstance(version, dict) or not version.get("gitVersion"):
+        raise RuntimeError("Kubernetes API /version response has no gitVersion")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -126,6 +152,7 @@ def main() -> int:
             "linkselector",
             "bot-api",
             "public-ingress",
+            "kube-api",
             "check-listeners",
             "deny-tailnet",
             "deny-public",
@@ -144,6 +171,8 @@ def main() -> int:
         probe_bot_api(args.host)
     elif args.operation == "public-ingress":
         probe_public_ingress(args.host)
+    elif args.operation == "kube-api":
+        probe_kubernetes_api()
     elif args.operation == "check-listeners":
         for port in (2444, 2445):
             require_open(args.host, port)
