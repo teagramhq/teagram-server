@@ -268,7 +268,7 @@ MTProto port 2443.
 | Tailnet web, `https://teagram.tailaa4918.ts.net/` | in-cluster Tailscale proxy to `linkselector:8081` | linkselector |
 | Tailnet desktop and discovery | Tailscale proxy to `teagramd:2444` | tailnet WebSocket listener |
 | Tailnet admin | Tailscale proxy to `teagramd:2445` | admin listener |
-| Tailnet MTProto | TCP 2443 through Tailscale proxy to `teagramd:2443` | MTProto listener |
+| Tailnet MTProto | Tailscale userspace forwarding to the proxy pod's loopback `socat` listener on 2443, then `teagramd:2443` | Half-close-preserving MTProto listener |
 | Tailnet Bot API | TCP 2447 through Tailscale proxy with PROXY v1 to `teagramd:2447` | Bot API relay on pod port 2448 |
 
 The public `server.teagram.io` and Bot API routes remain behind `hold-merge`
@@ -379,8 +379,9 @@ outside its namespaced NetworkPolicy rule.
 The proxy health and metrics endpoints listen on port 9002. The metrics Service
 has Prometheus scrape annotations; collect container logs with
 `kubectl logs statefulset/tailscale-proxy --namespace teagram`. Alert when the
-proxy is not Ready or its restart count increases. Do not add a liveness probe:
-transient tailnet connectivity must not force re-registration.
+proxy is not Ready or either the `tailscale` or `mtproto-forwarder` container's
+restart count increases. Do not add a liveness probe: transient tailnet
+connectivity must not force re-registration.
 
 ## One-time cleanup, post-check, and rollback
 
@@ -403,8 +404,12 @@ Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
 `telegramd-key-r1` response. In the tailnet admin console, confirm that the
 new in-cluster device is named `teagram` and that
 `teagram.tailaa4918.ts.net` resolves to that device. CI runs the same discovery
-probe through the Service targeted by the proxy and fails when it returns zero
-bytes.
+probe through the same `socat` loopback forwarder configured in the proxy pod,
+and fails when it returns zero bytes. Tailscale Serve does not handle TCP 2443:
+the userspace netstack forwards it to the pod loopback listener, which preserves
+the client's write half-close while waiting for the server response. CI keeps
+the real Tailscale daemon scaled to zero, so it verifies the forwarder and
+half-close exchange without registering a tailnet device.
 
 During a proxy incident, run the reviewed access rollback with the admin
 kubeconfig. It stops the proxy and removes its API egress policy, state
@@ -429,7 +434,10 @@ disposable overlay scales the real Tailscale proxy to zero and uses no
 production credential; its policy probe uses a keyless `tailscale-proxy`
 ServiceAccount token for `/version` and the proxy label for source-identity
 rules. CI does not claim to sample real Tailscale daemon
-restarts; the first production teagramd rollout records the proxy container's
-restartCount before and after, and production alerts monitor that count. The
-ingress probes run from in-cluster identities; only the disposable release
-rollback integration test uses short-lived `kubectl port-forward` connections.
+restarts; the first production teagramd rollout records the `tailscale` and
+`mtproto-forwarder` container restartCounts before and after, and production
+alerts monitor both. Its `mtproto-smoke` Job runs the 48-byte discovery
+half-close probe through the same loopback forwarder used by the production
+proxy. The ingress probes run from in-cluster identities; only the disposable
+release rollback integration test uses short-lived `kubectl port-forward`
+connections.

@@ -245,10 +245,9 @@ PY
 serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
 jq --exit-status '
   .TCP["443"].HTTPS == true and
-  .TCP["2443"].TCPForward == "teagramd:2443" and
   .TCP["2447"].TCPForward == "teagramd:2447" and
   .TCP["2447"].ProxyProtocol == 1 and
-  ((.TCP | keys | sort) == ["2443", "2447", "443"]) and
+  ((.TCP | keys | sort) == ["2447", "443"]) and
   (has("AllowFunnel") | not) and
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/"] .Proxy == "http://linkselector:8081" and
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/apiws"].Proxy == "http://teagramd:2444/apiws" and
@@ -294,8 +293,27 @@ ingress_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Probe 
 ci_overlay="$(kubectl kustomize deploy/k8s/ci)"
 ci_advertise_addr="$(yq -r 'select(.kind == "ConfigMap" and (.metadata.name | test("^teagramd-runtime-"))) | .data.TG_ADVERTISE_ADDR' <<<"$ci_overlay")"
 mtproto_smoke_endpoint="$(yq -r '.spec.template.spec.containers[] | select(.name == "smoke") | .command[2]' deploy/k8s/ci/mtproto-probe-job.yaml)"
-[[ "$ci_advertise_addr" == 'teagramd:2443' && "$mtproto_smoke_endpoint" == "$ci_advertise_addr" ]] ||
-  fail 'the in-cluster MTProto smoke must use the endpoint advertised by the CI server'
+[[ "$ci_advertise_addr" == 'teagramd:2443' && "$mtproto_smoke_endpoint" == "127.0.0.1:${ci_advertise_addr##*:}" ]] ||
+  fail 'the in-cluster MTProto smoke must reach the advertised port through the loopback forwarder'
+production_forwarder_image="$(yq -r '.spec.template.spec.containers[] | select(.name == "mtproto-forwarder") | .image' deploy/k8s/base/tailscale-proxy.yaml)"
+ci_forwarder_image="$(yq -r '.spec.template.spec.initContainers[] | select(.name == "mtproto-forwarder") | .image' deploy/k8s/ci/mtproto-probe-job.yaml)"
+production_forwarder_command="$(yq -r '.spec.template.spec.containers[] | select(.name == "mtproto-forwarder") | .command | join(" ")' deploy/k8s/base/tailscale-proxy.yaml)"
+ci_forwarder_command="$(yq -r '.spec.template.spec.initContainers[] | select(.name == "mtproto-forwarder") | .command | join(" ")' deploy/k8s/ci/mtproto-probe-job.yaml)"
+production_forwarder_args="$(yq -r '.spec.template.spec.containers[] | select(.name == "mtproto-forwarder") | .args | join(" ")' deploy/k8s/base/tailscale-proxy.yaml)"
+ci_forwarder_args="$(yq -r '.spec.template.spec.initContainers[] | select(.name == "mtproto-forwarder") | .args | join(" ")' deploy/k8s/ci/mtproto-probe-job.yaml)"
+[[ "$production_forwarder_image" == "$ci_forwarder_image" &&
+   "$production_forwarder_image" == 'mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e' &&
+   "$production_forwarder_command" == "$ci_forwarder_command" &&
+   "$production_forwarder_command" == socat &&
+   "$production_forwarder_args" == "$ci_forwarder_args" &&
+   "$production_forwarder_args" == '-d -d TCP-LISTEN:2443,bind=127.0.0.1,reuseaddr,fork TCP:teagramd:2443' &&
+   "$(yq -r '.spec.template.spec.initContainers[] | select(.name == "mtproto-forwarder") | .restartPolicy' deploy/k8s/ci/mtproto-probe-job.yaml)" == Always ]] ||
+  fail 'the MTProto CI job must use the same half-close forwarder as the production proxy'
+discovery_probe_command="$(yq -r '.spec.template.spec.containers[] | select(.name == "discovery") | .command | join(" ")' deploy/k8s/ci/mtproto-probe-job.yaml)"
+[[ "$discovery_probe_command" == 'python3 /tests/probe_discovery.py --host 127.0.0.1 --port 2443' &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "discovery") | .volumeMounts[] | select(.name == "ingress-probes") | .mountPath' deploy/k8s/ci/mtproto-probe-job.yaml)" == /tests &&
+   "$(yq -r '.spec.template.spec.volumes[] | select(.name == "ingress-probes") | .configMap.name' deploy/k8s/ci/mtproto-probe-job.yaml)" == k8s-ingress-probes ]] ||
+  fail 'the MTProto CI job must run the 48-byte half-close discovery probe through the loopback forwarder'
 ci_public_advertise_addr="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR") | .value' <<<"$ci_overlay")"
 ci_public_registration="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_REGISTRATION") | .value' <<<"$ci_overlay")"
 ci_public_origin="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") | .value' <<<"$ci_overlay")"
