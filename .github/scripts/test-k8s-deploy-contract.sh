@@ -375,6 +375,8 @@ grep --fixed-strings --quiet 'source and target S3 object counts or byte totals 
   fail 'the cutover runner must compare source and target S3 object counts and byte totals before switching routes'
 grep --fixed-strings --quiet 'source and target S3 per-object SHA-256 checksums do not match' deploy/k8s/cutover-alpha.sh ||
   fail 'the cutover runner must reject same-size S3 object corruption by SHA-256'
+grep --fixed-strings --quiet 'head -c "$1" /dev/zero | tr "\\000" x | mc pipe' deploy/k8s/cutover-alpha.sh ||
+  fail 'the K3s checksum test must generate its disposable corrupt object inside the client pod'
 cutover_seed_job=deploy/k8s/test-cutover-account-job.yaml
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "create-account") | .command | join(" ")' "$cutover_seed_job")" == '/usr/local/bin/teagramd' ]] ||
   fail 'the cutover account seed Job must invoke teagramd directly for its distroless image'
