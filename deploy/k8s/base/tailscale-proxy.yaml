@@ -16,10 +16,10 @@ data:
         "teagram.tailaa4918.ts.net:443": {
           "Handlers": {
             "/": {"Proxy": "http://linkselector:8081"},
-            "/apiws": {"Proxy": "http://teagramd:2444"},
-            "/.well-known/teagramd/client": {"Proxy": "http://teagramd:2444"},
-            "/.well-known/telegramd/client": {"Proxy": "http://teagramd:2444"},
-            "/admin": {"Proxy": "http://teagramd:2445"}
+            "/apiws": {"Proxy": "http://teagramd:2444/apiws"},
+            "/.well-known/teagramd/client": {"Proxy": "http://teagramd:2444/.well-known/teagramd/client"},
+            "/.well-known/telegramd/client": {"Proxy": "http://teagramd:2444/.well-known/teagramd/client"},
+            "/admin": {"Proxy": "http://teagramd:2445/admin"}
           }
         }
       }

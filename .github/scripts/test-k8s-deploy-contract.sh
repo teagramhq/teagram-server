@@ -251,12 +251,14 @@ jq --exit-status '
   ((.TCP | keys | sort) == ["2443", "2447", "443"]) and
   (has("AllowFunnel") | not) and
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/"] .Proxy == "http://linkselector:8081" and
-  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/apiws"].Proxy == "http://teagramd:2444" and
-  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/teagramd/client"].Proxy == "http://teagramd:2444" and
-  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/telegramd/client"].Proxy == "http://teagramd:2444" and
-  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/admin"].Proxy == "http://teagramd:2445"
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/apiws"].Proxy == "http://teagramd:2444/apiws" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/teagramd/client"].Proxy == "http://teagramd:2444/.well-known/teagramd/client" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/.well-known/telegramd/client"].Proxy == "http://teagramd:2444/.well-known/teagramd/client" and
+  .Web["teagram.tailaa4918.ts.net:443"].Handlers["/admin"].Proxy == "http://teagramd:2445/admin"
 ' <<<"$serve_config" >/dev/null ||
   fail 'the Tailscale Serve config must contain only the named tailnet Service targets and ports'
+python3 .github/scripts/test-tailscale-serve-routes.py <<<"$serve_config" ||
+  fail 'Tailscale Serve mount prefixes must resolve to the expected teagramd backend paths'
 [[ "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .image' deploy/k8s/base/tailscale-proxy.yaml)" == \
      'ghcr.io/tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c' &&
    "$(yq -r '.spec.template.spec.containers[] | select(.name == "tailscale") | .env[] | select(.name == "TS_KUBE_SECRET") | .value' deploy/k8s/base/tailscale-proxy.yaml)" == teagram-tailscale-state &&
@@ -412,7 +414,7 @@ fi
 if deploy/k8s/cutover-alpha.sh --apply --test-mode >/dev/null 2>&1; then
   fail 'the retired cutover script must not expose an apply path in test mode'
 fi
-python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ["deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in [".github/scripts/test-tailscale-serve-routes.py", "deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
   fail 'the in-cluster ingress probe scripts must parse as Python'
 grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
   fail 'the shared discovery probe must send the v1 half-close request'
