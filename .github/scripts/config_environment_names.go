@@ -28,12 +28,13 @@ type functionContext struct {
 }
 
 type packageSource struct {
-	files        []*ast.File
-	functions    []*functionContext
-	values       map[string][]ast.Expr
-	calls        map[string][]callSite
-	literalCalls map[*ast.FuncLit][]callSite
-	fset         *token.FileSet
+	files          []*ast.File
+	functions      []*functionContext
+	functionByNode map[ast.Node]*functionContext
+	values         map[string][]ast.Expr
+	calls          map[string][]callSite
+	literalCalls   map[*ast.FuncLit][]callSite
+	fset           *token.FileSet
 }
 
 type resolutionKey struct {
@@ -90,10 +91,11 @@ func environmentNames(root string) ([]string, error) {
 
 		fset := token.NewFileSet()
 		pkg := &packageSource{
-			values:       make(map[string][]ast.Expr),
-			calls:        make(map[string][]callSite),
-			literalCalls: make(map[*ast.FuncLit][]callSite),
-			fset:         fset,
+			functionByNode: make(map[ast.Node]*functionContext),
+			values:         make(map[string][]ast.Expr),
+			calls:          make(map[string][]callSite),
+			literalCalls:   make(map[*ast.FuncLit][]callSite),
+			fset:           fset,
 		}
 		for _, path := range paths {
 			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
@@ -120,7 +122,9 @@ func environmentNames(root string) ([]string, error) {
 			}
 		}
 		pkg.collectFunctions()
-		pkg.collectCalls()
+		if err := pkg.collectCalls(); err != nil {
+			return nil, err
+		}
 		if err := pkg.collectEnvironmentReads(names); err != nil {
 			return nil, err
 		}
@@ -163,22 +167,26 @@ func (pkg *packageSource) collectFunctions() {
 
 		for _, declaration := range file.Decls {
 			if function, ok := declaration.(*ast.FuncDecl); ok && function.Body != nil {
-				pkg.functions = append(pkg.functions, &functionContext{
+				context := &functionContext{
 					name:   function.Name.Name,
 					params: function.Type.Params,
 					body:   function.Body,
-				})
+				}
+				pkg.functions = append(pkg.functions, context)
+				pkg.functionByNode[function] = context
 			}
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			literal, ok := node.(*ast.FuncLit)
 			if ok {
-				pkg.functions = append(pkg.functions, &functionContext{
+				context := &functionContext{
 					name:    literalNames[literal],
 					params:  literal.Type.Params,
 					body:    literal.Body,
 					literal: literal,
-				})
+				}
+				pkg.functions = append(pkg.functions, context)
+				pkg.functionByNode[literal] = context
 			}
 			return true
 		})
@@ -200,61 +208,112 @@ func functionLiteral(expr ast.Expr) *ast.FuncLit {
 	return literal
 }
 
-func (pkg *packageSource) collectCalls() {
-	for _, function := range pkg.functions {
-		visitFunctionBody(function.body, func(node ast.Node) {
+func (pkg *packageSource) collectCalls() error {
+	for _, file := range pkg.files {
+		if err := pkg.walkFile(file, func(node ast.Node, caller *functionContext) error {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
-				return
+				return nil
 			}
+			site := callSite{args: call.Args, caller: caller}
 			switch callee := call.Fun.(type) {
 			case *ast.Ident:
-				pkg.calls[callee.Name] = append(pkg.calls[callee.Name], callSite{args: call.Args, caller: function})
+				pkg.calls[callee.Name] = append(pkg.calls[callee.Name], site)
 			case *ast.SelectorExpr:
-				pkg.calls[callee.Sel.Name] = append(pkg.calls[callee.Sel.Name], callSite{args: call.Args, caller: function})
+				pkg.calls[callee.Sel.Name] = append(pkg.calls[callee.Sel.Name], site)
 			case *ast.FuncLit:
-				pkg.literalCalls[callee] = append(pkg.literalCalls[callee], callSite{args: call.Args, caller: function})
+				pkg.literalCalls[callee] = append(pkg.literalCalls[callee], site)
 			}
-		})
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (pkg *packageSource) collectEnvironmentReads(names map[string]struct{}) error {
-	for _, function := range pkg.functions {
-		var visitErr error
-		visitFunctionBody(function.body, func(node ast.Node) {
-			if visitErr != nil {
-				return
-			}
+	for _, file := range pkg.files {
+		imports := osImportNames(file)
+		if err := pkg.walkFile(file, func(node ast.Node, function *functionContext) error {
 			call, ok := node.(*ast.CallExpr)
 			if !ok || len(call.Args) == 0 {
-				return
+				return nil
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
 			if !ok || selector.Sel.Name != "Getenv" && selector.Sel.Name != "LookupEnv" {
-				return
+				return nil
 			}
 			pkgName, ok := selector.X.(*ast.Ident)
-			if !ok || pkgName.Name != "os" {
-				return
+			if !ok {
+				return nil
+			}
+			if _, imported := imports[pkgName.Name]; !imported {
+				return nil
 			}
 
 			position := pkg.fset.Position(call.Args[0].Pos())
 			resolved, err := pkg.resolve(call.Args[0], function, names, make(map[resolutionKey]bool), position, 0)
 			if err != nil {
-				visitErr = err
-				return
+				return err
 			}
 			if !resolved {
-				visitErr = fmt.Errorf("%s:%d: cannot resolve environment key to a string literal", position.Filename, position.Line)
-				return
+				return fmt.Errorf("%s:%d: cannot resolve environment key to a string literal", position.Filename, position.Line)
 			}
-		})
-		if visitErr != nil {
-			return visitErr
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func osImportNames(file *ast.File) map[string]struct{} {
+	imports := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || path != "os" {
+			continue
+		}
+		name := "os"
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if name != "_" && name != "." {
+			imports[name] = struct{}{}
+		}
+	}
+	return imports
+}
+
+func (pkg *packageSource) walkFile(file *ast.File, visit func(ast.Node, *functionContext) error) error {
+	type activeFunction struct {
+		depth   int
+		context *functionContext
+	}
+	var functions []activeFunction
+	depth := 0
+	var visitErr error
+	ast.Inspect(file, func(node ast.Node) bool {
+		if node == nil {
+			if len(functions) > 0 && functions[len(functions)-1].depth == depth {
+				functions = functions[:len(functions)-1]
+			}
+			depth--
+			return visitErr == nil
+		}
+		depth++
+		if function, ok := pkg.functionByNode[node]; ok {
+			functions = append(functions, activeFunction{depth: depth, context: function})
+		}
+		var function *functionContext
+		if len(functions) > 0 {
+			function = functions[len(functions)-1].context
+		}
+		visitErr = visit(node, function)
+		return visitErr == nil
+	})
+	return visitErr
 }
 
 func visitFunctionBody(body *ast.BlockStmt, visit func(ast.Node)) {

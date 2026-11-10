@@ -35,7 +35,8 @@ class DocumentationCheckTests(unittest.TestCase):
 
     def test_missing_config_variable_is_named(self):
         (self.root / "internal/config/config.go").write_text(
-            'package config\nfunc load() { _ = os.Getenv("TG_NEW_SETTING") }\n'
+            'package config\nimport "os"\n'
+            'func load() { _ = os.Getenv("TG_NEW_SETTING") }\n'
         )
 
         result = self.run_checker()
@@ -43,9 +44,32 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TG_NEW_SETTING", result.stdout + result.stderr)
 
+    def test_package_level_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'var debugLevel = os.Getenv("TG_PACKAGE_ONLY")\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_PACKAGE_ONLY", result.stdout + result.stderr)
+
+    def test_aliased_os_import_config_variable_is_named(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport envos "os"\n'
+            'func load() { _ = envos.Getenv("TG_ALIASED_ONLY") }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_ALIASED_ONLY", result.stdout + result.stderr)
+
     def test_unused_config_variable_is_named(self):
         (self.root / "internal/config/config.go").write_text(
-            'package config\nfunc load() { _ = os.Getenv("TG_CURRENT_SETTING"); '
+            'package config\nimport ("errors"; "os")\n'
+            'func load() { _ = os.Getenv("TG_CURRENT_SETTING"); '
             '_ = errors.New("TG_REMOVED_SETTING") }\n'
         )
         (self.root / "docs/configuration.md").write_text(
@@ -164,7 +188,8 @@ class DocumentationCheckTests(unittest.TestCase):
 
     def test_test_only_config_variable_and_external_links_are_ignored(self):
         (self.root / "internal/config/config.go").write_text(
-            'package config\nfunc load() { _ = os.Getenv("TG_CURRENT_SETTING"); '
+            'package config\nimport "os"\n'
+            'func load() { _ = os.Getenv("TG_CURRENT_SETTING"); '
             '_ = os.Getenv("TG_FIXTURE_ONLY"); _ = os.Getenv("TG_PERF_ONLY") }\n'
         )
         (self.root / "internal/config/config_test.go").write_text(
@@ -174,7 +199,8 @@ class DocumentationCheckTests(unittest.TestCase):
             'package main\nvar _ = "TG_FIXTURE_ONLY"\n'
         )
         (self.root / "internal/linklanding/landing.go").write_text(
-            'package linklanding\nconst web = "TG_INVITE_WEB_SIGNUP_URL"\n'
+            'package linklanding\nimport "os"\n'
+            'const web = "TG_INVITE_WEB_SIGNUP_URL"\n'
             'const desktop = "TG_INVITE_DESKTOP_URL"\n'
             'func load() { _ = os.Getenv(web); _ = os.Getenv(desktop) }\n'
         )
