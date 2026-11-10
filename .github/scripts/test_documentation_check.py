@@ -250,7 +250,7 @@ class DocumentationCheckTests(unittest.TestCase):
             "A long fenced line that shifts an offset when code is removed.\n"
             "Another fenced line keeps the broken link far beyond the shortened text.\n"
             "```\n"
-            "[broken [nested](docs/nested-gone.md)](docs/gone.md\n"
+            "[broken `example` [nested](docs/nested-gone.md)](docs/gone.md\n"
         )
 
         result = self.run_checker()
@@ -259,8 +259,8 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README.md:8", output)
         self.assertIn("unclosed Markdown link", output)
-        self.assertIn("[broken [nested](docs/nested-gone.md)]", output)
-        self.assertIn("docs/nested-gone.md", output)
+        self.assertIn("[broken `example` [nested](docs/nested-gone.md)]", output)
+        self.assertIn("links to missing path docs/nested-gone.md", output)
 
     def test_link_title_stops_at_blank_line(self):
         (self.root / "README.md").write_text('[broken](docs/gone.md "a\n\ncontinued")\n')

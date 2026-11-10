@@ -290,7 +290,11 @@ def inline_link_destinations(text, base_offset=0, parse_errors=None):
         if destination_start < len(text) and text[destination_start] == "(":
             destination_end = matching_delimiter(text, destination_start, "(", ")")
             if destination_end is None:
-                parse_errors.append((base_offset + destination_start, text[label_start : label_end + 1]))
+                parse_errors.append((
+                    base_offset + destination_start,
+                    base_offset + label_start,
+                    base_offset + label_end + 1,
+                ))
                 destinations.extend(
                     inline_link_destinations(
                         text[label_start + 1 : label_end],
@@ -345,8 +349,9 @@ def missing_markdown_links(root):
             resolved = source.parent / target
             if not resolved.exists():
                 errors.append(f"{relative_source} links to missing path {destination}")
-        for offset, link_text in parse_errors:
+        for offset, label_start, label_end in parse_errors:
             line = text.count("\n", 0, offset) + 1
+            link_text = text[label_start:label_end]
             errors.append(f"{relative_source}:{line} has an unclosed Markdown link {link_text}")
     return errors
 
