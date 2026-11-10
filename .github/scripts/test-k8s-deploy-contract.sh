@@ -260,6 +260,8 @@ grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet Bot API check must send a PROXY v1 header'
 grep --fixed-strings --quiet 'deny-public' deploy/k8s/test-networkpolicy.py ||
   fail 'the policy probe must reject non-cloudflared access to both public listeners'
+grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress")' deploy/k8s/test-service-ingress.py ||
+  fail 'the cloudflared identity must prove access to both public listeners'
 grep --fixed-strings --quiet 'deny-egress' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet proxy policy probe must reject egress to PostgreSQL and RustFS'
 [[ "$(yq eval-all -r '[.metadata.labels."app.kubernetes.io/name"] | join(",")' deploy/k8s/ci/tailnet-policy-probes.yaml)" == 'tailscale-proxy,linkselector,network-policy-probe' ]] ||

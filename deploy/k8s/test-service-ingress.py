@@ -230,6 +230,7 @@ def main() -> int:
     exec_probe(TAILNET_PROBE, "bot-api")
     exec_probe(TAILNET_PROBE, "deny-public")
     exec_probe(TAILNET_PROBE, "deny-egress")
+    exec_probe(cloudflared, "public-ingress")
     exec_probe(cloudflared, "deny-tailnet")
     for pod in (UNTRUSTED_PROBE, LINKSELECTOR_PROBE):
         exec_probe(pod, "deny-tailnet")

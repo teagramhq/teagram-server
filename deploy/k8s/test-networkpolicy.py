@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import json
 import socket
 import sys
 
@@ -61,11 +62,75 @@ def probe_bot_api(host: str) -> None:
         raise RuntimeError(f"unauthenticated Bot API request returned {status_line.strip()!r}, want 401")
 
 
+def probe_public_ingress(host: str) -> None:
+    discovery = http.client.HTTPConnection(host, 2446, timeout=5)
+    try:
+        discovery.request(
+            "GET",
+            "/.well-known/teagramd/client",
+            headers={
+                "CF-Connecting-IP": "203.0.113.10",
+                "Host": "server.teagram.io",
+                "Connection": "close",
+            },
+        )
+        discovery_response = discovery.getresponse()
+        discovery_body = discovery_response.read()
+    finally:
+        discovery.close()
+    if discovery_response.status != 200:
+        raise RuntimeError(
+            f"public discovery returned HTTP {discovery_response.status}, want 200"
+        )
+    try:
+        document = json.loads(discovery_body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("public discovery returned invalid JSON") from error
+    public_endpoint = document.get("websocket", {}).get("endpoint")
+    if (
+        document.get("version") != 1
+        or public_endpoint != "wss://server.teagram.io/apiws"
+    ):
+        raise RuntimeError(
+            "public discovery did not advertise wss://server.teagram.io/apiws"
+        )
+
+    bot_api = http.client.HTTPConnection(host, 2449, timeout=5)
+    try:
+        bot_api.request(
+            "GET",
+            "/botbad-token/getMe",
+            headers={
+                "CF-Connecting-IP": "203.0.113.10",
+                "Host": "server.teagram.io",
+                "Connection": "close",
+            },
+        )
+        bot_api_response = bot_api.getresponse()
+        bot_api_response.read()
+    finally:
+        bot_api.close()
+    if bot_api_response.status != 401:
+        raise RuntimeError(
+            "unauthenticated public Bot API returned "
+            f"HTTP {bot_api_response.status}, want 401"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=("discovery", "linkselector", "bot-api", "check-listeners", "deny-tailnet", "deny-public", "deny-egress"),
+        choices=(
+            "discovery",
+            "linkselector",
+            "bot-api",
+            "public-ingress",
+            "check-listeners",
+            "deny-tailnet",
+            "deny-public",
+            "deny-egress",
+        ),
     )
     parser.add_argument("--host", default="teagramd")
     args = parser.parse_args()
@@ -77,6 +142,8 @@ def main() -> int:
         probe_linkselector("linkselector")
     elif args.operation == "bot-api":
         probe_bot_api(args.host)
+    elif args.operation == "public-ingress":
+        probe_public_ingress(args.host)
     elif args.operation == "check-listeners":
         for port in (2444, 2445):
             require_open(args.host, port)
