@@ -151,6 +151,18 @@ class TimingAndCleanupTests(unittest.TestCase):
                 },
                 "selector": {
                     **secure_service,
+                    "command": [
+                        "-listen-address",
+                        "0.0.0.0",
+                        "-port",
+                        "8081",
+                        "-server-upstream",
+                        "http://127.0.0.1:2446",
+                        "-web-upstream",
+                        "http://web:8080",
+                        "-landing-upstream",
+                        "http://linklanding:8082",
+                    ],
                     "environment": {
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
@@ -201,6 +213,18 @@ class TimingAndCleanupTests(unittest.TestCase):
         invalid_invite_config["services"]["selector"]["environment"]["UNAPPROVED"] = "unexpected"
         with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
             runner.validate_projection(invalid_invite_config)
+
+        for invalid_upstream in (None, "http://teagramd:2446"):
+            with self.subTest(invalid_upstream=invalid_upstream):
+                invalid_server_api_config = copy.deepcopy(config)
+                selector_command = invalid_server_api_config["services"]["selector"]["command"]
+                upstream_option = selector_command.index("-server-upstream")
+                if invalid_upstream is None:
+                    del selector_command[upstream_option : upstream_option + 2]
+                else:
+                    selector_command[upstream_option + 1] = invalid_upstream
+                with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
+                    runner.validate_projection(invalid_server_api_config)
 
     def test_timeout_returns_last_complete_observation_at_bound(self):
         now = [0.0]
