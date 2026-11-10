@@ -1086,6 +1086,9 @@ jobs:
       - name: Test bounded K8s workload checks
         run: .github/scripts/test-k8s-deploy-contract.sh
 
+      - name: Test early post-apply release rollback
+        run: python3 -B deploy/k8s/test-deploy-release-early-rollback.py
+
       - name: Check RPC performance workflow contract
         env:
           GOPROXY: 'https://proxy.golang.org|direct'

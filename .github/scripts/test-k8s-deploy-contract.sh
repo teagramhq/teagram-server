@@ -690,5 +690,9 @@ release_test_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "V
    "$release_test_step" == *'rollback=verified resource=statefulset/teagramd'* &&
    "$release_test_step" == *'test "$restored_image" = "$previous_image"'* ]] ||
   fail 'the K3s integration must force a bad deploy and verify automatic revision restoration'
+early_rollback_test_step="$(yq -r '.jobs."check-deploy-workflow".steps[] | select(.name == "Test early post-apply release rollback") | .run' .github/workflows/ci.yml)"
+[[ "$early_rollback_test_step" == 'python3 -B deploy/k8s/test-deploy-release-early-rollback.py' &&
+   -f deploy/k8s/test-deploy-release-early-rollback.py ]] ||
+  fail 'the deploy workflow must run the early post-apply template rollback regression'
 
 printf 'K8s deployment contract passed\n'
