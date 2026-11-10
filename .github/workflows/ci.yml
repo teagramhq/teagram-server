@@ -1071,6 +1071,9 @@ jobs:
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh
 
+      - name: Exercise production deploy runtime preflight steps
+        run: .github/scripts/test-deploy-runtime-preflight.sh
+
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
 
@@ -1106,14 +1109,20 @@ jobs:
           bash -n deploy/k8s/deploy-release.sh \
             deploy/k8s/initialize-channel-post-expiring-summaries.sh \
             deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
-            deploy/k8s/test-postgres-backup-restore.sh
+            deploy/k8s/test-postgres-backup-restore.sh \
+            deploy/k8s/test-postgres-backup-retention.sh \
+            deploy/k8s/test-postgres-backup-restore-guard.sh
           shellcheck deploy/k8s/deploy-release.sh \
             deploy/k8s/initialize-channel-post-expiring-summaries.sh \
             deploy/k8s/test-initialize-channel-post-expiring-summaries.sh \
-            deploy/k8s/test-postgres-backup-restore.sh
+            deploy/k8s/test-postgres-backup-restore.sh \
+            deploy/k8s/test-postgres-backup-retention.sh \
+            deploy/k8s/test-postgres-backup-restore-guard.sh
           shellcheck --shell=sh deploy/k8s/base/postgres-backup/backup.sh
           bash -n .github/scripts/test-k8s-deploy-contract.sh
           shellcheck .github/scripts/test-k8s-deploy-contract.sh
+          bash -n .github/scripts/test-deploy-runtime-preflight.sh
+          shellcheck .github/scripts/test-deploy-runtime-preflight.sh
           bash -n .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
           shellcheck .github/scripts/test-k8s-agent-access.sh deploy/k8s/check-agent-rbac.sh
           bash -n .github/scripts/check-k8s-migration-version.sh
@@ -1563,10 +1572,10 @@ jobs:
               yq -e 'select(.kind == "Deployment" and .metadata.name == "cloudflared") | .spec.replicas == 0' "$rendered" >/dev/null
               yq -e 'select(.kind == "Job" and .metadata.labels."app.kubernetes.io/name" == "db-migrations") | .spec.suspend == true' "$rendered" >/dev/null
             fi
-            if [[ "$overlay" == backup-bootstrap || "$overlay" == prod-cutover || "$overlay" == ci ]]; then
+            if [[ "$overlay" == prod-cutover || "$overlay" == ci ]]; then
               yq -e 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend == true' "$rendered" >/dev/null
             fi
-            if [[ "$overlay" == prod ]]; then
+            if [[ "$overlay" == prod || "$overlay" == backup-bootstrap ]]; then
               yq -e 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend == false' "$rendered" >/dev/null
             fi
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"

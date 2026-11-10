@@ -19,6 +19,7 @@ apply_started=false
 declare -A baseline_revisions=()
 declare -A baseline_statefulset_hashes=()
 declare -A baseline_templates=()
+declare -A baseline_replicas=()
 readonly controllers=(
   statefulset/postgres
   statefulset/rustfs
@@ -47,6 +48,29 @@ controller_template() {
   kubectl get "$resource" --namespace "$namespace" --output json |
     jq --compact-output --sort-keys --exit-status \
       '.spec.template | select(type == "object")'
+}
+
+controller_replicas() {
+  local resource="$1"
+  kubectl get "$resource" --namespace "$namespace" --output json |
+    jq --raw-output --exit-status '.spec.replicas // 1 | numbers'
+}
+
+controller_is_stable() {
+  local resource="$1" kind="$2"
+  kubectl get "$resource" --namespace "$namespace" --output json |
+    jq --exit-status --arg kind "$kind" '
+      (.spec.replicas // 1) as $desired
+      | (.metadata.generation // 0) as $generation
+      | (.status.observedGeneration // 0) >= $generation
+        and (.status.replicas // 0) == $desired
+        and (.status.updatedReplicas // 0) == $desired
+        and (.status.readyReplicas // 0) == $desired
+        and (.status.availableReplicas // $desired) == $desired
+        and ($kind != "statefulset" or
+          ((.status.currentRevision // "") != "" and
+           .status.currentRevision == .status.updateRevision))
+    ' >/dev/null
 }
 
 wait_for_statefulset_revision() {
@@ -98,7 +122,8 @@ delete_stale_statefulset_pods() {
 
 rollback() {
   local status=$? resource kind baseline baseline_template current_template
-  local restored_template rollback_failed=0
+  local baseline_count current_count
+  local restored_template restored_replicas rollback_failed=0
   trap - EXIT
   if ((status != 0)) && [[ "$apply_started" == true ]]; then
     printf 'deploy=failed sha=%s; restoring previous workload revisions\n' "$revision" >&2
@@ -122,16 +147,39 @@ rollback() {
         rollback_failed=1
         continue
       fi
-      if [[ "$current_template" == "$baseline_template" ]]; then
-        continue
-      fi
-      if ! kubectl rollout undo "$resource" --namespace "$namespace" \
-        --to-revision="$baseline"; then
-        printf 'rollback=failed resource=%s reason=undo-failed\n' "$resource" >&2
+      baseline_count="${baseline_replicas[$resource]:-}"
+      if [[ ! "$baseline_count" =~ ^[0-9]+$ ]]; then
+        printf 'rollback=unavailable resource=%s reason=no-replica-baseline\n' \
+          "$resource" >&2
         rollback_failed=1
         continue
       fi
-      if [[ "$kind" == statefulset ]]; then
+      if ! current_count="$(controller_replicas "$resource" 2>/dev/null)"; then
+        printf 'rollback=failed resource=%s reason=replica-count-unreadable\n' "$resource" >&2
+        rollback_failed=1
+        continue
+      fi
+      if [[ "$current_template" == "$baseline_template" &&
+        "$current_count" == "$baseline_count" ]]; then
+        continue
+      fi
+      if [[ "$current_template" != "$baseline_template" ]]; then
+        if ! kubectl rollout undo "$resource" --namespace "$namespace" \
+          --to-revision="$baseline"; then
+          printf 'rollback=failed resource=%s reason=undo-failed\n' "$resource" >&2
+          rollback_failed=1
+          continue
+        fi
+      fi
+      if [[ "$current_count" != "$baseline_count" ]] &&
+        ! kubectl patch "$resource" --namespace "$namespace" --type=merge \
+          --patch "{\"spec\":{\"replicas\":$baseline_count}}"; then
+        printf 'rollback=failed resource=%s reason=replica-count-restore-failed\n' \
+          "$resource" >&2
+        rollback_failed=1
+        continue
+      fi
+      if [[ "$kind" == statefulset && "$current_template" != "$baseline_template" ]]; then
         local baseline_hash="${baseline_statefulset_hashes[$resource]:-}"
         if [[ -z "$baseline_hash" ]] ||
           ! wait_for_statefulset_revision "$resource" "$baseline_hash" ||
@@ -154,8 +202,14 @@ rollback() {
         rollback_failed=1
         continue
       fi
-      if [[ "$restored_template" != "$baseline_template" ]]; then
-        printf 'rollback=failed resource=%s reason=template-not-restored\n' \
+      restored_replicas="$(controller_replicas "$resource" 2>/dev/null)" || {
+        printf 'rollback=failed resource=%s reason=replica-count-unreadable\n' "$resource" >&2
+        rollback_failed=1
+        continue
+      }
+      if [[ "$restored_template" != "$baseline_template" ||
+        "$restored_replicas" != "$baseline_count" ]]; then
+        printf 'rollback=failed resource=%s reason=spec-not-restored\n' \
           "$resource" >&2
         rollback_failed=1
         continue
@@ -174,6 +228,16 @@ trap 'printf "deploy-release failed at line %s: %s\\n" "$LINENO" "$BASH_COMMAND"
 kubectl apply --dry-run=server --filename "$manifest"
 for resource in "${controllers[@]}"; do
   kind="${resource%%/*}"
+  if ! controller_is_stable "$resource" "$kind"; then
+    printf 'deploy-release: %s is not fully stable; refusing to record a rollback baseline\n' \
+      "$resource" >&2
+    exit 1
+  fi
+  baseline_replicas["$resource"]="$(controller_replicas "$resource")"
+  [[ "${baseline_replicas[$resource]}" =~ ^[0-9]+$ ]] || {
+    printf 'deploy-release: no valid replica baseline for %s\n' "$resource" >&2
+    exit 1
+  }
   if [[ "$kind" == statefulset ]]; then
     baseline_hash="$(kubectl get "$resource" --namespace "$namespace" \
       --output 'jsonpath={.status.updateRevision}')"
@@ -197,12 +261,23 @@ for resource in "${controllers[@]}"; do
 done
 
 apply_started=true
-kubectl apply --filename "$manifest"
-kubectl wait --for=condition=complete jobs \
-  --selector=app.kubernetes.io/name=db-migrations \
+applied_resources="$(kubectl apply --filename "$manifest" --output name)"
+migration_jobs="$(grep --extended-regexp --only-matching \
+  '^job(\.batch)?/db-migrations-[a-z0-9]+$' <<< "$applied_resources" || true)"
+rustfs_jobs="$(grep --extended-regexp --only-matching \
+  '^job(\.batch)?/rustfs-init-[a-z0-9]+$' <<< "$applied_resources" || true)"
+mapfile -t migration_job_matches <<< "$migration_jobs"
+mapfile -t rustfs_job_matches <<< "$rustfs_jobs"
+[[ -n "$migration_jobs" && "${#migration_job_matches[@]}" == 1 &&
+  -n "$rustfs_jobs" && "${#rustfs_job_matches[@]}" == 1 ]] || {
+  printf 'deploy-release: apply did not report exactly one migration and RustFS Job\n' >&2
+  exit 1
+}
+migration_job="${migration_jobs#*/}"
+rustfs_job="${rustfs_jobs#*/}"
+kubectl wait --for=condition=complete "job/$migration_job" \
   --namespace "$namespace" --timeout=900s
-kubectl wait --for=condition=complete jobs \
-  --selector=app.kubernetes.io/name=rustfs-init \
+kubectl wait --for=condition=complete "job/$rustfs_job" \
   --namespace "$namespace" --timeout=600s
 for resource in "${controllers[@]}"; do
   kubectl rollout status "$resource" --namespace "$namespace" \

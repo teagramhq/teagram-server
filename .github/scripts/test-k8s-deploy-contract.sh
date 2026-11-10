@@ -600,7 +600,8 @@ for required_backup_line in \
   'pg_dump --format=custom --no-owner --no-acl' \
   'pg_restore --list' \
   'backup=verified path=%s bytes=%s sha256=%s' \
-  'tail -n +8'; do
+  'find "$backup_directory" -maxdepth 1 -type f' \
+  'prune_backups'; do
   grep --fixed-strings --quiet -- "$required_backup_line" "$backup_script" ||
     fail 'the backup command must verify each dump and prune files to seven'
 done
@@ -608,6 +609,10 @@ grep --fixed-strings --quiet 'postgres-backup' deploy/k8s/base/kustomization.yam
   fail 'the production and CI base must include the backup resources'
 grep --fixed-strings --quiet 'suspend: false' deploy/k8s/prod/postgres-backup-cronjob.yaml ||
   fail 'the production overlay must activate nightly backups after cutover'
+bootstrap_backup_suspend="$(kubectl kustomize deploy/k8s/backup-bootstrap |
+  yq eval-all -r 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend' -)"
+[[ "$bootstrap_backup_suspend" == false ]] ||
+  fail 'the pre-deploy overlay must leave nightly backups active if deployment fails'
 for overlay in prod-cutover ci; do
   backup_suspend="$(kubectl kustomize "deploy/k8s/$overlay" |
     yq eval-all -r 'select(.kind == "CronJob" and .metadata.name == "postgres-backup") | .spec.suspend' -)"
@@ -615,7 +620,7 @@ for overlay in prod-cutover ci; do
     fail "$overlay overlay must keep nightly backups suspended until production cutover is complete"
 done
 grep --fixed-strings --quiet '../base/postgres-backup' deploy/k8s/backup-bootstrap/kustomization.yaml ||
-  fail 'the pre-deploy overlay must provision only the suspended backup resources'
+  fail 'the pre-deploy overlay must provision the backup resources before taking its dump'
 for rbac_line in \
   'resources: ["cronjobs", "jobs"]' \
   'resources: ["persistentvolumeclaims"]' \
@@ -653,6 +658,14 @@ release_maintenance_line="$(grep -n -m 1 -F 'initialize-channel-post-expiring-su
   fail 'the deploy runner must dry-run, apply, smoke, initialize summaries, then emit the verified rollout marker'
 grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script" ||
   fail 'the release runner must automatically undo changed workload revisions on failure'
+grep --fixed-strings --quiet 'currentRevision == .status.updateRevision' "$release_script" ||
+  fail 'the release runner must refuse an unstable StatefulSet rollback baseline'
+grep --fixed-strings --quiet 'status.updatedReplicas' "$release_script" ||
+  fail 'the release runner must require all workload replicas to be updated and ready before apply'
+grep --fixed-strings --quiet 'kubectl wait --for=condition=complete "job/$migration_job"' "$release_script" ||
+  fail 'the release runner must wait for the exact migration Job created by this apply'
+grep --fixed-strings --quiet 'kubectl wait --for=condition=complete "job/$rustfs_job"' "$release_script" ||
+  fail 'the release runner must wait for the exact RustFS initializer Job created by this apply'
 grep --fixed-strings --quiet 'kubectl rollout status "$resource"' "$release_script" ||
   fail 'the release runner must wait for every production workload rollout'
 grep --fixed-strings --quiet 'kubectl delete pod "$pod"' "$release_script" ||
@@ -675,9 +688,15 @@ maintenance_job=deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml
 
 bash deploy/k8s/test-initialize-channel-post-expiring-summaries.sh >/dev/null ||
   fail 'the summary maintenance runner must continue until zero remain and fail closed on invalid batches'
+bash deploy/k8s/test-postgres-backup-retention.sh >/dev/null ||
+  fail 'backup retention must keep the seven newest verified dumps and clean stale temporary dumps'
+bash deploy/k8s/test-postgres-backup-restore-guard.sh >/dev/null ||
+  fail 'the destructive restore test must refuse non-GitHub and non-CI clusters'
 
 backup_restore_test=deploy/k8s/test-postgres-backup-restore.sh
 for restore_line in \
+  'GITHUB_ACTIONS:-' \
+  'https://127.0.0.1:6443' \
   'kubectl create job "$backup_job" --from=cronjob/postgres-backup' \
   'dropdb --username=postgres --force teagram' \
   'kubectl apply --filename deploy/k8s/test-postgres-backup-restore-job.yaml' \

@@ -144,12 +144,13 @@ images such as BusyBox are pinned from `mirror.gcr.io`.
 ## PostgreSQL backups
 
 The production overlay enables a daily 03:17 UTC PostgreSQL custom-format dump.
-`Deploy.` first applies the `backup-bootstrap/` overlay with the CronJob
-suspended, runs and verifies a fresh dump, and only then applies the production
-release. The nightly CronJob becomes active when `prod/` is applied. Both paths
-write to the `postgres-backups` 20 GiB PVC and keep the newest seven verified
-dumps. Each Job runs `pg_restore --list` before publishing a dump by an atomic
-rename; its log records the path, byte count, and SHA-256 without credentials.
+`Deploy.` first applies the `backup-bootstrap/` overlay, runs and verifies a
+fresh dump, and only then applies the production release. The bootstrap overlay
+keeps the nightly CronJob active so a failed deployment cannot leave scheduled
+backups disabled. Both paths write to the `postgres-backups` 20 GiB PVC and
+keep the newest seven verified dumps. Each Job runs `pg_restore --list` before
+publishing a dump by an atomic rename; its log records the path, byte count,
+and SHA-256 without credentials.
 
 The backup PVC is local to the k3s node, unencrypted, and has no off-cluster
 copy. It is a release recovery point, not protection against loss of the host

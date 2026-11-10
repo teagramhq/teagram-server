@@ -5,6 +5,17 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 : "${KUBECONFIG:?KUBECONFIG must point to the disposable CI cluster}"
 : "${RUNNER_TEMP:?RUNNER_TEMP must point to the disposable runner directory}"
+if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
+  printf 'PostgreSQL backup restore test is restricted to GitHub Actions k3s\n' >&2
+  exit 2
+fi
+api_server="$(kubectl config view --minify \
+  --output 'jsonpath={.clusters[0].cluster.server}')"
+if [[ "$api_server" != https://127.0.0.1:6443 ]]; then
+  printf 'PostgreSQL backup restore test refused unexpected API server: %s\n' \
+    "${api_server:-<empty>}" >&2
+  exit 2
+fi
 
 tmp_dir="$(mktemp -d "$RUNNER_TEMP/postgres-backup-restore.XXXXXX")"
 port_forward_pid=''

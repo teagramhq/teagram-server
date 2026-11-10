@@ -5,3 +5,6 @@ namespace: teagram
 
 resources:
   - ../base/postgres-backup
+
+patches:
+  - path: postgres-backup-cronjob.yaml
