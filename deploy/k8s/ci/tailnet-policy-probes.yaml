@@ -1,4 +1,11 @@
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tailscale-proxy
+  namespace: teagram
+automountServiceAccountToken: true
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: tailnet-policy-probe
@@ -6,7 +13,8 @@ metadata:
     app.kubernetes.io/name: tailscale-proxy
     app.kubernetes.io/component: ci-probe
 spec:
-  automountServiceAccountToken: false
+  serviceAccountName: tailscale-proxy
+  automountServiceAccountToken: true
   restartPolicy: Always
   securityContext:
     runAsNonRoot: true

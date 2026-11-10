@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import pathlib
 import socket
 import ssl
 import sys
@@ -119,6 +120,11 @@ def probe_public_ingress(host: str) -> None:
 
 
 def probe_kubernetes_api() -> None:
+    token = pathlib.Path(
+        "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    ).read_text(encoding="utf-8").strip()
+    if not token:
+        raise RuntimeError("Kubernetes API probe has no service-account token")
     connection = http.client.HTTPSConnection(
         "kubernetes.default.svc",
         443,
@@ -126,7 +132,14 @@ def probe_kubernetes_api() -> None:
         context=ssl._create_unverified_context(),
     )
     try:
-        connection.request("GET", "/version", headers={"Connection": "close"})
+        connection.request(
+            "GET",
+            "/version",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Connection": "close",
+            },
+        )
         response = connection.getresponse()
         body = response.read()
     finally:

@@ -183,8 +183,9 @@ fi
    "$(yq -r '[.spec.egress[3].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '443,3478,41641' &&
    "$(yq -r '.spec.egress[3].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,127.0.0.0/8' &&
    "$(yq -r '.spec.egress | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 5 &&
-   "$(yq -r '.spec.egress[4].to[0].ipBlock.cidr' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.43.0.1/32' &&
-   "$(yq -r '[.spec.egress[4].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 443 ]] ||
+   "$(yq -r '[.spec.egress[4].to[].ipBlock.cidr] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16' &&
+   "$(yq -r '.spec.egress[4].to[0].ipBlock.except | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '10.42.0.0/16,10.43.0.0/16' &&
+   "$(yq -r '[.spec.egress[4].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 6443 ]] ||
   fail 'the Tailscale proxy egress policy must limit cluster destinations and keep private and tailnet ranges blocked'
 serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
 jq --exit-status '
@@ -269,8 +270,12 @@ grep --fixed-strings --quiet 'deny-egress' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet proxy policy probe must reject egress to PostgreSQL and RustFS'
 grep --fixed-strings --quiet 'kubernetes.default.svc' deploy/k8s/test-networkpolicy.py ||
   fail 'the proxy-labelled policy probe must verify Kubernetes API access'
+grep --fixed-strings --quiet '"Authorization": f"Bearer {token}"' deploy/k8s/test-networkpolicy.py ||
+  fail 'the Kubernetes API probe must authenticate with its projected ServiceAccount token'
 grep --fixed-strings --quiet 'exec_probe(TAILNET_PROBE, "kube-api")' deploy/k8s/test-service-ingress.py ||
   fail 'the proxy-labelled CI pod must test Kubernetes API access'
+grep --fixed-strings --quiet 'serviceAccountName: tailscale-proxy' deploy/k8s/ci/tailnet-policy-probes.yaml ||
+  fail 'the Kubernetes API probe must use the proxy ServiceAccount identity'
 grep --fixed-strings --quiet 'bot-api-public-ci-stand-in' deploy/k8s/ci/public-ingress-ci.yaml ||
   fail 'the loopback public Bot API relay must be labelled as a CI-only stand-in'
 grep --fixed-strings --quiet 'MAIN-3600 replaces it' deploy/k8s/ci/public-ingress-ci.yaml ||

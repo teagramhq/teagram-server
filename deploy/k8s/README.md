@@ -209,11 +209,14 @@ check the tailnet-labelled, linkselector-labelled, and untrusted sources.
 Public traffic cannot assert tailnet identity because cloudflared has no access
 to tailnet-only ports and caller input cannot change the in-cluster source pod
 identity. The proxy also has default-deny egress with
-only the teagramd and linkselector Service ports, cluster DNS, the k3s API
-Service at `kubernetes.default.svc:443`, and Tailscale control/relay UDP and
-HTTPS destinations allowed; its policy excludes private, tailnet, and
-link-local IPv4 ranges from external egress. It cannot open
-connections to PostgreSQL, RustFS, or other application pods. MAIN-3598 exempts tailnet
+only the teagramd and linkselector Service ports, cluster DNS, the k3s API,
+and Tailscale control/relay UDP and HTTPS destinations allowed. The API
+Service at `kubernetes.default.svc:443` is translated to the node endpoint at
+port `6443`; the policy permits that port on RFC1918 addresses while excluding
+the default k3s Pod and Service CIDRs (`10.42.0.0/16` and `10.43.0.0/16`).
+The external egress rule still excludes private, tailnet, and link-local IPv4
+ranges, so the proxy cannot open connections to PostgreSQL, RustFS, or other
+application pods. MAIN-3598 exempts tailnet
 traffic from teagramd rate and connection limits; public per-client limits use
 the real client address supplied through `CF-Connecting-IP` by cloudflared
 only.
@@ -338,9 +341,10 @@ API access, the unauthenticated Bot API response, discovery half-close, and
 one-second probes during linkselector and teagramd rollouts. It requires all
 linkselector replicas and a Ready pod with a new UID before that rollout probe
 ends; teagramd also requires its StatefulSet generation to complete. The
-disposable overlay scales the real Tailscale proxy to zero and uses
-no production credential; its policy probe pod carries the proxy label only to
-test source-identity rules. CI does not claim to sample real Tailscale daemon
+disposable overlay scales the real Tailscale proxy to zero and uses no
+production credential; its policy probe uses a keyless `tailscale-proxy`
+ServiceAccount token for `/version` and the proxy label for source-identity
+rules. CI does not claim to sample real Tailscale daemon
 restarts; the first production teagramd rollout records the proxy container's
 restartCount before and after, and production alerts monitor that count. No
 smoke test uses a NodePort or `kubectl port-forward`.
