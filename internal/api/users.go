@@ -17,14 +17,14 @@ import (
 )
 
 func (h *handlers) checkAndChargePhoneLookup(r *mtproto.Request, phone string) error {
-	if r.TailnetPath {
+	if r.Tailnet() {
 		return nil
 	}
 	return h.store.CheckAndChargeLookup(r.Ctx, r.UserID, phone)
 }
 
 func (h *handlers) checkAndChargeUsernameLookup(r *mtproto.Request, username string) error {
-	if r.TailnetPath {
+	if r.Tailnet() {
 		return nil
 	}
 	return h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username)

@@ -143,7 +143,7 @@ func (h *handlers) handleSaveDraftAfterReplyOnConn(_ *mtproto.Conn, r *mtproto.R
 	}
 
 	var changed bool
-	if r.TailnetPath {
+	if r.Tailnet() {
 		changed, _, err = h.store.SaveCloudDraftUnmetered(r.Ctx, r.UserID, peerType, peerID, req.Message, req.NoWebpage, replyToMsgID)
 	} else {
 		changed, _, err = h.store.SaveCloudDraft(r.Ctx, r.UserID, peerType, peerID, req.Message, req.NoWebpage, replyToMsgID)

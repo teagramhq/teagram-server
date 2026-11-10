@@ -95,7 +95,7 @@ type Conn struct {
 	log          *slog.Logger
 	connectionID string
 	openedAt     time.Time
-	tailnetPath  bool
+	listenerPath ListenerPath
 
 	// pushDeliveryMu forms a barrier between update delivery and state snapshots.
 	// Pushes take its read lock before writeMu; updates.getState holds its write

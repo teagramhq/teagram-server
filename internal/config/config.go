@@ -302,9 +302,10 @@ type Config struct {
 	// header is honoured from. It is the whole of the trust decision in
 	// ClientAddrProxyV2 mode and is empty in every other mode.
 	ClientAddrProxies []netip.Prefix
-	// CFConnectingIPProxies is the source allowlist for CF-Connecting-IP on the
-	// public WebSocket listener. With that trust mode and no explicit list, only
-	// loopback forwarders are trusted for compatibility with local tunnel setups.
+	// CFConnectingIPProxies is the optional source allowlist for CF-Connecting-IP
+	// on the public WebSocket listener. When unset, the header retains the
+	// existing trust-mode behavior; a configured list restricts which peers may
+	// assert it.
 	CFConnectingIPProxies []netip.Prefix
 	// PreAuth is the deployment-wide budget for connections that have not
 	// authenticated: concurrent sockets, concurrent sockets per client network,
@@ -2479,6 +2480,9 @@ func clientAddrProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error
 	return prefixes, nil
 }
 
+// clientAddrCFProxies applies an optional source allowlist to CF-Connecting-IP.
+// An unset list preserves the existing behavior, where the selected header is
+// accepted from any peer; a configured list restricts the source peers.
 func clientAddrCFProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error) {
 	prefixes, err := parsePrefixes(raw, "TG_CLIENT_ADDR_CF_PROXY_CIDRS")
 	if err != nil {
@@ -2489,12 +2493,6 @@ func clientAddrCFProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, err
 			return nil, fmt.Errorf("TG_CLIENT_ADDR_CF_PROXY_CIDRS is set while TG_CLIENT_ADDR_TRUST is %q: the allowlist is only read in %q mode", trust, ClientAddrCFConnectingIP)
 		}
 		return nil, nil
-	}
-	if len(prefixes) == 0 {
-		return []netip.Prefix{
-			netip.MustParsePrefix("127.0.0.0/8"),
-			netip.MustParsePrefix("::1/128"),
-		}, nil
 	}
 	return prefixes, nil
 }
@@ -2591,16 +2589,11 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 }
 
 func parseListenerPath(raw, name string) (mtproto.ListenerPath, error) {
-	if raw == "" {
-		return mtproto.ListenerPathLimited, nil
+	path, err := mtproto.ParseListenerPath(raw)
+	if err != nil {
+		return mtproto.ListenerPathLimited, fmt.Errorf("%s: %w", name, err)
 	}
-	path := mtproto.ListenerPath(raw)
-	switch path {
-	case mtproto.ListenerPathLimited, mtproto.ListenerPathTailnet:
-		return path, nil
-	default:
-		return "", fmt.Errorf("%s must be %q or %q", name, mtproto.ListenerPathLimited, mtproto.ListenerPathTailnet)
-	}
+	return path, nil
 }
 
 func parseWebSocketBrowserOnly(raw, name string) (bool, error) {

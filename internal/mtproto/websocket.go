@@ -632,9 +632,9 @@ func (s *Server) serveWebSocketWithDiscovery(ctx context.Context, l net.Listener
 }
 
 // ServePublicWebSocketWithCFConnectingIP serves a public WebSocket listener
-// with its own discovery document and trusts the one CF-Connecting-IP header
-// supplied by the loopback-only Cloudflare Tunnel path. Other listeners keep
-// their socket peer address.
+// with its own discovery document and reads its client address from one
+// CF-Connecting-IP header. TrustCFConnectingIPProxies can restrict which socket
+// peers may assert that header; an unset allowlist preserves legacy behavior.
 func (s *Server) ServePublicWebSocketWithCFConnectingIP(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document) error {
 	return s.ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(ctx, l, handler, originPatterns, doc, false)
 }
@@ -776,8 +776,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return
 	}
 	if clientAddrHeader != "" {
-		addr := peerAddr(state.socket.RemoteAddr())
-		if s.trustsCFConnectingIP(addr) {
+		peer := peerAddr(state.socket.RemoteAddr())
+		addr := peer
+		if s.trustsCFConnectingIP(peer) {
 			values := r.Header.Values(clientAddrHeader)
 			if len(values) != 1 {
 				s.logInvalidClientAddrHeader(len(values))
@@ -791,6 +792,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 				return
 			}
 			addr = forwardedAddr.Unmap()
+			s.logCFConnectingIPTrust(peer, clientAddrHeader, addr, true)
+		} else if len(r.Header.Values(clientAddrHeader)) > 0 {
+			s.logCFConnectingIPTrust(peer, clientAddrHeader, netip.Addr{}, false)
 		}
 		state.socket.state.Lock()
 		if state.socket.closed {
@@ -813,15 +817,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}
 	requestPath := r.URL.EscapedPath()
 	if requestPath == clientDiscoveryPath {
-		allowed, err := s.discovery.allowContextForPath(r.Context(), state.addr, state.slot.path)
-		if err != nil {
-			s.log.Error("check WebSocket discovery rate limit", "err", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		if !allowed {
-			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
-			return
+		if clientAddrHeader != "" {
+			allowed, err := s.discovery.allowPerNetContext(r.Context(), state.addr)
+			if err != nil {
+				s.log.Error("check public WebSocket discovery rate limit; serving static document", "err", err, "client_addr", state.addr, "source", clientAddrHeader)
+			} else if !allowed {
+				if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
+					s.log.Info("public WebSocket discovery request refused at rate limit",
+						"client_addr", state.addr, "source", clientAddrHeader, "suppressed", dropped)
+				}
+				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+				return
+			}
 		}
 		s.handleClientDiscovery(w, r, discoveryDocument)
 		return
@@ -932,6 +939,20 @@ func (s *Server) logInvalidClientAddrHeader(valueCount int) {
 	if dropped, ok := s.clientAddrHeaderLog.allow(time.Now(), preAuthLogInterval); ok {
 		s.log.Warn("invalid CF-Connecting-IP header",
 			"header", cfConnectingIPHeader, "value_count", valueCount, "suppressed", dropped)
+	}
+}
+
+func (s *Server) logCFConnectingIPTrust(peer netip.Addr, source string, forwarded netip.Addr, trusted bool) {
+	if trusted {
+		if dropped, ok := s.clientAddrTrustLog.allow(time.Now(), preAuthLogInterval); ok {
+			s.log.Info("trusted forwarded client address",
+				"peer_addr", peer, "source", source, "client_addr", forwarded, "suppressed", dropped)
+		}
+		return
+	}
+	if dropped, ok := s.clientAddrIgnoreLog.allow(time.Now(), preAuthLogInterval); ok {
+		s.log.Info("ignored forwarded client address from untrusted peer",
+			"peer_addr", peer, "source", source, "suppressed", dropped)
 	}
 }
 

@@ -175,7 +175,7 @@ func (b *unimplementedBudget) logClose(now time.Time) (int64, bool) {
 // other per-connection charge in this package: the budget is per connection and
 // nothing that has not proved the key gets to spend one.
 func (c *Conn) ChargeUnimplemented() UnimplementedVerdict {
-	if c.tailnetPath {
+	if c.listenerPath == ListenerPathTailnet {
 		return UnimplementedAnswer
 	}
 	return c.unimplemented.charge(c.clock.Now())
@@ -185,7 +185,7 @@ func (c *Conn) ChargeUnimplemented() UnimplementedVerdict {
 // langpack request budget. It has the same window and thresholds as
 // unimplemented methods, but calls to the two surfaces are counted separately.
 func (c *Conn) ChargeLangpack() UnimplementedVerdict {
-	if c.tailnetPath {
+	if c.listenerPath == ListenerPathTailnet {
 		return UnimplementedAnswer
 	}
 	return c.langpack.charge(c.clock.Now())

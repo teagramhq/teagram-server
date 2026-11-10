@@ -322,7 +322,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	}
 
 	var updateErr error
-	if r.TailnetPath {
+	if r.Tailnet() {
 		updateErr = h.store.UpdateUsernameUnmetered(r.Ctx, r.UserID, username)
 	} else {
 		updateErr = h.store.UpdateUsername(r.Ctx, r.UserID, username)

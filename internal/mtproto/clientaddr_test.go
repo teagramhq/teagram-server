@@ -144,7 +144,7 @@ func TestRequestTailnetPathComesFromConfiguredTCPListener(t *testing.T) {
 			}
 			seen := make(chan bool, 1)
 			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
-				seen <- req.TailnetPath
+				seen <- req.Tailnet()
 				return nil
 			})
 			srv := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
@@ -179,7 +179,13 @@ func TestRequestTailnetPathComesFromConfiguredTCPListener(t *testing.T) {
 			if err != nil {
 				t.Fatalf("transport handshake: %v", err)
 			}
-			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.HelpGetConfigRequest{})
+			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.InvokeWithLayerRequest{
+				Layer: 100,
+				Query: &tg.InitConnectionRequest{
+					APIID: 1, DeviceModel: "test", SystemVersion: "1.0", AppVersion: "1.0",
+					SystemLangCode: "en", LangCode: "en", Query: &tg.HelpGetConfigRequest{},
+				},
+			})
 			if err := client.Send(ctx, &bin.Buffer{Buf: slices.Clone(frame)}); err != nil {
 				t.Fatalf("send frame: %v", err)
 			}

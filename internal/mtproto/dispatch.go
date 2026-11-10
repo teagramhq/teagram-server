@@ -39,9 +39,8 @@ type Request struct {
 	// RateLimitListener is the immutable listener scope assigned at accept.
 	// It is never selected from Host, Origin, forwarded headers, or RPC input.
 	RateLimitListener store.RateLimitListener
-	// TailnetPath is true only when the socket was accepted by a listener
-	// configured for the tailnet path. It is copied to nested RPC requests.
-	TailnetPath bool
+	// conn is the accepted connection that supplies the immutable listener policy.
+	conn *Conn
 	// ClientAddrFromProxyV2 is true when ClientAddr came from an allowlisted
 	// PROXY v2 header rather than the socket peer.
 	ClientAddrFromProxyV2 bool
@@ -95,6 +94,20 @@ type Request struct {
 	rpcLogMethod string
 	rpcResult    RPCResultClass
 	rpcStart     func(string)
+}
+
+// Tailnet reports whether this request arrived through a listener configured
+// for the tailnet path.
+func (r *Request) Tailnet() bool {
+	return r != nil && r.conn != nil && r.conn.listenerPath == ListenerPathTailnet
+}
+
+// MarkRequestTailnetForTesting marks a synthetic request for internal API tests.
+// Served production requests get this value only from their accepted Conn.
+func MarkRequestTailnetForTesting(r *Request) {
+	if r != nil {
+		r.conn = &Conn{listenerPath: ListenerPathTailnet}
+	}
 }
 
 // Handler processes decrypted MTProto requests.

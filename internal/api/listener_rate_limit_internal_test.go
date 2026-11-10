@@ -20,6 +20,11 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func tailnetRequest(r *mtproto.Request) *mtproto.Request {
+	mtproto.MarkRequestTailnetForTesting(r)
+	return r
+}
+
 func TestTailnetRequestBypassesCallerRateLimitHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -27,12 +32,11 @@ func TestTailnetRequestBypassesCallerRateLimitHelpers(t *testing.T) {
 	h := &handlers{
 		rateLimitSendCodeIP: store.SendCodeIPLimits{Calls: limit, Phones: limit},
 	}
-	r := &mtproto.Request{
-		Ctx:         context.Background(),
-		UserID:      17,
-		ClientAddr:  netip.Addr{},
-		TailnetPath: true,
-	}
+	r := tailnetRequest(&mtproto.Request{
+		Ctx:        context.Background(),
+		UserID:     17,
+		ClientAddr: netip.Addr{},
+	})
 
 	if err := h.checkRateLimitCost(r, "tailnet-account", limit, 1); err != nil {
 		t.Fatalf("tailnet account rate limit = %v, want allow", err)
@@ -76,9 +80,9 @@ func TestTailnetRPCDoesNotSpendPublicAccountRateLimit(t *testing.T) {
 	h := &handlers{store: s}
 	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
 	for range 10 {
-		if err := h.checkRateLimitCost(&mtproto.Request{
-			Ctx: ctx, UserID: user.ID, TailnetPath: true,
-		}, "listener-path", limit, 1); err != nil {
+		if err := h.checkRateLimitCost(tailnetRequest(&mtproto.Request{
+			Ctx: ctx, UserID: user.ID,
+		}), "listener-path", limit, 1); err != nil {
 			t.Fatalf("tailnet RPC rate limit = %v, want allow", err)
 		}
 	}
@@ -149,9 +153,9 @@ func TestTailnetUsernameAccountEnforcesTargetAccountPasswordProofBudget(t *testi
 		if err := (&tg.AccountGetPasswordSettingsRequest{Password: proof}).Encode(&body); err != nil {
 			t.Fatalf("encode password settings request: %v", err)
 		}
-		_, err := fixture.handler.handleGetPasswordSettings(&mtproto.Request{
-			Ctx: ctx, UserID: fixture.user.ID, AuthKeyID: fixture.authKeyID, TailnetPath: true, Buf: &body,
-		})
+		_, err := fixture.handler.handleGetPasswordSettings(tailnetRequest(&mtproto.Request{
+			Ctx: ctx, UserID: fixture.user.ID, AuthKeyID: fixture.authKeyID, Buf: &body,
+		}))
 		if attempt == 1 && !tgerr.Is(err, "PASSWORD_HASH_INVALID") {
 			t.Fatalf("first tailnet password settings proof = %v, want PASSWORD_HASH_INVALID for a real challenge", err)
 		}
@@ -213,9 +217,9 @@ func newTailnetUsernameLogin(
 	if err := (&tg.AuthSignInRequest{PhoneNumber: username, PhoneCodeHash: hash}).Encode(&signInBody); err != nil {
 		t.Fatalf("encode username sign-in: %v", err)
 	}
-	_, err = h.handleSignIn(nil, &mtproto.Request{
-		Ctx: ctx, AuthKeyID: authKeyID, TailnetPath: true, Buf: &signInBody,
-	})
+	_, err = h.handleSignIn(nil, tailnetRequest(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, Buf: &signInBody,
+	}))
 	if !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
 		t.Fatalf("username sign-in = %v, want SESSION_PASSWORD_NEEDED", err)
 	}
@@ -228,9 +232,9 @@ func issueTailnetPasswordChallenge(t *testing.T, h *handlers, ctx context.Contex
 	if err := (&tg.AccountGetPasswordRequest{}).Encode(&body); err != nil {
 		t.Fatalf("encode getPassword request: %v", err)
 	}
-	result, err := h.handleGetPassword(&mtproto.Request{
-		Ctx: ctx, AuthKeyID: authKeyID, UserID: userID, TailnetPath: true, Buf: &body,
-	})
+	result, err := h.handleGetPassword(tailnetRequest(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, UserID: userID, Buf: &body,
+	}))
 	if err != nil {
 		t.Fatalf("getPassword: %v", err)
 	}
@@ -263,8 +267,8 @@ func callTailnetCheckPassword(t *testing.T, h *handlers, ctx context.Context, au
 	if err := (&tg.AuthCheckPasswordRequest{Password: proof}).Encode(&body); err != nil {
 		t.Fatalf("encode checkPassword request: %v", err)
 	}
-	_, err := h.handleCheckPassword(&mtproto.Request{
-		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.Addr{}, TailnetPath: true, Buf: &body,
-	})
+	_, err := h.handleCheckPassword(tailnetRequest(&mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.Addr{}, Buf: &body,
+	}))
 	return err
 }

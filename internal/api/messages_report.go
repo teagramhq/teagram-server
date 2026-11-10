@@ -98,7 +98,7 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 			return nil, errMessageReportOptionInvalid
 		}
 		var visible bool
-		if r.TailnetPath {
+		if r.Tailnet() {
 			visible, err = h.store.CreateUserStickerSetReportsUnmetered(
 				r.Ctx, r.UserID, peerType, peerID, messageIDs, reason.reason, req.Message,
 			)

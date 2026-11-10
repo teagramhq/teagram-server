@@ -152,8 +152,10 @@ type Server struct {
 	// Written once before Serve and only read after, so the accept path needs
 	// no synchronisation to see it.
 	proxyV2 *proxyV2Source
-	// cfConnectingIPProxies is the source allowlist for the public WebSocket's
-	// CF-Connecting-IP header. It is written once before ServeWebSocket.
+	// cfConnectingIPProxies is the optional source allowlist for the public
+	// WebSocket's CF-Connecting-IP header. An empty list preserves the existing
+	// trust-mode behavior; a non-empty list restricts it. Written once before
+	// ServeWebSocket.
 	cfConnectingIPProxies []netip.Prefix
 	// Listener paths are assigned by the process configuration before serving.
 	tcpListenerPath       ListenerPath
@@ -196,6 +198,10 @@ type Server struct {
 	// an outage for every public visitor; keep this signal independent and
 	// sampled so malformed requests cannot flood the operator's logs.
 	clientAddrHeaderLog logSampler
+	// Accepted and ignored forwarded-header decisions have separate samplers so
+	// an untrusted-peer flood cannot silence the trusted-path signal.
+	clientAddrTrustLog  logSampler
+	clientAddrIgnoreLog logSampler
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler
@@ -275,8 +281,9 @@ func (s *Server) TrustProxyV2Headers(allow []netip.Prefix) {
 	s.proxyV2 = &proxyV2Source{allow: slices.Clone(allow)}
 }
 
-// TrustCFConnectingIPProxies sets which socket peers may assert the
-// CF-Connecting-IP header on the public WebSocket listener. Call it before
+// TrustCFConnectingIPProxies restricts which socket peers may assert the
+// CF-Connecting-IP header on the public WebSocket listener. An empty list keeps
+// the legacy behavior and accepts the header from any peer. Call it before
 // serving that listener.
 func (s *Server) TrustCFConnectingIPProxies(allow []netip.Prefix) {
 	s.cfConnectingIPProxies = slices.Clone(allow)
@@ -311,10 +318,10 @@ func validateListenerPath(path ListenerPath) error {
 }
 
 func (s *Server) trustsCFConnectingIP(peer netip.Addr) bool {
-	if !peer.IsValid() {
-		return false
+	if len(s.cfConnectingIPProxies) == 0 {
+		return true
 	}
-	return slices.ContainsFunc(s.cfConnectingIPProxies, func(p netip.Prefix) bool { return p.Contains(peer) })
+	return peer.IsValid() && slices.ContainsFunc(s.cfConnectingIPProxies, func(p netip.Prefix) bool { return p.Contains(peer) })
 }
 
 // SetPreAuthLimits replaces the bounds on what connections that have not
@@ -500,22 +507,18 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		rpcDeadline:              DefaultRPCDeadline,
 		tcpListenerPath:          ListenerPathLimited,
 		webSocketListenerPath:    ListenerPathLimited,
-		cfConnectingIPProxies: []netip.Prefix{
-			netip.MustParsePrefix("127.0.0.0/8"),
-			netip.MustParsePrefix("::1/128"),
-		},
-		preAuth:               newPreAuthLimiter(DefaultPreAuthLimits()),
-		preAuthLimits:         DefaultPreAuthLimits(),
-		exchangeLimits:        DefaultExchangeLimits(),
-		exchangeBudget:        newKeyExchangeBudget(DefaultExchangeLimits()),
-		replicaCount:          1,
-		discovery:             discovery,
-		unboundKeys:           newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
-		maxConnsPerUnboundKey: DefaultMaxConnsPerUnboundKey,
-		pendingLogins:         newPendingLoginLimiter(DefaultMaxPendingLoginConns),
-		pendingLoginLeases:    leases,
-		pendingLoginLifetime:  DefaultPendingLoginLifetime,
-		log:                   log,
+		preAuth:                  newPreAuthLimiter(DefaultPreAuthLimits()),
+		preAuthLimits:            DefaultPreAuthLimits(),
+		exchangeLimits:           DefaultExchangeLimits(),
+		exchangeBudget:           newKeyExchangeBudget(DefaultExchangeLimits()),
+		replicaCount:             1,
+		discovery:                discovery,
+		unboundKeys:              newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
+		maxConnsPerUnboundKey:    DefaultMaxConnsPerUnboundKey,
+		pendingLogins:            newPendingLoginLimiter(DefaultMaxPendingLoginConns),
+		pendingLoginLeases:       leases,
+		pendingLoginLifetime:     DefaultPendingLoginLifetime,
+		log:                      log,
 	}
 }
 
@@ -1508,7 +1511,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, connLog)
 	conn.connectionID = closeDiagnostics.connectionID
 	conn.openedAt = closeDiagnostics.openedAt
-	conn.tailnetPath = slot != nil && slot.path == ListenerPathTailnet
+	conn.listenerPath = slot.listenerPath()
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error, rpcTypeIDs []uint32) {
@@ -1625,10 +1628,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	// under the per-user cap only once someone signs in on that key. The hold is
 	// what counts it in between, and it is given back whatever ends the
 	// connection.
-	path := ListenerPathLimited
-	if slot != nil && slot.path == ListenerPathTailnet {
-		path = ListenerPathTailnet
-	}
+	path := conn.listenerPath
 	hold := &unboundKeyHold{lim: s.unboundKeys, path: path}
 	defer hold.release()
 	pending := s.newPendingLoginHold(path)
@@ -2080,6 +2080,13 @@ func (s *Server) runExchangeWithCloseDiagnosticsForPath(
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
 	if layer, err := s.exchangeBudget.chargeForPath(ctx, s.keys, attempts, clientAddr, path, listener, time.Now()); layer != "" {
+		if layer == "path" {
+			attrs := make([]any, 0, 6)
+			attrs = append(attrs, "path", path, "err", err)
+			attrs = append(attrs, connectionIDLogAttrs(closeDiagnostics)...)
+			s.log.Error("invalid key exchange listener path", attrs...)
+			return fmt.Errorf("invalid key exchange listener path: %w", err)
+		}
 		s.logExchangeBudgetRefusal(layer, listener, err, closeDiagnostics)
 		if sendErr := s.sendProtoError(ctx, bc, codec.CodeTransportFlood); sendErr != nil {
 			return sendErr

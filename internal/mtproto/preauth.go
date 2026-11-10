@@ -207,6 +207,13 @@ func (s *preAuthSlot) rateLimitListener() store.RateLimitListener {
 	return s.listener
 }
 
+func (s *preAuthSlot) listenerPath() ListenerPath {
+	if s == nil {
+		return ListenerPathLimited
+	}
+	return s.path
+}
+
 // keyAddr charges the slot to the network of the client address the connection
 // layer established, reporting whether that network had a slot free.
 //

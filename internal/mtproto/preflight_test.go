@@ -328,7 +328,7 @@ func TestTailnetPathBypassesPreAuthCapsAndLifetime(t *testing.T) {
 	limiter := newPreAuthLimiter(PreAuthLimits{
 		MaxConns:       1,
 		MaxConnsPerNet: 1,
-		Lifetime:       time.Millisecond,
+		Lifetime:       25 * time.Millisecond,
 	})
 	limited, ok := limiter.admit(store.RateLimitListenerTailnet)
 	if !ok {
@@ -345,12 +345,18 @@ func TestTailnetPathBypassesPreAuthCapsAndLifetime(t *testing.T) {
 		t.Fatal("tailnet listener was refused while the same network held the per-network slot")
 	}
 	fired := make(chan struct{}, 1)
-	tailnet.armLifetime(func() { fired <- struct{}{} })
-	time.Sleep(10 * time.Millisecond)
+	limited.armLifetime(func() { fired <- struct{}{} })
+	tailnetFired := make(chan struct{}, 1)
+	tailnet.armLifetime(func() { tailnetFired <- struct{}{} })
 	select {
 	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("limited pre-auth lifetime control did not fire")
+	}
+	select {
+	case <-tailnetFired:
 		t.Fatal("tailnet pre-auth lifetime ceiling fired")
-	default:
+	case <-time.After(5 * limiter.limits.Lifetime):
 	}
 }
 

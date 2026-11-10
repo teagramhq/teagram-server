@@ -271,7 +271,7 @@ func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (
 		release: release,
 		run:     func() { s.runConcurrentRPC(c, req, handler, release) },
 	}
-	started, duplicate := c.concurrentRPCs.start(req.MsgID, work, req.TailnetPath)
+	started, duplicate := c.concurrentRPCs.start(req.MsgID, work, req.Tailnet())
 	if duplicate {
 		if release != nil {
 			release()

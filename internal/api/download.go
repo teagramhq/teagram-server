@@ -111,13 +111,13 @@ func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
 	var reservation *store.RateLimitReservation
 	var denied *store.RateLimitResult
 	var err error
-	if !r.TailnetPath {
+	if !r.Tailnet() {
 		reservation, denied, err = h.store.ReserveRateLimit(
 			r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
 		)
 	}
 	if err != nil {
-		h.log.Error("get file rate limit")
+		h.log.Error("get file rate limit", "err", err)
 		return errInternal
 	}
 	if denied != nil {

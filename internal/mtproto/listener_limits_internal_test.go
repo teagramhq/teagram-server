@@ -55,7 +55,7 @@ func TestTailnetPendingLoginDoesNotClaimConnectionLease(t *testing.T) {
 }
 
 func TestTailnetConnectionBypassesPerConnectionFloodAndQueueLimits(t *testing.T) {
-	conn := &Conn{tailnetPath: true, clock: clock.System}
+	conn := &Conn{listenerPath: ListenerPathTailnet, clock: clock.System}
 	for range unimplementedCloseAt + 1 {
 		if got := conn.ChargeUnimplemented(); got != UnimplementedAnswer {
 			t.Fatalf("tailnet unimplemented verdict = %v, want answer", got)
@@ -86,7 +86,7 @@ func TestTailnetPeerDisconnectSkipsPerUserBudget(t *testing.T) {
 	budget := newPeerCancelBudget(func() time.Time { return now }, 8, peerCancelUserWindow, peerCancelGlobalRefillPeriod, 10)
 	for range 3 {
 		ctx, cancel := context.WithCancel(context.Background())
-		conn := &Conn{tailnetPath: true, peerCancels: budget}
+		conn := &Conn{listenerPath: ListenerPathTailnet, peerCancels: budget}
 		active := &activePeerRPC{userID: 41, ctx: ctx, cancel: cancel}
 		if !conn.beginActiveRPC(active) {
 			t.Fatal("tailnet connection refused active RPC")

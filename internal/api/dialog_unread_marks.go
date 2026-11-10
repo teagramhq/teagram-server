@@ -51,7 +51,7 @@ func (h *handlers) handleMarkDialogUnread(r *mtproto.Request) (bin.Encoder, erro
 	peerKey := store.PeerDialogKey{
 		PeerType: peerType, PeerID: peerID,
 	}
-	if r.TailnetPath {
+	if r.Tailnet() {
 		_, err = h.store.MarkDialogUnreadUnmetered(r.Ctx, r.UserID, peerKey, req.GetUnread())
 	} else {
 		_, err = h.store.MarkDialogUnread(r.Ctx, r.UserID, peerKey, req.GetUnread())

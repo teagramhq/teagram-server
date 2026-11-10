@@ -278,11 +278,11 @@ func (r *SessionRegistry) AddWithStatus(userID int64, c *Conn) (bool, *StatusCha
 func (r *SessionRegistry) add(userID int64, c *Conn, trackStatus bool) (bool, *StatusChange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !c.tailnetPath && r.limitedUserConns[userID] >= r.maxUserConns {
+	if c.listenerPath != ListenerPathTailnet && r.limitedUserConns[userID] >= r.maxUserConns {
 		return false, nil
 	}
 	r.m[userID] = append(r.m[userID], c)
-	if !c.tailnetPath {
+	if c.listenerPath != ListenerPathTailnet {
 		if r.limitedUserConns == nil {
 			r.limitedUserConns = make(map[int64]int)
 		}
@@ -319,7 +319,7 @@ func (r *SessionRegistry) remove(userID int64, c *Conn, trackStatus bool) (bool,
 	for i, x := range conns {
 		if x == c {
 			r.m[userID] = append(conns[:i], conns[i+1:]...)
-			if !c.tailnetPath {
+			if c.listenerPath != ListenerPathTailnet {
 				if n := r.limitedUserConns[userID] - 1; n > 0 {
 					r.limitedUserConns[userID] = n
 				} else {

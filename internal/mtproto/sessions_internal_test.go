@@ -45,7 +45,7 @@ func TestSessionRegistryTailnetConnectionsDoNotUseLimitedPathCap(t *testing.T) {
 	if !r.Add(7, limited) {
 		t.Fatal("first limited connection was refused")
 	}
-	tailnet := &Conn{tailnetPath: true}
+	tailnet := &Conn{listenerPath: ListenerPathTailnet}
 	if !r.Add(7, tailnet) {
 		t.Fatal("tailnet connection was refused by the limited-path cap")
 	}
