@@ -261,6 +261,11 @@ ci_public_origin="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "
    "$ci_public_registration" == closed &&
    "$ci_public_origin" == 'https://web.example.test' ]] ||
   fail 'the CI overlay must use synthetic public discovery, registration, and origin settings'
+# mtproto-smoke refuses a target port that differs from the advertised one, so
+# every forwarded MTProto probe must use the advertised port locally.
+if grep --fixed-strings --quiet '12443' .github/workflows/ci.yml deploy/k8s/test-postgres-backup-restore.sh; then
+  fail 'forwarded MTProto probes must use the CI-advertised port 2443, not 12443'
+fi
 if yq --exit-status 'select(.kind == "Job" and .metadata.name == "mtproto-smoke")' \
   <<<"$ci_overlay" >/dev/null 2>&1; then
   fail 'the MTProto smoke Job must be created after its generated client ConfigMap'

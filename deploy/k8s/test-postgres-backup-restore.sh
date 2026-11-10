@@ -96,7 +96,7 @@ kubectl exec --namespace teagram "$app_pod" -- \
   /usr/local/bin/teagramd client-config > "$tmp_dir/client.json"
 chmod 0644 "$tmp_dir/client.json"
 kubectl port-forward --address 127.0.0.1 --namespace teagram \
-  service/teagramd 12443:2443 > "$tmp_dir/port-forward.log" 2>&1 &
+  service/teagramd 2443:2443 > "$tmp_dir/port-forward.log" 2>&1 &
 port_forward_pid=$!
 for ((attempt = 0; attempt < 30; attempt++)); do
   if docker run --rm --network host \
@@ -106,7 +106,7 @@ for ((attempt = 0; attempt < 30; attempt++)); do
     --volume "$tmp_dir/password:/password:ro" \
     --entrypoint /usr/local/bin/mtproto-smoke \
     ghcr.io/teagramhq/teagramd:ci \
-    --endpoint 127.0.0.1:12443 \
+    --endpoint 127.0.0.1:2443 \
     --discovery-file /client.json \
     --username-file /username \
     --password-file /password; then

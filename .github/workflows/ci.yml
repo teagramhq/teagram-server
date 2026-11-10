@@ -2089,14 +2089,14 @@ jobs:
         env:
           DEPLOY_SHA: ${{ env.K8S_IMAGE_REVISION }}
           TEAGRAMD_IMAGE: ghcr.io/teagramhq/teagramd:ci
-          MT_PROTO_ENDPOINT: 127.0.0.1:12443
+          MT_PROTO_ENDPOINT: 127.0.0.1:2443
           DISCOVERY_URL: http://127.0.0.1:12444/.well-known/teagramd/client
           LINK_SMOKE_URL: http://127.0.0.1:18081/+k3s-smoke
         run: |
           set -euo pipefail
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl port-forward --address 127.0.0.1 --namespace teagram \
-            service/teagramd 12443:2443 12444:2444 \
+            service/teagramd 2443:2443 12444:2444 \
             > "$RUNNER_TEMP/release-mtproto-port-forward.log" 2>&1 &
           mtproto_forward_pid=$!
           kubectl port-forward --address 127.0.0.1 --namespace teagram \

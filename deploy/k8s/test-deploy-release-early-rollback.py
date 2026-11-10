@@ -311,7 +311,7 @@ def run_case(case: str, failed_resource: str | None, failure_phase: str,
                 "DEPLOY_RELEASE_TEST_CASE": case,
                 "RUNNER_TEMP": str(runner_temp),
                 "TEAGRAMD_IMAGE": "ghcr.io/teagramhq/teagramd:ci",
-                "MT_PROTO_ENDPOINT": "127.0.0.1:12443",
+                "MT_PROTO_ENDPOINT": "127.0.0.1:2443",
                 "DISCOVERY_URL": (
                     "https://invalid.example/client"
                     if case == "smoke"
