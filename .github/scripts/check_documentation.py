@@ -17,12 +17,12 @@ FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
 SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
 THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
-LIST_ITEM_START = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)")
+LIST_ITEM_START = re.compile(r"^( {0,3})(?:[-+*]|[0-9]{1,9}[.)])([ \t]+|$)")
 BLOCKQUOTE_START = re.compile(r"^ {0,3}>")
+TABLE_DELIMITER_CELL = re.compile(r":?-{3,}:?$")
 
 
-def indented_code_line(line):
-    columns = 0
+def indentation_columns(line, columns=0):
     for char in line:
         if char == " ":
             columns += 1
@@ -30,9 +30,69 @@ def indented_code_line(line):
             columns += 4 - columns % 4
         else:
             break
-        if columns >= 4:
-            return True
-    return False
+    return columns
+
+
+def indented_code_line(line, minimum=4):
+    return indentation_columns(line) >= minimum
+
+
+def table_row_cells(line):
+    line = line.strip()
+    cells = []
+    cell_start = 0
+    for index, char in enumerate(line):
+        if char == "|" and not escaped_at(line, index):
+            cells.append(line[cell_start:index].strip())
+            cell_start = index + 1
+    if not cells:
+        return None
+
+    cells.append(line[cell_start:].strip())
+    if line.startswith("|"):
+        cells.pop(0)
+    if line.endswith("|") and not escaped_at(line, len(line) - 1):
+        cells.pop()
+    return cells
+
+
+def gfm_table_line_starts(text):
+    lines = []
+    line_start = 0
+    while line_start < len(text):
+        line_end = text.find("\n", line_start)
+        if line_end == -1:
+            line_end = len(text)
+        else:
+            line_end += 1
+        content_end = line_end
+        if content_end > line_start and text[content_end - 1] == "\n":
+            content_end -= 1
+        if content_end > line_start and text[content_end - 1] == "\r":
+            content_end -= 1
+        lines.append((line_start, text[line_start:content_end]))
+        line_start = line_end
+
+    table_lines = set()
+    index = 0
+    while index + 1 < len(lines):
+        header_cells = table_row_cells(lines[index][1])
+        delimiter_cells = table_row_cells(lines[index + 1][1])
+        if (
+            header_cells is None
+            or delimiter_cells is None
+            or len(header_cells) != len(delimiter_cells)
+            or not all(TABLE_DELIMITER_CELL.fullmatch(cell) for cell in delimiter_cells)
+        ):
+            index += 1
+            continue
+
+        table_lines.update((lines[index][0], lines[index + 1][0]))
+        index += 2
+        while index < len(lines) and table_row_cells(lines[index][1]) is not None:
+            table_lines.add(lines[index][0])
+            index += 1
+    return table_lines
 
 
 def config_environment_names(root):
@@ -80,12 +140,15 @@ def markdown_files(root):
 def without_code(text):
     characters = list(text)
     block_boundaries = set()
+    table_lines = gfm_table_line_starts(text)
     fence_char = None
     fence_length = 0
     in_blockquote = False
     in_indented_code = False
     allow_indented_code = True
     last_block_was_list_item = False
+    list_content_indent = 0
+    indented_code_indent = 4
     line_start = 0
     while line_start < len(text):
         line_end = text.find("\n", line_start)
@@ -112,12 +175,13 @@ def without_code(text):
                 characters[index] = " "
         elif in_indented_code and not line.strip():
             block_boundaries.update((line_start, line_end))
-        elif in_indented_code and indented_code_line(line):
+        elif in_indented_code and indented_code_line(line, indented_code_indent):
             for index in range(line_start, content_end):
                 characters[index] = " "
         else:
             if in_indented_code:
                 in_indented_code = False
+                indented_code_indent = 4
                 block_boundaries.add(line_start)
 
             start = FENCE_START.match(line)
@@ -134,14 +198,18 @@ def without_code(text):
                 block_boundaries.update((line_start, line_end))
                 in_blockquote = False
                 allow_indented_code = True
-            elif line.startswith("|"):
+            elif line_start in table_lines:
                 block_boundaries.update((line_start, line_end))
                 in_blockquote = False
                 allow_indented_code = False
                 last_block_was_list_item = False
-            elif allow_indented_code and not last_block_was_list_item and indented_code_line(line):
+            elif allow_indented_code and indented_code_line(
+                line,
+                list_content_indent + 4 if last_block_was_list_item else 4,
+            ):
                 block_boundaries.add(line_start)
                 in_indented_code = True
+                indented_code_indent = list_content_indent + 4 if last_block_was_list_item else 4
                 in_blockquote = False
                 allow_indented_code = False
                 for index in range(line_start, content_end):
@@ -157,11 +225,18 @@ def without_code(text):
                 in_blockquote = False
                 allow_indented_code = True
                 last_block_was_list_item = False
-            elif LIST_ITEM_START.match(line):
+            elif (list_item := LIST_ITEM_START.match(line)):
                 block_boundaries.add(line_start)
                 in_blockquote = False
                 allow_indented_code = False
                 last_block_was_list_item = True
+                marker_start = list_item.end(1)
+                padding_start = list_item.start(2)
+                marker_width = len(line[marker_start:padding_start])
+                list_content_indent = indentation_columns(
+                    list_item.group(2),
+                    indentation_columns(list_item.group(1)) + marker_width,
+                )
             else:
                 allow_indented_code = False
                 if not line.startswith((" ", "\t")):

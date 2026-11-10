@@ -210,9 +210,35 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_nested_indented_code_block_inside_list_hides_markdown_links(self):
+        (self.root / "README.md").write_text(
+            "1. Install.\n\n"
+            "        [missing](docs/nope.md)\n"
+            "        more example\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nested_indented_code_block_stops_at_list_content_indent(self):
+        (self.root / "README.md").write_text(
+            "1. Install.\n\n"
+            "        [example](docs/nope.md)\n\n"
+            "    See [the guide](docs/gone.md).\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/gone.md", output)
+        self.assertNotIn("docs/nope.md", output)
+
     def test_code_span_does_not_cross_table_rows(self):
         (self.root / "README.md").write_text(
             "| `x | [a](docs/gone.md) |\n"
+            "| --- | --- |\n"
             "| y ` | z |\n"
         )
 
@@ -220,6 +246,17 @@ class DocumentationCheckTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
+    def test_pipe_line_inside_multiline_code_span_is_not_a_table_boundary(self):
+        (self.root / "README.md").write_text(
+            "``example\n"
+            "| [missing](docs/nope.md)\n"
+            "continued``\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_code_span_does_not_cross_blank_paragraph_boundary(self):
         (self.root / "README.md").write_text(
