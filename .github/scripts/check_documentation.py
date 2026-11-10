@@ -107,8 +107,8 @@ def without_code(text):
         run_length = run_end - index
         search = run_end
         closing_end = None
-        while search < len(cleaned) and cleaned[search] not in "\r\n":
-            if cleaned[search] != "`" or escaped_at(cleaned, search):
+        while search < len(cleaned):
+            if cleaned[search] != "`":
                 search += 1
                 continue
             candidate_end = search + 1
@@ -123,7 +123,8 @@ def without_code(text):
             index = run_end
             continue
         for span_index in range(index, closing_end):
-            characters[span_index] = " "
+            if characters[span_index] not in "\r\n":
+                characters[span_index] = " "
         index = closing_end
 
     return "".join(characters)

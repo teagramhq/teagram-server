@@ -170,7 +170,7 @@ class DocumentationCheckTests(unittest.TestCase):
 
     def test_broken_markdown_link_after_stray_backtick_is_checked(self):
         (self.root / "README.md").write_text(
-            "` stray\n[missing](docs/nope.md) and `valid code`\n"
+            "` stray\n[missing](docs/nope.md) and plain text\n"
         )
 
         result = self.run_checker()
@@ -178,6 +178,26 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
+    def test_multiline_code_span_hides_markdown_links(self):
+        (self.root / "README.md").write_text(
+            "``example\n[missing](docs/nope.md)\ncontinued``\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_escaped_backtick_closes_code_span_before_broken_link(self):
+        (self.root / "README.md").write_text(
+            "`code\\` [missing](docs/nope.md) and `valid`\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
 
     def test_mismatched_backtick_runs_do_not_hide_broken_link(self):
         (self.root / "README.md").write_text(
