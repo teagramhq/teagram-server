@@ -202,9 +202,9 @@ install_k3s() {
 
 restore_previous_k3s_unit() {
   incus exec "$INSTANCE" -- install -o root -g root -m 0600 \
-    "$K3S_SERVICE_BACKUP" /etc/systemd/system/k3s.service
-  incus exec "$INSTANCE" -- systemctl daemon-reload
-  incus exec "$INSTANCE" -- systemctl restart k3s
+    "$K3S_SERVICE_BACKUP" /etc/systemd/system/k3s.service || return 1
+  incus exec "$INSTANCE" -- systemctl daemon-reload || return 1
+  incus exec "$INSTANCE" -- systemctl restart k3s || return 1
 }
 
 verify_k3s_api_tls_san() {
@@ -268,6 +268,9 @@ if address.version != 4 or address not in ipaddress.ip_network("100.64.0.0/10"):
 PY
     then
       install_exec+=" --tls-san=$previous_san"
+    else
+      printf 'k3s bootstrap: dropping previous API SAN outside 100.64.0.0/10: %s\n' \
+        "$previous_san" >&2
     fi
   done < <(grep --only-matching --extended-regexp -- '--tls-san=[^[:space:]]+' <<<"$unit" | cut -d= -f2- || true)
   install_k3s true "$install_exec"
@@ -276,7 +279,8 @@ PY
     fail 'the k3s installer did not add the tailnet API SAN'
   incus exec "$INSTANCE" -- systemctl daemon-reload
   if ! rotate_k3s_api_listener_certificate; then
-    restore_previous_k3s_unit
+    restore_previous_k3s_unit ||
+      fail "restore failed; recover from $K3S_SERVICE_BACKUP"
     fail 'k3s could not rotate its API listener certificate; the previous unit was restored'
   fi
 fi
@@ -292,11 +296,13 @@ if ! verify_k3s_api_tls_san; then
       /etc/systemd/system/k3s.service "$K3S_SERVICE_BACKUP"
   fi
   if ! rotate_k3s_api_listener_certificate; then
-    restore_previous_k3s_unit
+    restore_previous_k3s_unit ||
+      fail "restore failed; recover from $K3S_SERVICE_BACKUP"
     fail 'k3s could not rotate its API listener certificate; the previous unit was restored'
   fi
   if ! verify_k3s_api_tls_san; then
-    restore_previous_k3s_unit
+    restore_previous_k3s_unit ||
+      fail "restore failed; recover from $K3S_SERVICE_BACKUP"
     fail 'the API listener does not present a CA-valid certificate for the tailnet DNS name; the previous unit was restored'
   fi
 fi
@@ -420,19 +426,30 @@ if path.exists():
     try:
         existing_server = existing["clusters"][0]["cluster"]["server"]
         previous_url = urlsplit(existing_server)
-        previous_ip = ipaddress.ip_address(previous_url.hostname or "")
         previous_port = previous_url.port
-        previous_config = json.loads(json.dumps(config))
-        previous_config["clusters"][0]["cluster"]["server"] = existing_server
+        no_extra_url_parts = not (previous_url.path or previous_url.query or
+                                  previous_url.fragment or previous_url.username or
+                                  previous_url.password)
+        server_is_current = (previous_url.scheme == "https" and
+                             previous_url.hostname == sys.argv[1] and
+                             previous_port == expected_port and no_extra_url_parts)
+        server_is_legacy = False
+        if not server_is_current:
+            previous_ip = ipaddress.ip_address(previous_url.hostname or "")
+            server_is_legacy = (previous_url.scheme == "https" and
+                                previous_ip.version == 4 and
+                                previous_port == expected_port and no_extra_url_parts and
+                                previous_ip in ipaddress.ip_network("100.64.0.0/10"))
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        print("k3s bootstrap: existing deploy kubeconfig does not match this cluster", file=sys.stderr)
+        print("k3s bootstrap: existing deploy kubeconfig server must use the cluster tailnet endpoint or a legacy tailnet IP", file=sys.stderr)
         raise SystemExit(1)
-    if (existing != previous_config or previous_url.scheme != "https" or
-            previous_ip.version != 4 or previous_port != expected_port or
-            previous_url.path or previous_url.query or
-            previous_url.fragment or previous_url.username or previous_url.password or
-            previous_ip not in ipaddress.ip_network("100.64.0.0/10")):
-        print("k3s bootstrap: existing deploy kubeconfig does not match this cluster", file=sys.stderr)
+    if not (server_is_current or server_is_legacy):
+        print("k3s bootstrap: existing deploy kubeconfig server must use the cluster tailnet endpoint or a legacy tailnet IP", file=sys.stderr)
+        raise SystemExit(1)
+    previous_config = json.loads(json.dumps(config))
+    previous_config["clusters"][0]["cluster"]["server"] = existing_server
+    if existing != previous_config:
+        print("k3s bootstrap: existing deploy kubeconfig token or CA does not match this cluster", file=sys.stderr)
         raise SystemExit(1)
 fd, temporary = tempfile.mkstemp(prefix=".teagram-k3s-kubeconfig.", dir=str(path.parent))
 try:

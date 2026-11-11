@@ -373,10 +373,13 @@ def lxc(cmd):
     if cmd[:3] == ["k3s", "certificate", "rotate"]:
         if cmd[3:] != ["--service", "k3s-server"]:
             fail(f"unexpected k3s certificate rotation: {cmd}")
-        unit = pathlib.Path(LXC_ROOT, "etc/systemd/system/k3s.service")
-        state["api_tls_san"] = TAILNET_HOST in unit.read_text()
         log_action("certificate-rotate-k3s-server")
-        sys.exit(0)
+        if os.environ.get("MOCK_FAIL_CERTIFICATE_ROTATE") == "1":
+            exit_saved(state, 1)
+        unit = pathlib.Path(LXC_ROOT, "etc/systemd/system/k3s.service")
+        if os.environ.get("MOCK_KEEP_API_TLS_CERTIFICATE") != "1":
+            state["api_tls_san"] = TAILNET_HOST in unit.read_text()
+        exit_saved(state, 0)
     if cmd[:2] == ["openssl", "s_client"]:
         if ("-servername" not in cmd or
                 cmd[cmd.index("-servername") + 1] != TAILNET_HOST or
@@ -408,11 +411,17 @@ def lxc(cmd):
             log_action("systemctl stop k3s")
             state["k3s_running"] = False
             exit_saved(state, 0)
+        if action == ["start", "k3s"] and os.environ.get("MOCK_FAIL_SYSTEMCTL_START_K3S") == "1":
+            log_action("systemctl start k3s")
+            state["k3s_running"] = False
+            exit_saved(state, 1)
+        if action == ["restart", "k3s"] and os.environ.get("MOCK_FAIL_SYSTEMCTL_RESTART_K3S") == "1":
+            log_action("systemctl restart k3s")
+            state["k3s_running"] = False
+            exit_saved(state, 1)
         if action in (["start", "k3s"], ["restart", "k3s"]):
             log_action("systemctl " + " ".join(action))
             state["k3s_running"] = True
-            unit = pathlib.Path(LXC_ROOT, "etc/systemd/system/k3s.service")
-            state["api_tls_san"] = TAILNET_HOST in unit.read_text()
             exit_saved(state, 0)
         fail(f"unexpected systemctl command: {action}")
     if cmd[0] == "sysctl":

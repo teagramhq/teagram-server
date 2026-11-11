@@ -11,6 +11,7 @@ demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
+expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_build_if="(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')"
 expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
@@ -578,8 +579,18 @@ check_contract() {
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy-server' ]] ||
-    fail 'the production workflow must contain only its server deploy job'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-deploy-gate,deploy-server' ]] ||
+    fail 'the production workflow must contain the deploy gate notice and server deploy jobs'
+  [[ "$(query '.jobs."check-deploy-gate".name')" == 'check: deploy-gate' ]] ||
+    fail 'the disabled deploy notice job must use the check stage naming contract'
+  [[ "$(query '.jobs."check-deploy-gate".if')" == "$expected_disabled_if" ]] ||
+    fail 'the disabled deploy notice must run only for deploy candidates when the gate is false'
+  local disabled_notice_run
+  disabled_notice_run="$(query '.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run')"
+  grep -Fq '::notice::' <<< "$disabled_notice_run" ||
+    fail 'a disabled production deploy must emit a workflow notice'
+  grep -Fq 'GITHUB_STEP_SUMMARY' <<< "$disabled_notice_run" ||
+    fail 'a disabled production deploy must write a step summary'
   [[ "$(query '.jobs."deploy-server".name')" == 'deploy: server (prod)' ]] ||
     fail 'the production deploy job must use the deploy stage naming contract'
   [[ "$(query '.jobs."deploy-server".if')" == "$expected_if" ]] ||
@@ -984,6 +995,10 @@ self_test() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
   local mutations=(
+    'del(.jobs."check-deploy-gate")'
+    '.jobs."check-deploy-gate".if = "always()"'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("::notice::"; "::debug::")'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("GITHUB_STEP_SUMMARY"; "WRONG_SUMMARY")'
     '.on.pull_request = {}'
     '.on.pull_request_target = {}'
     '.on.push = {"branches": ["main"]}'

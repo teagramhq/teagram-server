@@ -490,6 +490,7 @@ sudo incus exec teagram-k3s -- rm -f \
   /usr/local/sbin/teagram-ops
 sudo rm -f /root/teagram-k3s-cutover.kubeconfig
 sudo incus exec teagram-k3s -- sh -c '
+  set -e
   if [ -f /root/.ssh/authorized_keys ]; then
     tmp=$(mktemp /root/.ssh/authorized_keys.XXXXXX)
     awk '\''!index($0, "command=\"/usr/local/sbin/teagram-ops\"")'\'' \

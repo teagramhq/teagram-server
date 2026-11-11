@@ -168,7 +168,8 @@ import sys
 
 unit = pathlib.Path(sys.argv[1])
 unit.write_text(unit.read_text().replace(
-    "--tls-san=teagram.tailaa4918.ts.net", "--tls-san=100.100.1.2"))
+    "--tls-san=teagram.tailaa4918.ts.net",
+    "--tls-san=100.100.1.2 --tls-san=api.internal.example"))
 state_path = unit.parents[4] / "state.json"
 state = json.loads(state_path.read_text())
 state["api_tls_san"] = False
@@ -198,6 +199,12 @@ grep -Fq -- '--tls-san=100.100.1.2' \
 grep -Fq -- '--tls-san=100.100.1.2' \
   "$MOCK_STATE/lxc/etc/systemd/system/k3s.service" ||
   fail 'SAN migration did not retain the previous endpoint SAN'
+if grep -Fq -- '--tls-san=api.internal.example' \
+  "$MOCK_STATE/lxc/etc/systemd/system/k3s.service"; then
+  fail 'SAN migration retained a non-tailnet API SAN'
+fi
+grep -Fq 'dropping previous API SAN outside 100.64.0.0/10: api.internal.example' \
+  "$work/run2.out" || fail 'SAN migration did not report the dropped non-tailnet SAN'
 grep -Fq -- '--tls-san=teagram.tailaa4918.ts.net' \
   "$MOCK_STATE/lxc/etc/systemd/system/k3s.service" ||
   fail 'SAN migration did not install the cluster device SAN'
@@ -251,8 +258,104 @@ if grep -Fxq 'k3s-install-skip-download' "$work/run4.actions"; then
   fail 'listener certificate recovery unnecessarily reinstalled k3s'
 fi
 
+# Existing deploy kubeconfigs with a non-tailnet server or stale credentials
+# must fail closed without replacing the file.
+for kubeconfig_case in non-tailnet-ip alternate-port different-ca rotated-token; do
+  cp "$work/kubeconfig.migrated" "$kubeconfig_path"
+  python3 - "$kubeconfig_path" "$kubeconfig_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+config = json.loads(path.read_text())
+cluster = config["clusters"][0]["cluster"]
+if case == "non-tailnet-ip":
+    cluster["server"] = "https://192.0.2.10:6443"
+elif case == "alternate-port":
+    cluster["server"] = "https://teagram.tailaa4918.ts.net:7443"
+elif case == "different-ca":
+    cluster["certificate-authority-data"] = "b3RoZXItY2E="
+elif case == "rotated-token":
+    config["users"][0]["user"]["token"] = "rotated-token"
+else:
+    raise SystemExit(f"unknown kubeconfig case: {case}")
+path.write_text(json.dumps(config, separators=(",", ":")) + "\n")
+PY
+  cp "$kubeconfig_path" "$work/$kubeconfig_case.before"
+  if MOCK_ACTIONS="$work/$kubeconfig_case.actions" PATH="$bin:$PATH" \
+    "$bootstrap" --apply > "$work/$kubeconfig_case.out" 2>&1; then
+    fail "bootstrap accepted an existing kubeconfig with $kubeconfig_case"
+  fi
+  cmp -s "$work/$kubeconfig_case.before" "$kubeconfig_path" ||
+    fail "bootstrap overwrote an existing kubeconfig with $kubeconfig_case"
+  case "$kubeconfig_case" in
+    non-tailnet-ip|alternate-port)
+      grep -Fq 'server must use the cluster tailnet endpoint or a legacy tailnet IP' \
+        "$work/$kubeconfig_case.out" ||
+        fail "the $kubeconfig_case kubeconfig failure did not identify the server field"
+      ;;
+    different-ca|rotated-token)
+      grep -Fq 'token or CA does not match this cluster' "$work/$kubeconfig_case.out" ||
+        fail "the $kubeconfig_case kubeconfig failure did not identify the credential fields"
+      ;;
+  esac
+done
+cp "$work/kubeconfig.migrated" "$kubeconfig_path"
+
+# A stale listener certificate or failed rotation/start must restore the saved
+# service unit and restart k3s with that unit.
+run_expected_tls_rollback() {
+  local failure_case=$1 failure_flag=$2 expected_error=$3 extra_failure_flag=${4:-}
+  local rollback_state="$work/$failure_case-state"
+  local rollback_actions="$work/$failure_case.actions"
+  local rollback_unit="$rollback_state/lxc/etc/systemd/system/k3s.service"
+  local rollback_backup="$rollback_unit.pre-main-3607"
+  cp -a "$MOCK_STATE" "$rollback_state"
+  python3 - "$rollback_state/state.json" <<'PY'
+import json
+import pathlib
+import sys
+
+state_path = pathlib.Path(sys.argv[1])
+state = json.loads(state_path.read_text())
+state["api_tls_san"] = False
+state_path.write_text(json.dumps(state))
+PY
+  [[ -f $rollback_backup ]] || fail "$failure_case fixture has no saved k3s unit"
+  cp "$work/kubeconfig.migrated" "$kubeconfig_path"
+  : > "$rollback_actions"
+  local -a failure_flags=("$failure_flag=1")
+  [[ -z $extra_failure_flag ]] || failure_flags+=("$extra_failure_flag=1")
+  if env "MOCK_STATE=$rollback_state" "MOCK_ACTIONS=$rollback_actions" \
+    "${failure_flags[@]}" "PATH=$bin:$PATH" "$bootstrap" --apply \
+    > "$work/$failure_case.out" 2>&1; then
+    fail "$failure_case did not make bootstrap exit non-zero"
+  fi
+  grep -Fq "$expected_error" "$work/$failure_case.out" ||
+    fail "$failure_case did not report the expected rotation failure"
+  cmp -s "$rollback_unit" "$rollback_backup" ||
+    fail "$failure_case did not restore the original k3s.service byte-for-byte"
+  grep -Fxq 'systemctl restart k3s' "$rollback_actions" ||
+    fail "$failure_case did not restart k3s after restoring its unit"
+}
+
+run_expected_tls_rollback certificate-rotate-failure MOCK_FAIL_CERTIFICATE_ROTATE \
+  'k3s could not rotate its API listener certificate'
+run_expected_tls_rollback systemctl-start-failure MOCK_FAIL_SYSTEMCTL_START_K3S \
+  'k3s could not rotate its API listener certificate'
+run_expected_tls_rollback stale-listener-certificate MOCK_KEEP_API_TLS_CERTIFICATE \
+  'the API listener does not present a CA-valid certificate for the tailnet DNS name'
+run_expected_tls_rollback restore-restart-failure MOCK_FAIL_CERTIFICATE_ROTATE \
+  'restore failed; recover from /etc/systemd/system/k3s.service.pre-main-3607' \
+  MOCK_FAIL_SYSTEMCTL_RESTART_K3S
+
 # No fixture secret may appear in what the script prints, on either run.
-if grep -Fq -- "$deployer_token" "$work/run1.out" "$work/run2.out" "$work/run3.out" "$work/run4.out"; then
+if grep -Fq -- "$deployer_token" "$work/run1.out" "$work/run2.out" "$work/run3.out" \
+  "$work/run4.out" "$work/certificate-rotate-failure.out" \
+  "$work/systemctl-start-failure.out" "$work/stale-listener-certificate.out" \
+  "$work/restore-restart-failure.out"; then
   fail 'the script printed a secret value'
 fi
 

@@ -26,6 +26,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check-deploy-gate:
+    name: 'check: deploy-gate'
+    if: ${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Report the disabled production deploy
+        run: |
+          set -euo pipefail
+          echo "::notice::Production deploy skipped because K3S_TAILNET_API_READY is not true"
+          {
+            echo '## Production deployment skipped'
+            echo
+            echo 'K3S_TAILNET_API_READY is not `true`; no production deploy ran.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy-server:
     name: 'deploy: server (prod)'
     if: ${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}
