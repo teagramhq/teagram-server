@@ -4,12 +4,18 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue key to report this run to (e.g. MAIN-123). Leave empty for no report."
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: real-client-browser-flow-pr-${{ github.event.pull_request.number }}
+  group: real-client-browser-flow-pr-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -27,7 +33,7 @@ jobs:
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_GUEST_WEB_ROOT: ${{ github.workspace }}/guest-web-source
-      REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       REAL_CLIENT_TESTED_REVISION: ${{ github.sha }}
 
     steps:
