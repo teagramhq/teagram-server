@@ -600,11 +600,14 @@ Bot API (HTTP)
 
 ## Backup and erasure recovery
 
-The live backup runs a nightly PostgreSQL `pg_dumpall` and mirrors the result
-to the host. `Deploy.` also verifies a PostgreSQL dump before a production
-release; the [k3s operations guide](deploy/k8s/README.md) documents that
-procedure, restore steps, and backup limits. RustFS stores production media;
-its storage and recovery controls are documented in the
+The production CronJob runs daily at 03:17 UTC and writes custom-format
+PostgreSQL dumps to the node-local `postgres-backups` 20 GiB PVC. It verifies
+each dump with `pg_restore --list` and retains the newest seven verified dumps.
+`Deploy.` also creates and verifies a pre-deploy dump on the same PVC. There is
+no off-cluster copy, so this path does not protect against loss of the k3s node
+or its disk. See the [k3s operations guide](deploy/k8s/README.md) for status
+checks, restore steps, and limits. RustFS stores production media; its storage
+and recovery controls are documented in the
 [media storage threat model](docs/media-storage-threat-model.md).
 
 An off-cluster encrypted backup pipeline with independent verification and a
