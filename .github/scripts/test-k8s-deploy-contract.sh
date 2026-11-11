@@ -202,12 +202,13 @@ fi
    "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(has("nodePort")) | .nodePort' deploy/k8s/base/teagramd-service.yaml)" == '' &&
    "$(yq -r 'select(.metadata.name == "teagramd") | [.spec.ports[] | [.name, .port] | join(":")] | join(",")' deploy/k8s/base/teagramd-service.yaml)" == \
      'mtproto:2443,websocket:2444,admin:2445,public-ws:2446,bot-api:2447,public-bot-api:2449' &&
-   "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(.name == "bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == bot-api-tailnet &&
+   "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(.name == "bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == bot-api-ingress &&
+   "$(yq -r '.spec.template.spec.containers[] | select(.name == "teagramd") | .ports[] | select(.name == "bot-api-ingress") | .containerPort' deploy/k8s/base/teagramd-statefulset.yaml)" == 2447 &&
    "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(.name == "public-bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == public-bot-api ]] ||
   fail 'teagramd Services must stay internal and expose only the reviewed listener ports'
 [[ "$(yq -r '.spec.ingress | length' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 2 &&
    "$(yq -r '[.spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/name"] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 'tailscale-proxy,cloudflared' &&
-   "$(yq -r '[.spec.ingress[0].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2443,2444,2445,2447' &&
+   "$(yq -r '[.spec.ingress[0].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2443,2444,2445,bot-api-ingress' &&
    "$(yq -r '[.spec.ingress[1].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2446,2449' ]] ||
   fail 'the default-deny teagramd policy must isolate tailnet and public listener ports by pod identity'
 if grep --fixed-strings --quiet 'ipBlock:' deploy/k8s/base/teagramd-networkpolicy.yaml; then
@@ -215,7 +216,7 @@ if grep --fixed-strings --quiet 'ipBlock:' deploy/k8s/base/teagramd-networkpolic
 fi
 [[ "$(yq -r '.spec.podSelector.matchLabels."app.kubernetes.io/name"' deploy/k8s/base/tailscale-proxy-egress.yaml)" == tailscale-proxy &&
    "$(yq -r '.spec.policyTypes | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == Egress &&
-   "$(yq -r '[.spec.egress[0].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '2443,2444,2445,2447' &&
+   "$(yq -r '[.spec.egress[0].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '2443,2444,2445,bot-api-ingress' &&
    "$(yq -r '.spec.egress[1].ports[0].port' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 8081 &&
    "$(yq -r '.spec.egress[1].to[0].podSelector.matchLabels."app.kubernetes.io/name"' deploy/k8s/base/tailscale-proxy-egress.yaml)" == linkselector &&
    "$(yq -r '[.spec.egress[2].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '53,53' &&
@@ -224,6 +225,8 @@ fi
    "$(yq -r '.spec.egress | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 4 &&
    "$(yq -r '[.spec.egress[].ports[].port] | map(select(. == 6443)) | length' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 0 ]] ||
   fail 'the Tailscale proxy egress policy must limit cluster destinations and keep private and tailnet ranges blocked'
+python3 -B .github/scripts/test_k8s_bot_api_rollback.py >/dev/null ||
+  fail 'rollback must keep the pre-PR tailnet Bot API listener reachable'
 python3 - <<'PY' || fail 'the API egress renderer must allow only ready endpoint IPv4 /32 addresses'
 import json
 import subprocess
@@ -496,9 +499,13 @@ fi
 if grep --fixed-strings --quiet 'TG_BOT_API_LISTEN_ADDR' deploy/k8s/base/teagramd-statefulset.yaml; then
   fail 'the legacy loopback Bot API listener must be removed from the production workload'
 fi
-if grep --extended-regexp --quiet 'name: bot-api-inner|name: bot-api-ingress|name: bot-api-socket' \
+if grep --extended-regexp --quiet 'name: bot-api-inner|name: bot-api-socket' \
   deploy/k8s/base/teagramd-statefulset.yaml; then
   fail 'the Bot API listeners must be direct teagramd listeners without relay sidecars'
+fi
+if [[ "$(yq -r '[.spec.template.spec.containers[] | select(.name == "bot-api-ingress")] | length' \
+  deploy/k8s/base/teagramd-statefulset.yaml)" != 0 ]]; then
+  fail 'the compatibility port name must not restore the old Bot API relay sidecar'
 fi
 for setting in TG_BOT_API_PUBLIC_LISTEN_ADDR TG_BOT_API_PUBLIC_PROXY_CIDRS TG_BOT_API_TAILNET_LISTEN_ADDR; do
   grep --fixed-strings --quiet "$setting" deploy/k8s/ci/public-ingress-ci.yaml ||

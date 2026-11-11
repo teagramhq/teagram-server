@@ -23,7 +23,7 @@ spec:
         - protocol: TCP
           port: 2445
         - protocol: TCP
-          port: 2447
+          port: bot-api-ingress
     - to:
         - podSelector:
             matchLabels:

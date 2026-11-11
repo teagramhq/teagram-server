@@ -207,7 +207,8 @@ spec:
             - name: admin
               containerPort: 2445
               protocol: TCP
-            - name: bot-api-tailnet
+            # Keep the legacy lookup name so rollback resolves the old 2448 pod port.
+            - name: bot-api-ingress
               containerPort: 2447
               protocol: TCP
             - name: public-bot-api

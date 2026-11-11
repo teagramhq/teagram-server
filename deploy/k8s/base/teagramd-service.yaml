@@ -23,7 +23,7 @@ spec:
       targetPort: public-ws
     - name: bot-api
       port: 2447
-      targetPort: bot-api-tailnet
+      targetPort: bot-api-ingress
     - name: public-bot-api
       port: 2449
       targetPort: public-bot-api
