@@ -1,6 +1,6 @@
 module github.com/teagramhq/teagram-server
 
-go 1.27.3
+go 1.27.4
 
 require (
 	filippo.io/age v1.2.1
