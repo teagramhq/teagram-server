@@ -2098,7 +2098,7 @@ func (h *handlers) handleEditChannelUsername(r *mtproto.Request) (bin.Encoder, e
 		return nil, errChatAdminRequired
 	}
 	if username != "" {
-		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+		if err := h.checkUsernameClaimQuota(r, username); err != nil {
 			return nil, err
 		}
 	}
@@ -2159,7 +2159,7 @@ func (h *handlers) handleCheckChannelUsername(r *mtproto.Request) (bin.Encoder, 
 		return nil, errPeerIDInvalid
 	}
 
-	if err := h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username); err != nil {
+	if err := h.checkAndChargeUsernameLookup(r, username); err != nil {
 		if errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
 			return nil, errUsernameLookupFloodWait
 		}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,28 @@ type shutdownTestAddr string
 
 func (a shutdownTestAddr) Network() string { return string(a) }
 func (a shutdownTestAddr) String() string  { return string(a) }
+
+type recordingDiscoveryRateLimitStore struct {
+	calls int
+}
+
+func (s *recordingDiscoveryRateLimitStore) CheckDiscoveryRateLimit(
+	context.Context,
+	netip.Addr,
+	store.RateLimitConfig,
+	store.RateLimitConfig,
+) (*store.RateLimitResult, error) {
+	s.calls++
+	return nil, nil //nolint:nilnil // a nil result admits the request.
+}
+
+type webSocketRemoteAddrConn struct {
+	net.Conn
+
+	remote net.Addr
+}
+
+func (c webSocketRemoteAddrConn) RemoteAddr() net.Addr { return c.remote }
 
 func TestWebSocketWaitTracksHandlerAfterSocketClose(t *testing.T) {
 	listener := newWebSocketListener(shutdownTestListener{}, nil, store.RateLimitListenerTailnet, "")
@@ -164,5 +187,67 @@ func TestHandleWebSocketLogsInvalidCFConnectingIPThrottled(t *testing.T) {
 		if strings.Contains(logText, raw) {
 			t.Errorf("logs contain raw header value %q: %s", raw, logText)
 		}
+	}
+}
+
+func TestPublicWebSocketDiscoveryUsesOnlyInMemoryPerNetworkBudget(t *testing.T) {
+	var logs bytes.Buffer
+	server := &Server{
+		preAuth: newPreAuthLimiter(PreAuthLimits{MaxConnsPerNet: 1}),
+		discovery: newDiscoveryLimiter(DiscoveryLimits{
+			MaxRequestsPerNet: 1,
+			PerNetWindow:      time.Minute,
+		}),
+		log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	}
+	rateStore := &recordingDiscoveryRateLimitStore{}
+	server.discovery.store = rateStore
+
+	request := func(clientAddr string) int {
+		t.Helper()
+		serverConn, peerConn := net.Pipe()
+		defer func() {
+			if err := peerConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close peer connection: %v", err)
+			}
+			if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close server connection: %v", err)
+			}
+		}()
+		slot, ok := server.preAuth.admit(store.RateLimitListenerPublic)
+		if !ok {
+			t.Fatal("failed to admit test socket")
+		}
+		state := &webSocketConnState{
+			socket: &webSocketAcceptedConn{
+				Conn: webSocketRemoteAddrConn{
+					Conn:   serverConn,
+					remote: &net.TCPAddr{IP: net.ParseIP("172.18.0.1"), Port: 34567},
+				},
+				slot: slot,
+			},
+			slot: slot,
+		}
+		req := httptest.NewRequestWithContext(
+			context.WithValue(context.Background(), webSocketConnKey{}, state),
+			http.MethodGet, clientDiscoveryPath, nil,
+		)
+		req.Header.Set("Cf-Connecting-Ip", clientAddr)
+		recorder := httptest.NewRecorder()
+		server.handleWebSocket(recorder, req, nil, nil, false, []byte(`{"public":true}`), cfConnectingIPHeader)
+		return recorder.Code
+	}
+
+	if got := request("198.51.100.42"); got != http.StatusOK {
+		t.Fatalf("first client's discovery status = %d, want 200", got)
+	}
+	if got := request("198.51.100.42"); got != http.StatusTooManyRequests {
+		t.Fatalf("repeated client's discovery status = %d, want 429", got)
+	}
+	if got := request("203.0.113.42"); got != http.StatusOK {
+		t.Fatalf("distinct client's discovery status = %d, want 200", got)
+	}
+	if rateStore.calls != 0 {
+		t.Fatalf("CheckDiscoveryRateLimit calls = %d, want 0 for public static discovery", rateStore.calls)
 	}
 }

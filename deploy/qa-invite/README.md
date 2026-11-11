@@ -11,6 +11,13 @@ that selects the invite stack. The page and API WebSocket share the QA-only
 origin, so the browser does not make cross-address-space requests from
 `web.teagram.io`. Turnstile is absent.
 
+HAProxy sends the browser peer address to Nginx with PROXY v2. Nginx trusts
+that preamble only from HAProxy's fixed backend address, then overwrites
+`CF-Connecting-IP` with the resolved client address on discovery and WebSocket
+requests. teagramd trusts that header only from Nginx's fixed backend address;
+the raw MTProto listener keeps socket-based addressing. The isolated QA backend
+uses `198.18.131.0/24`, separate from the public demo's `198.18.130.0/24`.
+
 The Compose memory limits total 1088 MiB at peak migration time. Postgres and
 the server have separate persistent volumes. Logs use Docker's bounded JSON
 driver. The `up` operation validates the pinned image revision and digest,

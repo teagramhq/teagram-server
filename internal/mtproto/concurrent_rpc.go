@@ -32,13 +32,13 @@ type concurrentRPCSet struct {
 	err     error
 }
 
-func (s *concurrentRPCSet) start(msgID int64, work concurrentRPCWork) (started, duplicate bool) {
+func (s *concurrentRPCSet) start(msgID int64, work concurrentRPCWork, unbounded bool) (started, duplicate bool) {
 	s.mu.Lock()
 	if _, exists := s.entries[msgID]; exists {
 		s.mu.Unlock()
 		return true, true
 	}
-	if len(s.entries) >= maxConcurrentRPCsPerConn+maxQueuedConcurrentRPCsPerConn {
+	if !unbounded && len(s.entries) >= maxConcurrentRPCsPerConn+maxQueuedConcurrentRPCsPerConn {
 		s.mu.Unlock()
 		return false, false
 	}
@@ -271,7 +271,7 @@ func (s *Server) dispatchConcurrentRPC(c *Conn, req *Request, handler Handler) (
 		release: release,
 		run:     func() { s.runConcurrentRPC(c, req, handler, release) },
 	}
-	started, duplicate := c.concurrentRPCs.start(req.MsgID, work)
+	started, duplicate := c.concurrentRPCs.start(req.MsgID, work, req.Tailnet())
 	if duplicate {
 		if release != nil {
 			release()

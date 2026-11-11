@@ -251,6 +251,39 @@ func TestUploadByteRateLimitIsPerAccountAcrossSaveMethods(t *testing.T) {
 	}
 }
 
+func TestUploadByteRateLimitUsesSeparateBudgetFromPartCalls(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+
+	u, err := s.CreateUser(context.Background(), "+15551298012")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	callLimit := store.RateLimitConfig{Limit: 600, Window: time.Minute}
+	byteLimit := store.RateLimitConfig{Limit: 1 << 20, Window: time.Hour}
+	payload := make([]byte, 64<<10)
+	const fileID = 4012
+	for part := range 16 {
+		_, err := api.SaveFilePartForTestWithRateLimits(s, u.ID, callLimit, byteLimit, &tg.UploadSaveFilePartRequest{
+			FileID: fileID, FilePart: part, Bytes: payload,
+		})
+		if err != nil {
+			t.Fatalf("part %d within both budgets: %v", part, err)
+		}
+	}
+
+	_, err = api.SaveFilePartForTestWithRateLimits(s, u.ID, callLimit, byteLimit, &tg.UploadSaveFilePartRequest{
+		FileID: fileID, FilePart: 16, Bytes: payload,
+	})
+	if !isFloodWait(err) {
+		t.Fatalf("part beyond 1 MiB byte budget: expected FLOOD_WAIT, got %v", err)
+	}
+	if _, ok, err := s.UploadPart(context.Background(), u.ID, fileID, 16); err != nil || ok {
+		t.Fatalf("byte-budget-denied part stored: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestUploadByteRateLimitCountsOversizedPartBytes(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)

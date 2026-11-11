@@ -97,9 +97,16 @@ func (h *handlers) handleReportMessage(r *mtproto.Request) (bin.Encoder, error) 
 		if !ok {
 			return nil, errMessageReportOptionInvalid
 		}
-		visible, err := h.store.CreateUserStickerSetReports(
-			r.Ctx, r.UserID, peerType, peerID, messageIDs, reason.reason, req.Message,
-		)
+		var visible bool
+		if r.Tailnet() {
+			visible, err = h.store.CreateUserStickerSetReportsUnmetered(
+				r.Ctx, r.UserID, peerType, peerID, messageIDs, reason.reason, req.Message,
+			)
+		} else {
+			visible, err = h.store.CreateUserStickerSetReports(
+				r.Ctx, r.UserID, peerType, peerID, messageIDs, reason.reason, req.Message,
+			)
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrUserStickerSetReportRateLimited) {
 				return nil, FloodWaitError(3600)

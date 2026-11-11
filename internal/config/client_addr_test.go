@@ -22,6 +22,8 @@ import (
 func TestLoadClientAddrTrustDefault(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_LISTEN_PATH", "")
+	t.Setenv("TG_WEBSOCKET_LISTEN_PATH", "")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -29,6 +31,9 @@ func TestLoadClientAddrTrustDefault(t *testing.T) {
 	}
 	if cfg.ClientAddrTrust != config.ClientAddrSocket {
 		t.Errorf("ClientAddrTrust = %q, want %q", cfg.ClientAddrTrust, config.ClientAddrSocket)
+	}
+	if cfg.ListenPath != mtproto.ListenerPathLimited || cfg.WebSocketListenPath != mtproto.ListenerPathLimited {
+		t.Errorf("listener path defaults = (%q, %q), want limited zero values", cfg.ListenPath, cfg.WebSocketListenPath)
 	}
 	if got := cfg.RateLimits.SendCodeIP.Calls; got.Limit != 10 || got.Window != time.Hour {
 		t.Errorf("SendCodeIP.Calls = %+v, want 10 per hour", got)
@@ -213,6 +218,7 @@ func TestLoadClientAddrTrustAcceptsCloudflareOnPublicWebSocket(t *testing.T) {
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
 	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
 	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS", "")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -223,6 +229,38 @@ func TestLoadClientAddrTrustAcceptsCloudflareOnPublicWebSocket(t *testing.T) {
 	}
 	if cfg.PublicWebSocketListenAddr != "127.0.0.1:2446" {
 		t.Errorf("PublicWebSocketListenAddr = %q, want 127.0.0.1:2446", cfg.PublicWebSocketListenAddr)
+	}
+	if len(cfg.CFConnectingIPProxies) != 0 {
+		t.Errorf("CFConnectingIPProxies = %v, want an unset allowlist to preserve the legacy header trust behavior", cfg.CFConnectingIPProxies)
+	}
+}
+
+func TestLoadCFConnectingIPProxyCIDRsReplaceUnsetTrust(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS", "172.18.0.1,203.0.113.0/24")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("172.18.0.1/32"), netip.MustParsePrefix("203.0.113.0/24")}
+	if !slices.Equal(cfg.CFConnectingIPProxies, want) {
+		t.Fatalf("CFConnectingIPProxies = %v, want configured forwarders %v", cfg.CFConnectingIPProxies, want)
+	}
+}
+
+func TestLoadCFConnectingIPProxyCIDRsRequireCFTrustMode(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrSocket))
+	t.Setenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS", "172.18.0.1")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_CLIENT_ADDR_CF_PROXY_CIDRS") {
+		t.Fatalf("Load with CF proxy CIDRs under socket trust = %v, want a named configuration error", err)
 	}
 }
 
@@ -236,6 +274,22 @@ func TestLoadClientAddrProxyCIDRsRejectedWithCFConnectingIP(t *testing.T) {
 	_, err := config.Load(discardLog())
 	if err == nil || !strings.Contains(err.Error(), "TG_CLIENT_ADDR_PROXY_CIDRS") {
 		t.Fatalf("Load with proxy CIDRs in CF-Connecting-IP mode = %v, want error naming TG_CLIENT_ADDR_PROXY_CIDRS", err)
+	}
+}
+
+func TestLoadRejectsMalformedCFConnectingIPForwarders(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_CLIENT_ADDR_TRUST", string(config.ClientAddrCFConnectingIP))
+	t.Setenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS", "not-a-cidr")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a malformed CF-Connecting-IP forwarder")
+	}
+	if !strings.Contains(err.Error(), "TG_CLIENT_ADDR_CF_PROXY_CIDRS") {
+		t.Fatalf("Load error = %q, want it to name TG_CLIENT_ADDR_CF_PROXY_CIDRS", err)
 	}
 }
 

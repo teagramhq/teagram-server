@@ -28,16 +28,7 @@ const (
 var dialogFilterMutationRateLimit = store.RateLimitConfig{Limit: 60, Window: time.Minute}
 
 func (h *handlers) checkDialogFilterRateLimit(req *mtproto.Request) error {
-	result, err := h.store.CheckRateLimitCost(req.Ctx, req.UserID, dialogFilterRateLimitSurface, dialogFilterMutationRateLimit, 1)
-	if err != nil {
-		h.log.Error("dialog filter rate limit", "user_id", req.UserID, "err", err)
-		return errInternal
-	}
-	if result != nil {
-		h.recordRateLimitDenial(dialogFilterRateLimitSurface)
-		return FloodWaitError(60)
-	}
-	return nil
+	return h.checkRateLimitWindow(req, dialogFilterRateLimitSurface, dialogFilterMutationRateLimit)
 }
 
 func (h *handlers) registerDialogFilterMutation(d *mtproto.Dispatcher, id uint32, fn methodFunc) {

@@ -83,7 +83,8 @@ func (l *unboundKeyLimiter) release(id [8]byte) {
 // only one that decrypts its frames — so the fields need no lock of their own;
 // the counters they move are the limiter's, and those are guarded.
 type unboundKeyHold struct {
-	lim *unboundKeyLimiter
+	lim  *unboundKeyLimiter
+	path ListenerPath
 	// key is the auth key this connection is charged to, meaningful only while
 	// charged.
 	key     [8]byte
@@ -110,7 +111,7 @@ type unboundKeyHold struct {
 // and it holds through everything that comes after: a key unbound again by the
 // 2FA path, and a connection that renegotiates a new one.
 func (h *unboundKeyHold) charge(id [8]byte, userID int64) bool {
-	if h.signedIn {
+	if h.signedIn || h.path == ListenerPathTailnet {
 		return true
 	}
 	if userID != 0 {

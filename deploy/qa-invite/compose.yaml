@@ -78,6 +78,8 @@ services:
       TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ":2446"
       TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: teagram-demo.incus:443
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://teagram-demo.incus
+      TG_CLIENT_ADDR_TRUST: cf-connecting-ip
+      TG_CLIENT_ADDR_CF_PROXY_CIDRS: 198.18.131.3/32
       TG_REGISTRATION: invite
       TG_USER_INVITE_QUOTA: "5"
       TG_USER_INVITE_MIN_ACCOUNT_AGE: 0
@@ -137,7 +139,7 @@ services:
         target: /usr/share/nginx/html/.well-known/teagramd
         read_only: true
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:8443/.well-known/teagramd/client"]
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:9443/.well-known/teagramd/client"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -145,7 +147,9 @@ services:
     depends_on:
       teagramd:
         condition: service_started
-    networks: [backend]
+    networks:
+      backend:
+        ipv4_address: 198.18.131.3
     restart: unless-stopped
     logging: *logging
 
@@ -177,7 +181,10 @@ services:
     depends_on:
       tls-edge:
         condition: service_healthy
-    networks: [backend, publish]
+    networks:
+      backend:
+        ipv4_address: 198.18.131.2
+      publish: {}
     restart: unless-stopped
     logging: *logging
 
@@ -192,6 +199,10 @@ volumes:
 networks:
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: 198.18.131.0/24
+          ip_range: 198.18.131.128/26
   publish:
     driver: bridge
     internal: false

@@ -11,6 +11,8 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/exchange"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 type exchangeLogCapture struct {
@@ -52,6 +54,27 @@ func (c *exchangeScriptConn) Send(_ context.Context, b *bin.Buffer) error {
 }
 
 func (c *exchangeScriptConn) Close() error { return nil }
+
+func TestUnknownKeyExchangePathIsInternalError(t *testing.T) {
+	logSink := &exchangeLogCapture{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(logSink))
+	conn := &exchangeScriptConn{}
+	first := &bin.Buffer{}
+	var attempts int
+	err := server.runExchangeWithCloseDiagnosticsForPath(
+		context.Background(), conn, first, netip.MustParseAddr("192.0.2.10"), nil,
+		&attempts, store.RateLimitListenerPublic, ListenerPath(99),
+	)
+	if err == nil {
+		t.Fatal("unknown listener path succeeded")
+	}
+	if len(conn.sent) != 0 {
+		t.Fatalf("unknown path sent %d protocol replies, want none", len(conn.sent))
+	}
+	if logSink.records != 1 || logSink.record.Message != "invalid key exchange listener path" {
+		t.Fatalf("log record = (%d, %q), want one internal path error", logSink.records, logSink.record.Message)
+	}
+}
 
 func TestExchangeConnReturns404ForLookupMiss(t *testing.T) {
 	keyID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}

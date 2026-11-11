@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -108,11 +110,16 @@ func (h *handlers) keepGetFileLeaseAlive(
 // the same allowance: giving a second lane its own budget would double what one
 // account may read out of the blob store.
 func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
-	reservation, denied, err := h.store.ReserveRateLimit(
-		r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
-	)
+	var reservation *store.RateLimitReservation
+	var denied *store.RateLimitResult
+	var err error
+	if !r.Tailnet() {
+		reservation, denied, err = h.store.ReserveRateLimit(
+			r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
+		)
+	}
 	if err != nil {
-		h.log.Error("get file rate limit")
+		h.log.Error("get file rate limit", "err", rateLimitErrorSummary(err))
 		return errInternal
 	}
 	if denied != nil {
@@ -144,6 +151,16 @@ func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
 	}
 	h.recordRateLimitDenial("upload_get_file")
 	return floodWaitForDuration(denied.Wait)
+}
+
+// rateLimitErrorSummary keeps useful database failure codes in operator logs
+// without exposing the dynamic PostgreSQL message, which may contain row or
+// constraint details.
+func rateLimitErrorSummary(err error) string {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return "PostgreSQL SQLSTATE " + pgErr.Code
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 func floodWaitForDuration(wait time.Duration) error {

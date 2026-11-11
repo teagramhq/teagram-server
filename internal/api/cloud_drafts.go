@@ -142,7 +142,12 @@ func (h *handlers) handleSaveDraftAfterReplyOnConn(_ *mtproto.Conn, r *mtproto.R
 		}
 	}
 
-	changed, _, err := h.store.SaveCloudDraft(r.Ctx, r.UserID, peerType, peerID, req.Message, req.NoWebpage, replyToMsgID)
+	var changed bool
+	if r.Tailnet() {
+		changed, _, err = h.store.SaveCloudDraftUnmetered(r.Ctx, r.UserID, peerType, peerID, req.Message, req.NoWebpage, replyToMsgID)
+	} else {
+		changed, _, err = h.store.SaveCloudDraft(r.Ctx, r.UserID, peerType, peerID, req.Message, req.NoWebpage, replyToMsgID)
+	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, nil, nil, errPeerIDInvalid

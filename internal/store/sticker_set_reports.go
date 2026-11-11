@@ -157,6 +157,31 @@ func (s *Store) CreateUserStickerSetReports(
 	messageIDs []int64,
 	reason, comment string,
 ) (bool, error) {
+	return s.createUserStickerSetReports(ctx, reporterID, peerType, peerID, messageIDs, reason, comment, true)
+}
+
+// CreateUserStickerSetReportsUnmetered files the same reports without the
+// per-reporter hourly rate limit. Listener policy decides when this is allowed.
+func (s *Store) CreateUserStickerSetReportsUnmetered(
+	ctx context.Context,
+	reporterID int64,
+	peerType PeerType,
+	peerID int64,
+	messageIDs []int64,
+	reason, comment string,
+) (bool, error) {
+	return s.createUserStickerSetReports(ctx, reporterID, peerType, peerID, messageIDs, reason, comment, false)
+}
+
+func (s *Store) createUserStickerSetReports(
+	ctx context.Context,
+	reporterID int64,
+	peerType PeerType,
+	peerID int64,
+	messageIDs []int64,
+	reason, comment string,
+	rateLimited bool,
+) (bool, error) {
 	if reporterID <= 0 || peerID <= 0 || len(messageIDs) == 0 || !validReportPeerType(peerType) ||
 		!validUserStickerSetReportReason(reason) || len(comment) > 512 || !utf8.ValidString(comment) ||
 		strings.ContainsRune(comment, '\x00') {
@@ -246,12 +271,14 @@ func (s *Store) CreateUserStickerSetReports(
 	if len(newTargets) == 0 {
 		return true, nil
 	}
-	count, err := qtx.CountRecentUserStickerSetReports(ctx, reporterID)
-	if err != nil {
-		return false, fmt.Errorf("count recent sticker-set reports for reporter %d: %w", reporterID, err)
-	}
-	if count+int64(len(newTargets)) > UserStickerSetReportsPerHour {
-		return false, ErrUserStickerSetReportRateLimited
+	if rateLimited {
+		count, countErr := qtx.CountRecentUserStickerSetReports(ctx, reporterID)
+		if countErr != nil {
+			return false, fmt.Errorf("count recent sticker-set reports for reporter %d: %w", reporterID, countErr)
+		}
+		if count+int64(len(newTargets)) > UserStickerSetReportsPerHour {
+			return false, ErrUserStickerSetReportRateLimited
+		}
 	}
 	for _, target := range newTargets {
 		if err := qtx.InsertUserStickerSetReport(ctx, db.InsertUserStickerSetReportParams{

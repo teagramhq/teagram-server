@@ -122,6 +122,13 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the commit-message regression fixture'
   [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test selective pre-push checks") | .run')" == 'python3 -B .github/scripts/test_git_hooks.py' ]] ||
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
+  local qa_password_step_names qa_password_pull
+  qa_password_step_names="$(ci_query '.jobs."check-deploy-workflow".steps | map(.name) | join("|")')"
+  [[ "$qa_password_step_names" == *'Pull PostgreSQL image for QA password timestamp check|Check QA password timestamp operation'* ]] ||
+    ci_fail 'the QA password timestamp check must preload PostgreSQL through the retry/fallback helper'
+  qa_password_pull="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Pull PostgreSQL image for QA password timestamp check") | .run')"
+  [[ "$qa_password_pull" == 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' ]] ||
+    ci_fail 'the QA password timestamp check must use the canonical PostgreSQL image through the pull helper'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||

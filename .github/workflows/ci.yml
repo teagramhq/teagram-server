@@ -1313,6 +1313,11 @@ jobs:
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
 
+      - name: Pull PostgreSQL image for QA password timestamp check
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image mirror.gcr.io/library/postgres:18-alpine
+
       - name: Check QA password timestamp operation
         run: deploy/teagram/test-qa-password-timestamps.sh
 
@@ -1898,6 +1903,22 @@ jobs:
           docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl wait --for=condition=Ready node --all --timeout=180s
+          flannel_cni_ready=false
+          for attempt in $(seq 1 90); do
+            if docker exec teagram-k3s sh -c \
+              'grep -q "^FLANNEL_SUBNET=[0-9]" /run/flannel/subnet.env' 2>/dev/null; then
+              flannel_cni_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$flannel_cni_ready" != true ]]; then
+            echo "k3s flannel CNI did not publish /run/flannel/subnet.env within 180 seconds" >&2
+            docker ps -a --filter name=teagram-k3s || true
+            docker logs --tail 80 teagram-k3s || true
+            docker exec teagram-k3s ls -l /run/flannel || true
+            exit 1
+          fi
           required_images=(
             ghcr.io/teagramhq/teagramd:ci
             ghcr.io/teagramhq/link-edge-landing:ci

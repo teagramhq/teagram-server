@@ -475,6 +475,16 @@ func (s *Store) DialogPartners(ctx context.Context, userID int64) ([]int64, erro
 // Returns ErrUsernameOccupied when the handle is already taken by another
 // account. Returns ErrUsernameFloodWait when the rate limit is exceeded.
 func (s *Store) UpdateUsername(ctx context.Context, userID int64, username string) error {
+	return s.updateUsername(ctx, userID, username, true)
+}
+
+// UpdateUsernameUnmetered performs the same account username mutation without
+// the per-account request rate limit. Listener policy decides when this is allowed.
+func (s *Store) UpdateUsernameUnmetered(ctx context.Context, userID int64, username string) error {
+	return s.updateUsername(ctx, userID, username, false)
+}
+
+func (s *Store) updateUsername(ctx context.Context, userID int64, username string, rateLimited bool) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -502,11 +512,13 @@ func (s *Store) UpdateUsername(ctx context.Context, userID int64, username strin
 
 	// Prune expired rows before counting.
 	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-UsernameChangeWindow), Valid: true}
-	if err := qtx.DeleteExpiredUsernameChanges(ctx, db.DeleteExpiredUsernameChangesParams{
-		UserID:    userID,
-		ChangedAt: cutoff,
-	}); err != nil {
-		return fmt.Errorf("prune username changes: %w", err)
+	if rateLimited {
+		if err := qtx.DeleteExpiredUsernameChanges(ctx, db.DeleteExpiredUsernameChangesParams{
+			UserID:    userID,
+			ChangedAt: cutoff,
+		}); err != nil {
+			return fmt.Errorf("prune username changes: %w", err)
+		}
 	}
 
 	// Clear or claim the username first — only record the rate-limit token on
@@ -556,18 +568,20 @@ func (s *Store) UpdateUsername(ctx context.Context, userID int64, username strin
 	}
 
 	// Record the successful change and verify the rate limit.
-	if err := qtx.InsertUsernameChange(ctx, userID); err != nil {
-		return fmt.Errorf("record username change: %w", err)
-	}
-	count, err := qtx.CountUsernameChanges(ctx, db.CountUsernameChangesParams{
-		UserID:    userID,
-		ChangedAt: cutoff,
-	})
-	if err != nil {
-		return fmt.Errorf("count username changes: %w", err)
-	}
-	if count > UsernameChangeLimit {
-		return ErrUsernameFloodWait
+	if rateLimited {
+		if err := qtx.InsertUsernameChange(ctx, userID); err != nil {
+			return fmt.Errorf("record username change: %w", err)
+		}
+		count, countErr := qtx.CountUsernameChanges(ctx, db.CountUsernameChangesParams{
+			UserID:    userID,
+			ChangedAt: cutoff,
+		})
+		if countErr != nil {
+			return fmt.Errorf("count username changes: %w", countErr)
+		}
+		if count > UsernameChangeLimit {
+			return ErrUsernameFloodWait
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

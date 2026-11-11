@@ -69,6 +69,14 @@ grep -Fq 'TG_USER_INVITE_QUOTA: "5"' "$COMPOSE" || fail 'invite quota must be fi
 grep -Fq 'TG_USER_INVITE_MIN_ACCOUNT_AGE: 0' "$COMPOSE" || fail 'new operator accounts must be allowed to issue invites'
 grep -Fq 'TG_PUBLIC_REGISTRATION: invite' "$COMPOSE" || fail 'WebSocket registration must use invite mode'
 grep -Fq 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://teagram-demo.incus' "$COMPOSE" || fail 'QA Web origin is not allowed for API WebSockets'
+grep -Fq 'server tls-edge tls-edge:8443 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg" || fail 'QA HAProxy does not preserve the browser peer address to the TLS edge'
+grep -Fq 'listen 8443 ssl proxy_protocol;' "$NGINX" || fail 'QA TLS edge does not accept HAProxy PROXY protocol'
+grep -Fq 'set_real_ip_from 198.18.131.2/32;' "$NGINX" || fail 'QA TLS edge trusts an unexpected PROXY protocol sender'
+grep -Fq 'real_ip_header proxy_protocol;' "$NGINX" || fail 'QA TLS edge does not resolve the validated browser peer address'
+[[ $(grep -Fc 'proxy_set_header CF-Connecting-IP $remote_addr;' "$NGINX" || true) -eq 2 ]] || fail 'QA WebSocket and discovery do not forward the resolved client address'
+! grep -Fq '$http_cf_connecting_ip' "$NGINX" || fail 'QA TLS edge trusts a client-supplied CF-Connecting-IP value'
+grep -Fq 'listen 127.0.0.1:9443 ssl;' "$NGINX" || fail 'QA TLS health listener is missing'
+grep -Fq 'https://127.0.0.1:9443/.well-known/teagramd/client' "$COMPOSE" || fail 'QA TLS healthcheck does not use the local non-PROXY listener'
 grep -Fq 'TG_TURNSTILE_SIGNIN_ENABLED: "false"' "$COMPOSE" || fail 'Turnstile must be disabled and reported absent'
 grep -Fq 'TEAGRAM_QA_INVITE_IMAGE_REF' "$COMPOSE" || fail 'server image must be selected by immutable digest'
 grep -Fq 'RELEASES_DIR=$STATE_DIR/releases' "$FORCED_COMMAND" || fail 'reviewed Compose snapshots must be retained under QA state'
@@ -89,6 +97,14 @@ ENV
 docker compose --project-name teagram-qa-invite --project-directory "$test_project_dir" \
   --env-file "$CONTRACT_TMP/qa-invite.env" --file "$COMPOSE" config --format json > "$CONTRACT_TMP/compose.json" ||
   fail 'could not render QA Compose bind sources'
+jq -e '
+  .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "cf-connecting-ip"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_CF_PROXY_CIDRS == "198.18.131.3/32"
+  and .services.haproxy.networks.backend.ipv4_address == "198.18.131.2"
+  and .services["tls-edge"].networks.backend.ipv4_address == "198.18.131.3"
+  and .networks.backend.ipam.config[0].subnet == "198.18.131.0/24"
+  and .networks.backend.ipam.config[0].ip_range == "198.18.131.128/26"
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'QA WebSocket limits do not trust only the fixed TLS edge client address'
 jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/teagram-demo/public-client \
   --slurpfile live "$LIVE_SNAPSHOT" '
   . as $config

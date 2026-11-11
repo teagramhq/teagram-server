@@ -633,7 +633,7 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 5
 	case "messages_search_global":
 		return 6
-	case "save_file_part":
+	case "save_file_part", "save_file_part_bytes":
 		return 7
 	case "upload_get_file":
 		return 8

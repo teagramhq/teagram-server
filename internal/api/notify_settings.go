@@ -214,7 +214,12 @@ func (h *handlers) handleUpdateNotifySettings(r *mtproto.Request) (bin.Encoder, 
 		}
 		return nil, notifySettingsRPCError(err)
 	}
-	if _, err = h.store.UpdateNotifySettings(r.Ctx, r.UserID, key, value); err != nil {
+	if r.Tailnet() {
+		_, err = h.store.UpdateNotifySettingsUnmetered(r.Ctx, r.UserID, key, value)
+	} else {
+		_, err = h.store.UpdateNotifySettings(r.Ctx, r.UserID, key, value)
+	}
+	if err != nil {
 		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) &&
 			!errors.Is(err, store.ErrNotifySettingsTooMany) &&
 			!errors.Is(err, store.ErrNotifySettingsRateLimited) {

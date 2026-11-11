@@ -730,9 +730,19 @@ func (h *handlers) checkRateLimit(r *mtproto.Request, surface string, cfg store.
 	return h.checkRateLimitCost(r, surface, cfg, 1)
 }
 
+func callerRateLimitForRequest(r *mtproto.Request, cfg store.RateLimitConfig) store.RateLimitConfig {
+	if r.Tailnet() {
+		return store.RateLimitConfig{}
+	}
+	return cfg
+}
+
 // checkRateLimitCost checks the per-account rate limit for a request with the
 // given token cost. Returns nil when allowed, or a FLOOD_WAIT error when denied.
 func (h *handlers) checkRateLimitCost(r *mtproto.Request, surface string, cfg store.RateLimitConfig, cost int) error {
+	if r.Tailnet() {
+		return nil
+	}
 	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, surface, cfg, cost)
 	return h.finishRateLimitCost(r, surface, result, err)
 }
@@ -743,6 +753,9 @@ func (h *handlers) checkRateLimitCost(r *mtproto.Request, surface string, cfg st
 func (h *handlers) checkRateLimitCostWithDeadline(
 	r *mtproto.Request, ctx context.Context, surface string, cfg store.RateLimitConfig, cost int,
 ) error {
+	if r.Tailnet() {
+		return nil
+	}
 	result, err := h.store.CheckRateLimitCost(ctx, r.UserID, surface, cfg, cost)
 	if err != nil && r.Ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return FloodWaitError(1)
@@ -768,6 +781,9 @@ func (h *handlers) finishRateLimitCost(r *mtproto.Request, surface string, resul
 // checkRateLimit: it is the surface's whole window, so a denial halfway through
 // asks for the same backoff as one at its start.
 func (h *handlers) checkRateLimitWindow(r *mtproto.Request, surface string, cfg store.RateLimitConfig) error {
+	if r.Tailnet() {
+		return nil
+	}
 	if !cfg.Enabled() {
 		return nil
 	}
@@ -788,6 +804,9 @@ func (h *handlers) checkRateLimitWindow(r *mtproto.Request, surface string, cfg 
 // bursts cannot all pass before any charge. Returns nil when allowed, or a
 // FLOOD_WAIT error when denied.
 func (h *handlers) checkAndChargeRateLimitIP(r *mtproto.Request, surface string, cfg store.RateLimitConfig) error {
+	if r.Tailnet() {
+		return nil
+	}
 	if !cfg.Enabled() {
 		return nil
 	}
@@ -817,6 +836,9 @@ func (h *handlers) checkAndChargeRateLimitIP(r *mtproto.Request, surface string,
 // Returns a reservation on success, a denial result on rejection, or an error
 // on storage failure. Used by checkPassword for the reserve-then-refund pattern.
 func (h *handlers) reserveRateLimitIP(r *mtproto.Request, surface string, cfg store.RateLimitConfig) (*store.RateLimitReservation, *store.RateLimitResult, error) {
+	if r.Tailnet() {
+		return nil, nil, nil
+	}
 	if !cfg.Enabled() {
 		return nil, nil, nil
 	}
@@ -836,7 +858,7 @@ func (h *handlers) reserveRateLimitIP(r *mtproto.Request, surface string, cfg st
 // refundRateLimitIP refunds a previously reserved per-IP rate-limit token.
 // No-op when the reservation is nil.
 func (h *handlers) refundRateLimitIP(r *mtproto.Request, surface string, res *store.RateLimitReservation) error {
-	if res == nil {
+	if r.Tailnet() || res == nil {
 		return nil
 	}
 	key, ok := store.IPBucketKey(r.ClientAddr)

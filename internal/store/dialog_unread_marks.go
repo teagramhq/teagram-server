@@ -32,6 +32,16 @@ type DialogUnreadMarkChange struct {
 // Visibility checks, the shared mutation budget, the current value, the
 // recovery row, and the peer-free notification commit atomically.
 func (s *Store) MarkDialogUnread(ctx context.Context, ownerID int64, peer PeerDialogKey, unread bool) (bool, error) {
+	return s.markDialogUnread(ctx, ownerID, peer, unread, true)
+}
+
+// MarkDialogUnreadUnmetered performs the same mutation without the per-owner
+// request rate limit. Listener policy decides when this is allowed.
+func (s *Store) MarkDialogUnreadUnmetered(ctx context.Context, ownerID int64, peer PeerDialogKey, unread bool) (bool, error) {
+	return s.markDialogUnread(ctx, ownerID, peer, unread, false)
+}
+
+func (s *Store) markDialogUnread(ctx context.Context, ownerID int64, peer PeerDialogKey, unread bool, rateLimited bool) (bool, error) {
 	if ownerID <= 0 || peer.PeerID <= 0 || peer.PeerType < PeerTypeUser || peer.PeerType > PeerTypeChannel {
 		return false, ErrDialogUnreadMarkPeerInvalid
 	}
@@ -104,17 +114,19 @@ func (s *Store) MarkDialogUnread(ctx context.Context, ownerID int64, peer PeerDi
 		return false, fmt.Errorf("read current dialog unread mark: %w", err)
 	}
 
-	_, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
-		SubjectID:      ownerID,
-		Surface:        dialogUnreadMarkRateLimitSurface,
-		Cost:           1,
-		WindowDuration: pgtype.Interval{Microseconds: time.Minute.Microseconds(), Valid: true},
-		LimitCount:     60,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrDialogUnreadMarkRateLimited
-	} else if err != nil {
-		return false, fmt.Errorf("consume dialog unread mark rate limit: %w", err)
+	if rateLimited {
+		_, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
+			SubjectID:      ownerID,
+			Surface:        dialogUnreadMarkRateLimitSurface,
+			Cost:           1,
+			WindowDuration: pgtype.Interval{Microseconds: time.Minute.Microseconds(), Valid: true},
+			LimitCount:     60,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrDialogUnreadMarkRateLimited
+		} else if err != nil {
+			return false, fmt.Errorf("consume dialog unread mark rate limit: %w", err)
+		}
 	}
 
 	if currentUnread == unread {

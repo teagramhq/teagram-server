@@ -48,9 +48,14 @@ func (h *handlers) handleMarkDialogUnread(r *mtproto.Request) (bin.Encoder, erro
 	if err != nil {
 		return nil, err
 	}
-	_, err = h.store.MarkDialogUnread(r.Ctx, r.UserID, store.PeerDialogKey{
+	peerKey := store.PeerDialogKey{
 		PeerType: peerType, PeerID: peerID,
-	}, req.GetUnread())
+	}
+	if r.Tailnet() {
+		_, err = h.store.MarkDialogUnreadUnmetered(r.Ctx, r.UserID, peerKey, req.GetUnread())
+	} else {
+		_, err = h.store.MarkDialogUnread(r.Ctx, r.UserID, peerKey, req.GetUnread())
+	}
 	if err != nil {
 		if !errors.Is(err, store.ErrDialogUnreadMarkPeerInvalid) && !errors.Is(err, store.ErrDialogUnreadMarkRateLimited) {
 			h.log.Error("mark dialog unread", "user_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "err", err)
