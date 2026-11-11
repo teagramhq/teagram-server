@@ -20,6 +20,11 @@ type callSite struct {
 	caller *functionContext
 }
 
+type rangeSource struct {
+	expr ast.Expr
+	key  bool
+}
+
 type functionContext struct {
 	name    string
 	params  *ast.FieldList
@@ -365,7 +370,7 @@ func (pkg *packageSource) resolve(expr ast.Expr, function *functionContext, name
 	case *ast.Ident:
 		if function != nil {
 			if sources := rangeSources(function, expr.Name); len(sources) > 0 {
-				return pkg.resolveAll(sources, function, names, seen, origin, depth+1)
+				return pkg.resolveRangeSources(sources, function, names, seen, origin, depth+1)
 			}
 			if index, ok := parameterIndex(function, expr.Name); ok {
 				sites := pkg.callSites(function)
@@ -393,7 +398,14 @@ func (pkg *packageSource) resolve(expr ast.Expr, function *functionContext, name
 		if len(sources) == 0 {
 			return false, nil
 		}
-		return pkg.resolveRangeFields(sources, expr.Sel.Name, function, names, seen, origin, depth+1)
+		expressions := make([]ast.Expr, 0, len(sources))
+		for _, source := range sources {
+			if source.key {
+				return false, nil
+			}
+			expressions = append(expressions, source.expr)
+		}
+		return pkg.resolveRangeFields(expressions, expr.Sel.Name, function, names, seen, origin, depth+1)
 	case *ast.CompositeLit:
 		var elements []ast.Expr
 		for _, element := range expr.Elts {
@@ -417,6 +429,107 @@ func (pkg *packageSource) resolveAll(expressions []ast.Expr, function *functionC
 	allResolved := true
 	for _, expression := range expressions {
 		resolved, err := pkg.resolve(expression, function, names, seen, origin, depth+1)
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveRangeSources(sources []rangeSource, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(sources) == 0 {
+		return false, nil
+	}
+	allResolved := true
+	for _, source := range sources {
+		var resolved bool
+		var err error
+		if source.key {
+			resolved, err = pkg.resolveMapKeys(source.expr, function, names, seen, origin, depth+1)
+		} else {
+			resolved, err = pkg.resolve(source.expr, function, names, seen, origin, depth+1)
+		}
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveMapKeys(expr ast.Expr, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if expr == nil {
+		return false, nil
+	}
+	if depth >= maxResolutionDepth {
+		return false, fmt.Errorf("%s:%d: environment key resolution exceeded depth %d", origin.Filename, origin.Line, maxResolutionDepth)
+	}
+	resolution := resolutionKey{expr: expr, fn: function}
+	if seen[resolution] {
+		return false, nil
+	}
+	seen[resolution] = true
+	defer delete(seen, resolution)
+
+	switch expr := expr.(type) {
+	case *ast.ParenExpr:
+		return pkg.resolveMapKeys(expr.X, function, names, seen, origin, depth+1)
+	case *ast.CompositeLit:
+		if _, isMap := expr.Type.(*ast.MapType); !isMap {
+			return false, nil
+		}
+		keys := make([]ast.Expr, 0, len(expr.Elts))
+		for _, element := range expr.Elts {
+			keyed, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				return false, nil
+			}
+			keys = append(keys, keyed.Key)
+		}
+		return pkg.resolveAll(keys, function, names, seen, origin, depth+1)
+	case *ast.Ident:
+		if function != nil {
+			if index, ok := parameterIndex(function, expr.Name); ok {
+				return pkg.resolveMapKeysCallSites(pkg.callSites(function), index, names, seen, origin, depth+1)
+			}
+			if definitions := localDefinitions(function, expr.Name); len(definitions) > 0 {
+				return pkg.resolveMapKeysAll(definitions, function, names, seen, origin, depth+1)
+			}
+		}
+		if values := pkg.values[expr.Name]; len(values) > 0 {
+			return pkg.resolveMapKeysAll(values, nil, names, seen, origin, depth+1)
+		}
+	}
+	return false, nil
+}
+
+func (pkg *packageSource) resolveMapKeysAll(expressions []ast.Expr, function *functionContext, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(expressions) == 0 {
+		return false, nil
+	}
+	allResolved := true
+	for _, expression := range expressions {
+		resolved, err := pkg.resolveMapKeys(expression, function, names, seen, origin, depth+1)
+		if err != nil {
+			return false, err
+		}
+		allResolved = allResolved && resolved
+	}
+	return allResolved, nil
+}
+
+func (pkg *packageSource) resolveMapKeysCallSites(sites []callSite, index int, names map[string]struct{}, seen map[resolutionKey]bool, origin token.Position, depth int) (bool, error) {
+	if len(sites) == 0 {
+		return false, nil
+	}
+	allResolved := true
+	for _, site := range sites {
+		if index >= len(site.args) {
+			allResolved = false
+			continue
+		}
+		resolved, err := pkg.resolveMapKeys(site.args[index], site.caller, names, seen, origin, depth+1)
 		if err != nil {
 			return false, err
 		}
@@ -479,7 +592,14 @@ func (pkg *packageSource) resolveRangeField(expr ast.Expr, field string, functio
 	case *ast.Ident:
 		if function != nil {
 			if sources := rangeSources(function, expr.Name); len(sources) > 0 {
-				return pkg.resolveRangeFields(sources, field, function, names, seen, origin, depth+1)
+				expressions := make([]ast.Expr, 0, len(sources))
+				for _, source := range sources {
+					if source.key {
+						return false, nil
+					}
+					expressions = append(expressions, source.expr)
+				}
+				return pkg.resolveRangeFields(expressions, field, function, names, seen, origin, depth+1)
 			}
 			if index, ok := parameterIndex(function, expr.Name); ok {
 				sites := pkg.callSites(function)
@@ -599,8 +719,8 @@ func isEnvironmentName(value string) bool {
 	return true
 }
 
-func rangeSources(function *functionContext, name string) []ast.Expr {
-	var sources []ast.Expr
+func rangeSources(function *functionContext, name string) []rangeSource {
+	var sources []rangeSource
 	if function.body == nil {
 		return sources
 	}
@@ -610,10 +730,9 @@ func rangeSources(function *functionContext, name string) []ast.Expr {
 			return
 		}
 		if ident, ok := rangeStmt.Key.(*ast.Ident); ok && ident.Name == name {
-			sources = append(sources, rangeStmt.X)
-		}
-		if ident, ok := rangeStmt.Value.(*ast.Ident); ok && ident.Name == name {
-			sources = append(sources, rangeStmt.X)
+			sources = append(sources, rangeSource{expr: rangeStmt.X, key: true})
+		} else if ident, ok := rangeStmt.Value.(*ast.Ident); ok && ident.Name == name {
+			sources = append(sources, rangeSource{expr: rangeStmt.X})
 		}
 	})
 	return sources

@@ -144,6 +144,36 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertIn("TG_TABLE_ONLY", result.stdout + result.stderr)
         self.assertIn("TG_TABLE_POSITIONAL", result.stdout + result.stderr)
 
+    def test_map_range_key_config_variable_is_named_without_reading_values(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func load() { for name := range map[string]string{'
+            '"TG_MAP_KEY": "TG_MAP_VALUE"} { _ = os.Getenv(name) } }\n'
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("configuration reference is missing TG_MAP_KEY", output)
+        self.assertNotIn("configuration reference is missing TG_MAP_VALUE", output)
+
+    def test_map_range_key_config_variable_resolves_through_helper_parameter(self):
+        (self.root / "internal/config/config.go").write_text(
+            'package config\nimport "os"\n'
+            'func read(values map[string]string) { for name := range values {'
+            '_ = os.Getenv(name) } }\n'
+            'func load() { values := map[string]string{'
+            '"TG_MAP_KEY": "TG_MAP_VALUE"}; read(values) }\n'
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("configuration reference is missing TG_MAP_KEY", output)
+        self.assertNotIn("configuration reference is missing TG_MAP_VALUE", output)
+
     def test_unresolved_environment_key_reports_source_location(self):
         (self.root / "internal/config/config.go").write_text(
             'package config\nimport "os"\n'
@@ -178,6 +208,17 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README.md", result.stdout + result.stderr)
         self.assertIn("docs/nope.md", result.stdout + result.stderr)
+
+    def test_reference_definition_inside_blockquote_checks_relative_target(self):
+        (self.root / "README.md").write_text(
+            "> [ref]: docs/nope.md\n> [ref]\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md links to missing path docs/nope.md", output)
 
     def test_broken_markdown_link_after_stray_backtick_is_checked(self):
         (self.root / "README.md").write_text(

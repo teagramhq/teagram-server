@@ -575,7 +575,10 @@ def inline_link_destinations(text, base_offset=0, parse_errors=None):
 def markdown_destinations(text, parse_errors=None):
     cleaned = without_code(text)
     yield from inline_link_destinations(cleaned, parse_errors=parse_errors)
-    for match in REFERENCE_LINK.finditer(cleaned):
+    reference_text = "\n".join(
+        strip_blockquote_prefixes(line) for line in cleaned.split("\n")
+    )
+    for match in REFERENCE_LINK.finditer(reference_text):
         destination = match.group(1)
         if destination.startswith("<") and destination.endswith(">"):
             destination = destination[1:-1]
