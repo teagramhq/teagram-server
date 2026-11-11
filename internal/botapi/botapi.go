@@ -792,6 +792,84 @@ func LimitConnectionsPerSocketIP(listener net.Listener, limit int) net.Listener 
 	return limitConnections(listener, limit, false)
 }
 
+// RequireProxyV1 requires and decodes a PROXY v1 preface on every accepted
+// connection. Use it only on a listener reachable through a trusted proxy.
+func RequireProxyV1(listener net.Listener) net.Listener {
+	l := &requiredProxyV1Listener{
+		Listener: listener,
+		results:  make(chan proxyAcceptResult),
+		done:     make(chan struct{}),
+	}
+	go l.acceptConnections()
+	return l
+}
+
+type requiredProxyV1Listener struct {
+	net.Listener
+
+	results chan proxyAcceptResult
+	done    chan struct{}
+	closed  atomic.Bool
+}
+
+type proxyAcceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+func (l *requiredProxyV1Listener) acceptConnections() {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			select {
+			case l.results <- proxyAcceptResult{err: err}:
+				continue
+			case <-l.done:
+				return
+			}
+		}
+		go l.readProxyV1(conn)
+	}
+}
+
+func (l *requiredProxyV1Listener) readProxyV1(conn net.Conn) {
+	parsed, _, err := proxyv1.Read(conn, true, true)
+	if err != nil {
+		slog.Debug("rejected tailnet Bot API PROXY preface", "remote_addr", conn.RemoteAddr().String(), "err", err)
+		closeBotConn(conn)
+		return
+	}
+	select {
+	case l.results <- proxyAcceptResult{conn: parsed}:
+	case <-l.done:
+		closeBotConn(parsed)
+	}
+}
+
+func (l *requiredProxyV1Listener) Accept() (net.Conn, error) {
+	select {
+	case <-l.done:
+		return nil, net.ErrClosed
+	case result := <-l.results:
+		if result.err != nil {
+			return nil, result.err
+		}
+		if l.closed.Load() {
+			closeBotConn(result.conn)
+			return nil, net.ErrClosed
+		}
+		return result.conn, nil
+	}
+}
+
+func (l *requiredProxyV1Listener) Close() error {
+	if l.closed.CompareAndSwap(false, true) {
+		close(l.done)
+		return l.Listener.Close()
+	}
+	return net.ErrClosed
+}
+
 type acceptResult struct {
 	conn     net.Conn
 	err      error

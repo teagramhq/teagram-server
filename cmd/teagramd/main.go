@@ -1454,6 +1454,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		if err != nil {
 			return fmt.Errorf("tailnet Bot API listen: %w", err)
 		}
+		botAPILn = botapi.RequireProxyV1(botAPILn)
 		log.Info("tailnet Bot API server listening", "addr", cfg.BotAPITailnetListenAddr)
 		go func() {
 			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {

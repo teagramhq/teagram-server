@@ -62,6 +62,29 @@ func socketLimitServer(t *testing.T, limit int) string {
 	return ln.Addr().String()
 }
 
+func requiredProxyServer(t *testing.T) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Remote-Addr", r.RemoteAddr)
+	})
+	srv := botapi.NewServerWithHandler("", handler, slog.New(slog.DiscardHandler))
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(botapi.RequireProxyV1(ln)) }()
+	t.Cleanup(func() {
+		if err := srv.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve: %v", err)
+		}
+	})
+	return ln.Addr().String()
+}
+
 type overrideListener struct {
 	net.Listener
 
@@ -222,6 +245,40 @@ func TestSocketLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("PROXY preface returned HTTP %d, want HTTP 400 from the HTTP parser", response.StatusCode)
+	}
+}
+
+func TestRequiredProxyV1ListenerDecodesTailnetPeer(t *testing.T) {
+	addr := requiredProxyServer(t)
+	conn, reader := proxyDial(t, addr, proxyHeader("100.64.1.2"))
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read HTTP response: %v", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := response.Header.Get("X-Remote-Addr"), "100.64.1.2:1234"; got != want {
+		t.Fatalf("remote address = %q, want %q", got, want)
+	}
+}
+
+func TestRequiredProxyV1ListenerRejectsMissingPreface(t *testing.T) {
+	addr := requiredProxyServer(t)
+	conn, reader := proxyDial(t, addr, "")
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if response, err := http.ReadResponse(reader, nil); err == nil {
+		if err := response.Body.Close(); err != nil {
+			t.Error(err)
+		}
+		t.Fatalf("HTTP request without a PROXY preface returned status %d", response.StatusCode)
+	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		t.Fatalf("connection without a PROXY preface was not closed: %v", err)
 	}
 }
 
