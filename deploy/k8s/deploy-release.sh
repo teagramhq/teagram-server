@@ -373,6 +373,7 @@ if [[ "$cloudflared_replicas" != 1 || "$cloudflared_ready" != 1 ]]; then
     "${cloudflared_replicas:-0}" "${cloudflared_ready:-0}" >&2
   exit 1
 fi
+python3 "$(dirname -- "${BASH_SOURCE[0]}")/verify-cloudflared-client-address-trust.py"
 bash "$(dirname -- "${BASH_SOURCE[0]}")/smoke-production.sh"
 bash "$(dirname -- "${BASH_SOURCE[0]}")/initialize-channel-post-expiring-summaries.sh" \
   "${TEAGRAMD_IMAGE:?TEAGRAMD_IMAGE must name the tested server image}"

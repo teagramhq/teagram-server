@@ -15,6 +15,7 @@ import sys
 from probe_discovery import probe as probe_discovery
 
 
+BOT_API_AUTH_BURST = 20
 TAILNET_SERVICE_PORTS = (2443, 2444, 2445, 2447)
 PUBLIC_SERVICE_PORTS = (2446, 2449)
 
@@ -156,6 +157,40 @@ def probe_public_discovery_budgets(host: str) -> None:
         )
 
 
+def public_bot_api_status(connection: http.client.HTTPConnection, client_ip: str) -> int:
+    connection.request(
+        "GET",
+        "/botbad-token/getMe",
+        headers={
+            "CF-Connecting-IP": client_ip,
+            "Host": "server.example.test",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    return response.status
+
+
+def probe_public_bot_api_budget(host: str) -> None:
+    with http.client.HTTPConnection(host, 2449, timeout=5) as client_a:
+        for request_number in range(1, BOT_API_AUTH_BURST + 2):
+            status = public_bot_api_status(client_a, "198.51.100.10")
+            expected = 401 if request_number <= BOT_API_AUTH_BURST else 429
+            if status != expected:
+                raise RuntimeError(
+                    f"public Bot API client A request {request_number} returned "
+                    f"HTTP {status}, want {expected}"
+                )
+
+    with http.client.HTTPConnection(host, 2449, timeout=5) as client_b:
+        other_status = public_bot_api_status(client_b, "198.51.101.10")
+    if other_status != 401:
+        raise RuntimeError(
+            "public Bot API client B returned "
+            f"HTTP {other_status} after client A exhausted its auth budget, want 401 (not 429)"
+        )
+
+
 def probe_untrusted_public_header(host: str, trusted_proxy_ip: str) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
         route.connect((host, 2446))
@@ -247,6 +282,7 @@ def main() -> int:
             "bot-api",
             "public-ingress",
             "public-discovery-budget",
+            "public-bot-api-budget",
             "untrusted-public-header",
             "tailnet-discovery-budget",
             "kube-api",
@@ -271,6 +307,8 @@ def main() -> int:
         probe_public_ingress(args.host)
     elif args.operation == "public-discovery-budget":
         probe_public_discovery_budgets(args.host)
+    elif args.operation == "public-bot-api-budget":
+        probe_public_bot_api_budget(args.host)
     elif args.operation == "untrusted-public-header":
         if not args.trusted_proxy_ip:
             raise RuntimeError("untrusted-public-header requires --trusted-proxy-ip")

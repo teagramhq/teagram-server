@@ -396,15 +396,19 @@ proxy_trust_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Na
   fail 'the CI deployment test must narrow cloudflared trust in both the live StatefulSet and release manifest'
 proxy_log_fetch_line="$(grep -n -m 1 -F 'if ! kubectl logs --namespace teagram statefulset/teagramd --container teagramd' <<< "$proxy_trust_step" | cut -d: -f1)"
 proxy_log_failure_line="$(grep -n -m 1 -F 'could not retrieve teagramd logs to verify proxy trust' <<< "$proxy_trust_step" | cut -d: -f1)"
-proxy_log_warning_line="$(grep -n -m 1 -F 'per-IP limits are keyed on each connection' <<< "$proxy_trust_step" | cut -d: -f1)"
+proxy_log_startup_line="$(grep -n -m 1 -F 'public Bot API server listening' <<< "$proxy_trust_step" | cut -d: -f1)"
+proxy_log_warning_line="$(grep -n -m 1 -F "keyed on each connection's own peer address" <<< "$proxy_trust_step" | cut -d: -f1)"
 [[ "$proxy_log_fetch_line" =~ ^[0-9]+$ &&
    "$proxy_log_failure_line" =~ ^[0-9]+$ &&
+   "$proxy_log_startup_line" =~ ^[0-9]+$ &&
    "$proxy_log_warning_line" =~ ^[0-9]+$ &&
    "$proxy_log_fetch_line" -lt "$proxy_log_failure_line" &&
-   "$proxy_log_failure_line" -lt "$proxy_log_warning_line" &&
-   "$proxy_trust_step" == *'> "$teagramd_logs"'* ]] ||
-  fail 'the CI warning check must stop if teagramd logs cannot be retrieved before grep'
-grep --fixed-strings --quiet "per-IP limits are keyed on each connection's own peer address" \
+   "$proxy_log_failure_line" -lt "$proxy_log_startup_line" &&
+   "$proxy_log_startup_line" -lt "$proxy_log_warning_line" &&
+   "$proxy_trust_step" == *'> "$teagramd_logs"'* &&
+   "$proxy_trust_step" == *'if ! grep --fixed-strings --quiet "public Bot API server listening" "$teagramd_logs"; then'* ]] ||
+  fail 'the CI warning check must require retrievable logs and a public Bot API startup line before grep'
+grep --fixed-strings --quiet "keyed on each connection's own peer address" \
   .github/workflows/ci.yml ||
   fail 'CI must assert that teagramd logs no shared-client-address warning'
 grep --fixed-strings --quiet 'TG_CLIENT_ADDR_TRUST' deploy/k8s/prod/teagramd-listeners.yaml ||
@@ -435,6 +439,17 @@ grep --fixed-strings --quiet 'public-discovery-budget' deploy/k8s/test-networkpo
 grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-discovery-budget", "ingress-probe")' \
   deploy/k8s/test-service-ingress.py ||
   fail 'the forwarded client budgets must be exercised through cloudflared'
+grep --fixed-strings --quiet 'public-bot-api-budget' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public Bot API probe must exhaust a CF-Connecting-IP auth budget'
+grep --fixed-strings --quiet '"CF-Connecting-IP": client_ip' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public Bot API budget probe must send each simulated client address'
+grep --fixed-strings --quiet 'BOT_API_AUTH_BURST + 2' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public Bot API probe must prove client A exhausts its auth budget'
+grep --fixed-strings --quiet 'want 401 (not 429)' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public Bot API probe must reject client B inheriting client A'
+grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-bot-api-budget", "ingress-probe")' \
+  deploy/k8s/test-service-ingress.py ||
+  fail 'the public Bot API client-keying probe must run from the trusted connector pod'
 grep --fixed-strings --quiet 'untrusted-public-header' deploy/k8s/test-networkpolicy.py ||
   fail 'the public discovery probe must test an untrusted forwarded header'
 grep --fixed-strings --quiet 'PUBLIC_HEADER_PROBE' deploy/k8s/test-service-ingress.py ||
@@ -537,7 +552,7 @@ fi
 if deploy/k8s/cutover-alpha.sh --apply --test-mode >/dev/null 2>&1; then
   fail 'the retired cutover script must not expose an apply path in test mode'
 fi
-python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in [".github/scripts/test-tailscale-serve-routes.py", "deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py"]]' ||
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in [".github/scripts/test-tailscale-serve-routes.py", ".github/scripts/test_k8s_cloudflared_client_address_trust.py", "deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py", "deploy/k8s/verify-cloudflared-client-address-trust.py"]]' ||
   fail 'the in-cluster ingress probe scripts must parse as Python'
 grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
   fail 'the shared discovery probe must send the v1 half-close request'
@@ -1023,17 +1038,26 @@ rbac_step="$(yq -r '.jobs."check-k8s-manifests".steps[] | select(.name == "Verif
 release_script=deploy/k8s/deploy-release.sh
 release_dry_run_line="$(grep -n -m 1 -F 'kubectl apply --dry-run=server --filename "$manifest"' "$release_script" | cut -d: -f1)"
 release_apply_line="$(grep -n -m 1 -F 'kubectl apply --filename "$manifest"' "$release_script" | cut -d: -f1)"
+release_cloudflared_ready_line="$(grep -n -m 1 -F 'cloudflared_ready="$(kubectl get deployment cloudflared' "$release_script" | cut -d: -f1)"
+release_trust_check_line="$(grep -n -m 1 -F 'verify-cloudflared-client-address-trust.py' "$release_script" | cut -d: -f1)"
 release_marker_line="$(grep -n -m 1 -F 'rollout=verified sha=%s' "$release_script" | cut -d: -f1)"
 release_smoke_line="$(grep -n -m 1 -F 'smoke-production.sh' "$release_script" | cut -d: -f1)"
 release_maintenance_line="$(grep -n -m 1 -F 'initialize-channel-post-expiring-summaries.sh' "$release_script" | cut -d: -f1)"
 [[ "$release_dry_run_line" =~ ^[0-9]+$ && "$release_apply_line" =~ ^[0-9]+$ &&
+   "$release_cloudflared_ready_line" =~ ^[0-9]+$ &&
+   "$release_trust_check_line" =~ ^[0-9]+$ &&
    "$release_smoke_line" =~ ^[0-9]+$ && "$release_maintenance_line" =~ ^[0-9]+$ &&
    "$release_marker_line" =~ ^[0-9]+$ &&
    "$release_dry_run_line" -lt "$release_apply_line" &&
+   "$release_apply_line" -lt "$release_cloudflared_ready_line" &&
+   "$release_cloudflared_ready_line" -lt "$release_trust_check_line" &&
+   "$release_trust_check_line" -lt "$release_smoke_line" &&
    "$release_apply_line" -lt "$release_smoke_line" &&
    "$release_smoke_line" -lt "$release_maintenance_line" &&
    "$release_maintenance_line" -lt "$release_marker_line" ]] ||
-  fail 'the deploy runner must dry-run, apply, smoke, initialize summaries, then emit the verified rollout marker'
+  fail 'the deploy runner must verify connector trust after rollout and before smoke and the verified marker'
+python3 -B .github/scripts/test_k8s_cloudflared_client_address_trust.py >/dev/null ||
+  fail 'the post-deploy connector IP must remain inside both public listener trust CIDRs'
 grep --fixed-strings --quiet 'kubectl rollout undo "$resource"' "$release_script" ||
   fail 'the release runner must automatically undo changed workload revisions on failure'
 grep --fixed-strings --quiet 'currentRevision == .status.updateRevision' "$release_script" ||

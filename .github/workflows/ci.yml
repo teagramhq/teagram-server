@@ -2129,8 +2129,12 @@ jobs:
             echo "could not retrieve teagramd logs to verify proxy trust" >&2
             exit 1
           fi
+          if ! grep --fixed-strings --quiet "public Bot API server listening" "$teagramd_logs"; then
+            echo "teagramd logs did not confirm the public Bot API listener started" >&2
+            exit 1
+          fi
           if grep --fixed-strings --quiet \
-            "per-IP limits are keyed on each connection's own peer address" "$teagramd_logs"; then
+            "keyed on each connection's own peer address" "$teagramd_logs"; then
             echo "teagramd logged the shared-client-address warning" >&2
             exit 1
           fi

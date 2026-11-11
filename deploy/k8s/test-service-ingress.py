@@ -303,6 +303,7 @@ def main() -> int:
     exec_probe(TAILNET_PROBE, "deny-egress")
     exec_probe(cloudflared, "public-ingress", "ingress-probe")
     exec_probe(cloudflared, "public-discovery-budget", "ingress-probe")
+    exec_probe(cloudflared, "public-bot-api-budget", "ingress-probe")
     exec_probe(
         PUBLIC_HEADER_PROBE,
         "untrusted-public-header",
