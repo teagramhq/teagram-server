@@ -13,10 +13,8 @@ COPY tools/stickerbundle/ ./tools/stickerbundle/
 RUN bash tools/stickerbundle/generate.sh --output /sticker-bundle
 FROM ${STICKER_BUNDLE_SOURCE} AS sticker-bundle-source
 
-# mirror.gcr.io/library/golang:1.27 matches the `go 1.27.1` directive in
-# go.mod; the module file stays the single source of the version, so a bump
-# there is the only thing to change.
-FROM mirror.gcr.io/library/golang:1.27 AS build
+# Keep the builder image on the same Go patch release as the go.mod directive.
+FROM mirror.gcr.io/library/golang:1.27.4 AS build
 
 ARG DEMO_BUILD_GOMAXPROCS
 ARG DEMO_BUILD_GOMEMLIMIT
@@ -80,7 +78,7 @@ RUN /stickerbundle-check /sticker-bundle
 
 # Build the CI-only probe in its own stage and copy it only into the isolated
 # probe target below. It uses only the standard library.
-FROM mirror.gcr.io/library/golang:1.27 AS photothumb-probe-build
+FROM mirror.gcr.io/library/golang:1.27.4 AS photothumb-probe-build
 WORKDIR /probe
 COPY deploy/photothumb-runtime/probe.go ./probe.go
 RUN CGO_ENABLED=0 go build -o /photothumb-runtime-probe ./probe.go
