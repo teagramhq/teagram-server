@@ -749,6 +749,247 @@ func TestPublicWebSocketUsesCFConnectingIPForRequests(t *testing.T) {
 	}
 }
 
+func TestPublicWebSocketUsesCFConnectingIPWhenProxyCIDRsAreUnset(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	peer := netip.MustParseAddr("172.18.0.1")
+	forwarded := netip.MustParseAddr("198.51.100.91")
+	listener = &reportedPeerListener{Listener: listener, peer: &net.TCPAddr{IP: peer.AsSlice(), Port: 34567}}
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build public discovery document: %v", err)
+	}
+	var logs bytes.Buffer
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil,
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{MaxRequestsPerNet: 1, PerNetWindow: time.Minute}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	request := func(clientIP string) int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
+		if err != nil {
+			t.Fatalf("build discovery request: %v", err)
+		}
+		req.Header.Set("Cf-Connecting-Ip", clientIP)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET discovery for %s: %v", clientIP, err)
+		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("close discovery response: %v", err)
+			}
+		}()
+		return resp.StatusCode
+	}
+	serveCloudflarePublicWebSocket(t, ctx, server, listener, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }), doc)
+	if got := request(forwarded.String()); got != http.StatusOK {
+		t.Fatalf("first forwarded client discovery status = %d, want 200", got)
+	}
+	if got := request("198.51.100.92"); got != http.StatusOK {
+		t.Fatalf("second forwarded client discovery status = %d, want 200 for a distinct client behind peer %s", got, peer)
+	}
+	if got := request(forwarded.String()); got != http.StatusTooManyRequests {
+		t.Fatalf("repeated forwarded client discovery status = %d, want 429", got)
+	}
+	for _, want := range []string{"trusted forwarded client address", "peer_addr=172.18.0.1", "source=CF-Connecting-IP", "client_addr=198.51.100.91"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("trust decision log does not contain %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestPublicWebSocketRestrictsCFConnectingIPToConfiguredProxyCIDRs(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	forwarded := netip.MustParseAddr("198.51.100.91")
+	for _, tt := range []struct {
+		name         string
+		peer         netip.Addr
+		secondStatus int
+	}{
+		{name: "listed peer", peer: netip.MustParseAddr("203.0.113.9"), secondStatus: http.StatusOK},
+		{name: "unlisted peer", peer: netip.MustParseAddr("192.0.2.77"), secondStatus: http.StatusTooManyRequests},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+			listener = &reportedPeerListener{Listener: listener, peer: &net.TCPAddr{IP: tt.peer.AsSlice(), Port: 34567}}
+			doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+			if err != nil {
+				t.Fatalf("build public discovery document: %v", err)
+			}
+			var logs bytes.Buffer
+			server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil,
+				slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			server.TrustCFConnectingIPProxies([]netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")})
+			if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{MaxRequestsPerNet: 1, PerNetWindow: time.Minute}); err != nil {
+				t.Fatalf("set discovery limits: %v", err)
+			}
+			serveCloudflarePublicWebSocket(t, ctx, server, listener, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }), doc)
+			request := func(clientIP string) int {
+				t.Helper()
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
+				if err != nil {
+					t.Fatalf("build discovery request: %v", err)
+				}
+				req.Header.Set("Cf-Connecting-Ip", clientIP)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("GET discovery for %s: %v\nserver logs:\n%s", clientIP, err, logs.String())
+				}
+				defer func() {
+					if err := resp.Body.Close(); err != nil {
+						t.Errorf("close discovery response: %v", err)
+					}
+				}()
+				return resp.StatusCode
+			}
+			if got := request(forwarded.String()); got != http.StatusOK {
+				t.Fatalf("first discovery status = %d, want 200", got)
+			}
+			if got := request("198.51.100.92"); got != tt.secondStatus {
+				t.Errorf("second discovery status = %d, want %d for %s peer %s", got, tt.secondStatus, tt.name, tt.peer)
+			}
+		})
+	}
+}
+
+func TestPublicWebSocketDiscoveryUsesForwardedClientBudgets(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build public discovery document: %v", err)
+	}
+	var logs bytes.Buffer
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil,
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	serveCloudflarePublicWebSocket(t, ctx, server, listener, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil }), doc)
+
+	request := func(clientIP string) int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
+		if err != nil {
+			t.Fatalf("build discovery request: %v", err)
+		}
+		req.Header.Set("Cf-Connecting-Ip", clientIP)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET discovery for %s: %v", clientIP, err)
+		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("close discovery response: %v", err)
+			}
+		}()
+		return resp.StatusCode
+	}
+
+	if got := request("198.51.100.101"); got != http.StatusOK {
+		t.Fatalf("first client's discovery status = %d, want 200", got)
+	}
+	if got := request("198.51.100.101"); got != http.StatusTooManyRequests {
+		t.Fatalf("exhausted client's discovery status = %d, want 429", got)
+	}
+	if got := request("198.51.100.102"); got != http.StatusOK {
+		t.Fatalf("second client's discovery status = %d, want 200 despite first client's exhausted budget", got)
+	}
+	if !strings.Contains(logs.String(), "public WebSocket discovery request refused at rate limit") {
+		t.Errorf("discovery refusal was not logged:\n%s", logs.String())
+	}
+}
+
+func TestDefaultWebSocketDiscoveryDoesNotUsePublicBudget(t *testing.T) {
+	t.Parallel()
+
+	rsaKey := cloudflareTestRSAKey(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	doc, err := discovery.NewDocument("websocket.example.test:443", 2, &rsaKey.PublicKey, false, "")
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	if err := server.SetClientDiscoveryDocument(doc); err != nil {
+		t.Fatalf("set discovery document: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	t.Cleanup(func() {
+		if err := <-served; err != nil {
+			t.Errorf("serve WebSocket: %v", err)
+		}
+	})
+
+	for i := range 50 {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/.well-known/teagramd/client", nil)
+		if err != nil {
+			t.Fatalf("build discovery request %d: %v", i+1, err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("GET discovery request %d: %v", i+1, err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close discovery response %d: %v", i+1, err)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("discovery request %d status = %d, want 200", i+1, response.StatusCode)
+		}
+	}
+}
+
+type reportedPeerListener struct {
+	net.Listener
+
+	peer net.Addr
+}
+
+func (l *reportedPeerListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return reportedPeerConn{Conn: conn, peer: l.peer}, nil
+}
+
+type reportedPeerConn struct {
+	net.Conn
+
+	peer net.Addr
+}
+
+func (c reportedPeerConn) RemoteAddr() net.Addr { return c.peer }
+
 func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
 	t.Parallel()
 
@@ -780,6 +1021,97 @@ func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("tailnet request did not reach the handler")
+	}
+}
+
+func TestWebSocketRequestTailnetPathComesFromListenerConfiguration(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		path        mtproto.ListenerPath
+		publicAPI   bool
+		wantTailnet bool
+	}{
+		{name: "configured limited listener", path: mtproto.ListenerPathLimited},
+		{name: "configured tailnet listener", path: mtproto.ListenerPathTailnet, wantTailnet: true},
+		{name: "public listener stays limited", path: mtproto.ListenerPathTailnet, publicAPI: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+
+			listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+			key := rebindTestKey()
+			keys := mtproto.NewMemoryAuthKeyStore()
+			if err := keys.Save(ctx, key); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+			seen := make(chan bool, 1)
+			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+				seen <- req.Tailnet()
+				return nil
+			})
+			server := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
+			serverCtx, stopServer := context.WithCancel(ctx)
+			served := make(chan error, 1)
+			if tt.publicAPI {
+				if err := server.SetWebSocketListenerPath(tt.path); err != nil {
+					t.Fatalf("set default WebSocket listener path: %v", err)
+				}
+				rsaKey := cloudflareTestRSAKey(t)
+				doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false, "")
+				if err != nil {
+					t.Fatalf("build public discovery document: %v", err)
+				}
+				go func() {
+					served <- server.ServePublicWebSocketWithCFConnectingIP(serverCtx, listener, handler, nil, doc)
+				}()
+			} else {
+				if err := server.SetWebSocketListenerPath(tt.path); err != nil {
+					t.Fatalf("set WebSocket listener path: %v", err)
+				}
+				go func() { served <- server.ServeWebSocket(serverCtx, listener) }()
+			}
+			t.Cleanup(func() {
+				stopServer()
+				if err := <-served; err != nil {
+					t.Errorf("serve WebSocket: %v", err)
+				}
+			})
+
+			ws, _, err := dialWebSocketWithHeaders(ctx, listener.Addr().String(), http.Header{
+				"CF-Connecting-IP": []string{"198.51.100.41"},
+			})
+			if err != nil {
+				t.Fatalf("dial WebSocket: %v", err)
+			}
+			t.Cleanup(func() { closeWebSocket(t, ws) })
+			client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+			if err != nil {
+				t.Fatalf("transport handshake: %v", err)
+			}
+			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.InvokeWithLayerRequest{
+				Layer: 100,
+				Query: &tg.InitConnectionRequest{
+					APIID: 1, DeviceModel: "test", SystemVersion: "1.0", AppVersion: "1.0",
+					SystemLangCode: "en", LangCode: "en", Query: &tg.HelpGetConfigRequest{},
+				},
+			})
+			if err := client.Send(ctx, &bin.Buffer{Buf: slices.Clone(frame)}); err != nil {
+				t.Fatalf("send frame: %v", err)
+			}
+
+			select {
+			case got := <-seen:
+				if got != tt.wantTailnet {
+					t.Errorf("handler saw TailnetPath=%t, want %t from the listener configuration", got, tt.wantTailnet)
+				}
+			case <-ctx.Done():
+				t.Fatal("request did not reach handler")
+			}
+		})
 	}
 }
 

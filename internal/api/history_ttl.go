@@ -49,7 +49,7 @@ func (h *handlers) setUserHistoryTTLAfterReply(
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, peerPts, changed, err := h.store.SetUserHistoryTTL(r.Ctx, r.UserID, peerID, period, historyTTLRateLimit)
+	sender, senderPts, peerPts, changed, err := h.store.SetUserHistoryTTL(r.Ctx, r.UserID, peerID, period, callerRateLimitForRequest(r, historyTTLRateLimit))
 	if err != nil {
 		clearSenderRPC(attempt)
 		return nil, nil, nil, h.mapHistoryTTLError(r, "user", peerID, err)
@@ -102,7 +102,7 @@ func (h *handlers) setChatHistoryTTLAfterReply(
 	c *mtproto.Conn, r *mtproto.Request, chatID int64, period int,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	attempt := beginSenderRPC(c, r)
-	chat, sender, perOwner, changed, err := h.store.SetChatHistoryTTL(r.Ctx, chatID, r.UserID, period, historyTTLRateLimit)
+	chat, sender, perOwner, changed, err := h.store.SetChatHistoryTTL(r.Ctx, chatID, r.UserID, period, callerRateLimitForRequest(r, historyTTLRateLimit))
 	if err != nil {
 		clearSenderRPC(attempt)
 		return nil, nil, nil, h.mapHistoryTTLError(r, "chat", chatID, err)
@@ -146,7 +146,7 @@ func (h *handlers) setChatHistoryTTLAfterReply(
 func (h *handlers) setChannelHistoryTTLAfterReply(
 	r *mtproto.Request, channelID int64, period int,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	channel, service, pts, changed, err := h.store.SetChannelHistoryTTL(r.Ctx, channelID, r.UserID, period, historyTTLRateLimit)
+	channel, service, pts, changed, err := h.store.SetChannelHistoryTTL(r.Ctx, channelID, r.UserID, period, callerRateLimitForRequest(r, historyTTLRateLimit))
 	if err != nil {
 		return nil, nil, nil, h.mapHistoryTTLError(r, "channel", channelID, err)
 	}

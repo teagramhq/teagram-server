@@ -82,7 +82,7 @@ func (h *handlers) handleClearProfilePhoto(r *mtproto.Request) (bin.Encoder, err
 	defer cancel()
 	authKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
 	if err := h.store.ClearCurrentProfilePhotoWithWait(
-		mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID, h.rateLimitUpdateProfile, mutationWait,
+		mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID, callerRateLimitForRequest(r, h.rateLimitUpdateProfile), mutationWait,
 	); err != nil {
 		if errors.Is(err, store.ErrProfilePhotoBusy) ||
 			(r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded)) {

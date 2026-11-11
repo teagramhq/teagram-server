@@ -10,6 +10,9 @@ resources:
   - rustfs-statefulset.yaml
   - teagramd-service.yaml
   - teagramd-statefulset.yaml
+  - teagramd-networkpolicy.yaml
+  - tailscale-proxy-egress.yaml
+  - tailscale-proxy.yaml
   - rustfs-init-job.yaml
   - migrations-job.yaml
   - linklanding-service.yaml
@@ -17,6 +20,7 @@ resources:
   - linkselector-service.yaml
   - linkselector-deployment.yaml
   - cloudflared-deployment.yaml
+  - postgres-backup
 
 configMapGenerator:
   - name: postgres-config

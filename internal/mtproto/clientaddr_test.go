@@ -120,3 +120,84 @@ func TestRequestCarriesTheSocketPeerAddress(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestTailnetPathComesFromConfiguredTCPListener(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		path    mtproto.ListenerPath
+		tailnet bool
+	}{
+		{name: "limited listener", path: mtproto.ListenerPathLimited},
+		{name: "tailnet listener", path: mtproto.ListenerPathTailnet, tailnet: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+
+			key := rebindTestKey()
+			keys := mtproto.NewMemoryAuthKeyStore()
+			if err := keys.Save(ctx, key); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+			seen := make(chan bool, 1)
+			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+				seen <- req.Tailnet()
+				return nil
+			})
+			srv := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
+			if err := srv.SetTCPListenerPath(tt.path); err != nil {
+				t.Fatalf("set TCP listener path: %v", err)
+			}
+
+			nl, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			srvCtx, stopServer := context.WithCancel(ctx)
+			served := make(chan error, 1)
+			go func() { served <- srv.Serve(srvCtx, nl) }()
+			t.Cleanup(func() {
+				stopServer()
+				if err := <-served; err != nil {
+					t.Errorf("serve: %v", err)
+				}
+			})
+
+			raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", nl.Addr().String())
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := raw.Close(); err != nil {
+					t.Errorf("close client: %v", err)
+				}
+			})
+			client, err := transport.Intermediate.Handshake(raw)
+			if err != nil {
+				t.Fatalf("transport handshake: %v", err)
+			}
+			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.InvokeWithLayerRequest{
+				Layer: 100,
+				Query: &tg.InitConnectionRequest{
+					APIID: 1, DeviceModel: "test", SystemVersion: "1.0", AppVersion: "1.0",
+					SystemLangCode: "en", LangCode: "en", Query: &tg.HelpGetConfigRequest{},
+				},
+			})
+			if err := client.Send(ctx, &bin.Buffer{Buf: slices.Clone(frame)}); err != nil {
+				t.Fatalf("send frame: %v", err)
+			}
+
+			select {
+			case got := <-seen:
+				if got != tt.tailnet {
+					t.Errorf("handler saw TailnetPath=%t, want %t from the configured TCP listener", got, tt.tailnet)
+				}
+			case <-ctx.Done():
+				t.Fatal("request did not reach handler")
+			}
+		})
+	}
+}

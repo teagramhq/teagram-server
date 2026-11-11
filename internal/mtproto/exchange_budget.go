@@ -126,6 +126,24 @@ func (b *keyExchangeBudget) charge(
 	listener store.RateLimitListener,
 	now time.Time,
 ) (string, error) {
+	return b.chargeForPath(ctx, keys, attempts, addr, ListenerPathLimited, listener, now)
+}
+
+func (b *keyExchangeBudget) chargeForPath(
+	ctx context.Context,
+	keys AuthKeyStore,
+	attempts *int,
+	addr netip.Addr,
+	path ListenerPath,
+	listener store.RateLimitListener,
+	now time.Time,
+) (string, error) {
+	if path == ListenerPathTailnet {
+		return "", nil
+	}
+	if path != ListenerPathLimited {
+		return "path", fmt.Errorf("unknown key-exchange listener path %q", path)
+	}
 	if b.limits.PerConnection > 0 {
 		if attempts == nil {
 			return "connection", errors.New("missing key exchange connection counter")

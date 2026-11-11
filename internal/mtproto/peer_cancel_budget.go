@@ -83,6 +83,13 @@ func newPeerCancelBudget(now func() time.Time, maxUsers int, userWindow, refillP
 }
 
 func (b *peerCancelBudget) reserve(userID int64) (*peerCancelReservation, peerCancelDenial) {
+	return b.reserveForPath(userID, ListenerPathLimited)
+}
+
+func (b *peerCancelBudget) reserveForPath(userID int64, path ListenerPath) (*peerCancelReservation, peerCancelDenial) {
+	if path == ListenerPathTailnet {
+		userID = 0
+	}
 	now := b.now()
 	b.mu.Lock()
 	defer b.mu.Unlock()

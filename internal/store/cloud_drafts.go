@@ -41,6 +41,16 @@ type CloudDraftChange struct {
 // peer. Membership is rechecked while holding the same locks as removal, and
 // rate-limit admission, the value, and its recovery marker commit together.
 func (s *Store) SaveCloudDraft(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, message string, noWebpage bool, replyToMsgID int64) (bool, time.Time, error) {
+	return s.saveCloudDraft(ctx, ownerID, peerType, peerID, message, noWebpage, replyToMsgID, true)
+}
+
+// SaveCloudDraftUnmetered performs the same mutation without the per-owner
+// request rate limit. Listener policy decides when this is allowed.
+func (s *Store) SaveCloudDraftUnmetered(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, message string, noWebpage bool, replyToMsgID int64) (bool, time.Time, error) {
+	return s.saveCloudDraft(ctx, ownerID, peerType, peerID, message, noWebpage, replyToMsgID, false)
+}
+
+func (s *Store) saveCloudDraft(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, message string, noWebpage bool, replyToMsgID int64, rateLimited bool) (bool, time.Time, error) {
 	if ownerID <= 0 || peerID <= 0 || peerType < PeerTypeUser || peerType > PeerTypeChannel {
 		return false, time.Time{}, ErrNotMember
 	}
@@ -119,16 +129,18 @@ func (s *Store) SaveCloudDraft(ctx context.Context, ownerID int64, peerType Peer
 		}
 	}
 
-	if _, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
-		SubjectID:      ownerID,
-		Surface:        cloudDraftRateLimitSurface,
-		Cost:           1,
-		WindowDuration: pgtype.Interval{Microseconds: cloudDraftRateLimitWindow.Microseconds(), Valid: true},
-		LimitCount:     cloudDraftRateLimit,
-	}); errors.Is(err, pgx.ErrNoRows) {
-		return false, time.Time{}, ErrCloudDraftRateLimited
-	} else if err != nil {
-		return false, time.Time{}, fmt.Errorf("consume cloud draft rate limit: %w", err)
+	if rateLimited {
+		if _, err = qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
+			SubjectID:      ownerID,
+			Surface:        cloudDraftRateLimitSurface,
+			Cost:           1,
+			WindowDuration: pgtype.Interval{Microseconds: cloudDraftRateLimitWindow.Microseconds(), Valid: true},
+			LimitCount:     cloudDraftRateLimit,
+		}); errors.Is(err, pgx.ErrNoRows) {
+			return false, time.Time{}, ErrCloudDraftRateLimited
+		} else if err != nil {
+			return false, time.Time{}, fmt.Errorf("consume cloud draft rate limit: %w", err)
+		}
 	}
 
 	stamp, err := qtx.CloudDraftTimestamp(ctx)

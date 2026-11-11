@@ -7,6 +7,11 @@ import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 import {selectRealClientScenarios} from './real_client_scenarios.mjs';
+import {
+  collectMessageAckTraceEvidence,
+  configureAckTraceBuildEnvironment,
+  createRealClientBrowserReportCollector
+} from './real_client_ack_trace_report.mjs';
 
 const GUEST_SIGNUP_SCENARIOS = 'guest-signup';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -108,10 +113,20 @@ function cleanEnvironment(extra = {}) {
   return {...env, ...extra};
 }
 
-function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeoutMs}) {
+function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeoutMs, captureStdout = false, onStdoutChunk}) {
+  if(captureStdout && typeof onStdoutChunk !== 'function') {
+    return Promise.reject(new FlowError(stage, `${command} stdout capture has no chunk handler`));
+  }
   if(requestedSignal) return Promise.reject(new FlowError('cancelled', `workflow received ${requestedSignal}`));
-  const child = spawnTracked(command, args, {cwd, env, stdio: 'inherit'});
+  const child = spawnTracked(command, args, {cwd, env, stdio: captureStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit'});
   commandChildren.add(child);
+  if(captureStdout) {
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      onStdoutChunk(chunk);
+    });
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
     let timer;
@@ -262,7 +277,7 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios}) {
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios, messageAckTraceEvidence}) {
   const scenarios = guestSignupOnly ? (guestSignupGateOff ?
     (guestSignupQaBypass ? ['guest-signup-gate-off-qa-bypass'] : ['guest-signup-gate-off']) : [GUEST_SIGNUP_SCENARIOS]) : selectedScenarios;
   const result = {
@@ -275,7 +290,17 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
     scenarios,
     elapsedMs,
     fixtureCleanup: cleanupVerified ? 'verified' : 'failed',
-    traceArtifact: traceReady ? 'uploaded on this workflow run' : 'not produced'
+    traceArtifact: traceReady ? 'uploaded on this workflow run' : 'not produced',
+    ...(messageAckTraceEvidence ? {
+      ...(messageAckTraceEvidence.failedCheck ? {failedCheck: messageAckTraceEvidence.failedCheck} : {}),
+      messageSendAcknowledgementTraces: messageAckTraceEvidence.traces,
+      ...(messageAckTraceEvidence.diagnostics ? {
+        messageSendAcknowledgementTraceDiagnostics: messageAckTraceEvidence.diagnostics
+      } : {}),
+      ...(messageAckTraceEvidence.captureErrors ? {
+        messageSendAcknowledgementTraceCaptureErrors: messageAckTraceEvidence.captureErrors
+      } : {})
+    } : {})
   };
   writeFileSync(summaryPath, `${JSON.stringify(result, null, 2)}\n`, {mode: 0o600});
 
@@ -301,6 +326,18 @@ function writeSummary({status, serverRevision, webRevision, headRevision, tested
       `Scenarios: \`${scenarios.join(',')}\``,
       `Elapsed through fixture cleanup: **${formatDuration(elapsedMs)}**`,
       `Fixture cleanup: **${cleanupVerified ? 'verified' : 'failed'}**`,
+      ...(messageAckTraceEvidence ? [
+        '',
+        'Message send acknowledgement traces:',
+        '',
+        '```json',
+        JSON.stringify({
+          ...(messageAckTraceEvidence.failedCheck ? {failedCheck: messageAckTraceEvidence.failedCheck} : {}),
+          alice: messageAckTraceEvidence.traces.alice,
+          bob: messageAckTraceEvidence.traces.bob
+        }, null, 2),
+        '```'
+      ] : []),
       traceReady ? `Playwright trace artifact: [open workflow artifacts](${artifactLink})` : 'Playwright trace artifact: not produced',
       ''
     ].join('\n');
@@ -355,6 +392,8 @@ async function main() {
   let cleanupVerified = false;
   let traceReady = false;
   let fixtureStarted = false;
+  let browserReport;
+  let messageAckTraceEvidence;
   try {
     repositoryHead(serverRoot, serverRevision, 'server');
     repositoryHead(webRoot, webRevision, 'web');
@@ -408,11 +447,11 @@ async function main() {
     writeFileSync(keyPath, serverReady.mtprotoPublicKeyPEM, {mode: 0o600});
 
     runStage = 'private-artifact-build';
-    const buildEnvironment = cleanEnvironment({
+    const buildEnvironment = configureAckTraceBuildEnvironment(cleanEnvironment({
       MTPROTO_TARGET_MODE: 'private',
       MTPROTO_PRIVATE_ENDPOINT: 'wss://teagramd.test/apiws',
       MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: keyPath
-    });
+    }), guestSignupOnly);
     await runCommand('corepack', ['pnpm', 'exec', 'vite', 'build', '--outDir', artifactDirectory], {
       cwd: webRoot,
       env: buildEnvironment,
@@ -442,6 +481,7 @@ async function main() {
       ...(guestSignupQaBypassToken ? {REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken} : {})
     });
     let runnerError;
+    const browserReportCollector = createRealClientBrowserReportCollector();
     try {
       await runCommand('corepack', ['pnpm', 'run', 'test:real-client', '--',
         '--readiness-file', readinessPath,
@@ -454,10 +494,19 @@ async function main() {
         cwd: webRoot,
         env: runnerEnvironment,
         stage: runStage,
-        timeoutMs: stageTimeout(startedAt, TOTAL_BUDGET_MS, runStage)
+        timeoutMs: stageTimeout(startedAt, TOTAL_BUDGET_MS, runStage),
+        captureStdout: true,
+        onStdoutChunk: (chunk) => browserReportCollector.write(chunk)
       });
     } catch(error) {
       runnerError = error;
+    }
+
+    browserReport = browserReportCollector.finish();
+    try {
+      messageAckTraceEvidence = collectMessageAckTraceEvidence({guestSignupOnly, runnerError, browserReport});
+    } catch(error) {
+      throw new FlowError('browser-report-validation', error.message);
     }
 
     const traceManifest = join(traceDirectory, 'trace-manifest.json');
@@ -494,7 +543,8 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios});
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass,
+        selectedScenarios, messageAckTraceEvidence});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
       status = 'failed';

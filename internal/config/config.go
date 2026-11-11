@@ -56,9 +56,15 @@ const (
 // Config holds server configuration.
 type Config struct {
 	ListenAddr string
+	// ListenPath assigns the trust-boundary policy to the raw MTProto listener.
+	// It defaults to limited; only the accepting listener can mark a tailnet path.
+	ListenPath mtproto.ListenerPath
 	// WebSocketListenAddr is the address the WebSocket MTProto server binds to.
 	// Empty disables the endpoint entirely.
 	WebSocketListenAddr string
+	// WebSocketListenPath assigns the trust-boundary policy to the default
+	// WebSocket listener. It defaults to limited.
+	WebSocketListenPath mtproto.ListenerPath
 	// WebSocketOriginPatterns is the comma-separated allowlist of browser
 	// origins accepted by the WebSocket endpoint. Empty accepts no Origin
 	// header, while clients that send no Origin remain valid.
@@ -69,6 +75,9 @@ type Config struct {
 	// PublicWebSocketListenAddr enables the separate WebSocket listener for
 	// public traffic. Empty disables the endpoint.
 	PublicWebSocketListenAddr string
+	// PublicWebSocketListenPath is validated at startup and is always limited;
+	// the public listener cannot be configured for tailnet treatment.
+	PublicWebSocketListenPath mtproto.ListenerPath
 	// PublicWebSocketOriginPatterns is the independent browser-origin allowlist
 	// for the public WebSocket endpoint.
 	PublicWebSocketOriginPatterns []string
@@ -293,6 +302,11 @@ type Config struct {
 	// header is honoured from. It is the whole of the trust decision in
 	// ClientAddrProxyV2 mode and is empty in every other mode.
 	ClientAddrProxies []netip.Prefix
+	// CFConnectingIPProxies is the optional source allowlist for CF-Connecting-IP
+	// on the public WebSocket listener. When unset, the header retains the
+	// existing trust-mode behavior; a configured list restricts which peers may
+	// assert it.
+	CFConnectingIPProxies []netip.Prefix
 	// PreAuth is the deployment-wide budget for connections that have not
 	// authenticated: concurrent sockets, concurrent sockets per client network,
 	// and their maximum lifetime. teagramd divides the two concurrency budgets
@@ -967,6 +981,21 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	listenPath, err := parseListenerPath(os.Getenv("TG_LISTEN_PATH"), "TG_LISTEN_PATH")
+	if err != nil {
+		return Config{}, err
+	}
+	webSocketListenPath, err := parseListenerPath(os.Getenv("TG_WEBSOCKET_LISTEN_PATH"), "TG_WEBSOCKET_LISTEN_PATH")
+	if err != nil {
+		return Config{}, err
+	}
+	publicWebSocketListenPath, err := parseListenerPath(os.Getenv("TG_PUBLIC_WEBSOCKET_LISTEN_PATH"), "TG_PUBLIC_WEBSOCKET_LISTEN_PATH")
+	if err != nil {
+		return Config{}, err
+	}
+	if publicWebSocketListenPath == mtproto.ListenerPathTailnet {
+		return Config{}, errors.New("TG_PUBLIC_WEBSOCKET_LISTEN_PATH cannot be tailnet; the public listener always applies caller limits")
+	}
 	if err := validateBrowserOnlyListener(webSocketBrowserOnly, identity.WebSocketListenAddr, "TG_WEBSOCKET_BROWSER_ONLY", "TG_WEBSOCKET_LISTEN_ADDR"); err != nil {
 		return Config{}, err
 	}
@@ -975,10 +1004,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
+		ListenPath:                    listenPath,
 		WebSocketListenAddr:           identity.WebSocketListenAddr,
+		WebSocketListenPath:           webSocketListenPath,
 		WebSocketOriginPatterns:       originPatterns,
 		WebSocketBrowserOnly:          webSocketBrowserOnly,
 		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
+		PublicWebSocketListenPath:     publicWebSocketListenPath,
 		PublicWebSocketOriginPatterns: publicOriginPatterns,
 		PublicWebSocketBrowserOnly:    publicWebSocketBrowserOnly,
 		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
@@ -1820,6 +1852,14 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if trust == ClientAddrProxyV2 {
+		if listenPath == mtproto.ListenerPathTailnet {
+			return Config{}, errors.New("TG_LISTEN_PATH=tailnet cannot be combined with TG_CLIENT_ADDR_TRUST=proxy-v2")
+		}
+		if webSocketListenPath == mtproto.ListenerPathTailnet {
+			return Config{}, errors.New("TG_WEBSOCKET_LISTEN_PATH=tailnet cannot be combined with TG_CLIENT_ADDR_TRUST=proxy-v2")
+		}
+	}
 	if trust == ClientAddrCFConnectingIP && cfg.PublicWebSocketListenAddr == "" {
 		return Config{}, errors.New("TG_CLIENT_ADDR_TRUST=cf-connecting-ip requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR")
 	}
@@ -1829,6 +1869,11 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.ClientAddrProxies = proxies
+	cfProxies, err := clientAddrCFProxies(os.Getenv("TG_CLIENT_ADDR_CF_PROXY_CIDRS"), trust)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.CFConnectingIPProxies = cfProxies
 	// Admin server requires both env vars or neither: a listener without auth
 	// is a denial-of-service vector, and a hash with no listener is wasted work.
 	adminErr := validateAdmin(&cfg)
@@ -2451,7 +2496,7 @@ func clientAddrTrust(raw string) (ClientAddrTrust, error) {
 // Outside proxy-v2 mode the list is rejected instead of ignored, so an operator
 // cannot believe an unconsumed balancer allowlist protects a socket-keyed path.
 func clientAddrProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error) {
-	prefixes, err := parsePrefixes(raw)
+	prefixes, err := parsePrefixes(raw, "TG_CLIENT_ADDR_PROXY_CIDRS")
 	if err != nil {
 		return nil, err
 	}
@@ -2463,6 +2508,23 @@ func clientAddrProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error
 	}
 	if len(prefixes) == 0 {
 		return nil, fmt.Errorf("TG_CLIENT_ADDR_TRUST=%s requires TG_CLIENT_ADDR_PROXY_CIDRS to list the balancer addresses a PROXY header is accepted from", ClientAddrProxyV2)
+	}
+	return prefixes, nil
+}
+
+// clientAddrCFProxies applies an optional source allowlist to CF-Connecting-IP.
+// An unset list preserves the existing behavior, where the selected header is
+// accepted from any peer; a configured list restricts the source peers.
+func clientAddrCFProxies(raw string, trust ClientAddrTrust) ([]netip.Prefix, error) {
+	prefixes, err := parsePrefixes(raw, "TG_CLIENT_ADDR_CF_PROXY_CIDRS")
+	if err != nil {
+		return nil, err
+	}
+	if trust != ClientAddrCFConnectingIP {
+		if len(prefixes) > 0 {
+			return nil, fmt.Errorf("TG_CLIENT_ADDR_CF_PROXY_CIDRS is set while TG_CLIENT_ADDR_TRUST is %q: the allowlist is only read in %q mode", trust, ClientAddrCFConnectingIP)
+		}
+		return nil, nil
 	}
 	return prefixes, nil
 }
@@ -2484,12 +2546,12 @@ const mappedPrefixOffset = 96
 // IPv4 network to take, so it is refused rather than guessed at. Everything from
 // /96 down takes its IPv4 meaning, which puts a disguised default route
 // (::ffff:0.0.0.0/96) in front of the zero-length guard rather than past it.
-func normalizePrefix(p netip.Prefix, entry string) (netip.Prefix, error) {
+func normalizePrefix(p netip.Prefix, entry, setting string) (netip.Prefix, error) {
 	if !p.Addr().Is4In6() {
 		return p, nil
 	}
 	if p.Bits() < mappedPrefixOffset {
-		return netip.Prefix{}, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS entry %q is an IPv4-mapped prefix shorter than /%d, which names no IPv4 network: write it as an IPv4 CIDR", entry, mappedPrefixOffset)
+		return netip.Prefix{}, fmt.Errorf("%s entry %q is an IPv4-mapped prefix shorter than /%d, which names no IPv4 network: write it as an IPv4 CIDR", setting, entry, mappedPrefixOffset)
 	}
 	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-mappedPrefixOffset), nil
 }
@@ -2499,7 +2561,7 @@ func normalizePrefix(p netip.Prefix, entry string) (netip.Prefix, error) {
 // Anything that does not parse fails the start naming the entry: dropping it
 // would leave a balancer whose connections are all refused, which reads as an
 // outage rather than a typo.
-func parsePrefixes(raw string) ([]netip.Prefix, error) {
+func parsePrefixes(raw, setting string) ([]netip.Prefix, error) {
 	var prefixes []netip.Prefix
 	for entry := range strings.SplitSeq(raw, ",") {
 		entry = strings.TrimSpace(entry)
@@ -2509,11 +2571,11 @@ func parsePrefixes(raw string) ([]netip.Prefix, error) {
 		if strings.Contains(entry, "/") {
 			p, err := netip.ParsePrefix(entry)
 			if err != nil {
-				return nil, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS entry %q is not a CIDR", entry)
+				return nil, fmt.Errorf("%s entry %q is not a CIDR", setting, entry)
 			}
 			// Before the guard below, so a default route written in mapped form
 			// is caught by it rather than slipping past as a 96-bit prefix.
-			if p, err = normalizePrefix(p, entry); err != nil {
+			if p, err = normalizePrefix(p, entry, setting); err != nil {
 				return nil, err
 			}
 			// A default route trusts every peer on the internet as a balancer,
@@ -2523,14 +2585,14 @@ func parsePrefixes(raw string) ([]netip.Prefix, error) {
 			// to prevent, and it is the one allowlist mistake that would
 			// otherwise start cleanly, so it fails the start like the rest.
 			if p.Bits() == 0 {
-				return nil, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS entry %q trusts every address: name the balancers, not a default route", entry)
+				return nil, fmt.Errorf("%s entry %q trusts every address: name the forwarders, not a default route", setting, entry)
 			}
 			prefixes = append(prefixes, p)
 			continue
 		}
 		addr, err := netip.ParseAddr(entry)
 		if err != nil {
-			return nil, fmt.Errorf("TG_CLIENT_ADDR_PROXY_CIDRS entry %q is not an address or CIDR", entry)
+			return nil, fmt.Errorf("%s entry %q is not an address or CIDR", setting, entry)
 		}
 		// Unmapped so a 4-in-6 spelling matches the same peer addresses the
 		// listener reports, which are unmapped for the same reason.
@@ -2556,6 +2618,14 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 		}
 	}
 	return patterns, nil
+}
+
+func parseListenerPath(raw, name string) (mtproto.ListenerPath, error) {
+	path, err := mtproto.ParseListenerPath(raw)
+	if err != nil {
+		return mtproto.ListenerPathLimited, fmt.Errorf("%s: %w", name, err)
+	}
+	return path, nil
 }
 
 func parseWebSocketBrowserOnly(raw, name string) (bool, error) {

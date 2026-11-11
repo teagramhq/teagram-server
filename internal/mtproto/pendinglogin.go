@@ -65,14 +65,16 @@ type pendingLoginHold struct {
 	leases  pendingLoginLeaseStore
 	lease   *store.LimitLease
 	ttl     time.Duration
+	path    ListenerPath
 	charged bool
 }
 
-func (s *Server) newPendingLoginHold() *pendingLoginHold {
+func (s *Server) newPendingLoginHold(path ListenerPath) *pendingLoginHold {
 	return &pendingLoginHold{
 		lim:    s.pendingLogins,
 		leases: s.pendingLoginLeases,
 		ttl:    s.pendingLoginLifetime + time.Second,
+		path:   path,
 	}
 }
 
@@ -88,6 +90,9 @@ const pendingLoginLeaseSurface = "pending_login"
 // in-memory auth-key stores retain the process-local limiter for tests and
 // embedders.
 func (h *pendingLoginHold) acquire(ctx context.Context) (bool, error) {
+	if h.path == ListenerPathTailnet {
+		return true, nil
+	}
 	if h.charged {
 		return true, nil
 	}

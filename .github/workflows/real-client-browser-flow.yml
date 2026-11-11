@@ -22,7 +22,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 0186037771fa2a23a00aa6f8f319adf4a213c69b
+      REAL_CLIENT_WEB_REVISION: 8b28c847bc1ff07c711ee4fa9c3a83fc5d8b4324
       REAL_CLIENT_GUEST_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
@@ -122,7 +122,7 @@ jobs:
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
       - name: Test real-client worker source observation
-        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs test/e2e/real_server_fixture/real_client_scenarios.test.mjs test/e2e/real_server_fixture/run_real_client_browser_flow.test.mjs test/e2e/real_server_fixture/real_client_ack_trace_report.test.mjs
 
       - name: Test the pinned guest signup runner patch
         env:

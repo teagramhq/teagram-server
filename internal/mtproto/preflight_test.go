@@ -298,6 +298,252 @@ func TestDiscoveryLimiterFullyDisabled(t *testing.T) {
 	}
 }
 
+func TestTailnetDiscoveryBypassesCallerBudgets(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       1,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	})
+	addr := mustAddr("192.0.2.56")
+	for i := range 50 {
+		allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathTailnet)
+		if err != nil || !allowed {
+			t.Fatalf("tailnet discovery request %d allowed=%t err=%v, want allowed", i+1, allowed, err)
+		}
+	}
+	if allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathLimited); err != nil || !allowed {
+		t.Fatalf("first limited discovery request allowed=%t err=%v, want allowed after tailnet traffic", allowed, err)
+	}
+	if allowed, err := limiter.allowContextForPath(context.Background(), addr, ListenerPathLimited); err != nil || allowed {
+		t.Fatalf("second limited discovery request allowed=%t err=%v, want caller budget exhausted", allowed, err)
+	}
+}
+
+func TestRawDiscoveryPerNetworkTablePrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       10,
+		MaxRequestsPerNet: 3,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 2
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	now := time.Now()
+	if !limiter.allow(first, now) {
+		t.Fatal("first network was refused")
+	}
+	if !limiter.allow(second, now) {
+		t.Fatal("second network was refused")
+	}
+	if limiter.allow(third, now) {
+		t.Fatal("raw path admitted a third network while the per-network table was full")
+	}
+	if !limiter.allow(first, now) {
+		t.Fatal("an already tracked network was refused while the table was full")
+	}
+
+	expiredAt := now.Add(-2 * time.Minute)
+	firstBucket, ok := store.IPBucketKey(first)
+	if !ok {
+		t.Fatal("first address has no per-network bucket")
+	}
+	secondBucket, ok := store.IPBucketKey(second)
+	if !ok {
+		t.Fatal("second address has no per-network bucket")
+	}
+	limiter.perNet[firstBucket] = discoveryWindow{start: expiredAt, calls: 1}
+	limiter.perNet[secondBucket] = discoveryWindow{start: expiredAt, calls: 1}
+	if !limiter.allow(third, time.Now()) {
+		t.Fatal("raw path refused a new network after expired buckets should have been pruned")
+	}
+}
+
+func TestPublicDiscoveryFullTablePreservesIndependentOverflowBudgets(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequests:       10,
+		MaxRequestsPerNet: 2,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 2
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	fourth := mustAddr("198.51.100.3")
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
+	}
+	if !limiter.allowPerNet(second) {
+		t.Fatal("public discovery refused the second network")
+	}
+	for i := range limiter.limits.MaxRequestsPerNet {
+		if !limiter.allowPerNet(third) {
+			t.Fatalf("public discovery refused overflow request %d while its table was full", i+1)
+		}
+	}
+	if limiter.allowPerNet(third) {
+		t.Fatal("public discovery admitted a request beyond one overflow network's budget")
+	}
+	for i := range limiter.limits.MaxRequestsPerNet {
+		if !limiter.allowPerNet(fourth) {
+			t.Fatalf("public discovery refused independent overflow request %d", i+1)
+		}
+	}
+	if limiter.allowPerNet(fourth) {
+		t.Fatal("public discovery admitted a request beyond the second overflow network's budget")
+	}
+	if !limiter.allow(third, time.Now()) {
+		t.Fatal("full public table prevented the raw limiter from admitting a new network")
+	}
+}
+
+func TestPublicDiscoveryFullOverflowTableStillAnswersNewNetworks(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequestsPerNet: 1,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 1
+
+	first := mustAddr("192.0.2.1")
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
+	}
+	for i := range maxPublicDiscoveryOverflowBuckets {
+		addr := netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+		if !limiter.allowPerNet(addr) {
+			t.Fatalf("public discovery refused overflow network %d while filling its table", i)
+		}
+	}
+	for _, addr := range []netip.Addr{
+		mustAddr("203.0.113.1"),
+		mustAddr("203.0.113.2"),
+	} {
+		if !limiter.allowPerNet(addr) {
+			t.Fatalf("public discovery refused untracked network %s while overflow table was full", addr)
+		}
+	}
+	if len(limiter.publicOverflow) > maxPublicDiscoveryOverflowBuckets {
+		t.Fatalf("public overflow table grew to %d entries, above its bound %d", len(limiter.publicOverflow), maxPublicDiscoveryOverflowBuckets)
+	}
+}
+
+func TestPublicDiscoverySweepsAtMostOncePerWindowAndRecoversExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	limiter := newDiscoveryLimiter(DiscoveryLimits{
+		MaxRequestsPerNet: 2,
+		PerNetWindow:      time.Minute,
+	})
+	limiter.maxBuckets = 1
+	limiter.maxOverflowBuckets = 1
+
+	first := mustAddr("192.0.2.1")
+	second := mustAddr("192.0.2.2")
+	third := mustAddr("192.0.2.3")
+	firstBucket, ok := store.IPBucketKey(first)
+	if !ok {
+		t.Fatal("first address has no per-network bucket")
+	}
+	if !limiter.allowPerNet(first) {
+		t.Fatal("public discovery refused the first network")
+	}
+	if !limiter.allowPerNet(second) {
+		t.Fatal("public discovery refused the overflow network")
+	}
+
+	limiter.publicPerNet[firstBucket] = discoveryWindow{start: time.Now().Add(-2 * time.Minute), calls: 1}
+	if !limiter.allowPerNet(third) {
+		t.Fatal("public discovery refused a new network during the sweep interval")
+	}
+	if _, ok := limiter.publicPerNet[firstBucket]; !ok {
+		t.Fatal("public discovery rescanned its full table before the next sweep interval")
+	}
+	limiter.publicPerNetSweepAt = time.Now().Add(-time.Second)
+	fourth := mustAddr("192.0.2.4")
+	if !limiter.allowPerNet(fourth) {
+		t.Fatal("public discovery refused a new network after the sweep interval")
+	}
+	if _, ok := limiter.publicPerNet[firstBucket]; ok {
+		t.Fatal("public discovery retained an expired primary bucket after sweeping")
+	}
+
+	secondBucket, ok := store.IPBucketKey(second)
+	if !ok {
+		t.Fatal("second address has no per-network bucket")
+	}
+	thirdOverflow := mustAddr("192.0.2.5")
+	if !limiter.allowPerNet(thirdOverflow) {
+		t.Fatal("public discovery refused an untracked network while the overflow table was full")
+	}
+	limiter.publicOverflow[secondBucket] = discoveryWindow{start: time.Now().Add(-2 * time.Minute), calls: 1}
+	fifth := mustAddr("192.0.2.6")
+	if !limiter.allowPerNet(fifth) {
+		t.Fatal("public discovery refused an untracked network during the overflow sweep interval")
+	}
+	if _, ok := limiter.publicOverflow[secondBucket]; !ok {
+		t.Fatal("public discovery rescanned its overflow table before the next sweep interval")
+	}
+	limiter.publicOverflowSweepAt = time.Now().Add(-time.Second)
+	sixth := mustAddr("192.0.2.7")
+	if !limiter.allowPerNet(sixth) {
+		t.Fatal("public discovery refused an overflow network after the sweep interval")
+	}
+	if _, ok := limiter.publicOverflow[secondBucket]; ok {
+		t.Fatal("public discovery retained an expired overflow bucket after sweeping")
+	}
+}
+
+func TestTailnetPathBypassesPreAuthCapsAndLifetime(t *testing.T) {
+	t.Parallel()
+
+	limiter := newPreAuthLimiter(PreAuthLimits{
+		MaxConns:       1,
+		MaxConnsPerNet: 1,
+		Lifetime:       25 * time.Millisecond,
+	})
+	limited, ok := limiter.admit(store.RateLimitListenerTailnet)
+	if !ok {
+		t.Fatal("limited listener was refused its only slot")
+	}
+	defer limited.clear()
+
+	tailnet, ok := limiter.admitForPath(store.RateLimitListenerTailnet, ListenerPathTailnet)
+	if !ok {
+		t.Fatal("tailnet listener was refused while the limited listener held the global slot")
+	}
+	defer tailnet.clear()
+	if !tailnet.keyAddr(mustAddr("192.0.2.55")) {
+		t.Fatal("tailnet listener was refused while the same network held the per-network slot")
+	}
+	fired := make(chan struct{}, 1)
+	limited.armLifetime(func() { fired <- struct{}{} })
+	tailnetFired := make(chan struct{}, 1)
+	tailnet.armLifetime(func() { tailnetFired <- struct{}{} })
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("limited pre-auth lifetime control did not fire")
+	}
+	select {
+	case <-tailnetFired:
+		t.Fatal("tailnet pre-auth lifetime ceiling fired")
+	case <-time.After(5 * limiter.limits.Lifetime):
+	}
+}
+
 func TestSetDiscoveryLimitsRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 

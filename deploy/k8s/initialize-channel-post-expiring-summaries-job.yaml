@@ -1,31 +1,35 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: cutover-account-seed
+  generateName: expiring-summary-init-
   namespace: teagram
   labels:
-    app.kubernetes.io/name: cutover-account-seed
+    app.kubernetes.io/name: expiring-summary-init
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 180
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: cutover-account-seed
+        app.kubernetes.io/name: expiring-summary-init
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: create-account
-          image: ghcr.io/teagramhq/teagramd:ci
+        - name: initialize
+          image: ghcr.io/teagramhq/teagramd:unreleased
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/teagramd"]
-          args: ["admin", "create-user", "--username", "cutover_smoke"]
-          stdin: true
-          stdinOnce: true
+          args: ["maintenance", "initialize-channel-post-expiring-summaries"]
           env:
             - name: TG_POSTGRES_DSN
               valueFrom:
@@ -36,21 +40,18 @@ spec:
               value: /var/lib/teagramd/enc_key.hex
             - name: HOME
               value: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           securityContext:
-            runAsUser: 0
-            runAsGroup: 0
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_READ_SEARCH"]
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
           volumeMounts:
             - name: key-data
               mountPath: /var/lib/teagramd

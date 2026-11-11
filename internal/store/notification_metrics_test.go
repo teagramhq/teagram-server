@@ -253,6 +253,20 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 	}
 }
 
+func TestNotificationMetricsSaveFilePartBytesShareSaveFilePartSurface(t *testing.T) {
+	t.Parallel()
+
+	metrics := store.NewNotificationMetricsWithClock(func() time.Time {
+		return time.Unix(1_700_000_000, 0)
+	})
+	metrics.RecordRateLimitDenial("save_file_part_bytes")
+
+	got := metrics.Snapshot().RateLimitDenials
+	if got.Count != 1 || got.Dropped != 0 || got.BySurface.SaveFilePart != 1 {
+		t.Fatalf("byte-throttle denial snapshot = %+v, want one SaveFilePart denial and none dropped", got)
+	}
+}
+
 func TestNotificationMetricsCheckUsernameIPIsFixedSurface(t *testing.T) {
 	metrics := store.NewNotificationMetricsWithClock(func() time.Time {
 		return time.Unix(1_700_000_000, 0)

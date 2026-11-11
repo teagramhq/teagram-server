@@ -1,0 +1,128 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mtproto-smoke
+  labels:
+    app.kubernetes.io/name: tailscale-proxy
+    app.kubernetes.io/component: ci-probe
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tailscale-proxy
+        app.kubernetes.io/component: ci-probe
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      initContainers:
+        - name: mtproto-forwarder
+          restartPolicy: Always
+          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+          imagePullPolicy: IfNotPresent
+          command: ["socat"]
+          args:
+            - -d
+            - -d
+            - -t
+            - "30"
+            - TCP-LISTEN:2443,bind=127.0.0.1,reuseaddr,fork
+            - TCP:teagramd:2443
+          startupProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          image: ghcr.io/teagramhq/teagramd:ci
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/mtproto-smoke
+            - --endpoint
+            - 127.0.0.1:2443
+            - --expect-registration-mode
+            - open
+            - --discovery-file
+            - /client/client.json
+          volumeMounts:
+            - name: client-config
+              mountPath: /client
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        - name: discovery
+          image: mirror.gcr.io/library/python:3.13.11-alpine3.22@sha256:2fd93799bfc6381d078a8f656a5f45d6092e5d11d16f55889b3d5cbfdc64f045
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /tests/probe_discovery.py
+            - --host
+            - 127.0.0.1
+            - --port
+            - "2443"
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: ingress-probes
+              mountPath: /tests
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: client-config
+          configMap:
+            name: mtproto-probe-client
+        - name: ingress-probes
+          configMap:
+            name: k8s-ingress-probes

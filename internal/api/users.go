@@ -16,6 +16,20 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func (h *handlers) checkAndChargePhoneLookup(r *mtproto.Request, phone string) error {
+	if r.Tailnet() {
+		return nil
+	}
+	return h.store.CheckAndChargeLookup(r.Ctx, r.UserID, phone)
+}
+
+func (h *handlers) checkAndChargeUsernameLookup(r *mtproto.Request, username string) error {
+	if r.Tailnet() {
+		return nil
+	}
+	return h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username)
+}
+
 // handleResolvePhone serves contacts.resolvePhone: resolve a phone number to a
 // peer. Only authorized callers may use it; half-authorized (pending 2FA) keys
 // are refused. Quota is checked before the phone is looked up; on miss the same
@@ -35,7 +49,7 @@ func (h *handlers) handleResolvePhone(r *mtproto.Request) (bin.Encoder, error) {
 
 	phone := store.NormalizePhone(req.Phone)
 
-	if err := h.store.CheckAndChargeLookup(r.Ctx, r.UserID, phone); err != nil {
+	if err := h.checkAndChargePhoneLookup(r, phone); err != nil {
 		if errors.Is(err, store.ErrLookupQuotaExceeded) {
 			return nil, errLookupFloodWait
 		}
@@ -87,7 +101,7 @@ func (h *handlers) handleResolveUsername(r *mtproto.Request) (bin.Encoder, error
 	}
 
 	// Charge quota before the lookup — identically on hit and miss.
-	if err := h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username); err != nil {
+	if err := h.checkAndChargeUsernameLookup(r, username); err != nil {
 		if errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
 			return nil, errUsernameLookupFloodWait
 		}
@@ -138,12 +152,12 @@ func (h *handlers) handleResolveUsername(r *mtproto.Request) (bin.Encoder, error
 
 // checkUsernameClaimQuota charges a valid non-empty claim against the same
 // per-account budget used by contacts.resolveUsername before the claim executes.
-func (h *handlers) checkUsernameClaimQuota(ctx context.Context, callerID int64, handle string) error {
-	if err := h.store.CheckAndChargeUsernameLookup(ctx, callerID, strings.ToLower(handle)); err != nil {
+func (h *handlers) checkUsernameClaimQuota(r *mtproto.Request, handle string) error {
+	if err := h.checkAndChargeUsernameLookup(r, strings.ToLower(handle)); err != nil {
 		if errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
 			return errUsernameLookupFloodWait
 		}
-		h.log.Error("username claim: quota", "user_id", callerID, "err", err)
+		h.log.Error("username claim: quota", "user_id", r.UserID, "err", err)
 		return errInternal
 	}
 	return nil
@@ -283,7 +297,7 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 			// Share resolveUsername's per-account distinct-handle and burst budgets.
 			// Charge before any username lookup, even when this resolves to a channel
 			// or misses, so contacts.search cannot buy a second lookup path.
-			if err := h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username); err != nil {
+			if err := h.checkAndChargeUsernameLookup(r, username); err != nil {
 				if !errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
 					usernameQuotaErr = err
 				}
