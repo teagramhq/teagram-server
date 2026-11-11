@@ -101,17 +101,33 @@ export function patchRealClientObserver(webRoot) {
   }
 
   const uniquePeerSearchWaiter = `async function waitForUniquePeerSearchResult(page, resultsSelector, username, stage) {
-  const waitForMatches = (requireUnique) => page.waitForFunction(({resultsSelector, username, requireUnique}) => {
-    const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
-      const rect = row.getBoundingClientRect();
-      const style = window.getComputedStyle(row);
-      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
-        (row.textContent || '').includes(username);
-    });
-    return requireUnique ? matches.length === 1 : matches.length > 0;
-  }, {resultsSelector, username, requireUnique}, {timeout: 25_000});
-  await waitForMatches(false).catch(() => failStage(stage + '_search_results'));
-  await waitForMatches(true).catch(() => failStage(stage + '_search_result_not_unique'));
+  const usernameMatches = page.locator(\`${'${resultsSelector}'}:visible\`).filter({hasText: username});
+  const deadline = Date.now() + 25_000;
+  while(Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    try {
+      await page.waitForFunction(({resultsSelector, username}) => {
+        const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
+          const rect = row.getBoundingClientRect();
+          const style = window.getComputedStyle(row);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
+            (row.textContent || '').includes(username);
+        });
+        return matches.length === 1;
+      }, {resultsSelector, username}, {timeout: remaining});
+    } catch {
+      const matchCount = await usernameMatches.count().catch(() => 0);
+      failStage(stage + (matchCount > 0 ? '_search_result_not_unique' : '_search_results'));
+    }
+
+    const matchCount = await usernameMatches.count().catch(() => 0);
+    if(matchCount !== 1) continue;
+    const peerId = await usernameMatches.getAttribute('data-peer-id');
+    if(peerId) return {selectedRow: usernameMatches, peerId};
+  }
+
+  const matchCount = await usernameMatches.count().catch(() => 0);
+  failStage(stage + (matchCount > 0 ? '_search_result_not_unique' : '_search_results'));
 }
 `;
   const peerSelection = 'async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {';
@@ -134,11 +150,13 @@ export function patchRealClientObserver(webRoot) {
     if(visible.length !== 1) failStage(\`${'${stage}'}_search_result_not_unique\`);
     selectedRow = visible[0];
   }`;
-  const settledPeerSelection = `  await waitForUniquePeerSearchResult(page, resultsSelector, username, stage);
-  const usernameMatches = page.locator(\`${'${resultsSelector}'}:visible\`).filter({hasText: username});
-  if(await usernameMatches.count() !== 1) failStage(\`${'${stage}'}_search_result_not_unique\`);
-  const selectedRow = usernameMatches;`;
+  const settledPeerSelection = `  const {selectedRow, peerId} = await waitForUniquePeerSearchResult(page, resultsSelector, username, stage);`;
   browser = replaceOnce(browser, oldPeerSelection, settledPeerSelection, 'unique peer search selection');
+  browser = replaceOnce(browser,
+    `  const peerId = await selectedRow.getAttribute('data-peer-id');
+  if(!peerId) failStage(\`${'${stage}'}_peer_identity\`);`,
+    `  if(!peerId) failStage(\`${'${stage}'}_peer_identity\`);`,
+    'unique peer identity extraction');
 
   const oldCustomEmojiMessageWaiter = `async function waitForCustomEmojiMessage(page, text, docId, stage) {
   setPageScenarioStep(page, stage);

@@ -76,9 +76,10 @@ function patchBrowserForTest(t, globals, {
   return {browser, browserPath, observation};
 }
 
-function peerSelectionHarness(t, states) {
+function peerSelectionHarness(t, states, {loseFirstLocatorMatch = false} = {}) {
   let stateIndex = 0;
   let selectedPeerId;
+  let locatorCountCalls = 0;
   const visible = (row) => ({
     textContent: row.text,
     dataset: {peerId: row.peerId},
@@ -98,7 +99,13 @@ function peerSelectionHarness(t, states) {
     filter({hasText}) {
       const matches = () => states[stateIndex].filter((row) => row.display !== 'none' && row.text.includes(hasText));
       return {
-        async count() { return matches().length; },
+        async count() {
+          if(loseFirstLocatorMatch && locatorCountCalls++ === 0) {
+            stateIndex = Math.min(stateIndex + 1, states.length - 1);
+            return 0;
+          }
+          return matches().length;
+        },
         async getAttribute(name) { return name === 'data-peer-id' ? matches()[0]?.peerId : null; },
         async click() { selectedPeerId = matches()[0]?.peerId; },
       };
@@ -117,6 +124,7 @@ function peerSelectionHarness(t, states) {
     async waitForFunction(predicate, args) {
       while(stateIndex < states.length) {
         if(predicate(args)) return;
+        if(stateIndex === states.length - 1) break;
         stateIndex++;
       }
       throw new Error('search did not reach the requested peer state');
@@ -157,6 +165,28 @@ test('peer selection waits for one visible matching row after stale and duplicat
   assert.equal(peerId, '42');
   assert.equal(selectedPeerId(), '42');
   assert.equal(stateIndex(), 3);
+});
+
+test('peer selection retries when a unique search result disappears before its locator is read', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [
+    [{text: 'Alice @alice_unique', peerId: '42'}],
+    [],
+    [{text: 'Alice @alice_unique', peerId: '42'}],
+  ];
+  const {browser, page, selectedPeerId, stateIndex} = peerSelectionHarness(t, states, {loseFirstLocatorMatch: true});
+
+  const peerId = await browser.testSelectUniquePeer(
+    page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    '@alice_unique',
+    'bob_custom_emoji_status_chat'
+  );
+
+  assert.equal(peerId, '42');
+  assert.equal(selectedPeerId(), '42');
+  assert.equal(stateIndex(), 2);
 });
 
 test('peer selection reports missing search results when no visible username row appears', async (t) => {
