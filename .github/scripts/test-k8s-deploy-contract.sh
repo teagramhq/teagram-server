@@ -386,10 +386,14 @@ public_websocket_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name =
   fail 'the public WebSocket smoke must run inside the connector pod without port-forward'
 proxy_trust_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Narrow CI forwarded-IP trust to cloudflared") | .run' .github/workflows/ci.yml)"
 [[ "$proxy_trust_step" == *'cloudflared_ip'*'kubectl set env statefulset/teagramd'* &&
-   "$proxy_trust_step" == *'TG_CLIENT_ADDR_CF_PROXY_CIDRS=${cloudflared_ip}/32'* &&
-   "$proxy_trust_step" == *'TG_BOT_API_PUBLIC_PROXY_CIDRS=${cloudflared_ip}/32'* &&
+   "$proxy_trust_step" == *'trusted_proxy_cidr="${cloudflared_ip}/32"'* &&
+   "$proxy_trust_step" == *'TG_CLIENT_ADDR_CF_PROXY_CIDRS=${trusted_proxy_cidr}'* &&
+   "$proxy_trust_step" == *'TG_BOT_API_PUBLIC_PROXY_CIDRS=${trusted_proxy_cidr}'* &&
+   "$proxy_trust_step" == *'yq -i'* &&
+   "$proxy_trust_step" == *'TRUSTED_PROXY_CIDR'* &&
+   "$proxy_trust_step" == *'jq --slurp --exit-status'* &&
    "$proxy_trust_step" == *'kubectl rollout status statefulset/teagramd'* ]] ||
-  fail 'the CI deployment test must narrowly trust only cloudflared and reject the shared-address warning'
+  fail 'the CI deployment test must narrow cloudflared trust in both the live StatefulSet and release manifest'
 grep --fixed-strings --quiet "per-IP limits are keyed on each connection's own peer address" \
   .github/workflows/ci.yml ||
   fail 'CI must assert that teagramd logs no shared-client-address warning'

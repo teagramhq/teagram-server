@@ -2094,9 +2094,27 @@ jobs:
             --selector=app.kubernetes.io/name=cloudflared --output json \
             | jq -er '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | first | .status.podIP')"
           [[ "$cloudflared_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          trusted_proxy_cidr="${cloudflared_ip}/32"
           kubectl set env statefulset/teagramd --namespace teagram \
-            "TG_CLIENT_ADDR_CF_PROXY_CIDRS=${cloudflared_ip}/32" \
-            "TG_BOT_API_PUBLIC_PROXY_CIDRS=${cloudflared_ip}/32"
+            "TG_CLIENT_ADDR_CF_PROXY_CIDRS=${trusted_proxy_cidr}" \
+            "TG_BOT_API_PUBLIC_PROXY_CIDRS=${trusted_proxy_cidr}"
+          TRUSTED_PROXY_CIDR="$trusted_proxy_cidr" yq -i \
+            '(select(.kind == "StatefulSet" and .metadata.name == "teagramd")
+              | .spec.template.spec.containers[]
+              | select(.name == "teagramd")
+              | .env[]
+              | select(.name == "TG_CLIENT_ADDR_CF_PROXY_CIDRS" or .name == "TG_BOT_API_PUBLIC_PROXY_CIDRS")
+              | .value) = strenv(TRUSTED_PROXY_CIDR)' \
+            "$RUNNER_TEMP/k8s-ci.yaml"
+          yq eval-all -o=json \
+            'select(.kind == "StatefulSet" and .metadata.name == "teagramd")
+             | .spec.template.spec.containers[]
+             | select(.name == "teagramd")
+             | .env[]
+             | select(.name == "TG_CLIENT_ADDR_CF_PROXY_CIDRS" or .name == "TG_BOT_API_PUBLIC_PROXY_CIDRS")' \
+            "$RUNNER_TEMP/k8s-ci.yaml" \
+            | jq --slurp --exit-status --arg trusted "$trusted_proxy_cidr" \
+              'length == 2 and all(.[]; .value == $trusted)'
           kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
           kubectl get statefulset teagramd --namespace teagram --output json \
             | jq --exit-status --arg trusted "${cloudflared_ip}/32" '
