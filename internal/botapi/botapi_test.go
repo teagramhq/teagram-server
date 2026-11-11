@@ -626,6 +626,28 @@ func TestSendMessageRateLimitUsesBotBudgetAndReturnsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestTailnetPathExemptsMessageSendQuota(t *testing.T) {
+	st := newFakeStore()
+	st.limitResult = &store.RateLimitResult{Wait: time.Minute}
+	handler := botapi.WithTailnetPath(
+		botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{Limit: 1, Window: time.Minute}),
+	)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/bot123456:secret-sentinel/sendMessage", strings.NewReader(`{"chat_id":42,"text":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %q", response.Code, response.Body.String())
+	}
+	if st.limitCount != 0 {
+		t.Fatalf("tailnet sendMessage checked the per-bot quota %d times", st.limitCount)
+	}
+	if st.sendCount != 1 {
+		t.Fatalf("SendBotMessage called %d times, want 1", st.sendCount)
+	}
+}
+
 func TestSendMessageMapsRecipientRefusalsToDistinctBotAPI403s(t *testing.T) {
 	tests := []struct {
 		name string

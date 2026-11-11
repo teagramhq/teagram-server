@@ -12,7 +12,7 @@ access to trusted operators, and keep encrypted backups off the host.
 
 - A Linux host with systemd, a public DNS name such as `server.example.net`,
   and enough disk space for the database, uploaded media, and backups.
-- [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.4 or
+- [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.1 or
   newer from the [Go install guide](https://go.dev/doc/install), GNU make,
   Atlas (see the [migration guide](migrations.md)), Git, OpenSSL, and Caddy 2.8
   or newer from the [Caddy install guide](https://caddyserver.com/docs/install),

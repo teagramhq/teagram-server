@@ -1016,6 +1016,41 @@ func photoThumbSupervisorForStartup(
 	return supervisor
 }
 
+func newPublicBotAPIListener(listener net.Listener, maxConnections int) net.Listener {
+	return botapi.LimitConnectionsGlobally(listener, maxConnections)
+}
+
+func newTailnetBotAPIListener(listener net.Listener, logger *slog.Logger) net.Listener {
+	return botapi.RequireProxyV1(listener, logger)
+}
+
+func serveBotAPIServer(server *http.Server, listener net.Listener, name string, logger *slog.Logger, failures chan<- error) {
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error(name+" Bot API server", "err", err)
+			failures <- fmt.Errorf("%s Bot API server: %w", name, err)
+		}
+	}()
+}
+
+func serveUntilBotAPIError(ctx context.Context, failures <-chan error, serve func(context.Context) error) error {
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- serve(serveCtx) }()
+	select {
+	case err := <-failures:
+		cancel()
+		<-served
+		return err
+	case err := <-served:
+		return err
+	case <-ctx.Done():
+		cancel()
+		return <-served
+	}
+}
+
 func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err := validateServeEnvironment(); err != nil {
 		return err
@@ -1399,6 +1434,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		}()
 	}
 
+	botAPIErrors := make(chan error, 3)
 	if cfg.BotAPIListenAddr != "" {
 		botAPIServer := botapi.NewServerWithHandler(cfg.BotAPIListenAddr, botAPIHandler, log)
 		var botAPILC net.ListenConfig
@@ -1408,11 +1444,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		}
 		botAPILn = botapi.LimitConnectionsPerIP(botAPILn, botapi.DefaultMaxConnectionsPerIP)
 		log.Info("Bot API server listening", "addr", cfg.BotAPIListenAddr)
-		go func() {
-			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("Bot API server", "err", err)
-			}
-		}()
+		serveBotAPIServer(botAPIServer, botAPILn, "loopback", log, botAPIErrors)
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
 			defer cancel()
@@ -1430,13 +1462,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		if err != nil {
 			return fmt.Errorf("public Bot API listen: %w", err)
 		}
-		botAPILn = botapi.LimitConnectionsPerSocketIP(botAPILn, botapi.DefaultMaxConnectionsPerIP)
+		botAPILn = newPublicBotAPIListener(botAPILn, cfg.BotAPIPublicMaxConnections)
 		log.Info("public Bot API server listening", "addr", cfg.BotAPIPublicListenAddr)
-		go func() {
-			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("public Bot API server", "err", err)
-			}
-		}()
+		serveBotAPIServer(botAPIServer, botAPILn, "public", log, botAPIErrors)
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
 			defer cancel()
@@ -1454,13 +1482,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		if err != nil {
 			return fmt.Errorf("tailnet Bot API listen: %w", err)
 		}
-		botAPILn = botapi.RequireProxyV1(botAPILn)
+		botAPILn = newTailnetBotAPIListener(botAPILn, log)
 		log.Info("tailnet Bot API server listening", "addr", cfg.BotAPITailnetListenAddr)
-		go func() {
-			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("tailnet Bot API server", "err", err)
-			}
-		}()
+		serveBotAPIServer(botAPIServer, botAPILn, "tailnet", log, botAPIErrors)
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
 			defer cancel()
@@ -1504,7 +1528,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler, publicClientDiscovery)
 	}
 
-	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
+	return serveUntilBotAPIError(ctx, botAPIErrors, func(ctx context.Context) error {
+		return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
+	})
 }
 
 func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGeneration string) (discovery.Document, discovery.Document, error) {

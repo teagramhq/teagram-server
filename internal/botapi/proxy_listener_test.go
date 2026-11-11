@@ -64,6 +64,11 @@ func socketLimitServer(t *testing.T, limit int) string {
 
 func requiredProxyServer(t *testing.T) string {
 	t.Helper()
+	return requiredProxyServerWithLogger(t, slog.New(slog.DiscardHandler))
+}
+
+func requiredProxyServerWithLogger(t *testing.T, logger *slog.Logger) string {
+	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -71,9 +76,9 @@ func requiredProxyServer(t *testing.T) string {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Remote-Addr", r.RemoteAddr)
 	})
-	srv := botapi.NewServerWithHandler("", handler, slog.New(slog.DiscardHandler))
+	srv := botapi.NewServerWithHandler("", handler, logger)
 	done := make(chan error, 1)
-	go func() { done <- srv.Serve(botapi.RequireProxyV1(ln)) }()
+	go func() { done <- srv.Serve(botapi.RequireProxyV1(ln, logger)) }()
 	t.Cleanup(func() {
 		if err := srv.Close(); err != nil {
 			t.Error(err)
@@ -248,6 +253,80 @@ func TestSocketLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
 	}
 }
 
+func TestGlobalConnectionLimitRejectsAndReleasesReservations(t *testing.T) {
+	underlying, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := botapi.LimitConnectionsGlobally(underlying, 2)
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	clients := make([]net.Conn, 0, 3)
+	accepted := make([]net.Conn, 0, 3)
+	for range 2 {
+		client, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, client)
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Fatalf("accept within limit: %v", err)
+		}
+		accepted = append(accepted, conn)
+	}
+	closeClients := func() {
+		t.Helper()
+		for _, conn := range clients {
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close client: %v", err)
+			}
+		}
+		for _, conn := range accepted {
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close accepted connection: %v", err)
+			}
+		}
+	}
+	t.Cleanup(closeClients)
+
+	for i := range 3 {
+		extra, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := extra.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := extra.Read(make([]byte, 1)); err == nil {
+			t.Fatalf("over-limit connection %d remained open", i+1)
+		} else if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
+			t.Fatalf("over-limit connection %d was not closed: %v", i+1, err)
+		}
+		if err := extra.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close over-limit connection: %v", err)
+		}
+	}
+
+	if err := accepted[0].Close(); err != nil {
+		t.Fatalf("release first reservation: %v", err)
+	}
+	replacement, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients = append(clients, replacement)
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept after a reservation was released: %v", err)
+	}
+	accepted = append(accepted, conn)
+}
+
 func TestRequiredProxyV1ListenerDecodesTailnetPeer(t *testing.T) {
 	addr := requiredProxyServer(t)
 	conn, reader := proxyDial(t, addr, proxyHeader("100.64.1.2"))
@@ -279,6 +358,25 @@ func TestRequiredProxyV1ListenerRejectsMissingPreface(t *testing.T) {
 		t.Fatalf("HTTP request without a PROXY preface returned status %d", response.StatusCode)
 	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		t.Fatalf("connection without a PROXY preface was not closed: %v", err)
+	}
+}
+
+func TestRequiredProxyV1ListenerWarnsWhenPrefaceIsMissing(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	addr := requiredProxyServerWithLogger(t, logger)
+	conn, reader := proxyDial(t, addr, "")
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if response, err := http.ReadResponse(reader, nil); err == nil {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Errorf("close unexpected response body: %v", closeErr)
+		}
+		t.Fatalf("HTTP request without a PROXY preface returned status %d", response.StatusCode)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "rejected tailnet Bot API PROXY preface") {
+		t.Fatalf("missing-preface log = %q, want a warning", got)
 	}
 }
 

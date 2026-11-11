@@ -284,7 +284,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
 			return
 		}
-		h.sendMessage(w, r, botID, method, chatID, text)
+		h.sendMessage(w, r, botID, method, chatID, text, pathPolicy)
 		return
 	}
 	if endpointMethod == "getUpdates" {
@@ -358,7 +358,7 @@ func authBucketKey(r *http.Request, policy listenerPathPolicy) (string, error) {
 	return key, nil
 }
 
-func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int64, method string, chatID int64, text string) {
+func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int64, method string, chatID int64, text string, pathPolicy listenerPathPolicy) {
 	user, exists, err := h.store.UserByID(r.Context(), botID)
 	if err != nil {
 		h.log.Error("Bot API profile lookup failed", "bot_id", botID, "method", method)
@@ -370,17 +370,19 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int6
 		return
 	}
 
-	limit, err := h.store.CheckRateLimit(r.Context(), botID, "message_send", h.messageSendRateLimit)
-	if err != nil {
-		h.log.Error("Bot API rate limit check failed", "bot_id", botID, "method", method)
-		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-		return
-	}
-	if limit != nil {
-		body := rateLimitedMessageBody(limit.Wait)
-		h.log.Warn("Bot API rate limit exceeded", "bot_id", botID, "method", method)
-		h.write(w, http.StatusTooManyRequests, body, botID, method)
-		return
+	if pathPolicy.path != mtproto.ListenerPathTailnet {
+		limit, err := h.store.CheckRateLimit(r.Context(), botID, "message_send", h.messageSendRateLimit)
+		if err != nil {
+			h.log.Error("Bot API rate limit check failed", "bot_id", botID, "method", method)
+			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+			return
+		}
+		if limit != nil {
+			body := rateLimitedMessageBody(limit.Wait)
+			h.log.Warn("Bot API rate limit exceeded", "bot_id", botID, "method", method)
+			h.write(w, http.StatusTooManyRequests, body, botID, method)
+			return
+		}
 	}
 
 	randomID, err := randomMessageID()
@@ -757,6 +759,8 @@ type connectionLimitListener struct {
 	mu          sync.Mutex
 	limit       int
 	readProxyV1 bool
+	global      bool
+	activeTotal int
 	active      map[netip.Addr]int
 	results     chan acceptResult
 	done        chan struct{}
@@ -768,11 +772,15 @@ func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 }
 
 func limitConnections(listener net.Listener, limit int, readProxyV1 bool) net.Listener {
+	return limitConnectionsWithMode(listener, limit, readProxyV1, false)
+}
+
+func limitConnectionsWithMode(listener net.Listener, limit int, readProxyV1, global bool) net.Listener {
 	if limit < 1 {
 		limit = DefaultMaxConnectionsPerIP
 	}
 	l := &connectionLimitListener{
-		Listener: listener, limit: limit, readProxyV1: readProxyV1, active: make(map[netip.Addr]int),
+		Listener: listener, limit: limit, readProxyV1: readProxyV1, global: global, active: make(map[netip.Addr]int),
 		results: make(chan acceptResult), done: make(chan struct{}),
 	}
 	go l.acceptConnections()
@@ -792,11 +800,21 @@ func LimitConnectionsPerSocketIP(listener net.Listener, limit int) net.Listener 
 	return limitConnections(listener, limit, false)
 }
 
+// LimitConnectionsGlobally bounds open connections across the listener without
+// attributing them to the transport peer. Use it behind a shared forwarder.
+func LimitConnectionsGlobally(listener net.Listener, limit int) net.Listener {
+	return limitConnectionsWithMode(listener, limit, false, true)
+}
+
 // RequireProxyV1 requires and decodes a PROXY v1 preface on every accepted
 // connection. Use it only on a listener reachable through a trusted proxy.
-func RequireProxyV1(listener net.Listener) net.Listener {
+func RequireProxyV1(listener net.Listener, logger *slog.Logger) net.Listener {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	l := &requiredProxyV1Listener{
 		Listener: listener,
+		log:      logger,
 		results:  make(chan proxyAcceptResult),
 		done:     make(chan struct{}),
 	}
@@ -807,9 +825,11 @@ func RequireProxyV1(listener net.Listener) net.Listener {
 type requiredProxyV1Listener struct {
 	net.Listener
 
-	results chan proxyAcceptResult
-	done    chan struct{}
-	closed  atomic.Bool
+	log         *slog.Logger
+	results     chan proxyAcceptResult
+	done        chan struct{}
+	closed      atomic.Bool
+	lastWarning atomic.Int64
 }
 
 type proxyAcceptResult struct {
@@ -835,7 +855,11 @@ func (l *requiredProxyV1Listener) acceptConnections() {
 func (l *requiredProxyV1Listener) readProxyV1(conn net.Conn) {
 	parsed, _, err := proxyv1.Read(conn, true, true)
 	if err != nil {
-		slog.Debug("rejected tailnet Bot API PROXY preface", "remote_addr", conn.RemoteAddr().String(), "err", err)
+		now := time.Now().UnixNano()
+		previous := l.lastWarning.Load()
+		if now-previous >= int64(time.Second) && l.lastWarning.CompareAndSwap(previous, now) {
+			l.log.Warn("rejected tailnet Bot API PROXY preface", "remote_addr", conn.RemoteAddr().String(), "err", err)
+		}
 		closeBotConn(conn)
 		return
 	}
@@ -875,6 +899,7 @@ type acceptResult struct {
 	err      error
 	proxied  bool
 	reserved bool
+	global   bool
 }
 
 // Bound loopback connections awaiting a preface before their peer is known.
@@ -893,6 +918,20 @@ func (l *connectionLimitListener) acceptConnections() {
 			}
 		}
 		ip := remoteIP(conn.RemoteAddr().String())
+		if l.global {
+			if !l.reserveGlobal() {
+				closeBotConn(conn)
+				continue
+			}
+			select {
+			case l.results <- acceptResult{conn: conn, reserved: true, global: true}:
+			case <-l.done:
+				l.releaseGlobal()
+				closeBotConn(conn)
+				return
+			}
+			continue
+		}
 		if !l.readProxyV1 {
 			if !l.reserveIP(ip) {
 				closeBotConn(conn)
@@ -964,6 +1003,22 @@ func (l *connectionLimitListener) reserveIP(ip netip.Addr) bool {
 	return true
 }
 
+func (l *connectionLimitListener) reserveGlobal() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.activeTotal >= l.limit {
+		return false
+	}
+	l.activeTotal++
+	return true
+}
+
+func (l *connectionLimitListener) releaseGlobal() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.activeTotal--
+}
+
 func (l *connectionLimitListener) releaseIP(ip netip.Addr) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1002,17 +1057,33 @@ func (l *connectionLimitListener) Accept() (net.Conn, error) {
 		ip := remoteIP(conn.RemoteAddr().String())
 		if l.closed.Load() {
 			if result.reserved {
-				l.releaseIP(ip)
+				l.releaseReservation(result.global, ip)
 			}
 			closeBotConn(conn)
 			return nil, net.ErrClosed
 		}
-		if !result.reserved && !l.reserveIP(ip) {
-			closeBotConn(conn)
-			continue
+		if !result.reserved {
+			var reserved bool
+			if result.global {
+				reserved = l.reserveGlobal()
+			} else {
+				reserved = l.reserveIP(ip)
+			}
+			if !reserved {
+				closeBotConn(conn)
+				continue
+			}
 		}
-		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() { l.releaseIP(ip) }}, nil
+		return &limitedConn{Conn: conn, proxied: result.proxied, release: func() { l.releaseReservation(result.global, ip) }}, nil
 	}
+}
+
+func (l *connectionLimitListener) releaseReservation(global bool, ip netip.Addr) {
+	if global {
+		l.releaseGlobal()
+		return
+	}
+	l.releaseIP(ip)
 }
 
 type limitedConn struct {

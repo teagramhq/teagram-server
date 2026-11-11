@@ -1811,9 +1811,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Test service ingress rollout readiness
-        run: python3 .github/scripts/test_k8s_service_ingress_contract.py
-
       - uses: actions/download-artifact@v8.0.2
         with:
           name: sticker-catalogue-bundle

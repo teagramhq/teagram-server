@@ -39,18 +39,19 @@ type StickerImportMode string
 type RecoveryEmailMode string
 
 const (
-	RegistrationClosed             RegistrationMode  = "closed"
-	RegistrationInvite             RegistrationMode  = "invite"
-	RegistrationOpen               RegistrationMode  = "open"
-	StickerImportOn                StickerImportMode = "on"
-	StickerImportOff               StickerImportMode = "off"
-	RecoveryEmailOff               RecoveryEmailMode = "off"
-	RecoveryEmailContact           RecoveryEmailMode = "contact"
-	DefaultUploadPartTTL                             = 6 * time.Hour
-	DefaultUserInviteMinAccountAge                   = 7 * 24 * time.Hour
-	DefaultAuthKeySweepIdleWindow                    = 24 * time.Hour
-	DefaultAuthKeySweepMaxAge                        = 72 * time.Hour
-	DefaultSignUpTermsOfService                      = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	RegistrationClosed                RegistrationMode  = "closed"
+	RegistrationInvite                RegistrationMode  = "invite"
+	RegistrationOpen                  RegistrationMode  = "open"
+	StickerImportOn                   StickerImportMode = "on"
+	StickerImportOff                  StickerImportMode = "off"
+	RecoveryEmailOff                  RecoveryEmailMode = "off"
+	RecoveryEmailContact              RecoveryEmailMode = "contact"
+	DefaultUploadPartTTL                                = 6 * time.Hour
+	DefaultUserInviteMinAccountAge                      = 7 * 24 * time.Hour
+	DefaultAuthKeySweepIdleWindow                       = 24 * time.Hour
+	DefaultAuthKeySweepMaxAge                           = 72 * time.Hour
+	DefaultBotAPIPublicMaxConnections                   = 1024
+	DefaultSignUpTermsOfService                         = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
 )
 
 // Config holds server configuration.
@@ -94,6 +95,9 @@ type Config struct {
 	BotAPIPublicListenAddr string
 	// BotAPIPublicProxyCIDRs names the forwarders allowed to assert CF-Connecting-IP.
 	BotAPIPublicProxyCIDRs []netip.Prefix
+	// BotAPIPublicMaxConnections caps concurrent public Bot API connections across
+	// the listener, regardless of the shared forwarder's socket address.
+	BotAPIPublicMaxConnections int
 	// BotAPITailnetListenAddr enables the unlimited tailnet Bot API path.
 	BotAPITailnetListenAddr string
 	// AdminOrigin is the fixed Origin accepted by admin login and logout.
@@ -1008,6 +1012,14 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err := validateBrowserOnlyListener(publicWebSocketBrowserOnly, identity.PublicWebSocketListenAddr, "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"); err != nil {
 		return Config{}, err
 	}
+	botAPIPublicMaxConnections := DefaultBotAPIPublicMaxConnections
+	if value := os.Getenv("TG_BOT_API_PUBLIC_MAX_CONNECTIONS"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 {
+			return Config{}, errors.New("TG_BOT_API_PUBLIC_MAX_CONNECTIONS must be a positive integer")
+		}
+		botAPIPublicMaxConnections = parsed
+	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
 		ListenPath:                    listenPath,
@@ -1025,6 +1037,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		BotAPIListenAddr:              os.Getenv("TG_BOT_API_LISTEN_ADDR"),
 		BotAPIPublicListenAddr:        os.Getenv("TG_BOT_API_PUBLIC_LISTEN_ADDR"),
 		BotAPITailnetListenAddr:       os.Getenv("TG_BOT_API_TAILNET_LISTEN_ADDR"),
+		BotAPIPublicMaxConnections:    botAPIPublicMaxConnections,
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
 		ReplicaCount:                  1,

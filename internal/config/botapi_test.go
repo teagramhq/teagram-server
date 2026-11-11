@@ -84,9 +84,11 @@ func TestLoadBotAPIPathListeners(t *testing.T) {
 		public      string
 		tailnet     string
 		proxies     string
+		publicMax   string
 		wantPublic  string
 		wantTailnet string
 		wantProxies []string
+		wantMax     int
 		wantError   bool
 	}{
 		{
@@ -97,8 +99,12 @@ func TestLoadBotAPIPathListeners(t *testing.T) {
 			wantPublic:  "0.0.0.0:2445",
 			wantTailnet: "100.64.0.8:2446",
 			wantProxies: []string{"10.0.0.0/8", "fd00::/8"},
+			wantMax:     config.DefaultBotAPIPublicMaxConnections,
 		},
 		{name: "tailnet path without public path", tailnet: "[fd7a:115c:a1e0::8]:2446", wantTailnet: "[fd7a:115c:a1e0::8]:2446"},
+		{name: "public path custom global connection ceiling", public: "0.0.0.0:2445", proxies: "10.0.0.0/8", publicMax: "512", wantPublic: "0.0.0.0:2445", wantProxies: []string{"10.0.0.0/8"}, wantMax: 512},
+		{name: "public connection ceiling must be positive", publicMax: "0", wantError: true},
+		{name: "public connection ceiling must be an integer", publicMax: "many", wantError: true},
 		{name: "public path requires trusted forwarders", public: "0.0.0.0:2445", wantError: true},
 		{name: "public path rejects hostnames", public: "bot-api.example.test:2445", proxies: "10.0.0.0/8", wantError: true},
 		{name: "public path rejects invalid proxy CIDRs", public: "0.0.0.0:2445", proxies: "0.0.0.0/0", wantError: true},
@@ -120,6 +126,7 @@ func TestLoadBotAPIPathListeners(t *testing.T) {
 			t.Setenv("TG_BOT_API_PUBLIC_LISTEN_ADDR", tt.public)
 			t.Setenv("TG_BOT_API_TAILNET_LISTEN_ADDR", tt.tailnet)
 			t.Setenv("TG_BOT_API_PUBLIC_PROXY_CIDRS", tt.proxies)
+			t.Setenv("TG_BOT_API_PUBLIC_MAX_CONNECTIONS", tt.publicMax)
 			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
 			t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
@@ -139,6 +146,13 @@ func TestLoadBotAPIPathListeners(t *testing.T) {
 			}
 			if cfg.BotAPITailnetListenAddr != tt.wantTailnet {
 				t.Errorf("BotAPITailnetListenAddr = %q, want %q", cfg.BotAPITailnetListenAddr, tt.wantTailnet)
+			}
+			wantMax := tt.wantMax
+			if wantMax == 0 {
+				wantMax = config.DefaultBotAPIPublicMaxConnections
+			}
+			if cfg.BotAPIPublicMaxConnections != wantMax {
+				t.Errorf("BotAPIPublicMaxConnections = %d, want %d", cfg.BotAPIPublicMaxConnections, wantMax)
 			}
 			if len(cfg.BotAPIPublicProxyCIDRs) != len(tt.wantProxies) {
 				t.Fatalf("BotAPIPublicProxyCIDRs = %v, want %v", cfg.BotAPIPublicProxyCIDRs, tt.wantProxies)
