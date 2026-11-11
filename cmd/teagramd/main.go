@@ -1306,7 +1306,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, stickerSets, notifyMetrics)
 	var botAPIHandler http.Handler
 	var botAPIUpdateNotifier botUpdateNotifier
-	if cfg.BotAPIListenAddr != "" {
+	if cfg.BotAPIListenAddr != "" || cfg.BotAPIPublicListenAddr != "" || cfg.BotAPITailnetListenAddr != "" {
 		handler := botapi.NewHandler(st, log, cfg.RateLimits.MessageSend)
 		botAPIHandler = handler
 		botAPIUpdateNotifier = handler
@@ -1418,6 +1418,53 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			defer cancel()
 			if err := botAPIServer.Shutdown(shutdownCtx); err != nil {
 				log.Error("Bot API server shutdown", "err", err)
+			}
+		}()
+	}
+
+	if cfg.BotAPIPublicListenAddr != "" {
+		publicHandler := botapi.WithPublicPath(botAPIHandler, cfg.BotAPIPublicProxyCIDRs)
+		botAPIServer := botapi.NewServerWithHandler(cfg.BotAPIPublicListenAddr, publicHandler, log)
+		var botAPILC net.ListenConfig
+		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPIPublicListenAddr)
+		if err != nil {
+			return fmt.Errorf("public Bot API listen: %w", err)
+		}
+		botAPILn = botapi.LimitConnectionsPerSocketIP(botAPILn, botapi.DefaultMaxConnectionsPerIP)
+		log.Info("public Bot API server listening", "addr", cfg.BotAPIPublicListenAddr)
+		go func() {
+			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("public Bot API server", "err", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
+			defer cancel()
+			if err := botAPIServer.Shutdown(shutdownCtx); err != nil {
+				log.Error("public Bot API server shutdown", "err", err)
+			}
+		}()
+	}
+
+	if cfg.BotAPITailnetListenAddr != "" {
+		tailnetHandler := botapi.WithTailnetPath(botAPIHandler)
+		botAPIServer := botapi.NewServerWithHandler(cfg.BotAPITailnetListenAddr, tailnetHandler, log)
+		var botAPILC net.ListenConfig
+		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPITailnetListenAddr)
+		if err != nil {
+			return fmt.Errorf("tailnet Bot API listen: %w", err)
+		}
+		log.Info("tailnet Bot API server listening", "addr", cfg.BotAPITailnetListenAddr)
+		go func() {
+			if err := botAPIServer.Serve(botAPILn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("tailnet Bot API server", "err", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
+			defer cancel()
+			if err := botAPIServer.Shutdown(shutdownCtx); err != nil {
+				log.Error("tailnet Bot API server shutdown", "err", err)
 			}
 		}()
 	}

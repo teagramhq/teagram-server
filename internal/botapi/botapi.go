@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/proxyv1"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -146,6 +147,37 @@ func NewServerWithHandler(addr string, h http.Handler, logger *slog.Logger) *htt
 
 type proxyPeerContextKey struct{}
 
+type listenerPathContextKey struct{}
+
+type listenerPathPolicy struct {
+	path           mtproto.ListenerPath
+	public         bool
+	trustedProxies []netip.Prefix
+}
+
+// WithPublicPath applies public Bot API request limits. CF-Connecting-IP is
+// used only when the socket peer belongs to trustedForwarders.
+func WithPublicPath(next http.Handler, trustedForwarders []netip.Prefix) http.Handler {
+	return withListenerPath(next, listenerPathPolicy{
+		path:           mtproto.ListenerPathLimited,
+		public:         true,
+		trustedProxies: append([]netip.Prefix(nil), trustedForwarders...),
+	})
+}
+
+// WithTailnetPath marks requests as arriving on the configured tailnet
+// listener. Client headers cannot grant this policy.
+func WithTailnetPath(next http.Handler) http.Handler {
+	return withListenerPath(next, listenerPathPolicy{path: mtproto.ListenerPathTailnet})
+}
+
+func withListenerPath(next http.Handler, policy listenerPathPolicy) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), listenerPathContextKey{}, policy)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var botID int64
 	method := "unknown"
@@ -156,22 +188,29 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Preserve network buckets for direct clients; Serve authenticates the
-	// individual tailnet peer named by a trusted PROXY header.
-	key := sourceNetwork(r.RemoteAddr)
-	if r.Context().Value(proxyPeerContextKey{}) != nil {
-		key = remoteIP(r.RemoteAddr).String()
+	pathPolicy := listenerPathPolicy{}
+	if configured, ok := r.Context().Value(listenerPathContextKey{}).(listenerPathPolicy); ok {
+		pathPolicy = configured
 	}
-	if !h.limiter.reserve(key, time.Now()) {
-		h.rateLimited(w, botID, method)
-		return
-	}
-	authAttemptReserved := true
-	defer func() {
-		if authAttemptReserved {
-			h.limiter.refund(key, time.Now())
+	authAttemptReserved := false
+	if pathPolicy.path != mtproto.ListenerPathTailnet {
+		key, err := authBucketKey(r, pathPolicy)
+		if err != nil {
+			h.log.Warn("invalid Bot API CF-Connecting-IP header", "err", err)
+			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
+			return
 		}
-	}()
+		if !h.limiter.reserve(key, time.Now()) {
+			h.rateLimited(w, botID, method)
+			return
+		}
+		authAttemptReserved = true
+		defer func() {
+			if authAttemptReserved {
+				h.limiter.refund(key, time.Now())
+			}
+		}()
+	}
 	unauthorized := func(id int64, requestMethod string) {
 		authAttemptReserved = false
 		h.unauthorized(w, id, requestMethod)
@@ -291,6 +330,32 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	encoded = append(encoded, '\n')
 	h.log.Info("Bot API request", "bot_id", botID, "method", method)
 	h.write(w, http.StatusOK, encoded, botID, method)
+}
+
+func authBucketKey(r *http.Request, policy listenerPathPolicy) (string, error) {
+	if policy.public {
+		peer := remoteIP(r.RemoteAddr)
+		for _, trusted := range policy.trustedProxies {
+			if !peer.IsValid() || !trusted.Contains(peer) {
+				continue
+			}
+			values := r.Header.Values("Cf-Connecting-Ip")
+			if len(values) != 1 {
+				return "", errors.New("CF-Connecting-IP must appear exactly once")
+			}
+			clientIP, err := netip.ParseAddr(values[0])
+			if err != nil || !clientIP.IsValid() || clientIP.Zone() != "" {
+				return "", errors.New("CF-Connecting-IP must be exactly one IP address")
+			}
+			return "public:" + clientIP.Unmap().String(), nil
+		}
+		return "public-peer:" + sourceNetwork(r.RemoteAddr), nil
+	}
+	key := sourceNetwork(r.RemoteAddr)
+	if r.Context().Value(proxyPeerContextKey{}) != nil {
+		key = remoteIP(r.RemoteAddr).String()
+	}
+	return key, nil
 }
 
 func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int64, method string, chatID int64, text string) {
@@ -689,20 +754,25 @@ func remoteIP(remoteAddr string) netip.Addr {
 type connectionLimitListener struct {
 	net.Listener
 
-	mu      sync.Mutex
-	limit   int
-	active  map[netip.Addr]int
-	results chan acceptResult
-	done    chan struct{}
-	closed  atomic.Bool
+	mu          sync.Mutex
+	limit       int
+	readProxyV1 bool
+	active      map[netip.Addr]int
+	results     chan acceptResult
+	done        chan struct{}
+	closed      atomic.Bool
 }
 
 func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
+	return limitConnections(listener, limit, true)
+}
+
+func limitConnections(listener net.Listener, limit int, readProxyV1 bool) net.Listener {
 	if limit < 1 {
 		limit = DefaultMaxConnectionsPerIP
 	}
 	l := &connectionLimitListener{
-		Listener: listener, limit: limit, active: make(map[netip.Addr]int),
+		Listener: listener, limit: limit, readProxyV1: readProxyV1, active: make(map[netip.Addr]int),
 		results: make(chan acceptResult), done: make(chan struct{}),
 	}
 	go l.acceptConnections()
@@ -713,6 +783,13 @@ func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 // source IP. Rejected connections are closed before the HTTP server sees them.
 func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	return limitConnectionsPerIP(listener, limit)
+}
+
+// LimitConnectionsPerSocketIP bounds open HTTP connections by their transport
+// peer and does not parse PROXY protocol. Use it on the public HTTP path, where
+// only the configured HTTP forwarder may identify the client address.
+func LimitConnectionsPerSocketIP(listener net.Listener, limit int) net.Listener {
+	return limitConnections(listener, limit, false)
 }
 
 type acceptResult struct {
@@ -738,6 +815,20 @@ func (l *connectionLimitListener) acceptConnections() {
 			}
 		}
 		ip := remoteIP(conn.RemoteAddr().String())
+		if !l.readProxyV1 {
+			if !l.reserveIP(ip) {
+				closeBotConn(conn)
+				continue
+			}
+			select {
+			case l.results <- acceptResult{conn: conn, reserved: true}:
+			case <-l.done:
+				l.releaseIP(ip)
+				closeBotConn(conn)
+				return
+			}
+			continue
+		}
 		// A direct connection's transport address is its final client address.
 		// Reserve it before reading so idle sockets count against the same cap.
 		reserved := !ip.IsLoopback()

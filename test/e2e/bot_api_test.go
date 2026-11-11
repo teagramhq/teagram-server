@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -605,6 +606,63 @@ func testSmokeBotAPIGetMe(t *testing.T) {
 	}
 	if _, err := io.Copy(io.Discard, response.Body); err != nil {
 		t.Fatalf("read Bot API response: %v", err)
+	}
+}
+
+func testSmokeBotAPIPublicPathGetMe(t *testing.T) {
+	t.Helper()
+	testSmokeBotAPIPathGetMe(t, func(handler http.Handler) http.Handler {
+		return botapi.WithPublicPath(handler, []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")})
+	}, "203.0.113.7")
+}
+
+func testSmokeBotAPITailnetPathGetMe(t *testing.T) {
+	t.Helper()
+	testSmokeBotAPIPathGetMe(t, botapi.WithTailnetPath, "")
+}
+
+func testSmokeBotAPIPathGetMe(t *testing.T, wrap func(http.Handler) http.Handler, cfConnectingIP string) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	bot, token, err := f.store.CreateBot(f.ctx, "smoke_path_bot", "Path bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	handler := wrap(botapi.NewHandler(f.store, slog.New(slog.DiscardHandler), store.RateLimitConfig{}))
+	serverURL := startSmokeBotAPIServerWithHandler(t, f, handler)
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, serverURL+"/bot"+token+"/getMe", nil)
+	if err != nil {
+		t.Fatalf("build Bot API request: %v", err)
+	}
+	if cfConnectingIP != "" {
+		request.Header.Set("Cf-Connecting-Ip", cfConnectingIP)
+	}
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("Bot API request: %v", err)
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close Bot API response: %v", err)
+		}
+	}()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Bot API status = %d, want 200", response.StatusCode)
+	}
+	var got struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			ID        int64  `json:"id"`
+			IsBot     bool   `json:"is_bot"`
+			FirstName string `json:"first_name"`
+			Username  string `json:"username"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode Bot API response: %v", err)
+	}
+	if !got.OK || got.Result.ID != bot.ID || !got.Result.IsBot || got.Result.FirstName != "Path bot" || got.Result.Username != "smoke_path_bot" {
+		t.Fatalf("getMe result = %+v, want bot profile id %d", got, bot.ID)
 	}
 }
 

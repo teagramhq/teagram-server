@@ -38,6 +38,8 @@ SMOKE_SCENARIOS=(
   basic-group-reactions
   custom-emoji-actions
   bot-api-get-me
+  bot-api-public-path-get-me
+  bot-api-tailnet-path-get-me
   bot-api-get-updates-stock-client
   bot-api-send-message
   channel-reactions

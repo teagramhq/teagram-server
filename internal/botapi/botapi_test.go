@@ -1,6 +1,7 @@
 package botapi_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -850,6 +852,152 @@ func TestUnauthorizedRateLimitIsSharedBySourceNetwork(t *testing.T) {
 	if st.lookupCount != authAttemptLimit+1 {
 		t.Fatalf("different-network token lookups = %d, want %d", st.lookupCount, authAttemptLimit+1)
 	}
+}
+
+func TestPublicPathUsesTrustedCFConnectingIPForAuthBudget(t *testing.T) {
+	st := newFakeStore()
+	st.lookupErrs = map[string]error{"invalid": store.ErrBotTokenNotFound}
+	handler := botapi.WithPublicPath(
+		botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{}),
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	)
+	for range authAttemptLimit {
+		if status := serveInvalidBotRequest(t, handler, "10.0.0.2:2445", "203.0.113.7"); status != http.StatusUnauthorized {
+			t.Fatalf("request before budget exhaustion status = %d, want 401", status)
+		}
+	}
+	if status := serveInvalidBotRequest(t, handler, "10.0.0.2:2445", "203.0.113.7"); status != http.StatusTooManyRequests {
+		t.Fatalf("exhausted client status = %d, want 429", status)
+	}
+	if status := serveInvalidBotRequest(t, handler, "10.0.0.2:2445", "203.0.113.8"); status != http.StatusUnauthorized {
+		t.Fatalf("other client status = %d, want 401", status)
+	}
+}
+
+func TestPublicPathIgnoresCFConnectingIPOutsideTrustedForwarders(t *testing.T) {
+	st := newFakeStore()
+	st.lookupErrs = map[string]error{"invalid": store.ErrBotTokenNotFound}
+	handler := botapi.WithPublicPath(
+		botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{}),
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	)
+	for range authAttemptLimit {
+		if status := serveInvalidBotRequest(t, handler, "198.51.100.2:2445", "203.0.113.7"); status != http.StatusUnauthorized {
+			t.Fatalf("untrusted source request status = %d, want 401", status)
+		}
+	}
+	if status := serveInvalidBotRequest(t, handler, "10.0.0.2:2445", "203.0.113.7"); status != http.StatusUnauthorized {
+		t.Fatalf("trusted source with same client header status = %d, want 401", status)
+	}
+}
+
+func TestPublicPathRejectsMissingOrMalformedTrustedClientAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "missing"},
+		{name: "multiple", values: []string{"203.0.113.7", "203.0.113.8"}},
+		{name: "invalid", values: []string{"203.0.113.7, 203.0.113.8"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			handler := botapi.WithPublicPath(
+				botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{}),
+				[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+			)
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/botinvalid/getMe", nil)
+			request.RemoteAddr = "10.0.0.2:2445"
+			for _, value := range tc.values {
+				request.Header.Add("Cf-Connecting-Ip", value)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.Code)
+			}
+			if st.lookupCount != 0 {
+				t.Fatalf("invalid address reached token lookup %d times", st.lookupCount)
+			}
+		})
+	}
+}
+
+func TestTailnetPathExemptsRequestAndConnectionLimits(t *testing.T) {
+	st := newFakeStore()
+	st.lookupErrs = map[string]error{"invalid": store.ErrBotTokenNotFound}
+	handler := botapi.WithTailnetPath(
+		botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{}),
+	)
+	server := botapi.NewServerWithHandler("", handler, slog.New(slog.DiscardHandler))
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(listener) }()
+	connections := make([]net.Conn, 0, botapi.DefaultMaxConnectionsPerIP+1)
+	defer func() {
+		for _, conn := range connections {
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Error(err)
+			}
+		}
+		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Error(err)
+		}
+		if err := <-serveDone; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve: %v", err)
+		}
+	}()
+
+	for range botapi.DefaultMaxConnectionsPerIP + 1 {
+		dialer := net.Dialer{Timeout: 2 * time.Second}
+		conn, err := dialer.DialContext(context.Background(), "tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial tailnet connection %d: %v", len(connections)+1, err)
+		}
+		connections = append(connections, conn)
+		if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if status := sendInvalidBotRequest(t, conn); status != http.StatusUnauthorized {
+			t.Fatalf("connection %d status = %d, want 401", len(connections), status)
+		}
+	}
+	for range authAttemptLimit + 1 {
+		if status := sendInvalidBotRequest(t, connections[0]); status != http.StatusUnauthorized {
+			t.Fatalf("tailnet request status = %d, want 401", status)
+		}
+	}
+}
+
+func serveInvalidBotRequest(t *testing.T, handler http.Handler, remoteAddr, cfConnectingIP string) int {
+	t.Helper()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/botinvalid/getMe", nil)
+	request.RemoteAddr = remoteAddr
+	if cfConnectingIP != "" {
+		request.Header.Set("Cf-Connecting-Ip", cfConnectingIP)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response.Code
+}
+
+func sendInvalidBotRequest(t *testing.T, conn net.Conn) int {
+	t.Helper()
+	if _, err := io.WriteString(conn, "GET /botinvalid/getMe HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read Bot API response: %v", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode
 }
 
 func TestAdminCookieDoesNotAuthenticateBotAPI(t *testing.T) {

@@ -42,6 +42,26 @@ func proxyServer(t *testing.T, limit int, remote string) string {
 	return ln.Addr().String()
 }
 
+func socketLimitServer(t *testing.T, limit int) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := botapi.NewServer("", newFakeStore(), slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(botapi.LimitConnectionsPerSocketIP(ln, limit)) }()
+	t.Cleanup(func() {
+		if err := srv.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve: %v", err)
+		}
+	})
+	return ln.Addr().String()
+}
+
 type overrideListener struct {
 	net.Listener
 
@@ -187,6 +207,21 @@ func TestProxyHeaderFromNonLoopbackRejected(t *testing.T) {
 		t.Fatalf("forged header returned HTTP %d", response.StatusCode)
 	} else if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		t.Fatalf("forged connection not closed: %v", err)
+	}
+}
+
+func TestSocketLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
+	addr := socketLimitServer(t, 10)
+	_, reader := proxyDial(t, addr, proxyHeader("203.0.113.7")+"GET /invalid HTTP/1.1\r\nHost: example\r\n\r\n")
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read HTTP response after PROXY preface: %v", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PROXY preface returned HTTP %d, want HTTP 400 from the HTTP parser", response.StatusCode)
 	}
 }
 
