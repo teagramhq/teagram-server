@@ -497,14 +497,10 @@ cannot add, replace, or remove an email, and they do not change the password.
 Switching to `off` stops future email writes and responses while preserving
 existing rows; a later password set or change can overwrite the row with NULL.
 Switching back to `contact` exposes any retained row again and does not backfill
-missing emails. There is no bulk erase. The local `teagramd admin set-password`
-command changes the password verifier and leaves its recovery-email row
-untouched.
+missing emails. There is no bulk erase.
 
 An operator can read `contact` emails from the database. The verifier is sealed
-at rest; the email is not. The email is not proof of identity: authenticate a
-reset requester through a separate channel or factor before using
-`teagramd admin set-password`. A database dump made before switching to `off`
+at rest; the email is not. A database dump made before switching to `off`
 continues to contain emails stored at dump time. A slow password upsert can
 also include bound values in the slow-query log.
 
@@ -626,44 +622,11 @@ verifier and a closed, unassigned administration singleton. A retry after a
 successful assignment is a no-op; account, username, and verifier data are
 never created or changed.
 
-### 5e. Reset an existing username password from the local CLI
+### 5e. Existing username password command
 
-`teagramd admin set-password` is a local operator command. It has no RPC or
-admin-dashboard route. Run it inside the deployment container with a protected
-file on stdin; it refuses terminal input, password flags, empty input, and
-multi-line input. The command accepts one line and removes one trailing LF or
-CRLF. It does not validate registration policy or start server listeners, so it
-also works when `TG_REGISTRATION=open`.
-
-Create a private credential file on the operator workstation, then pass it to
-the production pod through stdin:
-
-```bash
-install -d -m 0700 "$HOME/teagram-password-reset"
-umask 077
-openssl rand -base64 24 > "$HOME/teagram-password-reset/tester1.password"
-chmod 0600 "$HOME/teagram-password-reset/tester1.password"
-kubectl exec --namespace teagram -i statefulset/teagramd -- \
-  teagramd admin set-password --username tester1 \
-  < "$HOME/teagram-password-reset/tester1.password"
-```
-
-The handle may be supplied with or without `@`, and matching is ASCII
-case-insensitive. Success writes only the canonical handle and user ID to
-stderr. The new password must not appear in argv, environment variables, shell
-history, logs, issue comments, or pull requests. Keep the credential file
-private; hand it to the account owner over the deployment's
-approved private channel, wait for login confirmation, then remove it.
-
-Before a production reset, take a recoverable PostgreSQL backup containing the
-current `public.user_passwords` row and test the restore procedure in an
-isolated database. If the backup tool cannot filter individual rows, back up
-the whole table rather than relying on an unsupported row-filter option. Keep
-the backup root-only and the encryption master key under its separate secret
-handling policy. If login verification fails, restore only the affected row in
-a reviewed transaction, verify that its old verifier decrypts with the original
-master key, and confirm the prior login before removing the backup. Do not
-blindly replay a whole-table dump into a live database.
+`teagramd admin set-password` is a local operator command with no RPC or
+admin-dashboard route. It changes the password verifier and leaves its
+recovery-email row untouched.
 
 ## 6. Supported Teagram clients
 
