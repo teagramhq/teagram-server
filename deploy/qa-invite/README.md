@@ -1,6 +1,6 @@
 # Invite-mode QA stack
 
-This is an isolated Compose project on the teagram-demo LXC. It owns its
+This isolated Compose project shares a host with the public demo but owns its
 PostgreSQL and server identity volumes, its internal-only Docker network, and
 its TLS/WebSocket proxy. It publishes only `10.96.46.70:443`; the public demo's
 PostgreSQL, edge, HAProxy, Cloudflare Tunnel, and release state are untouched.

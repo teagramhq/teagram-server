@@ -633,7 +633,7 @@ recovery-email row untouched.
 | Client | Status |
 |---|---|
 | Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |
-| Teagram Web | Supports username/password sign-in to its configured server. It does not use phone-number or QR sign-in. |
+| Teagram Web | Username/password sign-in is in progress and does not work yet. |
 | Stock Telegram clients | Unsupported. They use Telegram production DC addresses and RSA keys. |
 
 Other Teagram clients must use the server advertised address and DC id, and

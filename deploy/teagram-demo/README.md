@@ -1,11 +1,13 @@
 # Public demo deployment
 
-The public demo is a separate Compose deployment with its own PostgreSQL,
-identity, auth-key encryption, Turnstile, local blob storage, network state,
-checkout, and deployment credentials. It is not the production server stack
-and does not describe production storage or operations. Current production
-runs on k3s with RustFS; see the [deployment guide](../k8s/README.md). Keep the
-demo's data and credentials separate from production resources.
+The public demo is a separate Compose deployment on a dedicated LXC host, with
+its own PostgreSQL, identity, auth-key encryption, Turnstile, local blob
+storage, network state, checkout, and deployment credentials. Keep its data,
+volumes, identity, secrets, and deployment credentials separate from the
+development and production environments. The legacy `ROLLOUT_RUNNER_*`
+Turnstile helper described below is retired; current production runs on k3s
+with RustFS, as described in the
+[deployment guide](../k8s/README.md).
 
 The install script waits until the public client config exposes
 `wss://demo.teagram.io/apiws` and the tracked API seeder is ready. It keeps the
@@ -14,8 +16,8 @@ content, restored the demo settings, and verified the Turnstile gate.
 
 ## LXC prerequisites
 
-The Steward provisions the separate `teagram-demo` Incus LXC and its network
-policy. Required layout and policy:
+The demo runs on a dedicated LXC host with its own network policy. Required
+layout and policy:
 
 - Root-owned checkout at `/opt/teagram-demo`, branch `main`.
 - Incus `teagram-demo` on charlie, Debian 13, with `limits.cpu=1`,
@@ -393,8 +395,13 @@ it, it saves and verifies `authorized_keys` under the root-only
 separate root channel if the menu must be rolled back. The Gatus definitions
 in `gatus.yaml` are HTTPS probes and do not use an SSH key.
 
-The reviewed `turnstile-signin-on` and `turnstile-signin-off` ops scripts change
-only `TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
+### Retired Turnstile helper
+
+The demo-specific procedures below use the legacy `ROLLOUT_RUNNER_*` helper
+and are retained as historical reference. Current production runs on k3s, as
+described in the [deployment guide](../k8s/README.md). The reviewed
+`turnstile-signin-on` and `turnstile-signin-off` demo ops scripts change only
+`TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
 `ROLLOUT_RUNNER_ADDED_ENV` path for the first assignment and the
 `ROLLOUT_RUNNER_CHANGED_ENV` path for later boolean changes. Each change saves
 the prior root-only `.env` under

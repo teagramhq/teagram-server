@@ -106,15 +106,16 @@ modification, not the S3 request channel or service availability.
 The server retains a compatibility mode for older plaintext S3 objects. A
 persisted mode record selects whether the S3 store reads and writes raw objects
 or the encrypted envelope; media-key presence alone does not prove that the
-existing corpus is encrypted. The current k3s pod mounts
-`/run/teagramd/blob-mode` read-only, so its contents are runtime state and
-cannot be inferred from the manifests or this repository. The old Compose-era
-publisher and cutover instructions are retired; do not edit or publish these
-records manually.
-
-When a persisted record selects the legacy plaintext mode, an object-store
-reader or network observer can read media bytes. A transition to encrypted
-serving mode requires verified encrypted copies before the mode record changes.
+existing corpus is encrypted. The `s3-accepted` record selects this legacy
+plaintext mode even when media keys are present. The live corpus may still be
+governed by that record; in that state, existing media and new S3 writes are
+raw objects. An object-store reader or network observer can read their media
+bytes. The current k3s pod mounts `/run/teagramd/blob-mode` read-only, so its
+contents are runtime state and cannot be inferred from the manifests or this
+repository. A transition to encrypted serving mode requires verified
+encrypted copies before the mode record changes. The old Compose-era publisher
+and cutover instructions are retired; do not edit or publish these records
+manually.
 Fresh S3 stores without a plaintext-mode record require the media key ring and
 fail startup if it is missing; the server does not silently select plaintext
 mode. See the [k3s deployment guide](../deploy/k8s/README.md) for the current
