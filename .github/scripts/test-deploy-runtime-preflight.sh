@@ -59,6 +59,12 @@ case "$*" in
   *'config view --minify --output jsonpath={.clusters[0].cluster.server}')
     printf '%s\n' "$DEPLOY_RUNTIME_API_SERVER"
     ;;
+  *'config view --minify --output jsonpath={.clusters[0].cluster.certificate-authority-data}')
+    printf '%s\n' "$DEPLOY_RUNTIME_CA_DATA"
+    ;;
+  *'config view --minify --output jsonpath={.clusters[0].cluster.insecure-skip-tls-verify}')
+    printf '%s\n' "$DEPLOY_RUNTIME_INSECURE_SKIP"
+    ;;
   'auth can-i '*) printf '%s\n' "${DEPLOY_RUNTIME_CAN_I:-yes}" ;;
   'logs job/'*) printf '%s\n' "${DEPLOY_RUNTIME_BACKUP_LOG:-backup=verified path=/backups/teagram-20261110T010203Z-ci.dump bytes=17 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
   *) ;;
@@ -74,7 +80,9 @@ export DEPLOY_SHA=0123456789abcdef0123456789abcdef01234567
 export GH_TOKEN=test-token
 export DEPLOY_RUNTIME_KUBECTL_LOG="$tmp_dir/kubectl.log"
 export DEPLOY_RUNTIME_ATTESTATION_LOG="$tmp_dir/attestations.log"
-export DEPLOY_RUNTIME_API_SERVER=https://127.0.0.1:6443
+export DEPLOY_RUNTIME_API_SERVER=https://teagram.tailaa4918.ts.net:6443
+export DEPLOY_RUNTIME_CA_DATA=Y2x1c3Rlci1jYQ==
+export DEPLOY_RUNTIME_INSECURE_SKIP=''
 export KUBECONFIG_CONTENT=fixture-kubeconfig
 export BACKUP_JOB=postgres-backup-predeploy-123456-1
 : > "$DEPLOY_RUNTIME_KUBECTL_LOG"
@@ -154,14 +162,30 @@ extract_step 'Install the restricted cluster kubeconfig' "$tmp_dir/kubeconfig.sh
 : > "$tmp_dir/kubeconfig-output"
 GITHUB_ENV="$tmp_dir/kubeconfig-env" GITHUB_OUTPUT="$tmp_dir/kubeconfig-output" \
   bash "$tmp_dir/kubeconfig.sh"
+expected_host='teagram.tailaa4918.ts.net'
 [[ "$(stat -c '%a' "$RUNNER_TEMP/teagram-k3s.kubeconfig")" == 600 &&
   "$(cat "$tmp_dir/kubeconfig-env")" == "KUBECONFIG=$RUNNER_TEMP/teagram-k3s.kubeconfig" &&
-  "$(cat "$tmp_dir/kubeconfig-output")" == api_host=127.0.0.1 ]] ||
+  "$(cat "$tmp_dir/kubeconfig-output")" == "api_host=$expected_host" ]] ||
   fail 'kubeconfig installation or API host parsing produced an unexpected result'
 if DEPLOY_RUNTIME_API_SERVER=https://:6443 \
   GITHUB_ENV="$tmp_dir/kubeconfig-env" GITHUB_OUTPUT="$tmp_dir/kubeconfig-output" \
   bash "$tmp_dir/kubeconfig.sh" >"$tmp_dir/bad-host.out" 2>&1; then
   fail 'kubeconfig host parsing accepted an empty API host'
+fi
+if DEPLOY_RUNTIME_API_SERVER=https://other.example:6443 \
+  GITHUB_ENV="$tmp_dir/kubeconfig-env" GITHUB_OUTPUT="$tmp_dir/kubeconfig-output" \
+  bash "$tmp_dir/kubeconfig.sh" >"$tmp_dir/wrong-endpoint.out" 2>&1; then
+  fail 'kubeconfig validation accepted a non-tailnet API endpoint'
+fi
+if DEPLOY_RUNTIME_CA_DATA='' \
+  GITHUB_ENV="$tmp_dir/kubeconfig-env" GITHUB_OUTPUT="$tmp_dir/kubeconfig-output" \
+  bash "$tmp_dir/kubeconfig.sh" >"$tmp_dir/missing-ca.out" 2>&1; then
+  fail 'kubeconfig validation accepted missing cluster CA data'
+fi
+if DEPLOY_RUNTIME_INSECURE_SKIP=true \
+  GITHUB_ENV="$tmp_dir/kubeconfig-env" GITHUB_OUTPUT="$tmp_dir/kubeconfig-output" \
+  bash "$tmp_dir/kubeconfig.sh" >"$tmp_dir/insecure-tls.out" 2>&1; then
+  fail 'kubeconfig validation accepted insecure TLS verification'
 fi
 
 extract_step 'Validate the production release manifest' "$tmp_dir/preflight.sh"
