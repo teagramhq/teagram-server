@@ -76,15 +76,19 @@ function patchBrowserForTest(t, globals, {
   return {browser, browserPath, observation};
 }
 
-function peerSelectionHarness(t, states, {loseFirstLocatorMatch = false} = {}) {
+function peerSelectionHarness(t, states, {
+  advanceStateAfterUniqueWait = false,
+  locatorCountError,
+  waitError,
+} = {}) {
   let stateIndex = 0;
   let selectedPeerId;
-  let locatorCountCalls = 0;
+  let usernameLocatorGetAttributeCalls = 0;
   const visible = (row) => ({
     textContent: row.text,
     dataset: {peerId: row.peerId},
     display: row.display || 'block',
-    getAttribute: (name) => name === 'data-peer-id' ? row.peerId : null,
+    getAttribute: (name) => name === 'data-peer-id' ? row.peerId ?? null : null,
     getBoundingClientRect: () => ({width: 120, height: 40}),
   });
   const document = {querySelectorAll: () => states[stateIndex].map(visible)};
@@ -93,22 +97,35 @@ function peerSelectionHarness(t, states, {loseFirstLocatorMatch = false} = {}) {
     async waitFor() {},
     async fill() {},
   };
+  const matchingRows = ({hasText, peerId} = {}) => states[stateIndex].filter((row) => {
+    if(row.display === 'none' || row.visibility === 'hidden') return false;
+    if(hasText && !row.text.toLowerCase().includes(hasText.toLowerCase())) return false;
+    if(peerId && row.peerId !== peerId) return false;
+    return true;
+  });
+  const makeRowLocator = (options = {}) => ({
+    first() { return this; },
+    async count() {
+      if(locatorCountError) throw locatorCountError;
+      return matchingRows(options).length;
+    },
+    async getAttribute(name) {
+      if(options.hasText) usernameLocatorGetAttributeCalls++;
+      const matches = matchingRows(options);
+      if(matches.length > 1) throw new Error('strict mode violation: more than one peer row');
+      return name === 'data-peer-id' ? matches[0]?.peerId ?? null : null;
+    },
+    async click() {
+      const matches = matchingRows(options);
+      if(matches.length === 0) throw new Error('peer row disappeared before click');
+      selectedPeerId = matches[0].peerId;
+    },
+  });
   const rows = {
     first() { return this; },
     async waitFor() {},
     filter({hasText}) {
-      const matches = () => states[stateIndex].filter((row) => row.display !== 'none' && row.text.includes(hasText));
-      return {
-        async count() {
-          if(loseFirstLocatorMatch && locatorCountCalls++ === 0) {
-            stateIndex = Math.min(stateIndex + 1, states.length - 1);
-            return 0;
-          }
-          return matches().length;
-        },
-        async getAttribute(name) { return name === 'data-peer-id' ? matches()[0]?.peerId : null; },
-        async click() { selectedPeerId = matches()[0]?.peerId; },
-      };
+      return makeRowLocator({hasText});
     },
     async count() { return states[stateIndex].length; },
     nth(index) {
@@ -120,18 +137,35 @@ function peerSelectionHarness(t, states, {loseFirstLocatorMatch = false} = {}) {
     window: {getComputedStyle: (element) => ({display: element.display, visibility: 'visible'})},
   }, {exposePeerSelection: true});
   const page = {
-    locator(selector) { return selector === '#column-left .input-search-input' ? input : rows; },
+    locator(selector) {
+      if(selector === '#column-left .input-search-input') return input;
+      const peerId = selector.match(/\[data-peer-id="([^"]+)"\]/)?.[1];
+      return peerId ? makeRowLocator({peerId}) : rows;
+    },
     async waitForFunction(predicate, args) {
+      if(waitError) throw waitError;
       while(stateIndex < states.length) {
-        if(predicate(args)) return;
+        const result = predicate(args);
+        if(result) {
+          if(advanceStateAfterUniqueWait) stateIndex = Math.min(stateIndex + 1, states.length - 1);
+          return {jsonValue: async() => result, dispose: async() => {}};
+        }
         if(stateIndex === states.length - 1) break;
         stateIndex++;
       }
-      throw new Error('search did not reach the requested peer state');
+      const error = new Error('search did not reach the requested peer state');
+      error.name = 'TimeoutError';
+      throw error;
     },
     async evaluate() { return undefined; },
   };
-  return {browser, page, selectedPeerId: () => selectedPeerId, stateIndex: () => stateIndex};
+  return {
+    browser,
+    page,
+    selectedPeerId: () => selectedPeerId,
+    stateIndex: () => stateIndex,
+    usernameLocatorGetAttributeCalls: () => usernameLocatorGetAttributeCalls,
+  };
 }
 
 test('peer selection waits for one visible matching row after stale and duplicate results', async (t) => {
@@ -167,14 +201,18 @@ test('peer selection waits for one visible matching row after stale and duplicat
   assert.equal(stateIndex(), 3);
 });
 
-test('peer selection retries when a unique search result disappears before its locator is read', async (t) => {
+test('peer selection retains the unique peer ID when another matching row appears before selection', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const states = [
     [{text: 'Alice @alice_unique', peerId: '42'}],
-    [],
-    [{text: 'Alice @alice_unique', peerId: '42'}],
+    [
+      {text: 'Alice @alice_unique', peerId: '42'},
+      {text: 'Alice @alice_unique duplicate', peerId: '-42'},
+    ],
   ];
-  const {browser, page, selectedPeerId, stateIndex} = peerSelectionHarness(t, states, {loseFirstLocatorMatch: true});
+  const {browser, page, selectedPeerId, stateIndex, usernameLocatorGetAttributeCalls} = peerSelectionHarness(t, states, {
+    advanceStateAfterUniqueWait: true,
+  });
 
   const peerId = await browser.testSelectUniquePeer(
     page,
@@ -186,7 +224,78 @@ test('peer selection retries when a unique search result disappears before its l
 
   assert.equal(peerId, '42');
   assert.equal(selectedPeerId(), '42');
-  assert.equal(stateIndex(), 2);
+  assert.equal(stateIndex(), 1);
+  assert.equal(usernameLocatorGetAttributeCalls(), 0);
+});
+
+test('peer selection reports no results when the only locator match fails the DOM predicate', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[{text: 'Alice @ALICE_UNIQUE', peerId: '42'}]];
+  const {browser, page} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_search_results/
+  );
+});
+
+test('peer selection reports a missing peer identity immediately', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[{text: 'Alice @alice_unique'}]];
+  const {browser, page, stateIndex} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_peer_identity/
+  );
+  assert.equal(stateIndex(), 0);
+});
+
+test('peer selection propagates page failures instead of labelling them as missing results', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const pageError = new Error('page target closed');
+  pageError.name = 'TargetClosedError';
+  const {browser, page} = peerSelectionHarness(t, [[]], {waitError: pageError});
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    (error) => error === pageError
+  );
+});
+
+test('peer selection propagates locator errors while diagnosing a timeout', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const locatorError = new Error('page target closed while counting rows');
+  const {browser, page} = peerSelectionHarness(t, [[]], {locatorCountError: locatorError});
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    (error) => error === locatorError
+  );
 });
 
 test('peer selection reports missing search results when no visible username row appears', async (t) => {

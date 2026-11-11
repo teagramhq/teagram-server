@@ -102,32 +102,33 @@ export function patchRealClientObserver(webRoot) {
 
   const uniquePeerSearchWaiter = `async function waitForUniquePeerSearchResult(page, resultsSelector, username, stage) {
   const usernameMatches = page.locator(\`${'${resultsSelector}'}:visible\`).filter({hasText: username});
-  const deadline = Date.now() + 25_000;
-  while(Date.now() < deadline) {
-    const remaining = deadline - Date.now();
-    try {
-      await page.waitForFunction(({resultsSelector, username}) => {
-        const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
-          const rect = row.getBoundingClientRect();
-          const style = window.getComputedStyle(row);
-          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
-            (row.textContent || '').includes(username);
-        });
-        return matches.length === 1;
-      }, {resultsSelector, username}, {timeout: remaining});
-    } catch {
-      const matchCount = await usernameMatches.count().catch(() => 0);
-      failStage(stage + (matchCount > 0 ? '_search_result_not_unique' : '_search_results'));
-    }
-
-    const matchCount = await usernameMatches.count().catch(() => 0);
-    if(matchCount !== 1) continue;
-    const peerId = await usernameMatches.getAttribute('data-peer-id');
-    if(peerId) return {selectedRow: usernameMatches, peerId};
+  let matchHandle;
+  try {
+    matchHandle = await page.waitForFunction(({resultsSelector, username}) => {
+      const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
+        const rect = row.getBoundingClientRect();
+        const style = window.getComputedStyle(row);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
+          (row.textContent || '').includes(username);
+      });
+      return matches.length === 1 ? {peerId: matches[0].getAttribute('data-peer-id')} : false;
+    }, {resultsSelector, username}, {timeout: 25_000});
+  } catch(error) {
+    if(error.name !== 'TimeoutError') throw error;
+    const matchCount = await usernameMatches.count();
+    failStage(stage + (matchCount > 1 ? '_search_result_not_unique' : '_search_results'));
   }
 
-  const matchCount = await usernameMatches.count().catch(() => 0);
-  failStage(stage + (matchCount > 0 ? '_search_result_not_unique' : '_search_results'));
+  let match;
+  try {
+    match = await matchHandle.jsonValue();
+  } finally {
+    await matchHandle.dispose();
+  }
+  const peerId = match?.peerId;
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage + '_peer_identity');
+  const selectedRow = page.locator(\`${'${resultsSelector}'}[data-peer-id="${'${peerId}'}"]:visible\`).first();
+  return {selectedRow, peerId};
 }
 `;
   const peerSelection = 'async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {';
