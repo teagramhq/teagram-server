@@ -1,15 +1,12 @@
 # Invite-mode QA stack
 
-This isolated Compose project shares a host with the public demo but owns its
-PostgreSQL and server identity volumes, its internal-only Docker network, and
-its TLS/WebSocket proxy. It publishes only `10.96.46.70:443`; the public demo's
-PostgreSQL, edge, HAProxy, Cloudflare Tunnel, and release state are untouched.
-The listener is reachable at `teagram-demo.incus:443` from teagram-qa. Its TLS
-certificate is issued by a private QA root CA. The edge serves the verified
-public Web artifact at `https://teagram-demo.incus/` with a same-origin config
-that selects the invite stack. The page and API WebSocket share the QA-only
-origin, so the browser does not make cross-address-space requests from
-`web.teagram.io`. Turnstile is absent.
+This isolated Compose project shares a host with the public demo but owns
+separate PostgreSQL and server identity volumes, an internal-only Docker
+network, and a TLS/WebSocket proxy. Its private HTTPS endpoint is reachable
+from the QA environment; the public demo's PostgreSQL, edge, HAProxy, Cloudflare
+Tunnel, and release state are untouched. The edge serves the verified public
+Web artifact with a same-origin config for the invite stack. Its page and API
+WebSocket share the QA-only origin. Turnstile is absent.
 
 HAProxy sends the browser peer address to Nginx with PROXY v2. Nginx trusts
 that preamble only from HAProxy's fixed backend address, then overwrites

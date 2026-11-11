@@ -19,10 +19,10 @@ content, restored the demo settings, and verified the Turnstile gate.
 The demo runs on a dedicated LXC host with its own network policy. Required
 layout and policy:
 
-- Root-owned checkout at `/opt/teagram-demo`, branch `main`.
-- Incus `teagram-demo` on charlie, Debian 13, with `limits.cpu=1`,
+- Root-owned checkout of the application on the `main` branch.
+- Dedicated Debian 13 LXC guest with `limits.cpu=1`,
   `limits.cpu.priority=0`, `limits.memory=2GiB` and a 20 GiB root disk. This
-  intentionally stays below the original 2-vCPU / 4-GiB guidance.
+  intentionally stays below the earlier 2-vCPU / 4-GiB guidance.
 - Docker Engine and Compose v5.6.1. The bootstrap overlay uses
   Compose's `!override` merge tag.
 - Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock` and a
