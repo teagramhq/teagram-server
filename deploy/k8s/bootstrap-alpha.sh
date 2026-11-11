@@ -253,6 +253,43 @@ if ! grep -Fq -- "--tls-san=$K3S_TAILNET_HOST" <<<"$unit"; then
       /etc/systemd/system/k3s.service "$K3S_SERVICE_BACKUP"
   fi
   install_exec=$K3S_EXEC
+  previous_sans=$(python3 - "$unit" <<'PY'
+import shlex
+import sys
+
+exec_start = None
+found_exec_start = False
+previous_sans = []
+
+for line in sys.argv[1].splitlines() + [""]:
+    if exec_start is None:
+        if not line.startswith("ExecStart="):
+            continue
+        found_exec_start = True
+        exec_start = line.partition("=")[2].strip()
+    else:
+        exec_start += " " + line.strip()
+
+    if exec_start.endswith("\\"):
+        exec_start = exec_start[:-1]
+        continue
+
+    try:
+        arguments = shlex.split(exec_start)
+    except ValueError as exc:
+        raise SystemExit(f"invalid ExecStart quoting: {exc}")
+    previous_sans.extend(
+        argument.partition("=")[2]
+        for argument in arguments
+        if argument.startswith("--tls-san=")
+    )
+    exec_start = None
+
+if not found_exec_start:
+    raise SystemExit("k3s service has no ExecStart")
+print("\n".join(previous_sans))
+PY
+  ) || fail 'could not parse previous k3s service arguments'
   while IFS= read -r previous_san; do
     [[ -n $previous_san && $previous_san != "$K3S_TAILNET_HOST" ]] || continue
     if python3 - "$previous_san" <<'PY'
@@ -272,7 +309,7 @@ PY
       printf 'k3s bootstrap: dropping previous API SAN outside 100.64.0.0/10: %s\n' \
         "$previous_san" >&2
     fi
-  done < <(grep --only-matching --extended-regexp -- '--tls-san=[^[:space:]]+' <<<"$unit" | cut -d= -f2- || true)
+  done <<< "$previous_sans"
   install_k3s true "$install_exec"
   unit=$(incus exec "$INSTANCE" -- cat /etc/systemd/system/k3s.service)
   grep -Fq -- "--tls-san=$K3S_TAILNET_HOST" <<<"$unit" ||

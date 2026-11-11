@@ -161,15 +161,25 @@ cp "$kubeconfig_path" "$work/kubeconfig.before"
 
 # Simulate the existing cluster from MAIN-3278 before this change: its unit and
 # deploy kubeconfig use alpha's old tailnet IPv4 endpoint.
+# Match the pinned installer’s quoted, line-continued ExecStart format.
 python3 - "$MOCK_STATE/lxc/etc/systemd/system/k3s.service" "$kubeconfig_path" <<'PY'
 import json
 import pathlib
 import sys
 
 unit = pathlib.Path(sys.argv[1])
-unit.write_text(unit.read_text().replace(
-    "--tls-san=teagram.tailaa4918.ts.net",
-    "--tls-san=100.100.1.2 --tls-san=api.internal.example"))
+unit.write_text("\n".join([
+    "ExecStart=/usr/local/bin/k3s \\",
+    "    server \\",
+    "    '--disable=traefik' \\",
+    "    '--disable=servicelb' \\",
+    "    '--disable=metrics-server' \\",
+    "    '--tls-san=100.100.1.2' \\",
+    "    '--tls-san=api.internal.example' \\",
+    "    '--write-kubeconfig-mode=0600' \\",
+    "",
+    "",
+]))
 state_path = unit.parents[4] / "state.json"
 state = json.loads(state_path.read_text())
 state["api_tls_san"] = False
