@@ -100,6 +100,158 @@ export function patchRealClientObserver(webRoot) {
       'poll content assertion export');
   }
 
+  const uniquePeerSearchWaiter = `async function waitForUniquePeerSearchResult(page, resultsSelector, username, stage) {
+  const usernameMatches = page.locator(\`${'${resultsSelector}'}:visible\`).filter({hasText: username});
+  let matchHandle;
+  try {
+    matchHandle = await page.waitForFunction(({resultsSelector, username}) => {
+      const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
+        const rect = row.getBoundingClientRect();
+        const style = window.getComputedStyle(row);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
+          (row.textContent || '').includes(username);
+      });
+      return matches.length === 1 ? {peerId: matches[0].getAttribute('data-peer-id')} : false;
+    }, {resultsSelector, username}, {timeout: 25_000});
+  } catch(error) {
+    if(error.name !== 'TimeoutError') throw error;
+    const matchCount = await usernameMatches.count();
+    failStage(stage + (matchCount > 1 ? '_search_result_not_unique' : '_search_results'));
+  }
+
+  let match;
+  try {
+    match = await matchHandle.jsonValue();
+  } finally {
+    await matchHandle.dispose();
+  }
+  const peerId = match?.peerId;
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage + '_peer_identity');
+  const selectedRow = page.locator(\`${'${resultsSelector}'}[data-peer-id="${'${peerId}'}"]:visible\`).first();
+  return {selectedRow, peerId};
+}
+`;
+  const peerSelection = 'async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {';
+  browser = replaceOnce(browser, peerSelection, `${uniquePeerSearchWaiter}\n${peerSelection}`, 'unique peer search waiter');
+
+  const oldPeerSelection = `  const rows = page.locator(resultsSelector);
+  await rows.first().waitFor({state: 'visible', timeout: 25_000}).catch(() => failStage(\`${'${stage}'}_search_results\`));
+  const count = await rows.count();
+  const usernameMatches = rows.filter({hasText: username});
+  const matchCount = await usernameMatches.count();
+  let selectedRow;
+  if(matchCount === 1) {
+    selectedRow = usernameMatches;
+  } else {
+    const visible = [];
+    for(let index = 0; index < count; index++) {
+      const row = rows.nth(index);
+      if(await row.isVisible()) visible.push(row);
+    }
+    if(visible.length !== 1) failStage(\`${'${stage}'}_search_result_not_unique\`);
+    selectedRow = visible[0];
+  }`;
+  const settledPeerSelection = `  const {selectedRow, peerId} = await waitForUniquePeerSearchResult(page, resultsSelector, username, stage);`;
+  browser = replaceOnce(browser, oldPeerSelection, settledPeerSelection, 'unique peer search selection');
+  browser = replaceOnce(browser,
+    `  const peerId = await selectedRow.getAttribute('data-peer-id');
+  if(!peerId) failStage(\`${'${stage}'}_peer_identity\`);`,
+    `  if(!peerId) failStage(\`${'${stage}'}_peer_identity\`);`,
+    'unique peer identity extraction');
+
+  const oldCustomEmojiMessageWaiter = `async function waitForCustomEmojiMessage(page, text, docId, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    return messages.length === 1 && [...messages[0].querySelectorAll('.custom-emoji')]
+    .some((emoji) => emoji.dataset.docId === docId);
+  }, {text, docId}, {timeout: 30_000}).catch(() => failStage(stage));
+}`;
+  const settledCustomEmojiMessageWaiter = `async function waitForCustomEmojiMessage(page, text, docId, stage) {
+  setPageScenarioStep(page, stage);
+  const messageIdHandle = await page.waitForFunction(({text, docId}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    const messageIds = new Set();
+    for(const message of messages) {
+      const bubble = message.closest('.bubble');
+      const messageId = bubble?.getAttribute('data-mid') || '';
+      const hasEmoji = [...message.querySelectorAll('.custom-emoji')]
+      .some((emoji) => emoji.dataset.docId === docId);
+      if(hasEmoji && /^-?[0-9]{1,20}$/.test(messageId)) messageIds.add(messageId);
+    }
+    return messageIds.size === 1 ? [...messageIds][0] : false;
+  }, {text, docId}, {timeout: 30_000}).catch(() => failStage(stage));
+  const messageId = await messageIdHandle.jsonValue();
+  await messageIdHandle.dispose();
+  return messageId;
+}`;
+  browser = replaceOnce(browser, oldCustomEmojiMessageWaiter, settledCustomEmojiMessageWaiter, 'settled custom emoji message identity');
+
+  const oldCustomReactionWaiter = `async function waitForCustomMessageReaction(page, text, docId, expectedCount, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId, expectedCount}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    if(messages.length !== 1) return false;
+    const reactions = [...messages[0].closest('.bubble').querySelectorAll('reaction-element')];
+    const reaction = reactions.find((element) => {
+      return element.reactionCount?.reaction?._ === 'reactionCustomEmoji' &&
+        String(element.reactionCount.reaction.document_id) === docId;
+    });
+    return expectedCount === 0 ? !reaction : reaction?.reactionCount.count === expectedCount;
+  }, {text, docId, expectedCount}, {timeout: 30_000}).catch(() => failStage(stage));
+}`;
+  const settledCustomReactionWaiter = `async function waitForCustomMessageReaction(page, text, docId, messageId, expectedCount, stage) {
+  setPageScenarioStep(page, stage);
+  if(!/^-?[0-9]{1,20}$/.test(messageId || '')) failStage(stage + '_message_identity');
+  await page.waitForFunction(({text, docId, messageId, expectedCount}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => {
+      const bubble = message.closest('.bubble');
+      return bubble?.getAttribute('data-mid') === messageId && (message.textContent || '').includes(text);
+    });
+    if(messages.length === 0) return false;
+    const reactions = messages.flatMap((message) => [...message.closest('.bubble').querySelectorAll('reaction-element')]);
+    const reaction = reactions.find((element) => {
+      return element.reactionCount?.reaction?._ === 'reactionCustomEmoji' &&
+        String(element.reactionCount.reaction.document_id) === docId;
+    });
+    return expectedCount === 0 ? !reaction : reaction?.reactionCount.count === expectedCount;
+  }, {text, docId, messageId, expectedCount}, {timeout: 30_000}).catch(() => failStage(stage));
+}`;
+  browser = replaceOnce(browser, oldCustomReactionWaiter, settledCustomReactionWaiter, 'custom reaction message identity');
+
+  const oldCustomReactionAction = 'async function reactWithCustomEmoji(page, otherPage, text, docId, stage) {';
+  const settledCustomReactionAction = 'async function reactWithCustomEmoji(page, otherPage, text, docId, stage, messageId, otherMessageId) {';
+  browser = replaceOnce(browser, oldCustomReactionAction, settledCustomReactionAction, 'custom reaction message identity arguments');
+  browser = replaceOnce(browser,
+    "  const message = page.locator('#column-center .bubble .message').filter({hasText: text});",
+    "  const message = page.locator('#column-center .bubble[data-mid=\"' + messageId + '\"] .message').filter({hasText: text}).first();",
+    'custom reaction actor message selection');
+  browser = replaceOnce(browser,
+    '  await waitForCustomMessageReaction(page, text, docId, 1,',
+    '  await waitForCustomMessageReaction(page, text, docId, messageId, 1,',
+    'custom reaction actor identity');
+  browser = replaceOnce(browser,
+    '  await waitForCustomMessageReaction(otherPage, text, docId, 1,',
+    '  await waitForCustomMessageReaction(otherPage, text, docId, otherMessageId, 1,',
+    'custom reaction receiver identity');
+
+  browser = replaceOnce(browser,
+    "  await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');",
+    "  const aliceMessageId = await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');",
+    'custom message sender identity');
+  browser = replaceOnce(browser,
+    "  await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');",
+    "  const bobMessageId = await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');",
+    'custom message receiver identity');
+  browser = replaceOnce(browser,
+    "  await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction');",
+    "  await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction', bobMessageId, aliceMessageId);",
+    'custom reaction sender and receiver identities');
+
   const directMessageWaiter = `async function waitForDirectMessageCount(page, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
   currentStage = stage;
   await startGroupMessageTrace(page, stage);

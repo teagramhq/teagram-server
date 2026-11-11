@@ -34,7 +34,11 @@ function loadBrowserModule(browserPath, observation, globals = {}) {
   return module.exports;
 }
 
-function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
+function patchBrowserForTest(t, globals, {
+  legacyDirectMessage = false,
+  exposePeerSelection = false,
+  exposeCustomEmojiWaiters = false,
+} = {}) {
   const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
   assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
   const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
@@ -46,6 +50,14 @@ function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
   }
 
   const browserPath = join(scripts, 'browser.cjs');
+  if(exposePeerSelection) {
+    const browserSource = readFileSync(browserPath, 'utf8');
+    writeFileSync(browserPath, `${browserSource}\nmodule.exports.testSelectUniquePeer = selectUniquePeer;\n`);
+  }
+  if(exposeCustomEmojiWaiters) {
+    const browserSource = readFileSync(browserPath, 'utf8');
+    writeFileSync(browserPath, `${browserSource}\nmodule.exports.testWaitForCustomEmojiMessage = waitForCustomEmojiMessage;\nmodule.exports.testWaitForCustomMessageReaction = waitForCustomMessageReaction;\n`);
+  }
   if(legacyDirectMessage) {
     const currentAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
     const legacyAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
@@ -63,6 +75,393 @@ function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
   const browser = loadBrowserModule(browserPath, observation, globals);
   return {browser, browserPath, observation};
 }
+
+function peerSelectionHarness(t, states, {
+  advanceStateAfterUniqueWait = false,
+  locatorCountError,
+  waitError,
+} = {}) {
+  let stateIndex = 0;
+  let selectedPeerId;
+  let usernameLocatorGetAttributeCalls = 0;
+  const visible = (row) => ({
+    textContent: row.text,
+    dataset: {peerId: row.peerId},
+    display: row.display || 'block',
+    getAttribute: (name) => name === 'data-peer-id' ? row.peerId ?? null : null,
+    getBoundingClientRect: () => ({width: 120, height: 40}),
+  });
+  const document = {querySelectorAll: () => states[stateIndex].map(visible)};
+  const input = {
+    first() { return this; },
+    async waitFor() {},
+    async fill() {},
+  };
+  const matchingRows = ({hasText, peerId} = {}) => states[stateIndex].filter((row) => {
+    if(row.display === 'none' || row.visibility === 'hidden') return false;
+    if(hasText && !row.text.toLowerCase().includes(hasText.toLowerCase())) return false;
+    if(peerId && row.peerId !== peerId) return false;
+    return true;
+  });
+  const makeRowLocator = (options = {}) => ({
+    first() { return this; },
+    async count() {
+      if(locatorCountError) throw locatorCountError;
+      return matchingRows(options).length;
+    },
+    async getAttribute(name) {
+      if(options.hasText) usernameLocatorGetAttributeCalls++;
+      const matches = matchingRows(options);
+      if(matches.length > 1) throw new Error('strict mode violation: more than one peer row');
+      return name === 'data-peer-id' ? matches[0]?.peerId ?? null : null;
+    },
+    async click() {
+      const matches = matchingRows(options);
+      if(matches.length === 0) throw new Error('peer row disappeared before click');
+      selectedPeerId = matches[0].peerId;
+    },
+  });
+  const rows = {
+    first() { return this; },
+    async waitFor() {},
+    filter({hasText}) {
+      return makeRowLocator({hasText});
+    },
+    async count() { return states[stateIndex].length; },
+    nth(index) {
+      return {async isVisible() { return states[stateIndex][index]?.display !== 'none'; }};
+    },
+  };
+  const {browser} = patchBrowserForTest(t, {
+    document,
+    window: {getComputedStyle: (element) => ({display: element.display, visibility: 'visible'})},
+  }, {exposePeerSelection: true});
+  const page = {
+    locator(selector) {
+      if(selector === '#column-left .input-search-input') return input;
+      const peerId = selector.match(/\[data-peer-id="([^"]+)"\]/)?.[1];
+      return peerId ? makeRowLocator({peerId}) : rows;
+    },
+    async waitForFunction(predicate, args) {
+      if(waitError) throw waitError;
+      while(stateIndex < states.length) {
+        const result = predicate(args);
+        if(result) {
+          if(advanceStateAfterUniqueWait) stateIndex = Math.min(stateIndex + 1, states.length - 1);
+          return {jsonValue: async() => result, dispose: async() => {}};
+        }
+        if(stateIndex === states.length - 1) break;
+        stateIndex++;
+      }
+      const error = new Error('search did not reach the requested peer state');
+      error.name = 'TimeoutError';
+      throw error;
+    },
+    async evaluate() { return undefined; },
+  };
+  return {
+    browser,
+    page,
+    selectedPeerId: () => selectedPeerId,
+    stateIndex: () => stateIndex,
+    usernameLocatorGetAttributeCalls: () => usernameLocatorGetAttributeCalls,
+  };
+}
+
+test('peer selection waits for one visible matching row after stale and duplicate results', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [
+    [
+      {text: 'Bob recent chat', peerId: '11'},
+      {text: 'Carol recent chat', peerId: '12'},
+    ],
+    [
+      {text: 'Alice @alice_unique', peerId: '41', display: 'none'},
+      {text: 'Carol recent chat', peerId: '12'},
+    ],
+    [
+      {text: 'Alice @alice_unique', peerId: '42'},
+      {text: 'Alice @alice_unique duplicate', peerId: '-42'},
+    ],
+    [
+      {text: 'Alice @alice_unique', peerId: '42'},
+      {text: 'Alice Group', peerId: '-42'},
+    ],
+  ];
+  const {browser, page, selectedPeerId, stateIndex} = peerSelectionHarness(t, states);
+  const peerId = await browser.testSelectUniquePeer(
+    page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    '@alice_unique',
+    'bob_custom_emoji_status_chat'
+  );
+  assert.equal(peerId, '42');
+  assert.equal(selectedPeerId(), '42');
+  assert.equal(stateIndex(), 3);
+});
+
+test('peer selection retains the unique peer ID when another matching row appears before selection', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [
+    [{text: 'Alice @alice_unique', peerId: '42'}],
+    [
+      {text: 'Alice @alice_unique', peerId: '42'},
+      {text: 'Alice @alice_unique duplicate', peerId: '-42'},
+    ],
+  ];
+  const {browser, page, selectedPeerId, stateIndex, usernameLocatorGetAttributeCalls} = peerSelectionHarness(t, states, {
+    advanceStateAfterUniqueWait: true,
+  });
+
+  const peerId = await browser.testSelectUniquePeer(
+    page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    '@alice_unique',
+    'bob_custom_emoji_status_chat'
+  );
+
+  assert.equal(peerId, '42');
+  assert.equal(selectedPeerId(), '42');
+  assert.equal(stateIndex(), 1);
+  assert.equal(usernameLocatorGetAttributeCalls(), 0);
+});
+
+test('peer selection reports no results when the only locator match fails the DOM predicate', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[{text: 'Alice @ALICE_UNIQUE', peerId: '42'}]];
+  const {browser, page} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_search_results/
+  );
+});
+
+test('peer selection reports a missing peer identity immediately', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[{text: 'Alice @alice_unique'}]];
+  const {browser, page, stateIndex} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_peer_identity/
+  );
+  assert.equal(stateIndex(), 0);
+});
+
+test('peer selection propagates page failures instead of labelling them as missing results', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const pageError = new Error('page target closed');
+  pageError.name = 'TargetClosedError';
+  const {browser, page} = peerSelectionHarness(t, [[]], {waitError: pageError});
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    (error) => error === pageError
+  );
+});
+
+test('peer selection propagates locator errors while diagnosing a timeout', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const locatorError = new Error('page target closed while counting rows');
+  const {browser, page} = peerSelectionHarness(t, [[]], {locatorCountError: locatorError});
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    (error) => error === locatorError
+  );
+});
+
+test('peer selection reports missing search results when no visible username row appears', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[{text: 'Bob recent chat', peerId: '11'}]];
+  const {browser, page} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_search_results/
+  );
+});
+
+test('peer selection reports ambiguity when multiple visible username rows remain', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [[
+    {text: 'Alice @alice_unique', peerId: '42'},
+    {text: 'Alice @alice_unique duplicate', peerId: '-42'},
+  ]];
+  const {browser, page} = peerSelectionHarness(t, states);
+
+  await assert.rejects(
+    browser.testSelectUniquePeer(
+      page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      '@alice_unique',
+      'bob_custom_emoji_status_chat'
+    ),
+    /bob_custom_emoji_status_chat_search_result_not_unique/
+  );
+});
+
+function customEmojiMessage(text, docId, messageId, {sent = true, hasReaction = false, hasEmoji = true} = {}) {
+  const reaction = {
+    reactionCount: {
+      reaction: {_: 'reactionCustomEmoji', document_id: docId},
+      count: 1,
+    },
+  };
+  const bubble = {
+    getAttribute: (name) => name === 'data-mid' ? messageId : null,
+    classList: {contains: (name) => (name === 'is-sent' || name === 'is-read') && sent},
+    querySelectorAll: (selector) => selector === 'reaction-element' && hasReaction ? [reaction] : [],
+  };
+  return {
+    textContent: `${text}👍`,
+    dataset: {docId},
+    closest: () => bubble,
+    querySelectorAll: (selector) => selector === '.custom-emoji' && hasEmoji ? [{dataset: {docId}}] : [],
+  };
+}
+
+function customEmojiWaitPage(messages) {
+  return {
+    async waitForFunction(predicate, args) {
+      const result = predicate(args);
+      if(!result) throw new Error('receiver state did not appear');
+      return {jsonValue: async() => result, dispose: async() => {}};
+    },
+  };
+}
+
+test('custom emoji reaction wait follows the settled message ID through optimistic duplicates', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const optimistic = customEmojiMessage(messageText, docId, '2.0001', {sent: false});
+  const sent = customEmojiMessage(messageText, docId, '3', {hasReaction: true});
+  const document = {querySelectorAll: () => [optimistic, sent]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([optimistic, sent]);
+
+  const messageId = await browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'alice_custom_emoji_send_visible');
+  assert.equal(messageId, '3');
+  await browser.testWaitForCustomMessageReaction(
+    page, messageText, docId, messageId, 1, 'bob_custom_emoji_reaction_receiver'
+  );
+});
+
+test('custom emoji reaction wait ignores a reaction on the optimistic duplicate', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const optimistic = customEmojiMessage(messageText, docId, '2.0001', {sent: false, hasReaction: true});
+  const sent = customEmojiMessage(messageText, docId, '3');
+  const document = {querySelectorAll: () => [optimistic, sent]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([optimistic, sent]);
+
+  await assert.rejects(
+    browser.testWaitForCustomMessageReaction(
+      page, messageText, docId, '3', 1, 'bob_custom_emoji_reaction_receiver'
+    ),
+    /bob_custom_emoji_reaction_receiver/
+  );
+});
+
+test('custom emoji receiver wait accepts an incoming message without sender state', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const received = customEmojiMessage(messageText, docId, '9', {sent: false});
+  const document = {querySelectorAll: () => [received]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([received]);
+
+  assert.equal(
+    await browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'bob_custom_emoji_receive_visible'),
+    '9'
+  );
+});
+
+test('custom emoji receiver wait fails when the requested emoji is missing', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const received = customEmojiMessage(messageText, docId, '9', {sent: false, hasEmoji: false});
+  const document = {querySelectorAll: () => [received]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([received]);
+
+  await assert.rejects(
+    browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'bob_custom_emoji_receive_visible'),
+    /bob_custom_emoji_receive_visible/
+  );
+});
+
+test('custom emoji receiver wait rejects multiple numeric IDs carrying the emoji', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const first = customEmojiMessage(messageText, docId, '2');
+  const second = customEmojiMessage(messageText, docId, '3');
+  const document = {querySelectorAll: () => [first, second]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([first, second]);
+
+  await assert.rejects(
+    browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'bob_custom_emoji_receive_visible'),
+    /bob_custom_emoji_receive_visible/
+  );
+});
+
+test('custom emoji reaction wait fails when the receiver has no reaction', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const sent = customEmojiMessage(messageText, docId, '3');
+  const document = {querySelectorAll: () => [sent]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([sent]);
+
+  await assert.rejects(
+    browser.testWaitForCustomMessageReaction(
+      page, messageText, docId, '3', 1, 'bob_custom_emoji_reaction_receiver'
+    ),
+    /bob_custom_emoji_reaction_receiver/
+  );
+});
 
 function messageBubble(messageId, sendState) {
   return {
