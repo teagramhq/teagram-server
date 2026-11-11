@@ -362,7 +362,7 @@ func TestRequiredProxyV1ListenerRejectsMissingPreface(t *testing.T) {
 }
 
 func TestRequiredProxyV1ListenerWarnsWhenPrefaceIsMissing(t *testing.T) {
-	var logs bytes.Buffer
+	var logs synchronizedBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	addr := requiredProxyServerWithLogger(t, logger)
 	conn, reader := proxyDial(t, addr, "")
@@ -378,6 +378,23 @@ func TestRequiredProxyV1ListenerWarnsWhenPrefaceIsMissing(t *testing.T) {
 	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "rejected tailnet Bot API PROXY preface") {
 		t.Fatalf("missing-preface log = %q, want a warning", got)
 	}
+}
+
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func TestLoopbackWithoutProxyHeaderStillWorks(t *testing.T) {
