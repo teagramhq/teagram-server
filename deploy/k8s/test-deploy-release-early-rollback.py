@@ -109,7 +109,26 @@ def mock_kubectl() -> int:
             print(json.dumps({"kind": "Job", "metadata": {"name": name}, "status": status}))
             return 0
         if resource == "pods" and output == "json":
-            print('{"items":[]}')
+            if "--selector=app.kubernetes.io/name=cloudflared" in args:
+                print(
+                    json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "metadata": {"name": "cloudflared-fixture"},
+                                    "status": {
+                                        "podIP": "10.42.0.10",
+                                        "conditions": [
+                                            {"type": "Ready", "status": "True"}
+                                        ],
+                                    },
+                                }
+                            ]
+                        }
+                    )
+                )
+            else:
+                print('{"items":[]}')
             return 0
         if resource == "controllerrevision":
             print("1")
@@ -225,9 +244,15 @@ def fixture_templates() -> dict[str, dict[str, object]]:
     templates: dict[str, dict[str, object]] = {}
     for resource in CONTROLLERS:
         name = resource.split("/", maxsplit=1)[1]
+        container = {"name": name, "image": f"example/{name}:baseline"}
+        if resource == "statefulset/teagramd":
+            container["env"] = [
+                {"name": "TG_CLIENT_ADDR_CF_PROXY_CIDRS", "value": "10.42.0.0/16"},
+                {"name": "TG_BOT_API_PUBLIC_PROXY_CIDRS", "value": "10.42.0.0/16"},
+            ]
         templates[resource] = {
             "metadata": {"labels": {"fixture": name}},
-            "spec": {"containers": [{"name": name, "image": f"example/{name}:baseline"}]},
+            "spec": {"containers": [container]},
         }
     return templates
 
@@ -287,6 +312,10 @@ def run_case(case: str, failed_resource: str | None, failure_phase: str,
             encoding="utf-8",
         )
         shutil.copyfile(release_script, script_dir / "deploy-release.sh")
+        shutil.copyfile(
+            repo_root / "deploy/k8s/verify-cloudflared-client-address-trust.py",
+            script_dir / "verify-cloudflared-client-address-trust.py",
+        )
         shutil.copyfile(repo_root / "deploy/k8s/smoke-production.sh", script_dir / "smoke-production.sh")
         (script_dir / "initialize-channel-post-expiring-summaries.sh").write_text(
             "#!/usr/bin/env bash\n"

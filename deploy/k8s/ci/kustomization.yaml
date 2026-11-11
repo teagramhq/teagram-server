@@ -4,6 +4,7 @@ namespace: teagram
 resources:
   - ../prod
   - tailnet-policy-probes.yaml
+  - public-header-probe.yaml
   - tailscale-proxy-probe-serviceaccount.yaml
 configMapGenerator:
   - name: required-migration-version
@@ -35,4 +36,10 @@ patches:
   - path: tailscale-proxy-ci.yaml
   - path: linkselector-ci.yaml
   - path: public-ingress-ci.yaml
+  - path: public-header-networkpolicy-ci.yaml
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: teagramd-ingress
   - path: postgres-backup-cronjob.yaml

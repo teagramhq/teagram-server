@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import json
 import pathlib
 import socket
@@ -14,6 +15,7 @@ import sys
 from probe_discovery import probe as probe_discovery
 
 
+BOT_API_AUTH_BURST = 20
 TAILNET_SERVICE_PORTS = (2443, 2444, 2445, 2447)
 PUBLIC_SERVICE_PORTS = (2446, 2449)
 
@@ -119,6 +121,123 @@ def probe_public_ingress(host: str) -> None:
         )
 
 
+def public_discovery_status(host: str, client_ip: str) -> int:
+    connection = http.client.HTTPConnection(host, 2446, timeout=5)
+    try:
+        connection.request(
+            "GET",
+            "/.well-known/teagramd/client",
+            headers={
+                "CF-Connecting-IP": client_ip,
+                "Host": "server.example.test",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        return response.status
+    finally:
+        connection.close()
+
+
+def probe_public_discovery_budgets(host: str) -> None:
+    for request_number in range(1, 12):
+        status = public_discovery_status(host, "198.51.100.10")
+        expected = 200 if request_number <= 10 else 429
+        if status != expected:
+            raise RuntimeError(
+                f"public discovery client A request {request_number} returned "
+                f"HTTP {status}, want {expected}"
+            )
+
+    other_status = public_discovery_status(host, "198.51.101.10")
+    if other_status != 200:
+        raise RuntimeError(
+            f"public discovery client B returned HTTP {other_status} after A exhausted its budget, want 200"
+        )
+
+
+def public_bot_api_status(connection: http.client.HTTPConnection, client_ip: str) -> int:
+    connection.request(
+        "GET",
+        "/botbad-token/getMe",
+        headers={
+            "CF-Connecting-IP": client_ip,
+            "Host": "server.example.test",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    return response.status
+
+
+def probe_public_bot_api_budget(host: str) -> None:
+    client_a = http.client.HTTPConnection(host, 2449, timeout=5)
+    try:
+        for request_number in range(1, BOT_API_AUTH_BURST + 2):
+            status = public_bot_api_status(client_a, "198.51.100.10")
+            expected = 401 if request_number <= BOT_API_AUTH_BURST else 429
+            if status != expected:
+                raise RuntimeError(
+                    f"public Bot API client A request {request_number} returned "
+                    f"HTTP {status}, want {expected}"
+                )
+    finally:
+        client_a.close()
+
+    client_b = http.client.HTTPConnection(host, 2449, timeout=5)
+    try:
+        other_status = public_bot_api_status(client_b, "198.51.101.10")
+    finally:
+        client_b.close()
+    if other_status != 401:
+        raise RuntimeError(
+            "public Bot API client B returned "
+            f"HTTP {other_status} after client A exhausted its auth budget, want 401 (not 429)"
+        )
+
+
+def probe_untrusted_public_header(host: str, trusted_proxy_ip: str) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        route.connect((host, 2446))
+        peer = ipaddress.ip_address(route.getsockname()[0])
+    trusted_proxy = ipaddress.ip_address(trusted_proxy_ip)
+    if peer == trusted_proxy:
+        raise RuntimeError(
+            f"untrusted probe source {peer} is the trusted cloudflared address {trusted_proxy}"
+        )
+
+    for request_number in range(1, 12):
+        forwarded_ip = f"198.51.{request_number}.10"
+        status = public_discovery_status(host, forwarded_ip)
+        expected = 200 if request_number <= 10 else 429
+        if status != expected:
+            raise RuntimeError(
+                f"untrusted source {peer} request {request_number} with "
+                f"CF-Connecting-IP {forwarded_ip} returned HTTP {status}, want {expected}; "
+                "the untrusted header may have been credited"
+            )
+
+
+def probe_tailnet_discovery_budget(host: str) -> None:
+    for request_number in range(1, 51):
+        connection = http.client.HTTPConnection(host, 2444, timeout=5)
+        try:
+            connection.request(
+                "GET",
+                "/.well-known/teagramd/client",
+                headers={"Host": "teagramd", "Connection": "close"},
+            )
+            response = connection.getresponse()
+            response.read()
+        finally:
+            connection.close()
+        if response.status != 200:
+            raise RuntimeError(
+                f"tailnet discovery request {request_number} returned HTTP {response.status}, want 200"
+            )
+
+
 def probe_kubernetes_api() -> None:
     service_account_dir = pathlib.Path(
         "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -168,6 +287,10 @@ def main() -> int:
             "linkselector",
             "bot-api",
             "public-ingress",
+            "public-discovery-budget",
+            "public-bot-api-budget",
+            "untrusted-public-header",
+            "tailnet-discovery-budget",
             "kube-api",
             "check-listeners",
             "deny-tailnet",
@@ -176,6 +299,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--host", default="teagramd")
+    parser.add_argument("--trusted-proxy-ip")
     args = parser.parse_args()
 
     if args.operation == "discovery":
@@ -187,6 +311,16 @@ def main() -> int:
         probe_bot_api(args.host)
     elif args.operation == "public-ingress":
         probe_public_ingress(args.host)
+    elif args.operation == "public-discovery-budget":
+        probe_public_discovery_budgets(args.host)
+    elif args.operation == "public-bot-api-budget":
+        probe_public_bot_api_budget(args.host)
+    elif args.operation == "untrusted-public-header":
+        if not args.trusted_proxy_ip:
+            raise RuntimeError("untrusted-public-header requires --trusted-proxy-ip")
+        probe_untrusted_public_header(args.host, args.trusted_proxy_ip)
+    elif args.operation == "tailnet-discovery-budget":
+        probe_tailnet_discovery_budget(args.host)
     elif args.operation == "kube-api":
         probe_kubernetes_api()
     elif args.operation == "check-listeners":

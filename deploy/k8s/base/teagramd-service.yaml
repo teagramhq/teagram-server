@@ -26,7 +26,7 @@ spec:
       targetPort: bot-api-ingress
     - name: public-bot-api
       port: 2449
-      targetPort: 2449
+      targetPort: public-bot-api
 ---
 apiVersion: v1
 kind: Service

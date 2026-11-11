@@ -273,7 +273,13 @@ The Cloudflare Tunnel's remotely managed route for `web.teagram.io` targets
 `http://linklanding:8082` and ordinary web traffic to the `web` Service on
 port 8080. Route `server.teagram.io` `/apiws` and discovery paths directly to
 `http://teagramd:2446`; it advertises `server.teagram.io:443` and allows the
-`https://web.teagram.io` origin. The public Bot API uses `teagramd:2449`.
+`https://web.teagram.io` origin. Add a Cloudflare Tunnel route for
+`server.teagram.io` with path regex `^/bot[^/]+/` to
+`http://teagramd:2449`; the full path is forwarded unchanged. The public Bot
+API and WebSocket listeners accept `CF-Connecting-IP` only when the socket
+peer is in the K3s pod range. NetworkPolicy admits their ports only from
+cloudflared pod identity, so the address allowlist and pod selector together
+define the trusted forwarder.
 `teagramd` remains ClusterIP-only, and the public listener does not expose
 MTProto port 2443.
 
@@ -288,20 +294,19 @@ MTProto port 2443.
 | Tailnet desktop and discovery | Tailscale proxy to `teagramd:2444` | tailnet WebSocket listener |
 | Tailnet admin | Tailscale proxy to `teagramd:2445` | admin listener |
 | Tailnet MTProto | Tailscale userspace forwarding to the proxy pod's loopback `socat` listener on 2443, then `teagramd:2443` | Half-close-preserving MTProto listener |
-| Tailnet Bot API | TCP 2447 through Tailscale proxy with PROXY v1 to `teagramd:2447` | Bot API relay on pod port 2448 |
 | Tailnet Kubernetes API | raw TCP 6443 through the cluster Tailscale device to `kubernetes.default.svc:443` | kube-apiserver terminates TLS; only delta and the deploy runner tags may connect |
+| Tailnet Bot API | TCP 2447 through Tailscale proxy with required PROXY v1 to `teagramd:2447` | direct tailnet Bot API listener |
 
 Tailscale Serve's TCP forward closes both sockets on the first EOF. Tailnet
 Bot API clients must keep the write side open until they receive the HTTP
 response.
 
-The public `server.teagram.io` and Bot API routes remain behind `hold-merge`
-until MAIN-3599 and MAIN-3600 are live. Funnel stays disabled. The tunnel and
-Tailscale Serve configuration target Kubernetes Service names only; neither
-path depends on the deleted application LXC.
+The `server.teagram.io` Bot API route is part of the Tunnel's public path set;
+Funnel stays disabled. Both Tunnel and Tailscale Serve target Kubernetes
+Service names only, with no dependency on the deleted application LXC.
 
 `teagramd-networkpolicy` selects teagramd pods and defaults ingress to deny.
-It admits ports 2443, 2444, 2445, and 2448 only from the Tailscale proxy pod
+It admits ports 2443, 2444, 2445, and 2447 only from the Tailscale proxy pod
 identity, and ports 2446 and 2449 only from cloudflared. It does not trust pod
 CIDRs or request headers. Linkselector and other application pods have a
 separate source identity and are refused by both listener groups; CI probes
@@ -326,9 +331,10 @@ traffic from teagramd rate and connection limits; public per-client limits use
 the real client address supplied through `CF-Connecting-IP` by cloudflared
 only.
 
-The CI-only `bot-api-public-ci-stand-in` exercises cloudflared's public-path
-reachability on port 2449. It relays to the loopback Bot API only in the
-disposable test overlay; MAIN-3600 replaces it with the direct public listener.
+The CI overlay uses the same direct public and tailnet Bot API listeners as
+production. Its ingress probes verify separate public client budgets, ignore
+forwarded addresses from an untrusted source, and check unauthenticated `getMe`
+on both paths.
 
 The `Deploy.` runner joins with a new OAuth client whose only tag is
 `tag:k3s-deploy`; its `KUBECONFIG` reaches
