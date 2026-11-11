@@ -27,7 +27,7 @@ These items are parked and are not part of the current plan.
 
 ## Stack
 
-- **Language:** Go 1.27.1.
+- **Language:** Go 1.27.4.
 - **Wire:** MTProto 2.0 over gotd codecs; `tg`/`mt` type schema (gotd v0.162.0).
 - **Storage:** Postgres via `pgx/v5`; `sqlc`-generated queries; Atlas migrations.
 - **At-rest crypto:** auth keys and SRP verifiers encrypted (keycrypt).

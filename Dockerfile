@@ -13,7 +13,7 @@ COPY tools/stickerbundle/ ./tools/stickerbundle/
 RUN bash tools/stickerbundle/generate.sh --output /sticker-bundle
 FROM ${STICKER_BUNDLE_SOURCE} AS sticker-bundle-source
 
-# mirror.gcr.io/library/golang:1.27 matches the `go 1.27.1` directive in
+# mirror.gcr.io/library/golang:1.27 matches the `go 1.27.4` directive in
 # go.mod; the module file stays the single source of the version, so a bump
 # there is the only thing to change.
 FROM mirror.gcr.io/library/golang:1.27 AS build
