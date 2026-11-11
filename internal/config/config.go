@@ -2689,8 +2689,9 @@ func validateBrowserOnlyListener(browserOnly bool, listenAddr, settingName, list
 // operator running without it where the support tickets will come from before
 // they arrive. The carrier-NAT half remains an accepted risk in every mode. CF
 // mode removes the proxy assumption only on the public WebSocket listener;
-// tailnet requests still use their socket peers. No warning is needed when no
-// per-IP limit is enabled or no limited listener uses socket peer addresses.
+// tailnet requests still use their socket peers. In CF mode, no warning is
+// needed when no limited listener uses socket peer addresses. Socket mode keeps
+// its existing warning whenever a per-IP limit is enabled.
 //
 // Every limit keyed on a client address has to be in the condition below, or an
 // operator turns one off and stops being warned about the other. The pre-auth
@@ -2709,10 +2710,10 @@ func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 	if c.ClientAddrTrust == ClientAddrProxyV2 {
 		return
 	}
-	if !c.hasSocketKeyedPerIPListener() {
-		return
-	}
 	if c.ClientAddrTrust == ClientAddrCFConnectingIP {
+		if !c.hasSocketKeyedPerIPListener() {
+			return
+		}
 		log.Warn("tailnet per-IP limits remain keyed on each connection's own peer address",
 			"trust", string(ClientAddrSocket),
 			"listener", "tailnet",
@@ -2730,6 +2731,9 @@ func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 }
 
 func (c Config) hasSocketKeyedPerIPListener() bool {
+	if c.BotAPIListenAddr != "" {
+		return true
+	}
 	if c.ListenAddr != "" && c.ListenPath != mtproto.ListenerPathTailnet {
 		return true
 	}

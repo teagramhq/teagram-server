@@ -221,6 +221,52 @@ func TestWarnClientAddrTrustForCloudflareIsSilentWhenNonPublicListenersAreTailne
 	}
 }
 
+func TestWarnClientAddrTrustForCloudflareWhenBotAPIUsesSocketPeer(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust:           config.ClientAddrCFConnectingIP,
+		ListenAddr:                "127.0.0.1:2445",
+		ListenPath:                mtproto.ListenerPathTailnet,
+		WebSocketListenAddr:       "127.0.0.1:2447",
+		WebSocketListenPath:       mtproto.ListenerPathTailnet,
+		PublicWebSocketListenAddr: "127.0.0.1:2446",
+		BotAPIListenAddr:          "127.0.0.1:2448",
+		RateLimits: config.RateLimitsConfig{
+			SignUpIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	cfg.WarnClientAddrTrust(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
+		t.Fatalf("emitted %d warn lines with a socket-keyed Bot API listener, want one:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "keyed on each connection's own peer address") {
+		t.Fatalf("warning does not identify socket peer keying:\n%s", buf.String())
+	}
+}
+
+func TestWarnClientAddrTrustForSocketRemainsWhenListenersAreTailnet(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust:     config.ClientAddrSocket,
+		ListenAddr:          "127.0.0.1:2445",
+		ListenPath:          mtproto.ListenerPathTailnet,
+		WebSocketListenAddr: "127.0.0.1:2447",
+		WebSocketListenPath: mtproto.ListenerPathTailnet,
+		RateLimits: config.RateLimitsConfig{
+			SignUpIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	cfg.WarnClientAddrTrust(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
+		t.Fatalf("emitted %d warn lines in socket mode, want one as before:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "per-IP limits are keyed on each connection's own peer address") {
+		t.Fatalf("socket mode warning missing:\n%s", buf.String())
+	}
+}
+
 // TestLoadClientAddrTrustAcceptsSocket covers the one value that is supported,
 // spelled out.
 func TestLoadClientAddrTrustAcceptsSocket(t *testing.T) {
