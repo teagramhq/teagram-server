@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake incus and tailscale for test-bootstrap-alpha.sh.
+"""Fake Incus and k3s for test-bootstrap-alpha.sh.
 
 File operations inside the fake k3s LXC root run as real commands on rebased
 paths, so permission and comparison checks are real. The deleted application
@@ -25,9 +25,7 @@ INSTANCE = "teagram-k3s"
 NAMESPACE = "teagram"
 TOKEN = "tgtest-deployer-token-7f3a9c"
 CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBtgtestonly\n-----END CERTIFICATE-----\n"
-ADMIN_CERT = base64.b64encode(b"tgtest-k3s-admin-client-cert").decode()
-ADMIN_KEY = base64.b64encode(b"tgtest-k3s-admin-client-key").decode()
-TAILNET_IP = "100.100.1.2"
+TAILNET_HOST = "teagram.tailaa4918.ts.net"
 K3S_VERSION = "v1.37.1+k3s1"
 PATH_PREFIXES = ("/root/", "/etc/", "/usr/", "/run/", "/var/", "/opt/")
 CA_JSONPATH = "{.data.ca\\.crt}"
@@ -43,9 +41,7 @@ def load_state():
             "instance": None,
             "k3s_installed": False,
             "k3s_running": False,
-            "ssh_enabled": False,
-            "ssh_active": False,
-            "serve": {"TCP": {}},
+            "api_tls_san": False,
             "objects": {},
             "resource_data": {},
             "token_populated": False,
@@ -98,16 +94,16 @@ def run_rebased(root, args):
     sys.exit(subprocess.run(rebase(root, args)).returncode)
 
 
-def install_k3s(state):
+def install_k3s(state, command):
     unit = os.path.join(LXC_ROOT, "etc/systemd/system/k3s.service")
     os.makedirs(os.path.dirname(unit), exist_ok=True)
+    match = re.search(r"INSTALL_K3S_EXEC='([^']*)'", command)
+    if not match:
+        fail("k3s install omitted INSTALL_K3S_EXEC")
     with open(unit, "w") as handle:
-        handle.write(
-            "ExecStart=/usr/local/bin/k3s server --disable=traefik --disable=servicelb "
-            "--disable=metrics-server --tls-san=" + TAILNET_IP +
-            " --write-kubeconfig-mode=0600\n")
+        handle.write("ExecStart=/usr/local/bin/k3s " + match.group(1) + "\n")
     state["k3s_installed"] = True
-    log_action("k3s-install")
+    log_action("k3s-install-skip-download" if "INSTALL_K3S_SKIP_DOWNLOAD=true" in command else "k3s-install")
     exit_saved(state, 0)
 
 
@@ -192,27 +188,6 @@ def deployer_role_allows(verb, group, resource):
 def kubectl(args, state):
     if args[0].startswith("--as="):
         args = args[1:]
-    if args[:2] == ["config", "view"]:
-        if not all(option in args for option in ("--raw", "--flatten", "--minify")):
-            fail("admin kubeconfig view omitted a required protection option")
-        log_action("kubeconfig-admin-view")
-        print(json.dumps({
-            "apiVersion": "v1",
-            "kind": "Config",
-            "clusters": [{"name": "teagram-k3s", "cluster": {
-                "server": "https://127.0.0.1:6443",
-                "certificate-authority-data": base64.b64encode(CA_PEM.encode()).decode(),
-            }}],
-            "contexts": [{"name": "default", "context": {
-                "cluster": "teagram-k3s", "user": "default", "namespace": "default",
-            }}],
-            "current-context": "default",
-            "users": [{"name": "default", "user": {
-                "client-certificate-data": ADMIN_CERT,
-                "client-key-data": ADMIN_KEY,
-            }}],
-        }))
-        sys.exit(0)
     if args[0] == "apply":
         log_action("kubectl-apply-attempt")
         manifest = sys.stdin.read()
@@ -386,7 +361,7 @@ def lxc(cmd):
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "command -v k3s" in cmd[2]:
         sys.exit(0 if state["k3s_installed"] else 1)
     if cmd[0] == "bash" and cmd[1:2] == ["-c"] and "install.sh" in cmd[2]:
-        install_k3s(state)
+        install_k3s(state, cmd[2])
     if cmd[0] == "command":
         fail("command -v must be invoked through a shell")
     if cmd[0] == "k3s" and cmd[1] == "--version":
@@ -395,33 +370,62 @@ def lxc(cmd):
         sys.exit(0)
     if cmd[0] == "k3s" and cmd[1] == "kubectl":
         kubectl(cmd[2:], state)
+    if cmd[:3] == ["k3s", "certificate", "rotate"]:
+        if cmd[3:] != ["--service", "k3s-server"]:
+            fail(f"unexpected k3s certificate rotation: {cmd}")
+        log_action("certificate-rotate-k3s-server")
+        if os.environ.get("MOCK_FAIL_CERTIFICATE_ROTATE") == "1":
+            exit_saved(state, 1)
+        unit = pathlib.Path(LXC_ROOT, "etc/systemd/system/k3s.service")
+        if os.environ.get("MOCK_KEEP_API_TLS_CERTIFICATE") != "1":
+            state["api_tls_san"] = TAILNET_HOST in unit.read_text()
+        exit_saved(state, 0)
+    if cmd[:2] == ["openssl", "s_client"]:
+        if ("-servername" not in cmd or
+                cmd[cmd.index("-servername") + 1] != TAILNET_HOST or
+                "-verify_hostname" not in cmd or
+                cmd[cmd.index("-verify_hostname") + 1] != TAILNET_HOST or
+                "-verify" not in cmd or
+                "-verify_return_error" not in cmd or
+                "-CAfile" not in cmd):
+            fail(f"API TLS verification is not pinned to the tailnet endpoint and CA: {cmd}")
+        log_action("api-listener-tls-verify")
+        if not state["api_tls_san"]:
+            print("verify error:num=62:Hostname mismatch", file=sys.stderr)
+            sys.exit(1)
+        print("Verify return code: 0 (ok)")
+        sys.exit(0)
     if cmd[0] == "systemctl":
         action = cmd[1:]
         if action == ["enable", "--now", "k3s"]:
             if not state["k3s_running"]:
                 log_action("systemctl enable --now k3s")
                 state["k3s_running"] = True
+                unit = pathlib.Path(LXC_ROOT, "etc/systemd/system/k3s.service")
+                state["api_tls_san"] = TAILNET_HOST in unit.read_text()
             exit_saved(state, 0)
-        if action == ["enable", "ssh"]:
-            log_action("systemctl enable ssh")
-            state["ssh_enabled"] = True
+        if action == ["daemon-reload"]:
+            log_action("systemctl daemon-reload")
+            sys.exit(0)
+        if action == ["stop", "k3s"]:
+            log_action("systemctl stop k3s")
+            state["k3s_running"] = False
             exit_saved(state, 0)
-        if action == ["is-enabled", "--quiet", "ssh"]:
-            sys.exit(0 if state["ssh_enabled"] else 1)
-        if action in (["restart", "ssh"], ["start", "ssh"]):
+        if action == ["start", "k3s"] and os.environ.get("MOCK_FAIL_SYSTEMCTL_START_K3S") == "1":
+            log_action("systemctl start k3s")
+            state["k3s_running"] = False
+            exit_saved(state, 1)
+        if action == ["restart", "k3s"] and os.environ.get("MOCK_FAIL_SYSTEMCTL_RESTART_K3S") == "1":
+            log_action("systemctl restart k3s")
+            state["k3s_running"] = False
+            exit_saved(state, 1)
+        if action in (["start", "k3s"], ["restart", "k3s"]):
             log_action("systemctl " + " ".join(action))
-            state["ssh_active"] = True
+            state["k3s_running"] = True
             exit_saved(state, 0)
-        if action == ["is-active", "--quiet", "ssh"]:
-            sys.exit(0 if state["ssh_active"] else 1)
         fail(f"unexpected systemctl command: {action}")
     if cmd[0] == "sysctl":
         log_action("sysctl")
-        sys.exit(0)
-    if cmd[0] == "sshd":
-        runtime_dir = os.path.join(LXC_ROOT, "run/sshd")
-        if not os.path.isdir(runtime_dir):
-            fail("Missing privilege separation directory: /run/sshd")
         sys.exit(0)
     if cmd[0] == "ss":
         print("State Recv-Q Send-Q Local Address:Port Peer Address:Port")
@@ -494,29 +498,10 @@ def incus(args):
     fail(f"unexpected incus command: {args}")
 
 
-def tailscale(args):
-    state = load_state()
-    if args == ["ip", "-4"]:
-        print(TAILNET_IP)
-        sys.exit(0)
-    if args == ["serve", "status", "--json"]:
-        print(json.dumps({"TCP": state["serve"]["TCP"], "AllowFunnel": {}}))
-        sys.exit(0)
-    if args[0] == "serve" and "--tcp=" in args[-2]:
-        port = args[-2].split("=", 1)[1]
-        target = args[-1]
-        state["serve"]["TCP"][port] = {"TCPForward": target[len("tcp://"):]}
-        log_action("serve " + port)
-        exit_saved(state, 0)
-    fail(f"unexpected tailscale command: {args}")
-
-
 def main():
     tool, args = sys.argv[1], sys.argv[2:]
     if tool == "incus":
         incus(args)
-    if tool == "tailscale":
-        tailscale(args)
     if tool == "k3s":
         k3s(args)
     fail(f"unknown mock tool: {tool}")

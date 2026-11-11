@@ -8,6 +8,7 @@ data:
   serve.json: |
     {
       "TCP": {
+        "6443": {"TCPForward": "kubernetes.default.svc:443"},
         "443": {"HTTPS": true},
         "2447": {"TCPForward": "teagramd:2447", "ProxyProtocol": 1}
       },

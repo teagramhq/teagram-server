@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly INSTANCE=teagram-k3s
 readonly NAMESPACE=teagram
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly SCRIPT_DIR
@@ -19,10 +20,38 @@ Usage: install-tailnet-proxy-access.sh --dry-run | --apply | --rollback
   --apply    Install the proxy ServiceAccount/RBAC and create its empty state Secret once.
   --rollback Stop the proxy and remove proxy access; preserve Tailscale state and deployer access.
 
-Use only with the reviewed teagram k3s admin kubeconfig. This script never creates
+Run on alpha. Kubernetes administration uses `incus exec teagram-k3s -- k3s kubectl`;
+the script does not create or require a cluster-admin kubeconfig. It never creates
 the external tailscale-auth Secret and never reads or prints Secret contents.
 The API egress policy is restricted to the current Kubernetes API endpoint IPs.
 EOF
+}
+
+kubectl() {
+  local -a args=("$@")
+  local index filename
+  for ((index = 0; index < ${#args[@]}; index++)); do
+    case "${args[index]}" in
+      --filename|-f)
+        ((index + 1 < ${#args[@]})) || fail 'kubectl filename flag has no value'
+        filename=${args[index + 1]}
+        [[ $filename != - ]] || break
+        [[ -r $filename ]] || fail "kubectl input file is not readable: $filename"
+        args[index + 1]=-
+        incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${args[@]}" < "$filename"
+        return
+        ;;
+      --filename=*|-f=*)
+        filename=${args[index]#*=}
+        [[ $filename != - ]] || break
+        [[ -r $filename ]] || fail "kubectl input file is not readable: $filename"
+        args[index]=--filename=-
+        incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${args[@]}" < "$filename"
+        return
+        ;;
+    esac
+  done
+  incus exec --mode=non-interactive "$INSTANCE" -- k3s kubectl "${args[@]}"
 }
 
 [[ $# -eq 1 ]] || { usage >&2; exit 64; }
@@ -32,11 +61,12 @@ case "$1" in
   *) usage >&2; exit 64 ;;
 esac
 
-command -v kubectl >/dev/null 2>&1 || fail 'kubectl is required'
+command -v incus >/dev/null 2>&1 || fail 'incus is required'
 command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
 [[ -f "$ACCESS_MANIFEST" ]] || fail "missing reviewed manifest: $ACCESS_MANIFEST"
 readonly API_EGRESS_RENDERER="$SCRIPT_DIR/render-tailnet-proxy-api-egress.py"
 [[ -f "$API_EGRESS_RENDERER" ]] || fail "missing reviewed renderer: $API_EGRESS_RENDERER"
+incus info "$INSTANCE" >/dev/null || fail "Incus instance $INSTANCE is unavailable"
 context=$(kubectl config current-context)
 [[ -n "$context" ]] || fail 'kubectl has no current context'
 printf 'Target context: %s\n' "$context"

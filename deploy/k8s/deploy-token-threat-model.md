@@ -7,7 +7,7 @@ namespace of the `teagram-k3s` LXC on `alpha`: its long-lived token Secret
 `teagram-deployer-token`, the root-only kubeconfig
 `/root/teagram-k3s-deploy.kubeconfig`, and the GitHub environment secret that
 holds a copy of that kubeconfig. It does not cover the RSA server identity
-(see `identity-threat-model.md`) or the forced-command operations menu.
+(see `identity-threat-model.md`) or the daemon's separate agent credential.
 
 The token is the only credential a deploy job presents to the k3s API. Its
 Role can create, get, list, patch and watch Deployments and StatefulSets,
@@ -23,10 +23,10 @@ allowlist.
 
 Trusted: the k3s control plane, root on `alpha`, root on the LXC, the Steward
 member that installs the kubeconfig into GitHub, and Tech Lead, who approves
-rotation. Everything else is untrusted for this purpose: any workflow run that
-can read the GitHub environment secret, any repository collaborator who can
-change a workflow that uses it, and any tailnet node that can reach the API
-port (it still needs the token, but the port is reachable).
+rotation. Delta's tagged device and the tagged deploy runner are the only
+tailnet sources permitted to reach the API port. Everything else is untrusted
+for this purpose: any workflow run that can read the GitHub environment secret
+and any repository collaborator who can change a workflow that uses it.
 
 ## Scope of the token
 
@@ -132,5 +132,5 @@ rotation.
 - The token does not expire and is valid until its Secret is deleted.
 - Secrets sit in plaintext in the k3s datastore until encryption at rest is
   enabled.
-- The API port is reachable from every tailnet node, so the token is the only
-  control on the API.
+- The API port is reachable from two tags (delta's tag and `tag:k3s-deploy`),
+  not the whole tailnet.

@@ -14,8 +14,6 @@ if grep -En 'mktemp.*XXXXXX\.[[:alpha:]]' "$repo_root/deploy/k8s/bootstrap-alpha
 fi
 grep --fixed-strings --quiet 'alpha_install_remote_file' \
   "$repo_root/deploy/k8s/bootstrap-alpha.sh"
-grep --fixed-strings --quiet 'alpha_ensure_sshd_runtime_dir' \
-  "$repo_root/deploy/k8s/bootstrap-alpha.sh"
 
 readonly TEST_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 container_output=$(docker run --rm -i \
@@ -24,8 +22,7 @@ container_output=$(docker run --rm -i \
   "$TEST_IMAGE" bash -s <<'CONTAINER_TEST'
 set -euo pipefail
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends openssh-server busybox-static util-linux >/dev/null
-ssh-keygen -A >/dev/null
+apt-get install -y -qq --no-install-recommends busybox-static util-linux >/dev/null
 source /alpha-incus.sh
 
 # Model the target LXC's denied reopen: fd 0 remains usable, while opening the
@@ -82,15 +79,6 @@ if alpha_remote_file_matches "$test_instance" /tmp/alpha-compat/config \
   printf 'remote file comparison accepted different stdin\n' >&2
   exit 1
 fi
-if incus exec "$test_instance" -- sshd -t >/tmp/sshd-before.log 2>&1; then
-  printf 'sshd -t unexpectedly passed without /run/sshd\n' >&2
-  exit 1
-fi
-grep --fixed-strings --quiet 'Missing privilege separation directory: /run/sshd' \
-  /tmp/sshd-before.log
-alpha_ensure_sshd_runtime_dir "$test_instance"
-[[ $(stat -c '%a:%u:%g' /run/sshd) == 755:0:0 ]]
-incus exec "$test_instance" -- sshd -t
 printf 'alpha Incus compatibility test passed\n'
 CONTAINER_TEST
 )

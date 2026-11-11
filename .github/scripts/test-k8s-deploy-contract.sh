@@ -264,9 +264,10 @@ PY
 serve_config="$(yq -r 'select(.kind == "ConfigMap" and .metadata.name == "tailscale-proxy-serve-config") | .data."serve.json"' deploy/k8s/base/tailscale-proxy.yaml)"
 jq --exit-status '
   .TCP["443"].HTTPS == true and
+  .TCP["6443"].TCPForward == "kubernetes.default.svc:443" and
   .TCP["2447"].TCPForward == "teagramd:2447" and
   .TCP["2447"].ProxyProtocol == 1 and
-  ((.TCP | keys | sort) == ["2447", "443"]) and
+  ((.TCP | keys | sort) == ["2447", "443", "6443"]) and
   (has("AllowFunnel") | not) and
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/"] .Proxy == "http://linkselector:8081" and
   .Web["teagram.tailaa4918.ts.net:443"].Handlers["/apiws"].Proxy == "http://teagramd:2444/apiws" and
@@ -277,6 +278,15 @@ jq --exit-status '
   fail 'the Tailscale Serve config must contain only the named tailnet Service targets and ports'
 grep --fixed-strings --quiet '"ip": ["tcp:443", "tcp:2443", "tcp:2447"]' deploy/k8s/README.md ||
   fail 'the tailnet grant must exclude the proxy metrics listener on 9002'
+[[ "$(grep --fixed-strings --count '"ip": ["tcp:6443"]' deploy/k8s/README.md)" == 1 ]] ||
+  fail 'the tailnet policy must contain exactly one API grant on tcp:6443'
+grep --fixed-strings --quiet "\"src\": [\"<delta's tag>\", \"tag:k3s-deploy\"]" deploy/k8s/README.md ||
+  fail 'the API grant must name only delta and the restricted deploy runner'
+grep --fixed-strings --quiet 'Do not grant `tag:ci-deploy`' deploy/k8s/README.md ||
+  fail 'the API grant must explicitly exclude the legacy CI tag'
+if grep --extended-regexp --quiet 'statefulset/tailscale-proxy|deployment/tailscale-proxy' deploy/k8s/deploy-release.sh; then
+  fail 'application releases must not restart the Tailscale proxy'
+fi
 grep --fixed-strings --quiet 'Bot API clients must keep the write side open' deploy/k8s/README.md ||
   fail 'the tailnet Bot API limitation around TCP half-close must be documented'
 python3 .github/scripts/test-tailscale-serve-routes.py <<<"$serve_config" ||
@@ -638,17 +648,39 @@ case "${1:-} ${2:-}" in
     grep --fixed-strings --quiet 'name: teagram-tailscale-state' "$INSTALL_CREATED_MANIFEST"
     ;;
   'apply --filename=-')
-    cat > "$INSTALL_POLICY_MANIFEST"
+    manifest=$(cat)
+    if grep --fixed-strings --quiet 'name: tailscale-proxy-api-egress' <<< "$manifest"; then
+      printf '%s\n' "$manifest" > "$INSTALL_POLICY_MANIFEST"
+    fi
     ;;
   'apply --filename') ;;
   *) printf 'unexpected kubectl call: %s\n' "$*" >&2; exit 64 ;;
 esac
 KUBECTL
 chmod 0700 "$install_fixture/bin/kubectl"
+cat > "$install_fixture/bin/incus" <<'INCUS'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == info ]]; then
+  exit 0
+fi
+[[ "${1:-}" == exec ]] || exit 64
+shift
+while [[ "${1:-}" == --mode=* ]]; do shift; done
+[[ "${1:-}" == teagram-k3s ]] || exit 64
+shift
+[[ "${1:-}" == -- ]] || exit 64
+shift
+[[ "${1:-}" == k3s && "${2:-}" == kubectl ]] || exit 64
+shift 2
+exec "$MOCK_KUBECTL" "$@"
+INCUS
+chmod 0700 "$install_fixture/bin/incus"
 
 run_tailnet_proxy_apply() {
   local scenario="$1"
   env "PATH=$install_fixture/bin:$PATH" \
+    "MOCK_KUBECTL=$install_fixture/bin/kubectl" \
     "TAILNET_INSTALL_CASE=$scenario" \
     "KUBECTL_CALLS=$install_fixture/$scenario.calls" \
     "INSTALL_CREATED_MANIFEST=$install_fixture/$scenario.manifest" \
@@ -657,6 +689,7 @@ run_tailnet_proxy_apply() {
 }
 
 if ! env "PATH=$install_fixture/bin:$PATH" \
+  "MOCK_KUBECTL=$install_fixture/bin/kubectl" \
   "TAILNET_INSTALL_CASE=absent" \
   "KUBECTL_CALLS=$install_fixture/dry-run.calls" \
   "INSTALL_CREATED_MANIFEST=$install_fixture/dry-run.manifest" \
@@ -764,10 +797,29 @@ case "${1:-} ${2:-}" in
 esac
 KUBECTL
 chmod 0700 "$rollback_fixture/bin/kubectl"
+cat > "$rollback_fixture/bin/incus" <<'INCUS'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == info ]]; then
+  exit 0
+fi
+[[ "${1:-}" == exec ]] || exit 64
+shift
+while [[ "${1:-}" == --mode=* ]]; do shift; done
+[[ "${1:-}" == teagram-k3s ]] || exit 64
+shift
+[[ "${1:-}" == -- ]] || exit 64
+shift
+[[ "${1:-}" == k3s && "${2:-}" == kubectl ]] || exit 64
+shift 2
+exec "$MOCK_KUBECTL" "$@"
+INCUS
+chmod 0700 "$rollback_fixture/bin/incus"
 
 run_tailnet_proxy_rollback() {
   local scenario="$1"
   env "PATH=$rollback_fixture/bin:$PATH" \
+    "MOCK_KUBECTL=$rollback_fixture/bin/kubectl" \
     "TAILNET_ROLLBACK_CASE=$scenario" \
     "KUBECTL_CALLS=$rollback_fixture/$scenario.calls" \
     bash deploy/k8s/install-tailnet-proxy-access.sh --rollback

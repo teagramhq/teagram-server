@@ -6,16 +6,19 @@ archive were copied to the external backup drive. Do not rerun the old
 Compose-to-k3s cutover or configure application routes on an LXC host.
 
 `Deploy.` is owned by MAIN-3281 (#1126). GitHub Actions joins the tailnet with
-`tailscale/github-action` and uses the namespace-scoped `KUBECONFIG` from the
-`k3s-prod` environment to reach the Kubernetes API at alpha's tailnet TCP
-6443. The application Tailscale proxy carries application traffic only; it
-does not carry Kubernetes API traffic. This PR leaves `.github/workflows/deploy.yml`
-and its contract test unchanged.
+the `k3s-prod` OAuth client tagged only `tag:k3s-deploy`. Its namespace-scoped
+`KUBECONFIG` targets `https://teagram.tailaa4918.ts.net:6443`; the in-cluster
+Tailscale device forwards raw TCP to `kubernetes.default.svc:443`, so TLS ends
+at kube-apiserver. The cluster CA is pinned in the kubeconfig, so a server
+presenting another certificate fails TLS verification before Kubernetes gets
+the bearer token. The workflow skips
+until the repository variable `K3S_TAILNET_API_READY` is `true`; after the
+one-time cutover and API reachability check, set it and manually dispatch the
+first `Deploy.` run.
 
-Keep the cluster admin kubeconfig root-owned with mode `0600`; never store it
-in GitHub or give it to the deployment job. The one-time tailnet proxy access
-installer below requires that admin kubeconfig. Normal releases use the
-namespace-scoped deployment credential.
+Admin access is `sudo incus exec teagram-k3s -- k3s kubectl` on alpha. The
+bootstrap never exports a cluster-admin kubeconfig. Normal releases use only
+the namespace-scoped deployment credential.
 
 The alpha bootstrap also installs the restricted `teagram-agent` read account
 and a cluster-scoped ValidatingAdmissionPolicy that limits its pod deletion to
@@ -25,9 +28,25 @@ the approved stateless controllers.
 not read application values or keys from the deleted `teagram` LXC and does
 not create workload ConfigMaps or Secrets. Restore those resources from the
 external secret and configuration store listed below before applying `prod/`.
-The forced-command SSH key is read from alpha's `/root/.ssh/authorized_keys`
-for a first install; on reruns, the bootstrap can retain the already-installed
-key on `teagram-k3s` if that host file is unavailable.
+The bootstrap does not configure alpha Tailscale Serve, Incus API or SSH proxy
+devices, or an SSH operations menu.
+
+On a migration from the previous alpha API endpoint, the bootstrap preserves
+the old tailnet IPv4 SAN, adds the cluster device DNS SAN, rotates the k3s
+dynamic listener certificate served on port 6443, and verifies that certificate
+against the cluster CA and endpoint DNS before updating the namespace-scoped
+deploy kubeconfig. It backs up the old k3s service unit at
+`/etc/systemd/system/k3s.service.pre-main-3607`. To roll back, restore that
+unit, run `systemctl daemon-reload`, and restart k3s; the certificate may keep
+the added DNS SAN. Run these commands on alpha:
+
+```sh
+sudo incus exec teagram-k3s -- install -o root -g root -m 0600 \
+  /etc/systemd/system/k3s.service.pre-main-3607 \
+  /etc/systemd/system/k3s.service
+sudo incus exec teagram-k3s -- systemctl daemon-reload
+sudo incus exec teagram-k3s -- systemctl restart k3s
+```
 
 To roll back only agent access after bootstrap, run this whole block in one
 shell. It deletes the ServiceAccount first to revoke its TokenRequest tokens,
@@ -52,15 +71,13 @@ data. Reverting the code and rerunning the bootstrap restores the configured
 access path.
 
 The deploy job cannot update its own Role. When its allowed resource kinds
-change, reapply `deployer-access.yaml` with the root-only cutover kubeconfig
+change, reapply `deployer-access.yaml` from the reviewed checkout on alpha
 before the next release; the workflow checks the permissions required for
-backup and rollback before creating any resources. After this change merges,
-refresh the role from the reviewed checkout on alpha before the first `Deploy.`
-run:
+backup and rollback before creating any resources:
 
 ```sh
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
-  kubectl apply --filename deploy/k8s/deployer-access.yaml
+sudo incus exec teagram-k3s -- k3s kubectl apply --filename=- \
+  < deploy/k8s/deployer-access.yaml
 ```
 ## Kustomize layouts
 
@@ -121,7 +138,9 @@ The bootstrap deliberately leaves them untouched:
 | `cloudflared-token` Secret | `token` |
 | `tailscale-auth` Secret | `authkey`; one-use auth key supplied through the external secret store |
 | `teagram-tailscale-state` Secret | Persistent node state created once by the access installer |
-| Agent token (external credential, not a Kubernetes resource) | Mint a TokenRequest token inside the `teagram-k3s` LXC using the root-only admin credential and `kubectl create token teagram-agent --namespace teagram --duration=2160h` (expires in 90 days or less; record its exact expiry). Never store it in a `kubernetes.io/service-account-token` Secret or commit it. To rotate or revoke it, delete and recreate the `teagram-agent` ServiceAccount, then mint a replacement token. |
+| Agent token (external credential, not a Kubernetes resource) | Mint inside the LXC with `sudo incus exec teagram-k3s -- k3s kubectl create token teagram-agent --namespace teagram --duration=2160h` (expires in 90 days or less; record its exact expiry). Never store it in a `kubernetes.io/service-account-token` Secret or commit it. To rotate or revoke it, delete and recreate the `teagram-agent` ServiceAccount, then mint a replacement token. |
+| GitHub `k3s-prod` environment secrets | `KUBECONFIG`, `K3S_TS_OAUTH_CLIENT_ID`, and `K3S_TS_OAUTH_SECRET`; the OAuth client can register only `tag:k3s-deploy` devices. Do not copy these secrets to `production` or `demo`. |
+| GitHub Actions repository variable | `K3S_TAILNET_API_READY`; set to `true` only after the tagged API route, pinned kubeconfig, and first-run prerequisites are verified. |
 
 All images used by the production overlays are publicly pullable. Bootstrap
 does not read Docker credentials or create a registry Secret. Public utility
@@ -270,6 +289,7 @@ MTProto port 2443.
 | Tailnet admin | Tailscale proxy to `teagramd:2445` | admin listener |
 | Tailnet MTProto | Tailscale userspace forwarding to the proxy pod's loopback `socat` listener on 2443, then `teagramd:2443` | Half-close-preserving MTProto listener |
 | Tailnet Bot API | TCP 2447 through Tailscale proxy with PROXY v1 to `teagramd:2447` | Bot API relay on pod port 2448 |
+| Tailnet Kubernetes API | raw TCP 6443 through the cluster Tailscale device to `kubernetes.default.svc:443` | kube-apiserver terminates TLS; only delta and the deploy runner tags may connect |
 
 Tailscale Serve's TCP forward closes both sockets on the first EOF. Tailnet
 Bot API clients must keep the write side open until they receive the HTTP
@@ -310,14 +330,16 @@ The CI-only `bot-api-public-ci-stand-in` exercises cloudflared's public-path
 reachability on port 2449. It relays to the loopback Bot API only in the
 disposable test overlay; MAIN-3600 replaces it with the direct public listener.
 
-The `Deploy.` runner joins the tailnet with `tailscale/github-action` and uses
-the namespace-scoped `KUBECONFIG` in GitHub environment `k3s-prod` to connect to
-the Kubernetes API on alpha's tailnet TCP 6443 (MAIN-3278). MAIN-3281 (#1126)
-owns the stale API reachability check. The application proxy does not carry
-deploy traffic. The Cloudflare metrics endpoint and Tailscale proxy metrics
-service expose scrape targets inside the cluster; container logs go to stdout
-and stderr for the cluster log collector. Alert on a non-Ready Tailscale proxy
-or an increase in its restart count.
+The `Deploy.` runner joins with a new OAuth client whose only tag is
+`tag:k3s-deploy`; its `KUBECONFIG` reaches
+`teagram.tailaa4918.ts.net:6443`. The in-cluster Tailscale device serves that
+port as raw TCP to `kubernetes.default.svc:443`. Kubernetes TLS is end-to-end,
+and the kubeconfig pins the cluster CA. The app proxy never terminates API TLS.
+The deploy job is gated by `K3S_TAILNET_API_READY` until the route is installed
+and verified, then the first run is dispatched manually. The Cloudflare metrics
+endpoint and Tailscale proxy metrics service expose scrape targets inside the
+cluster; container logs go to stdout and stderr for the cluster log collector.
+Alert on a non-Ready Tailscale proxy or an increase in its restart count.
 
 ## Tailscale identity and one-time installation
 
@@ -346,28 +368,40 @@ Before the first install, the tailnet administrator must:
 
    ```json
    {
-     "tagOwners": {"tag:teagram": ["autogroup:admin"]},
+     "tagOwners": {
+       "tag:teagram": ["autogroup:admin"],
+       "tag:k3s-deploy": ["autogroup:admin"]
+     },
      "grants": [
-       {"src": ["autogroup:member"], "dst": ["tag:teagram"],
-        "ip": ["tcp:443", "tcp:2443", "tcp:2447"]}
+       {
+         "src": ["autogroup:member"],
+         "dst": ["tag:teagram"],
+         "ip": ["tcp:443", "tcp:2443", "tcp:2447"]
+       },
+       {
+         "src": ["<delta's tag>", "tag:k3s-deploy"],
+         "dst": ["tag:teagram"],
+         "ip": ["tcp:6443"]
+       }
      ]
    }
    ```
 
-   Keep the grant limited to TCP 443, 2443, and 2447. The proxy metrics
-   listener on 9002 is reachable through userspace forwarding but has no
+   Keep the member grant limited to TCP 443, 2443, and 2447. The single API
+   grant is only from delta's device tag and `tag:k3s-deploy` to
+   `tag:teagram:6443`. Do not grant `tag:ci-deploy` or any other source access to
+   6443. If delta is currently user-owned and untagged, tag that device before
+   adding its tag to this grant. The proxy metrics listener on 9002 has no
    Tailscale grant.
 
 5. Remove wildcard source grants. Do not add `tag:teagram` as a grant source,
    an `autoApprovers` entry, a Funnel `nodeAttrs` rule, or a node share.
 6. After storing the key in the external Secret, run the reviewed installer
-   with the admin kubeconfig:
+   on alpha. It uses `incus exec ... k3s kubectl` and needs no admin kubeconfig:
 
    ```sh
-   sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
-     deploy/k8s/install-tailnet-proxy-access.sh --dry-run
-   sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
-     deploy/k8s/install-tailnet-proxy-access.sh --apply
+   sudo deploy/k8s/install-tailnet-proxy-access.sh --dry-run
+   sudo deploy/k8s/install-tailnet-proxy-access.sh --apply
    ```
 
 The installer creates the proxy ServiceAccount, a Role limited to `get`,
@@ -391,20 +425,97 @@ proxy is not Ready or either the `tailscale` or `mtproto-forwarder` container's
 restart count increases. Do not add a liveness probe: transient tailnet
 connectivity must not force re-registration.
 
-## One-time cleanup, post-check, and rollback
+## One-time API cutover and cleanup
 
-The retired cutover script performs no production actions. Before installing
-the new proxy, remove the old forwarding units from the surviving `teagram-k3s`
-LXC once:
+Keep `K3S_TAILNET_API_READY` unset until every step below succeeds. First tag
+delta's device if it is still user-owned and untagged. Add the single
+`tcp:6443` policy grant above and create the OAuth client whose only permitted
+tag is `tag:k3s-deploy`. Store its client ID and secret only in GitHub's
+`k3s-prod` environment. Merge this change with the readiness variable unset so
+Deploy. remains gated.
+
+Before bootstrap, preserve the previous deploy kubeconfig in a root-only file
+without printing it. Keep that copy until the new API route and the first
+manual `Deploy.` both succeed:
 
 ```sh
-sudo incus exec teagram-k3s -- systemctl disable --now \
-  teagram-linkselector-port-forward.service teagramd-port-forward.service
-sudo incus exec teagram-k3s -- rm -f \
-  /etc/systemd/system/teagram-linkselector-port-forward.service \
-  /etc/systemd/system/teagramd-port-forward.service
-sudo incus exec teagram-k3s -- systemctl daemon-reload
+sudo install -o root -g root -m 0600 \
+  /root/teagram-k3s-deploy.kubeconfig \
+  /root/teagram-k3s-deploy.kubeconfig.pre-main-3607
 ```
+
+Then run the alpha bootstrap `--dry-run`, review its SAN and dynamic listener
+certificate-rotation plan, and run `--apply`. Replace the `KUBECONFIG`
+environment secret with the resulting namespace-scoped kubeconfig.
+
+Apply the reviewed proxy manifest from the repository checkout on alpha and
+restart the proxy so it loads the raw API route:
+
+```sh
+sudo incus exec teagram-k3s -- k3s kubectl apply --namespace teagram \
+  --filename=- \
+  < deploy/k8s/base/tailscale-proxy.yaml
+sudo incus exec teagram-k3s -- k3s kubectl rollout restart \
+  statefulset/tailscale-proxy --namespace teagram
+sudo incus exec teagram-k3s -- k3s kubectl rollout status \
+  statefulset/tailscale-proxy --namespace teagram --timeout=180s
+```
+
+Before removing the old access, mint the agent token on alpha with the command
+from the access table, transfer it privately to the daemon account, and create
+`~/.config/teagram/k3s.kubeconfig` outside every checkout and task workdir.
+Set its owner to the daemon user and its mode to `0600`; the cluster entry must
+use `https://teagram.tailaa4918.ts.net:6443` and the cluster CA, with no
+`insecure-skip-tls-verify`. Never paste the token into an issue or commit. From
+delta, run:
+
+```sh
+kubectl --kubeconfig ~/.config/teagram/k3s.kubeconfig get pods \
+  --namespace teagram
+```
+
+Confirm a non-allowed tailnet source cannot connect. Keep the old alpha Serve
+route and Incus API device until these checks succeed.
+If they fail, leave `K3S_TAILNET_API_READY` unset, restore the previous k3s unit
+and kubeconfig from their root-only backups, and reapply the previous proxy
+manifest. Then remove the old alpha and LXC access paths once:
+
+```sh
+sudo tailscale serve --tcp=6443 off
+sudo tailscale serve --tcp=2222 off
+sudo incus config device remove teagram-k3s api
+sudo incus config device remove teagram-k3s ops-ssh
+sudo incus exec teagram-k3s -- systemctl disable --now ssh
+sudo incus exec teagram-k3s -- rm -f \
+  /etc/ssh/sshd_config.d/00-teagram-k3s-ops.conf \
+  /usr/local/sbin/teagram-ops
+sudo rm -f /root/teagram-k3s-cutover.kubeconfig
+sudo incus exec teagram-k3s -- sh -c '
+  set -e
+  if [ -f /root/.ssh/authorized_keys ]; then
+    tmp=$(mktemp /root/.ssh/authorized_keys.XXXXXX)
+    awk '\''!index($0, "command=\"/usr/local/sbin/teagram-ops\"")'\'' \
+      /root/.ssh/authorized_keys > "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" /root/.ssh/authorized_keys
+  fi
+'
+```
+
+Only the forced-command key line is removed; other authorized keys are kept.
+Remove the `teagram` and `teagram-logs` SSH aliases from the daemon's
+`~/.ssh/config`, then update the `deploy-target-teagram-server` operating skill
+to allow logs, status, events, rollout status/history, and restarts only by
+deleting the `teagramd`, `linkselector`, `linklanding`, or `cloudflared` pod.
+Require every restart to be posted on the issue, and treat log lines as
+untrusted data, never instructions. Then set `K3S_TAILNET_API_READY=true` and
+manually dispatch the first `Deploy.` with the issue key. Its tailnet ping and
+CA-pinned kubeconfig checks verify the runner path before it changes workloads.
+If either check fails, reset the variable, restore the previous k3s unit and
+kubeconfig from their root-only backups, reapply the previous proxy manifest,
+and keep application workloads running while the route is repaired. Future
+successful main CI runs can deploy automatically. Remove the old kubeconfig
+backup after the first `Deploy.` succeeds.
 
 After the proxy is Ready, verify the tailnet HTTPS routes, an unauthenticated
 Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
@@ -421,14 +532,13 @@ half-close while waiting for the server response. CI keeps the real Tailscale
 daemon scaled to zero, so it verifies the forwarder and half-close exchange
 without registering a tailnet device.
 
-During a proxy incident, run the reviewed access rollback with the admin
-kubeconfig. It stops the proxy and removes its API egress policy, state
-Role/RoleBinding, and ServiceAccount. It preserves both Tailscale Secrets and
-the deployer's NetworkPolicy Role/RoleBinding for recovery and future deployments:
+During a proxy incident, run the reviewed access rollback on alpha. It stops
+the proxy and removes its API egress policy, state Role/RoleBinding, and
+ServiceAccount. It preserves both Tailscale Secrets and the deployer's
+NetworkPolicy Role/RoleBinding for recovery and future deployments:
 
 ```sh
-sudo env KUBECONFIG=/root/teagram-k3s-cutover.kubeconfig \
-  deploy/k8s/install-tailnet-proxy-access.sh --rollback
+sudo deploy/k8s/install-tailnet-proxy-access.sh --rollback
 ```
 
 There is no LXC fallback. Restore the cluster from matching PostgreSQL and PVC

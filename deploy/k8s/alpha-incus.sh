@@ -27,8 +27,3 @@ alpha_install_remote_file() {
     mv -f -- "$temporary" "$destination"
   ' sh "$destination" "$mode"
 }
-
-alpha_ensure_sshd_runtime_dir() {
-  local instance=$1
-  incus exec "$instance" -- install -d -o root -g root -m 0755 /run/sshd
-}

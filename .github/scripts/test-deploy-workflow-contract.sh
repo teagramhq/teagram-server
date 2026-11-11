@@ -10,7 +10,8 @@ workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
-expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
+expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_build_if="(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')"
 expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
@@ -578,8 +579,18 @@ check_contract() {
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy-server' ]] ||
-    fail 'the production workflow must contain only its server deploy job'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-deploy-gate,deploy-server' ]] ||
+    fail 'the production workflow must contain the deploy gate notice and server deploy jobs'
+  [[ "$(query '.jobs."check-deploy-gate".name')" == 'check: deploy-gate' ]] ||
+    fail 'the disabled deploy notice job must use the check stage naming contract'
+  [[ "$(query '.jobs."check-deploy-gate".if')" == "$expected_disabled_if" ]] ||
+    fail 'the disabled deploy notice must run only for deploy candidates when the gate is false'
+  local disabled_notice_run
+  disabled_notice_run="$(query '.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run')"
+  grep -Fq '::notice::' <<< "$disabled_notice_run" ||
+    fail 'a disabled production deploy must emit a workflow notice'
+  grep -Fq 'GITHUB_STEP_SUMMARY' <<< "$disabled_notice_run" ||
+    fail 'a disabled production deploy must write a step summary'
   [[ "$(query '.jobs."deploy-server".name')" == 'deploy: server (prod)' ]] ||
     fail 'the production deploy job must use the deploy stage naming contract'
   [[ "$(query '.jobs."deploy-server".if')" == "$expected_if" ]] ||
@@ -617,6 +628,20 @@ check_contract() {
     fail 'the demo target artifact must be uploaded only after a verified production deployment'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Install the restricted cluster kubeconfig") | .env.KUBECONFIG_CONTENT')" == '${{ secrets.KUBECONFIG }}' ]] ||
     fail 'the production deploy must use the dedicated restricted kubeconfig secret'
+  kubeconfig_run="$(query '.jobs.deploy-server.steps[] | select(.name == "Install the restricted cluster kubeconfig") | .run')"
+  for kubeconfig_check in \
+    "https://teagram.tailaa4918.ts.net:6443" \
+    'certificate-authority-data' \
+    'insecure-skip-tls-verify'; do
+    grep --fixed-strings --quiet "$kubeconfig_check" <<< "$kubeconfig_run" ||
+      fail "the deploy kubeconfig check must validate $kubeconfig_check"
+  done
+  grep --fixed-strings --quiet '[[ -z "$insecure_skip" ]]' <<< "$kubeconfig_run" ||
+    fail 'the deploy workflow must reject kubeconfigs that set insecure-skip-tls-verify'
+  [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Join the tailnet") | .with.oauth-client-id')" == '${{ secrets.K3S_TS_OAUTH_CLIENT_ID }}' &&
+     "$(query '.jobs.deploy-server.steps[] | select(.name == "Join the tailnet") | .with.oauth-secret')" == '${{ secrets.K3S_TS_OAUTH_SECRET }}' &&
+     "$(query '.jobs.deploy-server.steps[] | select(.name == "Join the tailnet") | .with.tags')" == 'tag:k3s-deploy' ]] ||
+    fail 'the production deploy must join with the k3s-prod-only tagged OAuth client'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Remove the restricted cluster kubeconfig") | .if')" == '${{ always() }}' ]] ||
     fail 'the restricted kubeconfig must be removed even when a deployment step fails'
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Check out the tested source") | .with.ref')" == '${{ steps.target.outputs.sha }}' &&
@@ -970,6 +995,10 @@ self_test() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
   local mutations=(
+    'del(.jobs."check-deploy-gate")'
+    '.jobs."check-deploy-gate".if = "always()"'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("::notice::"; "::debug::")'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("GITHUB_STEP_SUMMARY"; "WRONG_SUMMARY")'
     '.on.pull_request = {}'
     '.on.pull_request_target = {}'
     '.on.push = {"branches": ["main"]}'
