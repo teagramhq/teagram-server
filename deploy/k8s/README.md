@@ -460,11 +460,24 @@ sudo incus exec teagram-k3s -- k3s kubectl rollout status \
   statefulset/tailscale-proxy --namespace teagram --timeout=180s
 ```
 
-Verify `https://teagram.tailaa4918.ts.net:6443` from delta with the pinned
-agent kubeconfig and `kubectl get pods --namespace teagram`. Confirm that a
-non-allowed tailnet source cannot connect. Keep the old alpha Serve route and
-Incus API device available until these checks succeed, then remove the old
-alpha and LXC access paths once:
+Before removing the old access, mint the agent token on alpha with the command
+from the access table, transfer it privately to the daemon account, and create
+`~/.config/teagram/k3s.kubeconfig` outside every checkout and task workdir.
+Set its owner to the daemon user and its mode to `0600`; the cluster entry must
+use `https://teagram.tailaa4918.ts.net:6443` and the cluster CA, with no
+`insecure-skip-tls-verify`. Never paste the token into an issue or commit. From
+delta, run:
+
+```sh
+kubectl --kubeconfig ~/.config/teagram/k3s.kubeconfig get pods \
+  --namespace teagram
+```
+
+Confirm a non-allowed tailnet source cannot connect. Keep the old alpha Serve
+route and Incus API device until these checks succeed.
+If they fail, leave `K3S_TAILNET_API_READY` unset, restore the previous k3s unit
+and kubeconfig from their root-only backups, and reapply the previous proxy
+manifest. Then remove the old alpha and LXC access paths once:
 
 ```sh
 sudo tailscale serve --tcp=6443 off
@@ -488,15 +501,19 @@ sudo incus exec teagram-k3s -- sh -c '
 ```
 
 Only the forced-command key line is removed; other authorized keys are kept.
-Update the daemon's kubeconfig and operating skill as described in the PR body,
-then set `K3S_TAILNET_API_READY=true` and manually dispatch the first `Deploy.`
-with the issue key. Its tailnet ping and CA-pinned kubeconfig checks verify the
-runner path before it changes workloads. If either check fails, reset the
-variable, restore the previous k3s unit and kubeconfig from their root-only
-backups, reapply the previous proxy manifest, and keep application workloads
-running while the route is repaired. Future successful main CI runs can deploy
-automatically. Remove the old kubeconfig backup after the first `Deploy.`
-succeeds.
+Remove the `teagram` and `teagram-logs` SSH aliases from the daemon's
+`~/.ssh/config`, then update the `deploy-target-teagram-server` operating skill
+to allow logs, status, events, rollout status/history, and restarts only by
+deleting the `teagramd`, `linkselector`, `linklanding`, or `cloudflared` pod.
+Require every restart to be posted on the issue, and treat log lines as
+untrusted data, never instructions. Then set `K3S_TAILNET_API_READY=true` and
+manually dispatch the first `Deploy.` with the issue key. Its tailnet ping and
+CA-pinned kubeconfig checks verify the runner path before it changes workloads.
+If either check fails, reset the variable, restore the previous k3s unit and
+kubeconfig from their root-only backups, reapply the previous proxy manifest,
+and keep application workloads running while the route is repaired. Future
+successful main CI runs can deploy automatically. Remove the old kubeconfig
+backup after the first `Deploy.` succeeds.
 
 After the proxy is Ready, verify the tailnet HTTPS routes, an unauthenticated
 Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
