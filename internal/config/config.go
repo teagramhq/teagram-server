@@ -2689,8 +2689,9 @@ func validateBrowserOnlyListener(browserOnly bool, listenAddr, settingName, list
 // operator running without it where the support tickets will come from before
 // they arrive. The carrier-NAT half remains an accepted risk in every mode. CF
 // mode removes the proxy assumption only on the public WebSocket listener;
-// tailnet requests still use their socket peers. No warning is needed when no
-// per-IP limit is enabled, since nothing is then keyed on an address at all.
+// tailnet requests still use their socket peers. In CF mode, no warning is
+// needed when no limited listener uses socket peer addresses. Socket mode keeps
+// its existing warning whenever a per-IP limit is enabled.
 //
 // Every limit keyed on a client address has to be in the condition below, or an
 // operator turns one off and stops being warned about the other. The pre-auth
@@ -2710,6 +2711,9 @@ func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 		return
 	}
 	if c.ClientAddrTrust == ClientAddrCFConnectingIP {
+		if !c.hasSocketKeyedPerIPListener() {
+			return
+		}
 		log.Warn("tailnet per-IP limits remain keyed on each connection's own peer address",
 			"trust", string(ClientAddrSocket),
 			"listener", "tailnet",
@@ -2724,6 +2728,19 @@ func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 		"trust", string(c.ClientAddrTrust),
 		"assumes", "one peer address is one client, reaching this process directly",
 		"risk", "behind a proxy or L4 load balancer every client shares one bucket: the per-IP cap becomes a global one, and the pre-auth connection cap becomes a server-wide ceiling on concurrent handshakes that refuses every client past it; behind a carrier NAT a whole mobile network shares one bucket and its subscribers are refused on each other's traffic")
+}
+
+func (c Config) hasSocketKeyedPerIPListener() bool {
+	if c.BotAPIListenAddr != "" {
+		return true
+	}
+	if c.ListenAddr != "" && c.ListenPath != mtproto.ListenerPathTailnet {
+		return true
+	}
+	if c.WebSocketListenAddr != "" && c.WebSocketListenPath != mtproto.ListenerPathTailnet {
+		return true
+	}
+	return c.ClientAddrTrust == ClientAddrSocket && c.PublicWebSocketListenAddr != ""
 }
 
 // handshakeReadTimeout is the timeout gotd applies to each read inside key
