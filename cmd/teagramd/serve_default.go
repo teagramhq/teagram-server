@@ -17,25 +17,39 @@ func validateServeEnvironment() error {
 	if _, supplied := os.LookupEnv("TG_FIXTURE_AUTH_PROGRESS"); supplied {
 		return errors.New("TG_FIXTURE_AUTH_PROGRESS is only supported by fixtureauthprogress builds")
 	}
+	if path, supplied := os.LookupEnv(rpcTraceFileEnv); supplied && path != "" {
+		return validateRPCTraceOutputPath(path)
+	}
 	return nil
 }
 
 func serveMTProto(ctx context.Context, server *mtproto.Server, tcp net.Listener, websocket net.Listener, public *publicWebSocketListener) error {
+	tracer, exporter, err := newRPCTraceFileTracerFromEnv()
+	if err != nil {
+		return err
+	}
+	if tracer != nil {
+		server.SetRPCTracer(tracer)
+	}
+
+	var serveErr error
 	if websocket == nil && public == nil {
-		return server.Serve(ctx, tcp)
+		serveErr = server.Serve(ctx, tcp)
+	} else {
+		group := tdsync.NewCancellableGroup(ctx)
+		group.Go(func(ctx context.Context) error { return server.Serve(ctx, tcp) })
+		if websocket != nil {
+			group.Go(func(ctx context.Context) error { return server.ServeWebSocket(ctx, websocket) })
+		}
+		if public != nil {
+			group.Go(func(ctx context.Context) error {
+				if public.trustCFConnectingIP {
+					return server.ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(ctx, public.listener, public.handler, public.originPatterns, public.discovery, public.browserOnly)
+				}
+				return server.ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly(ctx, public.listener, public.handler, public.originPatterns, public.discovery, public.browserOnly)
+			})
+		}
+		serveErr = group.Wait()
 	}
-	group := tdsync.NewCancellableGroup(ctx)
-	group.Go(func(ctx context.Context) error { return server.Serve(ctx, tcp) })
-	if websocket != nil {
-		group.Go(func(ctx context.Context) error { return server.ServeWebSocket(ctx, websocket) })
-	}
-	if public != nil {
-		group.Go(func(ctx context.Context) error {
-			if public.trustCFConnectingIP {
-				return server.ServePublicWebSocketWithCFConnectingIPAndBrowserOnly(ctx, public.listener, public.handler, public.originPatterns, public.discovery, public.browserOnly)
-			}
-			return server.ServeWebSocketWithHandlerAndDiscoveryAndBrowserOnly(ctx, public.listener, public.handler, public.originPatterns, public.discovery, public.browserOnly)
-		})
-	}
-	return group.Wait()
+	return errors.Join(serveErr, closeRPCTraceFile(tracer, exporter))
 }
