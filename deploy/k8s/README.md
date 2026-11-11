@@ -452,7 +452,8 @@ Apply the reviewed proxy manifest from the repository checkout on alpha and
 restart the proxy so it loads the raw API route:
 
 ```sh
-sudo incus exec teagram-k3s -- k3s kubectl apply --filename=- \
+sudo incus exec teagram-k3s -- k3s kubectl apply --namespace teagram \
+  --filename=- \
   < deploy/k8s/base/tailscale-proxy.yaml
 sudo incus exec teagram-k3s -- k3s kubectl rollout restart \
   statefulset/tailscale-proxy --namespace teagram
