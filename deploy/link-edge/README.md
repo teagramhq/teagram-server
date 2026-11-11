@@ -1,5 +1,11 @@
 # Isolated link edge
 
+Production use of this Compose and Tailscale Serve path is retired. Current
+production runs on k3s; see the [deployment guide](../k8s/README.md). The
+activation, refresh, and rollback procedures below are historical and must not
+be used to operate production. The isolated Compose control remains for local
+and CI testing.
+
 This Compose project runs the link selector and static landing page beside the
 separately managed Telegram Web container. It does not use the server stack's
 Compose file. The selector reaches Web through `teagram-web-edge-net` as

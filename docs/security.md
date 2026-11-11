@@ -66,19 +66,16 @@ Treat the view and its query-text file as sensitive as well. See the
 
 ### Log access and retention
 
-The Compose PostgreSQL service publishes no host port. PostgreSQL writes to
-standard error, which Docker captures. The service does not set a logging
-driver or rotation options, so the Docker daemon configuration controls where
-logs are stored and how long they remain. Docker's default `json-file` driver
-does not rotate logs unless rotation is configured. The repository therefore
-does not establish a time or size limit for PostgreSQL logs; operators must
-configure and verify host-level rotation and any log forwarding before
-deployment. See [Docker logging configuration](https://docs.docker.com/engine/logging/configure/)
-and the [JSON-file driver options](https://docs.docker.com/engine/logging/drivers/json-file/).
+The production PostgreSQL StatefulSet publishes no external service port.
+PostgreSQL writes to standard error, which is available through Kubernetes pod
+logs. The repository does not configure cluster log forwarding, retention, or
+at-rest encryption, so those controls belong to the cluster logging and access
+policy. Cluster users able to read the pod logs can access the sensitive query
+text described above. See the [k3s deployment guide](../deploy/k8s/README.md)
+for the current production topology.
 
-Reading `docker compose logs postgres` or the daemon's log storage requires
-Docker or host access. Docker daemon control can also inspect the database
-container and its data volume, so grant it only to trusted host operators.
+Use `kubectl logs --namespace teagram statefulset/postgres` to read the
+PostgreSQL pod logs. Restrict cluster API access to trusted operators.
 Forwarded log destinations inherit the same sensitive-data classification and
 need access and retention controls of their own.
 
@@ -95,12 +92,12 @@ of redacted queries. The migration does not grant membership to application
 or probe roles, and the migration test verifies that `browser_acceptance_probe`
 cannot read these objects.
 
-The Compose application DSN uses the `postgres` database role, and this
-change does not provision a separate least-privilege runtime role. That
-credential is therefore inside the trusted reader boundary: compromise of
-the running application credential can expose query statistics and the
-database contents it already accesses. The `pg_read_all_stats` grants do not
-contain that risk or provide isolation from the application.
+The production runtime receives `TG_POSTGRES_DSN` from the external
+`postgres-credentials` Secret. This repository does not provision a separate
+least-privilege application role, so the runtime credential is inside the
+trusted reader boundary: compromise of it can expose query statistics and the
+database contents the application already accesses. The `pg_read_all_stats`
+grants do not contain that risk or provide isolation from the application.
 
 # Threat model: profile-photo clear and request replay
 
@@ -256,9 +253,10 @@ search paths constrain the owner and dialog; the postings path joins back to
 the same owner-local message row and rechecks the complete query, deletion
 state, and expiry before returning source message rows. No RPC returns posting
 lexemes. The migration adds no row-level security or per-owner database grants;
-tenant isolation is enforced in application SQL. The current Compose runtime
-uses the shared `postgres` role, so a database operator or compromised runtime
-credential can read lexemes across owners, as it can read source messages.
+tenant isolation is enforced in application SQL. The production runtime uses
+the shared database credential supplied by `postgres-credentials`, so a
+database operator or compromised runtime credential can read lexemes across
+owners, as it can read source messages.
 
 ## Abuse cases and controls
 
@@ -320,17 +318,12 @@ request payloads, tokens, or account IDs.
 
 ## Log access and retention
 
-On the production host, the QA SSH key is limited to the forced log reader and
-can retrieve up to 5,000 matching lines, but any valid cutoff can be requested;
-that is a volume bound rather than an age limit. Host root and Docker
-administrators can read raw application logs and the legacy archive. The host
-syslog rotation is size-based, with an 8 GiB maximum and no fixed age limit;
-the legacy archive can remain until replaced or deleted. Logs are not encrypted
-at rest. Keep the reader key and host access limited to trusted responders.
-The deployment's [retained log threat model](../deploy/teagram/README.md#retained-log-threat-model)
-documents the full reader, rotation, archive, and deletion boundaries. Forwarded
-copies inherit the same sensitivity and require their own access and retention
-controls.
+These records are written to the production `teagramd` pod logs. Cluster users
+with log access can read them; the repository does not define log retention or
+at-rest encryption for the cluster. Restrict access to trusted responders and
+apply separate access and retention controls to forwarded copies. See the
+[k3s deployment guide](../deploy/k8s/README.md) for the current production
+topology.
 
 # Threat model: TCP and WebSocket connection timeout diagnostics
 
@@ -363,19 +356,13 @@ payloads, or raw peer IP addresses.
 |---|---|
 | A log reader correlates one socket's lifetime | The connection ID joins sampled open records with close and timeout records. TCP failures while resolving the client address or reading the PROXY header before admission have no open record and, when sampled, are reported as `transport negotiation error`; WebSocket requests that fail before a successful upgrade also have no open record. Global and per-network pre-auth cap refusals have no open record, but use their own sampled `connection refused at the pre-auth cap` and `connection refused at the per-network pre-auth cap` records, respectively. `opened_at` keeps close records identifiable when the open line was suppressed and gives a server-side lifetime reference. It is generated by the server and is not accepted as a credential. |
 | A log reader correlates reconnects or identifies an account | The auth-key ID and session ID make authenticated timeout records linkable; a reader with database access can map the stable auth-key ID to an account. Treat the identifiers and timing as sensitive personal data and restrict log access to trusted responders. |
-| An unauthenticated peer floods the log with short-lived connections | Open records are sampled independently from close records and report `suppressed`, bounding the synchronous open-log writes per server. This does not bound connection attempts or other log classes, and retained logs remain subject to size-based rotation. |
+| An unauthenticated peer floods the log with short-lived connections | Open records are sampled independently from close records and report `suppressed`, bounding the synchronous open-log writes per server. This does not bound connection attempts or other log classes; retained logs follow the cluster logging and retention policy. |
 | A log reader obtains authentication secrets, request contents, or a source IP from these records | The TCP and WebSocket lifecycle and timeout records omit auth-key bytes, request payloads, and raw peer IP addresses. Other log record types have their own fields and threat models. |
 
 ## Log access and retention
 
-These records use the production `teagramd` log path. The QA SSH key can read
-up to 5,000 matching lines through a forced command, with any valid UTC cutoff;
-it has no shell or Docker access. Host root and Docker administrators can read
-raw logs and the legacy archive; users with access to host syslog files can
-read those records. Logs are not encrypted at rest. Syslog rotation is
-size-based, with an 8 GiB cap and no fixed age limit. The legacy archive
-captures up to seven days and 5,000 lines at up to 32 MiB, but can remain until
-replaced or deleted. Restrict the reader key and host access, and apply
-separate access and retention controls to forwarded copies.
-See the deployment's [retained log threat model](../deploy/teagram/README.md#retained-log-threat-model)
-for the full reader and deletion boundaries.
+Cluster users with pod-log access can read these records. The repository does
+not define production log retention or at-rest encryption; restrict cluster
+log access to trusted responders and apply separate controls to forwarded
+copies. See the [k3s deployment guide](../deploy/k8s/README.md) for the current
+production topology.

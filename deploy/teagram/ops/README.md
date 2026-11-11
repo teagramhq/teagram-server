@@ -1,5 +1,10 @@
 # Teagram ops scripts
 
+Retired production reference: the SSH and Compose operations runner documented
+below is no longer the production operations path. Current production runs on
+k3s; see the [deployment guide](../../k8s/README.md). Treat all commands and
+procedures here as historical, not instructions for the live production stack.
+
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
@@ -102,9 +107,10 @@ endpoint unreachable or permit peer-address forgery. There is no staging LXC.
 The CI fixture previews the resolved Compose isolation and exercises Serve
 apply, repeat, refusal and rollback against a mock. The relays expose Docker
 health status and bounded connection logs; inspect them and run `verify` after
-deployment. The rollout runner recreates them after a server restart so the
-inner relay joins the current network namespace. Production acceptance
-additionally needs `getMe` and the cross-peer revoked-token isolation test.
+deployment. The retired Compose runner recreated them after a server restart
+so the inner relay joined the previous network namespace. The former production
+acceptance plan also required `getMe` and the cross-peer revoked-token isolation
+test.
 
 ## Bot API QA test bot
 

@@ -1,19 +1,20 @@
 # PostgreSQL statistics review
 
-Use this short review for the Compose PostgreSQL 18 instance after the live
-move. Run the first review one week after the move, then review weekly for the
-rest of the first month and monthly after that. Execution and I/O counters are
-cumulative since their last reset; tuple counts are estimates and size queries
-are current snapshots. Compare results with the prior review before resetting
-the execution and I/O counters for the next interval.
+Use this short review for the PostgreSQL 18 instance in the current k3s
+production deployment. Run the first review one week after cutover, then review
+weekly for the rest of the first month and monthly after that. Execution and
+I/O counters are cumulative since their last reset; tuple counts are estimates
+and size queries are current snapshots. Compare results with the prior review
+before resetting the execution and I/O counters for the next interval.
 
 ## Run the review
 
-On the host, open `psql` in the Compose Postgres container as its trusted
-operator role:
+From an operator workstation with access to the `teagram` namespace, open
+`psql` in the PostgreSQL StatefulSet as its trusted operator role:
 
 ```sh
-docker compose exec postgres psql -X -v ON_ERROR_STOP=1 -U postgres -d teagram
+kubectl exec --namespace teagram -it statefulset/postgres -- \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d teagram
 ```
 
 Paste each SQL query below at the `psql` prompt. The statistics views and
@@ -22,11 +23,11 @@ as a trusted operator. The top-statement queries return representative SQL
 text. Keep query results in the trusted operator session. For cross-review
 comparisons, use one private snapshot at
 `~/.local/state/teagram/postgres-stats-review/previous-review.txt` on the
-Compose host. Keep the directory accessible only to the operator (`0700`) and
-the snapshot readable and writable only by that operator (`0600`). Store only
-the total-time top-five `queryid` values and per-table dead/live ratios needed
-for comparison; never store SQL text. At each review, compare current results
-with the snapshot, replace it with the current values, and remove any older
+operator workstation. Keep the directory accessible only to the operator
+(`0700`) and the snapshot readable and writable only by that operator (`0600`).
+Store only the total-time top-five `queryid` values and per-table dead/live
+ratios needed for comparison; never store SQL text. At each review, compare the
+results with the snapshot, replace it with the current values, and remove older
 copies before resetting the counters. Retain only this latest snapshot until
 the next review. See the
 [statistics-reader boundary](security.md#statistics-reader-boundary).
@@ -162,9 +163,9 @@ WHERE datname = current_database();
 
 - If the database is at least 80% of `shared_buffers` and relation read time is
   above 5% of query execution time for the same interval, open an `io_method`
-  review ticket. Keep `worker` unless the A/B review justifies a change. Use
-  MAIN-2001's method: on an isolated copy seeded with MAIN-1987's scale data,
-  set `shared_buffers` below the data size, then compare `worker` with
+  review ticket. Keep `worker` unless the A/B review justifies a change. On an
+  isolated copy seeded with representative production-scale data, set
+  `shared_buffers` below the data size, then compare `worker` with
   `io_uring` using `EXPLAIN (ANALYZE, BUFFERS)` for sequential and bitmap scans
   and `VACUUM` duration over three runs each. A 20% p95 improvement is the
   evidence to reopen the setting; review the required seccomp change separately.

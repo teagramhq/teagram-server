@@ -1,16 +1,16 @@
 # Public demo deployment
 
-The demo runs in its own `teagram-demo` LXC and Docker engine, separate from the
-dev `teagram` LXC. Its Compose project has its own PostgreSQL volume, RSA
-identity volume, auth-key encryption secret, Turnstile secret file, blob mount,
-Docker networks, checkout, forced SSH deploy key and Cloudflare tunnel. Do not
-reuse `/opt/teagram`, the dev LXC's volumes or its deploy credentials.
+The public demo is a separate Compose deployment with its own PostgreSQL,
+identity, auth-key encryption, Turnstile, local blob storage, network state,
+checkout, and deployment credentials. It is not the production server stack
+and does not describe production storage or operations. Current production
+runs on k3s with RustFS; see the [deployment guide](../k8s/README.md). Keep the
+demo's data and credentials separate from production resources.
 
-The install script intentionally stops until the public client config exposes
-`wss://demo.teagram.io/apiws` (MAIN-2196) and the tracked API seeder is ready.
-It keeps the edge stopped until it has closed the admin election, seeded and
-verified the content, restored production settings and verified the Turnstile
-gate.
+The install script waits until the public client config exposes
+`wss://demo.teagram.io/apiws` and the tracked API seeder is ready. It keeps the
+edge stopped until it has closed the admin election, seeded and verified the
+content, restored the demo settings, and verified the Turnstile gate.
 
 ## LXC prerequisites
 
