@@ -220,6 +220,20 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README.md links to missing path docs/nope.md", output)
 
+    def test_reference_definition_inside_blockquoted_fence_is_ignored(self):
+        (self.root / "README.md").write_text(
+            "> ~~~markdown\n"
+            "> [ref]: docs/nope.md\n"
+            "> [ref]\n"
+            "> ~~~\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("docs/nope.md", output)
+
     def test_broken_markdown_link_after_stray_backtick_is_checked(self):
         (self.root / "README.md").write_text(
             "` stray\n[missing](docs/nope.md) and plain text\n"

@@ -202,7 +202,75 @@ def markdown_files(root):
     return [path for path in paths if path.is_file()]
 
 
+def without_blockquote_fenced_code(text):
+    characters = list(text)
+    fence_char = None
+    fence_length = 0
+    quote_depth = 0
+    line_start = 0
+    while line_start < len(text):
+        line_end = text.find("\n", line_start)
+        if line_end == -1:
+            line_end = len(text)
+        else:
+            line_end += 1
+        content_end = line_end
+        if content_end > line_start and text[content_end - 1] == "\n":
+            content_end -= 1
+        if content_end > line_start and text[content_end - 1] == "\r":
+            content_end -= 1
+
+        line = text[line_start:content_end]
+        content = line
+        line_quote_depth = 0
+        while match := BLOCKQUOTE_START.match(content):
+            line_quote_depth += 1
+            content = content[match.end() :]
+            if content.startswith((" ", "\t")):
+                content = content[1:]
+
+        if fence_char is not None:
+            if line_quote_depth < quote_depth:
+                fence_char = None
+                fence_length = 0
+                quote_depth = 0
+            else:
+                content = line
+                for _ in range(quote_depth):
+                    match = BLOCKQUOTE_START.match(content)
+                    if match is None:
+                        break
+                    content = content[match.end() :]
+                    if content.startswith((" ", "\t")):
+                        content = content[1:]
+
+                closing = re.match(
+                    r"^\s{0,3}" + re.escape(fence_char) + r"{" + str(fence_length) + r",}\s*$",
+                    content,
+                )
+                for index in range(line_start, content_end):
+                    characters[index] = " "
+                if closing:
+                    fence_char = None
+                    fence_length = 0
+                    quote_depth = 0
+                line_start = line_end
+                continue
+
+        start = FENCE_START.match(content)
+        if line_quote_depth and start:
+            quote_depth = line_quote_depth
+            fence_char = start.group(1)[0]
+            fence_length = len(start.group(1))
+            for index in range(line_start, content_end):
+                characters[index] = " "
+        line_start = line_end
+
+    return "".join(characters)
+
+
 def without_code(text):
+    text = without_blockquote_fenced_code(text)
     characters = list(text)
     block_boundaries = set()
     table_lines = gfm_table_line_starts(text)
