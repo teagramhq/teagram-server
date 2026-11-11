@@ -231,6 +231,12 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Test documentation checks
+        run: python3 -B .github/scripts/test_documentation_check.py
+
+      - name: Check configuration reference and Markdown links
+        run: python3 -B .github/scripts/check_documentation.py
+
       - name: Lint
         uses: golangci/golangci-lint-action@v9.3.0
         with:

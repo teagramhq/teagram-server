@@ -795,7 +795,7 @@ Tracked so shortcuts don't rot into "later means never".
   does not create or change accounts from environment values.
 - Password and registration limits include per-account and per-network failed
   `auth.checkPassword` limits and a per-network sign-up limit. Their defaults
-  and environment variables are in `docs/clients.md`.
+  and environment variables are in `docs/configuration.md`.
 - E2E gates cover sign-in through `auth.checkPassword` and registration through
   `auth.signUp` and `account.updatePasswordSettings` with a real gotd client.
 
@@ -842,7 +842,7 @@ Tracked so shortcuts don't rot into "later means never".
 - Operators can read the database, including messages. Messages are not
   end-to-end encrypted. Slow-query logs and database dumps can retain older
   values after a setting changes. Deployment details and exact environment
-  variables are in `docs/clients.md`.
+  variables are in `docs/configuration.md`.
 
 ## Engineering invariants
 

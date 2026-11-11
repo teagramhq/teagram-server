@@ -62,7 +62,7 @@ own registration mode, which remains closed unless configured separately.
 
 ## Configuration
 
-Configuration is read from environment variables. The full reference is in [docs/clients.md](docs/clients.md).
+Configuration is read from environment variables. The full reference is in [docs/configuration.md](docs/configuration.md).
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -104,7 +104,7 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_RATE_LIMIT_CREATE_STICKER_SET_WINDOW` | `1m` | Per-account sticker-set creation limit window |
 | `TG_ADMIN_LISTEN_ADDR` | unset | Optional admin HTTP listener |
 
-`TG_RPC_DEADLINE=0` fails startup; it does not disable the deadline. The complete variable and rate-limit inventory is in [docs/clients.md](docs/clients.md).
+`TG_RPC_DEADLINE=0` fails startup; it does not disable the deadline. The complete variable and rate-limit inventory is in [docs/configuration.md](docs/configuration.md).
 
 ## Architecture
 
@@ -126,7 +126,8 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 
 | Path | Contents |
 |---|---|
-| [docs/clients.md](docs/clients.md) | Client connection, server discovery, and configuration reference |
+| [docs/clients.md](docs/clients.md) | Client connections, discovery, enrollment, and sign-in |
+| [docs/configuration.md](docs/configuration.md) | Complete `teagramd` environment variable reference |
 | [docs/self-hosting.md](docs/self-hosting.md) | Single-host self-hosting guide |
 | [docs/catalog.md](docs/catalog.md) | Catalog and RPC support reference |
 | [docs/observability.md](docs/observability.md) | Admin metrics, dashboards, and operations |
