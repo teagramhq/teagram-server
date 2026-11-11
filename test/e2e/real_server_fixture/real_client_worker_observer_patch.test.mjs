@@ -143,7 +143,7 @@ test('peer selection waits for one matching row after stale search results', asy
   assert.equal(stateIndex, 1);
 });
 
-function customEmojiMessage(text, docId, messageId, {sent = true, hasReaction = false} = {}) {
+function customEmojiMessage(text, docId, messageId, {sent = true, hasReaction = false, hasEmoji = true} = {}) {
   const reaction = {
     reactionCount: {
       reaction: {_: 'reactionCustomEmoji', document_id: docId},
@@ -159,7 +159,7 @@ function customEmojiMessage(text, docId, messageId, {sent = true, hasReaction = 
     textContent: `${text}👍`,
     dataset: {docId},
     closest: () => bubble,
-    querySelectorAll: (selector) => selector === '.custom-emoji' ? [{dataset: {docId}}] : [],
+    querySelectorAll: (selector) => selector === '.custom-emoji' && hasEmoji ? [{dataset: {docId}}] : [],
   };
 }
 
@@ -187,6 +187,36 @@ test('custom emoji reaction wait follows the settled message ID through optimist
   assert.equal(messageId, '3');
   await browser.testWaitForCustomMessageReaction(
     page, messageText, docId, messageId, 1, 'bob_custom_emoji_reaction_receiver'
+  );
+});
+
+test('custom emoji receiver wait accepts an incoming message without sender state', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const received = customEmojiMessage(messageText, docId, '9', {sent: false});
+  const document = {querySelectorAll: () => [received]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([received]);
+
+  assert.equal(
+    await browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'bob_custom_emoji_receive_visible'),
+    '9'
+  );
+});
+
+test('custom emoji receiver wait fails when the requested emoji is missing', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const received = customEmojiMessage(messageText, docId, '9', {sent: false, hasEmoji: false});
+  const document = {querySelectorAll: () => [received]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([received]);
+
+  await assert.rejects(
+    browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'bob_custom_emoji_receive_visible'),
+    /bob_custom_emoji_receive_visible/
   );
 });
 

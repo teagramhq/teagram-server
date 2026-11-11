@@ -157,10 +157,9 @@ export function patchRealClientObserver(webRoot) {
     for(const message of messages) {
       const bubble = message.closest('.bubble');
       const messageId = bubble?.getAttribute('data-mid') || '';
-      const sent = bubble?.classList.contains('is-sent') || bubble?.classList.contains('is-read');
       const hasEmoji = [...message.querySelectorAll('.custom-emoji')]
       .some((emoji) => emoji.dataset.docId === docId);
-      if(sent && hasEmoji && /^-?[0-9]{1,20}$/.test(messageId)) messageIds.add(messageId);
+      if(hasEmoji && /^-?[0-9]{1,20}$/.test(messageId)) messageIds.add(messageId);
     }
     return messageIds.size === 1 ? [...messageIds][0] : false;
   }, {text, docId}, {timeout: 30_000}).catch(() => failStage(stage));
