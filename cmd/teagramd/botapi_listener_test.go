@@ -204,6 +204,16 @@ func TestBotAPIServeFailureStopsMainServe(t *testing.T) {
 	}
 }
 
+func TestLoopbackBotAPIServeFailureDoesNotBlockWithoutFailureChannel(t *testing.T) {
+	server := botapi.NewServerWithHandler("", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), slog.New(slog.DiscardHandler))
+	done := serveBotAPIServer(server, failingBotAPIListener{err: errors.New("loopback listener failed")}, "loopback", slog.New(slog.DiscardHandler), nil)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loopback Bot API Serve goroutine blocked while reporting its failure")
+	}
+}
+
 func listenBotAPITestTCP(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", "127.0.0.1:0")

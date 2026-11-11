@@ -1024,13 +1024,18 @@ func newTailnetBotAPIListener(listener net.Listener, logger *slog.Logger) net.Li
 	return botapi.RequireProxyV1(listener, logger)
 }
 
-func serveBotAPIServer(server *http.Server, listener net.Listener, name string, logger *slog.Logger, failures chan<- error) {
+func serveBotAPIServer(server *http.Server, listener net.Listener, name string, logger *slog.Logger, failures chan<- error) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error(name+" Bot API server", "err", err)
-			failures <- fmt.Errorf("%s Bot API server: %w", name, err)
+			if failures != nil {
+				failures <- fmt.Errorf("%s Bot API server: %w", name, err)
+			}
 		}
 	}()
+	return done
 }
 
 func serveUntilBotAPIError(ctx context.Context, failures <-chan error, serve func(context.Context) error) error {
@@ -1444,7 +1449,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		}
 		botAPILn = botapi.LimitConnectionsPerIP(botAPILn, botapi.DefaultMaxConnectionsPerIP)
 		log.Info("Bot API server listening", "addr", cfg.BotAPIListenAddr)
-		serveBotAPIServer(botAPIServer, botAPILn, "loopback", log, botAPIErrors)
+		serveBotAPIServer(botAPIServer, botAPILn, "loopback", log, nil)
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), botAPIShutdownTimeout)
 			defer cancel()

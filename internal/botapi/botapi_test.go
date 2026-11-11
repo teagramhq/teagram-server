@@ -957,6 +957,7 @@ func TestTailnetPathExemptsRequestAndConnectionLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	listener = botapi.RequireProxyV1(listener, slog.New(slog.DiscardHandler))
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	connections := make([]net.Conn, 0, botapi.DefaultMaxConnectionsPerIP+1)
@@ -983,6 +984,9 @@ func TestTailnetPathExemptsRequestAndConnectionLimits(t *testing.T) {
 		connections = append(connections, conn)
 		if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 			t.Fatal(err)
+		}
+		if _, err := io.WriteString(conn, proxyHeader("100.64.1.2")); err != nil {
+			t.Fatalf("write tailnet PROXY preface %d: %v", len(connections), err)
 		}
 		if status := sendInvalidBotRequest(t, conn); status != http.StatusUnauthorized {
 			t.Fatalf("connection %d status = %d, want 401", len(connections), status)

@@ -42,7 +42,7 @@ func proxyServer(t *testing.T, limit int, remote string) string {
 	return ln.Addr().String()
 }
 
-func socketLimitServer(t *testing.T, limit int) string {
+func globalLimitServer(t *testing.T, limit int) string {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -50,7 +50,7 @@ func socketLimitServer(t *testing.T, limit int) string {
 	}
 	srv := botapi.NewServer("", newFakeStore(), slog.New(slog.DiscardHandler), store.RateLimitConfig{})
 	done := make(chan error, 1)
-	go func() { done <- srv.Serve(botapi.LimitConnectionsPerSocketIP(ln, limit)) }()
+	go func() { done <- srv.Serve(botapi.LimitConnectionsGlobally(ln, limit)) }()
 	t.Cleanup(func() {
 		if err := srv.Close(); err != nil {
 			t.Error(err)
@@ -238,8 +238,8 @@ func TestProxyHeaderFromNonLoopbackRejected(t *testing.T) {
 	}
 }
 
-func TestSocketLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
-	addr := socketLimitServer(t, 10)
+func TestGlobalLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
+	addr := globalLimitServer(t, 10)
 	_, reader := proxyDial(t, addr, proxyHeader("203.0.113.7")+"GET /invalid HTTP/1.1\r\nHost: example\r\n\r\n")
 	response, err := http.ReadResponse(reader, nil)
 	if err != nil {
@@ -250,6 +250,33 @@ func TestSocketLimitListenerDoesNotAcceptProxyV1Preface(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("PROXY preface returned HTTP %d, want HTTP 400 from the HTTP parser", response.StatusCode)
+	}
+}
+
+func TestGlobalConnectionLimitRejectsNonPositiveLimits(t *testing.T) {
+	for _, limit := range []int{0, -1} {
+		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+			underlying, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var limited net.Listener
+			panicked := func() (panicked bool) {
+				defer func() { panicked = recover() != nil }()
+				limited = botapi.LimitConnectionsGlobally(underlying, limit)
+				return false
+			}()
+			if limited != nil {
+				if err := limited.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+					t.Errorf("close limited listener: %v", err)
+				}
+			} else if err := underlying.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close underlying listener: %v", err)
+			}
+			if !panicked {
+				t.Fatalf("LimitConnectionsGlobally(%d) did not panic", limit)
+			}
+		})
 	}
 }
 
@@ -294,7 +321,8 @@ func TestGlobalConnectionLimitRejectsAndReleasesReservations(t *testing.T) {
 	}
 	t.Cleanup(closeClients)
 
-	for i := range 3 {
+	assertRejected := func(i int) {
+		t.Helper()
 		extra, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
@@ -311,20 +339,40 @@ func TestGlobalConnectionLimitRejectsAndReleasesReservations(t *testing.T) {
 			t.Errorf("close over-limit connection: %v", err)
 		}
 	}
+	for i := range 3 {
+		assertRejected(i)
+	}
 
-	if err := accepted[0].Close(); err != nil {
-		t.Fatalf("release first reservation: %v", err)
+	for i := range 5 {
+		if err := accepted[i].Close(); err != nil {
+			t.Fatalf("release reservation %d: %v", i+1, err)
+		}
+		replacement, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, replacement)
+		acceptedConn := make(chan acceptResultForTest, 1)
+		go func() {
+			conn, err := listener.Accept()
+			acceptedConn <- acceptResultForTest{conn: conn, err: err}
+		}()
+		select {
+		case result := <-acceptedConn:
+			if result.err != nil {
+				t.Fatalf("accept after reservation %d was released: %v", i+1, result.err)
+			}
+			accepted = append(accepted, result.conn)
+		case <-time.After(time.Second):
+			t.Fatalf("accept after reservation %d was released timed out", i+1)
+		}
+		assertRejected(i + 3)
 	}
-	replacement, err := (&net.Dialer{Timeout: time.Second}).DialContext(t.Context(), "tcp4", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	clients = append(clients, replacement)
-	conn, err := listener.Accept()
-	if err != nil {
-		t.Fatalf("accept after a reservation was released: %v", err)
-	}
-	accepted = append(accepted, conn)
+}
+
+type acceptResultForTest struct {
+	conn net.Conn
+	err  error
 }
 
 func TestRequiredProxyV1ListenerDecodesTailnetPeer(t *testing.T) {

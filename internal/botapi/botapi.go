@@ -758,7 +758,6 @@ type connectionLimitListener struct {
 
 	mu          sync.Mutex
 	limit       int
-	readProxyV1 bool
 	global      bool
 	activeTotal int
 	active      map[netip.Addr]int
@@ -768,19 +767,18 @@ type connectionLimitListener struct {
 }
 
 func limitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
-	return limitConnections(listener, limit, true)
+	return limitConnectionsWithMode(listener, limit, false)
 }
 
-func limitConnections(listener net.Listener, limit int, readProxyV1 bool) net.Listener {
-	return limitConnectionsWithMode(listener, limit, readProxyV1, false)
-}
-
-func limitConnectionsWithMode(listener net.Listener, limit int, readProxyV1, global bool) net.Listener {
+func limitConnectionsWithMode(listener net.Listener, limit int, global bool) net.Listener {
 	if limit < 1 {
+		if global {
+			panic("botapi: global connection limit must be positive")
+		}
 		limit = DefaultMaxConnectionsPerIP
 	}
 	l := &connectionLimitListener{
-		Listener: listener, limit: limit, readProxyV1: readProxyV1, global: global, active: make(map[netip.Addr]int),
+		Listener: listener, limit: limit, global: global, active: make(map[netip.Addr]int),
 		results: make(chan acceptResult), done: make(chan struct{}),
 	}
 	go l.acceptConnections()
@@ -793,17 +791,10 @@ func LimitConnectionsPerIP(listener net.Listener, limit int) net.Listener {
 	return limitConnectionsPerIP(listener, limit)
 }
 
-// LimitConnectionsPerSocketIP bounds open HTTP connections by their transport
-// peer and does not parse PROXY protocol. Use it on the public HTTP path, where
-// only the configured HTTP forwarder may identify the client address.
-func LimitConnectionsPerSocketIP(listener net.Listener, limit int) net.Listener {
-	return limitConnections(listener, limit, false)
-}
-
 // LimitConnectionsGlobally bounds open connections across the listener without
 // attributing them to the transport peer. Use it behind a shared forwarder.
 func LimitConnectionsGlobally(listener net.Listener, limit int) net.Listener {
-	return limitConnectionsWithMode(listener, limit, false, true)
+	return limitConnectionsWithMode(listener, limit, true)
 }
 
 // RequireProxyV1 requires and decodes a PROXY v1 preface on every accepted
@@ -927,20 +918,6 @@ func (l *connectionLimitListener) acceptConnections() {
 			case l.results <- acceptResult{conn: conn, reserved: true, global: true}:
 			case <-l.done:
 				l.releaseGlobal()
-				closeBotConn(conn)
-				return
-			}
-			continue
-		}
-		if !l.readProxyV1 {
-			if !l.reserveIP(ip) {
-				closeBotConn(conn)
-				continue
-			}
-			select {
-			case l.results <- acceptResult{conn: conn, reserved: true}:
-			case <-l.done:
-				l.releaseIP(ip)
 				closeBotConn(conn)
 				return
 			}
