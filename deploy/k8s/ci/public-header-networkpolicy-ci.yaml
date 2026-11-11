@@ -1,0 +1,11 @@
+- op: add
+  path: /spec/ingress/-
+  value:
+    from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: public-header-probe
+            app.kubernetes.io/component: ci-probe
+    ports:
+      - protocol: TCP
+        port: 2446

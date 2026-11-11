@@ -201,11 +201,13 @@ fi
 [[ "$(yq -r 'select(.metadata.name == "teagramd") | .spec.type' deploy/k8s/base/teagramd-service.yaml)" == ClusterIP &&
    "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(has("nodePort")) | .nodePort' deploy/k8s/base/teagramd-service.yaml)" == '' &&
    "$(yq -r 'select(.metadata.name == "teagramd") | [.spec.ports[] | [.name, .port] | join(":")] | join(",")' deploy/k8s/base/teagramd-service.yaml)" == \
-     'mtproto:2443,websocket:2444,admin:2445,public-ws:2446,bot-api:2447,public-bot-api:2449' ]] ||
+     'mtproto:2443,websocket:2444,admin:2445,public-ws:2446,bot-api:2447,public-bot-api:2449' &&
+   "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(.name == "bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == bot-api-tailnet &&
+   "$(yq -r 'select(.metadata.name == "teagramd") | .spec.ports[] | select(.name == "public-bot-api") | .targetPort' deploy/k8s/base/teagramd-service.yaml)" == public-bot-api ]] ||
   fail 'teagramd Services must stay internal and expose only the reviewed listener ports'
 [[ "$(yq -r '.spec.ingress | length' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 2 &&
    "$(yq -r '[.spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/name"] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == 'tailscale-proxy,cloudflared' &&
-   "$(yq -r '[.spec.ingress[0].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2443,2444,2445,2448' &&
+   "$(yq -r '[.spec.ingress[0].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2443,2444,2445,2447' &&
    "$(yq -r '[.spec.ingress[1].ports[].port] | join(",")' deploy/k8s/base/teagramd-networkpolicy.yaml)" == '2446,2449' ]] ||
   fail 'the default-deny teagramd policy must isolate tailnet and public listener ports by pod identity'
 if grep --fixed-strings --quiet 'ipBlock:' deploy/k8s/base/teagramd-networkpolicy.yaml; then
@@ -213,7 +215,7 @@ if grep --fixed-strings --quiet 'ipBlock:' deploy/k8s/base/teagramd-networkpolic
 fi
 [[ "$(yq -r '.spec.podSelector.matchLabels."app.kubernetes.io/name"' deploy/k8s/base/tailscale-proxy-egress.yaml)" == tailscale-proxy &&
    "$(yq -r '.spec.policyTypes | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == Egress &&
-   "$(yq -r '[.spec.egress[0].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '2443,2444,2445,2448' &&
+   "$(yq -r '[.spec.egress[0].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '2443,2444,2445,2447' &&
    "$(yq -r '.spec.egress[1].ports[0].port' deploy/k8s/base/tailscale-proxy-egress.yaml)" == 8081 &&
    "$(yq -r '.spec.egress[1].to[0].podSelector.matchLabels."app.kubernetes.io/name"' deploy/k8s/base/tailscale-proxy-egress.yaml)" == linkselector &&
    "$(yq -r '[.spec.egress[2].ports[].port] | join(",")' deploy/k8s/base/tailscale-proxy-egress.yaml)" == '53,53' &&
@@ -382,6 +384,31 @@ public_websocket_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name =
    "$public_websocket_step" == *'--host 127.0.0.1 --port 8080'* &&
    "$public_websocket_step" != *'kubectl port-forward'* ]] ||
   fail 'the public WebSocket smoke must run inside the connector pod without port-forward'
+proxy_trust_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Narrow CI forwarded-IP trust to cloudflared") | .run' .github/workflows/ci.yml)"
+[[ "$proxy_trust_step" == *'cloudflared_ip'*'kubectl set env statefulset/teagramd'* &&
+   "$proxy_trust_step" == *'TG_CLIENT_ADDR_CF_PROXY_CIDRS=${cloudflared_ip}/32'* &&
+   "$proxy_trust_step" == *'TG_BOT_API_PUBLIC_PROXY_CIDRS=${cloudflared_ip}/32'* &&
+   "$proxy_trust_step" == *'kubectl rollout status statefulset/teagramd'* ]] ||
+  fail 'the CI deployment test must narrowly trust only cloudflared and reject the shared-address warning'
+grep --fixed-strings --quiet "per-IP limits are keyed on each connection's own peer address" \
+  .github/workflows/ci.yml ||
+  fail 'CI must assert that teagramd logs no shared-client-address warning'
+grep --fixed-strings --quiet 'TG_CLIENT_ADDR_TRUST' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production listener overlay must select Cloudflare client-address trust'
+grep --fixed-strings --quiet 'value: cf-connecting-ip' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production public listener must use the Cloudflare client-address header'
+grep --fixed-strings --quiet 'TG_LISTEN_PATH' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production raw listener must use the tailnet path policy'
+grep --fixed-strings --quiet 'TG_WEBSOCKET_LISTEN_PATH' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production WebSocket listener must use the tailnet path policy'
+grep --fixed-strings --quiet 'TG_BOT_API_PUBLIC_LISTEN_ADDR' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production public Bot API listener must be enabled'
+grep --fixed-strings --quiet 'TG_BOT_API_TAILNET_LISTEN_ADDR' deploy/k8s/prod/teagramd-listeners.yaml ||
+  fail 'the production tailnet Bot API listener must be enabled'
+grep --fixed-strings --quiet 'path regex `^/bot[^/]+/`' deploy/k8s/README.md ||
+  fail 'the operations documentation must state the exact Cloudflare Bot API path rule'
+grep --fixed-strings --quiet '`http://teagramd:2449`' deploy/k8s/README.md ||
+  fail 'the operations documentation must state the exact public Bot API target Service'
 grep --fixed-strings --quiet 'TCP:teagramd:2446' deploy/k8s/ci/cloudflared-ci.yaml ||
   fail 'the disposable public connector must reach the public WebSocket Service directly'
 grep --fixed-strings --quiet 'name: ingress-probe' deploy/k8s/ci/cloudflared-ci.yaml ||
@@ -389,6 +416,22 @@ grep --fixed-strings --quiet 'name: ingress-probe' deploy/k8s/ci/cloudflared-ci.
 grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-ingress", "ingress-probe")' \
   deploy/k8s/test-service-ingress.py ||
   fail 'cloudflared public listener probes must execute from the connector pod identity'
+grep --fixed-strings --quiet 'public-discovery-budget' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public discovery probe must exhaust one forwarded client budget'
+grep --fixed-strings --quiet 'exec_probe(cloudflared, "public-discovery-budget", "ingress-probe")' \
+  deploy/k8s/test-service-ingress.py ||
+  fail 'the forwarded client budgets must be exercised through cloudflared'
+grep --fixed-strings --quiet 'untrusted-public-header' deploy/k8s/test-networkpolicy.py ||
+  fail 'the public discovery probe must test an untrusted forwarded header'
+grep --fixed-strings --quiet 'PUBLIC_HEADER_PROBE' deploy/k8s/test-service-ingress.py ||
+  fail 'the untrusted public-header probe must run from its own pod'
+grep --fixed-strings --quiet -- '--trusted-proxy-ip' deploy/k8s/test-service-ingress.py ||
+  fail 'the untrusted-header probe must compare its source with the trusted cloudflared IP'
+grep --fixed-strings --quiet 'tailnet-discovery-budget' deploy/k8s/test-networkpolicy.py ||
+  fail 'the tailnet discovery probe must exceed the public per-client budget'
+grep --fixed-strings --quiet 'exec_probe(TAILNET_PROBE, "tailnet-discovery-budget")' \
+  deploy/k8s/test-service-ingress.py ||
+  fail 'the tailnet discovery budget must run through the tailnet Service'
 python3 .github/scripts/test_k8s_public_websocket_contract.py ||
   fail 'the public WebSocket connector smoke must validate its discovery contract'
 grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
@@ -416,13 +459,28 @@ grep --fixed-strings --quiet 'render-tailnet-proxy-api-egress.py' .github/workfl
   fail 'CI must install the exact API endpoint egress allowlist before probing it'
 grep --fixed-strings --quiet 'serviceAccountName: tailscale-proxy' deploy/k8s/ci/tailnet-policy-probes.yaml ||
   fail 'the Kubernetes API probe must use the proxy ServiceAccount identity'
-grep --fixed-strings --quiet 'bot-api-public-ci-stand-in' deploy/k8s/ci/public-ingress-ci.yaml ||
-  fail 'the loopback public Bot API relay must be labelled as a CI-only stand-in'
-grep --fixed-strings --quiet 'MAIN-3600 replaces it' deploy/k8s/ci/public-ingress-ci.yaml ||
-  fail 'the CI Bot API stand-in must identify its replacement issue'
+if grep --fixed-strings --quiet 'bot-api-public-ci-stand-in' deploy/k8s/ci/public-ingress-ci.yaml; then
+  fail 'the CI overlay must exercise the direct public Bot API listener'
+fi
+if grep --fixed-strings --quiet 'TG_BOT_API_LISTEN_ADDR' deploy/k8s/base/teagramd-statefulset.yaml; then
+  fail 'the legacy loopback Bot API listener must be removed from the production workload'
+fi
+if grep --extended-regexp --quiet 'name: bot-api-inner|name: bot-api-ingress|name: bot-api-socket' \
+  deploy/k8s/base/teagramd-statefulset.yaml; then
+  fail 'the Bot API listeners must be direct teagramd listeners without relay sidecars'
+fi
+for setting in TG_BOT_API_PUBLIC_LISTEN_ADDR TG_BOT_API_PUBLIC_PROXY_CIDRS TG_BOT_API_TAILNET_LISTEN_ADDR; do
+  grep --fixed-strings --quiet "$setting" deploy/k8s/ci/public-ingress-ci.yaml ||
+    fail "the CI overlay must exercise the direct Bot API listener setting $setting"
+done
 [[ "$(yq eval-all -r '[.metadata.labels."app.kubernetes.io/name"] | join(",")' deploy/k8s/ci/tailnet-policy-probes.yaml)" == 'tailscale-proxy,linkselector,network-policy-probe' ]] ||
   fail 'the in-cluster probes must model tailnet, linkselector, and untrusted source identities'
 ci_linkselector_overlay="$(kubectl kustomize deploy/k8s/ci)"
+ci_forwarded_header_rule="$(yq eval-all -r 'select(.kind == "NetworkPolicy" and .metadata.name == "teagramd-ingress") | .spec.ingress[2] | [.from[0].podSelector.matchLabels."app.kubernetes.io/name", .ports[0].port] | join(":")' <<<"$ci_linkselector_overlay")"
+[[ "$ci_forwarded_header_rule" == 'public-header-probe:2446' &&
+   "$(yq eval-all -r 'select(.kind == "Pod" and .metadata.name == "public-header-probe") | .metadata.labels."app.kubernetes.io/component"' <<<"$ci_linkselector_overlay")" == ci-probe &&
+   "$(yq eval-all -r 'select(.kind == "NetworkPolicy" and .metadata.name == "teagramd-ingress") | .spec.ingress[2].ports | length' <<<"$ci_linkselector_overlay")" == 1 ]] ||
+  fail 'the CI-only untrusted header pod must reach only the public WebSocket listener'
 ci_linkselector_selector="$(yq -r 'select(.kind == "Deployment" and .metadata.name == "linkselector") | .spec.selector.matchLabels' <<<"$ci_linkselector_overlay")"
 [[ "$ci_linkselector_selector" == *'app.kubernetes.io/name: linkselector'* &&
    "$ci_linkselector_selector" == *'app.kubernetes.io/component: server'* &&

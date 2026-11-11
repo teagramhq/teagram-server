@@ -155,8 +155,6 @@ spec:
                   key: TG_ADVERTISE_ADDR
             - name: TG_LISTEN_ADDR
               value: ":2443"
-            - name: TG_BOT_API_LISTEN_ADDR
-              value: 127.0.0.1:2447
             - name: TG_LOG_LOGIN_CODES
               value: "false"
             - name: TG_REGISTRATION
@@ -209,6 +207,12 @@ spec:
             - name: admin
               containerPort: 2445
               protocol: TCP
+            - name: bot-api-tailnet
+              containerPort: 2447
+              protocol: TCP
+            - name: public-bot-api
+              containerPort: 2449
+              protocol: TCP
           startupProbe:
             tcpSocket:
               port: mtproto
@@ -260,88 +264,7 @@ spec:
             - name: teagramd-media-keys
               mountPath: /run/teagramd/media-keys
               readOnly: true
-        - name: bot-api-inner
-          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
-          imagePullPolicy: IfNotPresent
-          args:
-            - -d
-            - -d
-            - -T120
-            - UNIX-LISTEN:/run/bot-api/relay.sock,fork,unlink-early,mode=0600,max-children=128
-            - TCP:127.0.0.1:2447
-          readinessProbe:
-            exec:
-              command:
-                - sh
-                - -ec
-                - >-
-                  test -S /run/bot-api/relay.sock &&
-                  socat -T2 -u /dev/null TCP:127.0.0.1:2447
-            periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 3
-          resources:
-            requests:
-              cpu: 5m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            - name: bot-api-socket
-              mountPath: /run/bot-api
-        - name: bot-api-ingress
-          image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
-          imagePullPolicy: IfNotPresent
-          args:
-            - -d
-            - -d
-            - -T120
-            - TCP-LISTEN:2448,bind=0.0.0.0,reuseaddr,fork,max-children=128
-            - UNIX-CONNECT:/run/bot-api/relay.sock
-          ports:
-            - name: bot-api-ingress
-              containerPort: 2448
-              protocol: TCP
-          readinessProbe:
-            exec:
-              command:
-                - sh
-                - -ec
-                - socat -T2 -u /dev/null TCP:127.0.0.1:2448
-            periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 3
-          resources:
-            requests:
-              cpu: 5m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            - name: bot-api-socket
-              mountPath: /run/bot-api
       volumes:
-        - name: bot-api-socket
-          emptyDir:
-            sizeLimit: 8Mi
         - name: teagramd-blob-credentials
           secret:
             secretName: teagramd-blob-credentials

@@ -2086,6 +2086,31 @@ jobs:
           kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
           kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s
 
+      - name: Narrow CI forwarded-IP trust to cloudflared
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          cloudflared_ip="$(kubectl get pods --namespace teagram \
+            --selector=app.kubernetes.io/name=cloudflared --output json \
+            | jq -er '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | first | .status.podIP')"
+          [[ "$cloudflared_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          kubectl set env statefulset/teagramd --namespace teagram \
+            "TG_CLIENT_ADDR_CF_PROXY_CIDRS=${cloudflared_ip}/32" \
+            "TG_BOT_API_PUBLIC_PROXY_CIDRS=${cloudflared_ip}/32"
+          kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
+          kubectl get statefulset teagramd --namespace teagram --output json \
+            | jq --exit-status --arg trusted "${cloudflared_ip}/32" '
+                .spec.template.spec.containers[]
+                | select(.name == "teagramd")
+                | [.env[] | select(.name == "TG_CLIENT_ADDR_CF_PROXY_CIDRS") | .value][0] == $trusted
+                  and [.env[] | select(.name == "TG_BOT_API_PUBLIC_PROXY_CIDRS") | .value][0] == $trusted
+              '
+          if kubectl logs --namespace teagram statefulset/teagramd --container teagramd \
+            | grep --fixed-strings --quiet "per-IP limits are keyed on each connection's own peer address"; then
+            echo "teagramd logged the shared-client-address warning" >&2
+            exit 1
+          fi
+
       - name: Probe Tailscale, cloudflared, and denied in-cluster ingress
         run: |
           set -euo pipefail

@@ -14,6 +14,7 @@ NAMESPACE = "teagram"
 TAILNET_PROBE = "tailnet-policy-probe"
 UNTRUSTED_PROBE = "untrusted-policy-probe"
 LINKSELECTOR_PROBE = "linkselector-policy-probe"
+PUBLIC_HEADER_PROBE = "public-header-probe"
 
 
 class ProbeFailure(RuntimeError):
@@ -34,7 +35,12 @@ def kubectl(*args: str) -> str:
         ) from error
 
 
-def exec_probe(pod: str, operation: str, container: str | None = None) -> None:
+def exec_probe(
+    pod: str,
+    operation: str,
+    container: str | None = None,
+    extra_args: tuple[str, ...] = (),
+) -> None:
     try:
         args = ["exec", "--namespace", NAMESPACE]
         if container is not None:
@@ -48,6 +54,7 @@ def exec_probe(pod: str, operation: str, container: str | None = None) -> None:
                 operation,
             )
         )
+        args.extend(extra_args)
         kubectl(*args)
     except RuntimeError as error:
         raise ProbeFailure(str(error)) from error
@@ -75,6 +82,16 @@ def cloudflared_probe() -> str:
     if not ready:
         raise RuntimeError("cloudflared has no Ready CI probe pod")
     return ready[0]
+
+
+def pod_ip(name: str) -> str:
+    pod = json.loads(
+        kubectl("get", "pod", name, "--namespace", NAMESPACE, "--output", "json")
+    )
+    address = pod.get("status", {}).get("podIP")
+    if not address:
+        raise RuntimeError(f"pod {name} has no assigned IP")
+    return address
 
 
 def teagramd_state() -> tuple[dict, list[dict]]:
@@ -274,9 +291,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
 
-    for pod in (TAILNET_PROBE, UNTRUSTED_PROBE, LINKSELECTOR_PROBE):
+    for pod in (TAILNET_PROBE, UNTRUSTED_PROBE, LINKSELECTOR_PROBE, PUBLIC_HEADER_PROBE):
         kubectl("wait", "--for=condition=Ready", f"pod/{pod}", "--namespace", NAMESPACE, "--timeout=180s")
     cloudflared = cloudflared_probe()
+    cloudflared_ip = pod_ip(cloudflared)
     exec_probe(TAILNET_PROBE, "kube-api")
     exec_probe(TAILNET_PROBE, "discovery")
     exec_probe(TAILNET_PROBE, "check-listeners")
@@ -284,6 +302,13 @@ def main() -> int:
     exec_probe(TAILNET_PROBE, "deny-public")
     exec_probe(TAILNET_PROBE, "deny-egress")
     exec_probe(cloudflared, "public-ingress", "ingress-probe")
+    exec_probe(cloudflared, "public-discovery-budget", "ingress-probe")
+    exec_probe(
+        PUBLIC_HEADER_PROBE,
+        "untrusted-public-header",
+        extra_args=("--trusted-proxy-ip", cloudflared_ip),
+    )
+    exec_probe(TAILNET_PROBE, "tailnet-discovery-budget")
     exec_probe(cloudflared, "deny-tailnet", "ingress-probe")
     for pod in (UNTRUSTED_PROBE, LINKSELECTOR_PROBE):
         exec_probe(pod, "deny-tailnet")

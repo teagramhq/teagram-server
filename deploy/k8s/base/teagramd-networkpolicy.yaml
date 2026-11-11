@@ -23,7 +23,7 @@ spec:
         - protocol: TCP
           port: 2445
         - protocol: TCP
-          port: 2448
+          port: 2447
     - from:
         - podSelector:
             matchLabels:

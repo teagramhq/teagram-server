@@ -35,7 +35,19 @@ spec:
             - name: TG_RSA_KEY_FINGERPRINT
               value: "-309015054596985302"
             - name: TG_CLIENT_ADDR_TRUST
-              value: socket
+              value: cf-connecting-ip
+            - name: TG_CLIENT_ADDR_CF_PROXY_CIDRS
+              value: 10.42.0.0/16
+            - name: TG_LISTEN_PATH
+              value: tailnet
+            - name: TG_WEBSOCKET_LISTEN_PATH
+              value: tailnet
+            - name: TG_BOT_API_PUBLIC_LISTEN_ADDR
+              value: ":2449"
+            - name: TG_BOT_API_PUBLIC_PROXY_CIDRS
+              value: 10.42.0.0/16
+            - name: TG_BOT_API_TAILNET_LISTEN_ADDR
+              value: ":2447"
             - name: TG_ADMIN_LISTEN_ADDR
               value: ":2445"
             - name: TG_ADMIN_TOKEN_HASH
