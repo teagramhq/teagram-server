@@ -5,29 +5,23 @@ project and is not affiliated with Telegram.
 
 ## Current status
 
-This is a development deployment with no real users. The live target is
-`777742c`, deployed on 2026-10-10 through the rollout runner. Media bodies are
-stored on a local volume; RustFS support is present but inactive in the live
-deployment. The deployment backup gate is a PostgreSQL `pg_dump` followed by a
-restore into an isolated database.
+The live service is used for development and has no real users. Production runs
+on a single-node k3s cluster. Its manifests configure the S3-compatible blob
+backend to use RustFS. The current deployment and release process are described
+in the [k3s operations guide](deploy/k8s/README.md) and the
+[`Deploy.` workflow](.github/workflows/deploy.yml).
 
-On `777742c`, recipients cannot open received photos or documents (MAIN-1548;
-open [fix PR #540](https://github.com/teagramhq/teagram-server/pull/540)).
-Channel dialogs with unread posts opened empty on that target; the fix is on
-`main` (MAIN-1503, [PR #522](https://github.com/teagramhq/teagram-server/pull/522)).
+## Not currently planned
 
-## Parked — not planned now
+- A dedicated cloud account, an independent release signer, and WORM storage.
+- An off-cluster encrypted backup pipeline with independent verification and
+  retention service.
 
-- Zero-downtime deployments and whole-LXC snapshots.
-- A Teagram AWS account, independent release signer, and WORM storage.
-- An off-box encrypted backup pipeline.
-- Kubernetes manifests.
-
-These items are parked and are not part of the current plan.
+These items are not part of the current plan.
 
 ## Stack
 
-- **Language:** Go 1.27.1.
+- **Language:** Go 1.27.4.
 - **Wire:** MTProto 2.0 over gotd codecs; `tg`/`mt` type schema (gotd v0.162.0).
 - **Storage:** Postgres via `pgx/v5`; `sqlc`-generated queries; Atlas migrations.
 - **At-rest crypto:** auth keys and SRP verifiers encrypted (keycrypt).
@@ -52,15 +46,15 @@ These items are parked and are not part of the current plan.
 ## Positioning
 
 Existing open MTProto servers reach production scale by going wide and
-distributed — many microservices, a message broker, a cache tier, service
-discovery, separate object storage. This project takes the opposite bet.
+distributed — many microservices, a message broker, a cache tier, and service
+discovery. This project keeps the server core small while using S3-compatible
+storage for media.
 
-**Design bet:** a small, fully-open, verifiable core that runs on one datastore
-and no message broker. Postgres is the whole backend — rows *and* the realtime
-bus (`LISTEN`/`NOTIFY`) — betting it carries update fan-out far enough that
-Kafka/Redis/etcd stay unnecessary well into groups and channels. If a broker is
-ever needed, it's an optimization behind the same `buildUpdates` path, not a
-rewrite.
+**Design bet:** Postgres stores structured state and carries the realtime bus
+(`LISTEN`/`NOTIFY`); an S3-compatible service stores opaque media bodies. The
+server has no message broker, betting that Postgres can carry update fan-out
+without Kafka or Redis. If a broker is ever needed, it will sit behind the same
+`buildUpdates` path rather than replacing it.
 
 **Priorities in order:** correctness and openness first, operational simplicity
 second, feature breadth last. Every milestone stays provable against a real gotd
@@ -117,6 +111,9 @@ Secret chats
 - `messages.getDhConfig`, `messages.requestEncryption`,
   `messages.acceptEncryption`, `messages.discardEncryption`,
   `messages.sendEncrypted`, `messages.receivedQueue`
+
+Bot API (HTTP)
+- `getMe`, `sendMessage`, `getUpdates`
 
 ## Shipped
 
@@ -182,7 +179,7 @@ Secret chats
   to add later rather than a rewrite.
 - Photo and document uploads and message delivery shipped across #474, #481,
   #503, and #505. The server stores media bodies as opaque bytes on the configured
-  blob backend; the live deployment uses a local volume and RustFS is inactive.
+  blob backend; production uses RustFS through the S3-compatible interface.
 - **Download authorization is ownership of a message row**, not a capability.
   `upload.getFile` serves a file only when the caller owns a non-deleted `messages`
   row whose `file_id` matches. This was possible without a new model because
@@ -543,40 +540,85 @@ Secret chats
   (`TestContactsSearchChannelDiscovery`); cross-dialog search across all three
   peer types (`TestSearchGlobalAcrossDialogs`).
 
+### M16 — Username/password authentication
+
+- Accounts sign in with a username and password using SRP. Phone login is not
+  supported. `auth.signUp` creates a provisional account that must install an
+  SRP verifier before it can use authenticated methods.
+- `TG_REGISTRATION` controls account creation; existing accounts can sign in
+  in every mode. The first admitted account becomes the durable server
+  administrator. E2E gates cover sign-in and account setup with a real gotd
+  client.
+
+### M20 — Invite-gated registration
+
+- Operators can issue, list, and revoke single-use registration invitations.
+  The invitation is bound to one username and consumed with the username-mode
+  sign-up flow.
+- Signed-in users can create account invite links when their listener is in
+  `invite` mode and `TG_USER_INVITE_QUOTA` is positive. The quota counts links
+  created in the preceding seven days, including used, expired, or revoked
+  links. Basic-chat invite links remain unimplemented.
+
+### Additional shipped capabilities
+
+- **Bot API.** Bot accounts and tokens support the HTTP methods `getMe`,
+  `sendMessage`, and `getUpdates`.
+- **Welcome channel.** `TG_WELCOME_CHANNEL` can add newly admitted accounts to
+  a configured public channel.
+- **Stickers and custom emoji.** Accounts can create and manage sticker and
+  custom-emoji sets; catalog bundles can be generated and loaded at startup.
+- **Public clients.** A public WebSocket listener serves browser clients, and
+  HTTPS discovery publishes the server identity and connection details. The
+  web demo can enforce its browser-only WebSocket policy.
+- **Performance checks.** The RPC performance workflow exercises synthetic
+  scale fixtures and checks scenario budgets.
+- **Production deployment.** The live k3s deployment uses cloudflared for
+  public web, discovery, and Bot API paths, with Tailscale for tailnet access.
+
 ## Operational status
 
-- **Deployment.** The guarded rollout runner deploys reviewed targets. Zero-
-  downtime deployments and whole-LXC snapshots are parked, not planned now.
-- **CI.** Required GitHub checks cover `ci`, `docker`, `compose`, `sqlc`,
-  `pr-title`, `smoke`, `e2e-admin`, and `lint`.
-- **API layer.** The server follows gotd's current generated schema; a separately
-  pinned target Telegram API layer is not yet documented.
+- **Deployment.** Production runs on single-node k3s. The `Deploy.` workflow
+  releases green `main` commits; cloudflared serves the public web, discovery,
+  and Bot API paths, while Tailscale provides the tailnet path into the cluster.
+  The Compose-era rollout runner is retired. See the
+  [k3s operations guide](deploy/k8s/README.md) and
+  [`Deploy.` workflow](.github/workflows/deploy.yml).
+- **CI.** Required checks on `main` are `ci`, `pr-title`,
+  `real-client-browser-flow`, and `merge-gate`.
+- **API layer.** The server uses gotd v0.162.0's generated Telegram schema; it
+  does not pin a separate upstream API layer.
 - **Multi-DC.** The server advertises one DC. A DC registry and client migration
-  support remain open work.
+  support are not implemented.
 - **Observability.** A read-only admin metrics dashboard, JSON endpoint, and
-  event stream are implemented. Production trace export and RPC timing are not
-  available.
+  event stream are implemented. Production trace export and per-RPC timing are
+  not available.
 - **Rate limiting.** M14 limits and controls are summarized above. Remaining work
   is listed there; denial metrics are available on the admin dashboard.
 - **Backups.** See [Backup and erasure recovery](#backup-and-erasure-recovery)
-  for the current deployment gate and the parked off-box pipeline.
+  and the k3s operations guide for the current backup path.
 
 ## Backup and erasure recovery
 
-The only backup gate for the live development deployment is a PostgreSQL
-`pg_dump` followed by a restore into an isolated database. The rollout runner
-runs and verifies this gate before replacing the service. It does not back up the
-local media volume.
+The production CronJob runs daily at 03:17 UTC and writes custom-format
+PostgreSQL dumps to the node-local `postgres-backups` 20 GiB PVC. It verifies
+each dump with `pg_restore --list` and retains the newest seven verified dumps.
+`Deploy.` also creates and verifies a pre-deploy dump on the same PVC. There is
+no off-cluster copy, so this path does not protect against loss of the k3s node
+or its disk. See the [k3s operations guide](deploy/k8s/README.md) for status
+checks, restore steps, and limits. RustFS stores production media; its storage
+and recovery controls are documented in the
+[media storage threat model](docs/media-storage-threat-model.md).
 
-The off-box encrypted backup pipeline, independent verification, and retention
-service are parked and are not current deployment capabilities. Whole-LXC
-snapshots are also parked.
+An off-cluster encrypted backup pipeline with independent verification and a
+retention service is not deployed. The Compose-era rollout runner and its
+`pg_dump` gate are retired history, not the production backup path.
 
 ### Inert erasure-ledger groundwork
 
 - #494 adds the strict record codec and the account, file, message, channel-copy,
   allocator, epoch, gallery-delete, and receipt record vocabulary.
-- #509 adds alpha-local persistence and generated SQL access, without a runtime
+- #509 adds local persistence and generated SQL access, without a runtime
   writer.
 - #519 adds stream-lineage bindings and per-component allocator reservations.
 - #508 and #526 add synthetic provider-contract and recovery-bound tests,
@@ -584,6 +626,21 @@ snapshots are also parked.
 - This groundwork is inert: there is no provider client or credential, runtime
   writer, replay, or restore-admission gate. Synthetic tests do not establish
   provider consistency, retention, or restore readiness.
+
+### Profile retention threat model
+
+Gallery records identify only the owner, file, client file, mutation revision,
+and opaque operation key. They exclude session and auth-key identifiers,
+messages, paths, captions, network addresses, blob digests, and key material.
+The gallery horizon must outlive the restore window; upload receipts must also
+outlive gallery records and the upload-part TTL plus request deadline so a
+retry cannot turn a deleted photo into a new upload. A separate local
+deduplication record contains transport identifiers and never enters the
+erasure ledger.
+
+These retention values are validated at startup, but no runtime job consumes
+them to expire, compact, or delete data. They do not establish an active
+retention or restore guarantee.
 
 ## Known deferrals & tech debt
 
@@ -608,10 +665,11 @@ Tracked so shortcuts don't rot into "later means never".
   renames, removing another member, and pinning; any member may add users subject
   to the directed block list or leave, and the creator cannot be removed.
   Delegated admins and fine-grained `ChatAdminRights`/`ChatBannedRights` remain
-  deferred. `revoke_history`, `fwd_limit`, chat photos, and invite links are not
-  implemented. `revoke_history` and `fwd_limit` are accepted and ignored, so a
-  removed member keeps their own copies of past messages and a new member sees
-  no history before they joined. — M6
+  deferred. `revoke_history`, `fwd_limit`, chat photos, and basic-chat invite
+  links are not implemented. Account registration invites and user-issued
+  account invite links are separate shipped features. `revoke_history` and
+  `fwd_limit` are accepted and ignored, so a removed member keeps their own
+  copies of past messages and a new member sees no history before they joined. — M6
 - **Removed-member history access.** A removed member's dialog returns
   `ChatForbidden`; their retained message rows and `pts` are reachable through
   `updates.getDifference` replay and through `messages.searchGlobal` (the owned
@@ -675,14 +733,12 @@ Tracked so shortcuts don't rot into "later means never".
   `TG_MAX_USER_STORAGE_BYTES`, so an account that reaches it can never upload
   again, and the aggregate disk is `accounts × quota` of permanent storage. That
   runway's length is the argument for the deleter's priority. — M5
-- **No encryption at rest for media.** Deliberate, with a stated trigger rather
-  than a date: the blob store is a directory on the same host as the process
-  holding `TG_AUTHKEY_ENC_KEY`, so anything reaching the blobs already reaches the
-  key. It stops being free the moment the blob backend is a separate service with
-  separate credentials — the RustFS/S3 step. The design constraint that keeps it
-  cheap at that point: the sealing layer must be chunk-framed AEAD with a
-  per-chunk nonce, not one `Seal` over the object, because a single-object seal
-  cannot serve a byte range without decrypting the whole file per request. — M5
+- **The live RustFS corpus uses the plaintext compatibility mode.** Fresh S3
+  namespaces use the authenticated chunked media envelope, but the live
+  `s3-accepted` authority keeps existing objects and new writes plaintext until
+  a separate migration rewrites and verifies the corpus. The authority and its
+  limits are documented in the
+  [media storage threat model](docs/media-storage-threat-model.md). — M5
 - **`file_reference` is a placeholder** — the 8-byte big-endian file id, echoed
   deterministically and ignored entirely on input. Half-validating it would make
   it an oracle, which is why it is ignored rather than partially checked. — M5
@@ -765,56 +821,7 @@ Tracked so shortcuts don't rot into "later means never".
   without inspecting plaintext, so full-text indexing of secret-chat content is not possible by
   design and will not be added. — M13
 
-- **Invite-gated account issuance.** `TG_REGISTRATION` accepts `closed`, `invite`, and
-  `open`, with `closed` as the default. In `invite` mode, `auth.signUp` admits one username
-  only with an operator-issued, single-use, expiring authorization and a possession proof
-  carried through username sign-in; in `open` mode, it admits usernames without an invite.
-  The per-IP `sign_up_ip` limit (default 5/hour) remains defence in depth. — M20
-- **Residual account-issuance exposure.** The invite gate bounds issuance by
-  operator access, not by a global account count. It does not constrain an
-  invite obtained legitimately or contain a compromised operator credential.
-  — M20
-
-### M16 — Username/password authentication
-
-- Teagram accounts sign in with a username and password. Clients call
-  `auth.sendCode` with the username to start the handshake; no code is delivered.
-  The password is verified with SRP through `auth.checkPassword`. Phone login
-  is out of scope.
-- A username account without an SRP verifier cannot complete sign-in. The
-  verifier is installed by `account.updatePasswordSettings`; `auth.logOut`
-  removes the authorization.
-- `auth.signUp` creates a provisional account. Until the account has an SRP
-  verifier, only `help.getConfig`, `account.getPassword`,
-  `account.updatePasswordSettings`, and `auth.logOut` are available.
-- A username already assigned to an account cannot be registered again,
-  regardless of the account state.
-- `TG_REGISTRATION` (`closed`, `invite`, or `open`, default `closed`) controls
-  account creation. Existing accounts can sign in in every mode.
-- The first admitted account becomes the durable server administrator. Startup
-  does not create or change accounts from environment values.
-- Password and registration limits include per-account and per-network failed
-  `auth.checkPassword` limits and a per-network sign-up limit. Their defaults
-  and environment variables are in `docs/configuration.md`.
-- E2E gates cover sign-in through `auth.checkPassword` and registration through
-  `auth.signUp` and `account.updatePasswordSettings` with a real gotd client.
-
-### M20 — Invite-gated registration
-
-- Durable registration invites are issued for one username, carry a single-use
-  secret with a bounded lifetime, and can be listed or revoked by an operator.
-  The possession proof is handed through username-mode `auth.signIn` and
-  consumed by `auth.signUp`.
-- The admission transaction consumes the invite, clears the handoff secret,
-  creates the provisional username-mode account, claims the username, and binds
-  the unbound auth key atomically; a failure rolls the complete admission back.
-- The `teagramd invite issue`, `invite list`, and `invite revoke` commands provide
-  the operator issuance and lifecycle surface. `issue` prints the new secret once;
-  `list` and `revoke` do not expose stored secrets.
-- `TG_REGISTRATION` accepts `closed`, `invite`, and `open`; M20 added the invite-gated path,
-  while `open` uses the same admission flow without an invite.
-
-### Operator privacy controls (MAIN-2331, MAIN-2332)
+### Operator privacy controls
 
 - [PR #785](https://github.com/teagramhq/teagram-server/pull/785) made recovery
   email retention optional. `TG_RECOVERY_EMAIL=off` is the default and discards
