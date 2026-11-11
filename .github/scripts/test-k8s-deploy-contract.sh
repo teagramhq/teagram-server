@@ -394,6 +394,16 @@ proxy_trust_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Na
    "$proxy_trust_step" == *'jq --slurp --exit-status'* &&
    "$proxy_trust_step" == *'kubectl rollout status statefulset/teagramd'* ]] ||
   fail 'the CI deployment test must narrow cloudflared trust in both the live StatefulSet and release manifest'
+proxy_log_fetch_line="$(grep -n -m 1 -F 'if ! kubectl logs --namespace teagram statefulset/teagramd --container teagramd' <<< "$proxy_trust_step" | cut -d: -f1)"
+proxy_log_failure_line="$(grep -n -m 1 -F 'could not retrieve teagramd logs to verify proxy trust' <<< "$proxy_trust_step" | cut -d: -f1)"
+proxy_log_warning_line="$(grep -n -m 1 -F 'per-IP limits are keyed on each connection' <<< "$proxy_trust_step" | cut -d: -f1)"
+[[ "$proxy_log_fetch_line" =~ ^[0-9]+$ &&
+   "$proxy_log_failure_line" =~ ^[0-9]+$ &&
+   "$proxy_log_warning_line" =~ ^[0-9]+$ &&
+   "$proxy_log_fetch_line" -lt "$proxy_log_failure_line" &&
+   "$proxy_log_failure_line" -lt "$proxy_log_warning_line" &&
+   "$proxy_trust_step" == *'> "$teagramd_logs"'* ]] ||
+  fail 'the CI warning check must stop if teagramd logs cannot be retrieved before grep'
 grep --fixed-strings --quiet "per-IP limits are keyed on each connection's own peer address" \
   .github/workflows/ci.yml ||
   fail 'CI must assert that teagramd logs no shared-client-address warning'
