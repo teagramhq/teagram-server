@@ -3034,12 +3034,15 @@ func validateBotAPI(cfg *Config) error {
 		return errors.New("TG_BOT_API_PUBLIC_PROXY_CIDRS requires TG_BOT_API_PUBLIC_LISTEN_ADDR")
 	}
 	if addr := cfg.BotAPITailnetListenAddr; addr != "" {
-		ip, _, err := parseBotAPIListenAddr(addr, "TG_BOT_API_TAILNET_LISTEN_ADDR", false)
+		ip, _, err := parseBotAPIListenAddr(addr, "TG_BOT_API_TAILNET_LISTEN_ADDR", true)
 		if err != nil {
 			return err
 		}
-		if !botAPICGNATPrefix.Contains(ip) && !botAPITailnetPrefix.Contains(ip) {
-			return errors.New("TG_BOT_API_TAILNET_LISTEN_ADDR host must be in 100.64.0.0/10 or fd7a:115c:a1e0::/48")
+		if ip.IsValid() && !ip.IsUnspecified() {
+			privateOrTailnet := ip.IsPrivate() || botAPICGNATPrefix.Contains(ip) || botAPITailnetPrefix.Contains(ip)
+			if !privateOrTailnet {
+				return errors.New("TG_BOT_API_TAILNET_LISTEN_ADDR host must be private, in 100.64.0.0/10, in fd7a:115c:a1e0::/48, or a wildcard")
+			}
 		}
 	}
 
