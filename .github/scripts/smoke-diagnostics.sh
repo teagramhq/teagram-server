@@ -8,7 +8,7 @@ smoke_diagnostic_output_indent() (
   cat >"$fixture_dir/go.mod" <<'EOF'
 module smoke-diagnostics-indent
 
-go 1.27.1
+go 1.27.4
 EOF
   cat >"$fixture_dir/fixture_test.go" <<'EOF'
 package fixture
