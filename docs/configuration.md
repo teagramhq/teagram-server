@@ -163,6 +163,7 @@ Rate-limit counts use integer syntax and windows use Go duration syntax. A zero 
 | `TG_RATE_LIMIT_UPDATE_PROFILE_WINDOW` | `24h` | Go duration for the per-account profile-update bound. |
 | `TG_RATE_LIMIT_UPLOAD_BYTES` | `0` (disabled) | Optional non-negative integer byte budget per account per window for uploaded file data. Set a positive value to enable it; a positive limit requires a positive window. |
 | `TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW` | `1h` | Go duration for the per-account uploaded-byte budget. |
+| `TG_RPC_TRACE_FILE` | *(unset)* | Optional JSONL file for redacted RPC span records (`method`, `duration_us`, `result`, `end_unix_ms`). Unset or empty disables tracing. The path must be clean and contain no parent traversal; an existing path must be a regular file. The file is created or appended with mode `0600`. |
 | `TG_STICKER_CATALOG_BUNDLE` | *(unset)* | Path to a prebuilt sticker catalog bundle loaded at startup. An invalid or unreadable bundle fails startup. |
 | `TG_STICKER_IMPORT` | `on` | `on` or `off` (unset means `on`). Controls whether accounts can create or add to sticker sets. |
 | `TG_UPLOAD_MAX_BYTES` | `100 MiB` | Positive integer from 1 byte through 1 TiB. Maximum size of one uploaded file; overrides `TG_MAX_FILE_BYTES` when both are set. |
