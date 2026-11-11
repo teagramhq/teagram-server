@@ -913,6 +913,40 @@ func TestPublicPathIgnoresCFConnectingIPOutsideTrustedForwarders(t *testing.T) {
 	}
 }
 
+func TestPublicPathWarnsOncePerListenerForIgnoredCFConnectingIP(t *testing.T) {
+	st := newFakeStore()
+	st.lookupErrs = map[string]error{"invalid": store.ErrBotTokenNotFound}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	base := botapi.NewHandler(st, logger, store.RateLimitConfig{})
+	trustedForwarders := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	listeners := []http.Handler{
+		botapi.WithPublicPath(base, trustedForwarders),
+		botapi.WithPublicPath(base, trustedForwarders),
+	}
+
+	for _, listener := range listeners {
+		for range 3 {
+			if status := serveInvalidBotRequest(t, listener, "198.51.100.2:2445", "203.0.113.7"); status != http.StatusUnauthorized {
+				t.Fatalf("untrusted source request status = %d, want 401", status)
+			}
+		}
+	}
+
+	if warnings := strings.Count(logs.String(), `msg="ignored forwarded client address from untrusted peer"`); warnings != 2 {
+		t.Fatalf("emitted %d warnings for two listeners, want one per listener in the minute:\n%s", warnings, logs.String())
+	}
+	if !strings.Contains(logs.String(), "public Bot API") {
+		t.Errorf("ignored forwarded-address warning does not name the listener:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "peer_addr=198.51.100.2") {
+		t.Errorf("ignored forwarded-address warning does not name the peer:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "203.0.113.7") {
+		t.Errorf("ignored forwarded-address warning exposed the header value:\n%s", logs.String())
+	}
+}
+
 func TestPublicPathRejectsMissingOrMalformedTrustedClientAddress(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

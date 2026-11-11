@@ -29,6 +29,9 @@ import (
 )
 
 const (
+	cfConnectingIPHeader       = "Cf-Connecting-Ip"
+	cfConnectingIPHeaderSource = "CF-Connecting-IP"
+
 	maxRequestBodyBytes = 64 << 10
 	authBurst           = 20
 	authRefillInterval  = time.Second
@@ -150,18 +153,35 @@ type proxyPeerContextKey struct{}
 type listenerPathContextKey struct{}
 
 type listenerPathPolicy struct {
-	path           mtproto.ListenerPath
-	public         bool
-	trustedProxies []netip.Prefix
+	path                    mtproto.ListenerPath
+	public                  bool
+	trustedProxies          []netip.Prefix
+	ignoredForwardedAddrLog *forwardedAddrLogSampler
+}
+
+type forwardedAddrLogSampler struct {
+	last    atomic.Int64
+	dropped atomic.Int64
+}
+
+func (s *forwardedAddrLogSampler) allow(now time.Time) (int64, bool) {
+	n := now.UnixNano()
+	last := s.last.Load()
+	if n-last < int64(time.Minute) || !s.last.CompareAndSwap(last, n) {
+		s.dropped.Add(1)
+		return 0, false
+	}
+	return s.dropped.Swap(0), true
 }
 
 // WithPublicPath applies public Bot API request limits. CF-Connecting-IP is
 // used only when the socket peer belongs to trustedForwarders.
 func WithPublicPath(next http.Handler, trustedForwarders []netip.Prefix) http.Handler {
 	return withListenerPath(next, listenerPathPolicy{
-		path:           mtproto.ListenerPathLimited,
-		public:         true,
-		trustedProxies: append([]netip.Prefix(nil), trustedForwarders...),
+		path:                    mtproto.ListenerPathLimited,
+		public:                  true,
+		trustedProxies:          append([]netip.Prefix(nil), trustedForwarders...),
+		ignoredForwardedAddrLog: &forwardedAddrLogSampler{},
 	})
 }
 
@@ -191,6 +211,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pathPolicy := listenerPathPolicy{}
 	if configured, ok := r.Context().Value(listenerPathContextKey{}).(listenerPathPolicy); ok {
 		pathPolicy = configured
+	}
+	if pathPolicy.public && len(r.Header.Values(cfConnectingIPHeader)) > 0 {
+		peer := remoteIP(r.RemoteAddr)
+		if !trustedCFConnectingIPPeer(peer, pathPolicy.trustedProxies) {
+			if dropped, ok := pathPolicy.ignoredForwardedAddrLog.allow(time.Now()); ok {
+				h.log.Warn("ignored forwarded client address from untrusted peer",
+					"listener", "public Bot API", "peer_addr", peer,
+					"source", cfConnectingIPHeaderSource, "suppressed", dropped)
+			}
+		}
 	}
 	authAttemptReserved := false
 	if pathPolicy.path != mtproto.ListenerPathTailnet {
@@ -335,11 +365,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func authBucketKey(r *http.Request, policy listenerPathPolicy) (string, error) {
 	if policy.public {
 		peer := remoteIP(r.RemoteAddr)
-		for _, trusted := range policy.trustedProxies {
-			if !peer.IsValid() || !trusted.Contains(peer) {
-				continue
-			}
-			values := r.Header.Values("Cf-Connecting-Ip")
+		if trustedCFConnectingIPPeer(peer, policy.trustedProxies) {
+			values := r.Header.Values(cfConnectingIPHeader)
 			if len(values) != 1 {
 				return "", errors.New("CF-Connecting-IP must appear exactly once")
 			}
@@ -356,6 +383,18 @@ func authBucketKey(r *http.Request, policy listenerPathPolicy) (string, error) {
 		key = remoteIP(r.RemoteAddr).String()
 	}
 	return key, nil
+}
+
+func trustedCFConnectingIPPeer(peer netip.Addr, trustedForwarders []netip.Prefix) bool {
+	if !peer.IsValid() {
+		return false
+	}
+	for _, trusted := range trustedForwarders {
+		if trusted.Contains(peer) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int64, method string, chatID int64, text string, pathPolicy listenerPathPolicy) {

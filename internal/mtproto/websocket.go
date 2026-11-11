@@ -962,9 +962,10 @@ func (s *Server) logCFConnectingIPTrust(peer netip.Addr, source string, forwarde
 		}
 		return
 	}
-	if dropped, ok := s.clientAddrIgnoreLog.allow(time.Now(), preAuthLogInterval); ok {
-		s.log.Info("ignored forwarded client address from untrusted peer",
-			"peer_addr", peer, "source", source, "suppressed", dropped)
+	if dropped, ok := s.clientAddrIgnoreLog.allow(time.Now(), time.Minute); ok {
+		s.log.Warn("ignored forwarded client address from untrusted peer",
+			"listener", "public WebSocket", "peer_addr", peer,
+			"source", source, "suppressed", dropped)
 	}
 }
 

@@ -828,7 +828,7 @@ func TestPublicWebSocketRestrictsCFConnectingIPToConfiguredProxyCIDRs(t *testing
 			}
 			var logs bytes.Buffer
 			server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil,
-				slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+				slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 			server.TrustCFConnectingIPProxies([]netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")})
 			if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{MaxRequestsPerNet: 1, PerNetWindow: time.Minute}); err != nil {
 				t.Fatalf("set discovery limits: %v", err)
@@ -857,6 +857,22 @@ func TestPublicWebSocketRestrictsCFConnectingIPToConfiguredProxyCIDRs(t *testing
 			}
 			if got := request("198.51.100.92"); got != tt.secondStatus {
 				t.Errorf("second discovery status = %d, want %d for %s peer %s", got, tt.secondStatus, tt.name, tt.peer)
+			}
+			warnings := strings.Count(logs.String(), "level=WARN")
+			if tt.name == "unlisted peer" {
+				if warnings != 1 {
+					t.Fatalf("emitted %d warnings for two untrusted forwarded addresses, want one per listener per minute:\n%s", warnings, logs.String())
+				}
+				for _, want := range []string{"public WebSocket", "peer_addr=192.0.2.77"} {
+					if !strings.Contains(logs.String(), want) {
+						t.Errorf("untrusted forwarded-address warning does not name %q:\n%s", want, logs.String())
+					}
+				}
+				if strings.Contains(logs.String(), forwarded.String()) {
+					t.Errorf("untrusted forwarded-address warning exposed the header value:\n%s", logs.String())
+				}
+			} else if warnings != 0 {
+				t.Errorf("trusted proxy emitted an untrusted-address warning:\n%s", logs.String())
 			}
 		})
 	}

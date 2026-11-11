@@ -139,6 +139,8 @@ func TestLoadCheckUsernameIPRateLimitWindowCanDisableCounter(t *testing.T) {
 func TestWarnClientAddrTrustWhenUsernameCheckIsOnlyIPLimit(t *testing.T) {
 	cfg := config.Config{
 		ClientAddrTrust: config.ClientAddrSocket,
+		ListenAddr:      "127.0.0.1:2445",
+		ListenPath:      mtproto.ListenerPathLimited,
 		RateLimits: config.RateLimitsConfig{
 			CheckUsernameIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
 		},
@@ -175,9 +177,11 @@ func TestLoadClientAddrTrustRejectsUnsupported(t *testing.T) {
 	}
 }
 
-func TestWarnClientAddrTrustForCloudflareNamesOnlyTailnetSocketRisk(t *testing.T) {
+func TestWarnClientAddrTrustForCloudflareWhenSocketLimitedListenerRemains(t *testing.T) {
 	cfg := config.Config{
 		ClientAddrTrust:           config.ClientAddrCFConnectingIP,
+		ListenAddr:                "127.0.0.1:2445",
+		ListenPath:                mtproto.ListenerPathLimited,
 		PublicWebSocketListenAddr: "127.0.0.1:2446",
 		RateLimits: config.RateLimitsConfig{
 			SignUpIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
@@ -194,6 +198,26 @@ func TestWarnClientAddrTrustForCloudflareNamesOnlyTailnetSocketRisk(t *testing.T
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("warning does not mention %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+func TestWarnClientAddrTrustForCloudflareIsSilentWhenNonPublicListenersAreTailnet(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust:           config.ClientAddrCFConnectingIP,
+		ListenAddr:                "127.0.0.1:2445",
+		ListenPath:                mtproto.ListenerPathTailnet,
+		WebSocketListenAddr:       "127.0.0.1:2447",
+		WebSocketListenPath:       mtproto.ListenerPathTailnet,
+		PublicWebSocketListenAddr: "127.0.0.1:2446",
+		RateLimits: config.RateLimitsConfig{
+			SignUpIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	cfg.WarnClientAddrTrust(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if strings.Contains(buf.String(), "keyed on each connection's own peer address") {
+		t.Fatalf("warned about socket-keyed limits when all non-public listeners use the tailnet path:\n%s", buf.String())
 	}
 }
 
