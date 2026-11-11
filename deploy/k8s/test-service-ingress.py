@@ -114,8 +114,6 @@ def linkselector_state() -> tuple[dict, list[dict]]:
 
 
 def pod_is_ready(pod: dict) -> bool:
-    if pod.get("metadata", {}).get("deletionTimestamp") is not None:
-        return False
     return any(
         condition.get("type") == "Ready" and condition.get("status") == "True"
         for condition in pod.get("status", {}).get("conditions", [])

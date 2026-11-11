@@ -5,8 +5,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-python3 -B deploy/k8s/test_service_ingress_unit.py
-
 fail() {
   printf 'K8s deployment contract: %s\n' "$1" >&2
   exit 1

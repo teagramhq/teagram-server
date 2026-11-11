@@ -101,16 +101,17 @@ export function patchRealClientObserver(webRoot) {
   }
 
   const uniquePeerSearchWaiter = `async function waitForUniquePeerSearchResult(page, resultsSelector, username, stage) {
-  await page.waitForFunction(({resultsSelector, username}) => {
+  const waitForMatches = (requireUnique) => page.waitForFunction(({resultsSelector, username, requireUnique}) => {
     const matches = [...document.querySelectorAll(resultsSelector)].filter((row) => {
       const rect = row.getBoundingClientRect();
       const style = window.getComputedStyle(row);
       return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
         (row.textContent || '').includes(username);
     });
-    return matches.length === 1;
-  }, {resultsSelector, username}, {timeout: 25_000})
-  .catch(() => failStage(stage + '_search_result_not_unique'));
+    return requireUnique ? matches.length === 1 : matches.length > 0;
+  }, {resultsSelector, username, requireUnique}, {timeout: 25_000});
+  await waitForMatches(false).catch(() => failStage(stage + '_search_results'));
+  await waitForMatches(true).catch(() => failStage(stage + '_search_result_not_unique'));
 }
 `;
   const peerSelection = 'async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {';
