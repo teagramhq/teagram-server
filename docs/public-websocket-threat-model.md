@@ -3,20 +3,21 @@
 ## Scope and trust boundary
 
 This model covers the public MTProto WebSocket listener at
-`server.teagram.io`. The ingress contract sends only `/apiws` and
-`/.well-known/teagramd/client` through the host-side Cloudflare Tunnel to
-`127.0.0.1:2446`; Compose publishes that listener on LXC loopback. Treat the
-hostname as internet-facing: any caller that can reach it can fetch public
-discovery and open a WebSocket, including a script or native client that does
-not use the Teagram web app. The listener is separate from the default MTProto
-TCP listener and the existing tailnet WebSocket listener.
+`server.teagram.io`. Production sends public WebSocket traffic through the
+Cloudflare Tunnel connector to the in-cluster `teagramd` Service on port 2446.
+The Service is `ClusterIP`, and the NetworkPolicy permits that listener only
+from `cloudflared` pods. See the [k3s deployment guide](../deploy/k8s/README.md)
+for the production ingress topology. Treat the hostname as internet-facing:
+any caller that can reach it can fetch public discovery and open a WebSocket,
+including a script or native client that does not use the Teagram web app. The
+listener is separate from the default MTProto TCP listener and the tailnet
+WebSocket listener.
 
-The host loopback bind prevents direct connections from other network hosts.
-It does not isolate the listener from host processes, the Docker daemon, or
-containers attached to the Compose network. The tunnel, host, Docker daemon,
-Cloudflare zone and tunnel administrators, and tailnet membership are trusted
-boundaries. This rollout does not add a Cloudflare Access identity policy, so
-application authentication must assume an anonymous caller.
+The in-cluster Service and NetworkPolicy prevent direct external access to the
+pod listener. The cluster, Cloudflare zone and tunnel administrators, and
+tailnet membership are trusted boundaries. This deployment does not add a
+Cloudflare Access identity policy, so application authentication must assume
+an anonymous caller.
 
 The protected assets are account and session integrity, registration invites,
 authentication state, and availability of the public and tailnet services.
@@ -24,8 +25,8 @@ Neither the admin HTTP listener nor the tailnet TCP listener is part of the
 public route. The listener split separates ingress and registration policy; it
 does not create separate account or data stores. Public and tailnet accounts
 belong to the same Teagram service. Public WebSocket per-client abuse budgets
-are separate from the budgets shared by the default TCP and tailnet WebSocket
-listeners.
+are scoped to this listener and separate from the default TCP and tailnet
+services.
 
 ## Authentication controls
 
@@ -48,27 +49,26 @@ a new username.
 
 ## Abuse limits and residual risk
 
-When `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` is enabled in the production Compose
-stack, Compose selects `TG_CLIENT_ADDR_TRUST=cf-connecting-ip`. The host
-publishes port 2446 only on `127.0.0.1`, and the Cloudflare Tunnel is the only
-intended ingress path. The public listener requires exactly one parseable
-`CF-Connecting-IP` value and uses it for RPC and pre-auth per-network limits;
-missing, repeated, comma-separated, or malformed values receive HTTP 400.
-`X-Forwarded-For` is ignored. The loopback publish prevents direct access from
-other network hosts, with the Tunnel as the intended external ingress. Host
-processes, Docker, the Cloudflare zone and tunnel administrators remain trusted
-boundaries.
+The production overlay enables `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` and sets
+`TG_CLIENT_ADDR_TRUST=socket`. The listener therefore uses the immediate
+socket peer for RPC and pre-auth per-network limits; it does not use
+`CF-Connecting-IP` or `X-Forwarded-For`. With the current Cloudflare Tunnel
+path, that peer is a `cloudflared` pod address, so callers behind the same
+connector peer share a network bucket. The NetworkPolicy allows port 2446 only
+from `cloudflared` pods; the Cloudflare zone, tunnel administrators, and cluster
+administrators remain trusted boundaries.
 
 The default TCP listener and tailnet WebSocket listener continue to use their
-socket peers. Public and tailnet RPC budgets remain listener-scoped; request
-headers cannot choose or merge the tailnet budget. For an L4 deployment, use
-`proxy-v2` with its explicit balancer allowlist instead.
+socket peers. Request headers cannot choose or merge their listener scope. A
+different deployment that trusts an L4 proxy must configure `proxy-v2` with its
+explicit balancer allowlist.
 
-The 20-per-hour `account.checkUsername` budget uses the Cloudflare client IP
-for public WebSocket requests. Its key is the existing listener-scoped IPv4
-`/32` or IPv6 `/64` bucket, shared across unauthenticated auth keys; invalid
-and reserved-name probes consume it because charging precedes validation. The
-four-to-one ratio against
+The 20-per-hour `account.checkUsername` budget uses the observed socket peer
+for public WebSocket requests. Its key is the listener-scoped IPv4 `/32` or
+IPv6 `/64` bucket, shared across unauthenticated auth keys; invalid and
+reserved-name probes consume it because charging precedes validation. Under
+the current production trust mode this identifies the connector peer, not the
+end-user address. The four-to-one ratio against
 `auth.signUp` is correction headroom, not a measured anonymity threshold. The
 limit slows broad probing from one network, but a small targeted list fits
 within a window and multiple networks can multiply it. Deployments relying on
@@ -85,15 +85,13 @@ codes to logs. Rate limits, invites, and Origin checks reduce specific abuse
 paths but do not make the public listener private or provide a general bot
 defense.
 
-The tailnet TCP and optional tailnet WebSocket paths remain on their existing
-listeners and network routes and share their original per-client counters.
-Existing rows remain assigned to that tailnet scope; the additive migration
-creates separate public counters without resetting or copying them.
-`TG_REGISTRATION=open` continues to apply only there; public sign-up uses the
-separate invite policy. Deployment verification must confirm the host publish
-remains loopback-only, the tunnel routes only the two documented paths, public
-sign-up without an invite is refused, public budgets still limit traffic, and
-tailnet authentication still works through TCP and WebSocket.
+The tailnet TCP and optional tailnet WebSocket paths remain on separate
+listeners and the Tailscale proxy route. Production sets
+`TG_REGISTRATION=open` for those listeners and
+`TG_PUBLIC_REGISTRATION=invite` for public WebSocket sign-up. Verify the
+ClusterIP and NetworkPolicy ingress restrictions, public sign-up without an
+invite is refused, public budgets still limit traffic, and tailnet
+authentication still works through TCP and WebSocket.
 
 The isolated `demo.teagram.io` deployment has separate ingress and data
 stores. Its online deployment dumps can retain live demo account and message

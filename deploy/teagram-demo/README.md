@@ -1,26 +1,29 @@
 # Public demo deployment
 
-The demo runs in its own `teagram-demo` LXC and Docker engine, separate from the
-dev `teagram` LXC. Its Compose project has its own PostgreSQL volume, RSA
-identity volume, auth-key encryption secret, Turnstile secret file, blob mount,
-Docker networks, checkout, forced SSH deploy key and Cloudflare tunnel. Do not
-reuse `/opt/teagram`, the dev LXC's volumes or its deploy credentials.
+The public demo is a separate Compose deployment on a dedicated LXC host, with
+its own PostgreSQL, identity, auth-key encryption, Turnstile, local blob
+storage, network state, checkout, and deployment credentials. Keep its data,
+volumes, identity, secrets, and deployment credentials separate from the
+development and production environments. The legacy `ROLLOUT_RUNNER_*`
+Turnstile helper described below is no longer the production path; the live
+demo still depends on it until its replacement lands. Current production runs
+on k3s with RustFS, as described in the
+[deployment guide](../k8s/README.md).
 
-The install script intentionally stops until the public client config exposes
-`wss://demo.teagram.io/apiws` (MAIN-2196) and the tracked API seeder is ready.
-It keeps the edge stopped until it has closed the admin election, seeded and
-verified the content, restored production settings and verified the Turnstile
-gate.
+The install script waits until the public client config exposes
+`wss://demo.teagram.io/apiws` and the tracked API seeder is ready. It keeps the
+edge stopped until it has closed the admin election, seeded and verified the
+content, restored the demo settings, and verified the Turnstile gate.
 
 ## LXC prerequisites
 
-The Steward provisions the separate `teagram-demo` Incus LXC and its network
-policy. Required layout and policy:
+The demo runs on a dedicated LXC host with its own network policy. Required
+layout and policy:
 
-- Root-owned checkout at `/opt/teagram-demo`, branch `main`.
-- Incus `teagram-demo` on charlie, Debian 13, with `limits.cpu=1`,
+- Root-owned checkout of the application on the `main` branch.
+- Dedicated Debian 13 LXC guest with `limits.cpu=1`,
   `limits.cpu.priority=0`, `limits.memory=2GiB` and a 20 GiB root disk. This
-  intentionally stays below the original 2-vCPU / 4-GiB guidance.
+  intentionally stays below the earlier 2-vCPU / 4-GiB guidance.
 - Docker Engine and Compose v5.6.1. The bootstrap overlay uses
   Compose's `!override` merge tag.
 - Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock` and a
@@ -393,8 +396,12 @@ it, it saves and verifies `authorized_keys` under the root-only
 separate root channel if the menu must be rolled back. The Gatus definitions
 in `gatus.yaml` are HTTPS probes and do not use an SSH key.
 
-The reviewed `turnstile-signin-on` and `turnstile-signin-off` ops scripts change
-only `TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
+### Live demo Turnstile operations
+
+The `turnstile-signin-on` and `turnstile-signin-off` procedures still depend on
+the legacy helper loaded by `deploy-main.sh` and `init-demo.sh`. This dependency
+remains until its replacement lands. The procedures change only
+`TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
 `ROLLOUT_RUNNER_ADDED_ENV` path for the first assignment and the
 `ROLLOUT_RUNNER_CHANGED_ENV` path for later boolean changes. Each change saves
 the prior root-only `.env` under

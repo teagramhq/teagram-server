@@ -5,6 +5,10 @@ separate from the server stack and owns two containers: an internal-only
 Chromium runner and the dependency-free CONNECT observer. The browser can reach
 only the observer. The observer is dual-homed and permits CONNECT to the one
 pinned Tailscale target after validating the deployed artifact metadata.
+This harness is for controlled local and CI acceptance runs, not the current
+production ingress or deployment path. Production runs on k3s; see the
+[deployment guide](../k8s/README.md). The required `real-client-browser-flow`
+check is the pull-request browser smoke gate.
 
 The runner selects the architecture-specific Playwright image digest in
 `run.sh`; the image adds only the integrity-locked `@playwright/test@1.61.1`
@@ -235,8 +239,8 @@ handshake response and its exact error line for each architecture; the pinned
 arm64 image must report the exact no-handshake line. Runtime and wrapper unit
 fixtures cover malformed IDs and statuses, associated 503 classification,
 orphans, duplicates, overflow, post-close events, output leaks, strict allowlist
-validation, and cleanup override. The LXC deploy ticket uses the same wrapper on
-its native arm64 platform.
+validation, and cleanup override. These fixtures cover this harness without
+relying on the retired LXC production deployment path.
 
 The expected verification set for this directory is:
 
@@ -247,11 +251,10 @@ for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
 docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json
 ```
 
-On-LXC browser sandbox, MagicDNS/Serve reachability, direct-egress, and
-attached-stdout checks belong to the reviewed deployment ticket. No staging
-LXC is available for this runtime; the PR's Compose policy and synthetic tests
-are the preview gate. Roll back by reverting the PR and using the normal
-deployment path, then run:
+The Compose policy and synthetic tests validate this harness. They do not
+verify production ingress; use the k3s deployment guide for that topology and
+the required `real-client-browser-flow` check for pull-request browser
+coverage. Roll back a harness change by reverting the PR, then run:
 
 ```sh
 docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance down --rmi local
@@ -414,8 +417,8 @@ with mode exactly 0600, one hard link, and no final-component symlink:
   [Postgres password-file entry](https://www.postgresql.org/docs/current/libpq-pgpass.html),
   `host:port:database:browser_acceptance_probe:password`. Escape colons and
   backslashes with backslashes. Wildcards, additional entries and other roles
-  are rejected. The host may be loopback, an RFC1918 address on the LXC's
-  private Docker network, or an absolute Unix socket directory.
+  are rejected. The host may be loopback, a private database address reachable
+  from the operator workstation, or an absolute Unix socket directory.
 - `/etc/teagram-browser-acceptance/probe-config.json`: exactly
   `{"userId":"<positive decimal bigint>"}` for the existing test account.
 
@@ -446,16 +449,19 @@ never forwarded into a container. This keeps database-controlled text out of
 logs and evidence consumers; a privileged observer on the host may still
 inspect the probe's memory while it runs.
 
-Before credential forwarding, every running teagramd process must have
-`TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
-every replica, and `TG_LOG_LOGIN_CODES=false`. Docker's projection returns only
-those two effective flags and
-`TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Server source
-provenance comes only from the rollout runner's `/root/*.build/built-image.identity`
-records. Production has no evidence-root override. Candidate directories are
-root-owned mode 0700; candidate records are root-owned regular files with mode
-0600, one hard link, no-follow opening, and a 1 KiB limit. Each record must be
-the runner's exact one-line `captured_at_utc`, `source_sha`, `image_id`, and
+For this Compose-backed host probe, every running `teagramd` process must have
+`TG_REGISTRATION=closed` or `TG_REGISTRATION=open` before credentials are
+forwarded. Use the same setting on every replica and set
+`TG_LOG_LOGIN_CODES=false`. Docker's projection returns only those two flags and
+`TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Source
+provenance comes from root-owned `built-image.identity` records in the host
+probe's default evidence root. This legacy Compose/LXC evidence path is not
+used by the current k3s production deployment; see the
+[deployment guide](../k8s/README.md). The probe has no evidence-root override.
+Candidate directories are root-owned mode 0700; candidate records are
+root-owned regular files with mode 0600, one hard link, no-follow opening, and a
+1 KiB limit. Each record must be the exact one-line `captured_at_utc`,
+`source_sha`, `image_id`, and
 `revision_label_json` format in that order, followed by exactly one LF. A
 malformed candidate fails closed.
 For every running replica, at least one record must match its immutable image

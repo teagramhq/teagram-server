@@ -13,17 +13,14 @@ Config is in `atlas.hcl` under `env "local"`:
 
 ## Add a migration
 
-Either hand-write a file `migrations/<version>_<name>.sql` (version is a sortable
-timestamp, e.g. `20260721000001`), then re-hash:
+`atlas.hcl` declares no desired schema, so migrations are written as SQL rather
+than generated from a schema diff. Hand-write a file
+`migrations/<version>_<name>.sql` (version is a sortable timestamp, e.g.
+`20260721000001`), then hash and validate it:
 
 ```bash
 atlas migrate hash --env local
-```
-
-Or diff against a desired schema to generate one:
-
-```bash
-make migrate-new name=add_sessions   # atlas migrate diff ... --env local
+atlas migrate validate --env local
 ```
 
 ## Validate

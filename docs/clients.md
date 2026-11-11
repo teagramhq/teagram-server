@@ -28,13 +28,13 @@ kept as account or session data: `TG_SESSION_IP=false`,
 phone number. Device and app labels are stored by default with
 `TG_SESSION_DEVICE_LABELS=true`, and the server operator can read them.
 
-The session IP setting controls session metadata only. Every connection's IP is
-still processed in memory for pre-auth connection caps, PROXY-v2 parsing, and
-per-network abuse limits. Counters are deployment-wide within each listener
-scope: the default TCP and tailnet WebSocket listeners share their existing
-budgets, while the public WebSocket listener has independent per-client
-budgets. Defaults are 10
-`auth.sendCode` calls per network per hour, 20 distinct `auth.sendCode`
+The session IP setting controls session metadata only. Peer addresses are
+processed in memory for connection admission and per-network abuse limits, but
+are not retained as session metadata when `TG_SESSION_IP=false`. Client
+budgets follow each listener's configured path: tailnet listeners bypass
+per-client rate and connection limits, while limited listeners enforce them
+and the public WebSocket listener has its own caller-keyed budgets. Defaults
+are 10 `auth.sendCode` calls per network per hour, 20 distinct `auth.sendCode`
 identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
 network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
 20 unauthenticated `account.getPassword` calls per network per hour, and 5
@@ -49,10 +49,12 @@ five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
 `TG_CLIENT_ADDR_TRUST`. In `cf-connecting-ip` mode, only the public WebSocket
-listener uses its validated `CF-Connecting-IP` header; the TCP and tailnet
-WebSocket listeners continue to use their socket peers. Listener scope comes
-from the accepted socket, not `Host`, `Origin`, or `X-Forwarded-For`. The
-`auth.sendCode` tables store that network prefix; other IP rate-limit rows
+listener uses its validated `CF-Connecting-IP` header; other listeners use
+their socket peers. The production k3s overlay currently sets this trust mode
+to `socket`, so teagramd uses its immediate peer address there and ignores that
+header. Listener scope comes from the accepted socket, not `Host`, `Origin`, or
+`X-Forwarded-For`. The `auth.sendCode` tables store that network prefix; other
+IP rate-limit rows
 store a deterministic FNV-derived key, which is enumerable for IPv4 and
 pseudonymous rather than anonymous.
 Counter rows expire with their configured windows and are pruned by the limiter
@@ -142,9 +144,7 @@ is also available to provisional sessions.
 
 ### Public enrollment discovery and local preflight
 
-The server-side contract in this section is provided by teagram-server
-revision `b4b18c12` (`MAIN-736`). Deploy that server revision, or a later
-revision that retains the contract, as the document consumer. With demo
+This contract is implemented by the current teagram-server source. With demo
 advertisement disabled, the command renders the public identity without
 opening Postgres or loading the auth-key master secret:
 
@@ -297,12 +297,12 @@ unless `TG_BLOB_S3_ALLOW_INSECURE_HTTP=true` is explicitly set for a loopback
 or compose-only endpoint; startup logs a warning when this escape hatch is
 used. There is no TLS verification bypass setting.
 
-The main Compose file uses RustFS as its default blob store. Generate separate
-RustFS root and `teagramd` credentials on the box, keep `.env` at mode 0600,
-and let Compose mount those values as read-only files for the services that
-need them. The app key is limited to the `teagram` bucket's `teagramd/`
-prefix. Provision a separate media key outside the repository before starting
-the default S3 stack:
+For local Compose development, the main Compose file uses RustFS as its
+default blob store. Generate separate RustFS root and `teagramd` credentials,
+keep `.env` at mode 0600, and let Compose mount those values as read-only files
+for the services that need them. The app key is limited to the `teagram`
+bucket's `teagramd/` prefix. Provision a separate media key outside the
+repository before starting that local S3 stack:
 
 ```bash
 sudo install -d -o 65532 -g 65532 -m 0700 /etc/teagramd/media-keys
@@ -311,21 +311,14 @@ sudo chown 65532:65532 /etc/teagramd/media-keys/1.key
 sudo chmod 0600 /etc/teagramd/media-keys/1.key
 ```
 
-The default Compose service mounts that directory read-only and selects version
-1. Fresh S3 objects are encrypted at rest; a server with an accepted plaintext
-cutover authority keeps serving those existing objects in plaintext mode until
-the separately reviewed migration stage. RustFS and its console have no
-published ports. The internal S3 URL is plaintext on the private Compose
-network; the explicit HTTP setting is logged at startup. See the
-[S3 media threat model](media-storage-threat-model.md) for the key-custody,
-object-tampering, and accepted-plaintext boundaries.
-
-On first S3 startup, Compose may create an empty `.state/blob-mode` bind source.
-The server treats it as no authority only while the directory has no entries,
-then requires the media key and selects encrypted mode. Existing authority
-records are always validated and keep their selected mode. For a deployment
-without an authority, use a fresh S3 namespace; existing plaintext objects need
-their `s3-accepted` authority until the reviewed migration completes.
+The local Compose service mounts that directory read-only and selects version
+1. Fresh S3 objects use the encrypted envelope described in the
+[S3 media threat model](media-storage-threat-model.md). The current production
+deployment uses the in-cluster RustFS service and persistent volumes described
+in the [k3s deployment guide](../deploy/k8s/README.md); its media keys and S3
+credentials come from externally supplied Kubernetes resources. A separate
+legacy local-blob volume is mounted read-only for recovery. Do not use the old
+Compose rollout procedures to switch or restore production media.
 
 For local development, copy `.env.example` to `.env`, generate credentials,
 then run:
@@ -336,18 +329,11 @@ chmod 600 .env
 docker compose up
 ```
 
-The bucket and scoped app user are created idempotently during startup.
-`docker compose down` preserves RustFS data; never use `down -v` on the
-teagram-server LXC.
-
-The server and Compose files include an S3 backend, but the available rollout
-runner supports only inspected local initialization and same-backend local
-updates. Do not use `blob-migrate` or `blob-restore` to switch or recover a
-production deployment. Publishing S3 or recovered-local authority and running
-the verified copy/restore transition are deferred to a separately reviewed
-orchestration path. Keep the local overlay and `tgblobs` volume in use until
-that path is available. Include the `rustfsdata` named volume in any LXC backup
-or snapshot because Compose persistence alone is not backup or restore.
+The bucket and scoped app user are created idempotently during local startup.
+`docker compose down` preserves RustFS data; do not use `down -v` when local
+data must be retained. Production media backup and recovery use the k3s
+procedures in the deployment guide, not the retired Compose rollout path or
+its blob-mode publication commands.
 
 ### What the pre-auth bounds do and do not cover
 
@@ -511,14 +497,10 @@ cannot add, replace, or remove an email, and they do not change the password.
 Switching to `off` stops future email writes and responses while preserving
 existing rows; a later password set or change can overwrite the row with NULL.
 Switching back to `contact` exposes any retained row again and does not backfill
-missing emails. There is no bulk erase. The local `teagramd admin set-password`
-command changes the password verifier and leaves its recovery-email row
-untouched.
+missing emails. There is no bulk erase.
 
 An operator can read `contact` emails from the database. The verifier is sealed
-at rest; the email is not. The email is not proof of identity: authenticate a
-reset requester through a separate channel or factor before using
-`teagramd admin set-password`. A database dump made before switching to `off`
+at rest; the email is not. A database dump made before switching to `off`
 continues to contain emails stored at dump time. A slow password upsert can
 also include bound values in the slow-query log.
 
@@ -640,50 +622,18 @@ verifier and a closed, unassigned administration singleton. A retry after a
 successful assignment is a no-op; account, username, and verifier data are
 never created or changed.
 
-### 5e. Reset an existing username password from the local CLI
+### 5e. Existing username password command
 
-`teagramd admin set-password` is a local operator command. It has no RPC or
-admin-dashboard route. Run it inside the deployment container with a protected
-file on stdin; it refuses terminal input, password flags, empty input, and
-multi-line input. The command accepts one line and removes one trailing LF or
-CRLF. It does not validate registration policy or start server listeners, so it
-also works when `TG_REGISTRATION=open`.
-
-On the LXC, create a root-only directory and credential file, then pass the file
-to the container through stdin:
-
-```bash
-install -d -o root -g root -m 0700 /root/teagram-password-reset
-umask 077
-openssl rand -base64 24 > /root/teagram-password-reset/tester1.password
-chmod 0600 /root/teagram-password-reset/tester1.password
-docker compose exec -T teagramd teagramd admin set-password --username tester1 \
-  < /root/teagram-password-reset/tester1.password
-```
-
-The handle may be supplied with or without `@`, and matching is ASCII
-case-insensitive. Success writes only the canonical handle and user ID to
-stderr. The new password must not appear in argv, environment variables, shell
-history, logs, issue comments, or pull requests. Keep the credential file
-root-owned and private; hand it to the account owner over the deployment's
-approved private channel, wait for login confirmation, then remove it.
-
-Before a production reset, take a recoverable PostgreSQL backup containing the
-current `public.user_passwords` row and test the restore procedure in an
-isolated database. If the backup tool cannot filter individual rows, back up
-the whole table rather than relying on an unsupported row-filter option. Keep
-the backup root-only and the encryption master key under its separate secret
-handling policy. If login verification fails, restore only the affected row in
-a reviewed transaction, verify that its old verifier decrypts with the original
-master key, and confirm the prior login before removing the backup. Do not
-blindly replay a whole-table dump into a live database.
+`teagramd admin set-password` is a local operator command with no RPC or
+admin-dashboard route. It changes the password verifier and leaves its
+recovery-email row untouched.
 
 ## 6. Supported Teagram clients
 
 | Client | Status |
 |---|---|
 | Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |
-| Teagram Web | Username/password sign-in is in progress and does not work yet (MAIN-1541). |
+| Teagram Web | Username/password sign-in is in progress and does not work yet. |
 | Stock Telegram clients | Unsupported. They use Telegram production DC addresses and RSA keys. |
 
 Other Teagram clients must use the server advertised address and DC id, and

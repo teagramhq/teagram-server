@@ -2,8 +2,10 @@
 
 This guide runs `teagramd` as a systemd service on one Linux host, with
 PostgreSQL 18 in Docker and Caddy providing HTTPS and WebSocket TLS. It uses the
-server's local filesystem media backend. It does not use the project's guarded
-deployment Compose stack or its rollout runner.
+server's local filesystem media backend. This is a self-hosted setup, separate
+from the current production service, which runs on k3s with RustFS storage. See
+the [production deployment guide](../deploy/k8s/README.md) for Teagram's current
+deployment path.
 
 This is a single-host setup. Keep the host patched, restrict shell and Docker
 access to trusted operators, and keep encrypted backups off the host.
@@ -12,7 +14,7 @@ access to trusted operators, and keep encrypted backups off the host.
 
 - A Linux host with systemd, a public DNS name such as `server.example.net`,
   and enough disk space for the database, uploaded media, and backups.
-- [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.1 or
+- [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.4 or
   newer from the [Go install guide](https://go.dev/doc/install), GNU make,
   Atlas (see the [migration guide](migrations.md)), Git, OpenSSL, and Caddy 2.8
   or newer from the [Caddy install guide](https://caddyserver.com/docs/install),
