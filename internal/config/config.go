@@ -39,18 +39,19 @@ type StickerImportMode string
 type RecoveryEmailMode string
 
 const (
-	RegistrationClosed             RegistrationMode  = "closed"
-	RegistrationInvite             RegistrationMode  = "invite"
-	RegistrationOpen               RegistrationMode  = "open"
-	StickerImportOn                StickerImportMode = "on"
-	StickerImportOff               StickerImportMode = "off"
-	RecoveryEmailOff               RecoveryEmailMode = "off"
-	RecoveryEmailContact           RecoveryEmailMode = "contact"
-	DefaultUploadPartTTL                             = 6 * time.Hour
-	DefaultUserInviteMinAccountAge                   = 7 * 24 * time.Hour
-	DefaultAuthKeySweepIdleWindow                    = 24 * time.Hour
-	DefaultAuthKeySweepMaxAge                        = 72 * time.Hour
-	DefaultSignUpTermsOfService                      = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	RegistrationClosed                RegistrationMode  = "closed"
+	RegistrationInvite                RegistrationMode  = "invite"
+	RegistrationOpen                  RegistrationMode  = "open"
+	StickerImportOn                   StickerImportMode = "on"
+	StickerImportOff                  StickerImportMode = "off"
+	RecoveryEmailOff                  RecoveryEmailMode = "off"
+	RecoveryEmailContact              RecoveryEmailMode = "contact"
+	DefaultUploadPartTTL                                = 6 * time.Hour
+	DefaultUserInviteMinAccountAge                      = 7 * 24 * time.Hour
+	DefaultAuthKeySweepIdleWindow                       = 24 * time.Hour
+	DefaultAuthKeySweepMaxAge                           = 72 * time.Hour
+	DefaultBotAPIPublicMaxConnections                   = 1024
+	DefaultSignUpTermsOfService                         = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
 )
 
 // Config holds server configuration.
@@ -90,6 +91,15 @@ type Config struct {
 	// BotAPIListenAddr is the loopback or tailnet-only Bot API HTTP listener.
 	// Empty disables the listener.
 	BotAPIListenAddr string
+	// BotAPIPublicListenAddr enables the separately exposed, proxy-limited Bot API path.
+	BotAPIPublicListenAddr string
+	// BotAPIPublicProxyCIDRs names the forwarders allowed to assert CF-Connecting-IP.
+	BotAPIPublicProxyCIDRs []netip.Prefix
+	// BotAPIPublicMaxConnections caps concurrent public Bot API connections across
+	// the listener, regardless of the shared forwarder's socket address.
+	BotAPIPublicMaxConnections int
+	// BotAPITailnetListenAddr enables the unlimited tailnet Bot API path.
+	BotAPITailnetListenAddr string
 	// AdminOrigin is the fixed Origin accepted by admin login and logout.
 	// It is configured explicitly or derived from AdminListenAddr at startup.
 	AdminOrigin string
@@ -1002,6 +1012,14 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err := validateBrowserOnlyListener(publicWebSocketBrowserOnly, identity.PublicWebSocketListenAddr, "TG_PUBLIC_WEBSOCKET_BROWSER_ONLY", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"); err != nil {
 		return Config{}, err
 	}
+	botAPIPublicMaxConnections := DefaultBotAPIPublicMaxConnections
+	if value := os.Getenv("TG_BOT_API_PUBLIC_MAX_CONNECTIONS"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 {
+			return Config{}, errors.New("TG_BOT_API_PUBLIC_MAX_CONNECTIONS must be a positive integer")
+		}
+		botAPIPublicMaxConnections = parsed
+	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
 		ListenPath:                    listenPath,
@@ -1017,6 +1035,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
 		BotAPIListenAddr:              os.Getenv("TG_BOT_API_LISTEN_ADDR"),
+		BotAPIPublicListenAddr:        os.Getenv("TG_BOT_API_PUBLIC_LISTEN_ADDR"),
+		BotAPITailnetListenAddr:       os.Getenv("TG_BOT_API_TAILNET_LISTEN_ADDR"),
+		BotAPIPublicMaxConnections:    botAPIPublicMaxConnections,
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
 		ReplicaCount:                  1,
@@ -1874,6 +1895,11 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.CFConnectingIPProxies = cfProxies
+	botAPIPublicProxies, err := parsePrefixes(os.Getenv("TG_BOT_API_PUBLIC_PROXY_CIDRS"), "TG_BOT_API_PUBLIC_PROXY_CIDRS")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BotAPIPublicProxyCIDRs = botAPIPublicProxies
 	// Admin server requires both env vars or neither: a listener without auth
 	// is a denial-of-service vector, and a hash with no listener is wasted work.
 	adminErr := validateAdmin(&cfg)
@@ -2988,62 +3014,119 @@ func validateAdmin(cfg *Config) error {
 }
 
 func validateBotAPI(cfg *Config) error {
-	addr := cfg.BotAPIListenAddr
-	if addr == "" {
-		return nil
+	if addr := cfg.BotAPIListenAddr; addr != "" {
+		ip, _, err := parseBotAPIListenAddr(addr, "TG_BOT_API_LISTEN_ADDR", false)
+		if err != nil {
+			return err
+		}
+		if !ip.IsLoopback() && !botAPICGNATPrefix.Contains(ip) && !botAPITailnetPrefix.Contains(ip) {
+			return errors.New("TG_BOT_API_LISTEN_ADDR host must be loopback, in 100.64.0.0/10, or in fd7a:115c:a1e0::/48")
+		}
 	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		return errors.New("TG_BOT_API_LISTEN_ADDR must be an explicit loopback or tailnet IP literal with a port")
+	if addr := cfg.BotAPIPublicListenAddr; addr != "" {
+		if _, _, err := parseBotAPIListenAddr(addr, "TG_BOT_API_PUBLIC_LISTEN_ADDR", true); err != nil {
+			return err
+		}
+		if len(cfg.BotAPIPublicProxyCIDRs) == 0 {
+			return errors.New("TG_BOT_API_PUBLIC_LISTEN_ADDR requires TG_BOT_API_PUBLIC_PROXY_CIDRS to name trusted forwarders")
+		}
+	} else if len(cfg.BotAPIPublicProxyCIDRs) > 0 {
+		return errors.New("TG_BOT_API_PUBLIC_PROXY_CIDRS requires TG_BOT_API_PUBLIC_LISTEN_ADDR")
 	}
-	portNumber, err := strconv.Atoi(port)
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return errors.New("TG_BOT_API_LISTEN_ADDR must use a port from 1 to 65535")
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil || ip.Zone() != "" {
-		return errors.New("TG_BOT_API_LISTEN_ADDR host must be an unscoped IP literal")
-	}
-	ip = ip.Unmap()
-	if !ip.IsLoopback() && !botAPICGNATPrefix.Contains(ip) && !botAPITailnetPrefix.Contains(ip) {
-		return errors.New("TG_BOT_API_LISTEN_ADDR host must be loopback, in 100.64.0.0/10, or in fd7a:115c:a1e0::/48")
+	if addr := cfg.BotAPITailnetListenAddr; addr != "" {
+		ip, _, err := parseBotAPIListenAddr(addr, "TG_BOT_API_TAILNET_LISTEN_ADDR", true)
+		if err != nil {
+			return err
+		}
+		if ip.IsValid() && !ip.IsUnspecified() {
+			privateOrTailnet := ip.IsPrivate() || botAPICGNATPrefix.Contains(ip) || botAPITailnetPrefix.Contains(ip)
+			if !privateOrTailnet {
+				return errors.New("TG_BOT_API_TAILNET_LISTEN_ADDR host must be private, in 100.64.0.0/10, in fd7a:115c:a1e0::/48, or a wildcard")
+			}
+		}
 	}
 
-	for _, other := range []string{
+	botAPIListeners := []struct {
+		name string
+		addr string
+	}{
+		{name: "TG_BOT_API_LISTEN_ADDR", addr: cfg.BotAPIListenAddr},
+		{name: "TG_BOT_API_PUBLIC_LISTEN_ADDR", addr: cfg.BotAPIPublicListenAddr},
+		{name: "TG_BOT_API_TAILNET_LISTEN_ADDR", addr: cfg.BotAPITailnetListenAddr},
+	}
+	otherListeners := []string{
 		cfg.ListenAddr,
 		cfg.WebSocketListenAddr,
 		cfg.PublicWebSocketListenAddr,
 		cfg.AdminListenAddr,
-	} {
-		if other != "" && botAPIAddressConflicts(ip, portNumber, other) {
-			return errors.New("TG_BOT_API_LISTEN_ADDR must not overlap another listener address")
+	}
+	for i, listener := range botAPIListeners {
+		if listener.addr == "" {
+			continue
+		}
+		for _, other := range otherListeners {
+			if listenerAddressesConflict(listener.addr, other) {
+				return fmt.Errorf("%s must not overlap another listener address", listener.name)
+			}
+		}
+		for _, other := range botAPIListeners[i+1:] {
+			if other.addr != "" && listenerAddressesConflict(listener.addr, other.addr) {
+				return fmt.Errorf("%s must not overlap %s", listener.name, other.name)
+			}
 		}
 	}
 	return nil
 }
 
-func botAPIAddressConflicts(botIP netip.Addr, botPort int, other string) bool {
-	if other == "" {
-		return false
+func parseBotAPIListenAddr(addr, setting string, allowWildcard bool) (netip.Addr, int, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || (host == "" && !allowWildcard) {
+		if allowWildcard {
+			return netip.Addr{}, 0, fmt.Errorf("%s must be an IP literal or wildcard address with a port", setting)
+		}
+		return netip.Addr{}, 0, fmt.Errorf("%s must be an explicit IP literal with a port", setting)
 	}
-	otherHost, otherPort, err := net.SplitHostPort(other)
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return netip.Addr{}, 0, fmt.Errorf("%s must use a port from 1 to 65535", setting)
+	}
+	if host == "" {
+		return netip.Addr{}, portNumber, nil
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || ip.Zone() != "" {
+		return netip.Addr{}, 0, fmt.Errorf("%s host must be an unscoped IP literal", setting)
+	}
+	return ip.Unmap(), portNumber, nil
+}
+
+func listenerAddressesConflict(first, second string) bool {
+	firstHost, firstPort, err := net.SplitHostPort(first)
 	if err != nil {
 		return false
 	}
-	otherPortNumber, err := strconv.Atoi(otherPort)
-	if err != nil || otherPortNumber != botPort {
+	secondHost, secondPort, err := net.SplitHostPort(second)
+	if err != nil {
 		return false
 	}
-	if otherHost == "" {
-		return true
-	}
-	otherIP, err := netip.ParseAddr(otherHost)
+	firstPortNumber, err := strconv.Atoi(firstPort)
 	if err != nil {
-		// A same-port hostname can resolve to the Bot API address at bind time.
+		return false
+	}
+	secondPortNumber, err := strconv.Atoi(secondPort)
+	if err != nil || secondPortNumber != firstPortNumber {
+		return false
+	}
+	firstIP, firstErr := netip.ParseAddr(firstHost)
+	secondIP, secondErr := netip.ParseAddr(secondHost)
+	if firstHost == "" || secondHost == "" || (firstErr == nil && firstIP.IsUnspecified()) || (secondErr == nil && secondIP.IsUnspecified()) {
 		return true
 	}
-	otherIP = otherIP.Unmap()
-	return otherIP.IsUnspecified() || otherIP == botIP
+	if firstErr != nil || secondErr != nil {
+		// A same-port hostname can resolve to either listener address at bind time.
+		return true
+	}
+	return firstIP.Unmap() == secondIP.Unmap()
 }
 
 func validateAdminOrigin(origin string) error {

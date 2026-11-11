@@ -55,6 +55,14 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBotAPIGetMe(t)
 	})
+	t.Run("bot-api-public-path-get-me", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotAPIPublicPathGetMe(t)
+	})
+	t.Run("bot-api-tailnet-path-get-me", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotAPITailnetPathGetMe(t)
+	})
 	t.Run("bot-api-send-message", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBotAPISendMessage(t)
