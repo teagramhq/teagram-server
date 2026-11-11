@@ -1151,7 +1151,6 @@ jobs:
           bash -n deploy/k8s/test-bootstrap-alpha.sh
           bash -n deploy/k8s/test-alpha-incus-compat.sh
           bash -n deploy/k8s/install-tailnet-proxy-access.sh
-          sh -n deploy/k8s/teagram-k3s-ops.sh
           ./deploy/k8s/cutover-alpha.sh --dry-run
           bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
           bash -n deploy/teagram/deploy-main.sh
@@ -1224,7 +1223,6 @@ jobs:
             deploy/k8s/test-bootstrap-alpha.sh \
             deploy/k8s/test-alpha-incus-compat.sh \
             deploy/k8s/install-tailnet-proxy-access.sh \
-            deploy/k8s/teagram-k3s-ops.sh \
             deploy/k8s/cutover-alpha.sh \
             deploy/k8s/test-cutover-alpha.sh \
             deploy/teagram/deploy-main.sh \

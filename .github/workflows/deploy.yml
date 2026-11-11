@@ -28,7 +28,7 @@ concurrency:
 jobs:
   deploy-server:
     name: 'deploy: server (prod)'
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    if: ${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: k3s-prod
@@ -166,6 +166,20 @@ jobs:
           printf '%s\n' "$KUBECONFIG_CONTENT" > "$RUNNER_TEMP/teagram-k3s.kubeconfig"
           echo "KUBECONFIG=$RUNNER_TEMP/teagram-k3s.kubeconfig" >> "$GITHUB_ENV"
           server="$(kubectl --kubeconfig "$RUNNER_TEMP/teagram-k3s.kubeconfig" config view --minify --output 'jsonpath={.clusters[0].cluster.server}')"
+          [[ "$server" == 'https://teagram.tailaa4918.ts.net:6443' ]] || {
+            echo 'the kubeconfig must target the cluster Tailscale API endpoint' >&2
+            exit 1
+          }
+          ca_data="$(kubectl --kubeconfig "$RUNNER_TEMP/teagram-k3s.kubeconfig" config view --minify --output 'jsonpath={.clusters[0].cluster.certificate-authority-data}')"
+          [[ -n "$ca_data" ]] || {
+            echo 'the kubeconfig must pin the cluster CA' >&2
+            exit 1
+          }
+          insecure_skip="$(kubectl --kubeconfig "$RUNNER_TEMP/teagram-k3s.kubeconfig" config view --minify --output 'jsonpath={.clusters[0].cluster.insecure-skip-tls-verify}')"
+          [[ -z "$insecure_skip" ]] || {
+            echo 'the kubeconfig must omit insecure-skip-tls-verify' >&2
+            exit 1
+          }
           host="${server#*://}"
           host="${host%%/*}"
           host="${host%:*}"
@@ -175,9 +189,9 @@ jobs:
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci-deploy
+          oauth-client-id: ${{ secrets.K3S_TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.K3S_TS_OAUTH_SECRET }}
+          tags: tag:k3s-deploy
           ping: ${{ steps.kubeconfig.outputs.api_host }}
 
       - name: Validate the production release manifest
