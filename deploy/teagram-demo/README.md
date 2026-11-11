@@ -5,8 +5,9 @@ its own PostgreSQL, identity, auth-key encryption, Turnstile, local blob
 storage, network state, checkout, and deployment credentials. Keep its data,
 volumes, identity, secrets, and deployment credentials separate from the
 development and production environments. The legacy `ROLLOUT_RUNNER_*`
-Turnstile helper described below is retired; current production runs on k3s
-with RustFS, as described in the
+Turnstile helper described below is no longer the production path; the live
+demo still depends on it until its replacement lands. Current production runs
+on k3s with RustFS, as described in the
 [deployment guide](../k8s/README.md).
 
 The install script waits until the public client config exposes
@@ -395,12 +396,11 @@ it, it saves and verifies `authorized_keys` under the root-only
 separate root channel if the menu must be rolled back. The Gatus definitions
 in `gatus.yaml` are HTTPS probes and do not use an SSH key.
 
-### Retired Turnstile helper
+### Live demo Turnstile operations
 
-The demo-specific procedures below use the legacy `ROLLOUT_RUNNER_*` helper
-and are retained as historical reference. Current production runs on k3s, as
-described in the [deployment guide](../k8s/README.md). The reviewed
-`turnstile-signin-on` and `turnstile-signin-off` demo ops scripts change only
+The `turnstile-signin-on` and `turnstile-signin-off` procedures still depend on
+the legacy helper loaded by `deploy-main.sh` and `init-demo.sh`. This dependency
+remains until its replacement lands. The procedures change only
 `TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
 `ROLLOUT_RUNNER_ADDED_ENV` path for the first assignment and the
 `ROLLOUT_RUNNER_CHANGED_ENV` path for later boolean changes. Each change saves
