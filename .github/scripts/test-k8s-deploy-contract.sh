@@ -463,6 +463,8 @@ grep --fixed-strings --quiet 'exec_probe(TAILNET_PROBE, "tailnet-discovery-budge
   fail 'the tailnet discovery budget must run through the tailnet Service'
 python3 .github/scripts/test_k8s_public_websocket_contract.py ||
   fail 'the public WebSocket connector smoke must validate its discovery contract'
+python3 -B .github/scripts/test_k8s_public_bot_api_budget.py >/dev/null ||
+  fail 'the public Bot API budget probe must close HTTP connections without context-manager support'
 grep --fixed-strings --quiet 'PROXY TCP4' deploy/k8s/test-networkpolicy.py ||
   fail 'the tailnet Bot API check must send a PROXY v1 header'
 grep --fixed-strings --quiet 'deny-public' deploy/k8s/test-networkpolicy.py ||
@@ -552,7 +554,7 @@ fi
 if deploy/k8s/cutover-alpha.sh --apply --test-mode >/dev/null 2>&1; then
   fail 'the retired cutover script must not expose an apply path in test mode'
 fi
-python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in [".github/scripts/test-tailscale-serve-routes.py", ".github/scripts/test_k8s_cloudflared_client_address_trust.py", "deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py", "deploy/k8s/verify-cloudflared-client-address-trust.py"]]' ||
+python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in [".github/scripts/test-tailscale-serve-routes.py", ".github/scripts/test_k8s_cloudflared_client_address_trust.py", ".github/scripts/test_k8s_public_bot_api_budget.py", "deploy/k8s/probe-discovery.py", "deploy/k8s/render-tailnet-proxy-api-egress.py", "deploy/k8s/test-networkpolicy.py", "deploy/k8s/test-service-ingress.py", "deploy/k8s/verify-cloudflared-client-address-trust.py"]]' ||
   fail 'the in-cluster ingress probe scripts must parse as Python'
 grep --fixed-strings --quiet 'telegramd-key-v1' deploy/k8s/probe-discovery.py ||
   fail 'the shared discovery probe must send the v1 half-close request'

@@ -172,7 +172,8 @@ def public_bot_api_status(connection: http.client.HTTPConnection, client_ip: str
 
 
 def probe_public_bot_api_budget(host: str) -> None:
-    with http.client.HTTPConnection(host, 2449, timeout=5) as client_a:
+    client_a = http.client.HTTPConnection(host, 2449, timeout=5)
+    try:
         for request_number in range(1, BOT_API_AUTH_BURST + 2):
             status = public_bot_api_status(client_a, "198.51.100.10")
             expected = 401 if request_number <= BOT_API_AUTH_BURST else 429
@@ -181,9 +182,14 @@ def probe_public_bot_api_budget(host: str) -> None:
                     f"public Bot API client A request {request_number} returned "
                     f"HTTP {status}, want {expected}"
                 )
+    finally:
+        client_a.close()
 
-    with http.client.HTTPConnection(host, 2449, timeout=5) as client_b:
+    client_b = http.client.HTTPConnection(host, 2449, timeout=5)
+    try:
         other_status = public_bot_api_status(client_b, "198.51.101.10")
+    finally:
+        client_b.close()
     if other_status != 401:
         raise RuntimeError(
             "public Bot API client B returned "
