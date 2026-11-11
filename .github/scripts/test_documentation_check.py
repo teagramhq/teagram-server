@@ -55,6 +55,17 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TG_PACKAGE_ONLY", result.stdout + result.stderr)
 
+    def test_production_variable_in_perf_named_source_file_is_scanned(self):
+        (self.root / "internal/config/config_perf.go").write_text(
+            'package config\nimport "os"\n'
+            'func load() { _ = os.Getenv("TG_RUNTIME_SETTING") }\n'
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TG_RUNTIME_SETTING", result.stdout + result.stderr)
+
     def test_aliased_os_import_config_variable_is_named(self):
         (self.root / "internal/config/config.go").write_text(
             'package config\nimport envos "os"\n'
@@ -554,6 +565,18 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/guide.md", result.stdout + result.stderr)
         self.assertIn("missing.svg", result.stdout + result.stderr)
+
+    def test_missing_relative_unquoted_html_links_name_file_and_targets(self):
+        (self.root / "docs/guide.md").write_text(
+            "<a href=missing.html>Guide</a> and <img src=missing.svg>.\n"
+        )
+
+        result = self.run_checker()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/guide.md links to missing path missing.html", output)
+        self.assertIn("docs/guide.md links to missing path missing.svg", output)
 
     def test_test_only_config_variable_and_external_links_are_ignored(self):
         (self.root / "internal/config/config.go").write_text(

@@ -12,7 +12,10 @@ CONFIG_REFERENCE = Path("docs/configuration.md")
 CONFIG_ROW = re.compile(r"^\|\s*`(TG_[A-Z0-9_]+)`\s*\|", re.MULTILINE)
 ENVIRONMENT_NAME_EXTRACTOR = Path(__file__).with_name("config_environment_names.go")
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)", re.MULTILINE)
-HTML_LINK = re.compile(r"(?:href|src)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
+HTML_LINK = re.compile(
+    r"(?:href|src)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
+    re.IGNORECASE,
+)
 FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
 SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
@@ -578,7 +581,8 @@ def markdown_destinations(text, parse_errors=None):
             destination = destination[1:-1]
         yield html.unescape(unescape_markdown(destination))
     for match in HTML_LINK.finditer(cleaned):
-        yield html.unescape(match.group(2))
+        destination = next(value for value in match.groups() if value is not None)
+        yield html.unescape(destination)
 
 
 def missing_markdown_links(root):

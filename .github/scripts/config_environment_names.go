@@ -77,10 +77,6 @@ func environmentNames(root string) ([]string, error) {
 			if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			base := strings.ToLower(filepath.Base(path))
-			if strings.Contains(base, "fixture") || strings.Contains(base, "perf") {
-				return nil
-			}
 			paths = append(paths, path)
 			return nil
 		})
