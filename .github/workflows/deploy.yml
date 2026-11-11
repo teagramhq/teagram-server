@@ -39,7 +39,7 @@ jobs:
           {
             echo '## Production deployment skipped'
             echo
-            echo 'K3S_TAILNET_API_READY is not `true`; no production deploy ran.'
+            echo 'K3S_TAILNET_API_READY is not true; no production deploy ran.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-server:
