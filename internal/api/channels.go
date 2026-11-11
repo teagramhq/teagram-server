@@ -1026,8 +1026,9 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 //
 // ponytail: channelDifferenceTooLong is not implemented. Nothing trims
 // channel_events, so no pts can fall off the log yet and the too-long path
-// would be unreachable code. It rides with the event-log GC decision
-// (ROADMAP.md:258).
+// would be unreachable code. It rides with the event-log GC decision in
+// ROADMAP.md under "Known deferrals & tech debt", in the
+// "message_events GC + updates.differenceTooLong" item.
 func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UpdatesGetChannelDifferenceRequest
 	if err := req.Decode(r.BodyBuffer()); err != nil {
