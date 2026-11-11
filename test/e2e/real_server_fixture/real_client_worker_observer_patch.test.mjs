@@ -34,7 +34,11 @@ function loadBrowserModule(browserPath, observation, globals = {}) {
   return module.exports;
 }
 
-function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
+function patchBrowserForTest(t, globals, {
+  legacyDirectMessage = false,
+  exposePeerSelection = false,
+  exposeCustomEmojiWaiters = false,
+} = {}) {
   const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
   assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
   const webRoot = mkdtempSync(join(tmpdir(), 'real-client-observer-test-'));
@@ -46,6 +50,14 @@ function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
   }
 
   const browserPath = join(scripts, 'browser.cjs');
+  if(exposePeerSelection) {
+    const browserSource = readFileSync(browserPath, 'utf8');
+    writeFileSync(browserPath, `${browserSource}\nmodule.exports.testSelectUniquePeer = selectUniquePeer;\n`);
+  }
+  if(exposeCustomEmojiWaiters) {
+    const browserSource = readFileSync(browserPath, 'utf8');
+    writeFileSync(browserPath, `${browserSource}\nmodule.exports.testWaitForCustomEmojiMessage = waitForCustomEmojiMessage;\nmodule.exports.testWaitForCustomMessageReaction = waitForCustomMessageReaction;\n`);
+  }
   if(legacyDirectMessage) {
     const currentAssertion = '    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));';
     const legacyAssertion = '    await page.waitForTimeout(600);\n    currentStage = stage;\n    const count = await message.count();\n    if(count !== 1) failStage(`${stage}_message_count`);';
@@ -63,6 +75,137 @@ function patchBrowserForTest(t, globals, {legacyDirectMessage = false} = {}) {
   const browser = loadBrowserModule(browserPath, observation, globals);
   return {browser, browserPath, observation};
 }
+
+test('peer selection waits for one matching row after stale search results', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const states = [
+    [
+      {text: 'Bob recent chat', peerId: '11'},
+      {text: 'Carol recent chat', peerId: '12'},
+    ],
+    [
+      {text: 'Alice @alice_unique', peerId: '42'},
+      {text: 'Alice Group', peerId: '-42'},
+    ],
+  ];
+  let stateIndex = 0;
+  let selectedPeerId;
+  const visible = (row) => ({
+    textContent: row.text,
+    dataset: {peerId: row.peerId},
+    getAttribute: (name) => name === 'data-peer-id' ? row.peerId : null,
+    getBoundingClientRect: () => ({width: 120, height: 40}),
+  });
+  const document = {querySelectorAll: () => states[stateIndex].map(visible)};
+  const input = {
+    first() { return this; },
+    async waitFor() {},
+    async fill() {},
+  };
+  const rows = {
+    first() { return this; },
+    async waitFor() {},
+    filter({hasText}) {
+      const matches = () => states[stateIndex].filter((row) => row.text.includes(hasText));
+      return {
+        async count() { return matches().length; },
+        async getAttribute(name) { return name === 'data-peer-id' ? matches()[0]?.peerId : null; },
+        async click() { selectedPeerId = matches()[0]?.peerId; },
+      };
+    },
+    async count() { return states[stateIndex].length; },
+    nth(index) {
+      return {async isVisible() { return states[stateIndex][index] !== undefined; }};
+    },
+  };
+  const {browser} = patchBrowserForTest(t, {document, window: {getComputedStyle: () => ({display: 'block', visibility: 'visible'})}}, {exposePeerSelection: true});
+  const page = {
+    locator(selector) { return selector === '#column-left .input-search-input' ? input : rows; },
+    async waitForFunction(predicate, args) {
+      while(stateIndex < states.length) {
+        if(predicate(args)) return;
+        stateIndex++;
+      }
+      throw new Error('search did not produce a unique username result');
+    },
+    async evaluate() { return undefined; },
+  };
+
+  const peerId = await browser.testSelectUniquePeer(
+    page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    '@alice_unique',
+    'bob_custom_emoji_status_chat'
+  );
+  assert.equal(peerId, '42');
+  assert.equal(selectedPeerId, '42');
+  assert.equal(stateIndex, 1);
+});
+
+function customEmojiMessage(text, docId, messageId, {sent = true, hasReaction = false} = {}) {
+  const reaction = {
+    reactionCount: {
+      reaction: {_: 'reactionCustomEmoji', document_id: docId},
+      count: 1,
+    },
+  };
+  const bubble = {
+    getAttribute: (name) => name === 'data-mid' ? messageId : null,
+    classList: {contains: (name) => (name === 'is-sent' || name === 'is-read') && sent},
+    querySelectorAll: (selector) => selector === 'reaction-element' && hasReaction ? [reaction] : [],
+  };
+  return {
+    textContent: `${text}👍`,
+    dataset: {docId},
+    closest: () => bubble,
+    querySelectorAll: (selector) => selector === '.custom-emoji' ? [{dataset: {docId}}] : [],
+  };
+}
+
+function customEmojiWaitPage(messages) {
+  return {
+    async waitForFunction(predicate, args) {
+      const result = predicate(args);
+      if(!result) throw new Error('receiver state did not appear');
+      return {jsonValue: async() => result, dispose: async() => {}};
+    },
+  };
+}
+
+test('custom emoji reaction wait follows the settled message ID through optimistic duplicates', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const optimistic = customEmojiMessage(messageText, docId, '2.0001', {sent: false});
+  const sent = customEmojiMessage(messageText, docId, '3', {hasReaction: true});
+  const document = {querySelectorAll: () => [optimistic, sent]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([optimistic, sent]);
+
+  const messageId = await browser.testWaitForCustomEmojiMessage(page, messageText, docId, 'alice_custom_emoji_send_visible');
+  assert.equal(messageId, '3');
+  await browser.testWaitForCustomMessageReaction(
+    page, messageText, docId, messageId, 1, 'bob_custom_emoji_reaction_receiver'
+  );
+});
+
+test('custom emoji reaction wait fails when the receiver has no reaction', async (t) => {
+  assert.equal(typeof patchRealClientObserver, 'function');
+  const messageText = 'browser-ci-custom-emoji-receiver';
+  const docId = '-3086666970307253143';
+  const sent = customEmojiMessage(messageText, docId, '3');
+  const document = {querySelectorAll: () => [sent]};
+  const {browser} = patchBrowserForTest(t, {document}, {exposeCustomEmojiWaiters: true});
+  const page = customEmojiWaitPage([sent]);
+
+  await assert.rejects(
+    browser.testWaitForCustomMessageReaction(
+      page, messageText, docId, '3', 1, 'bob_custom_emoji_reaction_receiver'
+    ),
+    /bob_custom_emoji_reaction_receiver/
+  );
+});
 
 function messageBubble(messageId, sendState) {
   return {

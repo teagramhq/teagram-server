@@ -11,6 +11,97 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 )
 
+func TestCustomEmojiReactionPushToDirectMessageReceiver(t *testing.T) {
+	t.Parallel()
+	catalogue, _ := loadSmokeStickerBundleCatalogue(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.stickerSets = catalogue
+	})
+	const phoneA, phoneB = "+15551049101", "+15551049102"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a, b := newSmokeClient(t, f, "custom emoji message owner", phoneA), newSmokeClient(t, f, "custom emoji reactor", phoneB)
+	const setShortName = "openmoji_emoji_animals_nature"
+	document := getSmokeBundleStickerDocument(t, f, a, setShortName, 1)
+	for _, client := range []*smokeClient{a, b} {
+		if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{
+				Stickerset: &tg.InputStickerSetShortName{ShortName: setShortName},
+			})
+			if err != nil {
+				return err
+			}
+			if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+				return fmt.Errorf("install custom emoji set = %T, want successful install", result)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("install custom emoji set for %s: %v", client.label, err)
+		}
+	}
+
+	const messageText = "custom emoji reaction receiver push"
+	var messageID int
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(a.id, b.id), Message: messageText, RandomID: 1049101,
+		})
+		if err != nil {
+			return err
+		}
+		message, _, ok := outgoingMessage(t, result, messageText)
+		if !ok {
+			return fmt.Errorf("send result omitted %q", messageText)
+		}
+		messageID = message.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("send custom emoji reaction target: %v", err)
+	}
+	var bMessageID int
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peerUser(b.id, a.id), Limit: 10})
+		if err != nil {
+			return err
+		}
+		messages, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("direct history = %T, want *tg.MessagesMessages", result)
+		}
+		for _, item := range messages.Messages {
+			message, ok := item.(*tg.Message)
+			if ok && message.Message == messageText {
+				bMessageID = message.ID
+				return nil
+			}
+		}
+		return fmt.Errorf("B's direct history omitted %q", messageText)
+	}); err != nil {
+		t.Fatalf("read custom emoji target as B: %v", err)
+	}
+
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: peerUser(b.id, a.id), MsgID: bMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionCustomEmoji{DocumentID: document.ID}},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send custom emoji reaction as B: %v", err)
+	}
+
+	update := recvOrCtx(t, f.ctx, a.push.msgReactions, "A updateMessageReactions for B's custom emoji reaction")
+	if update.MsgID != messageID {
+		t.Fatalf("A reaction push message id = %d, want %d", update.MsgID, messageID)
+	}
+	if len(update.Reactions.Results) != 1 || update.Reactions.Results[0].Count != 1 {
+		t.Fatalf("A reaction push results = %+v, want one custom reaction", update.Reactions.Results)
+	}
+	reaction, ok := update.Reactions.Results[0].Reaction.(*tg.ReactionCustomEmoji)
+	if !ok || reaction.DocumentID != document.ID {
+		t.Fatalf("A reaction push reaction = %#v, want custom emoji document %d", update.Reactions.Results[0].Reaction, document.ID)
+	}
+}
+
 func testSmokeCustomEmojiActions(t *testing.T) {
 	t.Helper()
 	catalogue, _ := loadSmokeStickerBundleCatalogue(t)
