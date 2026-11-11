@@ -1,6 +1,6 @@
 # Build the MinIO client from the pinned upstream source revision because the
 # upstream release images and binaries are no longer publicly available.
-FROM mirror.gcr.io/library/golang:1.26 AS build
+FROM mirror.gcr.io/library/golang:1.27.4 AS build
 
 ENV CGO_ENABLED=0
 

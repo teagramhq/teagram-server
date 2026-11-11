@@ -88,6 +88,9 @@ func TestRPCTraceRecordsAllResultClasses(t *testing.T) {
 			if span.Duration != 5*time.Millisecond {
 				t.Errorf("duration = %s, want 5ms", span.Duration)
 			}
+			if span.EndTime != now {
+				t.Errorf("completion time = %s, want %s", span.EndTime, now)
+			}
 		})
 	}
 }
@@ -512,6 +515,30 @@ func TestRPCTraceDropsWhenQueueIsFull(t *testing.T) {
 		t.Fatalf("dropped = %d, want 1", got)
 	}
 	close(exporter.release)
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("close tracer: %v", err)
+	}
+}
+
+func TestRPCTraceSynchronousExporterRunsBeforeHandlerReturns(t *testing.T) {
+	var exported bool
+	exporter := mtproto.RPCSpanExporterFunc(func(context.Context, mtproto.RPCSpan) error {
+		exported = true
+		return nil
+	})
+	tracer := mtproto.NewRPCTracer(mtproto.RPCTracerConfig{
+		Exporter:            exporter,
+		SynchronousExporter: true,
+	})
+	dispatcher := mtproto.NewDispatcher().HandleFunc(tg.MessagesSendMessageRequestTypeID, func(_ *mtproto.Conn, _ *mtproto.Request) error {
+		return nil
+	})
+	if err := tracer.Wrap(dispatcher).OnMessage(nil, traceRequest(tg.MessagesSendMessageRequestTypeID)); err != nil {
+		t.Fatalf("handle RPC: %v", err)
+	}
+	if !exported {
+		t.Fatal("RPC handler returned before synchronous export completed")
+	}
 	if err := tracer.Close(); err != nil {
 		t.Fatalf("close tracer: %v", err)
 	}

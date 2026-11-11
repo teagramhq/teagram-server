@@ -71,14 +71,14 @@ case "$1" in
 esac
 """
 DOCKERFILE = """\
-FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27 AS build
-FROM mirror.gcr.io/library/golang:1.27 AS probe-build
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27.4 AS build
+FROM mirror.gcr.io/library/golang:1.27.4 AS probe-build
 FROM build AS tools
 FROM gcr.io/distroless/static-debian12:nonroot
 """
 IMAGES = [
     "gcr.io/distroless/static-debian12:nonroot",
-    "mirror.gcr.io/library/golang:1.27",
+    "mirror.gcr.io/library/golang:1.27.4",
 ]
 
 
@@ -270,7 +270,7 @@ class PullBaseImagesTests(unittest.TestCase):
     def test_pulls_base_images_of_every_dockerfile_once(self) -> None:
         other = self.dir / "Dockerfile.other"
         other.write_text(
-            "FROM mirror.gcr.io/library/golang:1.27 AS other\n"
+            "FROM mirror.gcr.io/library/golang:1.27.4 AS other\n"
             "FROM build\n"
             "FROM mirror.gcr.io/library/alpine:3.22\n",
             encoding="utf-8",

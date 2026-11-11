@@ -53,11 +53,11 @@ type RPCSpan struct {
 	Method   string
 	Duration time.Duration
 	Result   RPCResultClass
+	EndTime  time.Time
 }
 
-// RPCSpanExporter receives already-redacted spans. This package provides no
-// network exporter or endpoint configuration; callers should use an in-memory
-// exporter for tests and local diagnostics.
+// RPCSpanExporter receives already-redacted spans. Exporters should not retain
+// request data beyond the fields in RPCSpan.
 type RPCSpanExporter interface {
 	Export(context.Context, RPCSpan) error
 }
@@ -79,6 +79,9 @@ type RPCTracerConfig struct {
 	QueueCapacity   int
 	ShutdownTimeout time.Duration
 	Now             func() time.Time
+	// SynchronousExporter runs each export before the handled RPC returns.
+	// It is intended for opt-in file recording where every span must be kept.
+	SynchronousExporter bool
 }
 
 // RPCTracerSnapshot contains fixed, unlabeled recorder counters.
@@ -106,8 +109,8 @@ var ErrRPCTracerShutdownIncomplete = errors.New("rpc tracer shutdown incomplete"
 // its fixed retention capacity is full.
 var ErrRPCSpanExporterFull = errors.New("rpc span exporter full")
 
-// RPCTracer records a fixed-size asynchronous stream of redacted RPC spans.
-// The queue is never closed, which keeps concurrent recorders safe while
+// RPCTracer records a bounded stream of redacted RPC spans. In asynchronous
+// mode, its queue is never closed, which keeps concurrent recorders safe while
 // shutdown drains or drops the remaining bounded contents.
 type RPCTracer struct {
 	exporter        RPCSpanExporter
@@ -117,6 +120,7 @@ type RPCTracer struct {
 	cancel          context.CancelFunc
 	shutdownTimeout time.Duration
 	now             func() time.Time
+	synchronous     bool
 	closeOnce       sync.Once
 	active          atomic.Bool
 	recordGate      atomic.Uint64
@@ -139,7 +143,8 @@ type RPCTracer struct {
 
 // NewRPCTracer creates a bounded tracer. A nil exporter creates a disabled
 // tracer and no goroutine. Zero queue and shutdown settings use safe bounded
-// defaults; an exporter is never invoked synchronously by an RPC.
+// defaults. By default exports run asynchronously; SynchronousExporter waits
+// for each export before its RPC returns.
 func NewRPCTracer(cfg RPCTracerConfig) *RPCTracer {
 	if cfg.Exporter == nil {
 		return &RPCTracer{}
@@ -154,17 +159,21 @@ func NewRPCTracer(cfg RPCTracerConfig) *RPCTracer {
 		cfg.Now = time.Now
 	}
 
-	workerCtx, cancel := context.WithCancel(context.Background())
 	t := &RPCTracer{
 		exporter:        cfg.Exporter,
-		queue:           make(chan rpcSpanExport, cfg.QueueCapacity),
-		stop:            make(chan struct{}),
-		done:            make(chan struct{}),
-		cancel:          cancel,
 		shutdownTimeout: cfg.ShutdownTimeout,
 		now:             cfg.Now,
+		synchronous:     cfg.SynchronousExporter,
 	}
 	t.active.Store(true)
+	if cfg.SynchronousExporter {
+		return t
+	}
+	workerCtx, cancel := context.WithCancel(context.Background())
+	t.queue = make(chan rpcSpanExport, cfg.QueueCapacity)
+	t.stop = make(chan struct{})
+	t.done = make(chan struct{})
+	t.cancel = cancel
 	go t.run(workerCtx)
 	return t
 }
@@ -210,7 +219,7 @@ func (t *RPCTracer) Start() *rpcSpanHandle {
 }
 
 // Finish completes a span started by Start. Method and result are reduced to
-// the fixed vocabulary before they enter the bounded queue.
+// the fixed vocabulary before export.
 func (t *RPCTracer) Finish(handle *rpcSpanHandle, method string, result RPCResultClass) {
 	if handle == nil || handle.tracer != t || !handle.finished.CompareAndSwap(false, true) {
 		return
@@ -220,17 +229,19 @@ func (t *RPCTracer) Finish(handle *rpcSpanHandle, method string, result RPCResul
 		method = handle.method
 		t.increment(&t.rpcSettled[handle.methodIndex][rpcProgressResultIndex(result)])
 	}
-	duration := max(t.now().Sub(handle.started), 0)
+	endTime := t.now()
+	duration := max(endTime.Sub(handle.started), 0)
 	t.Record(RPCSpan{
 		Name:     RPCSpanName,
 		Method:   method,
 		Duration: duration,
 		Result:   result,
+		EndTime:  endTime,
 	})
 }
 
-// Record enqueues an already bounded span. It is nonblocking and drops when
-// the fixed queue is full.
+// Record exports an already bounded span. Asynchronous mode is nonblocking and
+// drops when the fixed queue is full.
 func (t *RPCTracer) Record(span RPCSpan) {
 	if !t.Enabled() {
 		return
@@ -243,6 +254,11 @@ func (t *RPCTracer) recordEnabled(span RPCSpan) {
 		return
 	}
 	defer t.endRecord()
+	if t.synchronous {
+		t.increment(&t.enqueued)
+		t.export(context.Background(), sanitizeRPCSpan(span))
+		return
+	}
 	t.enqueue(span)
 }
 
@@ -266,14 +282,19 @@ func (t *RPCTracer) Wrap(next Handler) Handler {
 // Close stops recording and waits for the configured bounded best-effort
 // drain. Exporter errors, panics, and a timeout never escape as request errors.
 func (t *RPCTracer) Close() error {
-	if t == nil || t.done == nil {
+	if t == nil || (!t.synchronous && t.done == nil) {
 		return nil
 	}
 	t.closeOnce.Do(func() {
 		t.closeRecordGate()
 		t.active.Store(false)
-		close(t.stop)
+		if t.stop != nil {
+			close(t.stop)
+		}
 	})
+	if t.synchronous {
+		return t.waitForSynchronousRecords()
+	}
 	timer := time.NewTimer(t.shutdownTimeout)
 	defer timer.Stop()
 	select {
@@ -294,14 +315,29 @@ func (t *RPCTracer) Close() error {
 
 // Shutdown is the context-bounded form of Close.
 func (t *RPCTracer) Shutdown(ctx context.Context) error {
-	if t == nil || t.done == nil {
+	if t == nil || (!t.synchronous && t.done == nil) {
 		return nil
 	}
 	t.closeOnce.Do(func() {
 		t.closeRecordGate()
 		t.active.Store(false)
-		close(t.stop)
+		if t.stop != nil {
+			close(t.stop)
+		}
 	})
+	if t.synchronous {
+		for t.recordGate.Load()&rpcTraceRecordGateCountMask != 0 {
+			select {
+			case <-ctx.Done():
+				t.cancelled.Store(true)
+				return ctx.Err()
+			default:
+				runtime.Gosched()
+			}
+		}
+		t.shutdownComplete.Store(true)
+		return nil
+	}
 	select {
 	case <-t.done:
 		counts := t.progressCounts()
@@ -316,6 +352,22 @@ func (t *RPCTracer) Shutdown(ctx context.Context) error {
 		t.cancel()
 		return ctx.Err()
 	}
+}
+
+func (t *RPCTracer) waitForSynchronousRecords() error {
+	timer := time.NewTimer(t.shutdownTimeout)
+	defer timer.Stop()
+	for t.recordGate.Load()&rpcTraceRecordGateCountMask != 0 {
+		select {
+		case <-timer.C:
+			t.cancelled.Store(true)
+			return ErrRPCTracerShutdownTimeout
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.shutdownComplete.Store(true)
+	return nil
 }
 
 type rpcSpanHandle struct {
