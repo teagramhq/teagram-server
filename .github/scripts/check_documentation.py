@@ -19,7 +19,7 @@ SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
 THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
 LIST_ITEM_START = re.compile(r"^( {0,3})(?:[-+*]|[0-9]{1,9}[.)])([ \t]+|$)")
 BLOCKQUOTE_START = re.compile(r"^ {0,3}>")
-TABLE_DELIMITER_CELL = re.compile(r":?-{3,}:?$")
+TABLE_DELIMITER_CELL = re.compile(r":?-+:?$")
 
 
 def indentation_columns(line, columns=0):
@@ -211,6 +211,7 @@ def without_code(text):
     last_block_was_list_item = False
     list_content_indent = 0
     indented_code_indent = 4
+    previous_line_blank = False
     line_start = 0
     while line_start < len(text):
         line_end = text.find("\n", line_start)
@@ -295,8 +296,9 @@ def without_code(text):
                 list_content_indent = list_indents[1]
             else:
                 allow_indented_code = False
-                if not line.startswith((" ", "\t")):
+                if previous_line_blank and not line.startswith((" ", "\t")):
                     last_block_was_list_item = False
+        previous_line_blank = not line.strip()
         line_start = line_end
 
     cleaned = "".join(characters)

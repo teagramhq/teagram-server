@@ -210,6 +210,18 @@ class DocumentationCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/gone.md", result.stdout + result.stderr)
 
+    def test_lazy_list_continuation_preserves_later_indented_link(self):
+        (self.root / "README.md").write_text(
+            "- Configure the key first\n"
+            "lazy continuation\n\n"
+            "    See [the guide](docs/gone.md).\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
     def test_nested_indented_code_block_inside_list_hides_markdown_links(self):
         (self.root / "README.md").write_text(
             "1. Install.\n\n"
@@ -239,6 +251,18 @@ class DocumentationCheckTests(unittest.TestCase):
         (self.root / "README.md").write_text(
             "| `x | [a](docs/gone.md) |\n"
             "| --- | --- |\n"
+            "| y ` | z |\n"
+        )
+
+        result = self.run_checker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("docs/gone.md", result.stdout + result.stderr)
+
+    def test_code_span_does_not_cross_table_rows_with_single_hyphen_delimiter(self):
+        (self.root / "README.md").write_text(
+            "| `x | [a](docs/gone.md) |\n"
+            "|-|-|\n"
             "| y ` | z |\n"
         )
 
