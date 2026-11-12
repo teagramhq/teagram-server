@@ -2263,6 +2263,39 @@ jobs:
             sleep 2
           done
 
+      - name: Assert user invite settings on the public listener
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl port-forward --address 127.0.0.1 --namespace teagram \
+            service/teagramd 2446:2446 \
+            > "$RUNNER_TEMP/public-app-config-port-forward.log" 2>&1 &
+          public_app_config_forward_pid=$!
+          cleanup() {
+            kill "$public_app_config_forward_pid" 2>/dev/null || true
+            wait "$public_app_config_forward_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --max-time 2 --silent --output /dev/null http://127.0.0.1:2446/apiws; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              cat "$RUNNER_TEMP/public-app-config-port-forward.log" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          docker run --rm --network host \
+            --volume "$RUNNER_TEMP/client.json:/client/client.json:ro" \
+            --entrypoint /usr/local/bin/mtproto-smoke \
+            ghcr.io/teagramhq/teagramd:ci \
+            --websocket-endpoint ws://127.0.0.1:2446/apiws \
+            --websocket-origin https://web.example.test \
+            --discovery-file /client/client.json \
+            --expect-registration-mode invite \
+            --expect-user-invite-quota 5
+
       - name: Test PostgreSQL backup restore and account sign-in
         run: |
           set -euo pipefail

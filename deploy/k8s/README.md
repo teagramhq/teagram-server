@@ -101,6 +101,9 @@ the Pod Security `baseline` profile on `teagram` and verifies it rejects a
 privileged `hostPath` pod.
 Read the [agent access threat model](agent-access-threat-model.md) before
 minting or using a `teagram-agent` TokenRequest token.
+Read the [public user-invites threat model](public-user-invites-threat-model.md)
+before changing the public invite-registration policy or investigating invite
+abuse.
 
 The migration Job name includes the first 16 characters of its image digest,
 so each pinned release gets a new Job instead of attempting to mutate an
