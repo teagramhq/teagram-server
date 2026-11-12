@@ -15,10 +15,12 @@ record linking an inviter to a redeemed invite. Anonymous internet clients,
 invite-link holders, and compromised or malicious eligible accounts are
 untrusted. The server, PostgreSQL, deployment configuration, mounted
 Turnstile secret, and Cloudflare Tunnel are trusted. Public listener ingress
-is admitted only from the `cloudflared` pod identity; the public listener
-accepts `CF-Connecting-IP` only from the configured pod CIDR. These checks
-together define the proxy boundary. The browser origin allowlist narrows normal
-browser use but is not an authorization control for RPC clients.
+is admitted only from pods labelled `cloudflared` by the `teagramd-ingress`
+NetworkPolicy. `TG_CLIENT_ADDR_CF_PROXY_CIDRS=10.42.0.0/16` trusts
+`CF-Connecting-IP` from the full K3s pod range, not only the cloudflared pod.
+The NetworkPolicy is the narrower network boundary that prevents other pods in
+that range from reaching public listener ports. The browser origin allowlist
+narrows normal browser use but is not an authorization control for RPC clients.
 
 ## Issuance and redemption
 
@@ -56,7 +58,7 @@ to cloudflared pods.
 | An invite link is leaked or publicly reposted | The link is a bearer secret: whoever redeems it first can register an account. It is single-use, expires after seven days, and can be revoked while live. Only the create response contains the secret; list responses omit it. Link recipients must still be treated as unverified people. |
 | An eligible account is compromised or deliberately issues invites to abusers | Account age and a per-account rolling quota limit issuance to five per week. Sign-up Turnstile and the per-IP signup budget raise the cost of automated account creation, but do not stop human-assisted or distributed abuse. Newly created accounts can become eligible to issue invites after seven days, so a patient invite chain can grow beyond one inviter's quota. |
 | A client replays an invite or races multiple redemptions | Redemption locks and consumes the live invite in the same transaction as account creation. Only one request can succeed; used, expired, revoked, or invalid secrets are rejected. |
-| A caller forges `CF-Connecting-IP` to evade per-IP limits | Only requests from the configured Cloudflare pod CIDR may supply the address, and NetworkPolicy permits public listener ingress only from pods labelled `cloudflared`. A compromised trusted forwarder or cluster control plane remains inside the trusted boundary. Clients behind the same NAT share a rate-limit bucket, while distributed source addresses can multiply their budgets. |
+| A caller forges `CF-Connecting-IP` to evade per-IP limits | The server accepts this header from `10.42.0.0/16`, the full K3s pod range. `teagramd-ingress` NetworkPolicy restricts ports 2446 and 2449 to pods labelled `cloudflared`; that selector, not the CIDR, is the cloudflared-only boundary. If the policy is missing or misconfigured, or an unauthorized pod can match its selector, any reachable in-range pod can spoof client addresses. A compromised cloudflared pod can also supply forged addresses. Clients behind the same NAT share a rate-limit bucket, while distributed source addresses can multiply their budgets. |
 | An attacker automates signup or solves Turnstile challenges | Siteverify checks the signup action and exact configured hostname, fails closed on provider errors, and does not accept test credentials in production. A valid challenge is not identity proof; determined attackers may still obtain challenges or use people and distributed addresses. |
 
 ## Detection and response
