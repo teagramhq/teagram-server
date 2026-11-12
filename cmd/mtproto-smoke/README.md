@@ -36,11 +36,13 @@ does not represent an account session and the probe performs no login RPC, but
 the current server does not expire it after 60 seconds. Avoid ad hoc repeated
 production probes; the workflow runs it once per deployment.
 
-The optional `--expect-user-invite-quota N` mode uses the same discovery and
-tailnet endpoint to call `help.getAppConfig` once. It verifies the advertised
-registration mode, invite-enabled flag, and exact quota. It also creates one
-unbound auth-key row as described above; it sends no account credentials or
-login RPC.
+The optional `--expect-user-invite-quota N` mode calls `help.getAppConfig`
+through the selected MTProto endpoint. Use `--websocket-endpoint` and
+`--websocket-origin` to check a public WebSocket listener; its app-config probe
+uses the supplied discovery document for the server identity and requires the
+listener's allowed Origin. It verifies the advertised registration mode,
+invite-enabled flag, and exact quota. The call creates one unbound auth-key row
+as described above; it sends no account credentials or login RPC.
 
 The deploy and QA probes accept `--endpoint` and `--discovery-url` overrides.
 The production workflow keeps the defaults above; a private QA run can target

@@ -355,10 +355,13 @@ discovery_probe_command="$(yq -r '.spec.template.spec.containers[] | select(.nam
 ci_public_advertise_addr="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR") | .value' <<<"$ci_overlay")"
 ci_public_registration="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_REGISTRATION") | .value' <<<"$ci_overlay")"
 ci_public_origin="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") | .value' <<<"$ci_overlay")"
+ci_public_invite_quota="$(yq -r 'select(.kind == "StatefulSet" and .metadata.name == "teagramd") | .spec.template.spec.containers[] | select(.name == "teagramd") | .env[] | select(.name == "TG_USER_INVITE_QUOTA") | .value' <<<"$ci_overlay")"
 [[ "$ci_public_advertise_addr" == 'server.example.test:443' &&
-   "$ci_public_registration" == closed &&
-   "$ci_public_origin" == 'https://web.example.test' ]] ||
-  fail 'the CI overlay must use synthetic public discovery, registration, and origin settings'
+   "$ci_public_registration" == invite &&
+   "$ci_public_origin" == 'https://web.example.test' &&
+   "$ci_public_invite_quota" == 5 &&
+   "$ci_overlay" != *'TG_USER_INVITE_MIN_ACCOUNT_AGE'* ]] ||
+  fail 'the CI overlay must use synthetic public discovery and verify the production invite quota without an account-age override'
 # mtproto-smoke refuses a target port that differs from the advertised one, so
 # every forwarded MTProto probe must use the advertised port locally.
 if grep --fixed-strings --quiet '12443' .github/workflows/ci.yml deploy/k8s/test-postgres-backup-restore.sh; then
@@ -387,6 +390,14 @@ public_websocket_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name =
    "$public_websocket_step" == *'--host 127.0.0.1 --port 8080'* &&
    "$public_websocket_step" != *'kubectl port-forward'* ]] ||
   fail 'the public WebSocket smoke must run inside the connector pod without port-forward'
+public_invite_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Assert user invite settings on the public listener") | .run' .github/workflows/ci.yml)"
+[[ "$public_invite_step" == *'service/teagramd 2446:2446'* &&
+   "$public_invite_step" == *'--entrypoint /usr/local/bin/mtproto-smoke'* &&
+   "$public_invite_step" == *'--websocket-endpoint ws://127.0.0.1:2446/apiws'* &&
+   "$public_invite_step" == *'--websocket-origin https://web.example.test'* &&
+   "$public_invite_step" == *'--expect-registration-mode invite'* &&
+   "$public_invite_step" == *'--expect-user-invite-quota 5'* ]] ||
+  fail 'k8s-deploy must verify the invite-enabled config and exact quota on the public listener'
 proxy_trust_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "Narrow CI forwarded-IP trust to cloudflared") | .run' .github/workflows/ci.yml)"
 [[ "$proxy_trust_step" == *'cloudflared_ip'*'kubectl set env statefulset/teagramd'* &&
    "$proxy_trust_step" == *'trusted_proxy_cidr="${cloudflared_ip}/32"'* &&

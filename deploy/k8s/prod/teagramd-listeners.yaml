@@ -20,6 +20,8 @@ spec:
               value: "server.teagram.io:443"
             - name: TG_PUBLIC_REGISTRATION
               value: invite
+            - name: TG_USER_INVITE_QUOTA
+              value: "5"
             - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
               value: "https://web.teagram.io"
             - name: TG_TURNSTILE_SIGNIN_ENABLED

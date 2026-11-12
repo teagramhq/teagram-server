@@ -296,6 +296,52 @@ func TestValidateAppConfigRegistrationMode(t *testing.T) {
 	}
 }
 
+func TestParseWebsocketTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		endpoint string
+		origin   string
+		wantHost string
+		wantPort int
+		wantErr  bool
+	}{
+		{
+			name:     "public listener with explicit port",
+			endpoint: "ws://127.0.0.1:2446/apiws", origin: "https://web.example.test",
+			wantHost: "127.0.0.1", wantPort: 2446,
+		},
+		{
+			name:     "secure listener default port",
+			endpoint: "wss://server.example.test/apiws", origin: "https://web.example.test",
+			wantHost: "server.example.test", wantPort: 443,
+		},
+		{name: "wrong path", endpoint: "ws://127.0.0.1:2446/", origin: "https://web.example.test", wantErr: true},
+		{name: "missing origin host", endpoint: "ws://127.0.0.1:2446/apiws", origin: "https://", wantErr: true},
+		{name: "query string", endpoint: "ws://127.0.0.1:2446/apiws?x=1", origin: "https://web.example.test", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseWebsocketTarget(test.endpoint, test.origin)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("parseWebsocketTarget succeeded, want failure")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseWebsocketTarget: %v", err)
+			}
+			if got.endpoint != test.endpoint || got.host != test.wantHost || got.port != test.wantPort {
+				t.Fatalf("parseWebsocketTarget = %+v, want endpoint=%q host=%q port=%d",
+					got, test.endpoint, test.wantHost, test.wantPort)
+			}
+		})
+	}
+}
+
 func TestParseInviteAppConfigRejectsIncompleteOrInvalidSettings(t *testing.T) {
 	t.Parallel()
 

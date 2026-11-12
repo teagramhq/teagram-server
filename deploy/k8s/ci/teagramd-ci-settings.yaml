@@ -13,7 +13,7 @@ spec:
             - name: TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR
               value: server.example.test:443
             - name: TG_PUBLIC_REGISTRATION
-              value: closed
+              value: invite
             - name: TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS
               value: https://web.example.test
             - name: TG_TURNSTILE_SIGNIN_ENABLED

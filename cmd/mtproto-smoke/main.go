@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mtproxy"
 	"github.com/gotd/td/mtproxy/obfuscator"
@@ -58,6 +59,8 @@ type serverIdentity struct {
 
 func main() {
 	endpoint := flag.String("endpoint", liveMTProtoEndpoint, "MTProto host:port to probe")
+	websocketEndpoint := flag.String("websocket-endpoint", "", "call help.getAppConfig through this MTProto WebSocket URL")
+	websocketOrigin := flag.String("websocket-origin", "", "Origin header required by the MTProto WebSocket listener")
 	discoveryURL := flag.String("discovery-url", liveDiscoveryURL, "HTTPS client discovery URL")
 	discoveryFile := flag.String("discovery-file", "", "read client discovery JSON from a local file")
 	usernameFile := flag.String("username-file", "", "sign in using the username in this protected file")
@@ -70,12 +73,15 @@ func main() {
 	flag.Parse()
 	quotaExpectationSet := false
 	registrationModeExpectationSet := false
+	endpointSet := false
 	flag.Visit(func(value *flag.Flag) {
 		switch value.Name {
 		case "expect-user-invite-quota":
 			quotaExpectationSet = true
 		case "expect-registration-mode":
 			registrationModeExpectationSet = true
+		case "endpoint":
+			endpointSet = true
 		}
 	})
 	if quotaExpectationSet && *expectedInviteQuota < 0 {
@@ -84,6 +90,22 @@ func main() {
 	if registrationModeExpectationSet && *expectedRegistrationMode != "closed" &&
 		*expectedRegistrationMode != "invite" && *expectedRegistrationMode != "open" {
 		log.Fatal("expected registration mode must be closed, invite, or open")
+	}
+	if *websocketEndpoint != "" {
+		if endpointSet {
+			log.Fatal("--endpoint cannot be used with --websocket-endpoint")
+		}
+		if !quotaExpectationSet && !registrationModeExpectationSet {
+			log.Fatal("--websocket-endpoint requires an app-config expectation")
+		}
+		if *websocketOrigin == "" {
+			log.Fatal("--websocket-origin is required with --websocket-endpoint")
+		}
+		if *usernameFile != "" || *passwordFile != "" || *mediaUploadFile != "" || *mediaDownloadFile != "" || *mediaManifestFile != "" {
+			log.Fatal("--websocket-endpoint cannot be used with credential or media smoke options")
+		}
+	} else if *websocketOrigin != "" {
+		log.Fatal("--websocket-origin requires --websocket-endpoint")
 	}
 	if flag.NArg() != 0 {
 		log.Fatal("unexpected arguments")
@@ -101,13 +123,15 @@ func main() {
 	if (*mediaUploadFile != "" || *mediaDownloadFile != "") && *usernameFile == "" {
 		log.Fatal("media smoke requires --username-file and --password-file")
 	}
-	if err := run(*endpoint, *discoveryURL, *discoveryFile, *expectedInviteQuota, *expectedRegistrationMode,
+	if err := run(*endpoint, *websocketEndpoint, *websocketOrigin, *discoveryURL, *discoveryFile,
+		*expectedInviteQuota, *expectedRegistrationMode,
 		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaManifestFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int, expectedRegistrationMode string,
+func run(endpoint, websocketEndpoint, websocketOrigin, discoveryURL, discoveryFile string,
+	expectedInviteQuota int, expectedRegistrationMode string,
 	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaManifestFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
@@ -141,15 +165,24 @@ func run(endpoint, discoveryURL, discoveryFile string, expectedInviteQuota int, 
 		},
 	}
 	if expectedInviteQuota >= 0 || expectedRegistrationMode != "" {
-		settings, err := probeAppConfig(ctx, endpoint, discoveryURL, discoveryFile, client)
+		appConfigEndpoint := endpoint
+		var settings inviteAppConfig
+		var err error
+		if websocketEndpoint != "" {
+			appConfigEndpoint = websocketEndpoint
+			settings, err = probeWebsocketAppConfig(ctx, websocketEndpoint, websocketOrigin,
+				discoveryURL, discoveryFile, client)
+		} else {
+			settings, err = probeAppConfig(ctx, endpoint, discoveryURL, discoveryFile, client)
+		}
 		if err != nil {
-			return fmt.Errorf("MTProto app-config smoke on %s: %w", endpoint, err)
+			return fmt.Errorf("MTProto app-config smoke on %s: %w", appConfigEndpoint, err)
 		}
 		if err := validateAppConfig(settings, expectedRegistrationMode, expectedInviteQuota); err != nil {
 			return err
 		}
 		if _, err := fmt.Printf("help.getAppConfig passed on %s registration_mode=%s user_invites_enabled=%t user_invite_quota=%d\n",
-			endpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
+			appConfigEndpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
 			return fmt.Errorf("write app-config smoke result: %w", err)
 		}
 		return nil
@@ -179,13 +212,7 @@ func probeAppConfig(ctx context.Context, endpoint, discoveryURL, discoveryFile s
 	if err := discovery.ValidateEndpoint(endpoint); err != nil {
 		return inviteAppConfig{}, fmt.Errorf("validate target endpoint: %w", err)
 	}
-	var identity serverIdentity
-	var err error
-	if discoveryFile != "" {
-		identity, err = readIdentityFile(discoveryFile)
-	} else {
-		identity, err = fetchIdentity(ctx, discoveryURL, httpClient)
-	}
+	identity, err := loadServerIdentity(ctx, discoveryURL, discoveryFile, httpClient)
 	if err != nil {
 		return inviteAppConfig{}, err
 	}
@@ -210,6 +237,44 @@ func probeAppConfig(ctx context.Context, endpoint, discoveryURL, discoveryFile s
 		}}},
 		Resolver: dcs.Plain(dcs.PlainOptions{}),
 	})
+	return readAppConfig(ctx, client)
+}
+
+func probeWebsocketAppConfig(ctx context.Context, endpoint, origin, discoveryURL, discoveryFile string,
+	httpClient *http.Client) (inviteAppConfig, error) {
+	target, err := parseWebsocketTarget(endpoint, origin)
+	if err != nil {
+		return inviteAppConfig{}, err
+	}
+	identity, err := loadServerIdentity(ctx, discoveryURL, discoveryFile, httpClient)
+	if err != nil {
+		return inviteAppConfig{}, err
+	}
+	client := telegram.NewClient(1, "hash", telegram.Options{
+		DC: identity.dcID,
+		DCList: dcs.List{
+			Options: []tg.DCOption{{ID: identity.dcID, IPAddress: target.host, Port: target.port}},
+			Domains: map[int]string{identity.dcID: target.endpoint},
+		},
+		PublicKeys:     []telegram.PublicKey{{RSA: identity.publicKey}},
+		SessionStorage: &session.StorageMemory{},
+		Resolver: dcs.Websocket(dcs.WebsocketOptions{DialOptions: &websocket.DialOptions{
+			HTTPHeader:   http.Header{"Origin": []string{origin}},
+			Subprotocols: []string{"binary"},
+		}}),
+	})
+	return readAppConfig(ctx, client)
+}
+
+func loadServerIdentity(ctx context.Context, discoveryURL, discoveryFile string,
+	httpClient *http.Client) (serverIdentity, error) {
+	if discoveryFile != "" {
+		return readIdentityFile(discoveryFile)
+	}
+	return fetchIdentity(ctx, discoveryURL, httpClient)
+}
+
+func readAppConfig(ctx context.Context, client *telegram.Client) (inviteAppConfig, error) {
 	var settings inviteAppConfig
 	if err := client.Run(ctx, func(ctx context.Context) error {
 		appConfig, err := client.API().HelpGetAppConfig(ctx, 0)
@@ -222,6 +287,38 @@ func probeAppConfig(ctx context.Context, endpoint, discoveryURL, discoveryFile s
 		return inviteAppConfig{}, err
 	}
 	return settings, nil
+}
+
+type websocketTarget struct {
+	endpoint string
+	host     string
+	port     int
+}
+
+func parseWebsocketTarget(endpoint, origin string) (websocketTarget, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || (parsed.Scheme != "ws" && parsed.Scheme != "wss") ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.Path != "/apiws" ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return websocketTarget{}, errors.New("MTProto WebSocket endpoint must be ws(s)://host:port/apiws")
+	}
+	port := 80
+	if parsed.Scheme == "wss" {
+		port = 443
+	}
+	if portText := parsed.Port(); portText != "" {
+		port, err = strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return websocketTarget{}, errors.New("MTProto WebSocket endpoint has an invalid port")
+		}
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil || (originURL.Scheme != "http" && originURL.Scheme != "https") ||
+		originURL.Hostname() == "" || originURL.User != nil ||
+		(originURL.Path != "" && originURL.Path != "/") || originURL.RawQuery != "" || originURL.Fragment != "" {
+		return websocketTarget{}, errors.New("MTProto WebSocket origin must be an HTTP(S) origin")
+	}
+	return websocketTarget{endpoint: parsed.String(), host: parsed.Hostname(), port: port}, nil
 }
 
 func validateAppConfig(settings inviteAppConfig, expectedRegistrationMode string, expectedInviteQuota int) error {
