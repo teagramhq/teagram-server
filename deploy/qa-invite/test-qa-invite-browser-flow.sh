@@ -96,6 +96,13 @@ chmod 0755 "$TMP_ROOT"
 mkdir -p "$TLS_PRIVATE_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR/web/releases" "$TEST_HOME/.pki/nssdb"
 chmod 0755 "$STATE_DIR" "$STATE_DIR/tls" "$TLS_IDENTITY_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR" "$WEB_CLIENT_DIR/web" "$WEB_CLIENT_DIR/web/releases"
 chmod 0700 "$TLS_PRIVATE_DIR" "$TEST_HOME"
+sudo -n install -d -o root -g root -m 0700 "$STATE_DIR/tmp" || fail 'could not create isolated QA /tmp state directory'
+sudo -n install -d -o root -g root -m 1777 "$STATE_DIR/tmp/tls-edge" "$STATE_DIR/tmp/haproxy" ||
+  fail 'could not create isolated QA service /tmp directories'
+[[ "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp")" == '0:0:700' &&
+  "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp/tls-edge")" == '0:0:1777' &&
+  "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp/haproxy")" == '0:0:1777' ]] ||
+  fail 'isolated QA /tmp directory ownership or mode is invalid'
 
 tar -czf "$TMP_ROOT/demo-web.tar.gz" -C "$PUBLIC_WEB_ROOT/dist-private" . || fail 'could not archive the pinned demo Web artifact'
 WEB_ARCHIVE_SHA=$(sha256sum "$TMP_ROOT/demo-web.tar.gz" | cut -d' ' -f1)

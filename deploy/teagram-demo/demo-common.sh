@@ -47,6 +47,43 @@ demo_fail() {
   return 1
 }
 
+demo_prepare_runtime_tmp_dirs() {
+  local runtime_tmp_dir="$DEMO_STATE_DIR/tmp"
+  local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"
+  local haproxy_tmp_dir="$runtime_tmp_dir/haproxy"
+  local edge_tmp_dir="$runtime_tmp_dir/edge"
+
+  [[ ! -L "$DEMO_REPO_ROOT/.state" && ! -L "$DEMO_STATE_DIR" &&
+    ! -L "$runtime_tmp_dir" && ! -L "$turnstile_tmp_dir" &&
+    ! -L "$haproxy_tmp_dir" && ! -L "$edge_tmp_dir" ]] || {
+    demo_fail 'demo /tmp state path must not contain symlinks'
+    return 1
+  }
+  install -d -o root -g root -m 0700 "$runtime_tmp_dir" || {
+    demo_fail 'demo /tmp state directory could not be created'
+    return 1
+  }
+  install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir" || {
+    demo_fail 'Turnstile egress /tmp directory could not be created'
+    return 1
+  }
+  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" || {
+    demo_fail 'proxy /tmp directories could not be created'
+    return 1
+  }
+  [[ "$(stat -c '%u:%g:%a' "$turnstile_tmp_dir")" == '584792:584792:1777' &&
+    "$(stat -c '%u:%g:%a' "$haproxy_tmp_dir")" == '0:0:1777' &&
+    "$(stat -c '%u:%g:%a' "$edge_tmp_dir")" == '0:0:1777' ]] || {
+    demo_fail 'demo /tmp directory ownership or mode could not be verified'
+    return 1
+  }
+}
+
+demo_prepare_runtime_tmp_dirs_for_up() {
+  [[ "${1:-}" == up ]] || return 0
+  demo_prepare_runtime_tmp_dirs
+}
+
 demo_server_client_config() {
   local service="$1" server_ids_output
   local -a server_ids=()
@@ -725,6 +762,7 @@ demo_haproxy_control() {
 demo_compose_with_file() {
   local compose_file="$1" image_ref
   shift
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -743,6 +781,7 @@ demo_compose() {
 
 demo_validation_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -756,6 +795,7 @@ demo_validation_compose() {
 
 demo_compose_input() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -769,6 +809,7 @@ demo_compose_input() {
 
 demo_bootstrap_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -784,6 +825,7 @@ demo_bootstrap_compose() {
 
 demo_seed_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -798,6 +840,7 @@ demo_seed_compose() {
 
 demo_seed_compose_input() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi

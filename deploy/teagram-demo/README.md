@@ -10,6 +10,14 @@ demo still depends on it until its replacement lands. Current production runs
 on k3s with RustFS, as described in the
 [deployment guide](../k8s/README.md).
 
+The `turnstile-egress`, `haproxy`, and `edge` `/tmp` directories are disk-backed
+bind mounts under `.state/teagram-demo/tmp`, one directory per service. Deploy
+creates them as mode `1777`; `turnstile-egress` uses uid/gid `584792`, while the
+proxy directories are root-owned. Compose cannot apply the former
+`turnstile-egress` tmpfs `noexec,nosuid,nodev` flags to a bind mount. Enforcing
+those flags requires host filesystem mount options; container capability and
+read-only-root settings remain in Compose.
+
 The install script waits until the public client config exposes
 `wss://demo.teagram.io/apiws` and the tracked API seeder is ready. It keeps the
 edge stopped until it has closed the admin election, seeded and verified the
