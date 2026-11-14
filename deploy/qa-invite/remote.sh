@@ -13,6 +13,7 @@ readonly CLIENT_DIR=$STATE_DIR/client
 readonly CLIENT_CONFIG=$CLIENT_DIR/teagram-config.json
 readonly ACCOUNT_DIR=$STATE_DIR/accounts
 readonly BACKUP_DIR=$STATE_DIR/backups
+readonly RUNTIME_TMP_DIR=$STATE_DIR/tmp
 readonly COMPOSE_FILE=$REPO_ROOT/deploy/qa-invite/compose.yaml
 readonly IMAGE_REPOSITORY=ghcr.io/teagramhq/teagram-server-demo
 readonly HOST_ADDRESS=10.96.46.70
@@ -43,7 +44,8 @@ valid_name() { [[ "$1" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]; }
 
 [[ -n "$REPO_ROOT" && -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || fail 'reviewed Compose files are unavailable'
 [[ "$(id -u)" -eq 0 ]] || fail 'must run through the restricted demo deploy command'
-[[ ! -L /opt/teagram-demo/.state && ! -L "$STATE_DIR" && ! -L "$ACCOUNT_DIR" && ! -L "$BACKUP_DIR" ]] ||
+[[ ! -L /opt/teagram-demo/.state && ! -L "$STATE_DIR" && ! -L "$ACCOUNT_DIR" &&
+  ! -L "$BACKUP_DIR" && ! -L "$RUNTIME_TMP_DIR" ]] ||
   fail 'qa-invite state path is unsafe'
 install -d -o root -g root -m 0700 "$STATE_DIR" "$ACCOUNT_DIR" "$BACKUP_DIR"
 [[ "$(stat -c '%u:%a' "$STATE_DIR")" == '0:700' ]] || fail 'qa-invite state directory must be root-only'
@@ -118,6 +120,18 @@ compose() {
     --env-file "$ENV_FILE" \
     --file "$COMPOSE_FILE" \
     "$@"
+}
+
+prepare_runtime_tmp_dirs() {
+  local haproxy_tmp_dir="$RUNTIME_TMP_DIR/haproxy"
+  local tls_edge_tmp_dir="$RUNTIME_TMP_DIR/tls-edge"
+
+  [[ ! -L "$haproxy_tmp_dir" && ! -L "$tls_edge_tmp_dir" ]] || fail 'QA /tmp state path is unsafe'
+  install -d -o root -g root -m 0700 "$RUNTIME_TMP_DIR"
+  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$tls_edge_tmp_dir"
+  [[ "$(stat -c '%u:%g:%a' "$haproxy_tmp_dir")" == '0:0:1777' &&
+    "$(stat -c '%u:%g:%a' "$tls_edge_tmp_dir")" == '0:0:1777' ]] ||
+    fail 'QA /tmp directory ownership or mode could not be verified'
 }
 
 # shellcheck disable=SC1091 # The reviewed archive supplies the referenced helper.
@@ -241,6 +255,7 @@ do_up() {
   ensure_tls
   ensure_client_assets
   write_env "$image_ref"
+  prepare_runtime_tmp_dirs
   if ! ensure_identity; then
     [[ -z "$previous_ref" ]] || write_env "$previous_ref"
     fail 'could not verify the persistent server identity'

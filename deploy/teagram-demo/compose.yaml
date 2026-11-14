@@ -237,10 +237,15 @@ services:
     pids_limit: 64
     tmpfs:
       - /run:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0755
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=1777
       - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0750
       - /var/spool/squid:rw,noexec,nosuid,nodev,size=32m,uid=584792,gid=584792,mode=0750
     volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/turnstile-egress
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
       - type: bind
         source: ./deploy/teagram-demo/turnstile-egress.conf
         target: /etc/squid/squid.conf
@@ -275,9 +280,13 @@ services:
     memswap_limit: 96m
     cpus: "0.25"
     pids_limit: 64
-    tmpfs:
-      - /tmp:size=16m,mode=1777
     volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/haproxy
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
       # Mount directories so atomic config replacements are visible to the
       # already-running proxy, rather than pinned to an old file inode.
       - type: bind
@@ -316,9 +325,13 @@ services:
     memswap_limit: 96m
     cpus: "0.25"
     pids_limit: 64
-    tmpfs:
-      - /tmp:size=16m,mode=1777
     volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/edge
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
       - type: bind
         source: ./deploy/teagram-demo/nginx-config
         target: /etc/nginx/demo

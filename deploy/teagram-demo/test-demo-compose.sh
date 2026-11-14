@@ -9,6 +9,36 @@ source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for expected in (
+    'install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir"',
+    'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir"',
+    '[[ "$(stat -c \'%u:%g:%a\' "$turnstile_tmp_dir")" == \'584792:584792:1777\'',
+):
+    if expected not in source:
+        raise SystemExit(f"demo-common.sh: missing /tmp directory ownership guard: {expected}")
+
+for name in (
+    "demo_compose_with_file",
+    "demo_validation_compose",
+    "demo_compose_input",
+    "demo_bootstrap_compose",
+    "demo_seed_compose",
+    "demo_seed_compose_input",
+):
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}", start)
+    body = source[start:end]
+    if "demo_prepare_runtime_tmp_dirs_for_up \"$@\" || return 1" not in body:
+        raise SystemExit(f"demo-common.sh: {name} does not prepare /tmp directories before Compose up")
+    if body.index("demo_prepare_runtime_tmp_dirs_for_up") > body.index("docker compose"):
+        raise SystemExit(f"demo-common.sh: {name} prepares /tmp directories after Compose")
+PY
+
 cat > "$TMP_DIR/demo.env" <<'ENV'
 POSTGRES_PASSWORD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TG_AUTHKEY_ENC_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -44,7 +74,8 @@ TG_UPLOADS_DISABLED=false env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
   --arg secretFile "$secret_file" \
-  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" '
+  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+  --arg tmpRoot "$REPO_ROOT/.state/teagram-demo/tmp" '
   .name == "teagram-demo"
   and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
@@ -56,12 +87,14 @@ jq -e \
   and .services.haproxy.platform == "linux/amd64"
   and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
   and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
+  and any(.services.haproxy.volumes[]; .type == "bind" and .source == ($tmpRoot + "/haproxy") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and any(.services.haproxy.volumes[]; (.source | endswith("/.state/teagram-demo/haproxy-config")) and .target == "/usr/local/etc/haproxy" and .read_only)
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
   and .services.edge.entrypoint == ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
   and (.services.edge.labels // {}) == {}
+  and any(.services.edge.volumes[]; .type == "bind" and .source == ($tmpRoot + "/edge") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
   and any(.services.edge.volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (.services.teagramd.networks | keys) == ["backend"]
@@ -73,12 +106,17 @@ jq -e \
   and .services.teagramd.depends_on["turnstile-egress"].condition == "service_healthy"
   and .services["turnstile-egress"].platform == "linux/amd64"
   and .services["turnstile-egress"].image == "mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb"
+  and any(.services["turnstile-egress"].volumes[]; .type == "bind" and .source == ($tmpRoot + "/turnstile-egress") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and (.services["turnstile-egress"].ports // [] | length) == 0
   and .services["turnstile-egress"].networks.backend.ipv4_address == "198.18.130.252"
   and .services["turnstile-egress"].networks.egress.gw_priority == 1
   and (.services["turnstile-egress"].networks | keys | sort) == ["backend", "egress"]
   and .services["turnstile-egress"].healthcheck.test == ["CMD", "/usr/bin/pebble", "health"]
   and any(.services["turnstile-egress"].volumes[]; .target == "/var/lib/pebble/default/layers/002-demo-health.yaml" and .read_only)
+  and ([.services[] | .tmpfs[]? | select(startswith("/tmp"))] | length == 0)
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/run:"))
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/var/log/squid:"))
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/var/spool/squid:"))
   and .networks.egress.internal != true
   and .services["turnstile-egress"].logging.options["max-size"] == "10m"
   and .services["turnstile-egress"].logging.options["max-file"] == "3"
