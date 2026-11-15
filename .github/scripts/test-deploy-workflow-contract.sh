@@ -187,6 +187,8 @@ check_ci_contract() {
   manifest_download="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Install pinned kubectl and kubeconform") | .run')"
   [[ "$(grep --fixed-strings --count -- '--retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60' <<< "$manifest_download")" == 2 ]] ||
     ci_fail 'pinned Kubernetes tool downloads must retry transient upstream gateway failures'
+  [[ "$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Test QA bot rollout guard with pinned kubectl") | .run')" == 'python3 -B deploy/k8s/test_qa_bot_rollout.py' ]] ||
+    ci_fail 'the QA bot rollout guard must be tested with pinned kubectl'
   manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
   [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
      "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
@@ -1113,6 +1115,7 @@ self_test() {
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'
+    'del(.jobs."check-k8s-manifests".steps[] | select(.name == "Test QA bot rollout guard with pinned kubectl"))'
     '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'

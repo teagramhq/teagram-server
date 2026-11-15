@@ -1534,6 +1534,9 @@ jobs:
           chmod 0755 "$tools_dir/kubeconform"
           echo "$tools_dir" >> "$GITHUB_PATH"
 
+      - name: Test QA bot rollout guard with pinned kubectl
+        run: python3 -B deploy/k8s/test_qa_bot_rollout.py
+
       - name: Start pinned k3s API for client dry-run
         run: |
           set -euo pipefail

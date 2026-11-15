@@ -45,8 +45,10 @@ set -euo pipefail
 case "$1" in
   create|wait) ;;
   rollout)
-    [[ "${2:-}" == status && "${3:-}" == statefulset/teagramd && " $* " == *' --watch=false '* ]]
-    [[ "${MOCK_ROLLOUT:-stable}" == stable ]]
+    [[ "${2:-}" == status && "${3:-}" == statefulset/teagramd && " $* " == *' --timeout=10s '* ]]
+    if [[ "${MOCK_ROLLOUT:-stable}" == unstable && " $* " != *' --watch=false '* ]]; then
+      exit 1
+    fi
     ;;
   get) printf '%s\n' '{"status":{"conditions":[{"type":"Complete","status":"True"}]}}' ;;
   logs)

@@ -155,7 +155,7 @@ jobs:
       - name: Check production rollout is settled
         run: |
           set -euo pipefail
-          if ! kubectl rollout status statefulset/teagramd -n teagram --watch=false \
+          if ! kubectl rollout status statefulset/teagramd -n teagram \
             --timeout=10s --request-timeout=10s; then
             printf '%s\n' 'production teagramd rollout is not settled' >&2
             exit 1
