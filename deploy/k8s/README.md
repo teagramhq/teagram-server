@@ -182,8 +182,9 @@ The main-only `QA bot operations.` workflow supports `create`, `rotate`,
 `revoke`, `status`, and `probe` for `teagram_qa_test_bot` only. The `k3s-prod`
 job uses the deploy kubeconfig, verifies the running server image and its main
 CI attestation, and runs a fixed-name Job. It shares the `Deploy.` concurrency
-group through delivery and uses `queue: max`, so a bot dispatch does not replace
-a pending deploy. Before backup it checks for queued or active deploys and an
+group through delivery. Both workflows use `queue: max` so neither replaces a
+pending deploy; when the 100-run queue is full, a new run is cancelled. Before
+backup it checks for queued or active deploys and an
 unsettled server rollout, failing if either is found. A rejected check makes no
 bot changes; dispatch again after deployment settles. It also refuses an
 operation while a previous bot Job still exists. A mutation first creates a

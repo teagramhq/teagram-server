@@ -203,22 +203,23 @@ if ((${#workflow_files[@]})); then
     warn_missing_tool actionlint 'workflow linting'
   else
     other_workflow_files=()
-    qa_bot_workflow=false
+    queue_workflow_files=()
     for workflow in "${workflow_files[@]}"; do
-      if [[ "$workflow" == .github/workflows/qa-bot.yml ]]; then
-        qa_bot_workflow=true
+      if [[ "$workflow" == .github/workflows/qa-bot.yml || "$workflow" == .github/workflows/deploy.yml ]]; then
+        queue_workflow_files+=("$workflow")
       else
         other_workflow_files+=("$workflow")
       fi
     done
-    if [[ "$qa_bot_workflow" == true ]]; then
+    if ((${#queue_workflow_files[@]})); then
       if ! command -v yq >/dev/null 2>&1; then
-        printf '%s\n' 'error: pre-push: yq is required to validate the QA bot queue' >&2
+        printf '%s\n' 'error: pre-push: yq is required to validate the shared deploy queue' >&2
         exit 1
       fi
+      bash .github/scripts/test-deploy-workflow-contract.sh --contract-only
       bash deploy/k8s/test-qa-bot-workflow-contract.sh
       actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' \
-        -ignore '^unexpected key "queue" for "concurrency" section' .github/workflows/qa-bot.yml
+        -ignore '^unexpected key "queue" for "concurrency" section' "${queue_workflow_files[@]}"
     fi
     if ((${#other_workflow_files[@]})); then
       actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' "${other_workflow_files[@]}"

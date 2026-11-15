@@ -14,6 +14,7 @@ fail() { printf 'qa-bot workflow contract: %s\n' "$1" >&2; exit 1; }
 [[ "$(query '.concurrency.group')" == "$(yq -r '.concurrency.group' .github/workflows/deploy.yml)" ]] || fail 'bot operations must hold the deploy lock through delivery'
 [[ "$(query '.concurrency."cancel-in-progress"')" == false ]] || fail 'bot requests must not cancel an active deploy'
 [[ "$(query '.concurrency.queue')" == max ]] || fail 'bot requests must not replace a pending deploy'
+[[ "$(yq -r '.concurrency.queue' .github/workflows/deploy.yml)" == max ]] || fail 'deploy requests must not replace a pending deploy'
 [[ "$(query '[.jobs | to_entries[] | select(.value.concurrency.queue != null) | .key] | join(",")')" == '' ]] || fail 'only the workflow may declare a queue'
 validation=$(query '.jobs.check-qa-bot-request.steps[0].run')
 [[ "$validation" == *'"$GITHUB_REF" == refs/heads/main'* && "$validation" == *'"$API_READY" == true'* ]] || fail 'main and readiness must be checked before credentials'
@@ -124,4 +125,5 @@ printf '%s\n' 'state=exists bot_id=123 username=teagram_qa_test_bot token_active
 : > "$GITHUB_STEP_SUMMARY"
 bash "$tmp/operation.sh" > "$tmp/output" || fail 'existing active bot was rejected'
 grep -Fxq 'QA bot already exists; no token was issued or delivered.' "$GITHUB_STEP_SUMMARY" || fail 'existing bot must be reported without claiming delivery'
+python3 -B deploy/k8s/test_qa_bot_concurrency.py
 printf '%s\n' 'QA bot workflow contract holds'
