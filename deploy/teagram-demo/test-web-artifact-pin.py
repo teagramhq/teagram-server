@@ -8,8 +8,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import shutil
 import sys
+import tempfile
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -314,6 +317,40 @@ def check_oversized_response_is_rejected() -> None:
     raise SystemExit("resolver accepted an oversized fragmented JSON response")
 
 
+def check_openssl_does_not_inherit_github_token() -> None:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise SystemExit("openssl is required to test the reviewed public key")
+    key = (SCRIPT.parent / "testdata/reviewed-web-public.txt").read_bytes()
+    with tempfile.TemporaryDirectory(prefix="web-pin-openssl-") as temp:
+        root = pathlib.Path(temp)
+        probe = root / "openssl"
+        probe.write_text(
+            '#!/bin/sh\n'
+            '[ -z "${GITHUB_TOKEN+x}" ] && [ -z "${GH_TOKEN+x}" ] || exit 1\n'
+            'if env | grep -Eq "ghs_fixture_(secondary_)?token"; then exit 1; fi\n'
+            'for arg in "$@"; do case "$arg" in *ghs_fixture_token*|*ghs_fixture_secondary_token*) exit 1;; esac; done\n'
+            'printf started > "$OPENSSL_PROBE"\n'
+            'exec "$REAL_OPENSSL" "$@"\n',
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+        env = {
+            "PATH": f"{root}:{os.environ['PATH']}",
+            "GITHUB_TOKEN": "ghs_fixture_token",
+            "GH_TOKEN": "ghs_fixture_secondary_token",
+            "REAL_OPENSSL": str(pathlib.Path(openssl).resolve()),
+            "OPENSSL_PROBE": str(root / "started"),
+        }
+        with patch.dict(os.environ, env):
+            fingerprint = MODULE.public_key_fingerprint(key)
+            if (os.environ.get("GITHUB_TOKEN") != "ghs_fixture_token"
+                or os.environ.get("GH_TOKEN") != "ghs_fixture_secondary_token"):
+                raise SystemExit("key verification changed the resolver's GitHub tokens")
+        if fingerprint != "fbb62871f07fae2a" or not (root / "started").is_file():
+            raise SystemExit("the token-free OpenSSL subprocess did not verify the key")
+
+
 def check_reviewed_target_and_key() -> None:
     key = (SCRIPT.parent / "testdata/reviewed-web-public.txt").read_bytes()
     target = {
@@ -557,6 +594,7 @@ def main() -> None:
     check_fetch_errors_are_actionable()
     check_untrusted_redirect_is_rejected()
     check_oversized_response_is_rejected()
+    check_openssl_does_not_inherit_github_token()
     check_reviewed_target_and_key()
     check_new_live_publication_resolves_without_pin_edit()
     check_published_release_survives_live_publication_update()

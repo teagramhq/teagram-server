@@ -47,6 +47,43 @@ demo_fail() {
   return 1
 }
 
+demo_prepare_runtime_tmp_dirs() {
+  local runtime_tmp_dir="$DEMO_STATE_DIR/tmp"
+  local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"
+  local haproxy_tmp_dir="$runtime_tmp_dir/haproxy"
+  local edge_tmp_dir="$runtime_tmp_dir/edge"
+
+  [[ ! -L "$DEMO_REPO_ROOT/.state" && ! -L "$DEMO_STATE_DIR" &&
+    ! -L "$runtime_tmp_dir" && ! -L "$turnstile_tmp_dir" &&
+    ! -L "$haproxy_tmp_dir" && ! -L "$edge_tmp_dir" ]] || {
+    demo_fail 'demo /tmp state path must not contain symlinks'
+    return 1
+  }
+  install -d -o root -g root -m 0700 "$runtime_tmp_dir" || {
+    demo_fail 'demo /tmp state directory could not be created'
+    return 1
+  }
+  install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir" || {
+    demo_fail 'Turnstile egress /tmp directory could not be created'
+    return 1
+  }
+  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" || {
+    demo_fail 'proxy /tmp directories could not be created'
+    return 1
+  }
+  [[ "$(stat -c '%u:%g:%a' "$turnstile_tmp_dir")" == '584792:584792:1777' &&
+    "$(stat -c '%u:%g:%a' "$haproxy_tmp_dir")" == '0:0:1777' &&
+    "$(stat -c '%u:%g:%a' "$edge_tmp_dir")" == '0:0:1777' ]] || {
+    demo_fail 'demo /tmp directory ownership or mode could not be verified'
+    return 1
+  }
+}
+
+demo_prepare_runtime_tmp_dirs_for_up() {
+  [[ "${1:-}" == up ]] || return 0
+  demo_prepare_runtime_tmp_dirs
+}
+
 demo_server_client_config() {
   local service="$1" server_ids_output
   local -a server_ids=()
@@ -101,6 +138,184 @@ TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256=$(
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )
 export TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+
+demo_migrate_proxy_tmpfs() {
+  local previous_sha="$1" active_server="$2" service target_hash legacy_hash live_hash
+  local mounts tmpfs previous_file edge_source_hash live_source_hash legacy_edge_bind_hash=
+  local -a proxy_ids=() migrate_services=()
+
+  [[ "$previous_sha" =~ ^[0-9a-f]{40}$ && -d "$TMP_DIR" ]] || {
+    demo_fail 'proxy /tmp migration requires a previous revision and temporary directory'
+    return 1
+  }
+  DEMO_PROXY_TMPFS_LEGACY_COMPOSE="$TMP_DIR/proxy-tmpfs-legacy.json"
+  if ! demo_compose config --format json | jq -e --arg tmp_root "$DEMO_STATE_DIR/tmp" '
+    . as $config
+    | if all(["turnstile-egress", "haproxy", "edge"][]; . as $service |
+        [$config.services[$service].volumes[]? | select(.target == "/tmp")] as $mounts
+        | ($mounts | length == 1)
+          and $mounts[0].type == "bind"
+          and $mounts[0].source == ($tmp_root + "/" + $service)
+          and ($mounts[0].read_only // false) == false
+          and $mounts[0].bind.create_host_path == false
+          and ([$config.services[$service].tmpfs[]? | select(startswith("/tmp"))] | length == 0)
+      ) then
+        .services["turnstile-egress"].volumes |= map(select(.target != "/tmp"))
+        | .services["turnstile-egress"].tmpfs |=
+            (.[0:1] + ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=1777"] + .[1:])
+        | .services.haproxy.volumes |= map(select(.target != "/tmp"))
+        | .services.haproxy.tmpfs = ["/tmp:size=16m,mode=1777"]
+        | .services.edge.volumes |= map(select(.target != "/tmp"))
+        | .services.edge.tmpfs = ["/tmp:size=16m,mode=1777"]
+      else error("unsupported desired proxy /tmp mounts") end
+  ' > "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE"; then
+    demo_fail 'previous proxy /tmp configuration could not be reconstructed'
+    return 1
+  fi
+  chmod 0600 "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" || return 1
+
+  mapfile -t proxy_ids < <(demo_compose ps -q edge)
+  ((${#proxy_ids[@]} == 1)) || { demo_fail 'running edge proxy is missing or ambiguous'; return 1; }
+  if demo_edge_uses_legacy_file_mount "${proxy_ids[0]}"; then
+    previous_file="$TMP_DIR/previous-edge-nginx.conf"
+    git -C "$DEMO_REPO_ROOT" show "$previous_sha:deploy/teagram-demo/nginx.conf" > "$previous_file" || {
+      demo_fail 'previous legacy edge configuration could not be read'
+      return 1
+    }
+    edge_source_hash=$(sha256sum "$previous_file" | awk '{print $1}') || return 1
+    live_source_hash=$(docker inspect --format '{{index .Config.Labels "com.teagram.demo.edge-config-sha256"}}' "${proxy_ids[0]}") || return 1
+    [[ "$live_source_hash" == "$edge_source_hash" ]] || {
+      demo_fail 'legacy edge source configuration differs from the previous release'
+      return 1
+    }
+    legacy_edge_bind_hash=$(demo_edge_legacy_compose_hash "$edge_source_hash") || return 1
+    jq -e --arg config_dir "$DEMO_SCRIPT_DIR/nginx-config" --arg legacy_file "$DEMO_SCRIPT_DIR/nginx.conf" \
+      --arg source_hash "$edge_source_hash" '
+      if .services.edge.entrypoint == ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
+        and ([.services.edge.volumes[] | select(.source == $config_dir and .target == "/etc/nginx/demo" and .read_only)] | length == 1)
+      then
+        .services.edge.entrypoint = ["nginx", "-g", "daemon off;"]
+        | .services.edge.labels = ((.services.edge.labels // {}) + {"com.teagram.demo.edge-config-sha256": $source_hash})
+        | .services.edge.volumes |= map(if .source == $config_dir and .target == "/etc/nginx/demo"
+            then .source = $legacy_file | .target = "/etc/nginx/nginx.conf" else . end)
+      else error("unsupported legacy edge configuration") end
+    ' "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" > "$TMP_DIR/proxy-tmpfs-legacy-edge.json" || return 1
+    mv -f -- "$TMP_DIR/proxy-tmpfs-legacy-edge.json" "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" || return 1
+  elif ! demo_edge_uses_directory_mount "${proxy_ids[0]}"; then
+    demo_fail 'edge proxy config mount is unsupported during /tmp migration'
+    return 1
+  fi
+
+  for service in turnstile-egress haproxy edge; do
+    mapfile -t proxy_ids < <(demo_compose ps -q "$service")
+    ((${#proxy_ids[@]} == 1)) || { demo_fail "running $service proxy is missing or ambiguous"; return 1; }
+    target_hash=$(demo_compose config --hash "$service" | awk -v s="$service" '$1 == s {print $2}') || return 1
+    legacy_hash=$(demo_compose_with_file "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" config --hash "$service" |
+      awk -v s="$service" '$1 == s {print $2}') || return 1
+    live_hash=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${proxy_ids[0]}") || return 1
+    [[ "$target_hash" =~ ^[0-9a-f]{64}$ && "$legacy_hash" =~ ^[0-9a-f]{64}$ &&
+      "$target_hash" != "$legacy_hash" ]] || { demo_fail "$service proxy hashes are invalid"; return 1; }
+    if [[ "$service" == haproxy ]]; then
+      live_source_hash=$(docker inspect --format '{{index .Config.Labels "com.teagram.demo.haproxy-config-sha256"}}' "${proxy_ids[0]}") || return 1
+      [[ "$live_source_hash" == "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" ]] || {
+        demo_fail 'haproxy source configuration changed before /tmp migration'
+        return 1
+      }
+    fi
+    tmpfs=$(docker inspect --format '{{json .HostConfig.Tmpfs}}' "${proxy_ids[0]}") || return 1
+    mounts=$(docker inspect --format '{{json .Mounts}}' "${proxy_ids[0]}") || return 1
+    if [[ "$live_hash" == "$legacy_hash" ]]; then
+      if ! jq -e '(. // {}) | has("/tmp")' <<< "$tmpfs" >/dev/null ||
+        ! jq -e 'all(.[]; .Destination != "/tmp" or .Type == "tmpfs")' <<< "$mounts" >/dev/null; then
+        demo_fail "$service does not have the expected previous /tmp tmpfs"
+        return 1
+      fi
+      migrate_services+=("$service")
+    elif [[ "$live_hash" == "$target_hash" || ( "$service" == edge && -n "$legacy_edge_bind_hash" && "$live_hash" == "$legacy_edge_bind_hash" ) ]]; then
+      if ! jq -e '(. // {}) | has("/tmp") | not' <<< "$tmpfs" >/dev/null ||
+        ! jq -e --arg source "$DEMO_STATE_DIR/tmp/$service" \
+          '[.[] | select(.Destination == "/tmp")] | length == 1 and .[0].Type == "bind" and .[0].Source == $source and .[0].RW == true' <<< "$mounts" >/dev/null; then
+        demo_fail "$service does not have the expected /tmp bind mount"
+        return 1
+      fi
+    else
+      demo_fail "$service has unrelated configuration drift; refusing /tmp migration"
+      return 1
+    fi
+  done
+
+  ((${#migrate_services[@]} > 0)) || return 0
+  for service in "${migrate_services[@]}"; do
+    if [[ "$service" == turnstile-egress ]]; then
+      for previous_file in turnstile-egress.conf pebble-health.yaml; do
+        if ! git -C "$DEMO_REPO_ROOT" show "$previous_sha:deploy/teagram-demo/$previous_file" > "$TMP_DIR/previous-$previous_file" ||
+          ! cmp -s -- "$TMP_DIR/previous-$previous_file" "$DEMO_SCRIPT_DIR/$previous_file"; then
+          demo_fail 'turnstile egress configuration changed before /tmp migration'
+          return 1
+        fi
+      done
+    fi
+  done
+  demo_prepare_runtime_tmp_dirs || return 1
+  if [[ " ${migrate_services[*]} " == *' haproxy '* ]]; then
+    demo_haproxy_control wait-healthy "$active_server" --timeout 60 || return 1
+    demo_prepare_haproxy_runtime || return 1
+    mapfile -t proxy_ids < <(demo_compose ps -q haproxy)
+    ((${#proxy_ids[@]} == 1)) || return 1
+    docker exec "${proxy_ids[0]}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null || {
+      demo_fail 'HAProxy configuration failed its pre-migration syntax check'
+      return 1
+    }
+  fi
+  if [[ " ${migrate_services[*]} " == *' edge '* ]]; then
+    demo_compose run --rm -T --no-deps --entrypoint nginx edge -c /etc/nginx/demo/nginx.conf -t >/dev/null || {
+      demo_fail 'edge configuration failed its pre-migration syntax check'
+      return 1
+    }
+  fi
+  for service in "${migrate_services[@]}"; do
+    if [[ "$service" == edge ]]; then
+      # The deploy cleanup uses this when a recreated edge must be rolled back.
+      # shellcheck disable=SC2034
+      EDGE_CONFIG_RELOAD_ATTEMPTED=1
+    fi
+    DEMO_PROXY_TMPFS_ATTEMPTED+=("$service")
+    demo_compose up -d --no-deps --force-recreate --wait --wait-timeout 120 "$service" || {
+      demo_fail "$service could not be recreated with its /tmp bind mount"
+      return 1
+    }
+    mapfile -t proxy_ids < <(demo_compose ps -q "$service")
+    ((${#proxy_ids[@]} == 1)) || { demo_fail "recreated $service proxy is missing or ambiguous"; return 1; }
+    target_hash=$(demo_compose config --hash "$service" | awk -v s="$service" '$1 == s {print $2}') || return 1
+    live_hash=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${proxy_ids[0]}") || return 1
+    tmpfs=$(docker inspect --format '{{json .HostConfig.Tmpfs}}' "${proxy_ids[0]}") || return 1
+    mounts=$(docker inspect --format '{{json .Mounts}}' "${proxy_ids[0]}") || return 1
+    if [[ ! "$target_hash" =~ ^[0-9a-f]{64}$ || "$live_hash" != "$target_hash" ]] ||
+      ! jq -e '(. // {}) | has("/tmp") | not' <<< "$tmpfs" >/dev/null ||
+      ! jq -e --arg source "$DEMO_STATE_DIR/tmp/$service" \
+        '[.[] | select(.Destination == "/tmp")] | length == 1 and .[0].Type == "bind" and .[0].Source == $source and .[0].RW == true' <<< "$mounts" >/dev/null; then
+      demo_fail "recreated $service proxy does not have the expected /tmp bind mount"
+      return 1
+    fi
+    if [[ "$service" == haproxy ]]; then
+      demo_haproxy_control wait-healthy "$active_server" --timeout 60 || return 1
+    elif [[ "$service" == edge ]]; then
+      docker exec "${proxy_ids[0]}" nginx -c /etc/nginx/demo/nginx.conf -t >/dev/null || return 1
+    fi
+  done
+}
+
+demo_restore_proxy_tmpfs() {
+  local service
+  for service in "${DEMO_PROXY_TMPFS_ATTEMPTED[@]}"; do
+    demo_compose_with_file "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" \
+      up -d --no-deps --force-recreate --wait --wait-timeout 120 "$service" || {
+      demo_fail "$service could not be restored to its previous /tmp configuration"
+      return 1
+    }
+  done
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+}
 
 demo_require_proxy_configuration_current() {
   local service="$1" expected_source_hash="${2:-}" allow_legacy_edge_migration="${3:-0}"
@@ -725,6 +940,7 @@ demo_haproxy_control() {
 demo_compose_with_file() {
   local compose_file="$1" image_ref
   shift
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -743,6 +959,7 @@ demo_compose() {
 
 demo_validation_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -756,6 +973,7 @@ demo_validation_compose() {
 
 demo_compose_input() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -769,6 +987,7 @@ demo_compose_input() {
 
 demo_bootstrap_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -784,6 +1003,7 @@ demo_bootstrap_compose() {
 
 demo_seed_compose() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
@@ -798,6 +1018,7 @@ demo_seed_compose() {
 
 demo_seed_compose_input() {
   local image_ref
+  demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi

@@ -285,10 +285,83 @@ grep --fixed-strings --quiet '"ip": ["tcp:443", "tcp:2443", "tcp:2447"]' deploy/
   fail 'the tailnet grant must exclude the proxy metrics listener on 9002'
 [[ "$(grep --fixed-strings --count '"ip": ["tcp:6443"]' deploy/k8s/README.md)" == 1 ]] ||
   fail 'the tailnet policy must contain exactly one API grant on tcp:6443'
-grep --fixed-strings --quiet "\"src\": [\"<delta's tag>\", \"tag:k3s-deploy\"]" deploy/k8s/README.md ||
-  fail 'the API grant must name only delta and the restricted deploy runner'
+api_grant_source="$(awk '/"src":/ { source = $0 } /"ip": \["tcp:6443"\]/ { print source }' deploy/k8s/README.md)"
+[[ "$api_grant_source" == *'"src": ["tag:k3s-deploy"]'* ]] ||
+  fail 'the API grant must name only the restricted deploy runner'
 grep --fixed-strings --quiet 'Do not grant `tag:ci-deploy`' deploy/k8s/README.md ||
   fail 'the API grant must explicitly exclude the legacy CI tag'
+
+cutover="$(awk '
+  /^## One-time API cutover and cleanup$/ { in_cutover = 1; next }
+  in_cutover && /^## / { exit }
+  in_cutover { print }
+' deploy/k8s/README.md)"
+[[ -n "$cutover" ]] || fail 'the one-time API cutover procedure must be documented'
+cutover_text="$(tr '\n' ' ' <<< "$cutover")"
+[[ "$cutover_text" == *'The server API cutover and first `Deploy.` succeeded in MAIN-3829.'* &&
+   "$cutover_text" == *'The procedure below is historical'* &&
+   "$cutover_text" == *'Do not rerun these steps or unset `K3S_TAILNET_API_READY` on a healthy route.'* &&
+   "$cutover_text" == *'the proxy configuration reloaded without a restart'* ]] ||
+  fail 'the completed server cutover must be identified as historical and describe the actual proxy reload'
+case "$cutover_text" in
+  *'### Completed server cutover (historical)'*'Do not rerun these steps or unset `K3S_TAILNET_API_READY` on a healthy route.'*'Keep `K3S_TAILNET_API_READY` unset'*) ;;
+  *) fail 'the historical warning must precede the original cutover instructions' ;;
+esac
+for required_access in \
+  '`multica-daemon` tailnet node' \
+  'reach production only through `ssh teagram` and `ssh teagram-logs`' \
+  '`teagram-ops` forced-command menu' \
+  '`ssh teagram`' \
+  '`ssh teagram-logs`' \
+  '`run <sha> <name>`' \
+  'forced-command `authorized_keys` line' \
+  'Incus `ops-ssh` device' \
+  'alpha Serve TCP 2222 route' \
+  'sshd in the LXC' \
+  'Only after teagram-web `Deploy.` succeeds on the tailnet API route' \
+  'alpha Serve TCP 6443 route and Incus `api` device'; do
+  [[ "$cutover_text" == *"$required_access"* ]] ||
+    fail "the cutover must document the preserved access and deferred cleanup: $required_access"
+done
+grep --fixed-strings --quiet 'No agent holds a Kubernetes API token' deploy/k8s/README.md ||
+  fail 'the README must prohibit agent API credentials'
+grep --fixed-strings --quiet 'inert because no token is minted' deploy/k8s/README.md ||
+  fail 'the README must explain why the agent access objects are inert'
+grep --fixed-strings --quiet 'agent-access-threat-model.md) is historical only.' deploy/k8s/README.md ||
+  fail 'the README must identify the token-based agent threat model as historical'
+agent_model_intro="$(head -n 8 deploy/k8s/agent-access-threat-model.md | tr '\n' ' ')"
+[[ "$agent_model_intro" == *'Historical only'* && "$agent_model_intro" == *'Do not mint or use `teagram-agent` tokens'* ]] ||
+  fail 'the old threat model must warn that agent token instructions are obsolete'
+deploy_model="$(tr '\n' ' ' < deploy/k8s/deploy-token-threat-model.md)"
+[[ "$deploy_model" == *'Agents hold no Kubernetes API token.'* &&
+   "$deploy_model" == *'Only `tag:k3s-deploy` can reach the in-cluster `tag:teagram` API on TCP 6443.'* &&
+   "$deploy_model" == *'legacy alpha API route'* ]] ||
+  fail 'the deploy token threat model must distinguish the current API grant from the legacy Web route'
+for access_model in deploy/k8s/agent-access-threat-model.md deploy/k8s/deploy-token-threat-model.md; do
+  access_model_host_status=0
+  grep --ignore-case --word-regexp --quiet delta "$access_model" || access_model_host_status=$?
+  require_no_match_status "$access_model_host_status" 'the obsolete agent host name in the access threat model'
+done
+agent_credential_status=0
+grep --extended-regexp --quiet \
+  'create token teagram-agent|\.config/teagram/k3s\.kubeconfig' deploy/k8s/README.md || agent_credential_status=$?
+require_no_match_status "$agent_credential_status" 'agent token creation and kubeconfig instructions'
+agent_host_status=0
+grep --ignore-case --word-regexp --quiet delta deploy/k8s/README.md || agent_host_status=$?
+require_no_match_status "$agent_host_status" 'the obsolete agent host name'
+
+cutover_commands="$(awk '/^```/ { in_code = !in_code; next } in_code { print }' <<< "$cutover")"
+unsafe_kubectl="$(awk '/kubectl/ && !/incus exec teagram-k3s -- k3s kubectl/ { print }' <<< "$cutover_commands")"
+[[ -z "$unsafe_kubectl" ]] || fail 'the cutover must not run kubectl on the agent host'
+case "$cutover_commands" in
+  *'--tcp=2222'*|*'ops-ssh'*|*'authorized_keys'*|*'teagram-ops'*|*'teagram-logs'*|*'.ssh/config'*|\
+  *'deploy-target-teagram-server'*|*'tailscale serve --tcp=6443 off'*|*'incus config device remove teagram-k3s api'*)
+    fail 'the cutover commands must preserve agent access and defer legacy API cleanup' ;;
+esac
+sshd_change_status=0
+grep --extended-regexp --quiet '(systemctl|service|rc-service).*(stop|disable).*(ssh|sshd)' \
+  <<< "$cutover_commands" || sshd_change_status=$?
+require_no_match_status "$sshd_change_status" 'sshd shutdown in the cutover'
 if grep --extended-regexp --quiet 'statefulset/tailscale-proxy|deployment/tailscale-proxy' deploy/k8s/deploy-release.sh; then
   fail 'application releases must not restart the Tailscale proxy'
 fi

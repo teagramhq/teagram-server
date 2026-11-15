@@ -589,12 +589,21 @@ check_contract() {
     fail 'the disabled deploy notice job must use the check stage naming contract'
   [[ "$(query '.jobs."check-deploy-gate".if')" == "$expected_disabled_if" ]] ||
     fail 'the disabled deploy notice must run only for deploy candidates when the gate is false'
-  local disabled_notice_run
+  [[ "$(query '.jobs."check-deploy-gate"."continue-on-error" // false')" == 'false' ]] ||
+    fail 'a disabled production deploy must fail the gate job'
+  [[ "$(query '.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | ."continue-on-error" // false')" == 'false' ]] ||
+    fail 'a disabled production deploy must not ignore the reporting step failure'
+  [[ "$(query '.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .if // ""')" == '' ]] ||
+    fail 'the disabled production deploy reporting step must not be skipped'
+  local disabled_notice_run disabled_notice_output
   disabled_notice_run="$(query '.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run')"
-  grep -Fq '::notice::' <<< "$disabled_notice_run" ||
-    fail 'a disabled production deploy must emit a workflow notice'
   grep -Fq 'GITHUB_STEP_SUMMARY' <<< "$disabled_notice_run" ||
     fail 'a disabled production deploy must write a step summary'
+  if disabled_notice_output="$(GITHUB_STEP_SUMMARY=/dev/null bash -c "$disabled_notice_run" 2>&1)"; then
+    fail 'a disabled production deploy must fail the reporting step'
+  fi
+  grep -Eq '^::error::.*K3S_TAILNET_API_READY' <<< "$disabled_notice_output" ||
+    fail 'a disabled production deploy must name K3S_TAILNET_API_READY in a workflow error'
   [[ "$(query '.jobs."deploy-server".name')" == 'deploy: server (prod)' ]] ||
     fail 'the production deploy job must use the deploy stage naming contract'
   [[ "$(query '.jobs."deploy-server".if')" == "$expected_if" ]] ||
@@ -1001,8 +1010,12 @@ self_test() {
   local mutations=(
     'del(.jobs."check-deploy-gate")'
     '.jobs."check-deploy-gate".if = "always()"'
-    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("::notice::"; "::debug::")'
+    '.jobs."check-deploy-gate"."continue-on-error" = true'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | ."continue-on-error") = true'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .if) = "${{ false }}"'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("::error::"; "::notice::")'
     '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("GITHUB_STEP_SUMMARY"; "WRONG_SUMMARY")'
+    '(.jobs."check-deploy-gate".steps[] | select(.name == "Report the disabled production deploy") | .run) |= sub("exit 1"; "exit 0")'
     '.on.pull_request = {}'
     '.on.pull_request_target = {}'
     '.on.push = {"branches": ["main"]}'

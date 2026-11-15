@@ -78,8 +78,15 @@ PIN_SOURCE_SHA=${QA_WEB_SOURCE_SHA:-}
 PIN_ARTIFACT_DIGEST=${QA_WEB_ARTIFACT_DIGEST:-}
 [[ "$PIN_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'demo Web source identity is invalid'
 [[ "$PIN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'demo Web artifact identity is invalid'
-WEB_IDENTITY=$(python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-published-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
-  fail 'demo Web release identity does not match the published pin'
+if [[ -v QA_WEB_VERIFIED_IDENTITY ]]; then
+  WEB_IDENTITY=$QA_WEB_VERIFIED_IDENTITY
+else
+  WEB_IDENTITY=$(python3 "$REPO_ROOT/deploy/teagram-demo/resolve_web_artifact_pin.py" --verify-published-release-identity "$PIN_SOURCE_SHA" "$PIN_ARTIFACT_DIGEST") ||
+    fail 'demo Web release identity does not match the published pin'
+fi
+jq -e --arg source "$PIN_SOURCE_SHA" --arg digest "$PIN_ARTIFACT_DIGEST" \
+  '.schemaVersion == 1 and .mode == "published" and .sourceCommit == $source and .artifactDigest == $digest and .deployable == false' \
+  <<< "$WEB_IDENTITY" >/dev/null || fail 'demo Web release identity does not match the published pin'
 WEB_EXPECTED_ENDPOINT=$(jq -er '.endpoint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web endpoint is invalid'
 WEB_EXPECTED_FINGERPRINT=$(jq -er '.fingerprint | strings' <<< "$WEB_IDENTITY") || fail 'demo Web fingerprint is invalid'
 [[ "$(git -C "$PUBLIC_WEB_ROOT" rev-parse HEAD)" == "$PIN_SOURCE_SHA" ]] || fail 'demo Web checkout does not match the deployed pin'
@@ -96,6 +103,13 @@ chmod 0755 "$TMP_ROOT"
 mkdir -p "$TLS_PRIVATE_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR/web/releases" "$TEST_HOME/.pki/nssdb"
 chmod 0755 "$STATE_DIR" "$STATE_DIR/tls" "$TLS_IDENTITY_DIR" "$TLS_PUBLIC_DIR" "$CLIENT_DIR" "$WEB_CLIENT_DIR" "$WEB_CLIENT_DIR/web" "$WEB_CLIENT_DIR/web/releases"
 chmod 0700 "$TLS_PRIVATE_DIR" "$TEST_HOME"
+sudo -n install -d -o root -g root -m 0700 "$STATE_DIR/tmp" || fail 'could not create isolated QA /tmp state directory'
+sudo -n install -d -o root -g root -m 1777 "$STATE_DIR/tmp/tls-edge" "$STATE_DIR/tmp/haproxy" ||
+  fail 'could not create isolated QA service /tmp directories'
+[[ "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp")" == '0:0:700' &&
+  "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp/tls-edge")" == '0:0:1777' &&
+  "$(sudo -n stat -c '%u:%g:%a' "$STATE_DIR/tmp/haproxy")" == '0:0:1777' ]] ||
+  fail 'isolated QA /tmp directory ownership or mode is invalid'
 
 tar -czf "$TMP_ROOT/demo-web.tar.gz" -C "$PUBLIC_WEB_ROOT/dist-private" . || fail 'could not archive the pinned demo Web artifact'
 WEB_ARCHIVE_SHA=$(sha256sum "$TMP_ROOT/demo-web.tar.gz" | cut -d' ' -f1)

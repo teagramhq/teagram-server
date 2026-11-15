@@ -9,6 +9,36 @@ source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for expected in (
+    'install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir"',
+    'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir"',
+    '[[ "$(stat -c \'%u:%g:%a\' "$turnstile_tmp_dir")" == \'584792:584792:1777\'',
+):
+    if expected not in source:
+        raise SystemExit(f"demo-common.sh: missing /tmp directory ownership guard: {expected}")
+
+for name in (
+    "demo_compose_with_file",
+    "demo_validation_compose",
+    "demo_compose_input",
+    "demo_bootstrap_compose",
+    "demo_seed_compose",
+    "demo_seed_compose_input",
+):
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}", start)
+    body = source[start:end]
+    if "demo_prepare_runtime_tmp_dirs_for_up \"$@\" || return 1" not in body:
+        raise SystemExit(f"demo-common.sh: {name} does not prepare /tmp directories before Compose up")
+    if body.index("demo_prepare_runtime_tmp_dirs_for_up") > body.index("docker compose"):
+        raise SystemExit(f"demo-common.sh: {name} prepares /tmp directories after Compose")
+PY
+
 cat > "$TMP_DIR/demo.env" <<'ENV'
 POSTGRES_PASSWORD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TG_AUTHKEY_ENC_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -44,7 +74,8 @@ TG_UPLOADS_DISABLED=false env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
   --arg secretFile "$secret_file" \
-  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" '
+  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+  --arg tmpRoot "$REPO_ROOT/.state/teagram-demo/tmp" '
   .name == "teagram-demo"
   and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
@@ -56,12 +87,14 @@ jq -e \
   and .services.haproxy.platform == "linux/amd64"
   and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
   and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
+  and any(.services.haproxy.volumes[]; .type == "bind" and .source == ($tmpRoot + "/haproxy") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and any(.services.haproxy.volumes[]; (.source | endswith("/.state/teagram-demo/haproxy-config")) and .target == "/usr/local/etc/haproxy" and .read_only)
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
   and .services.edge.entrypoint == ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
   and (.services.edge.labels // {}) == {}
+  and any(.services.edge.volumes[]; .type == "bind" and .source == ($tmpRoot + "/edge") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
   and any(.services.edge.volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (.services.teagramd.networks | keys) == ["backend"]
@@ -73,12 +106,17 @@ jq -e \
   and .services.teagramd.depends_on["turnstile-egress"].condition == "service_healthy"
   and .services["turnstile-egress"].platform == "linux/amd64"
   and .services["turnstile-egress"].image == "mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb"
+  and any(.services["turnstile-egress"].volumes[]; .type == "bind" and .source == ($tmpRoot + "/turnstile-egress") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
   and (.services["turnstile-egress"].ports // [] | length) == 0
   and .services["turnstile-egress"].networks.backend.ipv4_address == "198.18.130.252"
   and .services["turnstile-egress"].networks.egress.gw_priority == 1
   and (.services["turnstile-egress"].networks | keys | sort) == ["backend", "egress"]
   and .services["turnstile-egress"].healthcheck.test == ["CMD", "/usr/bin/pebble", "health"]
   and any(.services["turnstile-egress"].volumes[]; .target == "/var/lib/pebble/default/layers/002-demo-health.yaml" and .read_only)
+  and ([.services[] | .tmpfs[]? | select(startswith("/tmp"))] | length == 0)
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/run:"))
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/var/log/squid:"))
+  and any(.services["turnstile-egress"].tmpfs[]; startswith("/var/spool/squid:"))
   and .networks.egress.internal != true
   and .services["turnstile-egress"].logging.options["max-size"] == "10m"
   and .services["turnstile-egress"].logging.options["max-file"] == "3"
@@ -357,6 +395,228 @@ jq -e '
       exit 1
     fi
   done
+)
+
+(
+  MIGRATION_TEST_DIR="$TMP_DIR/proxy-tmpfs-migration"
+  mkdir -p "$MIGRATION_TEST_DIR/state"
+  MIGRATION_CALLS="$MIGRATION_TEST_DIR/calls"
+  MIGRATION_PREVIOUS_SHA=1111111111111111111111111111111111111111
+  MIGRATION_PREVIOUS_COMPOSE="$SCRIPT_DIR/testdata/proxy-tmpfs-compose.yaml"
+  MIGRATION_FAIL_SERVICE=
+  MIGRATION_BAD_BIND_SERVICE=
+  MIGRATION_EGRESS_CHANGED=0
+  MIGRATION_FAIL_HEALTH=0
+  MIGRATION_EDGE_LAYOUT=directory
+  MIGRATION_EDGE_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
+  DEMO_PROXY_TMPFS_LEGACY_COMPOSE=
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+
+  migration_hash() {
+    docker compose --env-file "$TMP_DIR/demo.env" --project-directory "$REPO_ROOT" \
+      --project-name teagram-demo --file "$1" config --hash "$2" | awk '{print $2}'
+  }
+  for service in turnstile-egress haproxy edge; do
+    migration_hash "$MIGRATION_PREVIOUS_COMPOSE" "$service" > "$MIGRATION_TEST_DIR/$service.old"
+    migration_hash "$SCRIPT_DIR/compose.yaml" "$service" > "$MIGRATION_TEST_DIR/$service.current"
+    printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"
+  done
+  : > "$MIGRATION_CALLS"
+
+  demo_compose() {
+    if [[ "$*" == 'config --format json' ]]; then
+      cat "$TMP_DIR/target.json"
+    elif [[ "$1 $2" == 'config --hash' ]]; then
+      printf '%s %s\n' "$3" "$(<"$MIGRATION_TEST_DIR/$3.current")"
+    elif [[ "$1 $2" == 'ps -q' ]]; then
+      printf '%s\n' "$3"
+    elif [[ "$1" == up ]]; then
+      local service="${!#}"
+      printf 'up %s\n' "$service" >> "$MIGRATION_CALLS"
+      [[ "$service" != "$MIGRATION_FAIL_SERVICE" ]] || return 1
+      printf 'current\n' > "$MIGRATION_TEST_DIR/state/$service"
+      [[ "$service" != edge ]] || MIGRATION_EDGE_LAYOUT=directory
+    elif [[ "$*" == 'run --rm -T --no-deps --entrypoint nginx edge -c /etc/nginx/demo/nginx.conf -t' ]]; then
+      printf 'nginx preflight\n' >> "$MIGRATION_CALLS"
+    else
+      printf 'unexpected migration Compose call: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+  demo_compose_with_file() {
+    local file="$1"
+    shift
+    if [[ "$1 $2" == 'config --hash' ]]; then
+      printf '%s %s\n' "$3" "$(migration_hash "$file" "$3")"
+    elif [[ "$1" == up ]]; then
+      local service="${!#}"
+      printf 'rollback %s\n' "$service" >> "$MIGRATION_CALLS"
+      printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"
+      [[ "$service" != edge || "${MIGRATION_ORIGINAL_EDGE_LAYOUT:-directory}" != legacy ]] || MIGRATION_EDGE_LAYOUT=legacy
+    else
+      return 1
+    fi
+  }
+  docker() {
+    if [[ "$1" == compose ]]; then
+      command docker "$@"
+      return
+    fi
+    if [[ "$1" == exec && "$3" == nginx ]]; then
+      printf 'nginx check\n' >> "$MIGRATION_CALLS"
+      return
+    fi
+    if [[ "$*" == 'exec haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg' ]]; then
+      printf 'haproxy preflight\n' >> "$MIGRATION_CALLS"
+      return
+    fi
+    [[ "$1 $2" == 'inspect --format' ]] || return 1
+    local format="$3" service="$4" state
+    state=$(<"$MIGRATION_TEST_DIR/state/$service")
+    case "$format" in
+      *com.docker.compose.config-hash*)
+        if [[ "$state" == drift ]]; then
+          printf '%064d\n' 1
+        else
+          cat "$MIGRATION_TEST_DIR/$service.$state"
+        fi ;;
+      *com.teagram.demo.haproxy-config-sha256*) printf '%s\n' "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" ;;
+      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MIGRATION_EDGE_SOURCE_HASH" ;;
+      *HostConfig.Tmpfs*)
+        if [[ "$state" == old ]]; then printf '{"/tmp":"fixture"}\n'; else printf 'null\n'; fi ;;
+      *'.Mounts'*)
+        if [[ "$format" == *'{{range'* ]]; then
+          if [[ "$MIGRATION_EDGE_LAYOUT" == legacy ]]; then
+            printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
+          else
+            printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
+          fi
+        elif [[ "$state" == old ]]; then
+          printf '[]\n'
+        else
+          local source="$DEMO_STATE_DIR/tmp/$service"
+          [[ "$service" != "$MIGRATION_BAD_BIND_SERVICE" ]] || source="$MIGRATION_TEST_DIR/unexpected"
+          jq -n --arg source "$source" '[{Type:"bind",Source:$source,Destination:"/tmp",RW:true}]'
+        fi ;;
+      *) return 1 ;;
+    esac
+  }
+  git() {
+    [[ "$1 $2 $3" == "-C $DEMO_REPO_ROOT show" ]] || return 1
+    case "$4" in
+      "$MIGRATION_PREVIOUS_SHA:deploy/teagram-demo/turnstile-egress.conf")
+        if (( MIGRATION_EGRESS_CHANGED )); then printf 'different configuration\n'; else cat "$SCRIPT_DIR/turnstile-egress.conf"; fi ;;
+      "$MIGRATION_PREVIOUS_SHA:deploy/teagram-demo/pebble-health.yaml") cat "$SCRIPT_DIR/pebble-health.yaml" ;;
+      "$MIGRATION_PREVIOUS_SHA:deploy/teagram-demo/nginx.conf") printf 'legacy nginx config fixture\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  demo_prepare_runtime_tmp_dirs() { printf 'prepare tmp\n' >> "$MIGRATION_CALLS"; }
+  demo_prepare_haproxy_runtime() { printf 'prepare haproxy\n' >> "$MIGRATION_CALLS"; }
+  demo_haproxy_control() {
+    printf 'haproxy %s\n' "$*" >> "$MIGRATION_CALLS"
+    (( MIGRATION_FAIL_HEALTH == 0 ))
+  }
+
+  demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next
+  for service in turnstile-egress haproxy edge; do
+    [[ "$(<"$MIGRATION_TEST_DIR/state/$service")" == current ]]
+    [[ "$(migration_hash "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" "$service")" == "$(<"$MIGRATION_TEST_DIR/$service.old")" ]]
+  done
+  [[ "$(<"$MIGRATION_CALLS")" == $'prepare tmp\nhaproxy wait-healthy teagramd-next --timeout 60\nprepare haproxy\nhaproxy preflight\nnginx preflight\nup turnstile-egress\nup haproxy\nhaproxy wait-healthy teagramd-next --timeout 60\nup edge\nnginx check' ]]
+  demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
+  demo_require_proxy_configuration_current edge
+
+  : > "$MIGRATION_CALLS"
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+  demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next
+  [[ ! -s "$MIGRATION_CALLS" && ${#DEMO_PROXY_TMPFS_ATTEMPTED[@]} == 0 ]]
+
+  printf 'old\n' > "$MIGRATION_TEST_DIR/state/haproxy"
+  : > "$MIGRATION_CALLS"
+  demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next
+  [[ "$(<"$MIGRATION_CALLS")" == $'prepare tmp\nhaproxy wait-healthy teagramd-next --timeout 60\nprepare haproxy\nhaproxy preflight\nup haproxy\nhaproxy wait-healthy teagramd-next --timeout 60' ]]
+  demo_restore_proxy_tmpfs
+  [[ "$(<"$MIGRATION_TEST_DIR/state/turnstile-egress")" == current &&
+    "$(<"$MIGRATION_TEST_DIR/state/haproxy")" == old && "$(<"$MIGRATION_TEST_DIR/state/edge")" == current ]]
+
+  for service in turnstile-egress haproxy edge; do
+    printf 'old\n' > "$MIGRATION_TEST_DIR/state/turnstile-egress"
+    printf 'old\n' > "$MIGRATION_TEST_DIR/state/haproxy"
+    printf 'old\n' > "$MIGRATION_TEST_DIR/state/edge"
+    printf 'drift\n' > "$MIGRATION_TEST_DIR/state/$service"
+    : > "$MIGRATION_CALLS"
+    if demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next >/dev/null 2>&1; then
+      printf 'migration accepted unrelated %s configuration drift\n' "$service" >&2
+      exit 1
+    fi
+    [[ ! -s "$MIGRATION_CALLS" ]]
+  done
+
+  for service in turnstile-egress haproxy edge; do printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"; done
+  : > "$MIGRATION_CALLS"
+  MIGRATION_EGRESS_CHANGED=1
+  if demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next >/dev/null 2>&1; then
+    printf 'migration accepted a changed egress configuration\n' >&2
+    exit 1
+  fi
+  MIGRATION_EGRESS_CHANGED=0
+  [[ ! -s "$MIGRATION_CALLS" ]]
+
+  MIGRATION_FAIL_HEALTH=1
+  if demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next >/dev/null 2>&1; then
+    printf 'migration accepted an unhealthy active server\n' >&2
+    exit 1
+  fi
+  MIGRATION_FAIL_HEALTH=0
+  if grep -q '^up ' "$MIGRATION_CALLS"; then
+    printf 'migration recreated a proxy before confirming the active server\n' >&2
+    exit 1
+  fi
+
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+  MIGRATION_BAD_BIND_SERVICE=turnstile-egress
+  if demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next >/dev/null 2>&1; then
+    printf 'migration accepted an unexpected recreated bind mount\n' >&2
+    exit 1
+  fi
+  MIGRATION_BAD_BIND_SERVICE=
+  demo_restore_proxy_tmpfs
+  [[ "$(<"$MIGRATION_TEST_DIR/state/turnstile-egress")" == old ]]
+
+  for service in turnstile-egress haproxy edge; do printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"; done
+  : > "$MIGRATION_CALLS"
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+  MIGRATION_FAIL_SERVICE=haproxy
+  if demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next >/dev/null 2>&1; then
+    printf 'migration accepted a failed HAProxy recreation\n' >&2
+    exit 1
+  fi
+  MIGRATION_FAIL_SERVICE=
+  demo_restore_proxy_tmpfs
+  for service in turnstile-egress haproxy edge; do [[ "$(<"$MIGRATION_TEST_DIR/state/$service")" == old ]]; done
+  [[ "$(tail -n 2 "$MIGRATION_CALLS")" == $'rollback turnstile-egress\nrollback haproxy' ]]
+
+  docker compose --env-file "$TMP_DIR/demo.env" --project-directory "$REPO_ROOT" \
+    --project-name teagram-demo --file "$MIGRATION_PREVIOUS_COMPOSE" config --format json |
+    jq --arg config_dir "$DEMO_SCRIPT_DIR/nginx-config" --arg legacy_file "$DEMO_SCRIPT_DIR/nginx.conf" \
+      --arg source_hash "$MIGRATION_EDGE_SOURCE_HASH" '
+      .services.edge.entrypoint = ["nginx", "-g", "daemon off;"]
+      | .services.edge.labels = {"com.teagram.demo.edge-config-sha256": $source_hash}
+      | .services.edge.volumes |= map(if .source == $config_dir and .target == "/etc/nginx/demo"
+          then .source = $legacy_file | .target = "/etc/nginx/nginx.conf" else . end)
+    ' > "$MIGRATION_TEST_DIR/legacy-file-edge.json"
+  migration_hash "$MIGRATION_TEST_DIR/legacy-file-edge.json" edge > "$MIGRATION_TEST_DIR/edge.old"
+  for service in turnstile-egress haproxy edge; do printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"; done
+  DEMO_PROXY_TMPFS_ATTEMPTED=()
+  MIGRATION_EDGE_LAYOUT=legacy
+  MIGRATION_ORIGINAL_EDGE_LAYOUT=legacy
+  : > "$MIGRATION_CALLS"
+  demo_migrate_proxy_tmpfs "$MIGRATION_PREVIOUS_SHA" teagramd-next
+  [[ "$MIGRATION_EDGE_LAYOUT" == directory && "$(<"$MIGRATION_TEST_DIR/state/edge")" == current ]]
+  [[ "$(migration_hash "$DEMO_PROXY_TMPFS_LEGACY_COMPOSE" edge)" == "$(<"$MIGRATION_TEST_DIR/edge.old")" ]]
+  demo_restore_proxy_tmpfs
+  [[ "$MIGRATION_EDGE_LAYOUT" == legacy && "$(<"$MIGRATION_TEST_DIR/state/edge")" == old ]]
 )
 
 (
@@ -853,6 +1113,7 @@ deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1
 )[0]
 assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
+    'demo_migrate_proxy_tmpfs "$PREV_SHA" "$ACTIVE_SERVER"',
     'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
     'demo_require_proxy_configuration_current edge "" 1',
     'demo_reload_edge',
@@ -1427,6 +1688,7 @@ ACTIVE_SERVER=teagramd
 CANDIDATE_SERVER=teagramd-next
 BACKUP_READY=1
 BACKUP_DIR="$TEST_ROOT/backup"
+DEMO_PROXY_TMPFS_ATTEMPTED=(haproxy)
 CANDIDATE_STARTED=1
 CLIENT_CONFIG_UPDATED=0
 CUTOVER_COMMITTED=0
@@ -1450,6 +1712,7 @@ demo_haproxy_control() {
 demo_compose() { printf 'compose %s\n' "$*" >> "$CALLS"; }
 demo_write_active_release() { printf 'active %s %s\n' "$1" "$2" >> "$CALLS"; }
 demo_prepare_haproxy_runtime() { printf 'prepare runtime\n' >> "$CALLS"; }
+demo_restore_proxy_tmpfs() { printf 'restore proxy tmpfs\n' >> "$CALLS"; }
 docker() { printf 'docker %s\n' "$*" >> "$CALLS"; }
 
 false
@@ -1470,12 +1733,41 @@ if grep -Fxq 'compose stop teagramd-next' "$TMP_DIR/deploy-rollback-failure-call
   printf '%s\n' 'deploy rollback stopped the candidate before the old slot was restored' >&2
   exit 1
 fi
+if grep -Fxq 'restore proxy tmpfs' "$TMP_DIR/deploy-rollback-failure-calls"; then
+  printf '%s\n' 'deploy restarted HAProxy before the old slot was restored' >&2
+  exit 1
+fi
+
+cat > "$TMP_DIR/deploy-proxy-rollback-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$CLEANUP_FUNCTION"
+BACKUP_READY=0
+CUTOVER_COMMITTED=0
+PUBLIC_ACTIVATION_STARTED=0
+EDGE_CONFIG_RELOAD_ATTEMPTED=0
+DEMO_PROXY_TMPFS_ATTEMPTED=(turnstile-egress haproxy)
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+TMP_DIR=
+demo_restore_proxy_tmpfs() { printf '%s\n' "${DEMO_PROXY_TMPFS_ATTEMPTED[*]}" > "$CALLS"; }
+trap demo_cleanup EXIT
+false
+BASH
+if env \
+  CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  CALLS="$TMP_DIR/deploy-proxy-rollback-calls" \
+  bash "$TMP_DIR/deploy-proxy-rollback-regression.sh"; then
+  printf '%s\n' 'proxy rollback regression unexpectedly succeeded' >&2
+  exit 1
+fi
+[[ "$(<"$TMP_DIR/deploy-proxy-rollback-calls")" == 'turnstile-egress haproxy' ]]
 
 cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
 PUBLIC_ACTIVATION_STARTED=1
 BACKUP_READY=1
+DEMO_PROXY_TMPFS_ATTEMPTED=()
 SERVICES_STOPPED=1
 RESTORE_DB=
 RESTORE_DB_CREATED=0

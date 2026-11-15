@@ -1,0 +1,131 @@
+# Previous proxy services before disk-backed /tmp mounts.
+name: teagram-demo
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  turnstile-egress:
+    image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
+    platform: linux/amd64
+    user: "584792:584792"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /run:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=1777
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0750
+      - /var/spool/squid:rw,noexec,nosuid,nodev,size=32m,uid=584792,gid=584792,mode=0750
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/turnstile-egress.conf
+        target: /etc/squid/squid.conf
+        read_only: true
+      - type: bind
+        source: ./deploy/teagram-demo/pebble-health.yaml
+        target: /var/lib/pebble/default/layers/002-demo-health.yaml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "/usr/bin/pebble", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      backend:
+        ipv4_address: 198.18.130.252
+    restart: unless-stopped
+    logging: *logging
+
+  haproxy:
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    labels:
+      com.teagram.demo.haproxy-config-sha256: ${TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256:?missing HAProxy configuration hash}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      # Mount directories so atomic config replacements are visible to the
+      # already-running proxy, rather than pinned to an old file inode.
+      - type: bind
+        source: ./.state/teagram-demo/haproxy-config
+        target: /usr/local/etc/haproxy
+        read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/haproxy-run
+        target: /run/haproxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      turnstile-egress:
+        condition: service_healthy
+    networks:
+      backend:
+        ipv4_address: 198.18.130.2
+    restart: unless-stopped
+    logging: *logging
+
+  edge:
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    entrypoint: ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
+    user: "101:101"
+    ports:
+      - "${TEAGRAM_DEMO_EDGE_BIND:-127.0.0.1:8080}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/nginx-config
+        target: /etc/nginx/demo
+        read_only: true
+      # The discovery file is atomically replaced during a rollout.
+      - type: bind
+        source: ./.state/teagram-demo/public-client
+        target: /usr/share/nginx/html/.well-known/teagramd
+        read_only: true
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks: [backend, edge]
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.18.130.0/24
+          ip_range: 198.18.130.128/26
+  edge:
+    driver: bridge
+  egress:
+    driver: bridge

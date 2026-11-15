@@ -1,5 +1,10 @@
 # Threat model: agent Kubernetes read access
 
+> **Historical only:** This describes a proposed token-based agent access path
+> that was not enabled. Do not mint or use `teagram-agent` tokens. Agents use
+> the `teagram-ops` forced-command SSH menu; the retained Kubernetes access
+> objects have no agent token.
+
 ## Scope and assets
 
 This model covers the `teagram-agent` ServiceAccount, its namespace-only Role
@@ -8,10 +13,10 @@ statement logging, and any TokenRequest token minted for an agent run. It does
 not cover API network exposure or the deployer credential; see
 `deploy-token-threat-model.md` and the separate API-access work.
 
-Treat the token as held by an attacker. Every agent run on delta can read it,
-and agents consume attacker-written text. In particular, pod logs can contain
-client-supplied strings, so a prompt-injected agent can spend the token exactly
-as an attacker would.
+Treat the token as held by an attacker. This model assumed every agent run on
+`multica-daemon` could read it, and agents consume attacker-written text. In
+particular, pod logs can contain client-supplied strings, so a prompt-injected
+agent could spend the token exactly as an attacker would.
 
 The protected assets are namespace Secrets and what they unlock, login codes
 and user data that could reach logs, the integrity of the PostgreSQL and
@@ -66,8 +71,9 @@ and replacement process against one database.
 
 ## Accepted residual risk
 
-- Any process running as the daemon user on delta can use the token. Tailnet
-  access identifies devices, not individual agents.
+- This model assumed any process running as the daemon user on
+  `multica-daemon` could use the token. Tailnet access identifies devices, not
+  individual agents.
 - A token holder can read workload specifications, events, and logs throughout
   `teagram`, including personal data that remains in logs.
 - A token holder can repeatedly delete the four allowed service pods and keep
