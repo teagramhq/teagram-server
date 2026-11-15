@@ -234,12 +234,28 @@ jobs:
           kubectl apply -k deploy/k8s/backup-bootstrap
           kubectl create job "$BACKUP_JOB" --from=cronjob/postgres-backup \
             --namespace teagram
-          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/postgres-backups \
-            --namespace teagram --timeout=300s
-          if ! kubectl wait --for=condition=complete "job/$BACKUP_JOB" \
+          if ! kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/postgres-backups \
+            --namespace teagram --timeout=300s ||
+            ! kubectl wait --for=condition=complete "job/$BACKUP_JOB" \
             --namespace teagram --timeout=900s; then
             kubectl logs "job/$BACKUP_JOB" --namespace teagram \
               --all-containers=true || true
+            if ! kubectl describe pods --namespace teagram --selector="job-name=$BACKUP_JOB"; then
+              echo 'Backup pod description unavailable' >&2
+            fi
+            if ! kubectl get events --namespace teagram --sort-by=.lastTimestamp | tail -n 50; then
+              echo 'Recent namespace events unavailable' >&2
+            fi
+            if ! kubectl describe pvc postgres-backups --namespace teagram; then
+              echo 'Backup PVC description unavailable' >&2
+            fi
+            pv_name="$(kubectl get pvc postgres-backups --namespace teagram --output=jsonpath='{.spec.volumeName}')" || pv_name=''
+            if [[ -n "$pv_name" ]]; then
+              kubectl get pv "$pv_name" --output wide ||
+                echo 'PV status unavailable: the deployer may lack cluster-scoped access' >&2
+            else
+              echo 'PVC has no bound PV or its name could not be read' >&2
+            fi
             exit 1
           fi
           kubectl logs "job/$BACKUP_JOB" --namespace teagram \

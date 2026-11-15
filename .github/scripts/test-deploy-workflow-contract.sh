@@ -290,6 +290,89 @@ SH
   fi
 )
 
+# Exercise the actual backup step with a stalled Job and a restricted API.
+check_backup_diagnostics() (
+  set -euo pipefail
+  local tmp scenario output status
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  query '.jobs.deploy-server.steps[] | select(.name == "Take and verify a pre-deploy PostgreSQL backup") | .run' > "$tmp/backup.sh"
+  cat > "$tmp/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$*" in
+  'apply -k deploy/k8s/backup-bootstrap' | 'create job backup-fixture --from=cronjob/postgres-backup --namespace teagram') ;;
+  'wait --for=jsonpath={.status.phase}=Bound pvc/postgres-backups --namespace teagram --timeout=300s')
+    [[ "$TEST_SCENARIO" != pvc-timeout ]] || exit 1
+    ;;
+  'wait --for=condition=complete job/backup-fixture --namespace teagram --timeout=900s')
+    [[ "$TEST_SCENARIO" == success ]] || exit 1
+    ;;
+  'logs job/backup-fixture --namespace teagram --all-containers=true')
+    if [[ "$TEST_SCENARIO" != success ]]; then
+      printf 'PodInitializing\n' >&2
+      exit 1
+    fi
+    printf 'backup=verified path=/backups/teagram-test.dump bytes=1 sha256=%064d\n' 0
+    ;;
+  'describe pods --namespace teagram --selector=job-name=backup-fixture')
+    if [[ "$TEST_SCENARIO" == describe-error ]]; then
+      printf 'pod describe failed\n' >&2
+      exit 1
+    fi
+    printf 'pod diagnostic\n'
+    ;;
+  'get events --namespace teagram --sort-by=.lastTimestamp') printf 'recent event diagnostic\n' ;;
+  'describe pvc postgres-backups --namespace teagram') printf 'claim diagnostic\n' ;;
+  'get pvc postgres-backups --namespace teagram --output=jsonpath={.spec.volumeName}')
+    [[ "$TEST_SCENARIO" == pvc-timeout ]] || printf 'pvc-fixture'
+    ;;
+  'get pv pvc-fixture --output wide')
+    if [[ "$TEST_SCENARIO" == pv-forbidden ]]; then
+      printf 'persistentvolumes is forbidden\n' >&2
+      exit 1
+    fi
+    printf 'volume diagnostic\n'
+    ;;
+  *) printf 'unexpected kubectl call: %s\n' "$*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$tmp/kubectl"
+  # These overrides are consumed by the extracted workflow child process.
+  # shellcheck disable=SC2030,SC2031
+  export PATH="$tmp:$PATH" BACKUP_JOB=backup-fixture RUNNER_TEMP="$tmp" MOCK_CALLS="$tmp/calls"
+  for scenario in job-timeout pvc-timeout pv-forbidden describe-error success; do
+    : > "$MOCK_CALLS"
+    status=0
+    output="$(TEST_SCENARIO="$scenario" bash -euo pipefail "$tmp/backup.sh" 2>&1)" || status=$?
+    if [[ "$scenario" == success ]]; then
+      [[ "$status" == 0 && "$output" == *'backup=verified'* ]] ||
+        fail 'a verified backup must still pass'
+      [[ "$output" != *'diagnostic'* ]] || fail 'a successful backup must not emit failure diagnostics'
+      continue
+    fi
+    [[ "$status" != 0 ]] || fail "a backup timeout must stop the deploy ($scenario)"
+    [[ "$output" == *'recent event diagnostic'* && "$output" == *'claim diagnostic'* ]] ||
+      fail "backup timeout must report events and claim status ($scenario)"
+    if [[ "$scenario" != describe-error ]]; then
+      [[ "$output" == *'pod diagnostic'* ]] || fail "backup timeout must describe the Job pod ($scenario)"
+    fi
+    case "$scenario" in
+      pvc-timeout)
+        [[ "$output" == *'PVC has no bound PV'* ]] || fail 'an unbound claim must be reported'
+        ;;
+      pv-forbidden)
+        [[ "$output" == *'persistentvolumes is forbidden'* && "$output" == *'PV status unavailable'* ]] ||
+          fail 'the deployer PV permission boundary must be reported'
+        ;;
+      *)
+        [[ "$output" == *'volume diagnostic'* ]] || fail "backup timeout must report PV status ($scenario)"
+        ;;
+    esac
+  done
+)
+
 check_demo_image_digest_download() (
   set -euo pipefail
   tmp="$(mktemp -d)"
@@ -1125,6 +1208,7 @@ self_test() {
 check_contract
 check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
+  check_backup_diagnostics
   python3 deploy/teagram-demo/test-deploy-web-artifact.py
   check_demo_credential_gate
   check_demo_manual_request
