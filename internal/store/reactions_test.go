@@ -217,3 +217,33 @@ func TestReactionOnDeletedMessage(t *testing.T) {
 		t.Fatalf("clear on deleted: want ErrMessageInvalid, got %v", err)
 	}
 }
+
+func TestReactionBatchOmitsDeletedOwnerCopy(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551300021")
+	b := mustUser(t, s, "+15551300022")
+	msg := send(t, s, a, b, "reacted", 10001)
+	if _, err := s.SendReaction(ctx, a.ID, msg.LocalID, "❤"); err != nil {
+		t.Fatalf("react: %v", err)
+	}
+	if _, err := s.DeleteMessages(ctx, a.ID, []int64{msg.LocalID}, false); err != nil {
+		t.Fatalf("delete owner copy: %v", err)
+	}
+
+	deleted, err := s.ReactionsByOwnerLocalIDs(ctx, a.ID, []int64{msg.LocalID})
+	if err != nil {
+		t.Fatalf("read deleted copy reactions: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted copy reactions = %#v, want none", deleted)
+	}
+	live, err := s.ReactionsByOwnerLocalIDs(ctx, b.ID, []int64{msg.PeerLocalID})
+	if err != nil {
+		t.Fatalf("read live copy reactions: %v", err)
+	}
+	if got := live[msg.PeerLocalID]; len(got) != 1 || got[0].Reaction != "❤" {
+		t.Errorf("live copy reactions = %#v, want one heart", got)
+	}
+}

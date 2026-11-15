@@ -144,6 +144,109 @@ func TestCustomEmojiReactionUsesLiveUserSetAndRemainsReadableAfterTakedown(t *te
 	}
 }
 
+func TestDirectDialogTopMessageReactions(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	pair := seedReactionPair(t, s, "+15551348111", "+15551348112", "")
+	set := getStickerSet(t, fullChannelDispatcher(s), pair.a.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_custom_emojis"}, 0)
+	if len(set.Documents) == 0 {
+		t.Fatal("custom emoji catalogue is empty")
+	}
+	document, ok := set.Documents[0].(*tg.Document)
+	if !ok || document.ID >= 0 {
+		t.Fatalf("catalogue custom emoji = %#v, want a negative document id", set.Documents[0])
+	}
+	peerFromA := api.InputPeerUser(pair.a.ID, pair.b.ID)
+	peerFromB := api.InputPeerUser(pair.b.ID, pair.a.ID)
+	if _, rpc := sendReaction(t, s, pair.a.ID, peerFromA, pair.aLocalID, &tg.ReactionCustomEmoji{DocumentID: document.ID}); rpc != nil {
+		t.Fatalf("send custom reaction: %s", rpc.ErrorMessage)
+	}
+	if _, rpc := sendReaction(t, s, pair.b.ID, peerFromB, pair.bLocalID, &tg.ReactionEmoji{Emoticon: "❤"}); rpc != nil {
+		t.Fatalf("send standard reaction: %s", rpc.ErrorMessage)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		viewerID int64
+		peerID   int64
+		localID  int64
+		customMy bool
+	}{
+		{name: "sender", viewerID: pair.a.ID, peerID: pair.b.ID, localID: pair.aLocalID, customMy: true},
+		{name: "recipient", viewerID: pair.b.ID, peerID: pair.a.ID, localID: pair.bLocalID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, method := range []string{"getDialogs", "getPeerDialogs"} {
+				t.Run(method, func(t *testing.T) {
+					var enc bin.Encoder
+					var err error
+					if method == "getDialogs" {
+						enc, err = api.GetDialogsForTest(s, tc.viewerID)
+					} else {
+						enc, err = api.GetPeerDialogsForTest(s, tc.viewerID, &tg.MessagesGetPeerDialogsRequest{
+							Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerUser(tc.viewerID, tc.peerID)}},
+						})
+					}
+					if err != nil {
+						t.Fatalf("%s: %v", method, err)
+					}
+					var buf bin.Buffer
+					if err := enc.Encode(&buf); err != nil {
+						t.Fatalf("encode %s: %v", method, err)
+					}
+					var messages []tg.MessageClass
+					if method == "getDialogs" {
+						var dialogs tg.MessagesDialogs
+						if err := dialogs.Decode(&buf); err != nil {
+							t.Fatalf("decode %s: %v", method, err)
+						}
+						messages = dialogs.Messages
+					} else {
+						var dialogs tg.MessagesPeerDialogs
+						if err := dialogs.Decode(&buf); err != nil {
+							t.Fatalf("decode %s: %v", method, err)
+						}
+						messages = dialogs.Messages
+					}
+					if len(messages) != 1 {
+						t.Fatalf("dialog messages = %d, want 1", len(messages))
+					}
+					message, ok := messages[0].(*tg.Message)
+					if !ok || int64(message.ID) != tc.localID {
+						t.Fatalf("dialog top message = %#v, want id %d", messages[0], tc.localID)
+					}
+					reactions, ok := message.GetReactions()
+					if !ok || len(reactions.Results) != 2 {
+						t.Fatalf("dialog top reactions = %#v present=%t, want custom emoji and heart", reactions, ok)
+					}
+					var customFound, heartFound bool
+					for _, result := range reactions.Results {
+						if result.Count != 1 {
+							t.Errorf("reaction count = %d, want 1", result.Count)
+						}
+						_, chosen := result.GetChosenOrder()
+						switch reaction := result.Reaction.(type) {
+						case *tg.ReactionCustomEmoji:
+							customFound = reaction.DocumentID == document.ID
+							if chosen != tc.customMy {
+								t.Errorf("custom reaction chosen=%t, want %t", chosen, tc.customMy)
+							}
+						case *tg.ReactionEmoji:
+							heartFound = reaction.Emoticon == "❤"
+							if chosen == tc.customMy {
+								t.Errorf("heart reaction chosen=%t, want %t", chosen, !tc.customMy)
+							}
+						}
+					}
+					if !customFound || !heartFound {
+						t.Errorf("dialog reactions = %#v, want custom emoji %d and heart", reactions.Results, document.ID)
+					}
+				})
+			}
+		})
+	}
+}
+
 func assertCustomEmojiReaction(t *testing.T, updates *tg.Updates, documentID int64) {
 	t.Helper()
 	if len(updates.Updates) != 1 {

@@ -227,7 +227,12 @@ WHERE message_reactions.owner_id = $1
   AND EXISTS (
       SELECT 1 FROM messages m
       WHERE m.owner_id = message_reactions.owner_id AND m.local_id = message_reactions.local_id
+        AND m.deleted = false
         AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+        AND (m.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+        ))
   )
 ORDER BY local_id, reactor_id
 `
