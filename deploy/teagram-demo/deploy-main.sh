@@ -34,6 +34,8 @@ EDGE_CONFIG_RELOAD_ATTEMPTED=0
 EDGE_CONTAINER_ID=
 PREV_WEB_RELEASE=
 PREV_WEB_LINK=
+DEMO_PROXY_TMPFS_LEGACY_COMPOSE=
+DEMO_PROXY_TMPFS_ATTEMPTED=()
 
 demo_remove_previous_image() {
   local previous_image_id="$1" active_image_id="$2"
@@ -227,6 +229,16 @@ demo_cleanup() {
       rc=1
     fi
   fi
+  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${#DEMO_PROXY_TMPFS_ATTEMPTED[@]} > 0 )); then
+    if (( PUBLIC_ACTIVATION_STARTED == 1 && rollback_confirmed == 0 )); then
+      printf 'demo proxy /tmp rollback skipped because the previous server was not confirmed healthy\n' >&2
+    else
+      demo_restore_proxy_tmpfs || {
+        printf 'demo proxy /tmp rollback could not be confirmed; inspect the public edge\n' >&2
+        rc=1
+      }
+    fi
+  fi
   if [[ -n "$RESTORE_DB" && "$RESTORE_DB_CREATED" == 1 ]]; then
     demo_compose exec -T postgres dropdb -U postgres --if-exists "$RESTORE_DB" </dev/null ||
       printf 'could not remove isolated restore database %s\n' "$RESTORE_DB" >&2
@@ -339,6 +351,7 @@ fi
 (("${#CONTAINER_IDS[@]}" >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
 [[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
+demo_migrate_proxy_tmpfs "$PREV_SHA" "$ACTIVE_SERVER"
 demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
 demo_require_proxy_configuration_current edge "" 1 "$PREV_SHA"
 mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
