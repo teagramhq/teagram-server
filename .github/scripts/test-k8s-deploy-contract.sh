@@ -298,6 +298,15 @@ cutover="$(awk '
 ' deploy/k8s/README.md)"
 [[ -n "$cutover" ]] || fail 'the one-time API cutover procedure must be documented'
 cutover_text="$(tr '\n' ' ' <<< "$cutover")"
+[[ "$cutover_text" == *'The server API cutover and first `Deploy.` succeeded in MAIN-3829.'* &&
+   "$cutover_text" == *'The procedure below is historical'* &&
+   "$cutover_text" == *'Do not rerun these steps or unset `K3S_TAILNET_API_READY` on a healthy route.'* &&
+   "$cutover_text" == *'the proxy configuration reloaded without a restart'* ]] ||
+  fail 'the completed server cutover must be identified as historical and describe the actual proxy reload'
+case "$cutover_text" in
+  *'### Completed server cutover (historical)'*'Do not rerun these steps or unset `K3S_TAILNET_API_READY` on a healthy route.'*'Keep `K3S_TAILNET_API_READY` unset'*) ;;
+  *) fail 'the historical warning must precede the original cutover instructions' ;;
+esac
 for required_access in \
   '`multica-daemon` tailnet node' \
   'reach production only through `ssh teagram` and `ssh teagram-logs`' \
@@ -318,6 +327,21 @@ grep --fixed-strings --quiet 'No agent holds a Kubernetes API token' deploy/k8s/
   fail 'the README must prohibit agent API credentials'
 grep --fixed-strings --quiet 'inert because no token is minted' deploy/k8s/README.md ||
   fail 'the README must explain why the agent access objects are inert'
+grep --fixed-strings --quiet 'agent-access-threat-model.md) is historical only.' deploy/k8s/README.md ||
+  fail 'the README must identify the token-based agent threat model as historical'
+agent_model_intro="$(head -n 8 deploy/k8s/agent-access-threat-model.md | tr '\n' ' ')"
+[[ "$agent_model_intro" == *'Historical only'* && "$agent_model_intro" == *'Do not mint or use `teagram-agent` tokens'* ]] ||
+  fail 'the old threat model must warn that agent token instructions are obsolete'
+deploy_model="$(tr '\n' ' ' < deploy/k8s/deploy-token-threat-model.md)"
+[[ "$deploy_model" == *'Agents hold no Kubernetes API token.'* &&
+   "$deploy_model" == *'Only `tag:k3s-deploy` can reach the in-cluster `tag:teagram` API on TCP 6443.'* &&
+   "$deploy_model" == *'legacy alpha API route'* ]] ||
+  fail 'the deploy token threat model must distinguish the current API grant from the legacy Web route'
+for access_model in deploy/k8s/agent-access-threat-model.md deploy/k8s/deploy-token-threat-model.md; do
+  access_model_host_status=0
+  grep --ignore-case --word-regexp --quiet delta "$access_model" || access_model_host_status=$?
+  require_no_match_status "$access_model_host_status" 'the obsolete agent host name in the access threat model'
+done
 agent_credential_status=0
 grep --extended-regexp --quiet \
   'create token teagram-agent|\.config/teagram/k3s\.kubeconfig' deploy/k8s/README.md || agent_credential_status=$?

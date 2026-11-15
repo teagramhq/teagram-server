@@ -11,10 +11,9 @@ the `k3s-prod` OAuth client tagged only `tag:k3s-deploy`. Its namespace-scoped
 Tailscale device forwards raw TCP to `kubernetes.default.svc:443`, so TLS ends
 at kube-apiserver. The cluster CA is pinned in the kubeconfig, so a server
 presenting another certificate fails TLS verification before Kubernetes gets
-the bearer token. The workflow skips
-until the repository variable `K3S_TAILNET_API_READY` is `true`; after the
-one-time cutover and API reachability check, set it and manually dispatch the
-first `Deploy.` run.
+the bearer token. The workflow requires the repository variable
+`K3S_TAILNET_API_READY` to be `true`. The one-time cutover and first `Deploy.`
+succeeded in MAIN-3829; keep the variable enabled for normal releases.
 
 Admin access is `sudo incus exec teagram-k3s -- k3s kubectl` on alpha. The
 bootstrap never exports a cluster-admin kubeconfig. Normal releases use only
@@ -101,8 +100,9 @@ Read the [deploy credential threat model](deploy-token-threat-model.md) before
 storing, using, or rotating the production kubeconfig. The bootstrap enforces
 the Pod Security `baseline` profile on `teagram` and verifies it rejects a
 privileged `hostPath` pod.
-The [agent access threat model](agent-access-threat-model.md) documents the
-retained objects; agents do not mint or use `teagram-agent` tokens.
+The [agent access threat model](agent-access-threat-model.md) is historical only.
+Its token minting and agent-host API instructions are obsolete and must not be
+followed; agents do not mint or use `teagram-agent` tokens.
 Read the [public user-invites threat model](public-user-invites-threat-model.md)
 before changing the public invite-registration policy or investigating invite
 abuse.
@@ -145,7 +145,7 @@ The bootstrap deliberately leaves them untouched:
 | `teagram-tailscale-state` Secret | Persistent node state created once by the access installer |
 | Agent access | No agent holds a Kubernetes API token. The retained `teagram-agent` objects are inert because no token is minted; agents use the `teagram-ops` forced-command menu. |
 | GitHub `k3s-prod` environment secrets | `KUBECONFIG`, `K3S_TS_OAUTH_CLIENT_ID`, and `K3S_TS_OAUTH_SECRET`; the OAuth client can register only `tag:k3s-deploy` devices. Do not copy these secrets to `production` or `demo`. |
-| GitHub Actions repository variable | `K3S_TAILNET_API_READY`; set to `true` only after the tagged API route, pinned kubeconfig, and first-run prerequisites are verified. |
+| GitHub Actions repository variable | `K3S_TAILNET_API_READY`; keep `true` after the tagged API route, pinned kubeconfig, and first-run prerequisites were verified. Unsetting it skips production deployment. |
 
 All images used by the production overlays are publicly pullable. Bootstrap
 does not read Docker credentials or create a registry Secret. Public utility
@@ -346,8 +346,8 @@ The `Deploy.` runner joins with a new OAuth client whose only tag is
 `teagram.tailaa4918.ts.net:6443`. The in-cluster Tailscale device serves that
 port as raw TCP to `kubernetes.default.svc:443`. Kubernetes TLS is end-to-end,
 and the kubeconfig pins the cluster CA. The app proxy never terminates API TLS.
-The deploy job is gated by `K3S_TAILNET_API_READY` until the route is installed
-and verified, then the first run is dispatched manually. The Cloudflare metrics
+The deploy job is gated by `K3S_TAILNET_API_READY`; the route was verified and
+the first run dispatched manually in MAIN-3829. The Cloudflare metrics
 endpoint and Tailscale proxy metrics service expose scrape targets inside the
 cluster; container logs go to stdout and stderr for the cluster log collector.
 Alert on a non-Ready Tailscale proxy or an increase in its restart count.
@@ -436,6 +436,25 @@ connectivity must not force re-registration.
 
 ## One-time API cutover and cleanup
 
+Agents on the `multica-daemon` tailnet node reach production only through
+`ssh teagram` and `ssh teagram-logs`. `ssh teagram` opens the `teagram-ops`
+forced-command menu, whose `run <sha> <name>` entry runs reviewed ops scripts.
+Preserve the menu and its forced-command `authorized_keys` line, the Incus
+`ops-ssh` device, the alpha Serve TCP 2222 route, sshd in the LXC, and both SSH
+aliases. Agents do not run `kubectl` on their host.
+
+Only after teagram-web `Deploy.` succeeds on the tailnet API route may the
+alpha Serve TCP 6443 route and Incus `api` device be removed. Leave both in
+place until then.
+
+### Completed server cutover (historical)
+
+The server API cutover and first `Deploy.` succeeded in MAIN-3829. The
+procedure below is historical and preserves the original commands and rollback
+path. Do not rerun these steps or unset `K3S_TAILNET_API_READY` on a healthy
+route. The manifest was applied and the proxy configuration reloaded without a
+restart; the restart commands below were not run during the cutover.
+
 Keep `K3S_TAILNET_API_READY` unset until the API route and first-run
 prerequisites below are verified. Add the single `tcp:6443` policy grant above
 and create the OAuth client whose only permitted tag is `tag:k3s-deploy`.
@@ -469,13 +488,6 @@ sudo incus exec teagram-k3s -- k3s kubectl rollout status \
   statefulset/tailscale-proxy --namespace teagram --timeout=180s
 ```
 
-Agents on the `multica-daemon` tailnet node reach production only through
-`ssh teagram` and `ssh teagram-logs`. `ssh teagram` opens the `teagram-ops`
-forced-command menu, whose `run <sha> <name>` entry runs reviewed ops scripts.
-Preserve the menu and its forced-command `authorized_keys` line, the Incus
-`ops-ssh` device, the alpha Serve TCP 2222 route, sshd in the LXC, and both SSH
-aliases. Agents do not run `kubectl` on their host.
-
 Confirm a non-allowed tailnet source cannot connect. Keep the old alpha Serve
 route and Incus API device throughout this first pass. If the checks fail,
 leave `K3S_TAILNET_API_READY` unset, restore the previous k3s unit and kubeconfig
@@ -490,9 +502,7 @@ and keep application workloads running while the route is repaired. Future
 successful main CI runs can deploy automatically. Remove the old kubeconfig
 backup after the first `Deploy.` succeeds.
 
-Only after teagram-web `Deploy.` succeeds on the tailnet API route may the
-alpha Serve TCP 6443 route and Incus `api` device be removed. Leave both in
-place during the first pass above.
+### Proxy verification and recovery
 
 After the proxy is Ready, verify the tailnet HTTPS routes, an unauthenticated
 Bot API request returns `401`, and a 48-byte `telegramd-key-v1` request to
