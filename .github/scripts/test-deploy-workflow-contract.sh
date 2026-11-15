@@ -324,16 +324,20 @@ case "$*" in
     printf 'pod diagnostic\n'
     ;;
   'get events --namespace teagram --sort-by=.lastTimestamp') printf 'recent event diagnostic\n' ;;
-  'describe pvc postgres-backups --namespace teagram') printf 'claim diagnostic\n' ;;
+  'describe pvc postgres-backups --namespace teagram')
+    printf 'claim diagnostic\n'
+    if [[ "$TEST_SCENARIO" == pvc-timeout ]]; then
+      printf 'Status: Pending\nVolume: <none>\n'
+    else
+      printf 'Status: Bound\nVolume: pvc-fixture\n'
+    fi
+    ;;
   'get pvc postgres-backups --namespace teagram --output=jsonpath={.spec.volumeName}')
-    [[ "$TEST_SCENARIO" == pvc-timeout ]] || printf 'pvc-fixture'
+    printf 'pvc-fixture'
     ;;
   'get pv pvc-fixture --output wide')
-    if [[ "$TEST_SCENARIO" == pv-forbidden ]]; then
-      printf 'persistentvolumes is forbidden\n' >&2
-      exit 1
-    fi
-    printf 'volume diagnostic\n'
+    printf 'persistentvolumes is forbidden\n' >&2
+    exit 1
     ;;
   *) printf 'unexpected kubectl call: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -342,7 +346,7 @@ SH
   # These overrides are consumed by the extracted workflow child process.
   # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" BACKUP_JOB=backup-fixture RUNNER_TEMP="$tmp" MOCK_CALLS="$tmp/calls"
-  for scenario in job-timeout pvc-timeout pv-forbidden describe-error success; do
+  for scenario in job-timeout pvc-timeout describe-error success; do
     : > "$MOCK_CALLS"
     status=0
     output="$(TEST_SCENARIO="$scenario" bash -euo pipefail "$tmp/backup.sh" 2>&1)" || status=$?
@@ -358,18 +362,16 @@ SH
     if [[ "$scenario" != describe-error ]]; then
       [[ "$output" == *'pod diagnostic'* ]] || fail "backup timeout must describe the Job pod ($scenario)"
     fi
-    case "$scenario" in
-      pvc-timeout)
-        [[ "$output" == *'PVC has no bound PV'* ]] || fail 'an unbound claim must be reported'
-        ;;
-      pv-forbidden)
-        [[ "$output" == *'persistentvolumes is forbidden'* && "$output" == *'PV status unavailable'* ]] ||
-          fail 'the deployer PV permission boundary must be reported'
-        ;;
-      *)
-        [[ "$output" == *'volume diagnostic'* ]] || fail "backup timeout must report PV status ($scenario)"
-        ;;
-    esac
+    if [[ "$scenario" == pvc-timeout ]]; then
+      [[ "$output" == *'Status: Pending'* && "$output" == *'Volume: <none>'* ]] ||
+        fail 'an unbound claim must be reported'
+    else
+      [[ "$output" == *'Status: Bound'* && "$output" == *'Volume: pvc-fixture'* ]] ||
+        fail "backup timeout must report the claim status and bound volume ($scenario)"
+    fi
+    if grep -q '^get pv ' "$MOCK_CALLS"; then
+      fail 'backup diagnostics must not query cluster-scoped PVs'
+    fi
   done
 )
 
