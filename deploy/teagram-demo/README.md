@@ -17,6 +17,11 @@ proxy directories are root-owned. Compose cannot apply the former
 `turnstile-egress` tmpfs `noexec,nosuid,nodev` flags to a bind mount. Enforcing
 those flags requires host filesystem mount options; container capability and
 read-only-root settings remain in Compose.
+The first deploy checks the running proxy configuration against the previous
+tmpfs layout and recreates the affected services in dependency order. Existing
+connections through HAProxy are interrupted during its recreation. If deployment
+fails before cutover, it restores the previous mounts when the previous server
+is confirmed healthy; an unconfirmed rollback requires operator inspection.
 
 The install script waits until the public client config exposes
 `wss://demo.teagram.io/apiws` and the tracked API seeder is ready. It keeps the
