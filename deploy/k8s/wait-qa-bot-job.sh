@@ -16,14 +16,15 @@ report_failure() {
     case "$line" in
       'qa-bot: operation requires root in the isolated job'|\
       'qa-bot: QA age recipient is unavailable'|\
-      'qa-bot: lookup failed or pinned username is not the expected QA bot'|\
+      'qa-bot: bot lookup command failed'|\
+      'qa-bot: pinned username is not the expected QA bot'|\
+      'qa-bot: existing QA bot has no active token; use rotate'|\
       'qa-bot: QA bot has no active token'|\
       'qa-bot: create failed'|\
       'qa-bot: QA bot does not exist'|\
       'qa-bot: rotation failed'|\
       'qa-bot: revocation failed'|\
       'qa-bot: create returned an invalid token; reconcile the pinned bot'|\
-      'qa-bot: could not verify the issued token; reconcile the pinned bot'|\
       'qa-bot: issued token does not match the pinned bot; reconcile its state')
         printf '%s\n' "$line" >&2
         found=true

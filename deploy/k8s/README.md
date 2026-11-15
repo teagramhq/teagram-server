@@ -240,15 +240,16 @@ Before a mutation, record a verified PostgreSQL backup and its restore path on
 the issue. Dispatch from main with, for example,
 `gh workflow run qa-bot.yml -f action=create -f issue=MAIN-123`. The workflow
 also verifies a fresh pre-operation backup and records its path in the run log.
-`create` is idempotent and does not issue a replacement token for an existing
-bot. If delivery fails after the producer succeeds, rerun the failed delivery
-job within the artifact's one-day retention period; it uses the original
-producer's ciphertext. Otherwise the issued token may still be active: inspect
-`status`, then `rotate` after the fixed-name Job is removed by its six-minute
-TTL. The workflow reports only recognized, sanitized operation failures. If
-cleanup revocation failed, reconcile the pinned bot and revoke it before
-issuing another token. Do not restore a whole database dump over new production
-writes merely to recover a bot token. To roll back delivery,
+`create` does not issue a replacement token for an existing active bot and
+reports that no token was delivered. It fails for a revoked bot; use `rotate`
+to issue a replacement. If delivery fails after the producer succeeds, rerun
+the failed delivery job within the artifact's one-day retention period; it uses
+the original producer's ciphertext. Otherwise the issued token may still be
+active: inspect `status`, then `rotate` after the fixed-name Job is removed by
+its six-minute TTL. The workflow reports only recognized, sanitized operation
+failures. If cleanup revocation failed, reconcile the pinned bot and revoke it
+before issuing another token. Do not restore a whole database dump over new
+production writes merely to recover a bot token. To roll back delivery,
 copy the reported writer backup to `.qa-account-writer.restore` on QA and run
 `mv -f ~/.local/bin/.qa-account-writer.restore ~/.local/bin/qa-account-writer`;
 this takes seconds. Revert the workflow change through the normal review path.

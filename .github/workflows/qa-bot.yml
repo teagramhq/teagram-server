@@ -194,6 +194,9 @@ jobs:
           else
             [[ "$first" =~ ^state=(missing|found|exists|revoked)\ (bot_id=[1-9][0-9]*\ )?username=teagram_qa_test_bot(\ token_active=(true|false)|\ action=revoke)?$ ]]
             [[ "$(wc -l < "$RUNNER_TEMP/qa-bot-result")" == 1 ]]
+            if [[ "$ACTION" == create && "$first" =~ ^state=exists\ bot_id=[1-9][0-9]*\ username=teagram_qa_test_bot\ token_active=true$ ]]; then
+              printf '%s\n' 'QA bot already exists; no token was issued or delivered.' >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           printf '%s\n' "$first"
           printf 'generated=%s\n' "$generated" >> "$GITHUB_OUTPUT"

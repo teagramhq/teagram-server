@@ -30,7 +30,7 @@ class WriterTest(unittest.TestCase):
 cat >/dev/null
 [ "${MOCK_DECRYPT_FAIL:-}" != 1 ] || exit 1
 if [ "$SSH_ORIGINAL_COMMAND" = bot-health ]; then
-    printf '%s' '1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    printf '%s' "${MOCK_HEALTH_OVERRIDE-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA}"
     exit 0
 fi
 printf '%s' "$MOCK_TOKEN"
@@ -40,7 +40,6 @@ printf '%s' "$MOCK_TOKEN"
         probe.write_text("""#!/bin/sh
 cat >/dev/null
 [ "${MOCK_PROBE_FAIL:-}" != 1 ] || exit 1
-[ "$(cat "$2")" = "$MOCK_TOKEN" ] || exit 1
 printf '%s\\n' 'getMe=200 username=teagram_qa_test_bot'
 """)
         probe.chmod(0o700)
@@ -98,6 +97,21 @@ printf '%s\\n' 'getMe=200 username=teagram_qa_test_bot'
         self.identity.chmod(0o644)
         self.assertNotEqual(self.invoke("bot-health").returncode, 0)
 
+    def test_rejects_invalid_decrypted_tokens_without_replacing_the_existing_file(self):
+        self.token_file.write_text("previous\n")
+        self.token_file.chmod(0o600)
+        for payload in ("9" * 21 + ":" + "A" * 43, TOKEN + "\n", "0:" + "A" * 43):
+            with self.subTest(length=len(payload)):
+                result = self.invoke("bot-store", {"MOCK_TOKEN": payload})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.token_file.read_text(), "previous\n")
+                self.assertEqual(list(self.path.glob("token.????????")), [])
+
+    def test_health_rejects_the_wrong_decrypted_challenge(self):
+        result = self.invoke("bot-health", {"MOCK_HEALTH_OVERRIDE": "wrong"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("qa-bot-writer=ready", result.stdout)
+
     def test_real_probe_checks_status_and_username_without_printing_token(self):
         class Handler(BaseHTTPRequestHandler):
             status = 200
@@ -120,16 +134,31 @@ printf '%s\\n' 'getMe=200 username=teagram_qa_test_bot'
         self.token_file.write_text(TOKEN)
         embedded = WRITER.read_text().split('  python3 - "$1" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
         embedded = embedded.replace("http://teagram.tailaa4918.ts.net:2447", f"http://127.0.0.1:{server.server_port}")
-        for status, body, expected in [
-            (200, b'{"ok":true,"result":{"username":"teagram_qa_test_bot"}}', 0),
-            (200, b'{"ok":true,"result":{"username":"another_bot"}}', 1),
-            (401, b'{}', 1),
+        for status, body, expected, diagnostic in [
+            (200, b'{"ok":true,"result":{"username":"teagram_qa_test_bot"}}', 0, ""),
+            (200, b'{"ok":true,"result":{"username":"another_bot"}}', 1, "ValueError"),
+            (401, b'{}', 1, "HTTP 401"),
         ]:
             Handler.status, Handler.body = status, body
             result = subprocess.run([sys.executable, "-c", embedded, str(self.token_file)],
                                     text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, expected)
+            self.assertIn(diagnostic, result.stderr)
             self.assertNotIn(TOKEN, result.stdout + result.stderr)
+            self.assertNotIn("/bot" + TOKEN, result.stdout + result.stderr)
+
+        injected_failure = """import urllib.error, urllib.request
+class FailingOpener:
+    def open(self, url, timeout):
+        raise urllib.error.URLError(TimeoutError(url))
+urllib.request.build_opener = lambda *_: FailingOpener()
+"""
+        result = subprocess.run([sys.executable, "-c", injected_failure + embedded, str(self.token_file)],
+                                text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TimeoutError", result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assertNotIn("http://", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

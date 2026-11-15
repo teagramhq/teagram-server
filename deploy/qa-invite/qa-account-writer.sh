@@ -27,6 +27,7 @@ bot_probe() {
 import json
 import pathlib
 import sys
+import urllib.error
 import urllib.request
 
 try:
@@ -36,8 +37,13 @@ try:
         result = json.load(response)
         if response.status != 200 or result.get("ok") is not True or result.get("result", {}).get("username") != "teagram_qa_test_bot":
             raise ValueError("unexpected bot")
-except Exception:
-    print("qa-bot probe failed", file=sys.stderr)
+except urllib.error.HTTPError as error:
+    print(f"qa-bot probe failed: HTTP {error.code}", file=sys.stderr)
+    raise SystemExit(1)
+except Exception as error:
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        error = error.reason
+    print(f"qa-bot probe failed: {type(error).__name__}", file=sys.stderr)
     raise SystemExit(1)
 print("getMe=200 username=teagram_qa_test_bot")
 PY

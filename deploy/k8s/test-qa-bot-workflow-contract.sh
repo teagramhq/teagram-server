@@ -22,6 +22,7 @@ cluster_steps=$(query '.jobs.ops-qa-bot.steps[] | .run // ""')
 delivery=$(query '.jobs.ops-qa-bot-delivery.steps[] | .run // ""')
 [[ "$delivery" == *'bot-store'* && "$delivery" == *'bot-probe'* ]] || fail 'restricted delivery and live probe are required'
 [[ "$delivery" != *'kubectl exec'* ]] || fail 'the QA writer must not obtain pod exec'
+[[ "$(query '.jobs.ops-qa-bot-delivery.if')" == "\${{ needs.ops-qa-bot.result == 'success' && (needs.ops-qa-bot.outputs.generated == 'true' || inputs.action == 'probe') }}" ]] || fail 'delivery must run only after generation or an explicit probe'
 [[ "$(query '.jobs.ops-qa-bot.outputs.artifact_name')" == '${{ steps.operation.outputs.artifact_name }}' ]] || fail 'the producer must expose its artifact name'
 [[ "$(query '.jobs.ops-qa-bot.steps[] | select(.name == "Transfer only the encrypted token") | .with.name')" == '${{ steps.operation.outputs.artifact_name }}' ]] || fail 'upload must use the producer name'
 [[ "$(query '.jobs.ops-qa-bot-delivery.steps[] | select(.name == "Download the encrypted token") | .with.name')" == '${{ needs.ops-qa-bot.outputs.artifact_name }}' ]] || fail 'delivery retry must use the original producer name'
@@ -57,7 +58,7 @@ if MOCK_BACKUP=missing bash "$tmp/backup.sh" >/dev/null; then fail 'missing back
 if MOCK_BACKUP=duplicate bash "$tmp/backup.sh" >/dev/null; then fail 'ambiguous backup was accepted'; fi
 
 query '.jobs.ops-qa-bot.steps[] | select(.name == "Run the pinned bot operation") | .run' > "$tmp/operation.sh"
-export RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$tmp/github-output" IMAGE=ghcr.io/teagramhq/teagramd:ci
+export RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$tmp/github-output" GITHUB_STEP_SUMMARY="$tmp/summary" IMAGE=ghcr.io/teagramhq/teagramd:ci
 export MOCK_RESULT="$tmp/result" ACTION=create
 printf '%s\n' 'action=create bot_id=123 username=teagram_qa_test_bot' \
   '-----BEGIN AGE ENCRYPTED FILE-----' 'ciphertext' '-----END AGE ENCRYPTED FILE-----' > "$MOCK_RESULT"
@@ -78,4 +79,9 @@ grep -Fxq 'generated=false' "$GITHUB_OUTPUT" || fail 'status unexpectedly select
 printf '%s\n' '123:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA' > "$MOCK_RESULT"
 if bash "$tmp/operation.sh" > "$tmp/output" 2>&1; then fail 'plaintext token was accepted as metadata'; fi
 if grep -Fq '123:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA' "$tmp/output"; then fail 'plaintext token was printed on failure'; fi
+ACTION=create
+printf '%s\n' 'state=exists bot_id=123 username=teagram_qa_test_bot token_active=true' > "$MOCK_RESULT"
+: > "$GITHUB_STEP_SUMMARY"
+bash "$tmp/operation.sh" > "$tmp/output" || fail 'existing active bot was rejected'
+grep -Fxq 'QA bot already exists; no token was issued or delivered.' "$GITHUB_STEP_SUMMARY" || fail 'existing bot must be reported without claiming delivery'
 printf '%s\n' 'QA bot workflow contract holds'

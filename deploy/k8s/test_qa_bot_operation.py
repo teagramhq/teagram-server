@@ -30,6 +30,9 @@ with pathlib.Path(os.environ['MOCK_CALLS']).open('a') as f:
     f.write(' '.join(sys.argv[1:]) + '\\n')
 args = sys.argv[1:]
 if args == ['bot', 'lookup', 'teagram_qa_test_bot']:
+    lookups = pathlib.Path(os.environ['MOCK_CALLS']).read_text().splitlines().count('bot lookup teagram_qa_test_bot')
+    if str(lookups) == os.environ.get('MOCK_LOOKUP_FAIL_AT'):
+        raise SystemExit(1)
     print(state.read_text().strip())
 elif args == ['bot', 'encrypt', '--check-recipient', os.environ['MOCK_RECIPIENT']]:
     pass
@@ -121,6 +124,47 @@ else:
         self.assertIn("new token could not be delivered or revoked; reconcile bot id 987654321", result.stderr)
         self.assertTrue(json.loads(self.state.read_text())["token_active"])
 
+    def test_failed_post_create_lookup_revokes_new_token(self):
+        result = self.invoke("create", extra_env={"MOCK_LOOKUP_FAIL_AT": "2"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bot lookup command failed", result.stderr)
+        self.assertIn("bot revoke 987654321", self.calls.read_text())
+        self.assertFalse(json.loads(self.state.read_text())["token_active"])
+
+    def test_failed_post_create_lookup_and_revocation_require_reconciliation(self):
+        result = self.invoke("create", extra_env={"MOCK_LOOKUP_FAIL_AT": "2", "MOCK_REVOKE_FAIL": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bot lookup command failed", result.stderr)
+        self.assertIn("could not be delivered or revoked; reconcile bot id 987654321", result.stderr)
+        self.assertTrue(json.loads(self.state.read_text())["token_active"])
+
+    def test_lookup_command_failure_and_wrong_record_are_distinct(self):
+        failed = self.invoke("status", extra_env={"MOCK_LOOKUP_FAIL_AT": "1"})
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("bot lookup command failed", failed.stderr)
+        self.state.write_text('{"state":"found","owner":"channel","id":9}\n')
+        mismatch = self.invoke("status")
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("pinned username is not the expected QA bot", mismatch.stderr)
+        self.assertNotIn("bot lookup command failed", mismatch.stderr)
+
+    def test_create_refuses_existing_revoked_bot(self):
+        self.assertEqual(self.invoke("create").returncode, 0)
+        self.assertEqual(self.invoke("revoke").returncode, 0)
+        before = self.calls.read_text().count("bot create")
+        result = self.invoke("create")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("use rotate", result.stderr)
+        self.assertEqual(self.calls.read_text().count("bot create"), before)
+
+    def test_rotate_mismatched_id_revokes_only_the_pinned_bot(self):
+        self.assertEqual(self.invoke("create").returncode, 0)
+        result = self.invoke("rotate", extra_env={"MOCK_TOKEN_OVERRIDE": "42:" + "B" * 43})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bot revoke 987654321", self.calls.read_text())
+        self.assertNotIn("bot revoke 42", self.calls.read_text())
+        self.assertFalse(json.loads(self.state.read_text())["token_active"])
+
 
 class RenderTest(unittest.TestCase):
     def test_manifest_and_argument_boundaries(self):
@@ -200,9 +244,11 @@ else:
 
     def test_failed_revocation_is_reported_without_leaking_unknown_output(self):
         failed = {"status": {"conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}}
-        logs = "qa-bot: new token could not be delivered or revoked; reconcile bot id 987654321\n" + TOKEN
+        logs = ("qa-bot: bot lookup command failed\n"
+                "qa-bot: new token could not be delivered or revoked; reconcile bot id 987654321\n" + TOKEN)
         result = self.invoke([failed], logs)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bot lookup command failed", result.stderr)
         self.assertIn("could not be delivered or revoked; reconcile bot id 987654321", result.stderr)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["get", "logs"])
@@ -220,6 +266,16 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("qa-bot: revocation failed", result.stderr)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
+    def test_lookup_and_revoked_bot_diagnostics_are_reported_safely(self):
+        failed = {"status": {"failed": 1}}
+        for diagnostic in ("bot lookup command failed", "pinned username is not the expected QA bot",
+                           "existing QA bot has no active token; use rotate"):
+            with self.subTest(diagnostic=diagnostic):
+                result = self.invoke([failed], "qa-bot: " + diagnostic + "\n" + TOKEN)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(diagnostic, result.stderr)
+                self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
     def test_unrecognized_log_lines_are_not_printed(self):
         failed = {"status": {"conditions": [{"type": "FailureTarget", "status": "True"}]}}
