@@ -23,6 +23,30 @@ env:
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
 jobs:
+  build-darwin:
+    name: 'build: darwin (arm64)'
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross-build for macOS
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build ./...
+
   check-sticker-license:
     name: 'check: sticker-license'
     if: ${{ !cancelled() }}
@@ -2341,6 +2365,7 @@ jobs:
     name: ci
     if: ${{ always() }}
     needs:
+      - build-darwin
       - check-security
       - test-go
       - check-sticker-license
@@ -2370,6 +2395,7 @@ jobs:
     steps:
       - name: Require all CI lanes to pass
         env:
+          BUILD_DARWIN_RESULT: ${{ needs.build-darwin.result }}
           CHECK_SECURITY_RESULT: ${{ needs.check-security.result }}
           TEST_GO_RESULT: ${{ needs.test-go.result }}
           CHECK_STICKER_LICENSE_RESULT: ${{ needs.check-sticker-license.result }}
@@ -2403,6 +2429,7 @@ jobs:
             expected_publish_result=skipped
           fi
           lane_results=(
+            "build-darwin=$BUILD_DARWIN_RESULT"
             "check-security=$CHECK_SECURITY_RESULT"
             "test-go=$TEST_GO_RESULT"
             "check-sticker-license=$CHECK_STICKER_LICENSE_RESULT"
@@ -2427,7 +2454,8 @@ jobs:
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
             "publish-k8s-images=$PUBLISH_K8S_IMAGES_RESULT"
           )
-          if [[ "$CHECK_SECURITY_RESULT" != "success" ||
+          if [[ "$BUILD_DARWIN_RESULT" != "success" ||
+                "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
                 "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
                 "$TEST_PHOTO_WORKER_RESULT" != "success" ||
