@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-request:
+  check-qa-bot-request:
     name: 'check: qa-bot-request'
     runs-on: ubuntu-26.04
     steps:
@@ -40,9 +40,9 @@ jobs:
           [[ "$ISSUE" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]
           [[ "$API_READY" == true ]]
 
-  check-qa-writer:
+  check-qa-bot-writer:
     name: 'check: qa-bot-writer'
-    needs: check-request
+    needs: check-qa-bot-request
     if: ${{ contains(fromJSON('["create","rotate","probe"]'), inputs.action) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
@@ -83,8 +83,8 @@ jobs:
 
   ops-qa-bot:
     name: 'ops: qa-bot (prod)'
-    needs: [check-request, check-qa-writer]
-    if: ${{ !cancelled() && needs.check-request.result == 'success' && (needs.check-qa-writer.result == 'success' || needs.check-qa-writer.result == 'skipped') }}
+    needs: [check-qa-bot-request, check-qa-bot-writer]
+    if: ${{ !cancelled() && needs.check-qa-bot-request.result == 'success' && (needs.check-qa-bot-writer.result == 'success' || needs.check-qa-bot-writer.result == 'skipped') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     environment: k3s-prod
@@ -94,6 +94,7 @@ jobs:
       contents: read
     outputs:
       generated: ${{ steps.operation.outputs.generated }}
+      artifact_name: ${{ steps.operation.outputs.artifact_name }}
       live_sha: ${{ steps.live.outputs.sha }}
     steps:
       - name: Check out reviewed main
@@ -179,7 +180,7 @@ jobs:
           python3 deploy/k8s/render-qa-bot-job.py "$IMAGE" "$ACTION" > "$RUNNER_TEMP/qa-bot-job.json"
           kubectl create --dry-run=server -f "$RUNNER_TEMP/qa-bot-job.json" >/dev/null
           kubectl create -f "$RUNNER_TEMP/qa-bot-job.json" >/dev/null
-          kubectl wait --for=condition=complete job/qa-bot-operation -n teagram --timeout=240s
+          bash deploy/k8s/wait-qa-bot-job.sh
           kubectl logs job/qa-bot-operation -c qa-bot -n teagram > "$RUNNER_TEMP/qa-bot-result"
           IFS= read -r first < "$RUNNER_TEMP/qa-bot-result"
           generated=false
@@ -189,6 +190,7 @@ jobs:
             [[ "$(head -n 1 "$RUNNER_TEMP/qa-bot-token.age")" == '-----BEGIN AGE ENCRYPTED FILE-----' ]]
             [[ "$(tail -n 1 "$RUNNER_TEMP/qa-bot-token.age")" == '-----END AGE ENCRYPTED FILE-----' ]]
             generated=true
+            printf 'artifact_name=qa-bot-token-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           else
             [[ "$first" =~ ^state=(missing|found|exists|revoked)\ (bot_id=[1-9][0-9]*\ )?username=teagram_qa_test_bot(\ token_active=(true|false)|\ action=revoke)?$ ]]
             [[ "$(wc -l < "$RUNNER_TEMP/qa-bot-result")" == 1 ]]
@@ -199,7 +201,7 @@ jobs:
         if: ${{ steps.operation.outputs.generated == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qa-bot-token-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.operation.outputs.artifact_name }}
           path: ${{ runner.temp }}/qa-bot-token.age
           if-no-files-found: error
           retention-days: 1
@@ -207,9 +209,9 @@ jobs:
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/qa-bot.kubeconfig" "$RUNNER_TEMP/qa-bot-job.json" "$RUNNER_TEMP/qa-bot-result" "$RUNNER_TEMP/qa-bot-token.age"
 
-  ops-qa-delivery:
+  ops-qa-bot-delivery:
     name: 'ops: qa-bot-delivery'
-    needs: [check-request, ops-qa-bot]
+    needs: [check-qa-bot-request, ops-qa-bot]
     if: ${{ needs.ops-qa-bot.result == 'success' && (needs.ops-qa-bot.outputs.generated == 'true' || inputs.action == 'probe') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
@@ -219,7 +221,7 @@ jobs:
         if: ${{ needs.ops-qa-bot.outputs.generated == 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: qa-bot-token-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.ops-qa-bot.outputs.artifact_name }}
           path: ${{ runner.temp }}/qa-bot-delivery
       - name: Join the QA tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0

@@ -17,10 +17,7 @@ operation() {
   python3 "$root/deploy/k8s/render-qa-bot-job.py" ghcr.io/teagramhq/teagramd:ci "$mode" > "$tmp/job.json"
   kubectl create --dry-run=server -f "$tmp/job.json" >/dev/null
   kubectl create -f "$tmp/job.json" >/dev/null
-  if ! kubectl wait --for=condition=complete job/qa-bot-operation -n teagram --timeout=240s; then
-    kubectl describe job qa-bot-operation -n teagram >&2
-    return 1
-  fi
+  bash "$root/deploy/k8s/wait-qa-bot-job.sh"
   kubectl logs job/qa-bot-operation -c qa-bot -n teagram > "$tmp/$mode"
   if grep -Eq '[1-9][0-9]*:[A-Za-z0-9_-]{43}' "$tmp/$mode"; then
     printf '%s\n' 'QA bot job exposed a token in its logs' >&2
@@ -43,4 +40,12 @@ operation revoke
 grep -Eq '^state=revoked bot_id=[1-9][0-9]* username=teagram_qa_test_bot action=revoke$' "$tmp/revoke"
 operation status
 grep -Eq '^state=found bot_id=[1-9][0-9]* username=teagram_qa_test_bot token_active=false$' "$tmp/status"
+python3 "$root/deploy/k8s/render-qa-bot-job.py" ghcr.io/teagramhq/teagramd:ci probe > "$tmp/job.json"
+kubectl create -f "$tmp/job.json" >/dev/null
+if bash "$root/deploy/k8s/wait-qa-bot-job.sh" > "$tmp/failed-probe" 2>&1; then
+  printf '%s\n' 'QA bot probe unexpectedly succeeded after revocation' >&2
+  exit 1
+fi
+grep -Fxq 'qa-bot: QA bot has no active token' "$tmp/failed-probe"
+kubectl delete job qa-bot-operation -n teagram --cascade=foreground --wait=true --timeout=60s >/dev/null
 printf '%s\n' 'QA bot job passed against disposable k3s'

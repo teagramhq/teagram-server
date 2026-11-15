@@ -29,7 +29,7 @@ def main():
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": 180,
-            "ttlSecondsAfterFinished": 120,
+            "ttlSecondsAfterFinished": 360,
             "template": {
                 "metadata": {"labels": {"app.kubernetes.io/name": "qa-bot-operation"}},
                 "spec": {

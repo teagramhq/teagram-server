@@ -37,6 +37,8 @@ elif args == ['bot', 'create', 'teagram_qa_test_bot', 'Teagram QA Test'] or args
     state.write_text(json.dumps({'first_name':'Teagram QA Test', 'id':987654321, 'kind':'bot', 'owner':'user', 'state':'found', 'token_active':True}, separators=(',', ':'), sort_keys=True))
     print(os.environ.get('MOCK_TOKEN_OVERRIDE', os.environ['MOCK_TOKEN']))
 elif args == ['bot', 'revoke', '987654321']:
+    if os.environ.get('MOCK_REVOKE_FAIL'):
+        raise SystemExit(1)
     value = json.loads(state.read_text())
     value['token_active'] = False
     state.write_text(json.dumps(value, separators=(',', ':'), sort_keys=True))
@@ -113,6 +115,12 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("bot revoke", self.calls.read_text())
 
+    def test_failed_cleanup_revocation_requires_reconciliation(self):
+        result = self.invoke("create", extra_env={"MOCK_ENCRYPT_FAIL": "1", "MOCK_REVOKE_FAIL": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("new token could not be delivered or revoked; reconcile bot id 987654321", result.stderr)
+        self.assertTrue(json.loads(self.state.read_text())["token_active"])
+
 
 class RenderTest(unittest.TestCase):
     def test_manifest_and_argument_boundaries(self):
@@ -124,6 +132,7 @@ class RenderTest(unittest.TestCase):
             container = pod["containers"][0]
             self.assertEqual(job["metadata"]["name"], "qa-bot-operation")
             self.assertEqual(job["spec"]["backoffLimit"], 0)
+            self.assertGreater(job["spec"]["ttlSecondsAfterFinished"], 240)
             self.assertFalse(pod["automountServiceAccountToken"])
             self.assertEqual(container["image"], image)
             self.assertEqual(container["command"][-1], operation)
@@ -136,6 +145,93 @@ class RenderTest(unittest.TestCase):
             self.assertTrue(next(v for v in pod["initContainers"][1]["volumeMounts"] if v["name"] == "key-data")["readOnly"])
         for args in [(image, "other"), ("other:ci", "create"), (image, "create", "other_bot")]:
             self.assertNotEqual(subprocess.run(["python3", str(RENDER), *args], capture_output=True, check=False).returncode, 0)
+
+
+class WaitTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = pathlib.Path(self.temporary.name)
+        self.calls = self.path / "calls"
+        self.calls.write_text("")
+        kubectl = self.path / "kubectl"
+        kubectl.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+calls = pathlib.Path(os.environ['MOCK_CALLS'])
+previous = calls.read_text().splitlines()
+with calls.open('a') as f:
+    f.write(sys.argv[1] + '\\n')
+if sys.argv[1] == 'get':
+    states = json.loads(os.environ['MOCK_STATES'])
+    print(json.dumps(states[min(previous.count('get'), len(states) - 1)]))
+elif sys.argv[1] == 'logs':
+    if os.environ.get('MOCK_LOGS_UNAVAILABLE'):
+        raise SystemExit(1)
+    print(os.environ.get('MOCK_LOGS', ''))
+else:
+    raise SystemExit(99)
+""")
+        kubectl.chmod(0o700)
+        bash_env = self.path / "bash-env"
+        bash_env.write_text("sleep() { SECONDS=241; }\n")
+        self.env = os.environ | {
+            "PATH": f"{self.path}:{os.environ['PATH']}",
+            "MOCK_CALLS": str(self.calls),
+            "BASH_ENV": str(bash_env),
+        }
+
+    def invoke(self, states, logs="", **extra):
+        env = self.env | {"MOCK_STATES": json.dumps(states), "MOCK_LOGS": logs} | extra
+        return subprocess.run(["bash", str(ROOT / "deploy/k8s/wait-qa-bot-job.sh")],
+                              text=True, capture_output=True, env=env, timeout=5, check=False)
+
+    def test_completed_job_succeeds_without_printing_logs(self):
+        result = self.invoke([{"status": {"conditions": [{"type": "Complete", "status": "True"}]}}], TOKEN)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["get"])
+
+    def test_pending_job_can_complete(self):
+        (self.path / "bash-env").write_text("sleep() { :; }\n")
+        complete = {"status": {"conditions": [{"type": "Complete", "status": "True"}]}}
+        result = self.invoke([{"status": {}}, complete])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["get", "get"])
+
+    def test_failed_revocation_is_reported_without_leaking_unknown_output(self):
+        failed = {"status": {"conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}}
+        logs = "qa-bot: new token could not be delivered or revoked; reconcile bot id 987654321\n" + TOKEN
+        result = self.invoke([failed], logs)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not be delivered or revoked; reconcile bot id 987654321", result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["get", "logs"])
+
+    def test_failed_job_with_unavailable_logs_is_reported(self):
+        failed = {"status": {"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}}
+        result = self.invoke([failed], MOCK_LOGS_UNAVAILABLE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DeadlineExceeded", result.stderr)
+        self.assertIn("logs unavailable", result.stderr)
+
+    def test_explicit_revocation_failure_is_reported(self):
+        failed = {"status": {"failed": 1}}
+        result = self.invoke([failed], "qa-bot: revocation failed\n" + TOKEN)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("qa-bot: revocation failed", result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
+    def test_unrecognized_log_lines_are_not_printed(self):
+        failed = {"status": {"conditions": [{"type": "FailureTarget", "status": "True"}]}}
+        result = self.invoke([failed], "qa-bot: revocation failed " + TOKEN)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no recognized operation diagnostic", result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
+    def test_pending_job_times_out(self):
+        result = self.invoke([{"status": {}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timed out", result.stderr)
 
 
 if __name__ == "__main__":

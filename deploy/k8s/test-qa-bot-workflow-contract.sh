@@ -10,17 +10,21 @@ fail() { printf 'qa-bot workflow contract: %s\n' "$1" >&2; exit 1; }
 [[ "$(query '.on.workflow_dispatch.inputs.action.options | join(",")')" == create,rotate,revoke,status,probe ]] || fail 'operation allowlist changed'
 [[ "$(query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == action,issue ]] || fail 'unexpected dispatch input'
 [[ "$(query '.jobs.ops-qa-bot.environment')" == k3s-prod ]] || fail 'cluster credentials must stay in k3s-prod'
-[[ "$(query '.jobs.check-qa-writer.environment')" == demo && "$(query '.jobs.ops-qa-delivery.environment')" == demo ]] || fail 'QA writer credential must stay in demo'
+[[ "$(query '.jobs.check-qa-bot-writer.environment')" == demo && "$(query '.jobs.ops-qa-bot-delivery.environment')" == demo ]] || fail 'QA writer credential must stay in demo'
 [[ "$(query '.concurrency.group')" == deploy-teagram-server ]] || fail 'bot operations must serialize with deploys'
-validation=$(query '.jobs.check-request.steps[0].run')
+validation=$(query '.jobs.check-qa-bot-request.steps[0].run')
 [[ "$validation" == *'"$GITHUB_REF" == refs/heads/main'* && "$validation" == *'"$API_READY" == true'* ]] || fail 'main and readiness must be checked before credentials'
-[[ "$(query '.jobs.ops-qa-bot.needs | join(",")')" == check-request,check-qa-writer ]] || fail 'QA preflight must precede the cluster job'
+[[ "$(query '.jobs.ops-qa-bot.needs | join(",")')" == check-qa-bot-request,check-qa-bot-writer ]] || fail 'QA preflight must precede the cluster job'
 cluster_steps=$(query '.jobs.ops-qa-bot.steps[] | .run // ""')
 [[ "$cluster_steps" == *'kubectl create --dry-run=server'* && "$cluster_steps" == *'--from=cronjob/postgres-backup'* ]] || fail 'server dry-run and backup are required'
 [[ "$cluster_steps" == *'gh attestation verify'* && "$cluster_steps" == *'docker buildx imagetools inspect'* ]] || fail 'live image provenance must be verified'
-delivery=$(query '.jobs.ops-qa-delivery.steps[] | .run // ""')
+[[ "$cluster_steps" == *'bash deploy/k8s/wait-qa-bot-job.sh'* ]] || fail 'the job must use the sanitized failure detector'
+delivery=$(query '.jobs.ops-qa-bot-delivery.steps[] | .run // ""')
 [[ "$delivery" == *'bot-store'* && "$delivery" == *'bot-probe'* ]] || fail 'restricted delivery and live probe are required'
 [[ "$delivery" != *'kubectl exec'* ]] || fail 'the QA writer must not obtain pod exec'
+[[ "$(query '.jobs.ops-qa-bot.outputs.artifact_name')" == '${{ steps.operation.outputs.artifact_name }}' ]] || fail 'the producer must expose its artifact name'
+[[ "$(query '.jobs.ops-qa-bot.steps[] | select(.name == "Transfer only the encrypted token") | .with.name')" == '${{ steps.operation.outputs.artifact_name }}' ]] || fail 'upload must use the producer name'
+[[ "$(query '.jobs.ops-qa-bot-delivery.steps[] | select(.name == "Download the encrypted token") | .with.name')" == '${{ needs.ops-qa-bot.outputs.artifact_name }}' ]] || fail 'delivery retry must use the original producer name'
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/qa-bot-contract.XXXXXXXX")
 cleanup() { case "$tmp" in */qa-bot-contract.*) rm -rf -- "$tmp" ;; *) return 1 ;; esac; }
@@ -31,6 +35,7 @@ cat > "$tmp/kubectl" <<'MOCK'
 set -euo pipefail
 case "$1" in
   create|wait) ;;
+  get) printf '%s\n' '{"status":{"conditions":[{"type":"Complete","status":"True"}]}}' ;;
   logs)
     if [[ -n "${MOCK_RESULT:-}" ]]; then cat "$MOCK_RESULT"; exit 0; fi
     if [[ "${MOCK_BACKUP:-}" != missing ]]; then
@@ -58,6 +63,10 @@ printf '%s\n' 'action=create bot_id=123 username=teagram_qa_test_bot' \
   '-----BEGIN AGE ENCRYPTED FILE-----' 'ciphertext' '-----END AGE ENCRYPTED FILE-----' > "$MOCK_RESULT"
 bash "$tmp/operation.sh" > "$tmp/output" || fail 'encrypted token result was rejected'
 grep -Fxq 'generated=true' "$GITHUB_OUTPUT" || fail 'encrypted token was not selected for delivery'
+grep -Fxq 'artifact_name=qa-bot-token-123-1' "$GITHUB_OUTPUT" || fail 'the first attempt did not publish its artifact name'
+GITHUB_RUN_ATTEMPT=2
+artifact_name=$(sed -n 's/^artifact_name=//p' "$GITHUB_OUTPUT")
+[[ "$artifact_name" != "qa-bot-token-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]] || fail 'retry substituted the delivery attempt for the producer attempt'
 grep -Fxq -- '-----BEGIN AGE ENCRYPTED FILE-----' "$tmp/qa-bot-token.age" || fail 'encrypted token was not preserved'
 ACTION=rotate
 if bash "$tmp/operation.sh" > "$tmp/output" 2>&1; then fail 'result for a different action was accepted'; fi

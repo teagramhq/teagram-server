@@ -1090,8 +1090,10 @@ jobs:
           python3 -B deploy/k8s/test_qa_bot_operation.py
           python3 -B deploy/qa-invite/test_qa_bot_writer.py
           sh -n deploy/k8s/qa-bot-operation.sh
-          bash -n deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh
-          shellcheck deploy/k8s/qa-bot-operation.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh deploy/k8s/test-qa-bot-workflow-contract.sh
+          for script in deploy/k8s/wait-qa-bot-job.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh; do
+            bash -n "$script"
+          done
+          shellcheck deploy/k8s/qa-bot-operation.sh deploy/k8s/wait-qa-bot-job.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh deploy/k8s/test-qa-bot-workflow-contract.sh
 
       - name: Test QA invite TLS constraints and renewal
         run: sudo -n bash deploy/qa-invite/test-qa-invite-tls.sh
