@@ -61,8 +61,11 @@ class ConcurrencyTest(unittest.TestCase):
         queue.submit("failed-ci-deploy", deploy_policy)
         self.assertEqual(queue.pending, ["successful-ci-deploy", "failed-ci-deploy"])
         self.assertEqual(queue.cancelled, [])
-        self.assertEqual([queue.finish(), queue.finish(), queue.finish()],
-                         ["qa-running", "successful-ci-deploy", "failed-ci-deploy"])
+        execution_order = [queue.finish(), queue.finish(), queue.finish()]
+        self.assertEqual(execution_order, ["qa-running", "successful-ci-deploy", "failed-ci-deploy"])
+        conclusions = {"successful-ci-deploy": "success", "failed-ci-deploy": "failure"}
+        self.assertEqual([run for run in execution_order if conclusions.get(run) == "success"],
+                         ["successful-ci-deploy"])
 
     def test_qa_dispatch_does_not_displace_a_pending_deploy(self):
         queue = QueueModel("deploy-running")
