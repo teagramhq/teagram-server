@@ -52,8 +52,11 @@ body = source[start:end]
 if body.index("prepare_runtime_tmp_dirs\n") > body.index("compose up"):
     raise SystemExit("remote.sh: QA /tmp directories must be prepared before Compose up")
 PY
+python3 "$REPO_ROOT/.github/scripts/test_real_server_fixture_gate.py" \
+  RealServerFixtureGateTests.test_qa_invite_verification_token_is_process_scoped \
+  RealServerFixtureGateTests.test_qa_invite_uses_resolved_live_publication || fail 'QA browser release identity contract failed'
 grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
-grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
+grep -Fq 'bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
 grep -Fq 'id: sticker-bundle-cache' "$BROWSER_WORKFLOW" || fail 'QA browser job does not restore the validated sticker bundle'
 grep -Fq 'node22-python3.12.15-${{' "$BROWSER_WORKFLOW" || fail 'QA sticker bundle cache key does not match the generated toolchain'
 grep -Fq 'tools/stickerbundle/package-lock.json' "$BROWSER_WORKFLOW" || fail 'QA sticker bundle cache key omits its Node lockfile'

@@ -173,10 +173,13 @@ def fetch_repo_file(path: str, source_commit: str, *, fetch: Callable[[str], Any
 
 
 def public_key_fingerprint(pem: bytes) -> str:
+    openssl_env = os.environ.copy()
+    openssl_env.pop("GITHUB_TOKEN", None)
+    openssl_env.pop("GH_TOKEN", None)
     try:
         result = subprocess.run(
             ["openssl", "rsa", "-pubin", "-RSAPublicKey_out", "-outform", "DER"],
-            input=pem, capture_output=True, timeout=10, check=True,
+            input=pem, capture_output=True, timeout=10, check=True, env=openssl_env,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("reviewed RSA public key is invalid") from error
