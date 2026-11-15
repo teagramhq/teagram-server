@@ -178,6 +178,90 @@ kubectl get events --namespace teagram --sort-by=.lastTimestamp
 kubectl logs --namespace teagram job/<failed-backup-job> --all-containers=true
 ```
 
+## QA bot operations
+
+The main-only `QA bot operations.` workflow supports `create`, `rotate`,
+`revoke`, `status`, and `probe` for `teagram_qa_test_bot` only. The `k3s-prod`
+job uses the deploy kubeconfig, verifies the running server image and its main
+CI attestation, and runs a fixed-name Job. It shares the `Deploy.` concurrency
+group through delivery. Both workflows use `queue: max` so neither replaces a
+pending deploy; when the 100-run queue is full, a new run is cancelled. Before
+backup it checks that the server rollout is settled; queued deploys wait until
+the QA workflow releases the shared group. A rejected check makes no bot
+changes; dispatch again after the rollout settles. It also refuses an
+operation while a previous bot Job still exists. A mutation first creates a
+verified PostgreSQL backup. A non-root init container copies the
+server's read-only auth-key file into a group-readable, memory-backed volume:
+the bot CLI requires UID 0, but receives no filesystem override capability.
+Only ciphertext encrypted to the pinned
+QA age recipient leaves that Job; it is transferred as a one-day artifact to
+the `demo` environment's restricted QA writer, which checks `getMe` before
+atomically installing the mode-0600 token on QA. No plaintext is emitted to
+pod or Actions logs. `probe` verifies the same file through tailnet port 2447
+and reports the live image's source SHA.
+
+After this change is merged, install the reviewed
+`deploy/qa-invite/qa-account-writer.sh` on the QA box at
+`/home/qa/.local/bin/qa-account-writer` with mode 0700, retaining a verified
+copy of the prior writer for rollback. Also install a static Linux amd64 `age`
+binary at `/home/qa/.local/bin/age`, owner `qa`, mode 0700. Build it from the
+module version pinned in `go.mod` without changing the checkout:
+
+```sh
+install -d -m 0700 plans/qa-bot-tools
+cp go.mod plans/qa-bot-tools/age.mod
+cp go.sum plans/qa-bot-tools/age.sum
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=mod \
+  -modfile=plans/qa-bot-tools/age.mod -o plans/qa-bot-tools/age filippo.io/age/cmd/age
+```
+
+Stage both files through the existing `teagram-qa` SSH access, then back up and
+compare the current writer before replacing it by atomic rename:
+
+```sh
+scp plans/qa-bot-tools/age teagram-qa:.local/bin/.qa-bot-age.new
+scp deploy/qa-invite/qa-account-writer.sh teagram-qa:.local/bin/.qa-account-writer.new
+ssh teagram-qa 'set -eu
+  dir="$HOME/.local/bin"
+  backup=$(mktemp "$dir/qa-account-writer.before.XXXXXXXX")
+  cp -p "$dir/qa-account-writer" "$backup"
+  cmp -s "$dir/qa-account-writer" "$backup"
+  if test -e "$dir/age"; then
+    age_backup=$(mktemp "$dir/age.before.XXXXXXXX")
+    cp -p "$dir/age" "$age_backup"
+    cmp -s "$dir/age" "$age_backup"
+    printf "age_backup=%s\n" "$age_backup"
+  fi
+  chmod 0700 "$dir/.qa-bot-age.new" "$dir/.qa-account-writer.new"
+  mv -f "$dir/.qa-bot-age.new" "$dir/age"
+  mv -f "$dir/.qa-account-writer.new" "$dir/qa-account-writer"
+  printf "writer_backup=%s\n" "$backup"'
+```
+
+The existing `demo` environment's `QA_ACCOUNTS_*` settings and restricted key
+are reused; the preflight decrypts `qa-bot-recipient-check.age` with the QA
+identity before any bot mutation. Keep the identity at
+`/home/qa/.config/age/keys.txt`, mode 0600.
+
+Before a mutation, record a verified PostgreSQL backup and its restore path on
+the issue. Dispatch from main with, for example,
+`gh workflow run qa-bot.yml -f action=create -f issue=MAIN-123`. The workflow
+also verifies a fresh pre-operation backup and records its path in the run log.
+`create` does not issue a replacement token for an existing active bot and
+reports that no token was delivered. It fails for a revoked bot; use `rotate`
+to issue a replacement. If delivery fails after the producer succeeds, rerun
+the failed delivery job within the artifact's one-day retention period; it uses
+the original producer's ciphertext. Otherwise the issued token may still be
+active: inspect `status`, then `rotate` after the fixed-name Job is removed by
+its six-minute TTL. The workflow reports only recognized, sanitized operation
+failures. If cleanup revocation failed, reconcile the pinned bot and revoke it
+before issuing another token. Do not restore a whole database dump over new
+production writes merely to recover a bot token. To roll back delivery,
+copy the reported writer backup to `.qa-account-writer.restore` on QA and run
+`mv -f ~/.local/bin/.qa-account-writer.restore ~/.local/bin/qa-account-writer`;
+this takes seconds. Revert the workflow change through the normal review path.
+Rotate the pinned bot if a replacement credential is needed.
+
 ## Expiring channel-post summary initialization
 
 After the production rollout is ready and smoke checks pass, `Deploy.` runs

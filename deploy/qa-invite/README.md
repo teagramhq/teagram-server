@@ -154,10 +154,14 @@ public key to `/home/qa/.ssh/authorized_keys` with this exact option form:
 command="/home/qa/.local/bin/qa-account-writer",restrict ssh-ed25519 <public-key> qa-invite-account-writer
 ```
 
-The key is generated for this workflow only. Do not reuse a login or deploy
-key. Set the private half as `QA_ACCOUNTS_SSH_KEY`; the public half is safe to
-store in `authorized_keys`. The workflow's health check must return
-`qa-account-writer=ready` before it stores or creates an account.
+The key is restricted to this writer, which is also used by the QA-bot
+workflow. Do not reuse a login or deploy key. Set the private half as
+`QA_ACCOUNTS_SSH_KEY`; the public half is safe to store in `authorized_keys`.
+The workflow's health check must return `qa-account-writer=ready` before it
+stores or creates an account. The bot commands accept only an encrypted token
+for the pinned bot, verify its identity through port 2447, and atomically store
+it as `/home/qa/.telegram-bot-token` with mode 0600. Their separate preflight
+checks the QA age identity against a non-secret encrypted challenge.
 
 The demo deployment itself continues to use only `DEMO_DEPLOY_SSH_KEY` on
 charlie port 2223. The QA writer key is used only by the create-account

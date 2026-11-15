@@ -1066,11 +1066,15 @@ jobs:
       - name: Lint deployment, performance, and real-client workflows
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
-            .github/workflows/deploy.yml \
             .github/workflows/deploy-demo.yml \
             .github/workflows/deploy-qa-invite.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
+          # actionlint v1.7.12 predates GitHub's concurrency.queue key.
+          # The deploy and QA contracts validate the permitted value and location.
+          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+            -ignore '^unexpected key "queue" for "concurrency" section' \
+            .github/workflows/deploy.yml .github/workflows/qa-bot.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
@@ -1082,6 +1086,17 @@ jobs:
 
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
+
+      - name: Check QA bot workflow and operation fixtures
+        run: |
+          bash deploy/k8s/test-qa-bot-workflow-contract.sh
+          python3 -B deploy/k8s/test_qa_bot_operation.py
+          python3 -B deploy/qa-invite/test_qa_bot_writer.py
+          sh -n deploy/k8s/qa-bot-operation.sh
+          for script in deploy/k8s/wait-qa-bot-job.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh; do
+            bash -n "$script"
+          done
+          shellcheck deploy/k8s/qa-bot-operation.sh deploy/k8s/wait-qa-bot-job.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh deploy/k8s/test-qa-bot-workflow-contract.sh
 
       - name: Test QA invite TLS constraints and renewal
         run: sudo -n bash deploy/qa-invite/test-qa-invite-tls.sh
@@ -1518,6 +1533,9 @@ jobs:
           tar --extract --gzip --file "$tools_dir/$kubeconform_archive" --directory "$tools_dir" kubeconform
           chmod 0755 "$tools_dir/kubeconform"
           echo "$tools_dir" >> "$GITHUB_PATH"
+
+      - name: Test QA bot rollout guard with pinned kubectl
+        run: python3 -B deploy/k8s/test_qa_bot_rollout.py
 
       - name: Start pinned k3s API for client dry-run
         run: |
@@ -2295,6 +2313,11 @@ jobs:
             --discovery-file /client/client.json \
             --expect-registration-mode invite \
             --expect-user-invite-quota 5
+
+      - name: Test the pinned QA bot job
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash deploy/k8s/test-qa-bot-k8s.sh
 
       - name: Test PostgreSQL backup restore and account sign-in
         run: |

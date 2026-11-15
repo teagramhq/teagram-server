@@ -187,6 +187,8 @@ check_ci_contract() {
   manifest_download="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Install pinned kubectl and kubeconform") | .run')"
   [[ "$(grep --fixed-strings --count -- '--retry 5 --retry-delay 2 --retry-max-time 120 --connect-timeout 10 --max-time 60' <<< "$manifest_download")" == 2 ]] ||
     ci_fail 'pinned Kubernetes tool downloads must retry transient upstream gateway failures'
+  [[ "$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Test QA bot rollout guard with pinned kubectl") | .run')" == 'python3 -B deploy/k8s/test_qa_bot_rollout.py' ]] ||
+    ci_fail 'the QA bot rollout guard must be tested with pinned kubectl'
   manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
   [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
      "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
@@ -661,6 +663,10 @@ check_contract() {
     fail 'concurrency group must be deploy-teagram-server'
   [[ "$(query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'concurrency must not cancel a deploy in progress'
+  [[ "$(query '.concurrency.queue')" == 'max' ]] ||
+    fail 'production deploys must not replace pending runs in the shared group'
+  [[ "$(query '[.jobs | to_entries[] | select(.value.concurrency.queue != null) | .key] | join(",")')" == '' ]] ||
+    fail 'only the production workflow may declare a queue'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
@@ -1112,6 +1118,8 @@ self_test() {
     'del(.concurrency)'
     '.concurrency.group = "deploy"'
     '.concurrency."cancel-in-progress" = true'
+    '.concurrency.queue = "single"'
+    'del(.concurrency.queue)'
     '(.jobs."deploy-server".steps[] | select(.name == "Check out the tested source") | .with.ref) = "main"'
     '(.jobs."deploy-server".steps[] | select(.name == "Check out the tested source") | .with."persist-credentials") = true'
     '(.jobs."deploy-server".steps[] | select(.name == "Upload the demo deployment target") | .with.name) = "wrong-target"'
@@ -1192,6 +1200,7 @@ self_test() {
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'
+    'del(.jobs."check-k8s-manifests".steps[] | select(.name == "Test QA bot rollout guard with pinned kubectl"))'
     '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'

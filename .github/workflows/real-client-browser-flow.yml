@@ -28,7 +28,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: 8b28c847bc1ff07c711ee4fa9c3a83fc5d8b4324
+      REAL_CLIENT_WEB_REVISION: a4a18f827973d9188b44705ac039bb227772cd11
       REAL_CLIENT_GUEST_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
@@ -144,6 +144,10 @@ jobs:
       - name: Install pinned web dependencies
         working-directory: web-source
         run: pnpm install --frozen-lockfile
+
+      - name: Test matched message acknowledgements
+        working-directory: web-source
+        run: pnpm exec vitest run src/tests/realClientSendAckTrace.test.ts
 
       - name: Install pinned guest signup runner dependencies
         working-directory: guest-web-source

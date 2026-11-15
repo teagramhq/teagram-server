@@ -1,0 +1,270 @@
+name: QA bot operations.
+
+run-name: ${{ format('QA bot {0} [{1}]', inputs.action, inputs.issue) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operation for the pinned QA bot
+        required: true
+        type: choice
+        options: [create, rotate, revoke, status, probe]
+      issue:
+        description: Multica issue key for the CI router
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-teagram-server
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  check-qa-bot-request:
+    name: 'check: qa-bot-request'
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Validate the request before accessing credentials
+        env:
+          ACTION: ${{ inputs.action }}
+          ISSUE: ${{ inputs.issue }}
+          API_READY: ${{ vars.K3S_TAILNET_API_READY }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ACTION" =~ ^(create|rotate|revoke|status|probe)$ ]]
+          [[ "$ISSUE" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]
+          [[ "$API_READY" == true ]]
+
+  check-qa-bot-writer:
+    name: 'check: qa-bot-writer'
+    needs: check-qa-bot-request
+    if: ${{ contains(fromJSON('["create","rotate","probe"]'), inputs.action) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment: demo
+    steps:
+      - name: Check out the reviewed recipient test
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Join the QA tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: ${{ vars.QA_ACCOUNTS_HOST }}
+      - name: Check the restricted QA bot writer
+        env:
+          QA_KEY: ${{ secrets.QA_ACCOUNTS_SSH_KEY }}
+          QA_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
+          QA_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+          QA_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$QA_HOST" =~ ^[A-Za-z0-9.-]+$ && "$QA_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$QA_PORT >= 1 && 10#$QA_PORT <= 65535 ))
+          [[ -n "$QA_KEY" && -n "$QA_KNOWN_HOSTS" ]]
+          umask 077
+          key="$RUNNER_TEMP/qa-bot-key"
+          hosts="$RUNNER_TEMP/qa-bot-hosts"
+          trap 'rm -f -- "$key" "$hosts"' EXIT
+          printf '%s\n' "$QA_KEY" > "$key"
+          printf '%s\n' "$QA_KNOWN_HOSTS" > "$hosts"
+          ssh -T -p "$QA_PORT" -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hosts" \
+            "qa@$QA_HOST" bot-health < deploy/qa-invite/qa-bot-recipient-check.age | grep -Fxq 'qa-bot-writer=ready'
+
+  ops-qa-bot:
+    name: 'ops: qa-bot (prod)'
+    needs: [check-qa-bot-request, check-qa-bot-writer]
+    if: ${{ !cancelled() && needs.check-qa-bot-request.result == 'success' && (needs.check-qa-bot-writer.result == 'success' || needs.check-qa-bot-writer.result == 'skipped') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    environment: k3s-prod
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      generated: ${{ steps.operation.outputs.generated }}
+      artifact_name: ${{ steps.operation.outputs.artifact_name }}
+      live_sha: ${{ steps.live.outputs.sha }}
+    steps:
+      - name: Check out reviewed main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned kubectl
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qa-bot-tools"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl --output "$RUNNER_TEMP/qa-bot-tools/kubectl"
+          printf '%s  %s\n' 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8 "$RUNNER_TEMP/qa-bot-tools/kubectl" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/qa-bot-tools/kubectl"
+          echo "$RUNNER_TEMP/qa-bot-tools" >> "$GITHUB_PATH"
+      - name: Install the restricted cluster kubeconfig
+        env:
+          KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KUBECONFIG_CONTENT" ]]
+          install -m 0600 /dev/null "$RUNNER_TEMP/qa-bot.kubeconfig"
+          printf '%s\n' "$KUBECONFIG_CONTENT" > "$RUNNER_TEMP/qa-bot.kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/qa-bot.kubeconfig" >> "$GITHUB_ENV"
+          server=$(kubectl --kubeconfig "$RUNNER_TEMP/qa-bot.kubeconfig" config view --minify -o 'jsonpath={.clusters[0].cluster.server}')
+          ca=$(kubectl --kubeconfig "$RUNNER_TEMP/qa-bot.kubeconfig" config view --minify -o 'jsonpath={.clusters[0].cluster.certificate-authority-data}')
+          insecure=$(kubectl --kubeconfig "$RUNNER_TEMP/qa-bot.kubeconfig" config view --minify -o 'jsonpath={.clusters[0].cluster.insecure-skip-tls-verify}')
+          [[ "$server" == 'https://teagram.tailaa4918.ts.net:6443' && -n "$ca" && -z "$insecure" ]]
+      - name: Join the production tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.K3S_TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.K3S_TS_OAUTH_SECRET }}
+          tags: tag:k3s-deploy
+          ping: teagram.tailaa4918.ts.net
+      - name: Verify the live server image and source
+        id: live
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pod=$(kubectl get pod teagramd-0 -n teagram -o json)
+          image=$(jq -er '.spec.containers[] | select(.name == "teagramd") | .image' <<< "$pod")
+          [[ "$image" =~ ^ghcr\.io/teagramhq/teagramd@sha256:[0-9a-f]{64}$ ]]
+          jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' <<< "$pod" >/dev/null
+          current=$(kubectl get statefulset teagramd -n teagram -o json | jq -er '.spec.template.spec.containers[] | select(.name == "teagramd") | .image')
+          [[ "$current" == "$image" ]]
+          image_info=$(docker buildx imagetools inspect "$image" --format '{{json .Image}}')
+          sha=$(jq -er '.config.Labels["org.opencontainers.image.revision"]' <<< "$image_info")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(jq -r '.config.Labels["org.opencontainers.image.source"]' <<< "$image_info")" == https://github.com/teagramhq/teagram-server ]]
+          gh attestation verify "oci://$image" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
+            --source-digest "$sha" --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml --format json >/dev/null
+          printf 'image=%s\nsha=%s\n' "$image" "$sha" >> "$GITHUB_OUTPUT"
+          printf 'live_sha=%s\n' "$sha"
+      - name: Check production rollout is settled
+        run: |
+          set -euo pipefail
+          if ! kubectl rollout status statefulset/teagramd -n teagram \
+            --timeout=10s --request-timeout=10s; then
+            printf '%s\n' 'production teagramd rollout is not settled' >&2
+            exit 1
+          fi
+      - name: Take and verify a pre-operation backup
+        if: ${{ contains(fromJSON('["create","rotate","revoke"]'), inputs.action) }}
+        run: |
+          set -euo pipefail
+          job="qa-bot-backup-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          kubectl create job "$job" --from=cronjob/postgres-backup -n teagram
+          kubectl wait --for=condition=complete "job/$job" -n teagram --timeout=900s
+          backup=$(kubectl logs "job/$job" -n teagram --all-containers=true)
+          verified=''
+          count=0
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^backup=verified\ path=/backups/teagram-[A-Za-z0-9TZ._-]+\.dump\ bytes=[1-9][0-9]*\ sha256=[0-9a-f]{64}$ ]]; then
+              verified=$line
+              ((count += 1))
+            fi
+          done <<< "$backup"
+          [[ "$count" == 1 ]]
+          printf '%s\n' "$verified"
+      - name: Run the pinned bot operation
+        id: operation
+        env:
+          IMAGE: ${{ steps.live.outputs.image }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 deploy/k8s/render-qa-bot-job.py "$IMAGE" "$ACTION" > "$RUNNER_TEMP/qa-bot-job.json"
+          kubectl create --dry-run=server -f "$RUNNER_TEMP/qa-bot-job.json" >/dev/null
+          kubectl create -f "$RUNNER_TEMP/qa-bot-job.json" >/dev/null
+          bash deploy/k8s/wait-qa-bot-job.sh
+          kubectl logs job/qa-bot-operation -c qa-bot -n teagram > "$RUNNER_TEMP/qa-bot-result"
+          IFS= read -r first < "$RUNNER_TEMP/qa-bot-result"
+          generated=false
+          if [[ "$first" =~ ^action=(create|rotate)\ bot_id=[1-9][0-9]*\ username=teagram_qa_test_bot$ ]]; then
+            [[ "$ACTION" == "${BASH_REMATCH[1]}" ]]
+            tail -n +2 "$RUNNER_TEMP/qa-bot-result" > "$RUNNER_TEMP/qa-bot-token.age"
+            [[ "$(head -n 1 "$RUNNER_TEMP/qa-bot-token.age")" == '-----BEGIN AGE ENCRYPTED FILE-----' ]]
+            [[ "$(tail -n 1 "$RUNNER_TEMP/qa-bot-token.age")" == '-----END AGE ENCRYPTED FILE-----' ]]
+            generated=true
+            printf 'artifact_name=qa-bot-token-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$first" =~ ^state=(missing|found|exists|revoked)\ (bot_id=[1-9][0-9]*\ )?username=teagram_qa_test_bot(\ token_active=(true|false)|\ action=revoke)?$ ]]
+            [[ "$(wc -l < "$RUNNER_TEMP/qa-bot-result")" == 1 ]]
+            if [[ "$ACTION" == create && "$first" =~ ^state=exists\ bot_id=[1-9][0-9]*\ username=teagram_qa_test_bot\ token_active=true$ ]]; then
+              printf '%s\n' 'QA bot already exists; no token was issued or delivered.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          printf '%s\n' "$first"
+          printf 'generated=%s\n' "$generated" >> "$GITHUB_OUTPUT"
+      - name: Transfer only the encrypted token
+        if: ${{ steps.operation.outputs.generated == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.operation.outputs.artifact_name }}
+          path: ${{ runner.temp }}/qa-bot-token.age
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove temporary cluster access and results
+        if: ${{ always() }}
+        run: rm -f -- "$RUNNER_TEMP/qa-bot.kubeconfig" "$RUNNER_TEMP/qa-bot-job.json" "$RUNNER_TEMP/qa-bot-result" "$RUNNER_TEMP/qa-bot-token.age"
+
+  ops-qa-bot-delivery:
+    name: 'ops: qa-bot-delivery'
+    needs: [check-qa-bot-request, ops-qa-bot]
+    if: ${{ needs.ops-qa-bot.result == 'success' && (needs.ops-qa-bot.outputs.generated == 'true' || inputs.action == 'probe') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment: demo
+    steps:
+      - name: Download the encrypted token
+        if: ${{ needs.ops-qa-bot.outputs.generated == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.ops-qa-bot.outputs.artifact_name }}
+          path: ${{ runner.temp }}/qa-bot-delivery
+      - name: Join the QA tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: ${{ vars.QA_ACCOUNTS_HOST }}
+      - name: Deliver and probe the pinned bot
+        env:
+          QA_KEY: ${{ secrets.QA_ACCOUNTS_SSH_KEY }}
+          QA_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
+          QA_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+          QA_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
+          GENERATED: ${{ needs.ops-qa-bot.outputs.generated }}
+          LIVE_SHA: ${{ needs.ops-qa-bot.outputs.live_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$QA_HOST" =~ ^[A-Za-z0-9.-]+$ && "$QA_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$QA_PORT >= 1 && 10#$QA_PORT <= 65535 ))
+          [[ -n "$QA_KEY" && -n "$QA_KNOWN_HOSTS" && "$LIVE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          umask 077
+          key="$RUNNER_TEMP/qa-bot-key"
+          hosts="$RUNNER_TEMP/qa-bot-hosts"
+          trap 'rm -f -- "$key" "$hosts" "$RUNNER_TEMP/qa-bot-delivery/qa-bot-token.age"' EXIT
+          printf '%s\n' "$QA_KEY" > "$key"
+          printf '%s\n' "$QA_KNOWN_HOSTS" > "$hosts"
+          ssh_command=(ssh -T -p "$QA_PORT" -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hosts" "qa@$QA_HOST")
+          if [[ "$GENERATED" == true ]]; then
+            "${ssh_command[@]}" bot-store < "$RUNNER_TEMP/qa-bot-delivery/qa-bot-token.age" | grep -Fxq 'qa-bot-token=stored'
+          fi
+          "${ssh_command[@]}" bot-probe </dev/null | grep -Fxq 'getMe=200 username=teagram_qa_test_bot'
+          printf 'getMe=200 username=teagram_qa_test_bot live_sha=%s\n' "$LIVE_SHA"

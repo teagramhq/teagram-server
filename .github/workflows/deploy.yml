@@ -24,6 +24,7 @@ permissions:
 concurrency:
   group: deploy-teagram-server
   cancel-in-progress: false
+  queue: max
 
 jobs:
   check-deploy-gate:
