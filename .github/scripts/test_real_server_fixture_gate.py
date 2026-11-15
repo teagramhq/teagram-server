@@ -178,6 +178,80 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_qa_invite_verification_token_is_process_scoped(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  real-client-browser-flow:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job)
+        job_settings = job.group("body").split("    steps:\n", 1)[0]
+        self.assertNotRegex(workflow.split("jobs:\n", 1)[0], r"(?m)^env:")
+        self.assertNotRegex(job_settings, r"(?i)(?:GITHUB_TOKEN|GH_TOKEN|github\.token|secrets\.)")
+        self.assertRegex(job_settings, r"(?m)^    permissions:\n      contents: read$")
+        step = re.search(
+            r"(?ms)^      - name: Exercise the QA invite TLS edge and Web artifact\n"
+            r"(?P<body>.*?)(?=^      - |\Z)",
+            job.group("body"),
+        )
+        self.assertIsNotNone(step)
+        step_env = re.search(r"(?ms)^        env:\n(?P<env>.*?)^        run: \|\n", step.group("body"))
+        self.assertIsNotNone(step_env)
+        env_lines = step_env.group("env").splitlines()
+        token_lines = [line for line in env_lines if re.match(r"\s*GITHUB_TOKEN:", line)]
+        self.assertEqual(
+            token_lines, ["          GITHUB_TOKEN: ${{ github.token }}"]
+        )
+        for line in env_lines:
+            if line not in token_lines:
+                self.assertNotRegex(line, r"(?i)(?:GITHUB_TOKEN|GH_TOKEN|github\.token|secrets\.)")
+        run = step.group("body").split("        run: |\n", 1)[1]
+        for relative_path in (
+            "deploy/qa-invite/test-qa-invite-browser-flow.sh",
+            "deploy/qa-invite/compose.yaml",
+        ):
+            source = (repo_root / relative_path).read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"(?i)(?:GITHUB_TOKEN|GH_TOKEN|github\.token|secrets\.)")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            resolver = root / "python3"
+            resolver.write_text(
+                '#!/bin/sh\n[ "${GITHUB_TOKEN-}" = fixture-github-token ] || exit 1\n'
+                '[ "$#" = 4 ] && [ "$1" = deploy/teagram-demo/resolve_web_artifact_pin.py ] && '
+                '[ "$2" = --verify-published-release-identity ] && '
+                '[ "$3" = "$QA_WEB_SOURCE_SHA" ] && [ "$4" = "$QA_WEB_ARTIFACT_DIGEST" ] || exit 1\n'
+                'printf \'%s\\n\' "$FIXTURE_WEB_IDENTITY"\n', encoding="utf-8"
+            )
+            resolver.chmod(0o755)
+            browser = root / "bash"
+            browser.write_text(
+                '#!/bin/sh\n[ "$1" = deploy/qa-invite/test-qa-invite-browser-flow.sh ] || exit 1\n'
+                'if env | grep -Fq fixture-github-token; then exit 1; fi\n'
+                'printf \'%s\\n\' "$QA_WEB_VERIFIED_IDENTITY" > "$CAPTURE_PATH"\n', encoding="utf-8"
+            )
+            browser.chmod(0o755)
+            identity = '{"sourceCommit":"fixture"}'
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                   "GITHUB_TOKEN": "fixture-github-token", "QA_WEB_SOURCE_SHA": "a" * 40,
+                   "QA_WEB_ARTIFACT_DIGEST": "sha256:" + "b" * 64,
+                   "FIXTURE_WEB_IDENTITY": identity, "CAPTURE_PATH": str(root / "identity")}
+            result = subprocess.run(
+                ["/bin/bash", "-eo", "pipefail", "-c", textwrap.dedent(run)],
+                cwd=root, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "identity").read_text(encoding="utf-8"), identity + "\n")
+            self.assertNotIn("fixture-github-token", result.stdout + result.stderr)
+            (root / "identity").unlink()
+            result = subprocess.run(
+                ["/bin/bash", "-eo", "pipefail", "-c", textwrap.dedent(run)],
+                cwd=root, env={**env, "GITHUB_TOKEN": ""}, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / "identity").exists())
+
     def test_qa_invite_uses_resolved_live_publication(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
@@ -194,17 +268,23 @@ class RealServerFixtureGateTests(unittest.TestCase):
             git.chmod(0o755)
             python = root / "python3"
             python.write_text(
-                '#!/bin/sh\n[ "$2" = --verify-published-release-identity ] && '
+                '#!/bin/sh\n[ -z "${GITHUB_TOKEN+x}" ] && [ -z "${FAIL_IF_RESOLVED+x}" ] || exit 1\n'
+                '[ "$2" = --verify-published-release-identity ] && '
                 '[ "$3" = "$QA_WEB_SOURCE_SHA" ] && [ "$4" = "$QA_WEB_ARTIFACT_DIGEST" ] || exit 1\n'
-                'printf \'%s\\n\' \'{"endpoint":"wss://web.example/apiws","fingerprint":"cccccccccccccccc"}\'\n',
+                'printf \'%s\\n\' "$FAKE_IDENTITY"\n',
                 encoding="utf-8",
             )
             python.chmod(0o755)
             sha = "a" * 40
+            identity = {"schemaVersion": 1, "mode": "published", "sourceCommit": sha,
+                        "artifactDigest": "sha256:" + "b" * 64, "deployable": False,
+                        "endpoint": "wss://web.example/apiws", "fingerprint": "c" * 16}
             env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "FAKE_SHA": sha,
                    "WEB_ROOT": temp, "WEB_REVISION": sha, "PUBLIC_WEB_ROOT": temp,
                    "QA_WEB_SOURCE_SHA": sha, "QA_WEB_ARTIFACT_DIGEST": "sha256:" + "b" * 64,
-                   "REPO_ROOT": str(repo_root)}
+                   "FAKE_IDENTITY": json.dumps(identity), "REPO_ROOT": str(repo_root)}
+            for name in ("GITHUB_TOKEN", "QA_WEB_VERIFIED_IDENTITY", "FAIL_IF_RESOLVED"):
+                env.pop(name, None)
             command = ["bash", "-e", "-c", 'fail() { echo "$*" >&2; exit 1; }\n' + script[start:end]]
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -212,6 +292,16 @@ class RealServerFixtureGateTests(unittest.TestCase):
                 with self.subTest(name=name):
                     invalid = {**env, name: value}
                     result = subprocess.run(command, env=invalid, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+            verified = {**env, "QA_WEB_VERIFIED_IDENTITY": json.dumps(identity), "FAIL_IF_RESOLVED": "1"}
+            result = subprocess.run(command, env=verified, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for invalid in ("", "{}", json.dumps({**identity, "sourceCommit": "d" * 40}),
+                            json.dumps({**identity, "artifactDigest": "sha256:" + "e" * 64}),
+                            json.dumps({**identity, "deployable": True})):
+                with self.subTest(verified_identity=invalid):
+                    result = subprocess.run(command, env={**verified, "QA_WEB_VERIFIED_IDENTITY": invalid},
+                                            capture_output=True, text=True)
                     self.assertNotEqual(result.returncode, 0)
 
     def test_real_client_resolves_live_web_without_checked_in_pin(self) -> None:
