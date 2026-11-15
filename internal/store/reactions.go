@@ -457,10 +457,14 @@ func (s *Store) ReactionsByOwnerLocal(ctx context.Context, ownerID, localID int6
 // two render identically. Ids with no reaction are absent from the map rather
 // than present and empty.
 func (s *Store) ReactionsByOwnerLocalIDs(ctx context.Context, ownerID int64, localIDs []int64) (map[int64][]Reaction, error) {
+	return reactionsByOwnerLocalIDs(ctx, s.q, ownerID, localIDs)
+}
+
+func reactionsByOwnerLocalIDs(ctx context.Context, q *db.Queries, ownerID int64, localIDs []int64) (map[int64][]Reaction, error) {
 	if len(localIDs) == 0 {
 		return map[int64][]Reaction{}, nil
 	}
-	rows, err := s.q.ReactionsByMessages(ctx, db.ReactionsByMessagesParams{
+	rows, err := q.ReactionsByMessages(ctx, db.ReactionsByMessagesParams{
 		OwnerID:  ownerID,
 		LocalIds: localIDs,
 	})
