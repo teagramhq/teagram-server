@@ -34,6 +34,24 @@ done
 
 bash -n "$FORCED_COMMAND" "$WRITER" "$REMOTE" "$INSTALLER" "$ROLLBACK" "$ROLLBACK_TEST" "$TLS_HELPER" "$TLS_TEST" "$QA_BROWSER_FLOW" || fail 'shell syntax failed'
 node --check "$QA_BROWSER_RUNNER" || fail 'QA browser runner syntax failed'
+python3 - "$REMOTE" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for expected in (
+    'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$tls_edge_tmp_dir"',
+    '[[ "$(stat -c \'%u:%g:%a\' "$haproxy_tmp_dir")" == \'0:0:1777\'',
+):
+    if expected not in source:
+        raise SystemExit(f"remote.sh: missing /tmp directory ownership guard: {expected}")
+
+start = source.index("do_up() {")
+end = source.index("\n}", start)
+body = source[start:end]
+if body.index("prepare_runtime_tmp_dirs\n") > body.index("compose up"):
+    raise SystemExit("remote.sh: QA /tmp directories must be prepared before Compose up")
+PY
 grep -Fq 'Exercise the QA invite TLS edge and Web artifact' "$BROWSER_WORKFLOW" || fail 'CI does not exercise the QA invite TLS edge and Web artifact'
 grep -Fq 'run: bash deploy/qa-invite/test-qa-invite-browser-flow.sh' "$BROWSER_WORKFLOW" || fail 'CI does not run the QA invite browser regression'
 grep -Fq 'id: sticker-bundle-cache' "$BROWSER_WORKFLOW" || fail 'QA browser job does not restore the validated sticker bundle'
@@ -120,8 +138,10 @@ jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/te
     and ($snapshot.publicDemo == "separate-compose-project")
     and (
       [$config.services[] | .volumes[]? | select(.type == "bind")] as $binds
-      | ($binds | length == 7)
+      | ($binds | length == 9)
         and all($binds[]; (.source | startswith($state + "/") or . == $web_source))
+        and any($binds[]; .source == ($state + "/tmp/tls-edge") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
+        and any($binds[]; .source == ($state + "/tmp/haproxy") and .target == "/tmp" and (.read_only // false) == false and .bind.create_host_path == false)
         and any($binds[]; .source == $web_source and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only == true)
         and any($binds[]; .source == ($state + "/tls/identity/public") and .target == "/run/qa-invite/tls" and .read_only == true)
         and any($binds[]; .source == ($state + "/client") and .target == "/run/qa-invite/client" and .read_only == true)
@@ -131,6 +151,10 @@ jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/te
       [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
       startswith($state + "/") or . == $web_source
     )
+    and .services["tls-edge"].read_only == true
+    and .services.haproxy.read_only == true
+    and ([.services[] | .tmpfs[]? | select(startswith("/tmp"))] | length == 0)
+    and any(.services["tls-edge"].tmpfs[]; startswith("/var/cache/nginx:"))
     and all(
       [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
       startswith("/tmp/") | not
@@ -138,7 +162,7 @@ jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/te
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'rendered QA Compose differs from the sanitized live target snapshot or escapes its isolated state'
 jq -e --arg state "$test_state_dir" '
   [.services[] | .volumes[]? | select(.type == "bind") | .source] as $sources
-  | ($sources | length == 7)
+  | ($sources | length == 9)
     and all($sources[]; (startswith($state + "/") or . == "/opt/teagram-demo/.state/teagram-demo/public-client") and (startswith("/tmp/") | not))
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'a QA bind source is missing, outside persistent state, or under /tmp'
 jq -e '

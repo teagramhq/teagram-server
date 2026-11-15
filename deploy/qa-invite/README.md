@@ -24,6 +24,12 @@ the previous image and database where the previous release is available.
 `down` removes only the containers and network; it retains volumes, the
 environment, TLS identity, and rollback dumps.
 
+The `tls-edge` and `haproxy` `/tmp` directories are disk-backed bind mounts at
+`$STATE_DIR/tmp/<service>`, with one root-owned mode `1777` directory per
+service. The deploy creates them before Compose starts the stack. These writable
+mounts remain available while each container's root filesystem stays
+read-only.
+
 ## Operations
 
 Run the `Deploy qa-invite.` workflow from `main` with one operation:

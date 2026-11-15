@@ -119,9 +119,14 @@ services:
     cpus: "0.25"
     pids_limit: 48
     tmpfs:
-      - /tmp:size=8m,mode=1777
       - /var/cache/nginx:size=16m,uid=101,gid=101,mode=0750
     volumes:
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:?set TEAGRAM_QA_INVITE_STATE_DIR}/tmp/tls-edge
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
       - type: bind
         source: ./nginx.conf
         target: /etc/nginx/nginx.conf
@@ -164,11 +169,15 @@ services:
     memswap_limit: 64m
     cpus: "0.25"
     pids_limit: 48
-    tmpfs:
-      - /tmp:size=8m,mode=1777
     ports:
       - "${TEAGRAM_QA_INVITE_BIND_ADDRESS:?set QA-only host bind}:443:8444/tcp"
     volumes:
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:?set TEAGRAM_QA_INVITE_STATE_DIR}/tmp/haproxy
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
       - type: bind
         source: ./haproxy.cfg
         target: /usr/local/etc/haproxy/haproxy.cfg
