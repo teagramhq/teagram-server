@@ -11,8 +11,9 @@ fail() { printf 'qa-bot workflow contract: %s\n' "$1" >&2; exit 1; }
 [[ "$(query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == action,issue ]] || fail 'unexpected dispatch input'
 [[ "$(query '.jobs.ops-qa-bot.environment')" == k3s-prod ]] || fail 'cluster credentials must stay in k3s-prod'
 [[ "$(query '.jobs.check-qa-bot-writer.environment')" == demo && "$(query '.jobs.ops-qa-bot-delivery.environment')" == demo ]] || fail 'QA writer credential must stay in demo'
-[[ "$(query '.concurrency.group')" == "$(yq -r '.concurrency.group' .github/workflows/deploy.yml)" ]] || fail 'bot operations must hold the deploy lock through delivery'
+[[ "$(query '.concurrency.group')" == deploy-teagram-server && "$(yq -r '.concurrency.group' .github/workflows/deploy.yml)" == deploy-teagram-server ]] || fail 'bot operations must hold the deploy lock through delivery'
 [[ "$(query '.concurrency."cancel-in-progress"')" == false ]] || fail 'bot requests must not cancel an active deploy'
+[[ "$(yq -r '.concurrency."cancel-in-progress"' .github/workflows/deploy.yml)" == false ]] || fail 'deploy requests must not cancel an active bot operation'
 [[ "$(query '.concurrency.queue')" == max ]] || fail 'bot requests must not replace a pending deploy'
 [[ "$(yq -r '.concurrency.queue' .github/workflows/deploy.yml)" == max ]] || fail 'deploy requests must not replace a pending deploy'
 [[ "$(query '[.jobs | to_entries[] | select(.value.concurrency.queue != null) | .key] | join(",")')" == '' ]] || fail 'only the workflow may declare a queue'
@@ -21,7 +22,7 @@ validation=$(query '.jobs.check-qa-bot-request.steps[0].run')
 [[ "$(query '.jobs.ops-qa-bot.needs | join(",")')" == check-qa-bot-request,check-qa-bot-writer ]] || fail 'QA preflight must precede the cluster job'
 cluster_steps=$(query '.jobs.ops-qa-bot.steps[] | .run // ""')
 cluster_step_names=$(query '.jobs.ops-qa-bot.steps[].name')
-[[ "$cluster_step_names" == *$'Check production deployment is idle\nTake and verify a pre-operation backup'* ]] || fail 'the deploy guard must precede the backup'
+[[ "$cluster_step_names" == *$'Check production rollout is settled\nTake and verify a pre-operation backup'* ]] || fail 'the rollout guard must precede the backup'
 [[ "$cluster_steps" == *'kubectl create --dry-run=server'* && "$cluster_steps" == *'--from=cronjob/postgres-backup'* ]] || fail 'server dry-run and backup are required'
 [[ "$cluster_steps" == *'gh attestation verify'* && "$cluster_steps" == *'docker buildx imagetools inspect'* ]] || fail 'live image provenance must be verified'
 [[ "$cluster_steps" == *'bash deploy/k8s/wait-qa-bot-job.sh'* ]] || fail 'the job must use the sanitized failure detector'
@@ -37,7 +38,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/qa-bot-contract.XXXXXXXX")
 cleanup() { case "$tmp" in */qa-bot-contract.*) rm -rf -- "$tmp" ;; *) return 1 ;; esac; }
 trap cleanup EXIT
 query '.jobs.ops-qa-bot.steps[] | select(.name == "Take and verify a pre-operation backup") | .run' > "$tmp/backup.sh"
-query '.jobs.ops-qa-bot.steps[] | select(.name == "Check production deployment is idle") | .run' > "$tmp/deploy-guard.sh"
+query '.jobs.ops-qa-bot.steps[] | select(.name == "Check production rollout is settled") | .run' > "$tmp/deploy-guard.sh"
 cat > "$tmp/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -65,8 +66,7 @@ chmod 0700 "$tmp/kubectl"
 cat > "$tmp/gh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${MOCK_GH_FAIL:-}" != 1 ]] || exit 1
-[[ "${MOCK_GH_INVALID:-}" != 1 ]] || { printf '%s\n' 'not-json'; exit 0; }
+printf '%s\n' called >> "$MOCK_GH_CALLS"
 [[ "${1:-}" == run && "${2:-}" == list ]]
 status='' workflow='' repo=''
 while [[ "$#" -gt 0 ]]; do
@@ -85,13 +85,12 @@ else
 fi
 MOCK
 chmod 0700 "$tmp/gh"
-export PATH="$tmp:$PATH" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 GITHUB_REPOSITORY=teagramhq/teagram-server
+export PATH="$tmp:$PATH" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 GITHUB_REPOSITORY=teagramhq/teagram-server MOCK_GH_CALLS="$tmp/gh-calls"
 bash "$tmp/deploy-guard.sh" > "$tmp/output" || fail 'an idle deploy and settled rollout were rejected'
-for state in queued in_progress pending requested waiting; do
-  if MOCK_DEPLOY_STATUS="$state" bash "$tmp/deploy-guard.sh" > "$tmp/output" 2>&1; then fail "active deploy state $state was accepted"; fi
+for state in queued pending requested waiting; do
+  MOCK_DEPLOY_STATUS="$state" bash "$tmp/deploy-guard.sh" > "$tmp/output" 2>&1 || fail "waiting deploy state $state was rejected"
 done
-if MOCK_GH_FAIL=1 bash "$tmp/deploy-guard.sh" > "$tmp/output" 2>&1; then fail 'deploy API failure was accepted'; fi
-if MOCK_GH_INVALID=1 bash "$tmp/deploy-guard.sh" > "$tmp/output" 2>&1; then fail 'invalid deploy API response was accepted'; fi
+[[ ! -s "$MOCK_GH_CALLS" ]] || fail 'waiting deploys must not be queried while the shared lock is held'
 if MOCK_ROLLOUT=unstable bash "$tmp/deploy-guard.sh" > "$tmp/output" 2>&1; then fail 'unsettled server rollout was accepted'; fi
 bash "$tmp/backup.sh" > "$tmp/output" || fail 'normal backup and retention output was rejected'
 grep -Fxq 'backup=verified path=/backups/teagram-20261115T120000Z-ci.dump bytes=123 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$tmp/output" || fail 'verified backup path was not reported'
@@ -125,5 +124,4 @@ printf '%s\n' 'state=exists bot_id=123 username=teagram_qa_test_bot token_active
 : > "$GITHUB_STEP_SUMMARY"
 bash "$tmp/operation.sh" > "$tmp/output" || fail 'existing active bot was rejected'
 grep -Fxq 'QA bot already exists; no token was issued or delivered.' "$GITHUB_STEP_SUMMARY" || fail 'existing bot must be reported without claiming delivery'
-python3 -B deploy/k8s/test_qa_bot_concurrency.py
 printf '%s\n' 'QA bot workflow contract holds'

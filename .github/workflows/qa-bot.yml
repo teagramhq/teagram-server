@@ -152,22 +152,9 @@ jobs:
             --source-digest "$sha" --signer-workflow teagramhq/teagram-server/.github/workflows/ci.yml --format json >/dev/null
           printf 'image=%s\nsha=%s\n' "$image" "$sha" >> "$GITHUB_OUTPUT"
           printf 'live_sha=%s\n' "$sha"
-      - name: Check production deployment is idle
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check production rollout is settled
         run: |
           set -euo pipefail
-          for state in queued in_progress pending requested waiting; do
-            if ! runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --all \
-              --status "$state" --limit 1 --json databaseId,status); then
-              printf '%s\n' 'could not check production deployment runs' >&2
-              exit 1
-            fi
-            if ! jq -e 'type == "array" and length == 0' <<< "$runs" >/dev/null; then
-              printf 'production deploy is active or cannot be verified (state=%s)\n' "$state" >&2
-              exit 1
-            fi
-          done
           if ! kubectl rollout status statefulset/teagramd -n teagram --watch=false \
             --timeout=10s --request-timeout=10s; then
             printf '%s\n' 'production teagramd rollout is not settled' >&2

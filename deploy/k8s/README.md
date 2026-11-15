@@ -186,9 +186,9 @@ job uses the deploy kubeconfig, verifies the running server image and its main
 CI attestation, and runs a fixed-name Job. It shares the `Deploy.` concurrency
 group through delivery. Both workflows use `queue: max` so neither replaces a
 pending deploy; when the 100-run queue is full, a new run is cancelled. Before
-backup it checks for queued or active deploys and an
-unsettled server rollout, failing if either is found. A rejected check makes no
-bot changes; dispatch again after deployment settles. It also refuses an
+backup it checks that the server rollout is settled; queued deploys wait until
+the QA workflow releases the shared group. A rejected check makes no bot
+changes; dispatch again after the rollout settles. It also refuses an
 operation while a previous bot Job still exists. A mutation first creates a
 verified PostgreSQL backup. A non-root init container copies the
 server's read-only auth-key file into a group-readable, memory-backed volume:
