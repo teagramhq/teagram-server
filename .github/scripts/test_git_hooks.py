@@ -343,6 +343,37 @@ class PrePushHookTests(unittest.TestCase):
         self.assertEqual([tool for tool, _, _ in calls], ["gitleaks"], calls)
         self.assertIn(f"--log-opts=main..{docs_sha}", calls[0][2])
 
+    def test_qa_queue_lint_exception_is_scoped_and_guarded(self) -> None:
+        self.git("checkout", "--quiet", "main")
+        self.git("checkout", "--quiet", "-b", "workflow-queue")
+        workflows = self.repo / ".github/workflows"
+        workflows.mkdir(parents=True)
+        for name in ("qa-bot.yml", "other.yml"):
+            (workflows / name).write_text("name: fixture\n", encoding="utf-8")
+        self.git("add", ".github/workflows")
+        self.git("commit", "--quiet", "-m", "test: add workflow fixtures")
+        workflow_sha = self.git("rev-parse", "HEAD").strip()
+        self.write_tool("actionlint")
+        self.write_tool("yq")
+
+        result = self.run_hook(local_sha=workflow_sha, ref_name="workflow-queue")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.calls()
+        self.assertTrue(any(tool == "bash" and args == "deploy/k8s/test-qa-bot-workflow-contract.sh"
+                            for tool, _, args in calls), calls)
+        lint = [args for tool, _, args in calls if tool == "actionlint"]
+        qa = [args for args in lint if ".github/workflows/qa-bot.yml" in args]
+        other = [args for args in lint if ".github/workflows/other.yml" in args]
+        self.assertEqual(len(qa), 1, lint)
+        self.assertEqual(len(other), 1, lint)
+        self.assertIn('unexpected key "queue"', qa[0])
+        self.assertNotIn('unexpected key "queue"', other[0])
+
+        rejected = self.run_hook(local_sha=workflow_sha, ref_name="workflow-queue", fail_tool="bash")
+        self.assertNotEqual(rejected.returncode, 0, "failed QA contract was ignored")
+        self.assertFalse(any(tool == "actionlint" and ".github/workflows/qa-bot.yml" in args
+                             for tool, _, args in self.calls()))
+
     def test_deleted_ref_skips_checks_and_existing_ref_scans_branch_commits(self) -> None:
         deleted = self.run_hook(local_sha=ZERO_SHA, remote_sha=self.feature_sha)
 

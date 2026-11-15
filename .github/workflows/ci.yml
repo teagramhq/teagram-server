@@ -1069,9 +1069,12 @@ jobs:
             .github/workflows/deploy.yml \
             .github/workflows/deploy-demo.yml \
             .github/workflows/deploy-qa-invite.yml \
-            .github/workflows/qa-bot.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
+          # actionlint v1.7.12 predates GitHub's concurrency.queue key.
+          # The QA workflow contract validates the permitted value and location.
+          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+            -ignore '^unexpected key "queue" for "concurrency" section' .github/workflows/qa-bot.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
