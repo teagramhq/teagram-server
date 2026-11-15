@@ -228,6 +228,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
             browser = root / "bash"
             browser.write_text(
                 '#!/bin/sh\n[ "$1" = deploy/qa-invite/test-qa-invite-browser-flow.sh ] || exit 1\n'
+                'for arg in "$@"; do case "$arg" in *fixture-github-token*) exit 1;; esac; done\n'
+                '[ "$#" = 1 ] || exit 1\n'
                 'if env | grep -Fq fixture-github-token; then exit 1; fi\n'
                 'printf \'%s\\n\' "$QA_WEB_VERIFIED_IDENTITY" > "$CAPTURE_PATH"\n', encoding="utf-8"
             )
