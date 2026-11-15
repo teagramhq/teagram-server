@@ -54,7 +54,7 @@ Pod Security blocks the direct node-root escape described above.
 ## GitHub secret storage
 
 - The kubeconfig is stored only as a secret of the GitHub environment
-  `k3s-prod`, used by the Kubernetes deploy job alone. Do not use the
+  `k3s-prod`, used by the Kubernetes deploy and reviewed QA-bot jobs. Do not use the
   `production` environment, which already holds the Compose deploy's secrets
   and would expose this token to that job.
 - Restrict `k3s-prod` deployment branches to `main`. No
@@ -62,6 +62,12 @@ Pod Security blocks the direct node-root escape described above.
 - Protect the workflow files that reference the environment with branch
   protection and required review, because anyone who can change such a
   workflow on `main` can read the secret.
+- The QA-bot job uses the existing deploy Role to create a fixed-name Job,
+  never pod exec or an agent Role grant. It verifies the live image provenance,
+  takes a verified backup before mutation, and encrypts a token to the pinned QA
+  age recipient before the Job writes any logs. The separate QA delivery job
+  uses only the `demo` environment's restricted writer key. A ciphertext-only
+  artifact connects the jobs and expires after one day.
 - The deploy job writes the kubeconfig to a file with mode `0600`, never
   prints it, and removes it when the job ends. It is never committed, placed
   in an image, uploaded as an artifact, or pasted into an issue or comment.

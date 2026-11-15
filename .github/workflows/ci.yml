@@ -1069,6 +1069,7 @@ jobs:
             .github/workflows/deploy.yml \
             .github/workflows/deploy-demo.yml \
             .github/workflows/deploy-qa-invite.yml \
+            .github/workflows/qa-bot.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
@@ -1082,6 +1083,15 @@ jobs:
 
       - name: Check isolated QA invite deployment contract
         run: deploy/qa-invite/test-qa-invite-contract.sh
+
+      - name: Check QA bot workflow and operation fixtures
+        run: |
+          bash deploy/k8s/test-qa-bot-workflow-contract.sh
+          python3 -B deploy/k8s/test_qa_bot_operation.py
+          python3 -B deploy/qa-invite/test_qa_bot_writer.py
+          sh -n deploy/k8s/qa-bot-operation.sh
+          bash -n deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh
+          shellcheck deploy/k8s/qa-bot-operation.sh deploy/k8s/test-qa-bot-k8s.sh deploy/qa-invite/qa-account-writer.sh deploy/k8s/test-qa-bot-workflow-contract.sh
 
       - name: Test QA invite TLS constraints and renewal
         run: sudo -n bash deploy/qa-invite/test-qa-invite-tls.sh
@@ -2295,6 +2305,11 @@ jobs:
             --discovery-file /client/client.json \
             --expect-registration-mode invite \
             --expect-user-invite-quota 5
+
+      - name: Test the pinned QA bot job
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          bash deploy/k8s/test-qa-bot-k8s.sh
 
       - name: Test PostgreSQL backup restore and account sign-in
         run: |

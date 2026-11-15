@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # Match literal shell expressions in the workflow.
+set -Eeuo pipefail
+
+workflow=.github/workflows/qa-bot.yml
+query() { yq -r "$1" "$workflow"; }
+fail() { printf 'qa-bot workflow contract: %s\n' "$1" >&2; exit 1; }
+
+[[ "$(query '.on | keys | join(",")')" == workflow_dispatch ]] || fail 'only manual dispatch is allowed'
+[[ "$(query '.on.workflow_dispatch.inputs.action.options | join(",")')" == create,rotate,revoke,status,probe ]] || fail 'operation allowlist changed'
+[[ "$(query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == action,issue ]] || fail 'unexpected dispatch input'
+[[ "$(query '.jobs.ops-qa-bot.environment')" == k3s-prod ]] || fail 'cluster credentials must stay in k3s-prod'
+[[ "$(query '.jobs.check-qa-writer.environment')" == demo && "$(query '.jobs.ops-qa-delivery.environment')" == demo ]] || fail 'QA writer credential must stay in demo'
+[[ "$(query '.concurrency.group')" == deploy-teagram-server ]] || fail 'bot operations must serialize with deploys'
+validation=$(query '.jobs.check-request.steps[0].run')
+[[ "$validation" == *'"$GITHUB_REF" == refs/heads/main'* && "$validation" == *'"$API_READY" == true'* ]] || fail 'main and readiness must be checked before credentials'
+[[ "$(query '.jobs.ops-qa-bot.needs | join(",")')" == check-request,check-qa-writer ]] || fail 'QA preflight must precede the cluster job'
+cluster_steps=$(query '.jobs.ops-qa-bot.steps[] | .run // ""')
+[[ "$cluster_steps" == *'kubectl create --dry-run=server'* && "$cluster_steps" == *'--from=cronjob/postgres-backup'* ]] || fail 'server dry-run and backup are required'
+[[ "$cluster_steps" == *'gh attestation verify'* && "$cluster_steps" == *'docker buildx imagetools inspect'* ]] || fail 'live image provenance must be verified'
+delivery=$(query '.jobs.ops-qa-delivery.steps[] | .run // ""')
+[[ "$delivery" == *'bot-store'* && "$delivery" == *'bot-probe'* ]] || fail 'restricted delivery and live probe are required'
+[[ "$delivery" != *'kubectl exec'* ]] || fail 'the QA writer must not obtain pod exec'
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/qa-bot-contract.XXXXXXXX")
+cleanup() { case "$tmp" in */qa-bot-contract.*) rm -rf -- "$tmp" ;; *) return 1 ;; esac; }
+trap cleanup EXIT
+query '.jobs.ops-qa-bot.steps[] | select(.name == "Take and verify a pre-operation backup") | .run' > "$tmp/backup.sh"
+cat > "$tmp/kubectl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  create|wait) ;;
+  logs)
+    if [[ -n "${MOCK_RESULT:-}" ]]; then cat "$MOCK_RESULT"; exit 0; fi
+    if [[ "${MOCK_BACKUP:-}" != missing ]]; then
+      printf '%s\n' 'backup=verified path=/backups/teagram-20261115T120000Z-ci.dump bytes=123 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    if [[ "${MOCK_BACKUP:-}" == duplicate ]]; then
+      printf '%s\n' 'backup=verified path=/backups/teagram-20261115T120001Z-ci.dump bytes=123 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    printf '%s\n' 'backup=retention-complete retained=7'
+    ;;
+  *) exit 99 ;;
+esac
+MOCK
+chmod 0700 "$tmp/kubectl"
+export PATH="$tmp:$PATH" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1
+bash "$tmp/backup.sh" > "$tmp/output" || fail 'normal backup and retention output was rejected'
+grep -Fxq 'backup=verified path=/backups/teagram-20261115T120000Z-ci.dump bytes=123 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$tmp/output" || fail 'verified backup path was not reported'
+if MOCK_BACKUP=missing bash "$tmp/backup.sh" >/dev/null; then fail 'missing backup was accepted'; fi
+if MOCK_BACKUP=duplicate bash "$tmp/backup.sh" >/dev/null; then fail 'ambiguous backup was accepted'; fi
+
+query '.jobs.ops-qa-bot.steps[] | select(.name == "Run the pinned bot operation") | .run' > "$tmp/operation.sh"
+export RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$tmp/github-output" IMAGE=ghcr.io/teagramhq/teagramd:ci
+export MOCK_RESULT="$tmp/result" ACTION=create
+printf '%s\n' 'action=create bot_id=123 username=teagram_qa_test_bot' \
+  '-----BEGIN AGE ENCRYPTED FILE-----' 'ciphertext' '-----END AGE ENCRYPTED FILE-----' > "$MOCK_RESULT"
+bash "$tmp/operation.sh" > "$tmp/output" || fail 'encrypted token result was rejected'
+grep -Fxq 'generated=true' "$GITHUB_OUTPUT" || fail 'encrypted token was not selected for delivery'
+grep -Fxq -- '-----BEGIN AGE ENCRYPTED FILE-----' "$tmp/qa-bot-token.age" || fail 'encrypted token was not preserved'
+ACTION=rotate
+if bash "$tmp/operation.sh" > "$tmp/output" 2>&1; then fail 'result for a different action was accepted'; fi
+ACTION=status
+printf '%s\n' 'state=missing username=teagram_qa_test_bot' > "$MOCK_RESULT"
+: > "$GITHUB_OUTPUT"
+bash "$tmp/operation.sh" > "$tmp/output" || fail 'missing-bot status was rejected'
+grep -Fxq 'generated=false' "$GITHUB_OUTPUT" || fail 'status unexpectedly selected a token for delivery'
+printf '%s\n' '123:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA' > "$MOCK_RESULT"
+if bash "$tmp/operation.sh" > "$tmp/output" 2>&1; then fail 'plaintext token was accepted as metadata'; fi
+if grep -Fq '123:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA' "$tmp/output"; then fail 'plaintext token was printed on failure'; fi
+printf '%s\n' 'QA bot workflow contract holds'
