@@ -297,7 +297,7 @@ func openDirectoryAt(parentFD int, name string, expectedUID uint32, field string
 }
 
 func validateStat(stat *unix.Stat_t, kind uint32, expectedUID uint32, field string) error {
-	if stat.Mode&unix.S_IFMT != kind {
+	if uint64(stat.Mode)&unix.S_IFMT != uint64(kind) {
 		return reject("invalid", field)
 	}
 	if stat.Uid != expectedUID {

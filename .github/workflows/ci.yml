@@ -23,6 +23,30 @@ env:
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
 jobs:
+  build-darwin:
+    name: 'build: darwin (arm64)'
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross-build for macOS
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build ./...
+
   check-sticker-license:
     name: 'check: sticker-license'
     if: ${{ !cancelled() }}
@@ -2387,6 +2411,7 @@ jobs:
       - check-k8s-manifests
       - test-k8s-deploy
       - publish-k8s-images
+      - build-darwin
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -2416,6 +2441,7 @@ jobs:
           K8S_MANIFESTS_RESULT: ${{ needs.check-k8s-manifests.result }}
           K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
           PUBLISH_K8S_IMAGES_RESULT: ${{ needs.publish-k8s-images.result }}
+          BUILD_DARWIN_RESULT: ${{ needs.build-darwin.result }}
           PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           expected_publish_result=success
@@ -2449,6 +2475,7 @@ jobs:
             "check-k8s-manifests=$K8S_MANIFESTS_RESULT"
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
             "publish-k8s-images=$PUBLISH_K8S_IMAGES_RESULT"
+            "build-darwin=$BUILD_DARWIN_RESULT"
           )
           if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -2472,7 +2499,8 @@ jobs:
                 "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ||
                 "$K8S_MANIFESTS_RESULT" != "success" ||
                 "$K8S_DEPLOY_RESULT" != "success" ||
-                "$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result" ]]; then
+                "$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result" ||
+                "$BUILD_DARWIN_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
