@@ -425,7 +425,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
             re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
         )
         expected_lanes = workflow_jobs - excluded_jobs
-        matrix_names = {
+        variant_names = {
+            "build-darwin": "build: darwin (arm64)",
             "build-browser-acceptance-image": "build: browser-acceptance-image (${{ matrix.arch }})",
             "test-photo-worker": "test: photo-worker (${{ matrix.arch }})",
         }
@@ -442,8 +443,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
             self.assertIsNotNone(job, f"CI workflow has no {job_id} job")
             name = re.search(r"(?m)^    name: ['\"]?(.*?)['\"]?$", job.group("body"))
             self.assertIsNotNone(name, f"CI job {job_id} has no explicit display name")
-            if job_id in matrix_names:
-                expected_name = matrix_names[job_id]
+            if job_id in variant_names:
+                expected_name = variant_names[job_id]
             else:
                 stage, _, subject = job_id.partition("-")
                 expected_name = f"{stage}: {subject}"
@@ -620,22 +621,24 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertEqual(fork_success.returncode, 0, fork_success.stdout + fork_success.stderr)
 
-        failed_lane = needed_lanes[0]
-        environment[result_envs[failed_lane]] = "failure"
-        failure = subprocess.run(
-            ["bash", "-e", "-c", shell_script],
-            capture_output=True,
-            check=False,
-            env=environment,
-            text=True,
-        )
-        self.assertNotEqual(
-            failure.returncode,
-            0,
-            "CI aggregate returned success when a required lane failed: "
-            + failure.stdout
-            + failure.stderr,
-        )
+        for failed_lane in (needed_lanes[0], "build-darwin"):
+            with self.subTest(failed_lane=failed_lane):
+                failure_environment = environment.copy()
+                failure_environment[result_envs[failed_lane]] = "failure"
+                failure = subprocess.run(
+                    ["bash", "-e", "-c", shell_script],
+                    capture_output=True,
+                    check=False,
+                    env=failure_environment,
+                    text=True,
+                )
+                self.assertNotEqual(
+                    failure.returncode,
+                    0,
+                    f"CI aggregate returned success when {failed_lane} failed: "
+                    + failure.stdout
+                    + failure.stderr,
+                )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
