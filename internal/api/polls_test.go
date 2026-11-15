@@ -973,12 +973,29 @@ func TestPollReadSurfacesHydrateViewerScopedMedia(t *testing.T) {
 	if memberPoll.Results.Results[0].Correct {
 		t.Fatal("member non-voter history revealed the answer key")
 	}
+	if _, rpc := sendReaction(t, s, member.ID, api.InputPeerChat(member.ID, chat.ID), int64(memberMessage.ID), &tg.ReactionEmoji{Emoticon: "❤"}); rpc != nil {
+		t.Fatalf("react to poll: %s", rpc.ErrorMessage)
+	}
+	assertPollReaction := func(label string, messages []tg.MessageClass) {
+		t.Helper()
+		reactions, ok := findPollMessage(t, messages).GetReactions()
+		if !ok || len(reactions.Results) != 1 {
+			t.Errorf("%s poll reactions = %#v present=%t, want a heart", label, reactions, ok)
+			return
+		}
+		heart, ok := reactions.Results[0].Reaction.(*tg.ReactionEmoji)
+		_, chosen := reactions.Results[0].GetChosenOrder()
+		if !ok || heart.Emoticon != "❤" || reactions.Results[0].Count != 1 || !chosen {
+			t.Errorf("%s poll reaction = %#v, want one chosen heart", label, reactions.Results[0])
+		}
+	}
 
 	dialogs, err := api.GetDialogsForTest(s, member.ID)
 	if err != nil {
 		t.Fatalf("getDialogs: %v", err)
 	}
 	assertPollMessageForViewer(t, messagesFromDialogResponse(t, dialogs), memberMessage.ID, false)
+	assertPollReaction("getDialogs", messagesFromDialogResponse(t, dialogs))
 	peerDialogs, err := api.GetPeerDialogsForTest(s, member.ID, &tg.MessagesGetPeerDialogsRequest{
 		Peers: []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: api.InputPeerChat(member.ID, chat.ID)}},
 	})
@@ -986,6 +1003,7 @@ func TestPollReadSurfacesHydrateViewerScopedMedia(t *testing.T) {
 		t.Fatalf("getPeerDialogs: %v", err)
 	}
 	assertPollMessageForViewer(t, messagesFromDialogResponse(t, peerDialogs), memberMessage.ID, false)
+	assertPollReaction("getPeerDialogs", messagesFromDialogResponse(t, peerDialogs))
 
 	if _, err = api.UpdatePinnedMessageForTest(s, creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
 		Peer: api.InputPeerChat(creator.ID, chat.ID), ID: creatorMessage.ID,

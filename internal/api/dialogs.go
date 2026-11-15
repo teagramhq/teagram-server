@@ -195,6 +195,16 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	profile.mark("dialog and peer assembly")
 
+	reactionIDs := make([]int64, len(tops))
+	for i, message := range tops {
+		reactionIDs[i] = message.LocalID
+	}
+	reactionsByMsg, err := h.store.ReactionsByOwnerLocalIDs(r.Ctx, r.UserID, reactionIDs)
+	if err != nil {
+		h.log.Error("get dialogs reactions", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	profile.mark("top message reactions")
 	files, err := h.loadFiles(r.Ctx, tops)
 	if err != nil {
 		h.log.Error("get dialogs files", "user_id", r.UserID, "err", err)
@@ -210,14 +220,14 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, 0, len(tops))
 	for i, m := range tops {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMessage, pollErr := messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, topCreateUsers[i], files, nil, reactionsByMsg[m.LocalID], poll)
 			if pollErr != nil {
 				h.log.Error("render dialog poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
 				return nil, errInternal
 			}
 			tlMsgs = append(tlMsgs, tlMessage)
 		} else {
-			tlMsgs = append(tlMsgs, h.messageToTL(m, topCreateUsers[i], files, nil, nil, h.dcID))
+			tlMsgs = append(tlMsgs, h.messageToTL(m, topCreateUsers[i], files, nil, reactionsByMsg[m.LocalID], h.dcID))
 		}
 	}
 	profile.mark("top message rendering")
@@ -463,13 +473,13 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 			}
 			if poll, ok := pollViews[selected.Message.LocalID]; ok {
-				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, media, nil, nil, poll)
+				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, media, nil, snapshot.ReactionsByLocalID[selected.Message.LocalID], poll)
 				if pollErr != nil {
 					return nil, pollErr
 				}
 				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
-				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, media, nil, nil, h.dcID))
+				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, media, nil, snapshot.ReactionsByLocalID[selected.Message.LocalID], h.dcID))
 			}
 		case selected.ChannelMessage != nil:
 			channel := snapshot.Channels[d.PeerID]

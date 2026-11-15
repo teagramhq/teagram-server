@@ -34,18 +34,19 @@ type PeerDialog struct {
 // read-only transaction so selection, entitlement, hydration, and state all
 // describe the same database snapshot.
 type PeerDialogsSnapshot struct {
-	Dialogs           []PeerDialog
-	CloudDrafts       map[PeerDialogKey]CloudDraft
-	State             State
-	Users             map[int64]User
-	EntitledUsers     map[int64]bool
-	ExplicitUserPeers map[int64]bool
-	Chats             map[int64]Chat
-	ChatMembers       map[int64][]Participant
-	ChatMembership    map[int64]bool
-	Channels          map[int64]Channel
-	ChannelMembers    map[int64]ChannelMember
-	Files             map[int64]File
+	Dialogs            []PeerDialog
+	CloudDrafts        map[PeerDialogKey]CloudDraft
+	State              State
+	Users              map[int64]User
+	EntitledUsers      map[int64]bool
+	ExplicitUserPeers  map[int64]bool
+	Chats              map[int64]Chat
+	ChatMembers        map[int64][]Participant
+	ChatMembership     map[int64]bool
+	Channels           map[int64]Channel
+	ChannelMembers     map[int64]ChannelMember
+	Files              map[int64]File
+	ReactionsByLocalID map[int64][]Reaction
 }
 
 // SetPeerDialogsSnapshotHook installs the test-only synchronization seam used
@@ -148,8 +149,14 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog messages: %w", err)
 	}
 	messages := make(map[int64]Message, len(messageRows))
+	reactionIDs := make([]int64, 0, len(messageRows))
 	for _, row := range messageRows {
 		messages[row.LocalID] = messageFromRow(row)
+		reactionIDs = append(reactionIDs, row.LocalID)
+	}
+	snapshot.ReactionsByLocalID, err = reactionsByOwnerLocalIDs(ctx, qtx, ownerID, reactionIDs)
+	if err != nil {
+		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog reactions: %w", err)
 	}
 	for key, d := range selected {
 		if m, ok := messages[d.Dialog.TopMessage]; ok {
