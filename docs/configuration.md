@@ -23,6 +23,7 @@ Rate-limit counts use integer syntax and windows use Go duration syntax. A zero 
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Its host also forms the discovery `websocket.endpoint` as `wss://host/apiws`. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` | `false` | Set to `true` to advertise demo guest sign-up and the stored wipe generation in discovery and `client-config`; requires the migrated Postgres row, and a non-boolean value fails configuration loading |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
+| `TG_PREVIOUS_PUBLIC_LINK_PREFIXES` | *(unset)* | Comma-separated previous public link prefixes accepted for revoking existing channel invites; each follows the same rules as `TG_PUBLIC_LINK_PREFIX`. New links always use the current prefix |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
 | `TG_PG_MAX_CONNS` | `8` | Maximum pooled Postgres sessions per process, at least 2 |
 | `TG_PG_MIN_CONNS` | `2` | Minimum pooled sessions, from 0 through `TG_PG_MAX_CONNS` |

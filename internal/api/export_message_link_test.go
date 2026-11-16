@@ -101,12 +101,16 @@ func TestExportMessageLinkReturnsCurrentPublicAndPrivateAddresses(t *testing.T) 
 	generatedResult, err := api.ExportMessageLinkForTest(s, creator.ID, &tg.ChannelsExportMessageLinkRequest{
 		Channel: api.InputChannel(creator.ID, public.ID),
 		ID:      1,
-	})
+	}, prefix, "https://old.example/")
 	if err != nil {
 		t.Fatalf("direct export: %v", err)
 	}
-	if _, ok := generatedResult.(*tg.ExportedMessageLink); !ok {
+	generatedLink, ok := generatedResult.(*tg.ExportedMessageLink)
+	if !ok {
 		t.Fatalf("direct export result = %T, want *tg.ExportedMessageLink", generatedResult)
+	}
+	if generatedLink.Link != prefix+"currentnews/1" {
+		t.Errorf("direct export link = %q, want current prefix", generatedLink.Link)
 	}
 
 	if err := s.EditChannelUsername(ctx, public.ID, creator.ID, "newscurrent"); err != nil {

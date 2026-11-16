@@ -379,6 +379,45 @@ func TestLoadServerConfigPreservesPublicLinkPrefix(t *testing.T) {
 	}
 }
 
+func TestLoadServerConfigPreviousPublicLinkPrefixes(t *testing.T) {
+	t.Setenv("TG_PUBLIC_LINK_PREFIX", "https://links.example.test/")
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "unset"},
+		{name: "multiple", value: "https://old.example/, https://older.example/", want: []string{"https://old.example/", "https://older.example/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_PREVIOUS_PUBLIC_LINK_PREFIXES", tc.value)
+			cfg, err := config.LoadServerConfig(discardLog())
+			if err != nil {
+				t.Fatalf("LoadServerConfig: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.PreviousPublicLinkPrefixes, tc.want) {
+				t.Fatalf("previous prefixes = %v, want %v", cfg.PreviousPublicLinkPrefixes, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadServerConfigRejectsInvalidPreviousPublicLinkPrefixes(t *testing.T) {
+	t.Setenv("TG_PUBLIC_LINK_PREFIX", "https://links.example.test/")
+	for _, value := range []string{"http://old.example/", "https://old.example/,https://Bad.example/", "https://old.example/,,https://older.example/"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TG_PREVIOUS_PUBLIC_LINK_PREFIXES", value)
+			_, err := config.LoadServerConfig(discardLog())
+			if err == nil || !strings.Contains(err.Error(), "TG_PREVIOUS_PUBLIC_LINK_PREFIXES") {
+				t.Fatalf("LoadServerConfig error = %v, want TG_PREVIOUS_PUBLIC_LINK_PREFIXES validation error", err)
+			}
+		})
+	}
+}
+
 func TestLoadReplicaID(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

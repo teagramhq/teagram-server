@@ -545,7 +545,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
-		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge, uploadsDisabled,
+		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge, uploadsDisabled, nil,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {

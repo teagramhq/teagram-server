@@ -3539,6 +3539,7 @@ func TestRevokeExportedChatInviteAcceptsOnlyConfiguredAndLegacyLinks(t *testing.
 	creator, joiner, ch := channelWith(t, s, "+15551294401", "+15551294402")
 	const prefixA = "https://links.example.test/"
 	const prefixB = "https://community.example.test/"
+	const prefixC = "https://older.example.test/"
 
 	for _, tc := range []struct {
 		name   string
@@ -3547,13 +3548,15 @@ func TestRevokeExportedChatInviteAcceptsOnlyConfiguredAndLegacyLinks(t *testing.
 	}{
 		{name: "configured prefix", prefix: prefixA, form: prefixA + "+"},
 		{name: "other configured prefix", prefix: prefixB, form: prefixB + "+"},
+		{name: "previous prefix", prefix: prefixA, form: prefixB + "+"},
+		{name: "second previous prefix", prefix: prefixA, form: prefixC + "+"},
 		{name: "legacy prefix", prefix: prefixA, form: "https://t.me/+"},
 		{name: "bare hash", prefix: prefixA, form: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exported, err := api.ExportChatInviteForTest(s, creator.ID, &tg.MessagesExportChatInviteRequest{
 				Peer: api.InputPeerChannel(creator.ID, ch.ID),
-			}, tc.prefix)
+			}, tc.prefix, prefixB, prefixC)
 			if err != nil {
 				t.Fatalf("export: %v", err)
 			}
@@ -3569,7 +3572,7 @@ func TestRevokeExportedChatInviteAcceptsOnlyConfiguredAndLegacyLinks(t *testing.
 			if tc.form != "" {
 				revokeValue = tc.form + hash
 			}
-			if _, err := api.RevokeExportedChatInviteForTest(s, creator.ID, ch.ID, revokeValue, tc.prefix); err != nil {
+			if _, err := api.RevokeExportedChatInviteForTest(s, creator.ID, ch.ID, revokeValue, tc.prefix, prefixB, prefixC); err != nil {
 				t.Fatalf("revoke %s: %v", tc.name, err)
 			}
 			if _, err := api.CheckChatInviteForTest(s, joiner.ID, &tg.MessagesCheckChatInviteRequest{Hash: hash}, tc.prefix); rpcMessage(t, err) != "PEER_ID_INVALID" {
@@ -3589,8 +3592,11 @@ func TestRevokeExportedChatInviteAcceptsOnlyConfiguredAndLegacyLinks(t *testing.
 		t.Fatalf("export response = %T, want *tg.ChatInviteExported", exported)
 	}
 	hash := strings.TrimPrefix(invite.Link, prefixA+"+")
-	if _, err := api.RevokeExportedChatInviteForTest(s, creator.ID, ch.ID, "https://evil.example/+"+hash, prefixA); err != nil {
+	if _, err := api.RevokeExportedChatInviteForTest(s, creator.ID, ch.ID, "https://evil.example/+"+hash, prefixA, prefixB, prefixC); err != nil {
 		t.Fatalf("revoke foreign-origin link: %v", err)
+	}
+	if _, err := api.RevokeExportedChatInviteForTest(s, creator.ID, ch.ID, prefixA+"+https://t.me/+"+hash, prefixA, prefixB); err != nil {
+		t.Fatalf("revoke nested link: %v", err)
 	}
 	if _, err := api.ImportChatInviteForTest(s, joiner.ID, &tg.MessagesImportChatInviteRequest{Hash: hash}, prefixB); err != nil {
 		t.Fatalf("foreign-origin revoke retired invite: %v", err)

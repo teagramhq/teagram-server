@@ -2128,6 +2128,21 @@ jobs:
           kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
           kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s
 
+      - name: Verify previous link prefixes reach the running pod
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          configmap="$(kubectl get pod teagramd-0 --namespace teagram --output json \
+            | jq --exit-status --raw-output '
+                .spec.containers[] | select(.name == "teagramd")
+                | .env[] | select(.name == "TG_PREVIOUS_PUBLIC_LINK_PREFIXES")
+                | select(.valueFrom.configMapKeyRef.key == "TG_PREVIOUS_PUBLIC_LINK_PREFIXES"
+                    and .valueFrom.configMapKeyRef.optional == true)
+                | .valueFrom.configMapKeyRef.name
+              ')"
+          kubectl get configmap "$configmap" --namespace teagram --output json \
+            | jq --exit-status '.data.TG_PREVIOUS_PUBLIC_LINK_PREFIXES == "https://old.example.test/"'
+
       - name: Narrow CI forwarded-IP trust to cloudflared
         run: |
           set -euo pipefail

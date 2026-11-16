@@ -131,7 +131,7 @@ The bootstrap deliberately leaves them untouched:
 
 | Resource | Required keys or values |
 | --- | --- |
-| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_MEDIA_KEY_CURRENT` |
+| `teagramd-runtime` ConfigMap | `TG_PUBLIC_LINK_PREFIX`, `TG_ADVERTISE_ADDR`, `TG_MEDIA_KEY_CURRENT`; optional `TG_PREVIOUS_PUBLIC_LINK_PREFIXES` |
 | `link-edge-runtime` ConfigMap | `TG_INVITE_WEB_SIGNUP_URL`; optional `TG_INVITE_DESKTOP_URL` |
 | `web` Service | ClusterIP endpoint on port 8080 for ordinary web traffic |
 | `postgres-credentials` Secret | `POSTGRES_PASSWORD`, `TG_POSTGRES_DSN` |

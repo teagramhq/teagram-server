@@ -1669,17 +1669,17 @@ func (h *handlers) handleRevokeExportedChatInvite(r *mtproto.Request) (bin.Encod
 		return nil, errPeerIDInvalid
 	}
 
-	// Revoke accepts bare hashes, current configured links, and the exact legacy
-	// link form. Other origins remain part of the hash and cannot revoke an invite.
+	// Other origins remain part of the hash and cannot revoke an invite.
 	hash := req.Hash
-	if h.cfg.MeURLPrefix != "" {
-		if configuredHash, ok := strings.CutPrefix(hash, h.cfg.MeURLPrefix+"+"); ok {
-			hash = configuredHash
-		} else if legacyHash, ok := strings.CutPrefix(hash, legacyInviteLinkPrefix); ok {
-			hash = legacyHash
+	prefixes := append([]string{h.cfg.MeURLPrefix}, h.previousPublicLinkPrefixes...)
+	prefixes = append(prefixes, strings.TrimSuffix(legacyInviteLinkPrefix, "+"))
+	for _, prefix := range prefixes {
+		if prefix != "" {
+			if configuredHash, ok := strings.CutPrefix(hash, prefix+"+"); ok {
+				hash = configuredHash
+				break
+			}
 		}
-	} else if legacyHash, ok := strings.CutPrefix(hash, legacyInviteLinkPrefix); ok {
-		hash = legacyHash
 	}
 
 	member, found, err := h.store.ChannelMemberOf(r.Ctx, channelID, r.UserID)
