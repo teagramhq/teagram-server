@@ -22,6 +22,7 @@ curl --fail --silent --show-error --location --max-time 20 \
 grep --fixed-strings --quiet 'Open this in Teagram' "$tmp_dir/link.html"
 
 timeout --signal=TERM --kill-after=5s 90s docker run --rm --network host \
+  --volume /etc/resolv.conf:/etc/resolv.conf:ro \
   --volume "$tmp_dir/client.json:/client.json:ro" \
   --entrypoint /usr/local/bin/mtproto-smoke \
   "$TEAGRAMD_IMAGE" \

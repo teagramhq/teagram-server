@@ -235,6 +235,15 @@ def mock_external_command() -> int:
         Path(destination).write_text(content, encoding="utf-8")
         return 0
     if command == "docker":
+        args = sys.argv[1:]
+        if not ("--network" in args and args[args.index("--network") + 1] == "host" and
+                "/etc/resolv.conf:/etc/resolv.conf:ro" in args):
+            print("mock docker: host resolver is unavailable to the smoke probe", file=sys.stderr)
+            return 1
+        record("smoke-probe-reached")
+        if os.environ["DEPLOY_RELEASE_TEST_CASE"] == "smoke-probe":
+            print("mock docker: MTProto probe failed", file=sys.stderr)
+            return 1
         return 0
     print(f"unexpected external command: {command}", file=sys.stderr)
     return 2
@@ -377,6 +386,8 @@ def run_case(case: str, failed_resource: str | None, failure_phase: str,
             failures.append("the injected spec changed after controller status advanced")
         if case == "smoke" and "smoke-discovery-failed" not in log:
             failures.append("the smoke check did not fail on the bad discovery URL")
+        if (expected_success or case == "smoke-probe") and "smoke-probe-reached" not in log:
+            failures.append("the MTProto probe did not use the host resolver")
         if case == "maintenance" and "maintenance-failed" not in log:
             failures.append("the maintenance command failure was not injected")
         if existing_failed_job:
@@ -431,6 +442,7 @@ def main() -> int:
         ("early-statefulset", "statefulset/teagramd", "wait", None, None),
         ("early-deployment", "deployment/linkselector", "wait", None, None),
         ("smoke", "deployment/linkselector", "smoke", None, None),
+        ("smoke-probe", "deployment/linkselector", "smoke", None, None),
         ("maintenance", "deployment/linkselector", "maintenance", None, None),
         ("cloudflared-count", None, "cloudflared", 2, None),
         ("unstable-baseline", None, "unstable", None, "deployment/linkselector"),
@@ -446,7 +458,7 @@ def main() -> int:
         failures.extend(run_case(*case))
     if failures:
         return 1
-    print("Deploy release rollback tests passed (9 rollback and Job retry cases)")
+    print("Deploy release rollback tests passed (10 rollback and Job retry cases)")
     return 0
 
 
