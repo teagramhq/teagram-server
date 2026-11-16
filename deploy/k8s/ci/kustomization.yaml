@@ -14,6 +14,7 @@ configMapGenerator:
   - name: teagramd-runtime
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+      - TG_PREVIOUS_PUBLIC_LINK_PREFIXES=https://old.example.test/
       - TG_ADVERTISE_ADDR=teagramd:2443
       - TG_MEDIA_KEY_CURRENT=1
   - name: link-edge-runtime

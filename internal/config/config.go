@@ -175,7 +175,9 @@ type Config struct {
 	// when rendering server-owned invite links. It is validated only for the
 	// MTProto server; administrative commands do not need it.
 	PublicLinkPrefix string
-	DCID             int
+	// PreviousPublicLinkPrefixes are accepted only when revoking existing invites.
+	PreviousPublicLinkPrefixes []string
+	DCID                       int
 	// LogLoginCodes opts into writing issued login codes to the log in
 	// cleartext. Off by default: the log is readable by anyone with the
 	// process output, and the code alone signs in any account that has no
@@ -911,11 +913,22 @@ func LoadServerConfig(log *slog.Logger) (Config, error) {
 	if err := ValidatePublicLinkPrefix(prefix); err != nil {
 		return Config{}, err
 	}
+	var previousPrefixes []string
+	if raw := os.Getenv("TG_PREVIOUS_PUBLIC_LINK_PREFIXES"); raw != "" {
+		for previous := range strings.SplitSeq(raw, ",") {
+			previous = strings.TrimSpace(previous)
+			if err := ValidatePublicLinkPrefix(previous); err != nil {
+				return Config{}, fmt.Errorf("TG_PREVIOUS_PUBLIC_LINK_PREFIXES: %w", err)
+			}
+			previousPrefixes = append(previousPrefixes, previous)
+		}
+	}
 	cfg, err := Load(log)
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.PublicLinkPrefix = prefix
+	cfg.PreviousPublicLinkPrefixes = previousPrefixes
 	return cfg, nil
 }
 

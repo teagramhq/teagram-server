@@ -1280,7 +1280,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, cfg.PreviousPublicLinkPrefixes, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

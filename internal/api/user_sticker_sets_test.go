@@ -1718,6 +1718,6 @@ func stickerDispatcherWithImportMode(s *store.Store, mode config.StickerImportMo
 		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{}, config.RegistrationClosed, api.NewDialogFilterSync(), nil,
 		config.DefaultUploadPartTTL, "", nil, "", false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, mode, 0, config.DefaultUserInviteMinAccountAge, false,
+		config.DefaultSignUpTermsOfService, nil, mode, 0, config.DefaultUserInviteMinAccountAge, false, nil,
 	)
 }

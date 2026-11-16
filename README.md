@@ -65,7 +65,7 @@ Configuration is read from environment variables. The full reference is in
 | Keys | `TG_RSA_KEY_PATH`, `TG_AUTHKEY_ENC_KEY` or `TG_AUTHKEY_ENC_KEY_FILE` | Server identity and auth-key encryption |
 | Listeners | `TG_LISTEN_ADDR`, `TG_WEBSOCKET_LISTEN_ADDR`, `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`, `TG_BOT_API_LISTEN_ADDR`, `TG_ADMIN_LISTEN_ADDR` | MTProto, WebSocket, Bot API, and admin endpoints |
 | Registration | `TG_REGISTRATION`, `TG_PUBLIC_REGISTRATION` | Account sign-up policy; production public WebSocket registration is configured as invite-only |
-| Public links | `TG_PUBLIC_LINK_PREFIX`, `TG_INVITE_WEB_SIGNUP_URL`, `TG_INVITE_DESKTOP_URL` | Client, discovery, and invite landing links |
+| Public links | `TG_PUBLIC_LINK_PREFIX`, `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, `TG_INVITE_WEB_SIGNUP_URL`, `TG_INVITE_DESKTOP_URL` | Client, discovery, and invite landing links |
 | Media | `TG_BLOB_DIR`, `TG_BLOB_S3_*` | Local media storage or an S3-compatible backend; production points the S3 endpoint at RustFS |
 
 ## Architecture

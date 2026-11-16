@@ -148,6 +148,12 @@ spec:
                 configMapKeyRef:
                   name: teagramd-runtime
                   key: TG_PUBLIC_LINK_PREFIX
+            - name: TG_PREVIOUS_PUBLIC_LINK_PREFIXES
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-runtime
+                  key: TG_PREVIOUS_PUBLIC_LINK_PREFIXES
+                  optional: true
             - name: TG_ADVERTISE_ADDR
               valueFrom:
                 configMapKeyRef:

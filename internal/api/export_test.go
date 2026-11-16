@@ -324,24 +324,29 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 	if len(linkPrefixes) > 0 {
 		linkPrefix = linkPrefixes[0]
 	}
+	var previousPrefixes []string
+	if len(linkPrefixes) > 1 {
+		previousPrefixes = linkPrefixes[1:]
+	}
 	return &handlers{
-		store:                    s,
-		stickerImportMode:        config.StickerImportOn,
-		cfg:                      &tg.Config{MeURLPrefix: linkPrefix},
-		signUpTermsOfService:     config.DefaultSignUpTermsOfService,
-		log:                      slog.New(slog.DiscardHandler),
-		maxFileBytes:             TestMaxFileBytes,
-		now:                      time.Now,
-		peers:                    pgtest.PeerDeriver(),
-		photos:                   pgtest.PhotoDeriver(),
-		rateLimitMessageSend:     store.RateLimitConfig{},
-		rateLimitCheckPassword:   store.RateLimitConfig{},
-		rateLimitCheckPasswordIP: store.RateLimitConfig{},
-		rateLimitGetPasswordIP:   store.RateLimitConfig{},
-		rateLimitSignUpIP:        store.RateLimitConfig{},
-		rateLimitPasswordProof:   store.RateLimitConfig{},
-		rateLimitGetPassword:     store.RateLimitConfig{},
-		blobs:                    blobs,
+		previousPublicLinkPrefixes: previousPrefixes,
+		store:                      s,
+		stickerImportMode:          config.StickerImportOn,
+		cfg:                        &tg.Config{MeURLPrefix: linkPrefix},
+		signUpTermsOfService:       config.DefaultSignUpTermsOfService,
+		log:                        slog.New(slog.DiscardHandler),
+		maxFileBytes:               TestMaxFileBytes,
+		now:                        time.Now,
+		peers:                      pgtest.PeerDeriver(),
+		photos:                     pgtest.PhotoDeriver(),
+		rateLimitMessageSend:       store.RateLimitConfig{},
+		rateLimitCheckPassword:     store.RateLimitConfig{},
+		rateLimitCheckPasswordIP:   store.RateLimitConfig{},
+		rateLimitGetPasswordIP:     store.RateLimitConfig{},
+		rateLimitSignUpIP:          store.RateLimitConfig{},
+		rateLimitPasswordProof:     store.RateLimitConfig{},
+		rateLimitGetPassword:       store.RateLimitConfig{},
+		blobs:                      blobs,
 	}
 }
 
@@ -868,12 +873,12 @@ func GetChannelMessagesForTest(s *store.Store, userID int64, req *tg.ChannelsGet
 }
 
 // ExportMessageLinkForTest encodes req and invokes handleExportMessageLink for the caller.
-func ExportMessageLinkForTest(s *store.Store, userID int64, req *tg.ChannelsExportMessageLinkRequest) (bin.Encoder, error) {
+func ExportMessageLinkForTest(s *store.Store, userID int64, req *tg.ChannelsExportMessageLinkRequest, linkPrefixes ...string) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
-	return testHandlers(s).handleExportMessageLink(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return testHandlers(s, linkPrefixes...).handleExportMessageLink(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // GetDifferenceForTest encodes req and treats its result as a successful reply,
