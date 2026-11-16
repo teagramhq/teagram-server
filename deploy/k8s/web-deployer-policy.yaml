@@ -76,8 +76,9 @@ spec:
            (!has(c.env) || size(c.env) == 0) &&
            (!has(c.envFrom) || size(c.envFrom) == 0) &&
            has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) &&
-           c.securityContext.allowPrivilegeEscalation == false))
-      message: deployment must not use extra containers, environment, or image pull secrets and must disable privilege escalation
+           c.securityContext.allowPrivilegeEscalation == false &&
+           has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem == true))
+      message: deployment must not use extra containers, environment, or image pull secrets and must disable privilege escalation and use a read-only root filesystem
     - expression: >-
         request.resource.resource != 'deployments' ||
         object.spec.template.spec.containers.all(c,

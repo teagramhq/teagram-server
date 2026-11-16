@@ -52,7 +52,7 @@ labels = {"app.kubernetes.io/name": "teagram-web"}
 web_container = {
     "name": "teagram-web",
     "image": "ghcr.io/teagramhq/teagram-web@sha256:" + "a" * 64,
-    "securityContext": {"allowPrivilegeEscalation": False},
+    "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True},
     "resources": {"limits": {"cpu": "500m", "memory": "256Mi"}},
 }
 deployment = {
@@ -97,7 +97,7 @@ assert f"request.userInfo.username == '{SA}'" in policy["spec"]["matchConditions
 # Lock the admission contract, including fields Kubernetes rejects before admission.
 contract = {key: policy["spec"][key] for key in ("matchConstraints", "matchConditions", "validations")}
 digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-assert digest == "263f9db77b64df129c9d167e4fedbef16145a11926c02f7f5026593f2aa15e78", digest
+assert digest == "21b1c1f7eb197a8d5408b0cae83e6d281af911ca567bcb0e023aedc86fd2dd61", digest
 binding = json.loads(kubectl("get", "validatingadmissionpolicybinding", "teagram-web-deployer", "-o", "json"))
 assert binding["spec"]["policyName"] == "teagram-web-deployer"
 assert binding["spec"]["validationActions"] == ["Deny"]
@@ -145,7 +145,9 @@ checks = {
     "environment source": container(envFrom=[{"secretRef": {"name": "other"}}]),
     "init container": template(initContainers=[{"name": "other", "image": "busybox"}]),
     "image pull secret": template(imagePullSecrets=[{"name": "other"}]),
-    "privilege escalation": container(securityContext={"allowPrivilegeEscalation": True}),
+    "privilege escalation": container(securityContext={"allowPrivilegeEscalation": True, "readOnlyRootFilesystem": True}),
+    "writable root filesystem": container(securityContext={"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": False}),
+    "missing read-only root filesystem": container(securityContext={"allowPrivilegeEscalation": False}),
     "probe host": container(livenessProbe={"httpGet": {"host": "teagramd", "port": 2443}}),
     "lifecycle hook": container(lifecycle={"postStart": {"exec": {"command": ["true"]}}}),
     "critical priority": template(priorityClassName="system-node-critical"),
