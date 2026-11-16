@@ -40,6 +40,29 @@ spec:
       message: deployment volumes must be emptyDir
     - expression: >-
         request.resource.resource != 'deployments' ||
+        (has(object.spec.replicas) && object.spec.replicas <= 2 &&
+         (!has(object.spec.template.spec.priorityClassName) || object.spec.template.spec.priorityClassName == '') &&
+         !has(object.spec.template.spec.resources))
+      message: deployment must limit replicas, use default priority, and omit pod-level resources
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        object.spec.template.spec.containers.all(c,
+          has(c.resources) && has(c.resources.limits) &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          quantity(c.resources.limits['cpu']).compareTo(quantity('0')) > 0 &&
+          quantity(c.resources.limits['cpu']).compareTo(quantity('500m')) <= 0 &&
+          quantity(c.resources.limits['memory']).compareTo(quantity('0')) > 0 &&
+          quantity(c.resources.limits['memory']).compareTo(quantity('256Mi')) <= 0)
+      message: deployment containers must have positive CPU and memory limits within web bounds
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (!has(object.spec.template.spec.volumes) || object.spec.template.spec.volumes.all(v,
+          has(v.emptyDir) && has(v.emptyDir.sizeLimit) &&
+          quantity(v.emptyDir.sizeLimit).compareTo(quantity('0')) > 0 &&
+          quantity(v.emptyDir.sizeLimit).compareTo(quantity('16Mi')) <= 0))
+      message: emptyDir volumes must have a positive size limit at most 16Mi
+    - expression: >-
+        request.resource.resource != 'deployments' ||
         (size(object.spec.template.spec.containers) == 1 &&
          object.spec.template.spec.containers[0].name == 'teagram-web' &&
          object.spec.template.spec.containers[0].image.matches('^ghcr[.]io/teagramhq/teagram-web@sha256:[0-9a-f]{64}$'))

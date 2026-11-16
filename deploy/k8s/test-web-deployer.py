@@ -53,12 +53,14 @@ web_container = {
     "name": "teagram-web",
     "image": "ghcr.io/teagramhq/teagram-web@sha256:" + "a" * 64,
     "securityContext": {"allowPrivilegeEscalation": False},
+    "resources": {"limits": {"cpu": "500m", "memory": "256Mi"}},
 }
 deployment = {
     "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "teagram-web"},
     "spec": {"replicas": 0, "selector": {"matchLabels": labels},
              "template": {"metadata": {"labels": labels}, "spec": {
                  "automountServiceAccountToken": False, "containers": [web_container],
+                 "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "16Mi"}}],
              }}},
 }
 service = {
@@ -95,7 +97,7 @@ assert f"request.userInfo.username == '{SA}'" in policy["spec"]["matchConditions
 # Lock the admission contract, including fields Kubernetes rejects before admission.
 contract = {key: policy["spec"][key] for key in ("matchConstraints", "matchConditions", "validations")}
 digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-assert digest == "c2c05b6ae6c2b468539e72a07d2ecd28b195ba09447f2cbb89664e1490a1b21a", digest
+assert digest == "263f9db77b64df129c9d167e4fedbef16145a11926c02f7f5026593f2aa15e78", digest
 binding = json.loads(kubectl("get", "validatingadmissionpolicybinding", "teagram-web-deployer", "-o", "json"))
 assert binding["spec"]["policyName"] == "teagram-web-deployer"
 assert binding["spec"]["validationActions"] == ["Deny"]
@@ -128,6 +130,9 @@ for verb, resource, name in [("patch", "statefulsets.apps", "teagramd"),
 
 patch("deployment", {"metadata": {"annotations": {"validation-check": "ok"}}})
 patch("service", {"metadata": {"annotations": {"validation-check": "ok"}}})
+patch("deployment", {"spec": {"replicas": 2}})
+patch("deployment", container(resources={"limits": {"cpu": "0.5", "memory": "268435456"}}))
+patch("deployment", template(volumes=[{"name": "tmp", "emptyDir": {"sizeLimit": "16777216"}}]))
 checks = {
     "secret volume": template(volumes=[{"name": "secret", "secret": {"secretName": "other"}}]),
     "foreign service account": template(serviceAccountName="teagram-deployer"),
@@ -143,6 +148,18 @@ checks = {
     "privilege escalation": container(securityContext={"allowPrivilegeEscalation": True}),
     "probe host": container(livenessProbe={"httpGet": {"host": "teagramd", "port": 2443}}),
     "lifecycle hook": container(lifecycle={"postStart": {"exec": {"command": ["true"]}}}),
+    "critical priority": template(priorityClassName="system-node-critical"),
+    "too many replicas": {"spec": {"replicas": 3}},
+    "pod-level resources": template(resources={"limits": {"cpu": "1", "memory": "1Gi"}}),
+    "missing cpu limit": container(resources={"limits": {"memory": "256Mi"}}),
+    "missing memory limit": container(resources={"limits": {"cpu": "500m"}}),
+    "zero cpu limit": container(resources={"limits": {"cpu": "0", "memory": "256Mi"}}),
+    "zero memory limit": container(resources={"limits": {"cpu": "500m", "memory": "0"}}),
+    "oversized cpu limit": container(resources={"limits": {"cpu": "501m", "memory": "256Mi"}}),
+    "oversized memory limit": container(resources={"limits": {"cpu": "500m", "memory": "257Mi"}}),
+    "emptyDir without size limit": template(volumes=[{"name": "tmp", "emptyDir": {}}]),
+    "zero emptyDir size limit": template(volumes=[{"name": "tmp", "emptyDir": {"sizeLimit": "0"}}]),
+    "oversized emptyDir": template(volumes=[{"name": "tmp", "emptyDir": {"sizeLimit": "17Mi"}}]),
 }
 for name, changes in checks.items():
     patch("deployment", changes, expected=False)
