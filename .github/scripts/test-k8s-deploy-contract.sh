@@ -695,6 +695,11 @@ runtime_configmap_row=$(grep --fixed-strings '`teagramd-runtime` ConfigMap' depl
 # shellcheck disable=SC2016
 grep --fixed-strings --quiet '`teagramd-turnstile` Secret' deploy/k8s/README.md ||
   fail 'the external Turnstile Secret must be documented without its value'
+for mode in --dry-run --apply --rollback; do
+  grep --fixed-strings --quiet "sudo deploy/k8s/update-public-link-prefix.sh $mode" \
+    deploy/k8s/README.md ||
+    fail "the public link prefix runbook must document $mode"
+done
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do
   probe_port="$(yq -r ".spec.template.spec.containers[] | select(.name == \"teagramd\") | .${probe}.tcpSocket.port" "$statefulset")"

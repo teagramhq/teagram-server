@@ -12,6 +12,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy/k8s/update-public-link-prefix.sh"
+README = ROOT / "deploy/k8s/README.md"
 OLD_PREFIX = "https://teagram.tailaa4918.ts.net/"
 PUBLIC_PREFIX = "https://web.teagram.io/"
 
@@ -88,7 +89,9 @@ if command[:2] == ["patch", "configmap"]:
 if command[:2] == ["rollout", "restart"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
     state = json.loads(state_path.read_text())
-    state.setdefault("_test", {})["readyReplicas"] = 1
+    mock_state = state.setdefault("_test", {})
+    mock_state["restartCount"] = mock_state.get("restartCount", 0) + 1
+    mock_state["readyReplicas"] = 1
     state_path.write_text(json.dumps(state))
     print("statefulset restarted")
     raise SystemExit(0)
@@ -120,7 +123,7 @@ def initial_state(prefix: str = OLD_PREFIX, previous: str | None = None) -> dict
     if previous is not None:
         data["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"] = previous
     return {"metadata": {"resourceVersion": "531"}, "data": data,
-            "_test": {"readyReplicas": 1}}
+            "_test": {"readyReplicas": 1, "restartCount": 0}}
 
 
 def expect_success(command: list[str], env: dict[str, str], expected: str) -> subprocess.CompletedProcess[str]:
@@ -144,6 +147,12 @@ def expect_refusal(command: list[str], env: dict[str, str], expected: str) -> su
 
 
 def run() -> None:
+    readme = README.read_text()
+    for mode in ("--dry-run", "--apply", "--rollback"):
+        command_text = f"sudo deploy/k8s/update-public-link-prefix.sh {mode}"
+        if command_text not in readme:
+            raise AssertionError(f"the k8s deployment runbook does not document {mode}")
+
     with tempfile.TemporaryDirectory(prefix="public-link-prefix-test-") as temporary:
         temp_path = pathlib.Path(temporary)
         fake_bin = temp_path / "bin"
@@ -168,6 +177,8 @@ def run() -> None:
         expect_success(command + ["--dry-run"], env, "dry_run=accepted")
         if json.loads(state_path.read_text()) != before:
             raise AssertionError("server dry-run changed the ConfigMap fixture")
+        if json.loads(state_path.read_text())["_test"]["restartCount"] != 0:
+            raise AssertionError("dry-run restarted teagramd")
 
         expect_success(command + ["--apply"], env, "rollout=verified")
         applied = json.loads(state_path.read_text())["data"]
@@ -175,21 +186,43 @@ def run() -> None:
             raise AssertionError("apply did not set the public link prefix")
         if applied.get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != OLD_PREFIX:
             raise AssertionError("apply did not preserve the former prefix for revocation")
+        if json.loads(state_path.read_text())["_test"]["restartCount"] != 1:
+            raise AssertionError("apply did not restart teagramd exactly once")
         for key in ("TG_ADVERTISE_ADDR", "TG_MEDIA_KEY_CURRENT", "KEEP_ME"):
             if applied.get(key) != before["data"].get(key):
                 raise AssertionError(f"apply changed unrelated ConfigMap key {key}")
 
         expect_success(command + ["--apply"], env, "rollout=verified")
+        if json.loads(state_path.read_text())["_test"]["restartCount"] != 2:
+            raise AssertionError("repeated apply did not restart teagramd exactly once")
         expect_success(command + ["--rollback"], env, "rollout=verified")
-        rolled_back = json.loads(state_path.read_text())["data"]
+        rolled_back_state = json.loads(state_path.read_text())
+        rolled_back = rolled_back_state["data"]
         if rolled_back.get("TG_PUBLIC_LINK_PREFIX") != OLD_PREFIX:
             raise AssertionError("rollback did not restore the original prefix")
-        if "TG_PREVIOUS_PUBLIC_LINK_PREFIXES" in rolled_back:
-            raise AssertionError("rollback did not remove its optional previous-prefix key")
+        if rolled_back.get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
+            raise AssertionError("rollback did not retain the public prefix for invite revocation")
+        if rolled_back_state["_test"]["restartCount"] != 3:
+            raise AssertionError("rollback did not restart teagramd exactly once")
         for key in ("TG_ADVERTISE_ADDR", "TG_MEDIA_KEY_CURRENT", "KEEP_ME"):
             if rolled_back.get(key) != before["data"].get(key):
                 raise AssertionError(f"rollback changed unrelated ConfigMap key {key}")
         expect_success(command + ["--rollback"], env, "rollback already applied")
+        if json.loads(state_path.read_text())["_test"]["restartCount"] != 3:
+            raise AssertionError("idempotent rollback restarted teagramd")
+
+        expect_success(command + ["--apply"], env, "rollout=verified")
+        reapplied = json.loads(state_path.read_text())
+        if reapplied["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != OLD_PREFIX:
+            raise AssertionError("reapply did not retain the tailnet prefix for revocation")
+        if reapplied["_test"]["restartCount"] != 4:
+            raise AssertionError("reapply did not restart teagramd exactly once")
+        expect_success(command + ["--rollback"], env, "rollout=verified")
+        rolled_back_again = json.loads(state_path.read_text())
+        if rolled_back_again["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
+            raise AssertionError("rollback after reapply dropped the public prefix")
+        if rolled_back_again["_test"]["restartCount"] != 5:
+            raise AssertionError("rollback after reapply did not restart teagramd exactly once")
 
         state_path.write_text(json.dumps(initial_state(prefix="https://other.example/")))
         unexpected = json.loads(state_path.read_text())
@@ -220,13 +253,17 @@ def run() -> None:
             raise AssertionError("failed apply did not leave the workload unready in the fixture")
         if failed_apply["data"].get("TG_PUBLIC_LINK_PREFIX") != PUBLIC_PREFIX:
             raise AssertionError("failed apply did not leave the attempted prefix in the fixture")
+        if failed_apply["_test"]["restartCount"] != 1:
+            raise AssertionError("failed apply did not restart teagramd exactly once")
 
         expect_success(command + ["--rollback"], env, "rollout=verified")
         recovered = json.loads(state_path.read_text())
         if recovered["data"].get("TG_PUBLIC_LINK_PREFIX") != OLD_PREFIX:
             raise AssertionError("rollback did not restore the old prefix after a failed rollout")
-        if "TG_PREVIOUS_PUBLIC_LINK_PREFIXES" in recovered["data"]:
-            raise AssertionError("rollback did not remove the previous-prefix key after a failed rollout")
+        if recovered["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
+            raise AssertionError("rollback after a failed rollout dropped public invite revocation")
+        if recovered["_test"]["restartCount"] != 2:
+            raise AssertionError("rollback after a failed rollout did not restart teagramd exactly once")
 
 
 if __name__ == "__main__":

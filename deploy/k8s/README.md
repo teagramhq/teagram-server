@@ -170,7 +170,8 @@ listed so admins can revoke channel invites issued before the update. This
 single-replica restart briefly disconnects clients; no database data changes.
 If the rollout does not verify, inspect the live state and run
 `sudo deploy/k8s/update-public-link-prefix.sh --rollback` to restore the
-tailnet prefix and remove the previous-prefix setting. The helper refuses to
+tailnet prefix while keeping `https://web.teagram.io/` listed for revoking
+channel invites issued during the attempted rollout. The helper refuses to
 overwrite runtime values outside the reviewed before and after states.
 
 ## PostgreSQL backups

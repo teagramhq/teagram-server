@@ -118,17 +118,17 @@ if environment["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"]["valueFrom"]["configMapKeyRef
 fi
 
 case "$mode:$current_prefix:$previous_state" in
-  --dry-run:"$OLD_PREFIX":absent|--apply:"$OLD_PREFIX":absent|--dry-run:"$PUBLIC_PREFIX":"$OLD_PREFIX"|--apply:"$PUBLIC_PREFIX":"$OLD_PREFIX")
+  --dry-run:"$OLD_PREFIX":absent|--apply:"$OLD_PREFIX":absent|--dry-run:"$OLD_PREFIX":"$PUBLIC_PREFIX"|--apply:"$OLD_PREFIX":"$PUBLIC_PREFIX"|--dry-run:"$PUBLIC_PREFIX":"$OLD_PREFIX"|--apply:"$PUBLIC_PREFIX":"$OLD_PREFIX")
     expected_prefix=$PUBLIC_PREFIX
     expected_previous=$OLD_PREFIX
     patch='{"data":{"TG_PUBLIC_LINK_PREFIX":"https://web.teagram.io/","TG_PREVIOUS_PUBLIC_LINK_PREFIXES":"https://teagram.tailaa4918.ts.net/"}}'
     ;;
   --rollback:"$PUBLIC_PREFIX":"$OLD_PREFIX")
     expected_prefix=$OLD_PREFIX
-    expected_previous=absent
-    patch='{"data":{"TG_PUBLIC_LINK_PREFIX":"https://teagram.tailaa4918.ts.net/","TG_PREVIOUS_PUBLIC_LINK_PREFIXES":null}}'
+    expected_previous=$PUBLIC_PREFIX
+    patch='{"data":{"TG_PUBLIC_LINK_PREFIX":"https://teagram.tailaa4918.ts.net/","TG_PREVIOUS_PUBLIC_LINK_PREFIXES":"https://web.teagram.io/"}}'
     ;;
-  --rollback:"$OLD_PREFIX":absent)
+  --rollback:"$OLD_PREFIX":"$PUBLIC_PREFIX")
     printf 'public link prefix update: rollback already applied\n'
     exit 0
     ;;
