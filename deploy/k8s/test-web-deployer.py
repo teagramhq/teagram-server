@@ -73,6 +73,12 @@ existing = kubectl("get", "deployment/teagram-web", "service/teagram-web", "-n",
                    "--ignore-not-found", "-o", "name")
 if existing.strip():
     raise SystemExit("test requires a disposable cluster without teagram-web resources")
+probe_names = ["teagram-web-network-probe", "teagram-web-linkselector-probe",
+               "teagram-web-cloudflared-probe", "teagram-web-unrelated-probe"]
+existing_probes = kubectl("get", *(f"pod/{name}" for name in probe_names), "-n", NAMESPACE,
+                          "--ignore-not-found", "-o", "name")
+if existing_probes.strip():
+    raise SystemExit("test requires a disposable cluster without web network probe pods")
 apply(deployment)
 apply(service)
 role = json.loads(kubectl("get", "role", "teagram-web-deployer", "-n", NAMESPACE, "-o", "json"))
@@ -107,10 +113,46 @@ network.setdefault("egress", [])
 assert network == {
     "podSelector": {"matchLabels": labels},
     "policyTypes": ["Ingress", "Egress"],
-    "ingress": [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "cloudflared"}}}],
+    "ingress": [{"from": [
+                    {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "cloudflared"}}},
+                    {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "linkselector"}}},
+                 ],
                  "ports": [{"protocol": "TCP", "port": 8080}]}],
     "egress": [],
 }, network
+
+probe_pods = [
+    {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": probe_names[0], "labels": labels},
+     "spec": {"automountServiceAccountToken": False, "containers": [{
+         "name": "web", "image": "busybox:1.36",
+         "command": ["sh", "-c", "mkdir -p /tmp/www && printf web-ok > /tmp/www/healthz && httpd -f -p 8080 -h /tmp/www"],
+         "readinessProbe": {"httpGet": {"path": "/healthz", "port": 8080}, "periodSeconds": 2},
+     }]}},
+    {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": probe_names[1], "labels": {"app.kubernetes.io/name": "linkselector"}},
+     "spec": {"automountServiceAccountToken": False, "containers": [{"name": "client", "image": "busybox:1.36", "command": ["sleep", "3600"]}]}},
+    {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": probe_names[2], "labels": {"app.kubernetes.io/name": "cloudflared"}},
+     "spec": {"automountServiceAccountToken": False, "containers": [{"name": "client", "image": "busybox:1.36", "command": ["sleep", "3600"]}]}},
+    {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": probe_names[3], "labels": {"app.kubernetes.io/name": "unrelated"}},
+     "spec": {"automountServiceAccountToken": False, "containers": [{"name": "client", "image": "busybox:1.36", "command": ["sleep", "3600"]}]}},
+]
+for probe_pod in probe_pods:
+    apply(probe_pod)
+kubectl("wait", "--for=condition=Ready", "--timeout=120s", "-n", NAMESPACE,
+        *(f"pod/{name}" for name in probe_names))
+web_pod = json.loads(kubectl("get", f"pod/{probe_names[0]}", "-n", NAMESPACE, "-o", "json"))
+web_ip = web_pod["status"]["podIP"]
+if not web_ip:
+    raise AssertionError("web network probe pod has no IP")
+for name in probe_names[1:3]:
+    result = kubectl("exec", "-n", NAMESPACE, f"pod/{name}", "--", "wget", "-qO-", "-T", "3",
+                     f"http://{web_ip}:8080/healthz")
+    if result.strip() != "web-ok":
+        raise AssertionError(f"{name} received an unexpected web probe response: {result!r}")
+    print(f"{name} reached web network probe")
+kubectl("exec", "-n", NAMESPACE, f"pod/{probe_names[3]}", "--", "wget", "-qO-", "-T", "3",
+        f"http://{web_ip}:8080/healthz", ok=False)
+print("unrelated pod was blocked from web network probe")
+kubectl("delete", "-n", NAMESPACE, "--wait=true", *(f"pod/{name}" for name in probe_names))
 for verb, resource, name in [("patch", "deployments.apps", "teagram-web"),
                              ("get", "deployments.apps", "teagram-web"),
                              ("patch", "services", "teagram-web"),
