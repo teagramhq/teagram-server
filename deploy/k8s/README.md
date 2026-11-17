@@ -151,6 +151,28 @@ All images used by the production overlays are publicly pullable. Bootstrap
 does not read Docker credentials or create a registry Secret. Public utility
 images are pinned from their configured registries.
 
+### Public link prefix update
+
+The runtime ConfigMap is external to the production overlay. After a tested
+server release supports `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, update its public
+link origin on alpha with the reviewed helper:
+
+```sh
+sudo deploy/k8s/update-public-link-prefix.sh --dry-run
+sudo deploy/k8s/update-public-link-prefix.sh --apply
+```
+
+The helper verifies the k3s instance marker, the ready single-replica workload,
+and the expected current values. It server-side validates the patch, changes
+only `TG_PUBLIC_LINK_PREFIX` and `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, then
+restarts teagramd and waits for it to become ready. The old tailnet prefix stays
+listed so admins can revoke channel invites issued before the update. This
+single-replica restart briefly disconnects clients; no database data changes.
+If the rollout does not verify, inspect the live state and run
+`sudo deploy/k8s/update-public-link-prefix.sh --rollback` to restore the
+tailnet prefix and remove the previous-prefix setting. The helper refuses to
+overwrite runtime values outside the reviewed before and after states.
+
 ## PostgreSQL backups
 
 The production overlay enables a daily 03:17 UTC PostgreSQL custom-format dump.
