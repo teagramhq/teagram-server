@@ -1192,6 +1192,8 @@ jobs:
           bash -n deploy/k8s/install-tailnet-proxy-access.sh
           ./deploy/k8s/cutover-alpha.sh --dry-run
           bash -n deploy/k8s/cutover-alpha.sh deploy/k8s/test-cutover-alpha.sh
+          bash -n deploy/k8s/update-public-link-prefix.sh
+          shellcheck deploy/k8s/update-public-link-prefix.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
@@ -1865,6 +1867,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Test public link runtime update
+        run: python3 -B deploy/k8s/test-update-public-link-prefix.py
 
       - name: Test service ingress rollout readiness
         run: python3 .github/scripts/test_k8s_service_ingress_contract.py
