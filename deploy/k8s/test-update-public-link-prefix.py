@@ -89,6 +89,8 @@ if command[:2] == ["get", "pod"] and len(command) >= 3:
     print(json.dumps({
         "metadata": {
             "name": command[2],
+            "uid": mock_state.get("podUID", "pod-uid-1"),
+            "resourceVersion": mock_state.get("podResourceVersion", "101"),
             "labels": {
                 "statefulset.kubernetes.io/pod-name": command[2],
                 "controller-revision-hash": mock_state.get("podRevision", "revision-1"),
@@ -149,36 +151,76 @@ if command[:2] == ["rollout", "restart"]:
     state_path.write_text(json.dumps(state))
     print("statefulset restarted")
     raise SystemExit(0)
-if command[:2] == ["delete", "pod"]:
+if command[:2] == ["delete", "--raw"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
     state = json.loads(state_path.read_text())
     mock_state = state.setdefault("_test", {})
-    selector_text = command[command.index("--selector") + 1]
-    selector = dict(part.split("=", 1) for part in selector_text.split(","))
-    pod_name = selector.get("statefulset.kubernetes.io/pod-name")
-    matches_stale_pod = (
-        selector.get("statefulset.kubernetes.io/pod-name") == pod_name
-        and selector.get("statefulset.kubernetes.io/pod-name") == "teagramd-0"
-        and selector.get("controller-revision-hash") == mock_state.get("podRevision")
-        and mock_state.get("podReady") is False
-        and mock_state.get("podRevision") != mock_state.get("updateRevision")
-        and mock_state.get("observedGeneration", 0) >= mock_state.get("generation", 1)
-        and mock_state.get("lastObservedRevision") == mock_state.get("updateRevision")
-    )
-    if matches_stale_pod:
+    if command[2] != "/api/v1/namespaces/teagram/pods/teagramd-0" or \
+            command[command.index("--filename") + 1] != "-":
+        raise SystemExit(2)
+    try:
+        delete_options = json.loads(sys.stdin.read())
+        preconditions = delete_options["preconditions"]
+    except (KeyError, json.JSONDecodeError):
+        preconditions = {}
+    mock_state["podDeleteAttemptCount"] = mock_state.get("podDeleteAttemptCount", 0) + 1
+    mock_state["lastDeletePreconditionUID"] = preconditions.get("uid")
+    mock_state["lastDeletePreconditionResourceVersion"] = preconditions.get("resourceVersion")
+
+    raced = mock_state.pop("race_on_delete", False)
+    if raced:
+        mock_state["podUID"] = "replacement-pod-uid"
+        mock_state["podResourceVersion"] = "202"
+        mock_state["podRevision"] = mock_state["updateRevision"]
+        mock_state["currentRevision"] = mock_state["updateRevision"]
+        mock_state["podReady"] = True
+        mock_state["readyReplicas"] = 1
+    current_uid = mock_state.get("podUID", "pod-uid-1")
+    current_resource_version = mock_state.get("podResourceVersion", "101")
+    has_both_preconditions = isinstance(preconditions.get("uid"), str) and \
+        isinstance(preconditions.get("resourceVersion"), str)
+    if not has_both_preconditions:
+        mock_state["missingDeletePreconditionCount"] = \
+            mock_state.get("missingDeletePreconditionCount", 0) + 1
+        if raced and mock_state.get("podReady"):
+            # An unguarded name-based delete would remove the replacement.
+            mock_state["healthyReplacementDeleteAttempts"] = 1
+            mock_state["podDeleteCount"] = mock_state.get("podDeleteCount", 0) + 1
+            mock_state["podReady"] = False
+            mock_state["readyReplicas"] = 0
+            state_path.write_text(json.dumps(state))
+            print('pod "teagramd-0" deleted')
+            raise SystemExit(0)
+    if preconditions.get("uid") != current_uid or \
+            preconditions.get("resourceVersion") != current_resource_version:
+        mock_state["deleteConflictCount"] = mock_state.get("deleteConflictCount", 0) + 1
+        state_path.write_text(json.dumps(state))
+        print("Error from server (Conflict): pod delete precondition failed", file=sys.stderr)
+        raise SystemExit(1)
+    if mock_state.get("podReady") or \
+            mock_state.get("podRevision") == mock_state.get("updateRevision"):
+        mock_state["healthyReplacementDeleteAttempts"] = \
+            mock_state.get("healthyReplacementDeleteAttempts", 0) + 1
+    mock_state["podDeletePreconditionsMatched"] = \
+        mock_state.get("podDeletePreconditionsMatched", 0) + 1
+    if mock_state.get("podReady") is False and \
+            mock_state.get("podRevision") != mock_state.get("updateRevision") and \
+            mock_state.get("observedGeneration", 0) >= mock_state.get("generation", 1) and \
+            mock_state.get("lastObservedRevision") == mock_state.get("updateRevision"):
         mock_state["podWasUnreadyWhenReplaced"] = not mock_state.get("podReady", True)
         mock_state["podReplacementAfterObservedRevision"] = True
         mock_state["podDeleteCount"] = mock_state.get("podDeleteCount", 0) + 1
         mock_state["podReplacementCount"] = mock_state.get("podReplacementCount", 0) + 1
+        mock_state["podUID"] = f"{current_uid}-replacement"
+        mock_state["podResourceVersion"] = str(int(current_resource_version) + 1)
         mock_state["podRevision"] = mock_state["updateRevision"]
         mock_state["currentRevision"] = mock_state["updateRevision"]
         mock_state["podReady"] = True
         mock_state["readyReplicas"] = 1
         state_path.write_text(json.dumps(state))
-        print('pod "teagramd-0" deleted and replaced')
+        print(json.dumps({"kind": "Status", "status": "Success"}))
         raise SystemExit(0)
-    print("No resources found in namespace teagram.")
-    raise SystemExit(0)
+    raise SystemExit(2)
 if command[:2] == ["rollout", "status"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
     state = json.loads(state_path.read_text())
@@ -187,6 +229,7 @@ if command[:2] == ["rollout", "status"]:
     if mock_state.pop("fail_next_rollout", False):
         mock_state["readyReplicas"] = 0
         mock_state["podReady"] = False
+        mock_state["podResourceVersion"] = str(int(mock_state.get("podResourceVersion", "101")) + 1)
         state_path.write_text(json.dumps(state))
         print("timed out waiting for statefulset", file=sys.stderr)
         raise SystemExit(1)
@@ -225,6 +268,13 @@ def initial_state(prefix: str = OLD_PREFIX, previous: str | None = None) -> dict
                 "lastObservedRevision": "",
                 "podDeleteCount": 0,
                 "podReplacementCount": 0,
+                "podUID": "pod-uid-1",
+                "podResourceVersion": "101",
+                "healthyReplacementDeleteAttempts": 0,
+                "podDeleteAttemptCount": 0,
+                "podDeletePreconditionsMatched": 0,
+                "missingDeletePreconditionCount": 0,
+                "deleteConflictCount": 0,
             }}
 
 
@@ -419,10 +469,34 @@ def run() -> None:
             raise AssertionError("rollback after a failed rollout did not restart teagramd exactly once")
         if recovered["_test"]["podDeleteCount"] != 1 or \
                 recovered["_test"]["podReplacementCount"] != 1 or \
+                recovered["_test"]["podDeleteAttemptCount"] != 1 or \
+                recovered["_test"]["podDeletePreconditionsMatched"] != 1 or \
+                recovered["_test"]["missingDeletePreconditionCount"] != 0 or \
                 recovered["_test"]["podWasUnreadyWhenReplaced"] is not True or \
                 recovered["_test"]["podReplacementAfterObservedRevision"] is not True or \
                 recovered["_test"]["podRevision"] != recovered["_test"]["updateRevision"]:
             raise AssertionError("rollback did not replace the stale unready pod after observing its revision")
+
+        raced_failed_rollout = initial_state()
+        raced_failed_rollout["_test"]["fail_next_rollout"] = True
+        state_path.write_text(json.dumps(raced_failed_rollout))
+        expect_refusal(command + ["--apply"], env, "rollout did not become ready")
+        raced_failed_rollout = json.loads(state_path.read_text())
+        raced_failed_rollout["_test"]["race_on_delete"] = True
+        state_path.write_text(json.dumps(raced_failed_rollout))
+        expect_success(command + ["--rollback"], env, "rollout=verified")
+        race_recovery = json.loads(state_path.read_text())
+        if race_recovery["_test"]["healthyReplacementDeleteAttempts"] != 0 or \
+                race_recovery["_test"]["podDeleteCount"] != 0 or \
+                race_recovery["_test"]["podDeleteAttemptCount"] != 1 or \
+                race_recovery["_test"]["deleteConflictCount"] != 1 or \
+                race_recovery["_test"]["lastDeletePreconditionUID"] != "pod-uid-1" or \
+                race_recovery["_test"]["lastDeletePreconditionResourceVersion"] != "102" or \
+                race_recovery["_test"]["missingDeletePreconditionCount"] != 0 or \
+                race_recovery["_test"]["podUID"] != "replacement-pod-uid" or \
+                race_recovery["_test"]["podReady"] is not True or \
+                race_recovery["_test"]["podRevision"] != race_recovery["_test"]["updateRevision"]:
+            raise AssertionError("rollback deleted a healthy pod replacement after a deletion race")
 
         patch_timeout_state = initial_state()
         patch_timeout_state["_test"]["fail_after_patch"] = True

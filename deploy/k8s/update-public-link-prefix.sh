@@ -201,12 +201,15 @@ print(f"{generation}\t{observed}\t{revision}")
 }
 
 replace_unready_stale_pod() {
-  local expected_revision=$1 pod_name pod_json pod_state pod_revision pod_ready pod_name_label selector
+  local expected_revision=$1 pod_name attempt pod_json pod_state pod_revision pod_ready
+  local pod_uid pod_resource_version delete_options delete_output delete_uri
   pod_name="$STATEFULSET-0"
-  pod_json=$(kubectl get pod "$pod_name" --namespace "$NAMESPACE" --ignore-not-found --output=json) ||
-    fail 'could not inspect teagramd-0 after observing the rollback revision'
-  [[ -n $pod_json ]] || return 0
-  pod_state=$(python3 -c '
+  delete_uri="/api/v1/namespaces/$NAMESPACE/pods/$pod_name"
+  for ((attempt = 0; attempt < 3; attempt++)); do
+    pod_json=$(kubectl get pod "$pod_name" --namespace "$NAMESPACE" --ignore-not-found --output=json) ||
+      fail 'could not inspect teagramd-0 after observing the rollback revision'
+    [[ -n $pod_json && $pod_json != null ]] || return 0
+    pod_state=$(python3 -c '
 import json, sys
 pod = json.load(sys.stdin)
 metadata = pod.get("metadata", {})
@@ -218,23 +221,43 @@ if not any(owner.get("kind") == "StatefulSet" and owner.get("name") == sys.argv[
 pod_name = metadata.get("name")
 pod_name_label = labels.get("statefulset.kubernetes.io/pod-name")
 revision = labels.get("controller-revision-hash")
+uid = metadata.get("uid")
+resource_version = metadata.get("resourceVersion")
 ready = any(condition.get("type") == "Ready" and condition.get("status") == "True"
             for condition in pod.get("status", {}).get("conditions", []))
 if not isinstance(pod_name, str) or pod_name != sys.argv[2] or pod_name_label != pod_name:
     raise SystemExit(1)
-if not isinstance(revision, str) or not revision:
+if not isinstance(revision, str) or not revision or not isinstance(uid, str) or not uid:
     raise SystemExit(1)
-print(f"{pod_name_label}\t{revision}\t{str(ready).lower()}")
+if not isinstance(resource_version, str) or not resource_version:
+    raise SystemExit(1)
+print(f"{revision}\t{str(ready).lower()}\t{uid}\t{resource_version}")
 ' "$STATEFULSET" "$pod_name" <<< "$pod_json") ||
-    fail 'teagramd-0 is not owned by the reviewed StatefulSet or has invalid revision labels'
-  IFS=$'\t' read -r pod_name_label pod_revision pod_ready <<< "$pod_state"
-  if [[ $pod_revision != "$expected_revision" && $pod_ready == false ]]; then
-    selector="statefulset.kubernetes.io/pod-name=$pod_name_label,controller-revision-hash=$pod_revision"
-    if ! kubectl delete pod --namespace "$NAMESPACE" --selector "$selector" \
-      --wait=true --timeout=180s; then
-      fail 'could not replace the stale unready teagramd-0; inspect the live state before retrying --rollback'
+      fail 'teagramd-0 is not owned by the reviewed StatefulSet or has invalid identity/revision metadata'
+    IFS=$'\t' read -r pod_revision pod_ready pod_uid pod_resource_version <<< "$pod_state"
+    if [[ $pod_revision == "$expected_revision" || $pod_ready != false ]]; then
+      return 0
     fi
-  fi
+    delete_options=$(python3 -c '
+import json, sys
+uid, resource_version = sys.argv[1:]
+print(json.dumps({
+    "apiVersion": "meta.k8s.io/v1",
+    "kind": "DeleteOptions",
+    "preconditions": {"uid": uid, "resourceVersion": resource_version},
+    "propagationPolicy": "Background",
+}, separators=(",", ":")))
+' "$pod_uid" "$pod_resource_version") || fail 'could not prepare guarded teagramd-0 deletion'
+    if delete_output=$(kubectl delete --raw "$delete_uri" --filename - <<< "$delete_options" 2>&1); then
+      return 0
+    fi
+    if [[ $delete_output == *Conflict* || $delete_output == *Precondition\ failed* ||
+          $delete_output == *NotFound* || $delete_output == *'not found'* ]]; then
+      continue
+    fi
+    fail "could not replace stale unready teagramd-0 ($delete_output); inspect the live state before retrying --rollback"
+  done
+  fail 'teagramd-0 kept changing while rollback tried to replace it; inspect the live state before retrying --rollback'
 }
 
 if [[ ${already_rolled_back:-false} == true ]]; then
