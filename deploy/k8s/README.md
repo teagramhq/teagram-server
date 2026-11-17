@@ -168,7 +168,10 @@ Only `--dry-run` and `--apply` require a ready workload.
 `--rollback` does not require readiness.
 It can restore the prefix if a failed rollout leaves the workload unready,
 provided the reviewed references and prefix values still match. The helper
-server-side validates the patch, changes only
+waits until the StatefulSet observes the rollback revision, deletes
+`teagramd-0` only when it is unready on a stale revision, then waits for its
+replacement; StatefulSet-managed PVCs are retained. It server-side validates
+the patch, changes only
 `TG_PUBLIC_LINK_PREFIX` and `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, then restarts
 teagramd and waits for it to become ready. The old tailnet prefix stays listed
 so admins can revoke channel invites issued before the update. This

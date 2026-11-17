@@ -117,6 +117,16 @@ if environment["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"]["valueFrom"]["configMapKeyRef
   fi
   fail 'teagramd must be ready with the reviewed runtime ConfigMap references before applying this change'
 fi
+revision_baseline=$(python3 -c '
+import json, sys
+statefulset = json.load(sys.stdin)
+generation = statefulset.get("metadata", {}).get("generation")
+revision = statefulset.get("status", {}).get("updateRevision", "")
+if not isinstance(generation, int) or not isinstance(revision, str):
+    raise SystemExit(1)
+print(f"{generation}\t{revision}")
+' <<< "$statefulset_json") || fail 'could not read the current StatefulSet revision'
+IFS=$'\t' read -r previous_generation previous_revision <<< "$revision_baseline"
 
 case "$mode:$current_prefix:$previous_state" in
   --dry-run:"$OLD_PREFIX":absent|--apply:"$OLD_PREFIX":absent|--dry-run:"$OLD_PREFIX":"$PUBLIC_PREFIX"|--apply:"$OLD_PREFIX":"$PUBLIC_PREFIX"|--dry-run:"$PUBLIC_PREFIX":"$OLD_PREFIX"|--apply:"$PUBLIC_PREFIX":"$OLD_PREFIX")
@@ -162,6 +172,71 @@ elif data.get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != expected_previous:
     "$advertise_before" "$media_key_version_before" <<< "$config_json"
 }
 
+wait_for_rollback_revision() {
+  local baseline_generation=$1 baseline_revision=$2 attempt current_json revision_state
+  local generation observed_generation update_revision
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    current_json=$(kubectl get statefulset "$STATEFULSET" --namespace "$NAMESPACE" --output=json) ||
+      fail 'could not read the StatefulSet while waiting for the rollback revision'
+    revision_state=$(python3 -c '
+import json, sys
+statefulset = json.load(sys.stdin)
+generation = statefulset.get("metadata", {}).get("generation")
+observed = statefulset.get("status", {}).get("observedGeneration")
+revision = statefulset.get("status", {}).get("updateRevision", "")
+if not isinstance(generation, int) or not isinstance(observed, int) or not isinstance(revision, str):
+    raise SystemExit(1)
+print(f"{generation}\t{observed}\t{revision}")
+' <<< "$current_json") || fail 'could not inspect the StatefulSet rollback revision'
+    IFS=$'\t' read -r generation observed_generation update_revision <<< "$revision_state"
+    if [[ $generation =~ ^[0-9]+$ && $observed_generation =~ ^[0-9]+$ ]] &&
+      (( generation > baseline_generation && observed_generation >= generation )) &&
+      [[ -n $update_revision && $update_revision != "$baseline_revision" ]]; then
+      rollback_revision=$update_revision
+      return 0
+    fi
+    sleep 1
+  done
+  fail 'the StatefulSet did not observe the rollback revision; inspect the live state before retrying'
+}
+
+replace_unready_stale_pod() {
+  local expected_revision=$1 pod_name pod_json pod_state pod_revision pod_ready pod_name_label selector
+  pod_name="$STATEFULSET-0"
+  pod_json=$(kubectl get pod "$pod_name" --namespace "$NAMESPACE" --ignore-not-found --output=json) ||
+    fail 'could not inspect teagramd-0 after observing the rollback revision'
+  [[ -n $pod_json ]] || return 0
+  pod_state=$(python3 -c '
+import json, sys
+pod = json.load(sys.stdin)
+metadata = pod.get("metadata", {})
+labels = metadata.get("labels", {})
+owners = metadata.get("ownerReferences", [])
+if not any(owner.get("kind") == "StatefulSet" and owner.get("name") == sys.argv[1] and
+           owner.get("controller") is True for owner in owners):
+    raise SystemExit(1)
+pod_name = metadata.get("name")
+pod_name_label = labels.get("statefulset.kubernetes.io/pod-name")
+revision = labels.get("controller-revision-hash")
+ready = any(condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in pod.get("status", {}).get("conditions", []))
+if not isinstance(pod_name, str) or pod_name != sys.argv[2] or pod_name_label != pod_name:
+    raise SystemExit(1)
+if not isinstance(revision, str) or not revision:
+    raise SystemExit(1)
+print(f"{pod_name_label}\t{revision}\t{str(ready).lower()}")
+' "$STATEFULSET" "$pod_name" <<< "$pod_json") ||
+    fail 'teagramd-0 is not owned by the reviewed StatefulSet or has invalid revision labels'
+  IFS=$'\t' read -r pod_name_label pod_revision pod_ready <<< "$pod_state"
+  if [[ $pod_revision != "$expected_revision" && $pod_ready == false ]]; then
+    selector="statefulset.kubernetes.io/pod-name=$pod_name_label,controller-revision-hash=$pod_revision"
+    if ! kubectl delete pod --namespace "$NAMESPACE" --selector "$selector" \
+      --wait=true --timeout=180s; then
+      fail 'could not replace the stale unready teagramd-0; inspect the live state before retrying --rollback'
+    fi
+  fi
+}
+
 if [[ ${already_rolled_back:-false} == true ]]; then
   verify_config "$runtime_json" "$expected_prefix" "$expected_previous" ||
     fail 'runtime ConfigMap no longer matches the reviewed rollback state; inspect the live state before retrying'
@@ -196,6 +271,10 @@ fi
 
 if ! kubectl rollout restart "statefulset/$STATEFULSET" --namespace "$NAMESPACE"; then
   fail 'ConfigMap updated but teagramd restart could not be started; run --rollback after inspecting the live state'
+fi
+if [[ $mode == --rollback ]]; then
+  wait_for_rollback_revision "$previous_generation" "$previous_revision"
+  replace_unready_stale_pod "$rollback_revision"
 fi
 if ! kubectl rollout status "statefulset/$STATEFULSET" --namespace "$NAMESPACE" --timeout=180s; then
   fail 'teagramd rollout did not become ready; run --rollback after inspecting the live state'

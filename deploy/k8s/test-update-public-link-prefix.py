@@ -55,7 +55,14 @@ if command[:2] == ["get", "configmap"]:
 if command[:2] == ["get", "statefulset"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
     state = json.loads(state_path.read_text())
+    mock_state = state.setdefault("_test", {})
+    if mock_state.get("restartCount", 0) > mock_state.get("lastObservedRestartCount", 0) and \
+            mock_state.get("observedGeneration", 0) >= mock_state.get("generation", 1):
+        mock_state["lastObservedRestartCount"] = mock_state["restartCount"]
+        mock_state["lastObservedRevision"] = mock_state.get("updateRevision", "")
+        state_path.write_text(json.dumps(state))
     print(json.dumps({
+        "metadata": {"generation": mock_state.get("generation", 1)},
         "spec": {
             "replicas": 1,
             "template": {"spec": {"containers": [{"name": "teagramd", "env": [
@@ -67,7 +74,33 @@ if command[:2] == ["get", "statefulset"]:
                                          "optional": True}}},
             ]}]}}
         },
-        "status": {"readyReplicas": state.get("_test", {}).get("readyReplicas", 1)},
+        "status": {
+            "readyReplicas": mock_state.get("readyReplicas", 1),
+            "observedGeneration": mock_state.get("observedGeneration", 1),
+            "updateRevision": mock_state.get("updateRevision", "revision-1"),
+            "currentRevision": mock_state.get("currentRevision", "revision-1"),
+        },
+    }))
+    raise SystemExit(0)
+if command[:2] == ["get", "pod"] and len(command) >= 3:
+    state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
+    state = json.loads(state_path.read_text())
+    mock_state = state.get("_test", {})
+    print(json.dumps({
+        "metadata": {
+            "name": command[2],
+            "labels": {
+                "statefulset.kubernetes.io/pod-name": command[2],
+                "controller-revision-hash": mock_state.get("podRevision", "revision-1"),
+            },
+            "ownerReferences": [{
+                "apiVersion": "apps/v1", "kind": "StatefulSet", "name": "teagramd",
+                "controller": True,
+            }],
+        },
+        "status": {"conditions": [{
+            "type": "Ready", "status": "True" if mock_state.get("podReady", True) else "False",
+        }]},
     }))
     raise SystemExit(0)
 if command[:2] == ["patch", "configmap"]:
@@ -103,12 +136,48 @@ if command[:2] == ["rollout", "restart"]:
     mock_state["restartCount"] = mock_state.get("restartCount", 0) + 1
     if mock_state.pop("fail_next_restart", False):
         mock_state["readyReplicas"] = 0
+        mock_state["podReady"] = False
         state_path.write_text(json.dumps(state))
         print("mock rollout restart failed", file=sys.stderr)
         raise SystemExit(1)
-    mock_state["readyReplicas"] = 1
+    mock_state["generation"] = mock_state.get("generation", 1) + 1
+    mock_state["observedGeneration"] = mock_state["generation"]
+    mock_state["updateRevision"] = f"revision-{mock_state['generation']}"
+    if mock_state.get("readyReplicas", 1) == 1 and mock_state.get("podReady", True):
+        mock_state["podRevision"] = mock_state["updateRevision"]
+        mock_state["currentRevision"] = mock_state["updateRevision"]
     state_path.write_text(json.dumps(state))
     print("statefulset restarted")
+    raise SystemExit(0)
+if command[:2] == ["delete", "pod"]:
+    state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
+    state = json.loads(state_path.read_text())
+    mock_state = state.setdefault("_test", {})
+    selector_text = command[command.index("--selector") + 1]
+    selector = dict(part.split("=", 1) for part in selector_text.split(","))
+    pod_name = selector.get("statefulset.kubernetes.io/pod-name")
+    matches_stale_pod = (
+        selector.get("statefulset.kubernetes.io/pod-name") == pod_name
+        and selector.get("statefulset.kubernetes.io/pod-name") == "teagramd-0"
+        and selector.get("controller-revision-hash") == mock_state.get("podRevision")
+        and mock_state.get("podReady") is False
+        and mock_state.get("podRevision") != mock_state.get("updateRevision")
+        and mock_state.get("observedGeneration", 0) >= mock_state.get("generation", 1)
+        and mock_state.get("lastObservedRevision") == mock_state.get("updateRevision")
+    )
+    if matches_stale_pod:
+        mock_state["podWasUnreadyWhenReplaced"] = not mock_state.get("podReady", True)
+        mock_state["podReplacementAfterObservedRevision"] = True
+        mock_state["podDeleteCount"] = mock_state.get("podDeleteCount", 0) + 1
+        mock_state["podReplacementCount"] = mock_state.get("podReplacementCount", 0) + 1
+        mock_state["podRevision"] = mock_state["updateRevision"]
+        mock_state["currentRevision"] = mock_state["updateRevision"]
+        mock_state["podReady"] = True
+        mock_state["readyReplicas"] = 1
+        state_path.write_text(json.dumps(state))
+        print('pod "teagramd-0" deleted and replaced')
+        raise SystemExit(0)
+    print("No resources found in namespace teagram.")
     raise SystemExit(0)
 if command[:2] == ["rollout", "status"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
@@ -117,10 +186,11 @@ if command[:2] == ["rollout", "status"]:
     mock_state["statusCount"] = mock_state.get("statusCount", 0) + 1
     if mock_state.pop("fail_next_rollout", False):
         mock_state["readyReplicas"] = 0
+        mock_state["podReady"] = False
         state_path.write_text(json.dumps(state))
         print("timed out waiting for statefulset", file=sys.stderr)
         raise SystemExit(1)
-    if mock_state.get("readyReplicas", 1) != 1:
+    if mock_state.get("readyReplicas", 1) != 1 or not mock_state.get("podReady", True):
         state_path.write_text(json.dumps(state))
         print("statefulset has no ready replicas", file=sys.stderr)
         raise SystemExit(1)
@@ -141,7 +211,21 @@ def initial_state(prefix: str = OLD_PREFIX, previous: str | None = None) -> dict
     if previous is not None:
         data["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"] = previous
     return {"metadata": {"resourceVersion": "531"}, "data": data,
-            "_test": {"readyReplicas": 1, "restartCount": 0, "statusCount": 0}}
+            "_test": {
+                "readyReplicas": 1,
+                "restartCount": 0,
+                "statusCount": 0,
+                "generation": 1,
+                "observedGeneration": 1,
+                "updateRevision": "revision-1",
+                "currentRevision": "revision-1",
+                "podRevision": "revision-1",
+                "podReady": True,
+                "lastObservedRestartCount": 0,
+                "lastObservedRevision": "",
+                "podDeleteCount": 0,
+                "podReplacementCount": 0,
+            }}
 
 
 def expect_success(command: list[str], env: dict[str, str], expected: str) -> subprocess.CompletedProcess[str]:
@@ -174,6 +258,9 @@ def run() -> None:
         "Only `--dry-run` and `--apply` require a ready workload.",
         "`--rollback` does not require readiness",
         "failed rollout leaves the workload unready",
+        "observes the rollback revision",
+        "`teagramd-0` only when it is unready on a stale revision",
+        "StatefulSet-managed PVCs are retained",
     ):
         if statement not in readme:
             raise AssertionError(f"the k8s deployment runbook is missing: {statement}")
@@ -255,6 +342,8 @@ def run() -> None:
             raise AssertionError("rollback did not retain the public prefix for invite revocation")
         if rolled_back_state["_test"]["restartCount"] != 3:
             raise AssertionError("rollback did not restart teagramd exactly once")
+        if rolled_back_state["_test"]["podDeleteCount"] != 0:
+            raise AssertionError("rollback deleted the pod when the normal rollout was ready")
         for key in ("TG_ADVERTISE_ADDR", "TG_MEDIA_KEY_CURRENT", "KEEP_ME"):
             if rolled_back.get(key) != before["data"].get(key):
                 raise AssertionError(f"rollback changed unrelated ConfigMap key {key}")
@@ -328,6 +417,12 @@ def run() -> None:
             raise AssertionError("rollback after a failed rollout dropped public invite revocation")
         if recovered["_test"]["restartCount"] != 2:
             raise AssertionError("rollback after a failed rollout did not restart teagramd exactly once")
+        if recovered["_test"]["podDeleteCount"] != 1 or \
+                recovered["_test"]["podReplacementCount"] != 1 or \
+                recovered["_test"]["podWasUnreadyWhenReplaced"] is not True or \
+                recovered["_test"]["podReplacementAfterObservedRevision"] is not True or \
+                recovered["_test"]["podRevision"] != recovered["_test"]["updateRevision"]:
+            raise AssertionError("rollback did not replace the stale unready pod after observing its revision")
 
         patch_timeout_state = initial_state()
         patch_timeout_state["_test"]["fail_after_patch"] = True
@@ -360,6 +455,9 @@ def run() -> None:
             raise AssertionError("failed rollback status did not count the attempted restart")
         if failed_rollback_status["_test"]["statusCount"] != 2:
             raise AssertionError("failed rollback did not record its rollout status check")
+        if failed_rollback_status["_test"]["podDeleteCount"] != 0 or \
+                failed_rollback_status["_test"]["podRevision"] != failed_rollback_status["_test"]["updateRevision"]:
+            raise AssertionError("rollback deleted a pod that was already on the observed revision")
         expect_success(command + ["--rollback"], env, "rollback already applied rollout=verified")
         recovered_rollback_status = json.loads(state_path.read_text())
         if recovered_rollback_status["_test"]["readyReplicas"] != 1 or \
