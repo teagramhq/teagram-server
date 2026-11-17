@@ -42,7 +42,7 @@ esac
 for command_name in incus python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
-incus info "$INSTANCE" >/dev/null 2>&1 || fail "Incus instance $INSTANCE is unavailable"
+incus info "$INSTANCE" >/dev/null || fail "Incus instance $INSTANCE is unavailable"
 marker=$(incus config get "$INSTANCE" user.teagram-k3s-bootstrap)
 [[ $marker == "$BOOTSTRAP_MARKER" ]] || fail 'the k3s instance bootstrap marker does not match'
 

@@ -26,6 +26,9 @@ import sys
 
 args = sys.argv[1:]
 if args[:2] == ["info", "teagram-k3s"]:
+    if os.environ.get("UPDATE_PREFIX_FAIL_INFO") == "1":
+        print("mock Incus socket permission denied", file=sys.stderr)
+        raise SystemExit(1)
     raise SystemExit(0)
 if args[:2] == ["config", "get"] and len(args) == 4:
     if args[2:] == ["teagram-k3s", "user.teagram-k3s-bootstrap"]:
@@ -197,6 +200,17 @@ def run() -> None:
 
         expect_success(command + ["--help"], env,
                        "--rollback Restore the tailnet prefix and retain the public prefix for")
+        info_error_env = env.copy()
+        info_error_env["UPDATE_PREFIX_FAIL_INFO"] = "1"
+        info_error = subprocess.run(command + ["--dry-run"], cwd=ROOT, env=info_error_env,
+                                    text=True, capture_output=True, check=False)
+        if info_error.returncode == 0 or \
+                "mock Incus socket permission denied" not in info_error.stderr:
+            raise AssertionError(
+                "a failed Incus info check did not surface its original error: "
+                f"exit={info_error.returncode}\nstderr={info_error.stderr}"
+            )
+
         marker_error_env = env.copy()
         marker_error_env["UPDATE_PREFIX_FAIL_MARKER"] = "1"
         marker_error = subprocess.run(command + ["--dry-run"], cwd=ROOT, env=marker_error_env,
