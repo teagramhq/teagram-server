@@ -46,6 +46,8 @@ if command[:2] == ["get", "configmap"]:
     sys.stdout.write(state_path.read_text())
     raise SystemExit(0)
 if command[:2] == ["get", "statefulset"]:
+    state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
+    state = json.loads(state_path.read_text())
     print(json.dumps({
         "spec": {
             "replicas": 1,
@@ -58,7 +60,7 @@ if command[:2] == ["get", "statefulset"]:
                                          "optional": True}}},
             ]}]}}
         },
-        "status": {"readyReplicas": 1},
+        "status": {"readyReplicas": state.get("_test", {}).get("readyReplicas", 1)},
     }))
     raise SystemExit(0)
 if command[:2] == ["patch", "configmap"]:
@@ -84,9 +86,24 @@ if command[:2] == ["patch", "configmap"]:
     print(json.dumps(updated))
     raise SystemExit(0)
 if command[:2] == ["rollout", "restart"]:
+    state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
+    state = json.loads(state_path.read_text())
+    state.setdefault("_test", {})["readyReplicas"] = 1
+    state_path.write_text(json.dumps(state))
     print("statefulset restarted")
     raise SystemExit(0)
 if command[:2] == ["rollout", "status"]:
+    state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
+    state = json.loads(state_path.read_text())
+    mock_state = state.setdefault("_test", {})
+    if mock_state.pop("fail_next_rollout", False):
+        mock_state["readyReplicas"] = 0
+        state_path.write_text(json.dumps(state))
+        print("timed out waiting for statefulset", file=sys.stderr)
+        raise SystemExit(1)
+    if mock_state.get("readyReplicas", 1) != 1:
+        print("statefulset has no ready replicas", file=sys.stderr)
+        raise SystemExit(1)
     print("statefulset successfully rolled out")
     raise SystemExit(0)
 raise SystemExit(2)
@@ -102,7 +119,8 @@ def initial_state(prefix: str = OLD_PREFIX, previous: str | None = None) -> dict
     }
     if previous is not None:
         data["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"] = previous
-    return {"metadata": {"resourceVersion": "531"}, "data": data}
+    return {"metadata": {"resourceVersion": "531"}, "data": data,
+            "_test": {"readyReplicas": 1}}
 
 
 def expect_success(command: list[str], env: dict[str, str], expected: str) -> subprocess.CompletedProcess[str]:
@@ -184,6 +202,31 @@ def run() -> None:
         expect_refusal(command + ["--apply"], env, "refusing to overwrite")
         if json.loads(state_path.read_text()) != unexpected:
             raise AssertionError("apply with an unexpected previous prefix changed the fixture")
+
+        unready_state = initial_state()
+        unready_state["_test"]["readyReplicas"] = 0
+        state_path.write_text(json.dumps(unready_state))
+        expect_refusal(command + ["--dry-run"], env, "must be ready")
+        expect_refusal(command + ["--apply"], env, "must be ready")
+        if json.loads(state_path.read_text()) != unready_state:
+            raise AssertionError("forward operation changed the ConfigMap while teagramd was unready")
+
+        failed_rollout_state = initial_state()
+        failed_rollout_state["_test"]["fail_next_rollout"] = True
+        state_path.write_text(json.dumps(failed_rollout_state))
+        expect_refusal(command + ["--apply"], env, "rollout did not become ready")
+        failed_apply = json.loads(state_path.read_text())
+        if failed_apply["_test"].get("readyReplicas") != 0:
+            raise AssertionError("failed apply did not leave the workload unready in the fixture")
+        if failed_apply["data"].get("TG_PUBLIC_LINK_PREFIX") != PUBLIC_PREFIX:
+            raise AssertionError("failed apply did not leave the attempted prefix in the fixture")
+
+        expect_success(command + ["--rollback"], env, "rollout=verified")
+        recovered = json.loads(state_path.read_text())
+        if recovered["data"].get("TG_PUBLIC_LINK_PREFIX") != OLD_PREFIX:
+            raise AssertionError("rollback did not restore the old prefix after a failed rollout")
+        if "TG_PREVIOUS_PUBLIC_LINK_PREFIXES" in recovered["data"]:
+            raise AssertionError("rollback did not remove the previous-prefix key after a failed rollout")
 
 
 if __name__ == "__main__":

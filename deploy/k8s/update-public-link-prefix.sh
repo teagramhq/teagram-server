@@ -94,11 +94,14 @@ statefulset_json=$(kubectl get statefulset "$STATEFULSET" --namespace "$NAMESPAC
 if ! python3 -c '
 import json, sys
 statefulset = json.load(sys.stdin)
+mode = sys.argv[1]
 spec = statefulset.get("spec", {})
 status = statefulset.get("status", {})
 containers = spec.get("template", {}).get("spec", {}).get("containers", [])
 server = next((container for container in containers if container.get("name") == "teagramd"), None)
-if spec.get("replicas") != 1 or status.get("readyReplicas") != 1 or server is None:
+if spec.get("replicas") != 1 or server is None:
+    raise SystemExit(1)
+if mode != "--rollback" and status.get("readyReplicas") != 1:
     raise SystemExit(1)
 environment = {entry.get("name"): entry for entry in server.get("env", [])}
 for name in ("TG_PUBLIC_LINK_PREFIX", "TG_PREVIOUS_PUBLIC_LINK_PREFIXES"):
@@ -107,7 +110,10 @@ for name in ("TG_PUBLIC_LINK_PREFIX", "TG_PREVIOUS_PUBLIC_LINK_PREFIXES"):
         raise SystemExit(1)
 if environment["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"]["valueFrom"]["configMapKeyRef"].get("optional") is not True:
     raise SystemExit(1)
-' <<< "$statefulset_json"; then
+' "$mode" <<< "$statefulset_json"; then
+  if [[ $mode == --rollback ]]; then
+    fail 'teagramd no longer has the reviewed runtime ConfigMap references; refusing rollback'
+  fi
   fail 'teagramd must be ready with the reviewed runtime ConfigMap references before applying this change'
 fi
 
