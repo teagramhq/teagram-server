@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: teagram-web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: teagram-web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: linkselector
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress: []

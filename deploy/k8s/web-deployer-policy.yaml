@@ -1,0 +1,113 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: teagram-web-deployer
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+        scope: Namespaced
+  matchConditions:
+    - name: teagram-web-deployer-only
+      expression: >-
+        request.namespace == 'teagram' &&
+        request.userInfo.username == 'system:serviceaccount:teagram:teagram-web-deployer'
+  validations:
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (object.spec.selector.matchLabels == {'app.kubernetes.io/name': 'teagram-web'} &&
+         (!has(object.spec.selector.matchExpressions) || size(object.spec.selector.matchExpressions) == 0) &&
+         object.spec.template.metadata.labels == {'app.kubernetes.io/name': 'teagram-web'})
+      message: deployment selector and template labels must identify only teagram-web
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        ((!has(object.spec.template.spec.serviceAccountName) || object.spec.template.spec.serviceAccountName == 'default') &&
+         has(object.spec.template.spec.automountServiceAccountToken) &&
+         object.spec.template.spec.automountServiceAccountToken == false)
+      message: deployment must use the default service account without a token
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (!has(object.spec.template.spec.volumes) || object.spec.template.spec.volumes.all(v, has(v.emptyDir)))
+      message: deployment volumes must be emptyDir
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (has(object.spec.replicas) && object.spec.replicas <= 2 &&
+         (!has(object.spec.template.spec.priorityClassName) || object.spec.template.spec.priorityClassName == '') &&
+         !has(object.spec.template.spec.resources))
+      message: deployment must limit replicas, use default priority, and omit pod-level resources
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        object.spec.template.spec.containers.all(c,
+          has(c.resources) && has(c.resources.limits) &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          quantity(c.resources.limits['cpu']).compareTo(quantity('0')) > 0 &&
+          quantity(c.resources.limits['cpu']).compareTo(quantity('500m')) <= 0 &&
+          quantity(c.resources.limits['memory']).compareTo(quantity('0')) > 0 &&
+          quantity(c.resources.limits['memory']).compareTo(quantity('256Mi')) <= 0)
+      message: deployment containers must have positive CPU and memory limits within web bounds
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (!has(object.spec.template.spec.volumes) || object.spec.template.spec.volumes.all(v,
+          has(v.emptyDir) && has(v.emptyDir.sizeLimit) &&
+          quantity(v.emptyDir.sizeLimit).compareTo(quantity('0')) > 0 &&
+          quantity(v.emptyDir.sizeLimit).compareTo(quantity('16Mi')) <= 0))
+      message: emptyDir volumes must have a positive size limit at most 16Mi
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        (size(object.spec.template.spec.containers) == 1 &&
+         object.spec.template.spec.containers[0].name == 'teagram-web' &&
+         object.spec.template.spec.containers[0].image.matches('^ghcr[.]io/teagramhq/teagram-web@sha256:[0-9a-f]{64}$'))
+      message: deployment must have one digest-pinned teagram-web container
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        ((!has(object.spec.template.spec.initContainers) || size(object.spec.template.spec.initContainers) == 0) &&
+         (!has(object.spec.template.spec.ephemeralContainers) || size(object.spec.template.spec.ephemeralContainers) == 0) &&
+         (!has(object.spec.template.spec.imagePullSecrets) || size(object.spec.template.spec.imagePullSecrets) == 0) &&
+         object.spec.template.spec.containers.all(c,
+           (!has(c.env) || size(c.env) == 0) &&
+           (!has(c.envFrom) || size(c.envFrom) == 0) &&
+           has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) &&
+           c.securityContext.allowPrivilegeEscalation == false &&
+           has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem == true))
+      message: deployment must not use extra containers, environment, or image pull secrets and must disable privilege escalation and use a read-only root filesystem
+    - expression: >-
+        request.resource.resource != 'deployments' ||
+        object.spec.template.spec.containers.all(c,
+          !has(c.lifecycle) &&
+          (!has(c.startupProbe) ||
+            ((!has(c.startupProbe.httpGet) || !has(c.startupProbe.httpGet.host) || c.startupProbe.httpGet.host == '') &&
+             (!has(c.startupProbe.tcpSocket) || !has(c.startupProbe.tcpSocket.host) || c.startupProbe.tcpSocket.host == ''))) &&
+          (!has(c.readinessProbe) ||
+            ((!has(c.readinessProbe.httpGet) || !has(c.readinessProbe.httpGet.host) || c.readinessProbe.httpGet.host == '') &&
+             (!has(c.readinessProbe.tcpSocket) || !has(c.readinessProbe.tcpSocket.host) || c.readinessProbe.tcpSocket.host == ''))) &&
+          (!has(c.livenessProbe) ||
+            ((!has(c.livenessProbe.httpGet) || !has(c.livenessProbe.httpGet.host) || c.livenessProbe.httpGet.host == '') &&
+             (!has(c.livenessProbe.tcpSocket) || !has(c.livenessProbe.tcpSocket.host) || c.livenessProbe.tcpSocket.host == ''))))
+      message: deployment probes must target the pod and lifecycle hooks are forbidden
+    - expression: >-
+        request.resource.resource != 'services' ||
+        (object.spec.type == 'ClusterIP' &&
+         object.spec.selector == {'app.kubernetes.io/name': 'teagram-web'} &&
+         (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0))
+      message: service must select only teagram-web and remain internal
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: teagram-web-deployer
+spec:
+  policyName: teagram-web-deployer
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: teagram

@@ -1623,7 +1623,7 @@ jobs:
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" "$rendered"
             kubectl apply --dry-run=client --validate=false --filename "$rendered"
           done
-          for manifest in agent-access.yaml agent-pod-delete-policy.yaml; do
+          for manifest in agent-access.yaml agent-pod-delete-policy.yaml web-deployer-access.yaml web-deployer-policy.yaml; do
             kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
               "deploy/k8s/$manifest"
             kubectl apply --dry-run=client --validate=false \
@@ -1635,6 +1635,15 @@ jobs:
           kubectl create --dry-run=server \
             --filename deploy/k8s/initialize-channel-post-expiring-summaries-job.yaml >/dev/null
           bash .github/scripts/check-k8s-prod-image-pins.sh "$RUNNER_TEMP/k8s-prod.yaml"
+
+      - name: Verify web deployer boundaries
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl apply --filename deploy/k8s/web-deployer-access.yaml
+          kubectl apply --filename deploy/k8s/web-deployer-policy.yaml
+          kubectl apply --namespace teagram --filename deploy/k8s/base/teagram-web-networkpolicy.yaml
+          WEB_DEPLOYER_TEST_DISPOSABLE=1 python3 -B deploy/k8s/test-web-deployer.py
 
       - name: Verify deployer RBAC and Pod Security boundaries
         run: |
