@@ -22,7 +22,8 @@ Usage: update-public-link-prefix.sh --dry-run | --apply | --rollback
 
   --dry-run  Server-side validate the public prefix change without applying it.
   --apply    Set the public prefix and retain the tailnet prefix for revocation.
-  --rollback Restore the tailnet prefix and remove the previous-prefix setting.
+  --rollback Restore the tailnet prefix and retain the public prefix for
+             revocation.
 
 Run as root on alpha. The apply and rollback modes restart the teagramd
 StatefulSet after changing its runtime ConfigMap.
@@ -42,7 +43,7 @@ for command_name in incus python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 incus info "$INSTANCE" >/dev/null 2>&1 || fail "Incus instance $INSTANCE is unavailable"
-marker=$(incus config get "$INSTANCE" user.teagram-k3s-bootstrap 2>/dev/null || true)
+marker=$(incus config get "$INSTANCE" user.teagram-k3s-bootstrap)
 [[ $marker == "$BOOTSTRAP_MARKER" ]] || fail 'the k3s instance bootstrap marker does not match'
 
 kubectl() {
@@ -129,20 +130,17 @@ case "$mode:$current_prefix:$previous_state" in
     patch='{"data":{"TG_PUBLIC_LINK_PREFIX":"https://teagram.tailaa4918.ts.net/","TG_PREVIOUS_PUBLIC_LINK_PREFIXES":"https://web.teagram.io/"}}'
     ;;
   --rollback:"$OLD_PREFIX":"$PUBLIC_PREFIX")
-    printf 'public link prefix update: rollback already applied\n'
-    exit 0
+    expected_prefix=$OLD_PREFIX
+    expected_previous=$PUBLIC_PREFIX
+    already_rolled_back=true
     ;;
   *)
-    fail 'runtime link prefix values differ from the reviewed before or after state; refusing to overwrite them'
+    observed_prefix_state=$(printf 'current_prefix=%q previous_prefix=%q' \
+      "$current_prefix" "$previous_state")
+    fail "runtime link prefix values differ from the reviewed before or after state ($observed_prefix_state);" \
+      'refusing to overwrite them'
     ;;
 esac
-patch=$(python3 -c '
-import json, sys
-patch = json.loads(sys.argv[1])
-patch["metadata"] = {"resourceVersion": sys.argv[2]}
-print(json.dumps(patch, separators=(",", ":")))
-' "$patch" "$resource_version") || fail 'could not prepare the guarded runtime patch'
-
 verify_config() {
   local config_json=$1 expected_prefix_value=$2 expected_previous_value=$3
   python3 -c '
@@ -164,25 +162,37 @@ elif data.get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != expected_previous:
     "$advertise_before" "$media_key_version_before" <<< "$config_json"
 }
 
-if ! dry_run_json=$(kubectl patch configmap "$CONFIGMAP" --namespace "$NAMESPACE" \
-  --type=merge --patch "$patch" --dry-run=server --output=json); then
-  fail 'server-side ConfigMap patch validation failed'
-fi
-verify_config "$dry_run_json" "$expected_prefix" "$expected_previous" ||
-  fail 'server-side patch would change unrelated runtime values or produced an unexpected result'
+if [[ ${already_rolled_back:-false} == true ]]; then
+  verify_config "$runtime_json" "$expected_prefix" "$expected_previous" ||
+    fail 'runtime ConfigMap no longer matches the reviewed rollback state; inspect the live state before retrying'
+else
+  patch=$(python3 -c '
+import json, sys
+patch = json.loads(sys.argv[1])
+patch["metadata"] = {"resourceVersion": sys.argv[2]}
+print(json.dumps(patch, separators=(",", ":")))
+' "$patch" "$resource_version") || fail 'could not prepare the guarded runtime patch'
 
-if [[ $mode == --dry-run ]]; then
-  printf 'public link prefix dry_run=accepted prefix=%s previous_prefix=%s\n' \
-    "$expected_prefix" "$expected_previous"
-  exit 0
-fi
+  if ! dry_run_json=$(kubectl patch configmap "$CONFIGMAP" --namespace "$NAMESPACE" \
+    --type=merge --patch "$patch" --dry-run=server --output=json); then
+    fail 'server-side ConfigMap patch validation failed'
+  fi
+  verify_config "$dry_run_json" "$expected_prefix" "$expected_previous" ||
+    fail 'server-side patch would change unrelated runtime values or produced an unexpected result'
 
-if ! applied_json=$(kubectl patch configmap "$CONFIGMAP" --namespace "$NAMESPACE" \
-  --type=merge --patch "$patch" --output=json); then
-  fail 'could not apply the runtime ConfigMap patch'
+  if [[ $mode == --dry-run ]]; then
+    printf 'public link prefix dry_run=accepted prefix=%s previous_prefix=%s\n' \
+      "$expected_prefix" "$expected_previous"
+    exit 0
+  fi
+
+  if ! applied_json=$(kubectl patch configmap "$CONFIGMAP" --namespace "$NAMESPACE" \
+    --type=merge --patch "$patch" --output=json); then
+    fail 'could not apply the runtime ConfigMap patch; inspect the live state, then rerun --apply or --rollback'
+  fi
+  verify_config "$applied_json" "$expected_prefix" "$expected_previous" ||
+    fail 'applied ConfigMap does not match the reviewed values; inspect the live state, then rerun --apply or --rollback'
 fi
-verify_config "$applied_json" "$expected_prefix" "$expected_previous" ||
-  fail 'applied ConfigMap does not match the reviewed values; use --rollback after inspecting the live state'
 
 if ! kubectl rollout restart "statefulset/$STATEFULSET" --namespace "$NAMESPACE"; then
   fail 'ConfigMap updated but teagramd restart could not be started; run --rollback after inspecting the live state'
@@ -191,5 +201,10 @@ if ! kubectl rollout status "statefulset/$STATEFULSET" --namespace "$NAMESPACE" 
   fail 'teagramd rollout did not become ready; run --rollback after inspecting the live state'
 fi
 
-printf 'public link prefix rollout=verified prefix=%s previous_prefix=%s\n' \
-  "$expected_prefix" "$expected_previous"
+if [[ ${already_rolled_back:-false} == true ]]; then
+  printf 'public link prefix update rollback already applied rollout=verified prefix=%s previous_prefix=%s\n' \
+    "$expected_prefix" "$expected_previous"
+else
+  printf 'public link prefix update rollout=verified prefix=%s previous_prefix=%s\n' \
+    "$expected_prefix" "$expected_previous"
+fi

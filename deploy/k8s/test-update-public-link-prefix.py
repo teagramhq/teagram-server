@@ -29,6 +29,9 @@ if args[:2] == ["info", "teagram-k3s"]:
     raise SystemExit(0)
 if args[:2] == ["config", "get"] and len(args) == 4:
     if args[2:] == ["teagram-k3s", "user.teagram-k3s-bootstrap"]:
+        if os.environ.get("UPDATE_PREFIX_FAIL_MARKER") == "1":
+            print("mock Incus config read failed", file=sys.stderr)
+            raise SystemExit(1)
         print("MAIN-3278")
         raise SystemExit(0)
     raise SystemExit(2)
@@ -83,7 +86,11 @@ if command[:2] == ["patch", "configmap"]:
             updated["data"][key] = value
     if "--dry-run=server" not in command:
         updated["metadata"]["resourceVersion"] = str(int(state["metadata"]["resourceVersion"]) + 1)
+        fail_after_patch = updated.get("_test", {}).pop("fail_after_patch", False)
         state_path.write_text(json.dumps(updated))
+        if fail_after_patch:
+            print("mock patch response timed out after commit", file=sys.stderr)
+            raise SystemExit(1)
     print(json.dumps(updated))
     raise SystemExit(0)
 if command[:2] == ["rollout", "restart"]:
@@ -91,6 +98,11 @@ if command[:2] == ["rollout", "restart"]:
     state = json.loads(state_path.read_text())
     mock_state = state.setdefault("_test", {})
     mock_state["restartCount"] = mock_state.get("restartCount", 0) + 1
+    if mock_state.pop("fail_next_restart", False):
+        mock_state["readyReplicas"] = 0
+        state_path.write_text(json.dumps(state))
+        print("mock rollout restart failed", file=sys.stderr)
+        raise SystemExit(1)
     mock_state["readyReplicas"] = 1
     state_path.write_text(json.dumps(state))
     print("statefulset restarted")
@@ -99,14 +111,17 @@ if command[:2] == ["rollout", "status"]:
     state_path = pathlib.Path(os.environ["UPDATE_PREFIX_STATE"])
     state = json.loads(state_path.read_text())
     mock_state = state.setdefault("_test", {})
+    mock_state["statusCount"] = mock_state.get("statusCount", 0) + 1
     if mock_state.pop("fail_next_rollout", False):
         mock_state["readyReplicas"] = 0
         state_path.write_text(json.dumps(state))
         print("timed out waiting for statefulset", file=sys.stderr)
         raise SystemExit(1)
     if mock_state.get("readyReplicas", 1) != 1:
+        state_path.write_text(json.dumps(state))
         print("statefulset has no ready replicas", file=sys.stderr)
         raise SystemExit(1)
+    state_path.write_text(json.dumps(state))
     print("statefulset successfully rolled out")
     raise SystemExit(0)
 raise SystemExit(2)
@@ -123,7 +138,7 @@ def initial_state(prefix: str = OLD_PREFIX, previous: str | None = None) -> dict
     if previous is not None:
         data["TG_PREVIOUS_PUBLIC_LINK_PREFIXES"] = previous
     return {"metadata": {"resourceVersion": "531"}, "data": data,
-            "_test": {"readyReplicas": 1, "restartCount": 0}}
+            "_test": {"readyReplicas": 1, "restartCount": 0, "statusCount": 0}}
 
 
 def expect_success(command: list[str], env: dict[str, str], expected: str) -> subprocess.CompletedProcess[str]:
@@ -180,6 +195,21 @@ def run() -> None:
         env["UPDATE_PREFIX_STATE"] = str(state_path)
         command = ["bash", str(SCRIPT)]
 
+        expect_success(command + ["--help"], env,
+                       "--rollback Restore the tailnet prefix and retain the public prefix for")
+        marker_error_env = env.copy()
+        marker_error_env["UPDATE_PREFIX_FAIL_MARKER"] = "1"
+        marker_error = subprocess.run(command + ["--dry-run"], cwd=ROOT, env=marker_error_env,
+                                      text=True, capture_output=True, check=False)
+        if marker_error.returncode == 0 or \
+                "mock Incus config read failed" not in marker_error.stderr:
+            raise AssertionError(
+                "a failed Incus marker read did not surface its original error: "
+                f"exit={marker_error.returncode}\nstderr={marker_error.stderr}"
+            )
+        if "bootstrap marker does not match" in marker_error.stderr:
+            raise AssertionError("a failed Incus marker read was misreported as a marker mismatch")
+
         before = json.loads(state_path.read_text())
         expect_success(command + ["--dry-run"], env, "dry_run=accepted")
         if json.loads(state_path.read_text()) != before:
@@ -215,31 +245,44 @@ def run() -> None:
             if rolled_back.get(key) != before["data"].get(key):
                 raise AssertionError(f"rollback changed unrelated ConfigMap key {key}")
         expect_success(command + ["--rollback"], env, "rollback already applied")
-        if json.loads(state_path.read_text())["_test"]["restartCount"] != 3:
-            raise AssertionError("idempotent rollback restarted teagramd")
+        idempotent_rollback = json.loads(state_path.read_text())
+        if idempotent_rollback["_test"]["restartCount"] != 4:
+            raise AssertionError("idempotent rollback did not restart teagramd exactly once")
+        if idempotent_rollback["_test"]["statusCount"] != 4:
+            raise AssertionError("idempotent rollback did not verify rollout status")
+        if idempotent_rollback["_test"]["readyReplicas"] != 1:
+            raise AssertionError("idempotent rollback did not verify workload readiness")
 
         expect_success(command + ["--apply"], env, "rollout=verified")
         reapplied = json.loads(state_path.read_text())
         if reapplied["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != OLD_PREFIX:
             raise AssertionError("reapply did not retain the tailnet prefix for revocation")
-        if reapplied["_test"]["restartCount"] != 4:
+        if reapplied["_test"]["restartCount"] != 5:
             raise AssertionError("reapply did not restart teagramd exactly once")
         expect_success(command + ["--rollback"], env, "rollout=verified")
         rolled_back_again = json.loads(state_path.read_text())
         if rolled_back_again["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
             raise AssertionError("rollback after reapply dropped the public prefix")
-        if rolled_back_again["_test"]["restartCount"] != 5:
+        if rolled_back_again["_test"]["restartCount"] != 6:
             raise AssertionError("rollback after reapply did not restart teagramd exactly once")
+        if rolled_back_again["_test"]["statusCount"] != 6:
+            raise AssertionError("rollback after reapply did not verify rollout status")
 
         state_path.write_text(json.dumps(initial_state(prefix="https://other.example/")))
         unexpected = json.loads(state_path.read_text())
-        expect_refusal(command + ["--apply"], env, "refusing to overwrite")
+        refusal = expect_refusal(command + ["--apply"], env, "refusing to overwrite")
+        if "current_prefix=https://other.example/" not in refusal.stderr or \
+                "previous_prefix=absent" not in refusal.stderr:
+            raise AssertionError("refusal did not report the observed current and previous prefixes")
         if json.loads(state_path.read_text()) != unexpected:
             raise AssertionError("refused apply changed the ConfigMap fixture")
 
         state_path.write_text(json.dumps(initial_state(previous="https://older.example/")))
         unexpected = json.loads(state_path.read_text())
-        expect_refusal(command + ["--apply"], env, "refusing to overwrite")
+        refusal = expect_refusal(command + ["--apply"], env, "refusing to overwrite")
+        if "current_prefix=https://teagram.tailaa4918.ts.net/" not in refusal.stderr or \
+                "previous_prefix=https://older.example/" not in refusal.stderr:
+            raise AssertionError("refusal did not report the observed prefix values")
         if json.loads(state_path.read_text()) != unexpected:
             raise AssertionError("apply with an unexpected previous prefix changed the fixture")
 
@@ -271,6 +314,64 @@ def run() -> None:
             raise AssertionError("rollback after a failed rollout dropped public invite revocation")
         if recovered["_test"]["restartCount"] != 2:
             raise AssertionError("rollback after a failed rollout did not restart teagramd exactly once")
+
+        patch_timeout_state = initial_state()
+        patch_timeout_state["_test"]["fail_after_patch"] = True
+        state_path.write_text(json.dumps(patch_timeout_state))
+        patch_timeout = expect_refusal(
+            command + ["--apply"], env,
+            "inspect the live state, then rerun --apply or --rollback",
+        )
+        if "could not apply the runtime ConfigMap patch" not in patch_timeout.stderr:
+            raise AssertionError("ambiguous patch failure did not explain the failed apply")
+        patch_timeout_result = json.loads(state_path.read_text())
+        if patch_timeout_result["data"].get("TG_PUBLIC_LINK_PREFIX") != PUBLIC_PREFIX or \
+                patch_timeout_result["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != OLD_PREFIX:
+            raise AssertionError("patch timeout fixture did not preserve the committed ConfigMap state")
+
+        rollback_status_failure = initial_state()
+        state_path.write_text(json.dumps(rollback_status_failure))
+        expect_success(command + ["--apply"], env, "rollout=verified")
+        rollback_status_failure = json.loads(state_path.read_text())
+        rollback_status_failure["_test"]["fail_next_rollout"] = True
+        state_path.write_text(json.dumps(rollback_status_failure))
+        expect_refusal(command + ["--rollback"], env, "rollout did not become ready")
+        failed_rollback_status = json.loads(state_path.read_text())
+        if failed_rollback_status["data"].get("TG_PUBLIC_LINK_PREFIX") != OLD_PREFIX or \
+                failed_rollback_status["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
+            raise AssertionError("failed rollback status did not leave the reviewed rollback values")
+        if failed_rollback_status["_test"]["readyReplicas"] != 0:
+            raise AssertionError("failed rollback status did not leave the workload unready")
+        if failed_rollback_status["_test"]["restartCount"] != 2:
+            raise AssertionError("failed rollback status did not count the attempted restart")
+        if failed_rollback_status["_test"]["statusCount"] != 2:
+            raise AssertionError("failed rollback did not record its rollout status check")
+        expect_success(command + ["--rollback"], env, "rollback already applied rollout=verified")
+        recovered_rollback_status = json.loads(state_path.read_text())
+        if recovered_rollback_status["_test"]["readyReplicas"] != 1 or \
+                recovered_rollback_status["_test"]["restartCount"] != 3 or \
+                recovered_rollback_status["_test"]["statusCount"] != 3:
+            raise AssertionError("retry of an already-applied rollback did not restart and verify readiness")
+
+        rollback_restart_failure = initial_state()
+        state_path.write_text(json.dumps(rollback_restart_failure))
+        expect_success(command + ["--apply"], env, "rollout=verified")
+        rollback_restart_failure = json.loads(state_path.read_text())
+        rollback_restart_failure["_test"]["fail_next_restart"] = True
+        state_path.write_text(json.dumps(rollback_restart_failure))
+        expect_refusal(command + ["--rollback"], env, "restart could not be started")
+        failed_rollback_restart = json.loads(state_path.read_text())
+        if failed_rollback_restart["data"].get("TG_PUBLIC_LINK_PREFIX") != OLD_PREFIX or \
+                failed_rollback_restart["data"].get("TG_PREVIOUS_PUBLIC_LINK_PREFIXES") != PUBLIC_PREFIX:
+            raise AssertionError("failed rollback restart did not leave the reviewed rollback values")
+        if failed_rollback_restart["_test"]["readyReplicas"] != 0:
+            raise AssertionError("failed rollback restart did not leave the workload unready")
+        expect_success(command + ["--rollback"], env, "rollback already applied rollout=verified")
+        recovered_rollback_restart = json.loads(state_path.read_text())
+        if recovered_rollback_restart["_test"]["readyReplicas"] != 1 or \
+                recovered_rollback_restart["_test"]["restartCount"] != 3 or \
+                recovered_rollback_restart["_test"]["statusCount"] != 2:
+            raise AssertionError("retry of a failed rollback restart did not recover the workload")
 
 
 if __name__ == "__main__":
