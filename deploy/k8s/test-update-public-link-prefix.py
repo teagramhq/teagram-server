@@ -152,6 +152,13 @@ def run() -> None:
         command_text = f"sudo deploy/k8s/update-public-link-prefix.sh {mode}"
         if command_text not in readme:
             raise AssertionError(f"the k8s deployment runbook does not document {mode}")
+    for statement in (
+        "Only `--dry-run` and `--apply` require a ready workload.",
+        "`--rollback` does not require readiness",
+        "failed rollout leaves the workload unready",
+    ):
+        if statement not in readme:
+            raise AssertionError(f"the k8s deployment runbook is missing: {statement}")
 
     with tempfile.TemporaryDirectory(prefix="public-link-prefix-test-") as temporary:
         temp_path = pathlib.Path(temporary)

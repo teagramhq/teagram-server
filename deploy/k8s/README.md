@@ -162,11 +162,16 @@ sudo deploy/k8s/update-public-link-prefix.sh --dry-run
 sudo deploy/k8s/update-public-link-prefix.sh --apply
 ```
 
-The helper verifies the k3s instance marker, the ready single-replica workload,
-and the expected current values. It server-side validates the patch, changes
-only `TG_PUBLIC_LINK_PREFIX` and `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, then
-restarts teagramd and waits for it to become ready. The old tailnet prefix stays
-listed so admins can revoke channel invites issued before the update. This
+The helper verifies the k3s instance marker, the single-replica workload's
+reviewed ConfigMap references, and the expected current values.
+Only `--dry-run` and `--apply` require a ready workload.
+`--rollback` does not require readiness.
+It can restore the prefix if a failed rollout leaves the workload unready,
+provided the reviewed references and prefix values still match. The helper
+server-side validates the patch, changes only
+`TG_PUBLIC_LINK_PREFIX` and `TG_PREVIOUS_PUBLIC_LINK_PREFIXES`, then restarts
+teagramd and waits for it to become ready. The old tailnet prefix stays listed
+so admins can revoke channel invites issued before the update. This
 single-replica restart briefly disconnects clients; no database data changes.
 If the rollout does not verify, inspect the live state and run
 `sudo deploy/k8s/update-public-link-prefix.sh --rollback` to restore the

@@ -700,6 +700,13 @@ for mode in --dry-run --apply --rollback; do
     deploy/k8s/README.md ||
     fail "the public link prefix runbook must document $mode"
 done
+grep --fixed-strings --quiet 'Only `--dry-run` and `--apply` require a ready workload.' \
+  deploy/k8s/README.md ||
+  fail 'the runbook must scope the ready-workload requirement to forward operations'
+grep --fixed-strings --quiet '`--rollback` does not require readiness' deploy/k8s/README.md ||
+  fail 'the runbook must state that rollback can run while the workload is unready'
+grep --fixed-strings --quiet 'failed rollout leaves the workload unready' deploy/k8s/README.md ||
+  fail 'the runbook must explain rollback after a failed unready rollout'
 statefulset=deploy/k8s/base/teagramd-statefulset.yaml
 for probe in startupProbe readinessProbe livenessProbe; do
   probe_port="$(yq -r ".spec.template.spec.containers[] | select(.name == \"teagramd\") | .${probe}.tcpSocket.port" "$statefulset")"
