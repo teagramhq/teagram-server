@@ -2,18 +2,37 @@ package store_test
 
 import (
 	"context"
+	_ "embed"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-func TestBlobInventoryReferencesIncludesOnlyStoredFilesAndLivePartKeys(t *testing.T) {
+//go:embed queries/uploads.sql
+var uploadsQueries string
+
+func TestBlobInventoryReferencesMatchesCanonicalSQL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := open(t)
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect canonical query: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close canonical query connection: %v", err)
+		}
+	})
+
 	u, err := s.CreateUser(ctx, "+155590002426")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -29,7 +48,7 @@ func TestBlobInventoryReferencesIncludesOnlyStoredFilesAndLivePartKeys(t *testin
 	if err != nil {
 		t.Fatalf("allocate pending file: %v", err)
 	}
-	partKey := "parts/01/0123456789abcdef0123456789abcd"
+	partKey := "parts/ab/" + strings.Repeat("0", 30)
 	if err := store.InsertUploadPartWithKey(ctx, s, u.ID, 17, 0, 4, partKey); err != nil {
 		t.Fatalf("insert live part: %v", err)
 	}
@@ -37,34 +56,104 @@ func TestBlobInventoryReferencesIncludesOnlyStoredFilesAndLivePartKeys(t *testin
 		t.Fatalf("insert part without key: %v", err)
 	}
 
+	rows, err := conn.Query(ctx, canonicalBlobInventoryReferencesSQL(t))
+	if err != nil {
+		t.Fatalf("execute canonical inventory SQL: %v", err)
+	}
+	type sourceRow struct {
+		kind         string
+		fileID       int64
+		blobKey      string
+		logicalBytes int64
+	}
+	var sourceRows []sourceRow
+	var canonical []store.BlobInventoryReference
+	for rows.Next() {
+		var row sourceRow
+		if err := rows.Scan(&row.kind, &row.fileID, &row.blobKey, &row.logicalBytes); err != nil {
+			rows.Close()
+			t.Fatalf("scan canonical inventory row: %v", err)
+		}
+		sourceRows = append(sourceRows, row)
+		switch row.kind {
+		case "file":
+			if row.fileID <= 0 || row.blobKey != "" {
+				rows.Close()
+				t.Fatalf("file inventory row = %+v, want positive file id and empty blob key", row)
+			}
+			canonical = append(canonical, store.BlobInventoryReference{
+				Key:          blob.Key(row.fileID),
+				Kind:         row.kind,
+				ID:           strconv.FormatInt(row.fileID, 10),
+				LogicalBytes: row.logicalBytes,
+			})
+		case "part":
+			if row.fileID != 0 || row.blobKey == "" {
+				rows.Close()
+				t.Fatalf("part inventory row = %+v, want zero file id and non-empty blob key", row)
+			}
+			canonical = append(canonical, store.BlobInventoryReference{
+				Key:          row.blobKey,
+				Kind:         row.kind,
+				ID:           row.blobKey,
+				LogicalBytes: row.logicalBytes,
+			})
+		default:
+			rows.Close()
+			t.Fatalf("canonical inventory row has unexpected kind %q", row.kind)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read canonical inventory rows: %v", err)
+	}
+	rows.Close()
+
 	got, err := s.BlobInventoryReferences(ctx)
 	if err != nil {
-		t.Fatalf("list inventory references: %v", err)
+		t.Fatalf("list generated inventory references: %v", err)
+	}
+	wantSourceRows := []sourceRow{
+		{kind: "file", fileID: stored.ID, blobKey: "", logicalBytes: 6},
+		{kind: "part", fileID: 0, blobKey: partKey, logicalBytes: 4},
 	}
 	want := []store.BlobInventoryReference{
 		{Key: blob.Key(stored.ID), Kind: "file", ID: strconv.FormatInt(stored.ID, 10), LogicalBytes: 6},
 		{Key: partKey, Kind: "part", ID: partKey, LogicalBytes: 4},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("references = %+v, want only stored file %d and live part", got, stored.ID)
+	if !reflect.DeepEqual(canonical, got) {
+		t.Fatalf("canonical SQL references = %+v, generated query references = %+v", canonical, got)
 	}
-	byKey := make(map[string]store.BlobInventoryReference, len(got))
-	for _, ref := range got {
-		byKey[ref.Key] = ref
-	}
-	if byKey[blob.Key(stored.ID)].ID != want[0].ID || byKey[blob.Key(stored.ID)].LogicalBytes != want[0].LogicalBytes {
-		t.Fatalf("stored file reference = %+v, want %+v", byKey[blob.Key(stored.ID)], want[0])
-	}
-	if byKey[partKey].Kind != want[1].Kind || byKey[partKey].ID != want[1].ID || byKey[partKey].LogicalBytes != want[1].LogicalBytes {
-		t.Fatalf("part reference = %+v, want %+v", byKey[partKey], want[1])
-	}
-	if _, exists := byKey[blob.Key(pending.ID)]; exists {
-		t.Fatalf("unstored file %d was counted as an object reference", pending.ID)
-	}
-	if _, exists := byKey[""]; exists {
-		t.Fatal("part row with no blob key was counted as an object reference")
+	if !reflect.DeepEqual(sourceRows, wantSourceRows) {
+		t.Fatalf("canonical SQL rows = %+v, want parser contract rows %+v (pending file %d excluded)", sourceRows, wantSourceRows, pending.ID)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("references = %+v, want ordered values %+v", got, want)
+		t.Fatalf("generated query references = %+v, want %+v", got, want)
 	}
+}
+
+func canonicalBlobInventoryReferencesSQL(t *testing.T) string {
+	t.Helper()
+	lines := strings.Split(uploadsQueries, "\n")
+	start := -1
+	for i, line := range lines {
+		if line == "-- name: BlobInventoryReferences :many" {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatal("canonical BlobInventoryReferences query is missing")
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "-- name: ") {
+			end = i
+			break
+		}
+	}
+	query := strings.TrimSpace(strings.Join(lines[start+1:end], "\n"))
+	if !strings.HasSuffix(query, ";") {
+		t.Fatal("canonical BlobInventoryReferences query has no terminating semicolon")
+	}
+	return query
 }
