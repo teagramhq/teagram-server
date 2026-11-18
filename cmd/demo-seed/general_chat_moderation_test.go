@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -40,8 +41,33 @@ func TestModerateGeneralChatPermanentlyBansMemberOnly(t *testing.T) {
 	}
 }
 
+func TestModerateGeneralChatUpgradesTemporaryBanToPermanent(t *testing.T) {
+	rights := tg.ChatBannedRights{ViewMessages: true, UntilDate: int(time.Now().Add(time.Hour).Unix())}
+	rights.SetFlags()
+	rpc := &generalModerationRPC{targetRole: "banned", bannedRights: rights}
+	if err := banGeneralChatGuest(context.Background(), tg.NewClient(rpc), "freshguest"); err != nil {
+		t.Fatalf("permanently ban temporarily banned General guest: %v", err)
+	}
+	if rpc.banCount != 1 || !rpc.bannedViewMessages || rpc.bannedUntilDate != 0 {
+		t.Fatalf("General ban calls=%d view=%t until=%d, want one permanent view ban", rpc.banCount, rpc.bannedViewMessages, rpc.bannedUntilDate)
+	}
+}
+
+func TestModerateGeneralChatKeepsPermanentBanIdempotent(t *testing.T) {
+	rights := tg.ChatBannedRights{ViewMessages: true}
+	rights.SetFlags()
+	rpc := &generalModerationRPC{targetRole: "banned", bannedRights: rights}
+	if err := banGeneralChatGuest(context.Background(), tg.NewClient(rpc), "freshguest"); err != nil {
+		t.Fatalf("re-ban permanently banned General guest: %v", err)
+	}
+	if rpc.banCount != 0 {
+		t.Fatalf("already-permanent General ban updates = %d, want none", rpc.banCount)
+	}
+}
+
 type generalModerationRPC struct {
 	targetRole         string
+	bannedRights       tg.ChatBannedRights
 	deletedMessageID   int
 	deleteCount        int
 	banCount           int
@@ -77,6 +103,13 @@ func (rpc *generalModerationRPC) Invoke(_ context.Context, input bin.Encoder, ou
 		}
 		if rpc.targetRole == "missing" {
 			return tgerr.New(400, "USER_NOT_PARTICIPANT")
+		}
+		if rpc.targetRole == "banned" {
+			participant.Participant = &tg.ChannelParticipantBanned{
+				Peer:         &tg.PeerUser{UserID: 42},
+				BannedRights: rpc.bannedRights,
+			}
+			return nil
 		}
 		if rpc.targetRole == "admin" {
 			participant.Participant = &tg.ChannelParticipantAdmin{UserID: 42}

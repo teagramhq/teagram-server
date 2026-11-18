@@ -79,9 +79,12 @@ func banGeneralChatGuest(ctx context.Context, api *tg.Client, username string) e
 	case *tg.ChannelParticipantBanned:
 		bannedPeer, ok := member.Peer.(*tg.PeerUser)
 		if ok && bannedPeer.UserID == user.ID {
-			return nil
+			if member.BannedRights.ViewMessages && member.BannedRights.UntilDate == 0 {
+				return nil
+			}
+		} else {
+			return errors.New("general ban record did not match the requested guest")
 		}
-		return errors.New("general ban record did not match the requested guest")
 	default:
 		return fmt.Errorf("general user %s is not an ordinary guest member", username)
 	}
