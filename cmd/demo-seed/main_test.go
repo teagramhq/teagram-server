@@ -297,6 +297,34 @@ func TestReadTurnstileQATokenTrimsAndValidatesSecret(t *testing.T) {
 	}
 }
 
+func TestOwnerAuthSendCodeUsesTurnstileTokenWhenEnabled(t *testing.T) {
+	token := strings.Repeat("q", 32)
+	tokenPath := filepath.Join(t.TempDir(), "qa-token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatalf("write QA token fixture: %v", err)
+	}
+
+	api := &fakeTurnstileProbeAPI{signInGateEnabled: true}
+	sent, err := sendAuthCodeForAccount(context.Background(), api, accountSpec{loginID: "demo_seed_owner", owner: true}, tokenPath)
+	if err != nil {
+		t.Fatalf("send owner auth code with Turnstile enabled: %v", err)
+	}
+	if _, ok := sent.(*tg.AuthSentCode); !ok {
+		t.Fatalf("owner auth code response = %T, want *tg.AuthSentCode", sent)
+	}
+	if api.wrappedToken != token || api.wrappedSendCodeRequest == nil || api.wrappedSendCodeRequest.PhoneNumber != "demo_seed_owner" {
+		t.Fatalf("wrapped owner auth.sendCode token/request = %q/%+v", api.wrappedToken, api.wrappedSendCodeRequest)
+	}
+
+	guestAPI := &fakeTurnstileProbeAPI{signInGateEnabled: true}
+	if _, err := sendAuthCodeForAccount(context.Background(), guestAPI, accountSpec{loginID: "demo_iona"}, tokenPath); !isSignInCaptchaRequired(err) {
+		t.Fatalf("guest auth.sendCode error = %v, want the original sign-in challenge", err)
+	}
+	if guestAPI.wrappedSendCodeRequest != nil {
+		t.Fatalf("guest auth.sendCode unexpectedly used the owner QA token: %+v", guestAPI.wrappedSendCodeRequest)
+	}
+}
+
 func TestExpectedSeedMarkerCounts(t *testing.T) {
 	for _, spec := range publicSpaces {
 		want := 32

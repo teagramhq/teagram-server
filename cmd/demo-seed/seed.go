@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/teagramhq/teagram-server/internal/demo"
 )
 
 type accountSpec struct {
@@ -63,9 +65,11 @@ var publicSpaces = []spaceSpec{
 }
 
 const (
-	demoGeneralChatUsername        = "teagramdemogeneral"
+	demoGeneralChatUsername        = demo.GeneralChatHandle
 	demoGeneralChatSlowmodeSeconds = 10
 )
+
+var errGeneralChatHandleCollision = errors.New("general handle is owned by another peer or has unexpected channel details")
 
 func generalChatDefaultBannedRights() tg.ChatBannedRights {
 	rights := tg.ChatBannedRights{
@@ -146,6 +150,9 @@ func seedDemo(ctx context.Context, cfg apiConfig, options seedOptions, ownerPass
 			generalChat, err := ensureGeneralChat(runCtx, api, spec)
 			if err != nil {
 				return err
+			}
+			if !generalChat.creator {
+				return errors.New("seed owner does not own General chat")
 			}
 			if err := inviteGeneralChatAccounts(runCtx, api, generalChat); err != nil {
 				return err
@@ -266,9 +273,21 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 }
 
 func ensureGeneralChat(ctx context.Context, api *tg.Client, spec spaceSpec) (remoteSpace, error) {
-	remote, err := ensurePublicSpace(ctx, api, spec)
+	remote, freeSpec, err := resolveOwnedGeneralChat(ctx, api, spec)
 	if err != nil {
 		return remoteSpace{}, fmt.Errorf("ensure General chat: %w", err)
+	}
+	if remote.channelID == 0 {
+		if freeSpec == nil {
+			return remoteSpace{}, errors.New("all reserved General handles are occupied by other peers")
+		}
+		remote, err = createPublicSpace(ctx, api, *freeSpec)
+		if err != nil {
+			return remoteSpace{}, fmt.Errorf("create General chat: %w", err)
+		}
+	}
+	if !remote.creator {
+		return remoteSpace{}, errors.New("seed owner does not own General chat")
 	}
 	full, err := api.ChannelsGetFullChannel(ctx, remote.inputChannel())
 	if err != nil {
@@ -329,11 +348,11 @@ func verifyGeneralChatDefaultBannedRights(ctx context.Context, api *tg.Client, r
 }
 
 func verifyGeneralChat(ctx context.Context, api *tg.Client, spec spaceSpec) error {
-	remote, err := resolvePublicSpace(ctx, api, spec)
+	remote, _, err := resolveOwnedGeneralChat(ctx, api, spec)
 	if err != nil {
 		return fmt.Errorf("resolve General chat: %w", err)
 	}
-	if !remote.creator {
+	if remote.channelID == 0 || !remote.creator {
 		return errors.New("seed owner does not own General chat")
 	}
 	if err := verifyGeneralChatDefaultBannedRights(ctx, api, remote); err != nil {
@@ -383,6 +402,9 @@ func verifyGeneralChat(ctx context.Context, api *tg.Client, spec spaceSpec) erro
 }
 
 func inviteGeneralChatAccounts(ctx context.Context, api *tg.Client, remote remoteSpace) error {
+	if remote.channelID <= 0 || !remote.creator {
+		return errors.New("refuse to invite guests to a General chat not owned by the seed account")
+	}
 	for _, account := range seedAccounts[1:] {
 		user, err := findInputUser(ctx, api, account.username)
 		if err != nil {
@@ -526,6 +548,10 @@ func ensurePublicSpace(ctx context.Context, api *tg.Client, spec spaceSpec) (rem
 	if !isRPCMessage(err, "USERNAME_NOT_OCCUPIED") {
 		return remoteSpace{}, err
 	}
+	return createPublicSpace(ctx, api, spec)
+}
+
+func createPublicSpace(ctx context.Context, api *tg.Client, spec spaceSpec) (remoteSpace, error) {
 	created, err := api.ChannelsCreateChannel(ctx, &tg.ChannelsCreateChannelRequest{
 		Broadcast: !spec.megagroup,
 		Megagroup: spec.megagroup,
@@ -546,6 +572,33 @@ func ensurePublicSpace(ctx context.Context, api *tg.Client, spec spaceSpec) (rem
 	return remoteSpace{spec: spec, channelID: channel.ID, accessHash: channel.AccessHash, creator: true}, nil
 }
 
+func resolveOwnedGeneralChat(ctx context.Context, api *tg.Client, spec spaceSpec) (remoteSpace, *spaceSpec, error) {
+	var firstFree *spaceSpec
+	for _, handle := range demo.GeneralChatHandles() {
+		candidate := spec
+		candidate.username = handle
+		remote, err := resolvePublicSpace(ctx, api, candidate)
+		if err == nil {
+			if remote.creator {
+				return remote, nil, nil
+			}
+			continue
+		}
+		if isRPCMessage(err, "USERNAME_NOT_OCCUPIED") {
+			if firstFree == nil {
+				free := candidate
+				firstFree = &free
+			}
+			continue
+		}
+		if errors.Is(err, errGeneralChatHandleCollision) {
+			continue
+		}
+		return remoteSpace{}, nil, err
+	}
+	return remoteSpace{}, firstFree, nil
+}
+
 func resolvePublicSpace(ctx context.Context, api *tg.Client, spec spaceSpec) (remoteSpace, error) {
 	resolved, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: spec.username})
 	if err != nil {
@@ -553,16 +606,19 @@ func resolvePublicSpace(ctx context.Context, api *tg.Client, spec spaceSpec) (re
 	}
 	channel, ok := resolvedChannel(resolved)
 	if !ok {
-		return remoteSpace{}, fmt.Errorf("public handle %s belongs to a non-channel peer", spec.username)
+		return remoteSpace{}, fmt.Errorf("%w: public handle %s belongs to a non-channel peer", errGeneralChatHandleCollision, spec.username)
 	}
 	if channel.Username != spec.username || channel.Title != spec.title || channel.Megagroup != spec.megagroup || channel.Broadcast == spec.megagroup {
-		return remoteSpace{}, fmt.Errorf("public handle %s does not match the expected demo channel", spec.username)
+		return remoteSpace{}, fmt.Errorf("%w: public handle %s does not match the expected demo channel", errGeneralChatHandleCollision, spec.username)
 	}
 	participant, err := api.ChannelsGetParticipant(ctx, &tg.ChannelsGetParticipantRequest{
 		Channel:     &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		Participant: &tg.InputPeerSelf{},
 	})
 	if err != nil {
+		if isRPCMessage(err, "USER_NOT_PARTICIPANT") {
+			return remoteSpace{}, fmt.Errorf("%w: seed owner is not a member of public handle %s", errGeneralChatHandleCollision, spec.username)
+		}
 		return remoteSpace{}, fmt.Errorf("inspect seed owner membership in public space %s: %w", spec.username, err)
 	}
 	return remoteSpace{

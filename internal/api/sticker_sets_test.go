@@ -1461,11 +1461,15 @@ func TestDemoGeneralGuestCanSendCatalogueSticker(t *testing.T) {
 		return &tg.MessagesSendMediaRequest{
 			Peer:    api.InputPeerChannel(guest.ID, channelID),
 			Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash}},
-			Message: "sticker from guest", RandomID: randomID,
+			Message: "", RandomID: randomID,
 		}
 	}
 	if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(general.ID, 4815162420)); err != nil {
 		t.Fatalf("send bundled sticker to General: %v", err)
+	}
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(general.ID, 4815162422))
+	if got := rpcMessage(t, err); got != "FLOOD_WAIT_30" {
+		t.Fatalf("repeat uncaptioned sticker send = %q, want FLOOD_WAIT_30", got)
 	}
 	posts, err := s.ChannelHistory(ctx, general.ID, 0, 10)
 	if err != nil {
@@ -1473,7 +1477,7 @@ func TestDemoGeneralGuestCanSendCatalogueSticker(t *testing.T) {
 	}
 	var generalStickerFound bool
 	for _, post := range posts {
-		if post.FromID == guest.ID && post.Message == "sticker from guest" && post.StickerDocumentID != nil && *post.StickerDocumentID == document.ID {
+		if post.FromID == guest.ID && post.Message == "" && post.StickerDocumentID != nil && *post.StickerDocumentID == document.ID {
 			generalStickerFound = true
 			break
 		}

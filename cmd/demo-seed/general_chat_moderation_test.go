@@ -164,6 +164,13 @@ func TestParseOptionsGeneralChatModeration(t *testing.T) {
 	if _, err := parseOptions([]string{"--moderate-delete-message", "0"}); err == nil {
 		t.Fatal("parseOptions accepted message ID zero")
 	}
+	options, err = parseOptions([]string{"--moderate-delete-message", "2147483647"})
+	if err != nil || options.moderateDeleteMessageID != 2147483647 {
+		t.Fatalf("parseOptions rejected MaxInt32 message ID: options=%+v err=%v", options, err)
+	}
+	if _, err := parseOptions([]string{"--moderate-delete-message", "2147483648"}); err == nil {
+		t.Fatal("parseOptions accepted a message ID above MaxInt32")
+	}
 	if _, err := parseOptions([]string{"--moderate-ban-user", "@freshguest"}); err == nil {
 		t.Fatal("parseOptions accepted a username with an @ prefix")
 	}

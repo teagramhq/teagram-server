@@ -172,6 +172,10 @@ services:
       - type: bind
         source: /var/lib/teagram-demo/secrets/demo-accounts
         target: /run/secrets/demo-accounts
+    # The seed owner may use the QA token only to pass the production sign-in
+    # challenge for seed and moderation commands; guests never receive it.
+    secrets:
+      - teagram_demo_turnstile_qa_bypass
     networks: [backend]
     logging: *logging
 
@@ -195,7 +199,7 @@ services:
         source: ./.state/teagram-demo/public-client/client
         target: /run/teagram-demo/client.json
         read_only: true
-    # Only the deploy-time probe needs the signup-only token to wrap auth.sendCode.
+    # The deploy-time probe uses the QA token to inspect signup and sign-in gates.
     secrets:
       - teagram_demo_turnstile_qa_bypass
     networks: [backend]

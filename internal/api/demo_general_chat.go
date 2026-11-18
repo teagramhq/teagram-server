@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const (
-	demoGeneralChatUsername         = "teagramdemogeneral"
+	demoGeneralChatUsername         = demo.GeneralChatHandle
 	demoGeneralChatMessageMax       = 1000
 	demoGeneralChatDuplicateWindow  = 30 * time.Second
 	demoGeneralChatResolutionTTL    = time.Minute
@@ -47,7 +48,9 @@ func defaultDemoGeneralChatPolicy() demoGeneralChatPolicy {
 	}
 }
 
-func (h *handlers) checkDemoGeneralChatMessages(r *mtproto.Request, channelID int64, texts []string, cost int, tooLong error) (bool, error) {
+func (h *handlers) checkDemoGeneralChatMessages(
+	r *mtproto.Request, channelID int64, texts []string, cost int, tooLong error, mediaIdentities ...string,
+) (bool, error) {
 	if !h.demoGeneralChatEnabled {
 		return false, nil
 	}
@@ -64,13 +67,15 @@ func (h *handlers) checkDemoGeneralChatMessages(r *mtproto.Request, channelID in
 			return false, tooLong
 		}
 	}
-	if err := h.preflightDemoGeneralChatRateLimits(r, texts, cost); err != nil {
+	if err := h.preflightDemoGeneralChatRateLimits(r, texts, cost, mediaIdentities...); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (h *handlers) demoGeneralChatRateLimitCharges(r *mtproto.Request, texts []string, cost int) []store.RateLimitCharge {
+func (h *handlers) demoGeneralChatRateLimitCharges(
+	r *mtproto.Request, texts []string, cost int, mediaIdentities ...string,
+) []store.RateLimitCharge {
 	if r.Tailnet() {
 		return nil
 	}
@@ -78,11 +83,7 @@ func (h *handlers) demoGeneralChatRateLimitCharges(r *mtproto.Request, texts []s
 		{Surface: demoGeneralChatHourSurface, Config: h.demoGeneralChatPolicy.perHour, Cost: cost},
 		{Surface: demoGeneralChatMinuteSurface, Config: h.demoGeneralChatPolicy.perMinute, Cost: cost},
 	}
-	for _, text := range texts {
-		if text == "" {
-			continue
-		}
-		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+	for _, surface := range demoGeneralChatDuplicateSurfaces(texts, mediaIdentities) {
 		charges = append(charges, store.RateLimitCharge{
 			Surface: surface, Config: h.demoGeneralChatPolicy.duplicateLimit, Cost: 1,
 		})
@@ -90,7 +91,9 @@ func (h *handlers) demoGeneralChatRateLimitCharges(r *mtproto.Request, texts []s
 	return charges
 }
 
-func (h *handlers) preflightDemoGeneralChatRateLimits(r *mtproto.Request, texts []string, cost int) error {
+func (h *handlers) preflightDemoGeneralChatRateLimits(
+	r *mtproto.Request, texts []string, cost int, mediaIdentities ...string,
+) error {
 	if r.Tailnet() {
 		return nil
 	}
@@ -109,11 +112,7 @@ func (h *handlers) preflightDemoGeneralChatRateLimits(r *mtproto.Request, texts 
 		return nil
 	}
 	counts := make(map[string]int)
-	for _, text := range texts {
-		if text == "" {
-			continue
-		}
-		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+	for _, surface := range demoGeneralChatDuplicateSurfaces(texts, mediaIdentities) {
 		counts[surface]++
 		if err := staticDemoGeneralChatRateLimitError(h.demoGeneralChatPolicy.duplicateLimit, counts[surface]); err != nil {
 			return err
@@ -122,7 +121,9 @@ func (h *handlers) preflightDemoGeneralChatRateLimits(r *mtproto.Request, texts 
 	return nil
 }
 
-func (h *handlers) checkDemoGeneralChatRateLimitBudgets(r *mtproto.Request, texts []string, cost int) error {
+func (h *handlers) checkDemoGeneralChatRateLimitBudgets(
+	r *mtproto.Request, texts []string, cost int, mediaIdentities ...string,
+) error {
 	if r.Tailnet() {
 		return nil
 	}
@@ -134,16 +135,15 @@ func (h *handlers) checkDemoGeneralChatRateLimitBudgets(r *mtproto.Request, text
 		{surface: demoGeneralChatHourSurface, config: h.demoGeneralChatPolicy.perHour, cost: cost},
 		{surface: demoGeneralChatMinuteSurface, config: h.demoGeneralChatPolicy.perMinute, cost: cost},
 	} {
+		if limit.cost <= 0 {
+			continue
+		}
 		if err := h.checkDemoGeneralChatRateLimitBudget(r, limit.surface, limit.config, limit.cost); err != nil {
 			return err
 		}
 	}
 	counts := make(map[string]int)
-	for _, text := range texts {
-		if text == "" {
-			continue
-		}
-		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+	for _, surface := range demoGeneralChatDuplicateSurfaces(texts, mediaIdentities) {
 		counts[surface]++
 		if err := h.checkDemoGeneralChatRateLimitBudget(r, surface, h.demoGeneralChatPolicy.duplicateLimit, counts[surface]); err != nil {
 			return err
@@ -189,6 +189,21 @@ func demoGeneralChatDuplicateRateLimitSurface(text string) string {
 	return demoGeneralChatDuplicateSurface + hex.EncodeToString(digest[:])
 }
 
+func demoGeneralChatDuplicateSurfaces(texts, mediaIdentities []string) []string {
+	var surfaces []string
+	for _, text := range texts {
+		if text != "" {
+			surfaces = append(surfaces, demoGeneralChatDuplicateRateLimitSurface(text))
+		}
+	}
+	for _, identity := range mediaIdentities {
+		if identity != "" {
+			surfaces = append(surfaces, demoGeneralChatDuplicateRateLimitSurface("media:"+identity))
+		}
+	}
+	return surfaces
+}
+
 func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool, error) {
 	now := h.demoGeneralChatNow()
 	if cached := h.demoGeneralChatTarget.Load(); cached != nil && now.Before(cached.expiresAt) {
@@ -222,8 +237,9 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 	}
 	var resolvedChannelID int64
 	if !found || resolved.Kind != store.UsernameKindChannel || resolved.Channel.ID <= 0 ||
-		resolved.Channel.Username == nil || *resolved.Channel.Username != demoGeneralChatUsername ||
-		resolved.Channel.Title != "General" || !resolved.Channel.Megagroup {
+		resolved.Channel.Username == nil || !demo.IsGeneralChatHandle(*resolved.Channel.Username) ||
+		resolved.Channel.Title != "General" || !resolved.Channel.Megagroup || resolved.User.ID <= 0 ||
+		resolved.Channel.CreatorID != resolved.User.ID {
 		h.logDemoGeneralChatResolutionError("missing or invalid public supergroup", channelID)
 	} else {
 		resolvedChannelID = resolved.Channel.ID
@@ -239,7 +255,26 @@ func (h *handlers) lookupDemoGeneralChat(ctx context.Context) (store.UsernameRes
 	if h.demoGeneralChatLookup != nil {
 		return h.demoGeneralChatLookup(ctx, demoGeneralChatUsername)
 	}
-	return h.store.UsernameByHandle(ctx, demoGeneralChatUsername)
+	owner, ownerFound, err := h.store.UsernameByHandle(ctx, demo.SeedOwnerUsername)
+	if err != nil {
+		return store.UsernameResolution{}, false, err
+	}
+	if !ownerFound || owner.Kind != store.UsernameKindUser || owner.User.ID <= 0 {
+		return store.UsernameResolution{}, false, nil
+	}
+	for _, handle := range demo.GeneralChatHandles() {
+		resolved, found, err := h.store.UsernameByHandle(ctx, handle)
+		if err != nil {
+			return store.UsernameResolution{}, false, err
+		}
+		if found && resolved.Kind == store.UsernameKindChannel && resolved.Channel.CreatorID == owner.User.ID &&
+			resolved.Channel.Username != nil && *resolved.Channel.Username == handle &&
+			resolved.Channel.Title == "General" && resolved.Channel.Megagroup {
+			resolved.User = owner.User
+			return resolved, true, nil
+		}
+	}
+	return store.UsernameResolution{}, false, nil
 }
 
 func (h *handlers) demoGeneralChatNow() time.Time {

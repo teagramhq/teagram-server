@@ -11,9 +11,13 @@ trap 'rm -rf -- "$TMP_DIR"' EXIT
 
 (
   demo_active_server() { printf 'teagramd-next\n'; }
-  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == teagramd-next:2443 ]]
-  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == teagramd-next:2443 ]]
-  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 1 teagramd:2443)" == teagramd:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == haproxy:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == haproxy:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 1 haproxy:2443)" == haproxy:2443 ]]
+  if demo_resolve_seed_endpoint --moderate-ban-user 1 teagramd-next:2443; then
+    printf 'moderation accepted a direct backend endpoint\n' >&2
+    exit 1
+  fi
 )
 
 python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
@@ -228,11 +232,21 @@ printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' >> "$TMP_DIR/demo-signin.env"
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  docker compose --env-file "$TMP_DIR/demo-signin.env" \
+  docker compose --env-file "$TMP_DIR/demo-signin.env" --profile seed \
     --project-directory "$REPO_ROOT" --project-name teagram-demo \
     --file "$SCRIPT_DIR/compose.yaml" config --format json > "$TMP_DIR/signin.json"
 jq -e '
-  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
+  .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
+  and ((.services.haproxy.ports // []) | length) == 0
+  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
+  and .services["teagramd-next"].environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
+  and .services["demo-seed"].profiles == ["seed"]
+  and (.services["demo-seed"].networks | keys) == ["backend"]
+  and (.services["demo-seed"].ports // [] | length) == 0
+  and (.services["demo-seed"].secrets | map(.source) | sort) == ["teagram_demo_turnstile_qa_bypass"]
+  and .services["demo-seed"].secrets[0].target == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and any(.services.haproxy.volumes[]; .target == "/usr/local/etc/haproxy" and .read_only)
+  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
@@ -845,7 +859,8 @@ jq -e '
   and (.services["demo-seed"].ports // [] | length) == 0
   and .services["demo-seed"].environment.GOMAXPROCS == "1"
   and .services["demo-seed"].environment.GOMEMLIMIT == "192MiB"
-  and (.services["demo-seed"].secrets // [] | length) == 0
+  and (.services["demo-seed"].secrets | map(.source) | sort) == ["teagram_demo_turnstile_qa_bypass"]
+  and .services["demo-seed"].secrets[0].target == "/run/secrets/teagram_demo_turnstile_qa_bypass"
   and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/demo-accounts" and (.read_only // false) == false)
@@ -1224,11 +1239,13 @@ assert_order(deploy_path, [
 ], start=normal_deploy_start)
 seed_demo = Path(sys.argv[3]).with_name("seed-demo.sh").read_text(encoding="utf-8")
 if 'ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT")' not in seed_demo:
-    raise SystemExit("seed-demo.sh: moderation modes must resolve their default endpoint from the active slot")
-if seed_demo.count('--moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT"') != 1:
-    raise SystemExit("seed-demo.sh: message moderation must use the resolved active endpoint")
-if seed_demo.count('--moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT"') != 1:
-    raise SystemExit("seed-demo.sh: ban moderation must use the resolved active endpoint")
+    raise SystemExit("seed-demo.sh: moderation modes must resolve the internal HAProxy endpoint")
+if seed_demo.count('run_moderation_helper \\\n      --moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: message moderation must use the production Compose profile")
+if seed_demo.count('run_moderation_helper \\\n      --moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: user moderation must use the production Compose profile")
+if 'demo_compose --profile seed run --rm --no-deps --pull never demo-seed "$@"' not in seed_demo:
+    raise SystemExit("seed-demo.sh: moderation must run against the production Compose profile")
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:

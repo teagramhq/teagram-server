@@ -21,9 +21,9 @@ Usage:
   seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
   seed-demo.sh --verify-turnstile --endpoint haproxy:2443
-  seed-demo.sh --moderate-delete-message --message-id ID [--endpoint teagramd:2443|teagramd-next:2443]
-  seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint teagramd:2443|teagramd-next:2443]
-  Moderation commands default to the active server slot.
+  seed-demo.sh --moderate-delete-message --message-id ID [--endpoint haproxy:2443]
+  seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint haproxy:2443]
+  Moderation commands route through the internal HAProxy listener.
 EOF
 }
 
@@ -74,9 +74,9 @@ done
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
 ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT") ||
   demo_fail 'resolve endpoint for demo seed operation'
-if [[ "$MODE" == --verify-turnstile ]]; then
+if [[ "$MODE" == --verify-turnstile || "$MODE" == --moderate-delete-message || "$MODE" == --moderate-ban-user ]]; then
   [[ "$ENDPOINT" == haproxy:2443 ]] ||
-    demo_fail "endpoint for $MODE must be the internal haproxy:2443 service"
+    demo_fail "endpoint for $MODE must be the internal haproxy:2443 listener"
 else
   [[ "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
     demo_fail "endpoint for $MODE must be an internal teagramd service"
@@ -161,6 +161,10 @@ run_seed_helper() {
   demo_seed_compose run --rm --no-deps --pull never "$service" "$@"
 }
 
+run_moderation_helper() {
+  demo_compose --profile seed run --rm --no-deps --pull never demo-seed "$@"
+}
+
 case "$MODE" in
   --check)
     check_dependencies
@@ -185,14 +189,14 @@ case "$MODE" in
   --moderate-delete-message)
     demo_require_env
     check_seed_secret_files
-    run_seed_helper demo-seed \
+    run_moderation_helper \
       --moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT" \
       --owner-username "$OWNER_USERNAME"
     ;;
   --moderate-ban-user)
     demo_require_env
     check_seed_secret_files
-    run_seed_helper demo-seed \
+    run_moderation_helper \
       --moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT" \
       --owner-username "$OWNER_USERNAME"
     ;;

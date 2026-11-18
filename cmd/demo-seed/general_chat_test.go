@@ -8,6 +8,8 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+
+	"github.com/teagramhq/teagram-server/internal/demo"
 )
 
 func TestSeedUpgradeCreatesMissingGeneralChatIdempotently(t *testing.T) {
@@ -73,8 +75,48 @@ func TestSeedUpgradeCreatesMissingGeneralChatIdempotently(t *testing.T) {
 	}
 }
 
+func TestSeedUpgradeUsesReservedFallbackWhenGeneralHandleCollides(t *testing.T) {
+	rpc := &generalChatRPC{collidingHandles: map[string]bool{demo.GeneralChatHandle: true}}
+	api := tg.NewClient(rpc)
+	for range 2 {
+		remote, err := ensureGeneralChat(context.Background(), api, demoGeneralChatSpace)
+		if err != nil {
+			t.Fatalf("ensure General after handle collision: %v", err)
+		}
+		if remote.spec.username != "teagramdemogeneralchat" || !remote.creator {
+			t.Fatalf("resolved General after handle collision = %+v, want seed-owned fallback handle", remote)
+		}
+	}
+	if rpc.createCount != 1 || rpc.createdUsername != "teagramdemogeneralchat" {
+		t.Fatalf("fallback General creates=%d handle=%q, want one create on fallback", rpc.createCount, rpc.createdUsername)
+	}
+	if err := inviteGeneralChatAccounts(context.Background(), api, remoteSpace{
+		spec:      spaceSpec{slug: "general", username: rpc.createdUsername, title: "General", megagroup: true},
+		channelID: 71, accessHash: 93, creator: true,
+	}); err != nil {
+		t.Fatalf("invite guests to fallback General: %v", err)
+	}
+	if err := verifyGeneralChat(context.Background(), api, demoGeneralChatSpace); err != nil {
+		t.Fatalf("verify fallback General: %v", err)
+	}
+}
+
+func TestInviteGeneralChatAccountsRequiresSeedOwner(t *testing.T) {
+	rpc := &generalChatRPC{}
+	if err := inviteGeneralChatAccounts(context.Background(), tg.NewClient(rpc), remoteSpace{
+		spec: demoGeneralChatSpace, channelID: 71, accessHash: 93,
+	}); err == nil {
+		t.Fatal("inviteGeneralChatAccounts accepted a General channel without seed-owner proof")
+	}
+	if rpc.inviteCount != 0 {
+		t.Fatalf("foreign General invitation count = %d, want none", rpc.inviteCount)
+	}
+}
+
 type generalChatRPC struct {
 	created                       bool
+	createdUsername               string
+	collidingHandles              map[string]bool
 	createCount                   int
 	usernameCount                 int
 	invited                       map[int64]bool
@@ -89,6 +131,16 @@ type generalChatRPC struct {
 func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
 	switch request := input.(type) {
 	case *tg.ContactsResolveUsernameRequest:
+		if rpc.collidingHandles[request.Username] {
+			resolved, ok := output.(*tg.ContactsResolvedPeer)
+			if !ok {
+				return fmt.Errorf("unexpected collision resolution output %T", output)
+			}
+			resolved.Chats = []tg.ChatClass{&tg.Channel{
+				ID: 13, AccessHash: 29, Username: request.Username, Title: "Unrelated public channel", Broadcast: true,
+			}}
+			return nil
+		}
 		if !rpc.created {
 			return tgerr.New(400, "USERNAME_NOT_OCCUPIED")
 		}
@@ -120,10 +172,8 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 			Megagroup:  true,
 		}}}
 	case *tg.ChannelsUpdateUsernameRequest:
-		if request.Username != demoGeneralChatUsername {
-			return fmt.Errorf("General username = %q, want %q", request.Username, demoGeneralChatUsername)
-		}
 		rpc.usernameCount++
+		rpc.createdUsername = request.Username
 		result, ok := output.(*tg.BoolBox)
 		if !ok {
 			return fmt.Errorf("unexpected update-username output %T", output)
@@ -223,7 +273,11 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 		if !ok {
 			return fmt.Errorf("unexpected channel-rights output %T", output)
 		}
-		channel := &tg.Channel{ID: 71, AccessHash: 93, Username: demoGeneralChatUsername, Title: demoGeneralChatSpace.title, Megagroup: true}
+		username := rpc.createdUsername
+		if username == "" {
+			username = demoGeneralChatUsername
+		}
+		channel := &tg.Channel{ID: 71, AccessHash: 93, Username: username, Title: demoGeneralChatSpace.title, Megagroup: true}
 		channel.SetDefaultBannedRights(rpc.defaultBannedRights)
 		chats.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{channel}}
 	case *tg.ChannelsToggleSlowModeRequest:

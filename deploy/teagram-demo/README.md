@@ -127,7 +127,8 @@ and topic management while leaving text, photos, and stickers available.
 General also enforces five messages per guest per minute and 30 per hour across
 all server replicas, in addition to slow mode. Text and captions are limited to
 1,000 Unicode characters. Repeating the same nonempty text or caption within 30
-seconds is refused with a flood-wait response. Guest creation already has a
+seconds is refused with a flood-wait response, including repeated photo bytes
+and the same bundled sticker when the caption is empty. Guest creation already has a
 five-attempt-per-IP-per-hour server limit; Turnstile remains enabled on public
 sign-up.
 
@@ -136,8 +137,11 @@ without failing sign-up and affects only that guest, who may miss General until
 the next weekly wipe resets and re-seeds the demo.
 
 Run the owner-only moderation command from the demo LXC to remove a General
-message or permanently ban an ordinary member. Both commands resolve the active
-server slot, including `teagramd-next` during a rolling deploy:
+message or permanently ban an ordinary member. Both commands run with the
+production Compose profile and connect to the internal HAProxy MTProto listener;
+HAProxy supplies the PROXY-v2 header and routes to the active server slot,
+including `teagramd-next` during a rolling deploy. Direct server endpoints are
+rejected:
 
 ```sh
 sudo deploy/teagram-demo/moderate-general.sh delete-message MESSAGE_ID
@@ -482,9 +486,12 @@ a shell command, echo it, list the process environment or log it.
 ### QA bypass token threat model
 
 The token bypasses Turnstile for demo signup, so anyone who obtains it can
-create demo accounts without that challenge. Treat the active token and its
-root-only recovery snapshot as secrets. Demo host root can read both; the
-server and isolated probe services can read the mounted token as gid 65532. An
+create demo accounts without that challenge. The seed-owner helper also uses
+it only to wrap `auth.sendCode` when production sign-in Turnstile challenges an
+owner-only seed or moderation command; the owner password is still required
+and guests never use this fallback. Treat the active token and its root-only
+recovery snapshot as secrets. Demo host root can read both; the server, seed
+helper and isolated probe services can read the mounted token as gid 65532. An
 authorized workspace admin transfers the new value into QA's audited custom_env
 entry, where the QA runtime is an intentional consumer. Keep it out of shell
 history and snapshots, CI output, logs and comments; QA reads it only from

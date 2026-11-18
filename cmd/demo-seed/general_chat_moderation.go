@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/gotd/td/tg"
 )
@@ -26,8 +27,8 @@ func moderateGeneralChat(ctx context.Context, cfg apiConfig, options seedOptions
 }
 
 func deleteGeneralChatMessage(ctx context.Context, api *tg.Client, messageID int) error {
-	if messageID <= 0 {
-		return errors.New("general message ID must be positive")
+	if messageID <= 0 || int64(messageID) > math.MaxInt32 {
+		return errors.New("general message ID must be positive and fit in signed 32-bit MTProto range")
 	}
 	remote, err := resolveModerationGeneralChat(ctx, api)
 	if err != nil {
@@ -101,11 +102,11 @@ func banGeneralChatGuest(ctx context.Context, api *tg.Client, username string) e
 }
 
 func resolveModerationGeneralChat(ctx context.Context, api *tg.Client) (remoteSpace, error) {
-	remote, err := resolvePublicSpace(ctx, api, demoGeneralChatSpace)
+	remote, _, err := resolveOwnedGeneralChat(ctx, api, demoGeneralChatSpace)
 	if err != nil {
 		return remoteSpace{}, fmt.Errorf("resolve General chat for moderation: %w", err)
 	}
-	if !remote.creator {
+	if remote.channelID == 0 || !remote.creator {
 		return remoteSpace{}, errors.New("demo_seed_owner does not own General chat")
 	}
 	return remote, nil

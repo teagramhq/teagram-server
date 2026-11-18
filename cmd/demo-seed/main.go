@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -201,8 +202,8 @@ func parseOptions(args []string) (seedOptions, error) {
 	if selected != 1 {
 		return seedOptions{}, errors.New("select exactly one demo-seed or General moderation operation")
 	}
-	if options.moderateDeleteMessageID < 0 || (options.moderateDeleteMessageID != 0 && int64(int(options.moderateDeleteMessageID)) != options.moderateDeleteMessageID) {
-		return seedOptions{}, errors.New("moderate-delete-message must be a positive message ID")
+	if options.moderateDeleteMessageID < 0 || options.moderateDeleteMessageID > math.MaxInt32 || (options.moderateDeleteMessageID != 0 && int64(int(options.moderateDeleteMessageID)) != options.moderateDeleteMessageID) {
+		return seedOptions{}, errors.New("moderate-delete-message must be a positive 32-bit message ID")
 	}
 	if options.moderateBanUsername != "" && !validGeneralChatUsername(options.moderateBanUsername) {
 		return seedOptions{}, errors.New("moderate-ban-user must be a username without @")
@@ -499,11 +500,7 @@ func runTelegramClient(ctx context.Context, options telegram.Options, action tel
 }
 
 func authenticate(ctx context.Context, api *tg.Client, account accountSpec, password *string, savePassword func(string) error) error {
-	sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{
-		PhoneNumber: account.loginID,
-		APIID:       appID,
-		APIHash:     appHash,
-	})
+	sent, err := sendAuthCodeForAccount(ctx, api, account, defaultTurnstileQAToken)
 	if err != nil {
 		return fmt.Errorf("request demo account sign-in code: %w", err)
 	}
@@ -583,6 +580,33 @@ func authenticate(ctx context.Context, api *tg.Client, account accountSpec, pass
 		}
 	}
 	return nil
+}
+
+type authSendCodeAPI interface {
+	AuthSendCode(context.Context, *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error)
+	Invoker() tg.Invoker
+}
+
+func sendAuthCodeForAccount(
+	ctx context.Context, api authSendCodeAPI, account accountSpec, qaTokenPath string,
+) (tg.AuthSentCodeClass, error) {
+	request := &tg.AuthSendCodeRequest{PhoneNumber: account.loginID, APIID: appID, APIHash: appHash}
+	sent, err := api.AuthSendCode(ctx, request)
+	if !isSignInCaptchaRequired(err) {
+		return sent, err
+	}
+	if !account.owner {
+		return nil, err
+	}
+	token, err := readTurnstileQAToken(qaTokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("read owner sign-in Turnstile token: %w", err)
+	}
+	var response tg.AuthSentCodeBox
+	if err := api.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{Token: token, Query: request}, &response); err != nil {
+		return nil, fmt.Errorf("request owner sign-in code with demo Turnstile token: %w", err)
+	}
+	return response.SentCode, nil
 }
 
 func setNewPassword(ctx context.Context, api *tg.Client, password string) error {

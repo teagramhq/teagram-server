@@ -622,19 +622,17 @@ demo_active_server() {
   printf '%s\n' "$active"
 }
 
-demo_active_server_endpoint() {
-  local active
-  active=$(demo_active_server) || return 1
-  printf '%s:2443\n' "$active"
-}
-
 demo_resolve_seed_endpoint() {
   local mode="$1" explicit="$2" endpoint="$3"
-  if [[ "$explicit" == 0 && ( "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ) ]]; then
-    demo_active_server_endpoint
-  else
-    printf '%s\n' "$endpoint"
+  if [[ "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ]]; then
+    if [[ "$explicit" == 1 && "$endpoint" != haproxy:2443 ]]; then
+      demo_fail 'moderation commands must use the internal haproxy:2443 listener'
+      return 1
+    fi
+    printf '%s\n' haproxy:2443
+    return 0
   fi
+  printf '%s\n' "$endpoint"
 }
 
 demo_active_image_ref() {

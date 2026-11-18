@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -120,6 +121,9 @@ func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create first owner: %v", err)
 	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username: %v", err)
+	}
 	first, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
 	if err != nil {
 		t.Fatalf("create first General: %v", err)
@@ -133,11 +137,7 @@ func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	if err := s.EditChannelUsername(ctx, first.ID, owner.ID, "previousgeneral"); err != nil {
 		t.Fatalf("move first General handle: %v", err)
 	}
-	secondOwner, err := s.CreateUser(ctx, "+15550001703")
-	if err != nil {
-		t.Fatalf("create second owner: %v", err)
-	}
-	second, _, _, err := s.CreateChannelWithServiceMessage(ctx, secondOwner.ID, "General", "", true)
+	second, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
 	if err != nil {
 		t.Fatalf("create replacement General: %v", err)
 	}
@@ -181,6 +181,9 @@ func TestDemoGeneralChatSlowModeRefusalDoesNotSpendLimits(t *testing.T) {
 	owner, err := s.CreateUser(ctx, "+15550001706")
 	if err != nil {
 		t.Fatalf("create General owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username: %v", err)
 	}
 	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
 	if err != nil {
@@ -305,6 +308,9 @@ func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {
 	if err != nil {
 		b.Fatalf("create owner: %v", err)
 	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		b.Fatalf("claim seed-owner username: %v", err)
+	}
 	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
 	if err != nil {
 		b.Fatalf("create General: %v", err)
@@ -428,8 +434,9 @@ func TestDemoGeneralChatLookupSurvivesCallerCancellation(t *testing.T) {
 				}
 				return store.UsernameResolution{
 					Kind: store.UsernameKindChannel,
+					User: store.User{ID: 43},
 					Channel: store.Channel{
-						ID: 77, Title: "General", Username: &username, Megagroup: true,
+						ID: 77, CreatorID: 43, Title: "General", Username: &username, Megagroup: true,
 					},
 				}, true, nil
 			}
