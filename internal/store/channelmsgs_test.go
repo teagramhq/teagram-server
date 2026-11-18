@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -182,6 +183,9 @@ func TestPostDemoGeneralStickerAllowedWhenDefaultBansDocuments(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
 	creator := mustUser(t, s, "+15551260027")
+	if err := s.ClaimUsername(ctx, creator.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim demo seed owner username: %v", err)
+	}
 	member := mustUser(t, s, "+15551260028")
 	channel, err := s.CreateChannel(ctx, creator.ID, "General", "", true)
 	if err != nil {

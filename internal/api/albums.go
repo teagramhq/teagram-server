@@ -132,12 +132,22 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		for i, item := range req.MultiMedia {
 			texts[i] = item.Message
 		}
-		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong)
+		var mediaIdentities []string
+		if h.demoGeneralChatEnabled {
+			mediaIdentities = make([]string, len(items))
+			for i, item := range items {
+				mediaIdentities[i] = fmt.Sprintf("photo:%d", item.FileID)
+			}
+		}
+		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong, mediaIdentities...)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		if demoGeneralChat {
-			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, texts, len(items))
+			if err := h.checkDemoGeneralChatRateLimitBudgets(r, nil, 0, mediaIdentities...); err != nil {
+				return nil, nil, nil, err
+			}
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, texts, len(items), mediaIdentities...)
 		}
 	}
 	groupedID, err := newGroupedID()

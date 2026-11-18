@@ -17,6 +17,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/reactionassets"
@@ -1497,6 +1498,38 @@ func TestDemoGeneralGuestCanSendCatalogueSticker(t *testing.T) {
 	_, err = api.SendMediaForTest(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(other.ID, 4815162421))
 	if got := rpcMessage(t, err); got != "CHAT_WRITE_FORBIDDEN" {
 		t.Fatalf("send bundled sticker to other megagroup = %q, want CHAT_WRITE_FORBIDDEN", got)
+	}
+}
+
+func TestDemoGeneralGuestCanSendCatalogueStickerOnFallbackHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, blobs, creator, guest, _ := downloadFixture(t, "+15551810023", "+15551810024")
+	set := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}, 0).Set
+	full := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetID{ID: set.ID, AccessHash: set.AccessHash}, 0)
+	if len(full.Documents) == 0 {
+		t.Fatal("getStickerSet returned no bundled sticker document")
+	}
+	document, ok := full.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("first sticker document = %T, want *tg.Document", full.Documents[0])
+	}
+
+	general := createGeneralChat(t, s)
+	fallbackHandle := demo.GeneralChatHandles()[1]
+	if err := s.EditChannelUsername(ctx, general.ID, general.CreatorID, fallbackHandle); err != nil {
+		t.Fatalf("move General to fallback handle %q: %v", fallbackHandle, err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, general.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(guest.ID, general.ID),
+		Media:    &tg.InputMediaDocument{ID: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash}},
+		RandomID: 4815162423,
+	})
+	if err != nil {
+		t.Fatalf("send bundled sticker to fallback-owned General: %v", err)
 	}
 }
 

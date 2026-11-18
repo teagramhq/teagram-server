@@ -8,10 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
-
-const demoGeneralChatHandle = "teagramdemogeneral"
 
 var chatMediaSubtypeRights = [...]string{
 	"send_stickers",
@@ -69,16 +68,31 @@ func checkMessageRestriction(rights []string, exempt, media bool, mediaRights []
 }
 
 func isDemoGeneralChatChannel(ctx context.Context, q *db.Queries, channelID int64) (bool, error) {
-	row, err := q.GetChannelByUsername(ctx, demoGeneralChatHandle)
+	owner, err := q.GetUserByUsername(ctx, demo.SeedOwnerUsername)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil
 	case err != nil:
-		return false, fmt.Errorf("load demo General channel: %w", err)
+		return false, fmt.Errorf("load demo General owner: %w", err)
 	}
-	channel := channelFromRow(row)
-	return channel.ID == channelID && channel.Title == "General" && channel.Megagroup &&
-		channel.Username != nil && *channel.Username == demoGeneralChatHandle, nil
+	if owner.ID <= 0 {
+		return false, nil
+	}
+	for _, handle := range demo.GeneralChatHandles() {
+		row, err := q.GetChannelByUsername(ctx, handle)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			continue
+		case err != nil:
+			return false, fmt.Errorf("load demo General channel %q: %w", handle, err)
+		}
+		channel := channelFromRow(row)
+		if channel.ID == channelID && channel.Title == "General" && channel.Megagroup &&
+			channel.CreatorID == owner.ID && channel.Username != nil && *channel.Username == handle {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CheckChatWritePermission checks a new basic-chat media send before the
