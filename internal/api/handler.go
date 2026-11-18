@@ -46,6 +46,7 @@ type handlers struct {
 	demoGeneralChatEnabled     bool
 	demoGeneralChatTarget      atomic.Pointer[demoGeneralChatCache]
 	demoGeneralChatCacheMu     sync.Mutex
+	demoGeneralChatLookup      func(context.Context, string) (store.UsernameResolution, bool, error)
 	demoGeneralChatPolicy      demoGeneralChatPolicy
 	cfg                        *tg.Config
 	previousPublicLinkPrefixes []string

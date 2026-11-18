@@ -4,10 +4,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,6 +208,58 @@ func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {
 		if isGeneral, err := h.isDemoGeneralChat(ctx, channel.ID); err != nil || !isGeneral {
 			b.Fatalf("cached General resolution = %t, err=%v", isGeneral, err)
 		}
+	}
+}
+
+func TestDemoGeneralChatLookupFailureIsCachedForRefreshWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	var lookups atomic.Int32
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				close(lookupStarted)
+			}
+			<-releaseLookup
+			return store.UsernameResolution{}, false, errors.New("injected username lookup failure")
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 77, expiresAt: now.Add(-time.Nanosecond)})
+
+	const concurrentCalls = 16
+	var wg sync.WaitGroup
+	started := make(chan struct{}, concurrentCalls)
+	for range concurrentCalls {
+		wg.Go(func() {
+			started <- struct{}{}
+			if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+				t.Error("expired cache lookup returned no error")
+			}
+		})
+	}
+	for range concurrentCalls {
+		<-started
+	}
+	<-lookupStarted
+	close(releaseLookup)
+	wg.Wait()
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("concurrent expired-cache calls performed %d lookups, want one", got)
+	}
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("cached lookup failure returned no error")
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("call within failed-refresh window performed %d lookups, want one total", got)
+	}
+	now = now.Add(demoGeneralChatLookupFailureTTL + time.Nanosecond)
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("lookup after failure-cache expiry returned no error")
+	}
+	if got := lookups.Load(); got != 2 {
+		t.Fatalf("call after failed-refresh window performed %d lookups, want two total", got)
 	}
 }
 

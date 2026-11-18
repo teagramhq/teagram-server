@@ -16,6 +16,7 @@ const (
 	demoGeneralChatMessageMax       = 1000
 	demoGeneralChatDuplicateWindow  = 30 * time.Second
 	demoGeneralChatResolutionTTL    = time.Minute
+	demoGeneralChatLookupFailureTTL = 5 * time.Second
 	demoGeneralChatPerMinuteLimit   = 5
 	demoGeneralChatPerHourLimit     = 30
 	demoGeneralChatMinuteSurface    = "demo_general_message_minute"
@@ -32,6 +33,7 @@ type demoGeneralChatPolicy struct {
 type demoGeneralChatCache struct {
 	channelID int64
 	expiresAt time.Time
+	err       error
 }
 
 func defaultDemoGeneralChatPolicy() demoGeneralChatPolicy {
@@ -81,6 +83,9 @@ func (h *handlers) checkDemoGeneralChatMessages(r *mtproto.Request, channelID in
 func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool, error) {
 	now := h.demoGeneralChatNow()
 	if cached := h.demoGeneralChatTarget.Load(); cached != nil && now.Before(cached.expiresAt) {
+		if cached.err != nil {
+			return false, cached.err
+		}
 		return cached.channelID == channelID, nil
 	}
 
@@ -89,12 +94,20 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 
 	now = h.demoGeneralChatNow()
 	if cached := h.demoGeneralChatTarget.Load(); cached != nil && now.Before(cached.expiresAt) {
+		if cached.err != nil {
+			return false, cached.err
+		}
 		return cached.channelID == channelID, nil
 	}
 
-	resolved, found, err := h.store.UsernameByHandle(ctx, demoGeneralChatUsername)
+	resolved, found, err := h.lookupDemoGeneralChat(ctx)
 	if err != nil {
-		return false, fmt.Errorf("look up demo General chat: %w", err)
+		lookupErr := fmt.Errorf("look up demo General chat: %w", err)
+		h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
+			expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
+			err:       lookupErr,
+		})
+		return false, lookupErr
 	}
 	var resolvedChannelID int64
 	if !found || resolved.Kind != store.UsernameKindChannel || resolved.Channel.ID <= 0 ||
@@ -109,6 +122,13 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 		expiresAt: now.Add(demoGeneralChatResolutionTTL),
 	})
 	return resolvedChannelID == channelID, nil
+}
+
+func (h *handlers) lookupDemoGeneralChat(ctx context.Context) (store.UsernameResolution, bool, error) {
+	if h.demoGeneralChatLookup != nil {
+		return h.demoGeneralChatLookup(ctx, demoGeneralChatUsername)
+	}
+	return h.store.UsernameByHandle(ctx, demoGeneralChatUsername)
 }
 
 func (h *handlers) demoGeneralChatNow() time.Time {
