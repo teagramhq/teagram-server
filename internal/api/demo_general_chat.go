@@ -15,6 +15,7 @@ const (
 	demoGeneralChatUsername         = "teagramdemogeneral"
 	demoGeneralChatMessageMax       = 1000
 	demoGeneralChatDuplicateWindow  = 30 * time.Second
+	demoGeneralChatResolutionTTL    = time.Minute
 	demoGeneralChatPerMinuteLimit   = 5
 	demoGeneralChatPerHourLimit     = 30
 	demoGeneralChatMinuteSurface    = "demo_general_message_minute"
@@ -26,6 +27,11 @@ type demoGeneralChatPolicy struct {
 	perMinute      store.RateLimitConfig
 	perHour        store.RateLimitConfig
 	duplicateLimit store.RateLimitConfig
+}
+
+type demoGeneralChatCache struct {
+	channelID int64
+	expiresAt time.Time
 }
 
 func defaultDemoGeneralChatPolicy() demoGeneralChatPolicy {
@@ -73,20 +79,43 @@ func (h *handlers) checkDemoGeneralChatMessages(r *mtproto.Request, channelID in
 }
 
 func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool, error) {
-	cached := h.demoGeneralChatChannelID.Load()
+	now := h.demoGeneralChatNow()
+	if cached := h.demoGeneralChatTarget.Load(); cached != nil && now.Before(cached.expiresAt) {
+		return cached.channelID == channelID, nil
+	}
+
+	h.demoGeneralChatCacheMu.Lock()
+	defer h.demoGeneralChatCacheMu.Unlock()
+
+	now = h.demoGeneralChatNow()
+	if cached := h.demoGeneralChatTarget.Load(); cached != nil && now.Before(cached.expiresAt) {
+		return cached.channelID == channelID, nil
+	}
+
 	resolved, found, err := h.store.UsernameByHandle(ctx, demoGeneralChatUsername)
 	if err != nil {
 		return false, fmt.Errorf("look up demo General chat: %w", err)
 	}
+	var resolvedChannelID int64
 	if !found || resolved.Kind != store.UsernameKindChannel || resolved.Channel.ID <= 0 ||
 		resolved.Channel.Username == nil || *resolved.Channel.Username != demoGeneralChatUsername ||
 		resolved.Channel.Title != "General" || !resolved.Channel.Megagroup {
-		h.demoGeneralChatChannelID.CompareAndSwap(cached, 0)
 		h.logDemoGeneralChatResolutionError("missing or invalid public supergroup", channelID)
-		return false, nil
+	} else {
+		resolvedChannelID = resolved.Channel.ID
 	}
-	h.demoGeneralChatChannelID.CompareAndSwap(cached, resolved.Channel.ID)
-	return h.demoGeneralChatChannelID.Load() == channelID, nil
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
+		channelID: resolvedChannelID,
+		expiresAt: now.Add(demoGeneralChatResolutionTTL),
+	})
+	return resolvedChannelID == channelID, nil
+}
+
+func (h *handlers) demoGeneralChatNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func (h *handlers) logDemoGeneralChatResolutionError(reason string, channelID int64) {

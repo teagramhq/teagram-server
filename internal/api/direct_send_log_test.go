@@ -111,6 +111,8 @@ func TestDemoGeneralChatInvalidResolutionLogsErrorOnce(t *testing.T) {
 func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	ctx, s, h, _ := newDirectSendLogHarness(t)
 	h.demoGeneralChatEnabled = true
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
 	owner, err := s.CreateUser(ctx, "+15550001702")
 	if err != nil {
 		t.Fatalf("create first owner: %v", err)
@@ -139,8 +141,12 @@ func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	if err := s.ClaimChannelUsername(ctx, second.ID, demoGeneralChatUsername); err != nil {
 		t.Fatalf("claim replacement General handle: %v", err)
 	}
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || !isGeneral {
+		t.Fatalf("old General before cache expiry = %t, err=%v; want cached true", isGeneral, err)
+	}
+	now = now.Add(demoGeneralChatResolutionTTL + time.Nanosecond)
 	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || isGeneral {
-		t.Fatalf("old General after handle recreation = %t, err=%v; want false", isGeneral, err)
+		t.Fatalf("old General after cache expiry = %t, err=%v; want false", isGeneral, err)
 	}
 	guest, err := s.CreateUser(ctx, "+15550001704")
 	if err != nil {
@@ -154,6 +160,51 @@ func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	_, err = h.checkDemoGeneralChatMessages(r, second.ID, []string{"second"}, 1, errMessageTooLong)
 	if err == nil || !strings.Contains(err.Error(), "FLOOD_WAIT (60)") {
 		t.Fatalf("second replacement General message = %v, want FLOOD_WAIT_60", err)
+	}
+}
+
+func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {
+	ctx := context.Background()
+	blobs, err := blob.NewLocal(b.TempDir())
+	if err != nil {
+		b.Fatalf("open blob store: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := blobs.Close(); err != nil {
+			b.Errorf("close blob store: %v", err)
+		}
+	})
+	s, err := store.Open(ctx, pgtest.DSN(b), pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			b.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15550001705")
+	if err != nil {
+		b.Fatalf("create owner: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		b.Fatalf("create General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+		b.Fatalf("claim General handle: %v", err)
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	if isGeneral, err := h.isDemoGeneralChat(ctx, channel.ID); err != nil || !isGeneral {
+		b.Fatalf("warm General resolution = %t, err=%v", isGeneral, err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if isGeneral, err := h.isDemoGeneralChat(ctx, channel.ID); err != nil || !isGeneral {
+			b.Fatalf("cached General resolution = %t, err=%v", isGeneral, err)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,7 +44,8 @@ type handlers struct {
 	// photoThumbs captures and supervises best-effort JPEG derivative work.
 	photoThumbs                *photothumb.Supervisor
 	demoGeneralChatEnabled     bool
-	demoGeneralChatChannelID   atomic.Int64
+	demoGeneralChatTarget      atomic.Pointer[demoGeneralChatCache]
+	demoGeneralChatCacheMu     sync.Mutex
 	demoGeneralChatPolicy      demoGeneralChatPolicy
 	cfg                        *tg.Config
 	previousPublicLinkPrefixes []string
