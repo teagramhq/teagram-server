@@ -134,6 +134,8 @@ jq -e --arg flag "$FLAG" --arg target "$TARGET" '
   and .services["teagramd-next"].environment[$flag] == $target
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY != ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SITE_KEY != ""

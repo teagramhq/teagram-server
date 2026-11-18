@@ -1058,6 +1058,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_REGISTRATION == "open"
     and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+    and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+    and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
     and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false" or .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
     and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED
     and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"

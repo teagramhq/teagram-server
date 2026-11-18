@@ -30,9 +30,11 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		return ErrChatWriteForbidden
 	}
 	if media {
-		// Photos have their own restriction and are not documents covered by send_docs.
+		// Photos and stickers have their own restrictions and are not generic
+		// documents covered by send_docs.
 		if hasChatRight(rights, "send_media") ||
-			(hasChatRight(rights, "send_docs") && !hasChatRight(mediaRights, "send_photos")) {
+			(hasChatRight(rights, "send_docs") &&
+				!hasChatRight(mediaRights, "send_photos") && !hasChatRight(mediaRights, "send_stickers")) {
 			return ErrChatWriteForbidden
 		}
 		if mediaRights == nil {

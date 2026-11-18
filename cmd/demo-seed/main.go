@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,16 +53,19 @@ type clientDocument struct {
 }
 
 type seedOptions struct {
-	check           bool
-	seed            bool
-	verifySeed      bool
-	verifyTurnstile bool
-	activity        bool
-	endpoint        string
-	ownerUsername   string
-	activityTarget  string
-	maxActionsHour  int
-	minActivityGap  time.Duration
+	check                   bool
+	seed                    bool
+	verifySeed              bool
+	verifyTurnstile         bool
+	activity                bool
+	generalChatEnabled      bool
+	moderateDeleteMessageID int64
+	moderateBanUsername     string
+	endpoint                string
+	ownerUsername           string
+	activityTarget          string
+	maxActionsHour          int
+	minActivityGap          time.Duration
 }
 
 type apiConfig struct {
@@ -93,7 +97,7 @@ func run(args []string) error {
 	if options.check {
 		return nil
 	}
-	if options.activity {
+	if options.activity || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" {
 		if err := requireRoot(); err != nil {
 			return err
 		}
@@ -133,6 +137,12 @@ func run(args []string) error {
 			return err
 		}
 		return verifySeed(ctx, cfg, options, ownerPassword, inventory)
+	case options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "":
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return moderateGeneralChat(ctx, cfg, options, ownerPassword)
 	case options.verifyTurnstile:
 		return verifyTurnstile(ctx, cfg)
 	case options.activity:
@@ -159,6 +169,8 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.BoolVar(&options.verifySeed, "verify-seed", false, "verify the seeded public content")
 	flags.BoolVar(&options.verifyTurnstile, "verify-turnstile", false, "verify production sign-up challenge enforcement")
 	flags.BoolVar(&options.activity, "activity", false, "post one fixed demo activity message")
+	flags.Int64Var(&options.moderateDeleteMessageID, "moderate-delete-message", 0, "delete one General message by ID")
+	flags.StringVar(&options.moderateBanUsername, "moderate-ban-user", "", "permanently ban a General member by username")
 	flags.StringVar(&options.endpoint, "endpoint", defaultEndpoint, "internal MTProto service endpoint")
 	flags.StringVar(&options.ownerUsername, "owner-username", "demo_seed_owner", "seed-owner login name")
 	flags.StringVar(&options.activityTarget, "target", "river", "seeded megagroup slug for scheduled activity")
@@ -167,20 +179,39 @@ func parseOptions(args []string) (seedOptions, error) {
 	if err := flags.Parse(args); err != nil {
 		return seedOptions{}, err
 	}
+	if raw := os.Getenv("TG_DEMO_GENERAL_CHAT_ENABLED"); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return seedOptions{}, errors.New("TG_DEMO_GENERAL_CHAT_ENABLED must be a boolean")
+		}
+		options.generalChatEnabled = enabled
+	}
 	if flags.NArg() != 0 {
 		return seedOptions{}, errors.New("unexpected positional arguments")
 	}
 	selected := 0
-	for _, value := range []bool{options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity} {
+	for _, value := range []bool{
+		options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity,
+		options.moderateDeleteMessageID != 0, options.moderateBanUsername != "",
+	} {
 		if value {
 			selected++
 		}
 	}
 	if selected != 1 {
-		return seedOptions{}, errors.New("select exactly one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
+		return seedOptions{}, errors.New("select exactly one demo-seed or General moderation operation")
 	}
-	if (options.seed || options.verifySeed) && options.ownerUsername != "demo_seed_owner" {
+	if options.moderateDeleteMessageID < 0 || (options.moderateDeleteMessageID != 0 && int64(int(options.moderateDeleteMessageID)) != options.moderateDeleteMessageID) {
+		return seedOptions{}, errors.New("moderate-delete-message must be a positive message ID")
+	}
+	if options.moderateBanUsername != "" && !validGeneralChatUsername(options.moderateBanUsername) {
+		return seedOptions{}, errors.New("moderate-ban-user must be a username without @")
+	}
+	if (options.seed || options.verifySeed || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && options.ownerUsername != "demo_seed_owner" {
 		return seedOptions{}, errors.New("seed owner must use the demo_seed_owner account")
+	}
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && !options.generalChatEnabled {
+		return seedOptions{}, errors.New("general moderation requires TG_DEMO_GENERAL_CHAT_ENABLED=true")
 	}
 	if options.activity {
 		switch options.activityTarget {
@@ -196,6 +227,19 @@ func parseOptions(args []string) (seedOptions, error) {
 		}
 	}
 	return options, nil
+}
+
+func validGeneralChatUsername(username string) bool {
+	if len(username) < 5 || len(username) > 32 || strings.TrimSpace(username) != username || strings.HasPrefix(username, "@") {
+		return false
+	}
+	for _, char := range username {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateEndpoint(endpoint string) error {

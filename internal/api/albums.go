@@ -126,6 +126,15 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(items)); err != nil {
 		return nil, nil, nil, err
 	}
+	if peerType == store.PeerTypeChannel {
+		texts := make([]string, len(req.MultiMedia))
+		for i, item := range req.MultiMedia {
+			texts[i] = item.Message
+		}
+		if err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	groupedID, err := newGroupedID()
 	if err != nil {
 		h.log.Error("album grouped id", "err", err)

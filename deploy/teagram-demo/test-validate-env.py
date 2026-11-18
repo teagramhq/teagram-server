@@ -73,6 +73,16 @@ class ValidateEnvTurnstileTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.validate({**self.values, "TG_ADVERTISE_DEMO_GUEST_SIGN_UP": "false"})
 
+    def test_general_chat_flag_is_enabled_for_demo(self) -> None:
+        self.validate({**self.values, "TG_DEMO_GENERAL_CHAT_ENABLED": "true"})
+        with self.assertRaises(SystemExit):
+            self.validate({**self.values, "TG_DEMO_GENERAL_CHAT_ENABLED": "false"})
+
+    def test_uploads_are_enabled_for_general_media_with_limits(self) -> None:
+        self.validate({**self.values, "TG_UPLOADS_DISABLED": "false"})
+        with self.assertRaises(SystemExit):
+            self.validate({**self.values, "TG_UPLOADS_DISABLED": "true"})
+
     def test_unknown_environment_setting_is_rejected(self) -> None:
         with self.assertRaises(SystemExit):
             self.validate({**self.values, "TG_UNAPPROVED_SETTING": "true"})

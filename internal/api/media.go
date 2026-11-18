@@ -614,6 +614,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, nil, nil, err
 	}
+	if peerType == store.PeerTypeChannel {
+		if err := h.checkDemoGeneralChatMessages(r, toID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	duplicate := false
 	if peerType == store.PeerTypeChat {
 		duplicate, err = h.store.CheckChatWritePermission(r.Ctx, toID, r.UserID, req.RandomID, mediaRights)

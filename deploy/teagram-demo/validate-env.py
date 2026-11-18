@@ -19,12 +19,13 @@ EXPECTED = {
     "TG_LOG_LOGIN_CODES": "false",
     "TG_MAX_FILE_BYTES": "16777216",
     "TG_MAX_USER_STORAGE_BYTES": "268435456",
-    "TG_UPLOADS_DISABLED": "true",
+    "TG_UPLOADS_DISABLED": "false",
     "TEAGRAM_DEMO_BLOB_PATH": "/srv/teagram-demo-blobs/data",
     "TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE": "/var/lib/teagram-demo/secrets/turnstile-secret-key",
 }
 OPTIONAL_VALUES = {
     "TG_ADVERTISE_DEMO_GUEST_SIGN_UP": {"true"},
+    "TG_DEMO_GENERAL_CHAT_ENABLED": {"true"},
     "TG_TURNSTILE_SIGNIN_ENABLED": {"false", "true"},
 }
 QA_BYPASS_TOKEN_PATH = pathlib.Path("/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token")

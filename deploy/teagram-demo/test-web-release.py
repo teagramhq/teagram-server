@@ -231,7 +231,7 @@ def main() -> None:
             updated.returncode != 0
             or "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io\n" not in expected_env
             or "TG_WEBSOCKET_BROWSER_ONLY=true\n" not in expected_env
-            or "TG_UPLOADS_DISABLED=true\n" not in expected_env
+            or "TG_UPLOADS_DISABLED=false\n" not in expected_env
             or "POSTGRES_PASSWORD=" + "d" * 64 + "\n" not in expected_env
             or "fixture-secret-must-not-be-printed" in updated.stdout.decode(errors="replace")
             or "fixture-secret-must-not-be-printed" in updated.stderr.decode(errors="replace")
@@ -244,22 +244,23 @@ def main() -> None:
         current_origins_env = root / "demo-current-origins.env"
         current_origins_env.write_text(
             "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io\n"
+            "TG_UPLOADS_DISABLED=true\n"
             "TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-secret-must-not-be-printed\n",
             encoding="utf-8",
         )
         current_origins_env.chmod(0o600)
         migrated = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(current_origins_env))
-        if migrated.returncode != 0 or "TG_UPLOADS_DISABLED=true\n" not in current_origins_env.read_text(encoding="utf-8"):
-            raise SystemExit("demo env migration omitted TG_UPLOADS_DISABLED for existing origins")
+        if migrated.returncode != 0 or "TG_UPLOADS_DISABLED=false\n" not in current_origins_env.read_text(encoding="utf-8"):
+            raise SystemExit("demo env migration omitted the approved upload setting for existing origins")
         if "TG_WEBSOCKET_BROWSER_ONLY=true\n" not in current_origins_env.read_text(encoding="utf-8"):
             raise SystemExit("demo env migration omitted the browser-only WebSocket policy")
 
-        unsafe_env = expected_env.replace("TG_UPLOADS_DISABLED=true\n", "TG_UPLOADS_DISABLED=false\n")
+        unsafe_env = expected_env.replace("TG_UPLOADS_DISABLED=false\n", "TG_UPLOADS_DISABLED=maybe\n")
         env_file.write_text(unsafe_env, encoding="utf-8")
         env_file.chmod(0o600)
-        rejected_uploads = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(env_file))
-        if rejected_uploads.returncode == 0 or env_file.read_text(encoding="utf-8") != unsafe_env:
-            raise SystemExit("demo environment update accepted client uploads or rewrote the file")
+        rejected_upload_setting = run(str(SCRIPT_DIR / "update-websocket-origins.py"), str(env_file))
+        if rejected_upload_setting.returncode == 0 or env_file.read_text(encoding="utf-8") != unsafe_env:
+            raise SystemExit("demo environment update accepted an invalid uploads setting or rewrote the file")
 
         unsafe_browser_only = expected_env.replace(
             "TG_WEBSOCKET_BROWSER_ONLY=true\n", "TG_WEBSOCKET_BROWSER_ONLY=false\n"

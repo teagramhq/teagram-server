@@ -5499,6 +5499,7 @@ type smokeFixture struct {
 	userInviteQuota             int
 	userInviteMinAccountAge     time.Duration
 	welcomeChannel              string
+	demoGeneralChatEnabled      bool
 	turnstileSiteKey            string
 	turnstileVerifier           api.SignUpTurnstileVerifier
 	turnstileSignInEnabled      bool
@@ -5966,7 +5967,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.uploadsDisabled, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.uploadsDisabled, f.demoGeneralChatEnabled, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

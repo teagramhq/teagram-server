@@ -152,6 +152,32 @@ func TestPostChannelStickerRetryRequiresSameDocumentID(t *testing.T) {
 	}
 }
 
+func TestPostChannelStickerAllowedWhenDefaultBansDocuments(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551260025")
+	member := mustUser(t, s, "+15551260026")
+	channel, err := s.CreateChannel(ctx, creator.ID, "Sticker permissions", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, "stickerpermissions"); err != nil {
+		t.Fatalf("claim megagroup username: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, member.ID); err != nil {
+		t.Fatalf("join megagroup: %v", err)
+	}
+	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"send_docs"}); err != nil {
+		t.Fatalf("ban generic documents: %v", err)
+	}
+
+	post, _, duplicate, err := s.PostChannelStickerAsWithEntities(ctx, channel.ID, member.ID, "sticker", 2402, -2402, 0, nil)
+	if err != nil || duplicate || post.LocalID == 0 {
+		t.Fatalf("post bundled sticker with generic documents banned = %+v duplicate=%t err=%v; want a new sticker post", post, duplicate, err)
+	}
+}
+
 func TestChannelEventsWindowIsBounded(t *testing.T) {
 	t.Parallel()
 	s := open(t)

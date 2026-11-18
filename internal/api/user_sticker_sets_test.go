@@ -1713,11 +1713,11 @@ func stickerSetMutation(t *testing.T, h mtproto.Handler, userID int64, method st
 }
 
 func stickerDispatcherWithImportMode(s *store.Store, mode config.StickerImportMode) mtproto.Handler {
-	return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+	return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuotaAndDemoGeneralChat(
 		s, 2, &tg.Config{MeURLPrefix: testPublicLinkPrefix}, slog.New(slog.DiscardHandler), false,
 		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{}, config.RegistrationClosed, api.NewDialogFilterSync(), nil,
 		config.DefaultUploadPartTTL, "", nil, "", false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, mode, 0, config.DefaultUserInviteMinAccountAge, false, nil,
+		config.DefaultSignUpTermsOfService, nil, mode, 0, config.DefaultUserInviteMinAccountAge, false, nil, false,
 	)
 }

@@ -2,8 +2,11 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +34,30 @@ func createWelcomeChannel(t *testing.T, s *store.Store, handle string, megagroup
 		t.Fatalf("claim welcome channel handle: %v", err)
 	}
 	return channel, message
+}
+
+func createGeneralChat(t *testing.T, s *store.Store) store.Channel {
+	t.Helper()
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+15550000119")
+	if err != nil {
+		t.Fatalf("create General chat owner: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create General chat: %v", err)
+	}
+	channel, _, err = s.SetChannelDefaultBannedRights(ctx, channel.ID, owner.ID, []string{
+		"change_info", "invite_users", "pin_messages", "manage_topics", "send_polls", "send_games", "send_inline",
+		"send_gifs", "send_videos", "send_roundvideos", "send_audios", "send_voices", "send_docs",
+	})
+	if err != nil {
+		t.Fatalf("restrict General guest permissions: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, "teagramdemogeneral"); err != nil {
+		t.Fatalf("claim General chat handle: %v", err)
+	}
+	return channel
 }
 
 func signUpWelcomeTestAccount(t *testing.T, s *store.Store, runner *api.SignUpTestRunner, keyID [8]byte, username string) *tg.User {
@@ -140,6 +167,153 @@ func TestSignUpSkipsConfiguredMegagroup(t *testing.T) {
 	}
 	if fields := attrs(logs.records[0]); fields["handle"] != "welcome_group" {
 		t.Fatalf("megagroup warning fields = %#v, want configured handle", fields)
+	}
+}
+
+func TestSignUpDemoGeneralChatAutoJoinIsFlagGated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	for _, allowed := range []string{"send_messages", "send_media", "send_photos", "send_stickers", "send_plain"} {
+		if slices.Contains(channel.DefaultBannedRights, allowed) {
+			t.Errorf("General default banned rights = %v, unexpectedly restricts %s", channel.DefaultBannedRights, allowed)
+		}
+	}
+	logs := &captureHandler{}
+	disabledRunner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.16"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+	disabledUser := signUpWelcomeTestAccount(t, s, disabledRunner, [8]byte{7}, "freshgeneraloff")
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, disabledUser.ID); err != nil || found {
+		t.Fatalf("new account General membership with flag off = %+v, found=%v, err=%v; want no membership", member, found, err)
+	}
+
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.15"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{8}, "freshgeneraluser")
+
+	member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID)
+	if err != nil || !found {
+		t.Fatalf("new account General membership = %+v, found=%v, err=%v; want immediate membership", member, found, err)
+	}
+	if member.Role != 0 || member.AdminChangeInfo {
+		t.Fatalf("new account General role = %+v, want a plain member", member)
+	}
+	response, err := api.GetDialogsForTest(s, user.ID)
+	if err != nil {
+		t.Fatalf("get dialogs after General auto-join: %v", err)
+	}
+	dialogs, ok := response.(*tg.MessagesDialogs)
+	if !ok {
+		t.Fatalf("get dialogs response = %T, want *tg.MessagesDialogs", response)
+	}
+	for _, raw := range dialogs.Dialogs {
+		dialog, ok := raw.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		peer, ok := dialog.Peer.(*tg.PeerChannel)
+		if ok && peer.ChannelID == channel.ID {
+			return
+		}
+	}
+	t.Fatalf("new account dialogs = %+v, want General channel %d", dialogs.Dialogs, channel.ID)
+}
+
+func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+
+	oversizeGuest := newMember("+15550000120")
+	_, err := api.SendMessageForTestWithDemoGeneralChat(s, oversizeGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerChannel(oversizeGuest.ID, channel.ID), Message: strings.Repeat("x", 1001), RandomID: 1,
+	})
+	rpcError(t, err, "MESSAGE_TOO_LONG")
+
+	duplicateGuest := newMember("+15550000121")
+	peer := api.InputPeerChannel(duplicateGuest.ID, channel.ID)
+	if _, err := api.SendMessageForTestWithDemoGeneralChat(s, duplicateGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "same note", RandomID: 2,
+	}); err != nil {
+		t.Fatalf("send first identical-text check message: %v", err)
+	}
+	_, err = api.SendMessageForTestWithDemoGeneralChat(s, duplicateGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "same note", RandomID: 3,
+	})
+	rpcError(t, err, "FLOOD_WAIT_30")
+
+	rateLimitedGuest := newMember("+15550000122")
+	peer = api.InputPeerChannel(rateLimitedGuest.ID, channel.ID)
+	for i := range 5 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChat(s, rateLimitedGuest.ID, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("note %d", i), RandomID: int64(i + 10),
+		}); err != nil {
+			t.Fatalf("send General message %d of 5: %v", i+1, err)
+		}
+	}
+	_, err = api.SendMessageForTestWithDemoGeneralChat(s, rateLimitedGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "sixth note", RandomID: 16,
+	})
+	rpcError(t, err, "FLOOD_WAIT_60")
+
+	hourLimitedGuest := newMember("+15550000123")
+	peer = api.InputPeerChannel(hourLimitedGuest.ID, channel.ID)
+	minuteLimit := store.RateLimitConfig{Limit: 100, Window: time.Minute}
+	hourLimit := store.RateLimitConfig{Limit: 2, Window: time.Hour}
+	for i := range 2 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChatLimits(s, hourLimitedGuest.ID, minuteLimit, hourLimit, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("hourly note %d", i), RandomID: int64(i + 30),
+		}); err != nil {
+			t.Fatalf("send hourly General message %d of 2: %v", i+1, err)
+		}
+	}
+	_, err = api.SendMessageForTestWithDemoGeneralChatLimits(s, hourLimitedGuest.ID, minuteLimit, hourLimit, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "third hourly note", RandomID: 32,
+	})
+	rpcError(t, err, "FLOOD_WAIT_3600")
+}
+
+func TestDemoGeneralChatAllowsGuestPhotoPosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	guest, err := s.CreateUser(ctx, "+15550000124")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	blobs := newBlobs(t)
+	body := jpegPhotoPayload(t, 640, 480)
+	const fileID = 12401
+	saveParts(t, s, guest.ID, fileID, body)
+	sent, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+		Media:    uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message:  "a small field photo",
+		RandomID: fileID,
+	})
+	if err != nil {
+		t.Fatalf("send General photo: %v", err)
+	}
+	post, _ := channelPhotoPostOf(t, sent)
+	photo := photoOfMessage(t, post)
+	if photo.ID == 0 || post.Message != "a small field photo" {
+		t.Fatalf("General photo post = id %d caption %q, want a stored photo and its caption", photo.ID, post.Message)
 	}
 }
 

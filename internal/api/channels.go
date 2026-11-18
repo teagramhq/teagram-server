@@ -958,6 +958,9 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, err
 	}
+	if err := h.checkDemoGeneralChatMessages(r, channelID, []string{req.Message}, 1, errMessageTooLong); err != nil {
+		return nil, err
+	}
 
 	// PostChannelMessageAs, never PostChannelMessage: the latter is the
 	// unchecked primitive and trusts its caller to have decided post rights.

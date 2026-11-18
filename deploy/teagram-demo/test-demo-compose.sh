@@ -45,6 +45,7 @@ TG_AUTHKEY_ENC_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+TG_DEMO_GENERAL_CHAT_ENABLED=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_WEBSOCKET_BROWSER_ONLY=true
@@ -52,7 +53,7 @@ TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
 TG_MAX_USER_STORAGE_BYTES=268435456
-TG_UPLOADS_DISABLED=true
+TG_UPLOADS_DISABLED=false
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 ENV
@@ -136,6 +137,8 @@ jq -e \
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
   and .services.teagramd.environment.GOMAXPROCS == "1"
   and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
   and (.services.teagramd.mem_limit | tostring) == "469762048"
@@ -147,10 +150,10 @@ jq -e \
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
   and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services.teagramd.environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
-  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "true"
+  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
-  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "true"
+  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
@@ -226,6 +229,8 @@ jq -e '
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
 ' "$TMP_DIR/signin.json" >/dev/null
 
 (

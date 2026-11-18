@@ -86,9 +86,9 @@ both `https://web.teagram.io` and `https://demo.teagram.io`. The demo enables
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-client uploads are disabled by `TG_UPLOADS_DISABLED=true`, and the existing
-500 KB per-file cap, upload-byte budget and 256 MiB per-account storage cap
-remain as defense in depth.
+and client uploads are enabled to support General photo posts. Uploads
+remain bounded by the 500 KB per-file cap, 20 MiB per-account hourly byte
+budget, and 256 MiB per-account lifetime storage cap.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
@@ -114,9 +114,37 @@ mounted into teagramd and the isolated `demo-probe` service for the deploy-time
 signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
-`TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
-older prepared files and rejects a value that would enable client uploads.
-The seed overlay temporarily enables uploads for the private API seeder.
+`TG_DEMO_GENERAL_CHAT_ENABLED=true` makes the API seed a single `General`
+supergroup owned by `demo_seed_owner` and adds new sign-ups to it. The seeder
+adds the precreated demo guest accounts too, sets 10-second slow mode, and
+verifies the group after setup, weekly wipes, and restarts. Guests join as
+ordinary members: they can send text, photos, and bundled stickers, but cannot
+change group details, pin messages, invite members, or delete another guest's
+messages. Default rights also block polls, generic files, other media types,
+and topic management while leaving text, photos, and stickers available.
+
+General also enforces five messages per guest per minute and 30 per hour across
+all server replicas, in addition to slow mode. Text and captions are limited to
+1,000 Unicode characters. Repeating the same nonempty text or caption within 30
+seconds is refused with a flood-wait response. Guest creation already has a
+five-attempt-per-IP-per-hour server limit; Turnstile remains enabled on public
+sign-up.
+
+Run the owner-only moderation command from the demo LXC to remove a General
+message or permanently ban an ordinary member:
+
+```sh
+sudo deploy/teagram-demo/moderate-general.sh delete-message MESSAGE_ID
+sudo deploy/teagram-demo/moderate-general.sh ban-user GUEST_USERNAME
+```
+
+The weekly database wipe clears General history and the seed recreates the
+group. No separate message-clear job runs between wipes.
+
+`TG_UPLOADS_DISABLED=false` is persisted in `.env`; deploy preflight migrates
+older prepared files to the approved value. `TG_STICKER_IMPORT=off` keeps users
+from uploading new sticker packs, while bundled catalogue stickers remain
+available to send. The same upload byte and storage caps apply to demo guests.
 Bootstrap and weekly reseed stop edge and HAProxy before seeding, then recreate
 teagramd with production configuration and verify the private path before edge
 starts. During a rolling deploy, the current server continues serving while
@@ -124,31 +152,24 @@ the candidate is seeded. The candidate has no host-published port and is not
 in HAProxy's backend until seed verification finishes and Compose recreates it
 with production configuration; HAProxy enables it only afterward.
 
-### Upload shutdown threat model
+### Demo upload limits
 
 Client uploads may contain personal photos and documents. Their bytes first
 occupy per-user temporary upload parts, then assembled file metadata and blob
-objects; short-lived upload grants bind staged files to their owner. An
-authenticated client could otherwise try the regular or big part RPCs, or
-bypass them through uploaded message media, profile photos, or chat/channel
-photos. With uploads disabled, each of those byte-ingress RPCs returns the
-same `UPLOADS_DISABLED` error before its storage path. The setting is loaded
-at process startup and applies through the shared handler on every listener.
-There is no HTTP file-upload route. Demo sticker import is off, and catalog
-sticker assets are bundled rather than accepted from clients.
+objects; short-lived upload grants bind staged files to their owner. The demo
+allows those upload RPCs so guests can send photos in General. There is no HTTP
+file-upload route. Demo sticker import is off, and catalog sticker assets are
+bundled rather than accepted from clients.
 
 `messages.sendMultiMedia` accepts owner-bound grants created by
-`messages.uploadMedia`; it carries no file bytes, and disabled mode prevents
-new grants from being issued. The switch does not erase parts, blobs, or grants
-accepted before it was enabled. Temporary parts and grants keep their existing
-TTL; completed file reads still enforce file-location and owner checks, and
-`upload.getFile` remains available for authorized existing media. The seed
-override is private to the internal Docker backend:
-bootstrap and weekly wipe stop both public proxy paths, while rolling deploys
-keep the candidate out of HAProxy until production configuration is restored.
-The backend network has no external route or published server port. LXC root
-and containers already attached to that backend are trusted; control of either
-can reach the seed API while the override is active.
+`messages.uploadMedia`; it carries no file bytes. Temporary parts and grants
+keep their existing TTL; completed file reads still enforce file-location and
+owner checks, and `upload.getFile` remains available for authorized media.
+The API seeder uses the internal backend network. Bootstrap and weekly wipe
+stop both public proxy paths, while rolling deploys keep the candidate out of
+HAProxy until seed verification finishes. The backend network has no external
+route or published server port. LXC root and containers already attached to
+that backend are trusted.
 
 For an authorized browser QA run, a test harness can set the demo QA token in
 the web client origin's local storage under the key
@@ -204,8 +225,9 @@ unset IMAGE_DIGEST
 The prepared charlie host already has its `.env` and Siteverify secret, so do
 not rerun `prepare-env.sh` there. The next merged init or deploy script creates
 the QA bypass token once if it is absent. Existing `.env` files may omit
-`TG_ADVERTISE_DEMO_GUEST_SIGN_UP`; Compose supplies the approved `true` default
-and validates the resolved value without rewriting the secrets.
+`TG_ADVERTISE_DEMO_GUEST_SIGN_UP` and `TG_DEMO_GENERAL_CHAT_ENABLED`; Compose
+supplies the approved `true` defaults and validates the resolved values without
+rewriting the secrets.
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
 then creates root-owned `.env` mode 0600 with the site key, the secret-file

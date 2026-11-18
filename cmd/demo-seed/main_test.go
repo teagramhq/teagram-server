@@ -491,6 +491,34 @@ func TestCheckModeNeedsNoConfigAndRejectsNonInternalEndpoints(t *testing.T) {
 	}
 }
 
+func TestParseOptionsDemoGeneralChatFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   string
+		enabled bool
+	}{
+		{name: "unset"},
+		{name: "disabled", value: "false"},
+		{name: "enabled", value: "true", enabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", tt.value)
+			options, err := parseOptions([]string{"--seed"})
+			if err != nil {
+				t.Fatalf("parseOptions: %v", err)
+			}
+			if got := options.generalChatEnabled; got != tt.enabled {
+				t.Errorf("general chat seed option = %t, want %t", got, tt.enabled)
+			}
+		})
+	}
+
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "sometimes")
+	if _, err := parseOptions([]string{"--seed"}); err == nil {
+		t.Fatal("parseOptions accepted a non-boolean TG_DEMO_GENERAL_CHAT_ENABLED")
+	}
+}
+
 func TestSeedManifestCoversRequiredPublicSpaces(t *testing.T) {
 	if len(seedAccounts) != 10 {
 		t.Fatalf("seed accounts = %d, want ten", len(seedAccounts))
@@ -535,6 +563,23 @@ func TestSeedManifestCoversRequiredPublicSpaces(t *testing.T) {
 	}
 	if len(conversationLines) != 12 {
 		t.Fatalf("group conversation has %d turns, want 12", len(conversationLines))
+	}
+}
+
+func TestDemoGeneralChatSeedIsOptInAndUnique(t *testing.T) {
+	if specs := generalChatSpaceSpecs(false); len(specs) != 0 {
+		t.Fatalf("general chat specs with flag off = %+v, want none", specs)
+	}
+	specs := generalChatSpaceSpecs(true)
+	if len(specs) != 1 {
+		t.Fatalf("general chat specs with flag on = %d, want one", len(specs))
+	}
+	spec := specs[0]
+	if spec.title != "General" || spec.username != demoGeneralChatUsername || !spec.megagroup {
+		t.Fatalf("general chat spec = %+v, want public General supergroup %q", spec, demoGeneralChatUsername)
+	}
+	if demoGeneralChatSlowmodeSeconds != 10 {
+		t.Fatalf("General chat slow mode = %d, want 10 seconds", demoGeneralChatSlowmodeSeconds)
 	}
 }
 

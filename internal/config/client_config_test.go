@@ -104,6 +104,38 @@ func TestLoadConfigCopiesDemoGuestSignUpAdvertisementModes(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDemoGeneralChatFlagModes(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	for _, tt := range []struct {
+		name    string
+		value   string
+		enabled bool
+	}{
+		{name: "unset"},
+		{name: "disabled", value: "false"},
+		{name: "enabled", value: "true", enabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", tt.value)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.DemoGeneralChatEnabled; got != tt.enabled {
+				t.Errorf("server config demo general chat = %t, want %t", got, tt.enabled)
+			}
+		})
+	}
+
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "sometimes")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_DEMO_GENERAL_CHAT_ENABLED") {
+		t.Fatalf("Load error = %v, want a validation error naming TG_DEMO_GENERAL_CHAT_ENABLED", err)
+	}
+}
+
 func TestLoadDiscoveryLimits(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))

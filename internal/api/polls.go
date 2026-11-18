@@ -107,6 +107,11 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	if err = h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, nil, nil, err
 	}
+	if peerType == store.PeerTypeChannel {
+		if err := h.checkDemoGeneralChatMessages(r, peerID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 
 	if peerType == store.PeerTypeChat {
 		return h.sendChatPoll(r, req, peerID, draft)

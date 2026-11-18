@@ -78,13 +78,18 @@ def update(path: pathlib.Path) -> None:
     if len(uploads_matches) > 1:
         reject("uploads-disabled-assignment-count")
     if uploads_matches:
-        uploads_value = lines[uploads_matches[0]].rstrip("\r\n").partition("=")[2]
-        if uploads_value != "true":
-            reject("uploads-must-remain-disabled")
+        uploads_index = uploads_matches[0]
+        uploads_value = lines[uploads_index].rstrip("\r\n").partition("=")[2]
+        if uploads_value == "true":
+            newline = lines[uploads_index][len(lines[uploads_index].rstrip("\r\n")) :]
+            lines[uploads_index] = f"{UPLOADS_DISABLED_VARIABLE}=false{newline}"
+            changed = True
+        elif uploads_value != "false":
+            reject("uploads-disabled-must-be-boolean")
     else:
         if lines and not lines[-1].endswith(("\n", "\r")):
             lines[-1] = lines[-1] + "\n"
-        lines.append(f"{UPLOADS_DISABLED_VARIABLE}=true\n")
+        lines.append(f"{UPLOADS_DISABLED_VARIABLE}=false\n")
         changed = True
 
     if not changed:

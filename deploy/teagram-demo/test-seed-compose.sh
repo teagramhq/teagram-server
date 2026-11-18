@@ -28,12 +28,13 @@ docker inspect "${SERVER_IDS[0]}" | jq -e '
     and ($env | any(. == "TG_TURNSTILE_SITE_KEY="))
     and ($env | any(. == "TG_TURNSTILE_SECRET_KEY_FILE="))
     and ($env | any(. == "TG_WELCOME_CHANNEL=teagramdemowelcome"))
+    and ($env | any(. == "TG_DEMO_GENERAL_CHAT_ENABLED=true"))
 ' >/dev/null || demo_fail 'seed convergence test requires the private seed-only server configuration'
 
 SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
 OWNER_USERNAME="$DEMO_SEED_OWNER_USERNAME"
 OWNER_PASSWORD_FILE="$DEMO_SEED_PASSWORD_FILE"
-EXPECTED_REPORT='demo seed verified accounts=10 welcome_posts=1 broadcast_channels=3 posts_per_channel=32 public_groups=3 posts_per_group=12 searchable_spaces=7 markers=133 search_account=demo_searcher reaction_examples=1'
+EXPECTED_REPORT='demo seed verified accounts=10 welcome_posts=1 broadcast_channels=3 posts_per_channel=32 public_groups=3 posts_per_group=12 general_chat=1 searchable_spaces=7 markers=133 search_account=demo_searcher reaction_examples=1'
 
 capture_seed_report() {
   local output report line

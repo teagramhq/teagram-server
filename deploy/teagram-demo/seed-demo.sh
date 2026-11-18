@@ -10,6 +10,8 @@ MODE=
 ENDPOINT=teagramd:2443
 OWNER_USERNAME=demo_seed_owner
 OWNER_PASSWORD_FILE="$DEMO_SEED_PASSWORD_FILE"
+MESSAGE_ID=
+TARGET_USERNAME=
 
 usage() {
   cat <<'EOF'
@@ -18,12 +20,14 @@ Usage:
   seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
   seed-demo.sh --verify-turnstile --endpoint haproxy:2443
+  seed-demo.sh --moderate-delete-message --message-id ID
+  seed-demo.sh --moderate-ban-user --username USERNAME
 EOF
 }
 
 while (($#)); do
   case "$1" in
-    --check|--seed|--verify-seed|--verify-turnstile)
+    --check|--seed|--verify-seed|--verify-turnstile|--moderate-delete-message|--moderate-ban-user)
       [[ -z "$MODE" ]] || { usage >&2; demo_fail 'select exactly one mode'; }
       MODE="$1"
       shift
@@ -41,6 +45,16 @@ while (($#)); do
     --owner-password-file)
       (($# >= 2)) || { usage >&2; demo_fail '--owner-password-file requires a path'; }
       OWNER_PASSWORD_FILE="$2"
+      shift 2
+      ;;
+    --message-id)
+      (($# >= 2)) || { usage >&2; demo_fail '--message-id requires a value'; }
+      MESSAGE_ID="$2"
+      shift 2
+      ;;
+    --username)
+      (($# >= 2)) || { usage >&2; demo_fail '--username requires a value'; }
+      TARGET_USERNAME="$2"
       shift 2
       ;;
     -h|--help)
@@ -61,6 +75,15 @@ if [[ "$MODE" == --verify-turnstile ]]; then
 else
   [[ "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
     demo_fail "endpoint for $MODE must be an internal teagramd service"
+fi
+if [[ "$MODE" == --moderate-delete-message ]]; then
+  [[ "$MESSAGE_ID" =~ ^[1-9][0-9]*$ ]] || demo_fail '--message-id must be a positive integer'
+  [[ -z "$TARGET_USERNAME" ]] || demo_fail '--username applies only to --moderate-ban-user'
+elif [[ "$MODE" == --moderate-ban-user ]]; then
+  [[ -z "$MESSAGE_ID" ]] || demo_fail '--message-id applies only to --moderate-delete-message'
+  [[ "$TARGET_USERNAME" =~ ^[A-Za-z0-9_]{5,32}$ ]] || demo_fail '--username must be a username without @'
+else
+  [[ -z "$MESSAGE_ID" && -z "$TARGET_USERNAME" ]] || demo_fail '--message-id and --username require a moderation mode'
 fi
 
 check_dependencies() {
@@ -86,6 +109,7 @@ check_source_wiring() {
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/main.go" ]] || demo_fail 'demo-seed source is missing'
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/seed.go" ]] || demo_fail 'demo-seed API implementation is missing'
   [[ -f "$DEMO_SCRIPT_DIR/compose.seed.yaml" ]] || demo_fail 'seed Compose overlay is missing'
+  [[ -x "$DEMO_SCRIPT_DIR/moderate-general.sh" ]] || demo_fail 'General moderation command is missing or not executable'
   [[ -x "$DEMO_SCRIPT_DIR/test-seed-compose.sh" ]] || demo_fail 'seed convergence Compose API test is missing or not executable'
   grep -Fq 'go build -o /demo-seed ./cmd/demo-seed' "$DEMO_REPO_ROOT/Dockerfile" ||
     demo_fail 'Dockerfile does not build the demo-seed binary'
@@ -151,6 +175,20 @@ case "$MODE" in
     check_seed_secret_files
     run_seed_helper demo-seed \
       --verify-seed --endpoint "$ENDPOINT" \
+      --owner-username "$OWNER_USERNAME"
+    ;;
+  --moderate-delete-message)
+    demo_require_env
+    check_seed_secret_files
+    run_seed_helper demo-seed \
+      --moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT" \
+      --owner-username "$OWNER_USERNAME"
+    ;;
+  --moderate-ban-user)
+    demo_require_env
+    check_seed_secret_files
+    run_seed_helper demo-seed \
+      --moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT" \
       --owner-username "$OWNER_USERNAME"
     ;;
   --verify-turnstile)

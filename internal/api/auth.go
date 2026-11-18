@@ -318,6 +318,7 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		c.RecordAuthorizationBinding(user.ID)
 	}
 	h.joinWelcomeChannel(r.Ctx, user.ID)
+	h.joinDemoGeneralChat(r.Ctx, user.ID)
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
 }
 
@@ -349,6 +350,30 @@ func (h *handlers) joinWelcomeChannel(ctx context.Context, userID int64) {
 	}
 	if _, _, err := h.store.JoinChannelByUsername(ctx, channel.ID, userID); err != nil {
 		h.log.Warn("welcome channel auto-join failed", "handle", handle, "reason", "join failed", "err", err)
+	}
+}
+
+func (h *handlers) joinDemoGeneralChat(ctx context.Context, userID int64) {
+	if !h.demoGeneralChatEnabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, welcomeChannelJoinTimeout)
+	defer cancel()
+
+	resolved, found, err := h.store.UsernameByHandle(ctx, demoGeneralChatUsername)
+	if err != nil {
+		h.log.Warn("demo General chat auto-join failed", "handle", demoGeneralChatUsername, "reason", "lookup failed", "err", err)
+		return
+	}
+	if !found || resolved.Kind != store.UsernameKindChannel || !resolved.Channel.Megagroup ||
+		resolved.Channel.Username == nil || *resolved.Channel.Username != demoGeneralChatUsername {
+		if h.demoGeneralChatWarning.CompareAndSwap(false, true) {
+			h.log.Warn("demo General chat auto-join skipped", "handle", demoGeneralChatUsername, "reason", "not a public supergroup")
+		}
+		return
+	}
+	if _, _, err := h.store.JoinChannelByUsername(ctx, resolved.Channel.ID, userID); err != nil {
+		h.log.Warn("demo General chat auto-join failed", "handle", demoGeneralChatUsername, "reason", "join failed", "err", err)
 	}
 }
 
