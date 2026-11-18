@@ -2,16 +2,21 @@ package e2e_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
-func TestDemoGeneralChatSignupAutoJoinSmoke(t *testing.T) {
+func testSmokeDemoGeneralChat(t *testing.T) {
+	t.Helper()
 	f := newSmokeFixtureWithSetup(t, config.RegistrationOpen, func(f *smokeFixture) {
 		f.demoGeneralChatEnabled = true
 	})
@@ -26,52 +31,169 @@ func TestDemoGeneralChatSignupAutoJoinSmoke(t *testing.T) {
 	if err := f.store.ClaimChannelUsername(f.ctx, channel.ID, "teagramdemogeneral"); err != nil {
 		t.Fatalf("claim General username: %v", err)
 	}
+	if _, changed, err := f.store.SetChannelSlowMode(f.ctx, channel.ID, owner.ID, 10); err != nil || !changed {
+		t.Fatalf("set General slow mode changed=%v err=%v", changed, err)
+	}
 
-	const username = "general_smoke_guest"
-	client := newUsernameClient(f.port, f.key, f.dcID, &session.StorageMemory{})
-	if err := client.Run(f.ctx, func(ctx context.Context) error {
-		api := client.API()
-		codeHash, err := sendCodeUsername(ctx, api, username)
-		if err != nil {
-			return fmt.Errorf("send signup code: %w", err)
-		}
-		code, err := f.codes.wait(ctx, username)
-		if err != nil {
-			return fmt.Errorf("wait for signup code: %w", err)
-		}
-		response, err := signInUsername(ctx, api, username, codeHash, code)
-		if err != nil && !isSignUpRequired(err) {
-			return fmt.Errorf("sign in before signup: %w", err)
-		}
-		if err == nil {
-			if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
-				return fmt.Errorf("sign in response = %T, want signup required", response)
+	signUpGuest := func(username string, afterSignUp func(context.Context, *tg.Client, int64) error) error {
+		sessionStorage := &session.StorageMemory{}
+		client := newUsernameClient(f.port, f.key, f.dcID, sessionStorage)
+		return client.Run(f.ctx, func(ctx context.Context) error {
+			api := client.API()
+			codeHash, err := sendCodeUsername(ctx, api, username)
+			if err != nil {
+				return fmt.Errorf("send signup code: %w", err)
 			}
-		}
-		response, err = signUpUsername(ctx, api, username, codeHash, "General", "Guest")
+			code, err := f.codes.wait(ctx, username)
+			if err != nil {
+				return fmt.Errorf("wait for signup code: %w", err)
+			}
+			response, err := signInUsername(ctx, api, username, codeHash, code)
+			if err != nil && !isSignUpRequired(err) {
+				return fmt.Errorf("sign in before signup: %w", err)
+			}
+			if err == nil {
+				if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
+					return fmt.Errorf("sign in response = %T, want signup required", response)
+				}
+			}
+			response, err = signUpUsername(ctx, api, username, codeHash, "General", "Guest")
+			if err != nil {
+				return fmt.Errorf("sign up guest: %w", err)
+			}
+			authorization, ok := response.(*tg.AuthAuthorization)
+			if !ok {
+				return fmt.Errorf("sign up response = %T, want authorization", response)
+			}
+			user, ok := authorization.User.(*tg.User)
+			if !ok || user.ID <= 0 {
+				return fmt.Errorf("sign up user = %T, want persisted user", authorization.User)
+			}
+			member, found, err := f.store.ChannelMemberOf(ctx, channel.ID, user.ID)
+			if err != nil {
+				return fmt.Errorf("read new guest General membership: %w", err)
+			}
+			if !found || member.Role != 0 {
+				return fmt.Errorf("new guest General membership = %+v found=%v, want ordinary member", member, found)
+			}
+			sessionData, err := loadSmokeSession(ctx, sessionStorage)
+			if err != nil {
+				return fmt.Errorf("load guest session after signup: %w", err)
+			}
+			if len(sessionData.AuthKeyID) != 8 {
+				return fmt.Errorf("guest auth key ID length = %d, want 8", len(sessionData.AuthKeyID))
+			}
+			var authKeyID [8]byte
+			copy(authKeyID[:], sessionData.AuthKeyID)
+			passwordState, err := api.AccountGetPassword(ctx)
+			if err != nil {
+				return fmt.Errorf("read password setup after signup: %w", err)
+			}
+			if passwordState.HasPassword {
+				return errors.New("new guest unexpectedly already has a password")
+			}
+			verifier, salt1, salt2, err := testComputeSRPVerifier([]byte("demo-general-smoke-password"))
+			if err != nil {
+				return fmt.Errorf("prepare guest password: %w", err)
+			}
+			_, err = api.AccountUpdatePasswordSettings(ctx, &tg.AccountUpdatePasswordSettingsRequest{
+				Password: &tg.InputCheckPasswordEmpty{},
+				NewSettings: tg.AccountPasswordInputSettings{
+					NewAlgo: &tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow{
+						Salt1: salt1,
+						Salt2: salt2,
+					},
+					NewPasswordHash: verifier,
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("set guest password after signup: %w", err)
+			}
+			storedKey, found, err := f.store.AuthKeyByID(ctx, mtproto.AuthKeyIDInt64(authKeyID))
+			if err != nil {
+				return fmt.Errorf("read guest auth key after signup: %w", err)
+			}
+			if !found || storedKey.UserID != user.ID || storedKey.Provisional {
+				return fmt.Errorf("guest auth key = {user:%d provisional:%v} found=%v, want bound and non-provisional user %d", storedKey.UserID, storedKey.Provisional, found, user.ID)
+			}
+			if _, err := smokeChannelDialog(ctx, api, channel.ID); err != nil {
+				return fmt.Errorf("General dialog after signup: %w", err)
+			}
+			return afterSignUp(ctx, api, user.ID)
+		})
+	}
+
+	const postedText = "hello from the first General guest"
+	err = signUpGuest("general_smoke_guest", func(ctx context.Context, api *tg.Client, userID int64) error {
+		result, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerChannel(userID, channel.ID), Message: postedText, RandomID: 7707001,
+		})
 		if err != nil {
-			return fmt.Errorf("sign up guest: %w", err)
+			return fmt.Errorf("send General post: %w", err)
 		}
-		authorization, ok := response.(*tg.AuthAuthorization)
+		updates, ok := result.(*tg.Updates)
 		if !ok {
-			return fmt.Errorf("sign up response = %T, want authorization", response)
+			return fmt.Errorf("General send result = %T, want *tg.Updates", result)
 		}
-		user, ok := authorization.User.(*tg.User)
-		if !ok || user.ID <= 0 {
-			return fmt.Errorf("sign up user = %T, want persisted user", authorization.User)
+		var foundPost bool
+		for _, update := range updates.Updates {
+			newPost, ok := update.(*tg.UpdateNewChannelMessage)
+			if !ok {
+				continue
+			}
+			message, ok := newPost.Message.(*tg.Message)
+			if !ok {
+				return fmt.Errorf("General send message = %T, want *tg.Message", newPost.Message)
+			}
+			if message.Message != postedText {
+				return fmt.Errorf("General send message = %q, want %q", message.Message, postedText)
+			}
+			foundPost = true
 		}
-		member, found, err := f.store.ChannelMemberOf(ctx, channel.ID, user.ID)
-		if err != nil {
-			return fmt.Errorf("read new guest General membership: %w", err)
+		if !foundPost {
+			return fmt.Errorf("General send result omitted posted text %q", postedText)
 		}
-		if !found || member.Role != 0 {
-			return fmt.Errorf("new guest General membership = %+v found=%v, want ordinary member", member, found)
+
+		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerChannel(userID, channel.ID), Message: "second send during slow mode", RandomID: 7707002,
+		})
+		var rpcError *tgerr.Error
+		if err == nil {
+			return errors.New("second General send during slow mode succeeded, want SLOWMODE_WAIT")
 		}
-		if _, err := smokeChannelDialog(ctx, api, channel.ID); err != nil {
-			return fmt.Errorf("General dialog after signup: %w", err)
+		if !errors.As(err, &rpcError) || !strings.HasPrefix(rpcError.Message, "SLOWMODE_WAIT_") {
+			return fmt.Errorf("second General send during slow mode = %w, want SLOWMODE_WAIT", err)
 		}
 		return nil
-	}); err != nil {
-		t.Fatalf("General signup smoke: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("first General guest smoke: %v", err)
+	}
+
+	err = signUpGuest("general_smoke_guest2", func(ctx context.Context, api *tg.Client, userID int64) error {
+		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer: peerChannel(userID, channel.ID), Limit: 20,
+		})
+		if err != nil {
+			return fmt.Errorf("read General history as second guest: %w", err)
+		}
+		history, ok := result.(*tg.MessagesChannelMessages)
+		if !ok {
+			return fmt.Errorf("General history result = %T, want *tg.MessagesChannelMessages", result)
+		}
+		matches := 0
+		for _, class := range history.Messages {
+			message, ok := class.(*tg.Message)
+			if ok && message.Message == postedText {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("second General guest history contains posted text %d times, want once", matches)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("second General guest smoke: %v", err)
 	}
 }

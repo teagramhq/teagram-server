@@ -155,15 +155,130 @@ func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create guest: %v", err)
 	}
+	if _, _, err := s.JoinChannelByUsername(ctx, second.ID, guest.ID); err != nil {
+		t.Fatalf("join guest to replacement General: %v", err)
+	}
+	h.rateLimitMessageSend = store.RateLimitConfig{}
 	h.demoGeneralChatPolicy.perMinute = store.RateLimitConfig{Limit: 1, Window: time.Minute}
 	r := &mtproto.Request{Ctx: ctx, UserID: guest.ID}
-	if isGeneral, err := h.checkDemoGeneralChatMessages(r, second.ID, []string{"first"}, 1, errMessageTooLong); err != nil || !isGeneral {
+	send := func(randomID int64, text string) error {
+		_, err := h.sendChannelMessage(r, second.ID, &tg.MessagesSendMessageRequest{RandomID: randomID, Message: text}, 0, nil)
+		return err
+	}
+	if err := send(70401, "first"); err != nil {
 		t.Fatalf("first replacement General message: %v", err)
 	}
-	_, err = h.checkDemoGeneralChatMessages(r, second.ID, []string{"second"}, 1, errMessageTooLong)
+	err = send(70402, "second")
 	if err == nil || !strings.Contains(err.Error(), "FLOOD_WAIT (60)") {
 		t.Fatalf("second replacement General message = %v, want FLOOD_WAIT_60", err)
 	}
+}
+
+func TestDemoGeneralChatSlowModeRefusalDoesNotSpendLimits(t *testing.T) {
+	ctx, s, h, _, dsn := newDirectSendLogHarnessWithDSN(t)
+	h.demoGeneralChatEnabled = true
+	h.rateLimitMessageSend = store.RateLimitConfig{}
+	owner, err := s.CreateUser(ctx, "+15550001706")
+	if err != nil {
+		t.Fatalf("create General owner: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create General channel: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim General username: %v", err)
+	}
+	if _, changed, err := s.SetChannelSlowMode(ctx, channel.ID, owner.ID, 10); err != nil || !changed {
+		t.Fatalf("set General slow mode changed=%v err=%v", changed, err)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	expireSlowMode := func(userID int64) {
+		t.Helper()
+		_, err := conn.Exec(ctx, `
+			WITH updated_participant AS (
+				UPDATE channel_participants AS participant
+				SET last_post_at = clock_timestamp() - interval '11 seconds'
+				WHERE participant.channel_id = $1 AND participant.user_id = $2
+				RETURNING participant.channel_id, participant.user_id, participant.last_post_at
+			)
+			INSERT INTO channel_post_markers (channel_id, user_id, last_post_at)
+			SELECT channel_id, user_id, last_post_at FROM updated_participant
+			ON CONFLICT (channel_id, user_id) DO UPDATE
+			SET last_post_at = EXCLUDED.last_post_at
+		`, channel.ID, userID)
+		if err != nil {
+			t.Fatalf("expire General slow mode for user %d: %v", userID, err)
+		}
+	}
+	send := func(userID, randomID int64, message string) error {
+		t.Helper()
+		_, err := h.sendChannelMessage(
+			&mtproto.Request{Ctx: ctx, UserID: userID}, channel.ID,
+			&tg.MessagesSendMessageRequest{RandomID: randomID, Message: message}, 0, nil,
+		)
+		return err
+	}
+	newMember := func(phone string) *store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join guest to General: %v", err)
+		}
+		return &user
+	}
+	refusedBySlowMode := func(t *testing.T, userID, randomID int64, text string) {
+		t.Helper()
+		err := send(userID, randomID, text)
+		if err == nil || !strings.Contains(err.Error(), "SLOWMODE_WAIT (") {
+			t.Fatalf("send during slow mode = %v, want SLOWMODE_WAIT", err)
+		}
+		expireSlowMode(userID)
+	}
+
+	t.Run("minute and hour counters", func(t *testing.T) {
+		h.demoGeneralChatPolicy = demoGeneralChatPolicy{
+			perMinute:      store.RateLimitConfig{Limit: 2, Window: time.Minute},
+			perHour:        store.RateLimitConfig{Limit: 2, Window: time.Hour},
+			duplicateLimit: store.RateLimitConfig{Limit: 5, Window: demoGeneralChatDuplicateWindow},
+		}
+		member := newMember("+15550001707")
+		if err := send(member.ID, 70701, "first accepted post"); err != nil {
+			t.Fatalf("first accepted post: %v", err)
+		}
+		refusedBySlowMode(t, member.ID, 70702, "post refused by slow mode")
+		if err := send(member.ID, 70703, "post after slow mode"); err != nil {
+			t.Fatalf("retry after slow mode spent the minute/hour allowance: %v", err)
+		}
+	})
+
+	t.Run("duplicate counter", func(t *testing.T) {
+		h.demoGeneralChatPolicy = demoGeneralChatPolicy{
+			perMinute:      store.RateLimitConfig{Limit: 10, Window: time.Minute},
+			perHour:        store.RateLimitConfig{Limit: 10, Window: time.Hour},
+			duplicateLimit: store.RateLimitConfig{Limit: 1, Window: demoGeneralChatDuplicateWindow},
+		}
+		member := newMember("+15550001708")
+		if err := send(member.ID, 70801, "first accepted post"); err != nil {
+			t.Fatalf("first accepted post: %v", err)
+		}
+		refusedBySlowMode(t, member.ID, 70802, "retry after slow mode")
+		if err := send(member.ID, 70803, "retry after slow mode"); err != nil {
+			t.Fatalf("slow-mode refusal recorded the duplicate: %v", err)
+		}
+	})
 }
 
 func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {

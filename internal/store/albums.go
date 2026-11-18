@@ -703,7 +703,9 @@ func channelAlbumDedup(ctx context.Context, qtx *db.Queries, channelID, fromID i
 // validation. Grants are consumed after the files-row interlock, which is
 // taken after channel_state and the participant row as in the single-photo
 // path.
-func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID int64, a AlbumSend) (ChannelAlbumResult, error) {
+func (s *Store) PostChannelAlbumAs(
+	ctx context.Context, channelID, replyToMsgID int64, a AlbumSend, rateLimits ...RateLimitCharge,
+) (ChannelAlbumResult, error) {
 	entityPayloads, err := albumEntityPayloads(a)
 	if err != nil {
 		return ChannelAlbumResult{}, err
@@ -842,6 +844,9 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	}
 	if marked != 1 {
 		return ChannelAlbumResult{}, ErrNotMember
+	}
+	if err = s.consumeRateLimitChargesTx(ctx, qtx, fromID, rateLimits); err != nil {
+		return ChannelAlbumResult{}, fmt.Errorf("charge channel album rate limits: %w", err)
 	}
 
 	stored, err := qtx.ChannelMessagesByRandomIDs(ctx, db.ChannelMessagesByRandomIDsParams{ChannelID: channelID, RandomIds: randomIDs})

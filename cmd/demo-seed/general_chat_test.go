@@ -10,9 +10,12 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-func TestEnsureGeneralChatIsIdempotentAndVerifiesSlowMode(t *testing.T) {
+func TestSeedUpgradeCreatesMissingGeneralChatIdempotently(t *testing.T) {
 	rpc := &generalChatRPC{}
 	api := tg.NewClient(rpc)
+	if err := verifyGeneralChat(context.Background(), api, demoGeneralChatSpace); err == nil {
+		t.Fatal("verify General before upgrade succeeded with no General chat")
+	}
 	for range 2 {
 		if _, err := ensureGeneralChat(context.Background(), api, demoGeneralChatSpace); err != nil {
 			t.Fatalf("ensure General chat: %v", err)

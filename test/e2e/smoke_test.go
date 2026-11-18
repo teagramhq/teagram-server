@@ -307,6 +307,9 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernameRegistration(t)
 	})
+	t.Run("demo-general-chat", func(t *testing.T) {
+		testSmokeDemoGeneralChat(t)
+	})
 	t.Run("user-invites", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUserInvites(t)

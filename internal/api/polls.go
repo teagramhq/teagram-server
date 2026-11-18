@@ -107,9 +107,14 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	if err = h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, nil, nil, err
 	}
+	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
 	if peerType == store.PeerTypeChannel {
-		if _, err := h.checkDemoGeneralChatMessages(r, peerID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
+		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, peerID, []string{req.Message}, 1, errMediaCaptionTooLong)
+		if err != nil {
 			return nil, nil, nil, err
+		}
+		if demoGeneralChat {
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, []string{req.Message}, 1)
 		}
 	}
 
@@ -117,7 +122,7 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		return h.sendChatPoll(r, req, peerID, draft)
 	}
 	if peerType == store.PeerTypeChannel {
-		return h.sendChannelPoll(r, req, peerID, draft)
+		return h.sendChannelPoll(r, req, peerID, draft, demoGeneralChatRateLimitCharges)
 	}
 	if peerType == store.PeerTypeUser && peerID != r.UserID {
 		return h.sendPrivatePoll(c, r, req, peerID, draft)
@@ -174,10 +179,14 @@ func (h *handlers) sendChannelPoll(
 	req *tg.MessagesSendMediaRequest,
 	channelID int64,
 	draft store.PollDraft,
+	rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, draft)
+	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, draft, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return nil, nil, nil, mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):

@@ -622,6 +622,21 @@ demo_active_server() {
   printf '%s\n' "$active"
 }
 
+demo_active_server_endpoint() {
+  local active
+  active=$(demo_active_server) || return 1
+  printf '%s:2443\n' "$active"
+}
+
+demo_resolve_seed_endpoint() {
+  local mode="$1" explicit="$2" endpoint="$3"
+  if [[ "$explicit" == 0 && ( "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ) ]]; then
+    demo_active_server_endpoint
+  else
+    printf '%s\n' "$endpoint"
+  fi
+}
+
 demo_active_image_ref() {
   local active_file="$DEMO_ACTIVE_RELEASE_FILE" image_ref
   if [[ -e "$active_file" || -L "$active_file" ]]; then

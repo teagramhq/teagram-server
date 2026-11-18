@@ -457,6 +457,7 @@ mapfile -t CANDIDATE_IDS < <(demo_compose ps -q "$CANDIDATE_SERVER")
 CANDIDATE_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${CANDIDATE_IDS[0]}")
 CANDIDATE_IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_IMAGE_ID")
 [[ "$CANDIDATE_IMAGE_REVISION" == "$SHA" ]] || demo_fail 'running candidate image does not match the requested SHA'
+"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"
 "$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"
 demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"
 

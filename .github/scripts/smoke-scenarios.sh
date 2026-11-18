@@ -63,6 +63,7 @@ SMOKE_SCENARIOS=(
   help-countries
   langpack
   username-registration
+  demo-general-chat
   user-invites
   turnstile-signup
   turnstile-signup-from-send-code

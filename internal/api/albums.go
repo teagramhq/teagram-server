@@ -126,13 +126,18 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(items)); err != nil {
 		return nil, nil, nil, err
 	}
+	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
 	if peerType == store.PeerTypeChannel {
 		texts := make([]string, len(req.MultiMedia))
 		for i, item := range req.MultiMedia {
 			texts[i] = item.Message
 		}
-		if _, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong); err != nil {
+		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong)
+		if err != nil {
 			return nil, nil, nil, err
+		}
+		if demoGeneralChat {
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, texts, len(items))
 		}
 	}
 	groupedID, err := newGroupedID()
@@ -143,7 +148,7 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	album := store.AlbumSend{FromID: r.UserID, Items: items, GroupedID: groupedID, GrantTTL: h.uploadGrantTTL}
 
 	if peerType == store.PeerTypeChannel {
-		result, postErr := h.store.PostChannelAlbumAs(r.Ctx, toID, replyToMsgID, album)
+		result, postErr := h.store.PostChannelAlbumAs(r.Ctx, toID, replyToMsgID, album, demoGeneralChatRateLimitCharges...)
 		if postErr != nil {
 			return nil, nil, nil, h.channelAlbumError(r, toID, postErr)
 		}
@@ -304,6 +309,9 @@ func newGroupedID() (int64, error) {
 func (h *handlers) channelAlbumError(r *mtproto.Request, channelID int64, err error) error {
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):

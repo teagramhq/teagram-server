@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,13 @@ type RateLimitConfig struct {
 	Limit int
 	// Window is the duration of the fixed window.
 	Window time.Duration
+}
+
+// RateLimitCharge is one allowance to consume atomically with a store mutation.
+type RateLimitCharge struct {
+	Surface string
+	Config  RateLimitConfig
+	Cost    int
 }
 
 // Enabled reports whether this config enforces anything. One definition, so
@@ -132,6 +140,19 @@ func (s *Store) consumeRateLimitTx(ctx context.Context, qtx *db.Queries, subject
 		return fmt.Errorf("%w: get rate limit %s: %w", ErrRateLimitStorage, surface, err)
 	}
 	return &RateLimitedError{Surface: surface, Wait: waitUntil(s.now(), expiresAt.Time)}
+}
+
+func (s *Store) consumeRateLimitChargesTx(ctx context.Context, qtx *db.Queries, subjectID int64, charges []RateLimitCharge) error {
+	ordered := append([]RateLimitCharge(nil), charges...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Surface < ordered[j].Surface
+	})
+	for _, charge := range ordered {
+		if err := s.consumeRateLimitTx(ctx, qtx, subjectID, charge.Surface, charge.Config, charge.Cost); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RateLimitResultSurface identifies the two independently bounded counters in

@@ -479,7 +479,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, false, nil, nil, false, false, nil)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, false, nil, nil, false, false, nil, nil)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -515,18 +515,18 @@ func (s *Store) PostChannelMessageAs(
 // channel row in the same post transaction.
 func (s *Store) PostChannelMessageAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
-	entities []PollDescriptionEntity,
+	entities []PollDescriptionEntity, rateLimits ...RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, false, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, false, entities, rateLimits)
 }
 
 // PostChannelStickerAsWithEntities appends a catalogue or live user-set
 // sticker with the send_stickers check inside the channel post transaction.
 func (s *Store) PostChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
-	entities []PollDescriptionEntity,
+	entities []PollDescriptionEntity, rateLimits ...RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, false)
+	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, false, rateLimits)
 }
 
 // PostDemoGeneralChannelStickerAsWithEntities admits a sticker in the demo
@@ -534,19 +534,19 @@ func (s *Store) PostChannelStickerAsWithEntities(
 // the channel still owns the reserved demo handle before applying the exception.
 func (s *Store) PostDemoGeneralChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
-	entities []PollDescriptionEntity,
+	entities []PollDescriptionEntity, rateLimits ...RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, true)
+	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, true, rateLimits)
 }
 
 func (s *Store) postChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
-	entities []PollDescriptionEntity, allowDemoGeneralSticker bool,
+	entities []PollDescriptionEntity, allowDemoGeneralSticker bool, rateLimits []RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
 	if stickerDocumentID == 0 {
 		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, allowDemoGeneralSticker, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, allowDemoGeneralSticker, entities, rateLimits)
 }
 
 // ChannelPhotoRetryAs resolves a photo-send retry only after the caller's
@@ -765,13 +765,13 @@ func (s *Store) PostChannelPhotoAs(
 // the channel post.
 func (s *Store) PostChannelPhotoAsWithEntities(
 	ctx context.Context, channelID, fromID, randomID int64, text string, fileID int64, replyToMsgID int64,
-	entities []PollDescriptionEntity,
+	entities []PollDescriptionEntity, rateLimits ...RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
 	if fileID == 0 {
 		return ChannelMessage{}, 0, false, ErrFileMissing
 	}
 	id := fileID
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, nil, replyToMsgID, true, nil, nil, true, false, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, nil, replyToMsgID, true, nil, nil, true, false, entities, rateLimits)
 }
 
 // ChannelTextMessageRetryAs resolves a text-send retry only after checking the
@@ -822,10 +822,10 @@ func (s *Store) ChannelTextMessageRetryAs(
 // PostChannelPollAs atomically admits a poll as a channel post, stores its
 // canonical poll and links it to the shared channel message before commit.
 func (s *Store) PostChannelPollAs(
-	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
+	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft, rateLimits ...RateLimitCharge,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, nil, 0, true, &draft, &poll, false, false, nil)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, nil, 0, true, &draft, &poll, false, false, nil, rateLimits)
 	return message, poll, pts, duplicate, err
 }
 
@@ -875,7 +875,7 @@ func (s *Store) ChannelPollRetryAs(
 
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID, stickerDocumentID *int64, replyToMsgID int64, checkRights bool,
-	pollDraft *PollDraft, pollResult *Poll, photoMedia, allowDemoGeneralSticker bool, entities []PollDescriptionEntity,
+	pollDraft *PollDraft, pollResult *Poll, photoMedia, allowDemoGeneralSticker bool, entities []PollDescriptionEntity, rateLimits []RateLimitCharge,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
@@ -1071,9 +1071,9 @@ func (s *Store) postChannelMessage(
 	// it the eraser can delete the row between the rights read above and the
 	// insert, and the RESTRICT foreign key on channel_messages.file_id surfaces as
 	// an internal error plus a dangling reference attempt rather than the clean
-	// MEDIA_INVALID this returns. files is this transaction's last lock class, so
-	// nothing taken below it — the post row's key-share on channels, the
-	// participant marker — can reverse the order against the eraser.
+	// MEDIA_INVALID this returns. The file lock follows channel_state and
+	// participant locks; General's limiter rows are charged after all post writes
+	// and markers so no counter lock is held while acquiring another lock class.
 	var refFileID int64
 	if fileID != nil {
 		refFileID = *fileID
@@ -1119,6 +1119,9 @@ func (s *Store) postChannelMessage(
 		if n != 1 {
 			return ChannelMessage{}, 0, false, ErrNotMember
 		}
+	}
+	if err = s.consumeRateLimitChargesTx(ctx, qtx, fromID, rateLimits); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("charge channel post rate limits: %w", err)
 	}
 
 	stored, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{

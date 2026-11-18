@@ -9,6 +9,13 @@ source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+(
+  demo_active_server() { printf 'teagramd-next\n'; }
+  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == teagramd-next:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == teagramd-next:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 1 teagramd:2443)" == teagramd:2443 ]]
+)
+
 python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
 import sys
 from pathlib import Path
@@ -1173,6 +1180,7 @@ deploy_steps = [
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"',
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_haproxy_control enable "$CANDIDATE_SERVER"',
@@ -1209,10 +1217,18 @@ assert_order(deploy_path, [
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
 ], start=normal_deploy_start)
+seed_demo = Path(sys.argv[3]).with_name("seed-demo.sh").read_text(encoding="utf-8")
+if 'ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT")' not in seed_demo:
+    raise SystemExit("seed-demo.sh: moderation modes must resolve their default endpoint from the active slot")
+if seed_demo.count('--moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: message moderation must use the resolved active endpoint")
+if seed_demo.count('--moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: ban moderation must use the resolved active endpoint")
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:

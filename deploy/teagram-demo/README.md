@@ -136,7 +136,8 @@ without failing sign-up and affects only that guest, who may miss General until
 the next weekly wipe resets and re-seeds the demo.
 
 Run the owner-only moderation command from the demo LXC to remove a General
-message or permanently ban an ordinary member:
+message or permanently ban an ordinary member. Both commands resolve the active
+server slot, including `teagramd-next` during a rolling deploy:
 
 ```sh
 sudo deploy/teagram-demo/moderate-general.sh delete-message MESSAGE_ID

@@ -958,15 +958,23 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, err
 	}
-	if _, err := h.checkDemoGeneralChatMessages(r, channelID, []string{req.Message}, 1, errMessageTooLong); err != nil {
+	demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, channelID, []string{req.Message}, 1, errMessageTooLong)
+	if err != nil {
 		return nil, err
+	}
+	var rateLimitCharges []store.RateLimitCharge
+	if demoGeneralChat {
+		rateLimitCharges = h.demoGeneralChatRateLimitCharges(r, []string{req.Message}, 1)
 	}
 
 	// PostChannelMessageAs, never PostChannelMessage: the latter is the
 	// unchecked primitive and trusts its caller to have decided post rights.
-	msg, pts, dup, err := h.store.PostChannelMessageAsWithEntities(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID, entities)
+	msg, pts, dup, err := h.store.PostChannelMessageAsWithEntities(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return nil, mapped
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
 		return nil, errChatWriteForbidden

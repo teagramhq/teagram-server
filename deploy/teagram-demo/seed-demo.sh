@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/demo-common.sh"
 
 MODE=
 ENDPOINT=teagramd:2443
+ENDPOINT_EXPLICIT=0
 OWNER_USERNAME=demo_seed_owner
 OWNER_PASSWORD_FILE="$DEMO_SEED_PASSWORD_FILE"
 MESSAGE_ID=
@@ -20,8 +21,9 @@ Usage:
   seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
   seed-demo.sh --verify-turnstile --endpoint haproxy:2443
-  seed-demo.sh --moderate-delete-message --message-id ID
-  seed-demo.sh --moderate-ban-user --username USERNAME
+  seed-demo.sh --moderate-delete-message --message-id ID [--endpoint teagramd:2443|teagramd-next:2443]
+  seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint teagramd:2443|teagramd-next:2443]
+  Moderation commands default to the active server slot.
 EOF
 }
 
@@ -35,6 +37,7 @@ while (($#)); do
     --endpoint)
       (($# >= 2)) || { usage >&2; demo_fail '--endpoint requires a value'; }
       ENDPOINT="$2"
+      ENDPOINT_EXPLICIT=1
       shift 2
       ;;
     --owner-username)
@@ -69,6 +72,8 @@ while (($#)); do
 done
 
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
+ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT") ||
+  demo_fail 'resolve endpoint for demo seed operation'
 if [[ "$MODE" == --verify-turnstile ]]; then
   [[ "$ENDPOINT" == haproxy:2443 ]] ||
     demo_fail "endpoint for $MODE must be the internal haproxy:2443 service"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,23 +63,81 @@ func (h *handlers) checkDemoGeneralChatMessages(r *mtproto.Request, channelID in
 			return false, tooLong
 		}
 	}
-	if err := h.checkDemoGeneralChatRateLimit(r, demoGeneralChatHourSurface, h.demoGeneralChatPolicy.perHour, cost); err != nil {
+	if err := h.preflightDemoGeneralChatRateLimits(r, texts, cost); err != nil {
 		return false, err
 	}
-	if err := h.checkDemoGeneralChatRateLimit(r, demoGeneralChatMinuteSurface, h.demoGeneralChatPolicy.perMinute, cost); err != nil {
-		return false, err
+	return true, nil
+}
+
+func (h *handlers) demoGeneralChatRateLimitCharges(r *mtproto.Request, texts []string, cost int) []store.RateLimitCharge {
+	if r.Tailnet() {
+		return nil
+	}
+	charges := []store.RateLimitCharge{
+		{Surface: demoGeneralChatHourSurface, Config: h.demoGeneralChatPolicy.perHour, Cost: cost},
+		{Surface: demoGeneralChatMinuteSurface, Config: h.demoGeneralChatPolicy.perMinute, Cost: cost},
 	}
 	for _, text := range texts {
 		if text == "" {
 			continue
 		}
-		digest := sha256.Sum256([]byte(text))
-		surface := demoGeneralChatDuplicateSurface + hex.EncodeToString(digest[:])
-		if err := h.checkDemoGeneralChatRateLimit(r, surface, h.demoGeneralChatPolicy.duplicateLimit, 1); err != nil {
-			return false, err
+		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+		charges = append(charges, store.RateLimitCharge{
+			Surface: surface, Config: h.demoGeneralChatPolicy.duplicateLimit, Cost: 1,
+		})
+	}
+	return charges
+}
+
+func (h *handlers) preflightDemoGeneralChatRateLimits(r *mtproto.Request, texts []string, cost int) error {
+	if r.Tailnet() {
+		return nil
+	}
+	for _, limit := range []struct {
+		config store.RateLimitConfig
+		cost   int
+	}{
+		{config: h.demoGeneralChatPolicy.perHour, cost: cost},
+		{config: h.demoGeneralChatPolicy.perMinute, cost: cost},
+	} {
+		if err := staticDemoGeneralChatRateLimitError(limit.config, limit.cost); err != nil {
+			return err
 		}
 	}
-	return true, nil
+	if !h.demoGeneralChatPolicy.duplicateLimit.Enabled() {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+		counts[surface]++
+		if err := staticDemoGeneralChatRateLimitError(h.demoGeneralChatPolicy.duplicateLimit, counts[surface]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func staticDemoGeneralChatRateLimitError(config store.RateLimitConfig, cost int) error {
+	if !config.Enabled() || cost <= config.Limit {
+		return nil
+	}
+	wait := config.Window / time.Second
+	if config.Window%time.Second != 0 {
+		wait++
+	}
+	if wait < 1 {
+		wait = 1
+	}
+	return FloodWaitError(int(wait))
+}
+
+func demoGeneralChatDuplicateRateLimitSurface(text string) string {
+	digest := sha256.Sum256([]byte(text))
+	return demoGeneralChatDuplicateSurface + hex.EncodeToString(digest[:])
 }
 
 func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool, error) {
@@ -147,18 +206,14 @@ func (h *handlers) logDemoGeneralChatResolutionError(reason string, channelID in
 	}
 }
 
-func (h *handlers) checkDemoGeneralChatRateLimit(r *mtproto.Request, surface string, cfg store.RateLimitConfig, cost int) error {
-	if r.Tailnet() || !cfg.Enabled() {
-		return nil
-	}
-	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, surface, cfg, cost)
-	if err != nil {
-		h.log.Error("demo General chat rate limit check", "user_id", r.UserID, "surface", surface, "err", err)
-		return errInternal
-	}
-	if result != nil {
+func (h *handlers) demoGeneralChatRateLimitError(r *mtproto.Request, err error) (error, bool) {
+	if limited, ok := errors.AsType[*store.RateLimitedError](err); ok {
 		h.recordRateLimitDenial("message_send")
-		return FloodWaitError(int(result.Wait / time.Second))
+		return FloodWaitError(int(limited.Wait / time.Second)), true
 	}
-	return nil
+	if errors.Is(err, store.ErrRateLimitStorage) {
+		h.log.Error("demo General chat rate limit write", "user_id", r.UserID, "err", err)
+		return errInternal, true
+	}
+	return nil, false
 }

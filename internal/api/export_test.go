@@ -1250,6 +1250,7 @@ func SendMultiMediaForTestWithDemoGeneralChat(
 	}
 	h := testHandlers(s)
 	h.demoGeneralChatEnabled = true
+	h.uploadGrantTTL = time.Hour
 	result, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{
 		Ctx: context.Background(), UserID: userID, Buf: &buf,
 	})

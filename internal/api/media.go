@@ -615,11 +615,15 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return nil, nil, nil, err
 	}
 	demoGeneralChat := false
+	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
 	if peerType == store.PeerTypeChannel {
 		var err error
 		demoGeneralChat, err = h.checkDemoGeneralChatMessages(r, toID, []string{req.Message}, 1, errMediaCaptionTooLong)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+		if demoGeneralChat {
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, []string{req.Message}, 1)
 		}
 	}
 	duplicate := false
@@ -715,9 +719,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	if peerType == store.PeerTypeChannel {
 		if isSticker {
-			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities, demoGeneralChat)
+			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities, demoGeneralChat, demoGeneralChatRateLimitCharges)
 		}
-		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities)
+		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities, demoGeneralChatRateLimitCharges)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -916,15 +920,18 @@ func (h *handlers) sendChatMedia(
 
 func (h *handlers) sendChannelSticker(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, stickerDocumentID, replyToMsgID int64,
-	entities []store.PollDescriptionEntity, demoGeneralChat bool,
+	entities []store.PollDescriptionEntity, demoGeneralChat bool, rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	postSticker := h.store.PostChannelStickerAsWithEntities
 	if demoGeneralChat {
 		postSticker = h.store.PostDemoGeneralChannelStickerAsWithEntities
 	}
-	message, pts, duplicate, err := postSticker(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities)
+	message, pts, duplicate, err := postSticker(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return nil, nil, nil, mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
@@ -956,11 +963,14 @@ func (h *handlers) sendChannelSticker(
 // accepted erasure policy, exactly as a refused basic-group send leaves it.
 func (h *handlers) sendChannelPhoto(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
-	entities []store.PollDescriptionEntity,
+	entities []store.PollDescriptionEntity, rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities)
+	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return nil, nil, nil, mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
