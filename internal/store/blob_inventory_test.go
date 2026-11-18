@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -146,6 +147,10 @@ func parseBlobInventoryCensusReferences(t *testing.T, tsv []byte) []censusRefere
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
 	parserPath := filepath.Join(repoRoot, "deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
+	// Register the parser source with go test's cache; subprocess reads aren't tracked.
+	if _, err := os.ReadFile(parserPath); err != nil {
+		t.Fatalf("read census parser source: %v", err)
+	}
 	const script = `import json, runpy, sys
 module = runpy.run_path(sys.argv[1])
 print(json.dumps(module["parse_references"](sys.stdin.buffer.read())))
