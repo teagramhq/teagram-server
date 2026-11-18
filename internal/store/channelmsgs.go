@@ -1071,9 +1071,9 @@ func (s *Store) postChannelMessage(
 	// it the eraser can delete the row between the rights read above and the
 	// insert, and the RESTRICT foreign key on channel_messages.file_id surfaces as
 	// an internal error plus a dangling reference attempt rather than the clean
-	// MEDIA_INVALID this returns. For media posts, the lock order is optional
-	// user-sticker set rows, channel_state, participant rows, file refs, then
-	// rate_limits rows. The rate-limit charge is the final write, and no lock
+	// MEDIA_INVALID this returns. For media posts, the lock order is
+	// channel_state, participant rows, optional user-sticker set rows, file refs,
+	// then rate_limits rows. The rate-limit charge is the final write, and no lock
 	// class is acquired after it; rate-limit-only paths do not acquire file refs.
 	var refFileID int64
 	if fileID != nil {
