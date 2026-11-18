@@ -146,6 +146,28 @@ func TestPostChannelMessageAsChecksMediaRestrictionsForFilePosts(t *testing.T) {
 	}
 }
 
+func TestSendDocsBanRejectsGenericDocumentPost(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	creator := mustUser(t, s, "+15551293511")
+	member := mustUser(t, s, "+15551293512")
+	channel := mustMegagroup(t, s, creator.ID, "Generic document restriction")
+	seat(t, s, channel, creator.ID, member.ID, 0)
+	file := storedFile(t, s, member.ID)
+	if len(file.SubtypeRights) != 0 {
+		t.Fatalf("stored document subtype rights = %v, want generic document", file.SubtypeRights)
+	}
+	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"send_docs"}); err != nil {
+		t.Fatalf("ban generic documents: %v", err)
+	}
+	fileID := file.ID
+	if _, _, _, err := s.PostChannelMessageAs(ctx, channel.ID, member.ID, "document", 93511, &fileID, 0); !errors.Is(err, store.ErrChatWriteForbidden) {
+		t.Fatalf("post generic document under send_docs ban = %v, want ErrChatWriteForbidden", err)
+	}
+}
+
 func TestPostChannelMessageDedupPrecedesDefaultRestriction(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

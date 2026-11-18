@@ -60,6 +60,20 @@ func createGeneralChat(t *testing.T, s *store.Store) store.Channel {
 	return channel
 }
 
+func assertChannelHistoryContainsText(t *testing.T, s *store.Store, channelID, userID int64, want string) {
+	t.Helper()
+	messages, err := s.ChannelHistory(context.Background(), channelID, 0, 100)
+	if err != nil {
+		t.Fatalf("read General history: %v", err)
+	}
+	for _, message := range messages {
+		if message.FromID == userID && message.Message == want {
+			return
+		}
+	}
+	t.Fatalf("General history = %+v, want stored text %q from user %d", messages, want, userID)
+}
+
 func signUpWelcomeTestAccount(t *testing.T, s *store.Store, runner *api.SignUpTestRunner, keyID [8]byte, username string) *tg.User {
 	t.Helper()
 	ctx := context.Background()
@@ -219,6 +233,76 @@ func TestSignUpDemoGeneralChatAutoJoinIsFlagGated(t *testing.T) {
 	t.Fatalf("new account dialogs = %+v, want General channel %d", dialogs.Dialogs, channel.ID)
 }
 
+func TestSignUpDemoGeneralChatJoinFailuresAreBestEffort(t *testing.T) {
+	t.Parallel()
+	for _, failure := range []string{"channel lookup", "membership insert"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			s, dsn := openStoreDSN(t)
+			channel := createGeneralChat(t, s)
+			conn, err := pgxpool.New(ctx, dsn)
+			if err != nil {
+				t.Fatalf("open fault-injection connection: %v", err)
+			}
+			defer conn.Close()
+
+			channelsUnavailable := false
+			if failure == "channel lookup" {
+				if _, err := conn.Exec(ctx, `ALTER TABLE channels RENAME TO test_channels_unavailable`); err != nil {
+					t.Fatalf("hide channels table: %v", err)
+				}
+				channelsUnavailable = true
+				defer func() {
+					if channelsUnavailable {
+						if _, err := conn.Exec(context.Background(), `ALTER TABLE test_channels_unavailable RENAME TO channels`); err != nil {
+							t.Errorf("restore channels table: %v", err)
+						}
+					}
+				}()
+			} else {
+				createFunction := fmt.Sprintf(`CREATE FUNCTION test_fail_general_join() RETURNS trigger AS $$
+BEGIN
+  IF NEW.channel_id = %d THEN
+    RAISE EXCEPTION 'injected General membership failure';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql`, channel.ID)
+				if _, err := conn.Exec(ctx, createFunction); err != nil {
+					t.Fatalf("create join failure function: %v", err)
+				}
+				createTrigger := `CREATE TRIGGER test_fail_general_join
+BEFORE INSERT ON channel_participants FOR EACH ROW EXECUTE FUNCTION test_fail_general_join()`
+				if _, err := conn.Exec(ctx, createTrigger); err != nil {
+					t.Fatalf("create join failure trigger: %v", err)
+				}
+			}
+
+			logs := &captureHandler{}
+			runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.17"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+			runner.SetDemoGeneralChatEnabledForTest(true)
+			user := signUpWelcomeTestAccount(t, s, runner, [8]byte{9}, "best_effort_"+strings.ReplaceAll(failure, " ", "_"))
+			if failure == "channel lookup" {
+				if _, err := conn.Exec(ctx, `ALTER TABLE test_channels_unavailable RENAME TO channels`); err != nil {
+					t.Fatalf("restore channels table after sign-up: %v", err)
+				}
+				channelsUnavailable = false
+			}
+
+			persisted, found, err := s.UserByID(ctx, user.ID)
+			if err != nil || !found || persisted.ID != user.ID {
+				t.Fatalf("persisted sign-up user = %+v, found=%v, err=%v", persisted, found, err)
+			}
+			if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || found {
+				t.Fatalf("General membership after %s failure = %+v, found=%v, err=%v; want no membership", failure, member, found, err)
+			}
+			if len(logs.records) == 0 {
+				t.Fatal("best-effort General join failure was not logged")
+			}
+		})
+	}
+}
+
 func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -249,6 +333,7 @@ func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("send first identical-text check message: %v", err)
 	}
+	assertChannelHistoryContainsText(t, s, channel.ID, duplicateGuest.ID, "same note")
 	_, err = api.SendMessageForTestWithDemoGeneralChat(s, duplicateGuest.ID, &tg.MessagesSendMessageRequest{
 		Peer: peer, Message: "same note", RandomID: 3,
 	})
@@ -262,6 +347,7 @@ func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) 
 		}); err != nil {
 			t.Fatalf("send General message %d of 5: %v", i+1, err)
 		}
+		assertChannelHistoryContainsText(t, s, channel.ID, rateLimitedGuest.ID, fmt.Sprintf("note %d", i))
 	}
 	_, err = api.SendMessageForTestWithDemoGeneralChat(s, rateLimitedGuest.ID, &tg.MessagesSendMessageRequest{
 		Peer: peer, Message: "sixth note", RandomID: 16,
@@ -278,11 +364,140 @@ func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) 
 		}); err != nil {
 			t.Fatalf("send hourly General message %d of 2: %v", i+1, err)
 		}
+		assertChannelHistoryContainsText(t, s, channel.ID, hourLimitedGuest.ID, fmt.Sprintf("hourly note %d", i))
 	}
 	_, err = api.SendMessageForTestWithDemoGeneralChatLimits(s, hourLimitedGuest.ID, minuteLimit, hourLimit, &tg.MessagesSendMessageRequest{
 		Peer: peer, Message: "third hourly note", RandomID: 32,
 	})
 	rpcError(t, err, "FLOOD_WAIT_3600")
+}
+
+func TestDemoGeneralChatLimitsAlbumCaptionsAndItemRate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+	album := func(caption string, count int, fileBase, randomBase int64) *tg.MessagesSendMultiMediaRequest {
+		request := &tg.MessagesSendMultiMediaRequest{
+			Peer:       api.InputPeerChannel(0, channel.ID),
+			MultiMedia: make([]tg.InputSingleMedia, count),
+		}
+		for i := range count {
+			request.MultiMedia[i] = tg.InputSingleMedia{
+				Media:   &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: fileBase + int64(i), AccessHash: 1}},
+				Message: caption, RandomID: randomBase + int64(i),
+			}
+		}
+		return request
+	}
+
+	t.Run("six items exceed per-guest minute limit", func(t *testing.T) {
+		guest := newMember("+15550000125")
+		request := album("photo caption", 6, 12500, 12600)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "FLOOD_WAIT_60")
+	})
+
+	t.Run("duplicate captions are refused", func(t *testing.T) {
+		guest := newMember("+15550000126")
+		request := album("same album caption", 2, 12600, 12700)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "FLOOD_WAIT_30")
+	})
+
+	t.Run("oversized caption is refused", func(t *testing.T) {
+		guest := newMember("+15550000127")
+		request := album(strings.Repeat("x", 1001), 2, 12700, 12800)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+	})
+}
+
+func TestDemoGeneralChatPhotoCaptionAndMinuteLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := newBlobs(t)
+	body := jpegPhotoPayload(t, 640, 480)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+
+	captionGuest := newMember("+15550000128")
+	const oversizedFileID = int64(12801)
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, captionGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(captionGuest.ID, channel.ID),
+		Media:   uploadedPhoto(oversizedFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message: strings.Repeat("x", 1001), RandomID: oversizedFileID,
+	})
+	rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+
+	rateGuest := newMember("+15550000129")
+	for i := range 5 {
+		fileID := int64(12900 + i)
+		saveParts(t, s, rateGuest.ID, fileID, body)
+		if _, err := api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:    api.InputPeerChannel(rateGuest.ID, channel.ID),
+			Media:   uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(body)),
+			Message: fmt.Sprintf("photo %d", i), RandomID: fileID,
+		}); err != nil {
+			t.Fatalf("send General photo %d of 5: %v", i+1, err)
+		}
+	}
+	const sixthFileID = int64(12905)
+	saveParts(t, s, rateGuest.ID, sixthFileID, body)
+	_, err = api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(rateGuest.ID, channel.ID),
+		Media:   uploadedPhoto(sixthFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message: "photo 5", RandomID: sixthFileID,
+	})
+	rpcError(t, err, "FLOOD_WAIT_60")
+}
+
+func TestDemoGeneralChatDoesNotLimitOtherMegagroups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	_ = createGeneralChat(t, s)
+	other, _ := createWelcomeChannel(t, s, "ordinary_group", true)
+	guest, err := s.CreateUser(ctx, "+15550000130")
+	if err != nil {
+		t.Fatalf("create guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, other.ID, guest.ID); err != nil {
+		t.Fatalf("join other megagroup: %v", err)
+	}
+	peer := api.InputPeerChannel(guest.ID, other.ID)
+	for i := range 10 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChat(s, guest.ID, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("ordinary message %d", i), RandomID: int64(13000 + i),
+		}); err != nil {
+			t.Fatalf("send other-megagroup message %d of 10: %v", i+1, err)
+		}
+	}
 }
 
 func TestDemoGeneralChatAllowsGuestPhotoPosts(t *testing.T) {

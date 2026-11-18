@@ -131,7 +131,7 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		for i, item := range req.MultiMedia {
 			texts[i] = item.Message
 		}
-		if err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong); err != nil {
+		if _, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong); err != nil {
 			return nil, nil, nil, err
 		}
 	}

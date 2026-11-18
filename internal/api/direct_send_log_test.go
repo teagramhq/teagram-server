@@ -72,6 +72,91 @@ func directSendLogRecords(t *testing.T, logs *strings.Builder) []map[string]any 
 	return records
 }
 
+func TestDemoGeneralChatInvalidResolutionLogsErrorOnce(t *testing.T) {
+	for _, target := range []string{"missing", "wrong channel"} {
+		t.Run(target, func(t *testing.T) {
+			ctx, s, h, logs := newDirectSendLogHarness(t)
+			h.demoGeneralChatEnabled = true
+			var channelID int64 = 999
+			if target == "wrong channel" {
+				owner, err := s.CreateUser(ctx, "+15550001701")
+				if err != nil {
+					t.Fatalf("create owner: %v", err)
+				}
+				channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "Not General", "", false)
+				if err != nil {
+					t.Fatalf("create wrong channel: %v", err)
+				}
+				if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+					t.Fatalf("claim General handle on wrong channel: %v", err)
+				}
+				channelID = channel.ID
+			}
+			for range 2 {
+				if isGeneral, err := h.isDemoGeneralChat(ctx, channelID); err != nil || isGeneral {
+					t.Fatalf("invalid General resolution = %t, err=%v; want false without error", isGeneral, err)
+				}
+			}
+			records := directSendLogRecords(t, logs)
+			if len(records) != 1 {
+				t.Fatalf("invalid General resolution logged %d records, want one: %+v", len(records), records)
+			}
+			if records[0]["level"] != "ERROR" {
+				t.Fatalf("invalid General resolution level = %v, want ERROR", records[0]["level"])
+			}
+		})
+	}
+}
+
+func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
+	ctx, s, h, _ := newDirectSendLogHarness(t)
+	h.demoGeneralChatEnabled = true
+	owner, err := s.CreateUser(ctx, "+15550001702")
+	if err != nil {
+		t.Fatalf("create first owner: %v", err)
+	}
+	first, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create first General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, first.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim first General handle: %v", err)
+	}
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || !isGeneral {
+		t.Fatalf("first General resolution = %t, err=%v", isGeneral, err)
+	}
+	if err := s.EditChannelUsername(ctx, first.ID, owner.ID, "previousgeneral"); err != nil {
+		t.Fatalf("move first General handle: %v", err)
+	}
+	secondOwner, err := s.CreateUser(ctx, "+15550001703")
+	if err != nil {
+		t.Fatalf("create second owner: %v", err)
+	}
+	second, _, _, err := s.CreateChannelWithServiceMessage(ctx, secondOwner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create replacement General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, second.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim replacement General handle: %v", err)
+	}
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || isGeneral {
+		t.Fatalf("old General after handle recreation = %t, err=%v; want false", isGeneral, err)
+	}
+	guest, err := s.CreateUser(ctx, "+15550001704")
+	if err != nil {
+		t.Fatalf("create guest: %v", err)
+	}
+	h.demoGeneralChatPolicy.perMinute = store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	r := &mtproto.Request{Ctx: ctx, UserID: guest.ID}
+	if isGeneral, err := h.checkDemoGeneralChatMessages(r, second.ID, []string{"first"}, 1, errMessageTooLong); err != nil || !isGeneral {
+		t.Fatalf("first replacement General message: %v", err)
+	}
+	_, err = h.checkDemoGeneralChatMessages(r, second.ID, []string{"second"}, 1, errMessageTooLong)
+	if err == nil || !strings.Contains(err.Error(), "FLOOD_WAIT (60)") {
+		t.Fatalf("second replacement General message = %v, want FLOOD_WAIT_60", err)
+	}
+}
+
 func uploadDirectSendLogAlbumDocument(t *testing.T, ctx context.Context, s *store.Store, h *handlers, userID, fileID int64) *tg.InputMediaDocument {
 	t.Helper()
 	if err := s.SaveUploadPart(ctx, userID, fileID, 0, []byte("private album bytes"), TestMaxFileBytes); err != nil {

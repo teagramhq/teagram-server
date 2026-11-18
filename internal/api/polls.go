@@ -108,7 +108,7 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		return nil, nil, nil, err
 	}
 	if peerType == store.PeerTypeChannel {
-		if err := h.checkDemoGeneralChatMessages(r, peerID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
+		if _, err := h.checkDemoGeneralChatMessages(r, peerID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
 			return nil, nil, nil, err
 		}
 	}

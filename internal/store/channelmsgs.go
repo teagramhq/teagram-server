@@ -479,7 +479,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, false, nil, nil, false, nil)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, false, nil, nil, false, false, nil)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -517,7 +517,7 @@ func (s *Store) PostChannelMessageAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 	entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, false, entities)
 }
 
 // PostChannelStickerAsWithEntities appends a catalogue or live user-set
@@ -526,10 +526,27 @@ func (s *Store) PostChannelStickerAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
 	entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
+	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, false)
+}
+
+// PostDemoGeneralChannelStickerAsWithEntities admits a sticker in the demo
+// General channel under its send_docs default ban. The transaction verifies
+// the channel still owns the reserved demo handle before applying the exception.
+func (s *Store) PostDemoGeneralChannelStickerAsWithEntities(
+	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
+	entities []PollDescriptionEntity,
+) (ChannelMessage, int, bool, error) {
+	return s.postChannelStickerAsWithEntities(ctx, channelID, fromID, text, randomID, stickerDocumentID, replyToMsgID, entities, true)
+}
+
+func (s *Store) postChannelStickerAsWithEntities(
+	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
+	entities []PollDescriptionEntity, allowDemoGeneralSticker bool,
+) (ChannelMessage, int, bool, error) {
 	if stickerDocumentID == 0 {
 		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, allowDemoGeneralSticker, entities)
 }
 
 // ChannelPhotoRetryAs resolves a photo-send retry only after the caller's
@@ -653,6 +670,17 @@ func SetChannelPhotoRetryAfterCommitHook(s *Store, fn func(context.Context, int6
 // other poster in the channel for the length of the Put, which is why this
 // precheck exists at all rather than the authoritative check moving earlier.
 func (s *Store) CheckChannelPhotoPostPermission(ctx context.Context, channelID, callerID int64, mediaRights []string) error {
+	return s.checkChannelPhotoPostPermission(ctx, channelID, callerID, mediaRights, false)
+}
+
+// CheckDemoGeneralChannelMediaPostPermission is the early media-send gate for
+// General. Only its sticker subtype gets the send_docs exception; the final
+// store write revalidates the target and restrictions in its own transaction.
+func (s *Store) CheckDemoGeneralChannelMediaPostPermission(ctx context.Context, channelID, callerID int64, mediaRights []string) error {
+	return s.checkChannelPhotoPostPermission(ctx, channelID, callerID, mediaRights, true)
+}
+
+func (s *Store) checkChannelPhotoPostPermission(ctx context.Context, channelID, callerID int64, mediaRights []string, allowDemoGeneralSticker bool) error {
 	row, err := s.q.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{ChannelID: channelID, UserID: callerID})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -679,7 +707,17 @@ func (s *Store) CheckChannelPhotoPostPermission(ctx context.Context, channelID, 
 		}
 		return nil
 	}
-	if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, member.Role >= channelRoleAdmin, true, mediaRights); err != nil {
+	restriction := checkDefaultMessageRestriction
+	if allowDemoGeneralSticker && hasChatRight(channel.DefaultBannedRights, "send_docs") && hasChatRight(mediaRights, "send_stickers") {
+		isGeneral, generalErr := isDemoGeneralChatChannel(ctx, s.q, channelID)
+		if generalErr != nil {
+			return generalErr
+		}
+		if isGeneral {
+			restriction = checkDemoGeneralChatStickerRestriction
+		}
+	}
+	if err = restriction(channel.DefaultBannedRights, member.Role >= channelRoleAdmin, true, mediaRights); err != nil {
 		return err
 	}
 	if member.Role != channelRoleMember {
@@ -733,7 +771,7 @@ func (s *Store) PostChannelPhotoAsWithEntities(
 		return ChannelMessage{}, 0, false, ErrFileMissing
 	}
 	id := fileID
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, nil, replyToMsgID, true, nil, nil, true, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, nil, replyToMsgID, true, nil, nil, true, false, entities)
 }
 
 // ChannelTextMessageRetryAs resolves a text-send retry only after checking the
@@ -787,7 +825,7 @@ func (s *Store) PostChannelPollAs(
 	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, nil, 0, true, &draft, &poll, false, nil)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, nil, 0, true, &draft, &poll, false, false, nil)
 	return message, poll, pts, duplicate, err
 }
 
@@ -837,7 +875,7 @@ func (s *Store) ChannelPollRetryAs(
 
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID, stickerDocumentID *int64, replyToMsgID int64, checkRights bool,
-	pollDraft *PollDraft, pollResult *Poll, photoMedia bool, entities []PollDescriptionEntity,
+	pollDraft *PollDraft, pollResult *Poll, photoMedia, allowDemoGeneralSticker bool, entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
@@ -962,7 +1000,18 @@ func (s *Store) postChannelMessage(
 				}
 				mediaRights = media.SubtypeRights
 			}
-			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || stickerDocumentID != nil || pollDraft != nil, mediaRights); err != nil {
+			restriction := checkDefaultMessageRestriction
+			if allowDemoGeneralSticker && stickerDocumentID != nil &&
+				hasChatRight(channel.DefaultBannedRights, "send_docs") && hasChatRight(mediaRights, "send_stickers") {
+				isGeneral, generalErr := isDemoGeneralChatChannel(ctx, qtx, channelID)
+				if generalErr != nil {
+					return ChannelMessage{}, 0, false, generalErr
+				}
+				if isGeneral {
+					restriction = checkDemoGeneralChatStickerRestriction
+				}
+			}
+			if err = restriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || stickerDocumentID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
 		}

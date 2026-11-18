@@ -614,8 +614,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, nil, nil, err
 	}
+	demoGeneralChat := false
 	if peerType == store.PeerTypeChannel {
-		if err := h.checkDemoGeneralChatMessages(r, toID, []string{req.Message}, 1, errMediaCaptionTooLong); err != nil {
+		var err error
+		demoGeneralChat, err = h.checkDemoGeneralChatMessages(r, toID, []string{req.Message}, 1, errMediaCaptionTooLong)
+		if err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -642,7 +645,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// post transaction repeats every one of these decisions under that lock and
 	// is the authority; this only declines the work.
 	if peerType == store.PeerTypeChannel {
-		if err = h.store.CheckChannelPhotoPostPermission(r.Ctx, toID, r.UserID, mediaRights); err != nil {
+		checkPermission := h.store.CheckChannelPhotoPostPermission
+		if demoGeneralChat {
+			checkPermission = h.store.CheckDemoGeneralChannelMediaPostPermission
+		}
+		if err = checkPermission(r.Ctx, toID, r.UserID, mediaRights); err != nil {
 			if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 				return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 			}
@@ -708,7 +715,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	if peerType == store.PeerTypeChannel {
 		if isSticker {
-			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities)
+			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities, demoGeneralChat)
 		}
 		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities)
 	}
@@ -909,11 +916,13 @@ func (h *handlers) sendChatMedia(
 
 func (h *handlers) sendChannelSticker(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, stickerDocumentID, replyToMsgID int64,
-	entities []store.PollDescriptionEntity,
+	entities []store.PollDescriptionEntity, demoGeneralChat bool,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelStickerAsWithEntities(
-		r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities,
-	)
+	postSticker := h.store.PostChannelStickerAsWithEntities
+	if demoGeneralChat {
+		postSticker = h.store.PostDemoGeneralChannelStickerAsWithEntities
+	}
+	message, pts, duplicate, err := postSticker(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}

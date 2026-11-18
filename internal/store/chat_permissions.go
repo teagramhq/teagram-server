@@ -7,7 +7,11 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/store/db"
 )
+
+const demoGeneralChatHandle = "teagramdemogeneral"
 
 var chatMediaSubtypeRights = [...]string{
 	"send_stickers",
@@ -23,6 +27,14 @@ func hasChatRight(rights []string, right string) bool {
 }
 
 func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRights []string) error {
+	return checkMessageRestriction(rights, exempt, media, mediaRights, false)
+}
+
+func checkDemoGeneralChatStickerRestriction(rights []string, exempt, media bool, mediaRights []string) error {
+	return checkMessageRestriction(rights, exempt, media, mediaRights, true)
+}
+
+func checkMessageRestriction(rights []string, exempt, media bool, mediaRights []string, allowStickerWithSendDocs bool) error {
 	if exempt {
 		return nil
 	}
@@ -34,7 +46,8 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		// documents covered by send_docs.
 		if hasChatRight(rights, "send_media") ||
 			(hasChatRight(rights, "send_docs") &&
-				!hasChatRight(mediaRights, "send_photos") && !hasChatRight(mediaRights, "send_stickers")) {
+				!hasChatRight(mediaRights, "send_photos") &&
+				(!allowStickerWithSendDocs || !hasChatRight(mediaRights, "send_stickers"))) {
 			return ErrChatWriteForbidden
 		}
 		if mediaRights == nil {
@@ -53,6 +66,19 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		return ErrChatWriteForbidden
 	}
 	return nil
+}
+
+func isDemoGeneralChatChannel(ctx context.Context, q *db.Queries, channelID int64) (bool, error) {
+	row, err := q.GetChannelByUsername(ctx, demoGeneralChatHandle)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("load demo General channel: %w", err)
+	}
+	channel := channelFromRow(row)
+	return channel.ID == channelID && channel.Title == "General" && channel.Megagroup &&
+		channel.Username != nil && *channel.Username == demoGeneralChatHandle, nil
 }
 
 // CheckChatWritePermission checks a new basic-chat media send before the

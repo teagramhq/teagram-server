@@ -1237,6 +1237,25 @@ func SendMediaForTestWithDemoGeneralChat(
 	return h.handleSendMedia(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SendMultiMediaForTestWithDemoGeneralChat invokes the album handler with
+// General chat policies enabled.
+func SendMultiMediaForTestWithDemoGeneralChat(
+	s *store.Store,
+	userID int64,
+	req *tg.MessagesSendMultiMediaRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	result, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, Buf: &buf,
+	})
+	return result, err
+}
+
 // UpdatePinnedMessageForTest encodes req and invokes handleUpdatePinnedMessage.
 func UpdatePinnedMessageForTest(s *store.Store, userID int64, req *tg.MessagesUpdatePinnedMessageRequest) (bin.Encoder, error) {
 	var buf bin.Buffer

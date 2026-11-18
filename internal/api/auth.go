@@ -367,9 +367,7 @@ func (h *handlers) joinDemoGeneralChat(ctx context.Context, userID int64) {
 	}
 	if !found || resolved.Kind != store.UsernameKindChannel || !resolved.Channel.Megagroup ||
 		resolved.Channel.Username == nil || *resolved.Channel.Username != demoGeneralChatUsername {
-		if h.demoGeneralChatWarning.CompareAndSwap(false, true) {
-			h.log.Warn("demo General chat auto-join skipped", "handle", demoGeneralChatUsername, "reason", "not a public supergroup")
-		}
+		h.logDemoGeneralChatResolutionError("not a public supergroup", resolved.Channel.ID)
 		return
 	}
 	if _, _, err := h.store.JoinChannelByUsername(ctx, resolved.Channel.ID, userID); err != nil {
