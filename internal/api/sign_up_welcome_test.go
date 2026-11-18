@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -491,6 +492,86 @@ func TestDemoGeneralChatPhotoCaptionAndMinuteLimit(t *testing.T) {
 	}
 	if fileIDCeilingAfter != fileIDCeilingBefore {
 		t.Errorf("over-limit photo changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+}
+
+func TestDemoGeneralChatSlowModePhotoRefusalDiscardsFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := s.PartBlobs()
+	body := jpegPhotoPayload(t, 640, 480)
+	guest, err := s.CreateUser(ctx, "+15550000132")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	const firstFileID = int64(13201)
+	saveParts(t, s, guest.ID, firstFileID, body)
+	if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(guest.ID, channel.ID),
+		Media:   uploadedPhoto(firstFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message: "first photo before slow mode", RandomID: firstFileID,
+	}); err != nil {
+		t.Fatalf("send first General photo: %v", err)
+	}
+	const refusedFileID = int64(13202)
+	saveParts(t, s, guest.ID, refusedFileID, body)
+	fileIDCeilingBefore, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before slow-mode refusal: %v", err)
+	}
+	gate := &assembledPutGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(gate.unblock)
+	observedBlobs := &observedAssembledPutBlob{Store: blobs, gate: gate}
+	result := make(chan error, 1)
+	go func() {
+		_, sendErr := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, observedBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:    api.InputPeerChannel(guest.ID, channel.ID),
+			Media:   uploadedPhoto(refusedFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+			Message: "photo refused by slow mode", RandomID: refusedFileID,
+		})
+		result <- sendErr
+	}()
+	select {
+	case <-gate.entered:
+	case sendErr := <-result:
+		gate.unblock()
+		t.Fatalf("photo send exited before assembly gate: %v", sendErr)
+	case <-time.After(30 * time.Second):
+		gate.unblock()
+		t.Fatal("photo did not pass precheck and reach blob assembly")
+	}
+	if _, changed, err := s.SetChannelSlowMode(ctx, channel.ID, channel.CreatorID, 10); err != nil || !changed {
+		gate.unblock()
+		t.Fatalf("set General slow mode during assembly changed=%v err=%v", changed, err)
+	}
+	gate.unblock()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		t.Fatal("slow-mode refused photo did not finish after blob assembly resumed")
+	}
+	var rpcErr *tgerr.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 || !strings.HasPrefix(rpcErr.Message, "SLOWMODE_WAIT_") {
+		t.Fatalf("slow-mode photo refusal = %v, want 420 SLOWMODE_WAIT", err)
+	}
+	fileIDCeilingAfter, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling after slow-mode refusal: %v", err)
+	}
+	if fileIDCeilingAfter != fileIDCeilingBefore {
+		t.Errorf("slow-mode refusal changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+	keys := observedBlobs.assembledKeys()
+	if len(keys) != 1 {
+		t.Fatalf("slow-mode photo assembled blob keys = %v, want one discarded file", keys)
+	}
+	if _, err := blobs.ReadAt(ctx, keys[0], 0, 1); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("slow-mode refusal blob read error = %v, want blob.ErrNotFound", err)
 	}
 }
 

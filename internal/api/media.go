@@ -964,24 +964,20 @@ func (h *handlers) sendChannelSticker(
 // read-only precheck in handleSendMediaAfterReplyOnConn exists only to decline
 // assembly, so a ban or demotion winning while the upload was being assembled
 // is caught here and creates no post and no event. The file this call assembled
-// is then simply unreferenced — charged to the sender and reclaimable under the
-// accepted erasure policy, exactly as a refused basic-group send leaves it.
+// is unreferenced on refusal. General rate-limit and slow-mode refusals discard
+// it immediately when the erasure interlocks confirm it is safe; other refusals
+// leave it reclaimable under the existing erasure policy.
 func (h *handlers) sendChannelPhoto(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
 	entities []store.PollDescriptionEntity, rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+		h.discardDemoGeneralChatPhoto(r, fileID, rateLimitCharges)
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}
 	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
-		if len(rateLimitCharges) > 0 {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Ctx), demoGeneralChatCleanupTimeout)
-			if cleanupErr := h.store.DiscardUnreferencedFile(cleanupCtx, fileID); cleanupErr != nil {
-				h.log.Error("discard refused demo General photo", "user_id", r.UserID, "file_id", fileID, "err", cleanupErr)
-			}
-			cancel()
-		}
+		h.discardDemoGeneralChatPhoto(r, fileID, rateLimitCharges)
 		return nil, nil, nil, mapped
 	}
 	switch {
@@ -1017,6 +1013,17 @@ func (h *handlers) sendChannelPhoto(
 		h.notifyChannelPost(r.Ctx, channelID)
 	}
 	return h.channelPhotoSendResponse(r, req, channelID, message, pts)
+}
+
+func (h *handlers) discardDemoGeneralChatPhoto(r *mtproto.Request, fileID int64, rateLimitCharges []store.RateLimitCharge) {
+	if len(rateLimitCharges) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Ctx), demoGeneralChatCleanupTimeout)
+	defer cancel()
+	if err := h.store.DiscardUnreferencedFile(cleanupCtx, fileID); err != nil {
+		h.log.Error("discard refused demo General photo", "user_id", r.UserID, "file_id", fileID, "err", err)
+	}
 }
 
 // channelPhotoSendResponse builds the poster-side Updates for a channel photo
