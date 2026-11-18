@@ -697,6 +697,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 	}
+	if demoGeneralChat && !isSticker {
+		if err := h.checkDemoGeneralChatRateLimitBudgets(r, []string{req.Message}, 1); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	if !existing && !isSticker {
 		var file store.File
 		var aerr error
@@ -970,6 +975,13 @@ func (h *handlers) sendChannelPhoto(
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}
 	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		if len(rateLimitCharges) > 0 {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Ctx), demoGeneralChatCleanupTimeout)
+			if cleanupErr := h.store.DiscardUnreferencedFile(cleanupCtx, fileID); cleanupErr != nil {
+				h.log.Error("discard refused demo General photo", "user_id", r.UserID, "file_id", fileID, "err", cleanupErr)
+			}
+			cancel()
+		}
 		return nil, nil, nil, mapped
 	}
 	switch {

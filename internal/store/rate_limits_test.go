@@ -601,6 +601,48 @@ func TestCheckRateLimitBudgetAndCharge(t *testing.T) {
 	}
 }
 
+func TestCheckRateLimitBudgetCost(t *testing.T) {
+	t.Parallel()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }() //nolint:errcheck // best-effort close
+
+	cfg := store.RateLimitConfig{Limit: 5, Window: time.Minute}
+	ctx := context.Background()
+	const subject = 1250
+	const surface = "budget_cost"
+	for range 3 {
+		if err := s.ChargeRateLimit(ctx, subject, surface, cfg); err != nil {
+			t.Fatalf("charge budget: %v", err)
+		}
+	}
+
+	for range 2 {
+		result, err := s.CheckRateLimitBudgetCost(ctx, subject, surface, cfg, 2)
+		if err != nil || result != nil {
+			t.Fatalf("cost-2 preflight: result=%+v err=%v, want allowed", result, err)
+		}
+	}
+	result, err := s.CheckRateLimitBudgetCost(ctx, subject, surface, cfg, 3)
+	if err != nil {
+		t.Fatalf("cost-3 preflight: %v", err)
+	}
+	if result == nil || result.Wait < time.Second {
+		t.Fatalf("cost-3 preflight result = %+v, want a denial with positive wait", result)
+	}
+
+	count, err := store.CountRateLimits(ctx, s, subject)
+	if err != nil {
+		t.Fatalf("count rate-limit rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("read-only budget checks created rows: count=%d, want 1", count)
+	}
+}
+
 // TestCheckRateLimitBudgetDisabled proves that a zero limit disables enforcement
 // for the budget check.
 func TestCheckRateLimitBudgetDisabled(t *testing.T) {

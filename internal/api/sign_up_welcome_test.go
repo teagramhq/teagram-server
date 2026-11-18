@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -469,12 +471,114 @@ func TestDemoGeneralChatPhotoCaptionAndMinuteLimit(t *testing.T) {
 	}
 	const sixthFileID = int64(12905)
 	saveParts(t, s, rateGuest.ID, sixthFileID, body)
-	_, err = api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+	fileIDCeilingBefore, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before refused photo: %v", err)
+	}
+	observedBlobs := &observedAssembledPutBlob{Store: s.PartBlobs()}
+	_, err = api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, observedBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer:    api.InputPeerChannel(rateGuest.ID, channel.ID),
 		Media:   uploadedPhoto(sixthFileID, 1, "general.jpg", jpegPhotoMD5(body)),
 		Message: "photo 5", RandomID: sixthFileID,
 	})
 	rpcError(t, err, "FLOOD_WAIT_60")
+	if keys := observedBlobs.assembledKeys(); len(keys) != 0 {
+		t.Errorf("over-limit photo assembled blobs %v, want no persisted file", keys)
+	}
+	fileIDCeilingAfter, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling after refused photo: %v", err)
+	}
+	if fileIDCeilingAfter != fileIDCeilingBefore {
+		t.Errorf("over-limit photo changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+}
+
+func TestDemoGeneralChatPhotoRateLimitRaceCleansLoser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := s.PartBlobs()
+	body := jpegPhotoPayload(t, 640, 480)
+	guest, err := s.CreateUser(ctx, "+15550000131")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	for i := range 4 {
+		fileID := int64(13100 + i)
+		saveParts(t, s, guest.ID, fileID, body)
+		if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+			Media:    uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(body)),
+			Message:  fmt.Sprintf("accepted photo %d", i),
+			RandomID: fileID,
+		}); err != nil {
+			t.Fatalf("send General photo %d of 4: %v", i+1, err)
+		}
+	}
+
+	gate := &assembledPutGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(gate.unblock)
+	const racingPhotoFileID = int64(13104)
+	saveParts(t, s, guest.ID, racingPhotoFileID, body)
+	observer := &observedAssembledPutBlob{Store: blobs, gate: gate}
+	result := make(chan error, 1)
+	go func() {
+		_, sendErr := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, observer, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+			Media:    uploadedPhoto(racingPhotoFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+			Message:  "photo raced by a text post",
+			RandomID: racingPhotoFileID,
+		})
+		result <- sendErr
+	}()
+	select {
+	case <-gate.entered:
+	case sendErr := <-result:
+		gate.unblock()
+		t.Fatalf("photo send exited before assembly gate: %v", sendErr)
+	case <-time.After(30 * time.Second):
+		gate.unblock()
+		t.Fatal("photo did not pass preflight and reach blob assembly")
+	}
+
+	if _, err := api.SendMessageForTestWithDemoGeneralChat(s, guest.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerChannel(guest.ID, channel.ID), Message: "consume the final General message token", RandomID: 13199,
+	}); err != nil {
+		gate.unblock()
+		t.Fatalf("post General text while photo assembly is in flight: %v", err)
+	}
+	gate.unblock()
+	var sendErr error
+	select {
+	case sendErr = <-result:
+	case <-time.After(30 * time.Second):
+		t.Fatal("rate-limit loser did not finish after blob assembly resumed")
+	}
+	rpcError(t, sendErr, "FLOOD_WAIT_60")
+
+	keys := observer.assembledKeys()
+	if len(keys) != 1 {
+		t.Fatalf("racing photo assembly keys = %v, want one", keys)
+	}
+	fileID, ok := blob.ParseKey(keys[0])
+	if !ok {
+		t.Fatalf("assembled blob key %q does not identify a file", keys[0])
+	}
+	files, err := s.ExistingFileIDs(ctx, []int64{fileID})
+	if err != nil {
+		t.Fatalf("check racing photo file row %d: %v", fileID, err)
+	}
+	if _, exists := files[fileID]; exists {
+		t.Errorf("rate-limit loser retained file row %d", fileID)
+	}
+	if _, err := blobs.ReadAt(ctx, keys[0], 0, 1); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("rate-limit loser blob read error = %v, want blob.ErrNotFound", err)
+	}
 }
 
 func TestDemoGeneralChatDoesNotLimitOtherMegagroups(t *testing.T) {

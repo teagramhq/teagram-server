@@ -21,6 +21,7 @@ const (
 	demoGeneralChatLookupTimeout    = 3 * time.Second
 	demoGeneralChatPerMinuteLimit   = 5
 	demoGeneralChatPerHourLimit     = 30
+	demoGeneralChatCleanupTimeout   = 5 * time.Second
 	demoGeneralChatMinuteSurface    = "demo_general_message_minute"
 	demoGeneralChatHourSurface      = "demo_general_message_hour"
 	demoGeneralChatDuplicateSurface = "demo_general_duplicate_"
@@ -119,6 +120,54 @@ func (h *handlers) preflightDemoGeneralChatRateLimits(r *mtproto.Request, texts 
 		}
 	}
 	return nil
+}
+
+func (h *handlers) checkDemoGeneralChatRateLimitBudgets(r *mtproto.Request, texts []string, cost int) error {
+	if r.Tailnet() {
+		return nil
+	}
+	for _, limit := range []struct {
+		surface string
+		config  store.RateLimitConfig
+		cost    int
+	}{
+		{surface: demoGeneralChatHourSurface, config: h.demoGeneralChatPolicy.perHour, cost: cost},
+		{surface: demoGeneralChatMinuteSurface, config: h.demoGeneralChatPolicy.perMinute, cost: cost},
+	} {
+		if err := h.checkDemoGeneralChatRateLimitBudget(r, limit.surface, limit.config, limit.cost); err != nil {
+			return err
+		}
+	}
+	counts := make(map[string]int)
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		surface := demoGeneralChatDuplicateRateLimitSurface(text)
+		counts[surface]++
+		if err := h.checkDemoGeneralChatRateLimitBudget(r, surface, h.demoGeneralChatPolicy.duplicateLimit, counts[surface]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *handlers) checkDemoGeneralChatRateLimitBudget(
+	r *mtproto.Request, surface string, config store.RateLimitConfig, cost int,
+) error {
+	if !config.Enabled() {
+		return nil
+	}
+	result, err := h.store.CheckRateLimitBudgetCost(r.Ctx, r.UserID, surface, config, cost)
+	if err != nil {
+		h.log.Error("demo General chat rate limit preflight", "user_id", r.UserID, "surface", surface, "err", err)
+		return errInternal
+	}
+	if result == nil {
+		return nil
+	}
+	h.recordRateLimitDenial("message_send")
+	return FloodWaitError(int(result.Wait / time.Second))
 }
 
 func staticDemoGeneralChatRateLimitError(config store.RateLimitConfig, cost int) error {

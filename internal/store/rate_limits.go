@@ -262,8 +262,20 @@ func (s *Store) SweepExpiredRateLimits(ctx context.Context) (int64, error) {
 // auth.checkPassword: the limit is checked first, SRP verification runs second,
 // and a failure charge follows only on bad proofs.
 func (s *Store) CheckRateLimitBudget(ctx context.Context, subjectID int64, surface string, cfg RateLimitConfig) (*RateLimitResult, error) {
+	return s.CheckRateLimitBudgetCost(ctx, subjectID, surface, cfg, 1)
+}
+
+// CheckRateLimitBudgetCost reads whether cost tokens fit the current window
+// without consuming them. It is an advisory preflight; the mutation that needs
+// the allowance must still charge it atomically in its own transaction.
+func (s *Store) CheckRateLimitBudgetCost(
+	ctx context.Context, subjectID int64, surface string, cfg RateLimitConfig, cost int,
+) (*RateLimitResult, error) {
 	if !cfg.enabled() {
 		return nil, nil //nolint:nilnil // disabled config is not an error
+	}
+	if cost <= 0 {
+		return nil, fmt.Errorf("check rate limit budget: invalid cost %d", cost)
 	}
 
 	row, err := s.q.CheckRateLimitBudget(ctx, db.CheckRateLimitBudgetParams{
@@ -272,17 +284,26 @@ func (s *Store) CheckRateLimitBudget(ctx context.Context, subjectID int64, surfa
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		// No row — budget not exhausted.
+		// No row — the request fits unless its cost exceeds a fresh window.
+		if cost > cfg.Limit {
+			now := s.now()
+			return &RateLimitResult{Wait: waitUntil(now, now.Add(cfg.Window))}, nil
+		}
 		return nil, nil //nolint:nilnil // no row means the budget is not exhausted
 	case err != nil:
 		return nil, fmt.Errorf("check rate limit budget: %w", err)
 	}
 
-	// Row exists — check if budget is exhausted.
-	if row.ExpiresAt.Time.After(s.now()) && row.TokenCount >= int32(cfg.Limit) { //nolint:gosec // rate limits are small positive ints
-		return &RateLimitResult{Wait: waitUntil(s.now(), row.ExpiresAt.Time)}, nil
+	now := s.now()
+	if !row.ExpiresAt.Time.After(now) {
+		if cost > cfg.Limit {
+			return &RateLimitResult{Wait: waitUntil(now, now.Add(cfg.Window))}, nil
+		}
+		return nil, nil //nolint:nilnil // expired windows allow a fresh budget
 	}
-	// Window expired or under limit — proceed.
+	if int64(cost) > int64(cfg.Limit)-int64(row.TokenCount) {
+		return &RateLimitResult{Wait: waitUntil(now, row.ExpiresAt.Time)}, nil
+	}
 	return nil, nil //nolint:nilnil // expired or under-limit windows allow the request
 }
 
