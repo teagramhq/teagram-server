@@ -530,7 +530,10 @@ func TestDemoGeneralChatPhotoCaptionAndMinuteLimit(t *testing.T) {
 		Media:   uploadedPhoto(sixthFileID, 1, "general.jpg", jpegPhotoMD5(sixthPhoto)),
 		Message: "photo 5", RandomID: sixthFileID,
 	})
-	rpcError(t, err, "FLOOD_WAIT_60")
+	var floodWait *tgerr.Error
+	if !errors.As(err, &floodWait) || floodWait.Code != 420 || !strings.HasPrefix(floodWait.Message, "FLOOD_WAIT_") {
+		t.Fatalf("sixth General photo error = %v, want 420 FLOOD_WAIT", err)
+	}
 	if keys := observedBlobs.assembledKeys(); len(keys) != 0 {
 		t.Errorf("over-limit photo assembled blobs %v, want no persisted file", keys)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
@@ -23,6 +24,9 @@ func testSmokeDemoGeneralChat(t *testing.T) {
 	owner, err := f.store.CreateUser(f.ctx, "+15550007001")
 	if err != nil {
 		t.Fatalf("create General owner: %v", err)
+	}
+	if err := f.store.ClaimUsername(f.ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim General seed owner username: %v", err)
 	}
 	channel, _, _, err := f.store.CreateChannelWithServiceMessage(f.ctx, owner.ID, "General", "", true)
 	if err != nil {
