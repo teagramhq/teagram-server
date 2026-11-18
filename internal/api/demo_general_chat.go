@@ -107,7 +107,7 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 	if err != nil {
 		lookupErr := fmt.Errorf("look up demo General chat: %w", err)
 		h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
-			expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
+			expiresAt: h.demoGeneralChatNow().Add(demoGeneralChatLookupFailureTTL),
 			err:       lookupErr,
 		})
 		return false, lookupErr

@@ -211,6 +211,32 @@ func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {
 	}
 }
 
+func TestDemoGeneralChatLookupFailureTTLStartsAfterLookup(t *testing.T) {
+	start := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	now := start
+	var lookups atomic.Int32
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+			lookups.Add(1)
+			now = now.Add(3 * time.Second)
+			return store.UsernameResolution{}, false, errors.New("injected username lookup failure")
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("first lookup returned no error")
+	}
+	now = start.Add(6 * time.Second)
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("lookup within five seconds of failed refresh returned no error")
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("lookup within five seconds after refresh performed %d lookups, want one", got)
+	}
+}
+
 func TestDemoGeneralChatLookupFailureIsCachedForRefreshWindow(t *testing.T) {
 	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
 	var lookups atomic.Int32
