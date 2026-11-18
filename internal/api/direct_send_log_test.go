@@ -263,6 +263,102 @@ func TestDemoGeneralChatLookupFailureIsCachedForRefreshWindow(t *testing.T) {
 	}
 }
 
+func TestDemoGeneralChatLookupSurvivesCallerCancellation(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var lookups atomic.Int32
+	username := demoGeneralChatUsername
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(ctx context.Context, _ string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				close(lookupStarted)
+			}
+			if _, ok := ctx.Deadline(); !ok {
+				return store.UsernameResolution{}, false, errors.New("lookup has no refresh deadline")
+			}
+			select {
+			case <-ctx.Done():
+				return store.UsernameResolution{}, false, ctx.Err()
+			case <-releaseLookup:
+				if err := ctx.Err(); err != nil {
+					return store.UsernameResolution{}, false, err
+				}
+				return store.UsernameResolution{
+					Kind: store.UsernameKindChannel,
+					Channel: store.Channel{
+						ID: 77, Title: "General", Username: &username, Megagroup: true,
+					},
+				}, true, nil
+			}
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+
+	callerCtx, cancel := context.WithCancel(context.Background())
+	type resolution struct {
+		isGeneral bool
+		err       error
+	}
+	firstResult := make(chan resolution, 1)
+	go func() {
+		isGeneral, err := h.isDemoGeneralChat(callerCtx, 77)
+		firstResult <- resolution{isGeneral: isGeneral, err: err}
+	}()
+	<-lookupStarted
+	cancel()
+
+	secondStarted := make(chan struct{})
+	secondResult := make(chan resolution, 1)
+	go func() {
+		close(secondStarted)
+		isGeneral, err := h.isDemoGeneralChat(context.Background(), 88)
+		secondResult <- resolution{isGeneral: isGeneral, err: err}
+	}()
+	<-secondStarted
+	close(releaseLookup)
+	first := <-firstResult
+	second := <-secondResult
+	if first.err != nil || !first.isGeneral {
+		t.Fatalf("cancelled first caller resolution = %t, err=%v; want shared General refresh", first.isGeneral, first.err)
+	}
+	if second.err != nil || second.isGeneral {
+		t.Fatalf("live non-General caller resolution = %t, err=%v; want false without error", second.isGeneral, second.err)
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("cancelled refresh and live caller performed %d lookups, want one", got)
+	}
+}
+
+func TestDemoGeneralChatContextLookupErrorIsNotCached(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	var lookups atomic.Int32
+	username := demoGeneralChatUsername
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				return store.UsernameResolution{}, false, context.DeadlineExceeded
+			}
+			return store.UsernameResolution{
+				Kind:    store.UsernameKindChannel,
+				Channel: store.Channel{ID: 77, Title: "General", Username: &username, Megagroup: true},
+			}, true, nil
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first lookup error = %v, want context deadline exceeded", err)
+	}
+	if isGeneral, err := h.isDemoGeneralChat(context.Background(), 77); err != nil || !isGeneral {
+		t.Fatalf("second lookup after context error = %t, err=%v; want resolved General", isGeneral, err)
+	}
+	if got := lookups.Load(); got != 2 {
+		t.Fatalf("context error refresh performed %d lookups, want retry", got)
+	}
+}
+
 func uploadDirectSendLogAlbumDocument(t *testing.T, ctx context.Context, s *store.Store, h *handlers, userID, fileID int64) *tg.InputMediaDocument {
 	t.Helper()
 	if err := s.SaveUploadPart(ctx, userID, fileID, 0, []byte("private album bytes"), TestMaxFileBytes); err != nil {

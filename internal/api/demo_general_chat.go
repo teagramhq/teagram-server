@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -17,6 +18,7 @@ const (
 	demoGeneralChatDuplicateWindow  = 30 * time.Second
 	demoGeneralChatResolutionTTL    = time.Minute
 	demoGeneralChatLookupFailureTTL = 5 * time.Second
+	demoGeneralChatLookupTimeout    = 3 * time.Second
 	demoGeneralChatPerMinuteLimit   = 5
 	demoGeneralChatPerHourLimit     = 30
 	demoGeneralChatMinuteSurface    = "demo_general_message_minute"
@@ -100,13 +102,17 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 		return cached.channelID == channelID, nil
 	}
 
-	resolved, found, err := h.lookupDemoGeneralChat(ctx)
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), demoGeneralChatLookupTimeout)
+	defer cancel()
+	resolved, found, err := h.lookupDemoGeneralChat(lookupCtx)
 	if err != nil {
 		lookupErr := fmt.Errorf("look up demo General chat: %w", err)
-		h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
-			expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
-			err:       lookupErr,
-		})
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
+				expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
+				err:       lookupErr,
+			})
+		}
 		return false, lookupErr
 	}
 	var resolvedChannelID int64
