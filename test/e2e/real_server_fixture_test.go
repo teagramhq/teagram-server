@@ -151,6 +151,16 @@ func TestRealServerFixtureInstallsPhotoWorkerFromServerRevision(t *testing.T) {
 	}
 }
 
+func TestRealServerFixtureDatabaseHealthcheckUsesTCP(t *testing.T) {
+	startScript, err := os.ReadFile(filepath.Join("real_server_fixture", "start.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(startScript, []byte(`--health-cmd='pg_isready -q -h 127.0.0.1 -U postgres -d teagram'`)) {
+		t.Fatal("fixture database healthcheck must use TCP so it cannot pass on Postgres' temporary initdb socket")
+	}
+}
+
 func TestRealServerFixtureUsesUniqueGitWorktreeRegistrationName(t *testing.T) {
 	startScript, err := os.ReadFile(filepath.Join("real_server_fixture", "start.sh"))
 	if err != nil {
