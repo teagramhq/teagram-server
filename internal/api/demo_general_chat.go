@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -107,12 +106,10 @@ func (h *handlers) isDemoGeneralChat(ctx context.Context, channelID int64) (bool
 	resolved, found, err := h.lookupDemoGeneralChat(lookupCtx)
 	if err != nil {
 		lookupErr := fmt.Errorf("look up demo General chat: %w", err)
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
-				expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
-				err:       lookupErr,
-			})
-		}
+		h.demoGeneralChatTarget.Store(&demoGeneralChatCache{
+			expiresAt: now.Add(demoGeneralChatLookupFailureTTL),
+			err:       lookupErr,
+		})
 		return false, lookupErr
 	}
 	var resolvedChannelID int64

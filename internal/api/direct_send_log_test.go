@@ -331,31 +331,55 @@ func TestDemoGeneralChatLookupSurvivesCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestDemoGeneralChatContextLookupErrorIsNotCached(t *testing.T) {
+func TestDemoGeneralChatContextLookupTimeoutIsSharedAndCached(t *testing.T) {
 	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
 	var lookups atomic.Int32
-	username := demoGeneralChatUsername
+	lookupStarted := make(chan struct{})
 	h := &handlers{
 		now: func() time.Time { return now },
-		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+		demoGeneralChatLookup: func(ctx context.Context, _ string) (store.UsernameResolution, bool, error) {
 			if lookups.Add(1) == 1 {
-				return store.UsernameResolution{}, false, context.DeadlineExceeded
+				close(lookupStarted)
 			}
-			return store.UsernameResolution{
-				Kind:    store.UsernameKindChannel,
-				Channel: store.Channel{ID: 77, Title: "General", Username: &username, Megagroup: true},
-			}, true, nil
+			<-ctx.Done()
+			return store.UsernameResolution{}, false, ctx.Err()
 		},
 	}
 	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+	const concurrentCalls = 8
+	started := make(chan struct{}, concurrentCalls)
+	errorsByCall := make(chan error, concurrentCalls)
+	var wg sync.WaitGroup
+	start := time.Now()
+	for range concurrentCalls {
+		wg.Go(func() {
+			started <- struct{}{}
+			_, err := h.isDemoGeneralChat(context.Background(), 77)
+			errorsByCall <- err
+		})
+	}
+	for range concurrentCalls {
+		<-started
+	}
+	<-lookupStarted
+	wg.Wait()
+	elapsed := time.Since(start)
+	for range concurrentCalls {
+		if err := <-errorsByCall; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("concurrent lookup error = %v, want context deadline exceeded", err)
+		}
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("8 concurrent callers performed %d timed-out lookups, want one", got)
+	}
+	if elapsed < 2*time.Second || elapsed > demoGeneralChatLookupTimeout+2*time.Second {
+		t.Fatalf("8 concurrent calls took %s, want one %s refresh", elapsed, demoGeneralChatLookupTimeout)
+	}
 	if _, err := h.isDemoGeneralChat(context.Background(), 77); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first lookup error = %v, want context deadline exceeded", err)
+		t.Fatalf("lookup within cached failure window = %v, want context deadline exceeded", err)
 	}
-	if isGeneral, err := h.isDemoGeneralChat(context.Background(), 77); err != nil || !isGeneral {
-		t.Fatalf("second lookup after context error = %t, err=%v; want resolved General", isGeneral, err)
-	}
-	if got := lookups.Load(); got != 2 {
-		t.Fatalf("context error refresh performed %d lookups, want retry", got)
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("call within cached failure window performed %d lookups, want one total", got)
 	}
 }
 
