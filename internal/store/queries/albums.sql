@@ -7,6 +7,23 @@ SELECT file_id FROM file_upload_grants
 WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND file_id = ANY(sqlc.arg(file_ids)::bigint[]);
 
+-- AlbumPhotoFilesForUpload reads only stored photo blobs the caller can
+-- present with a live upload grant. The album transaction repeats this
+-- authorization while consuming the grants after it takes its write locks.
+-- name: AlbumPhotoFilesForUpload :many
+SELECT f.*
+FROM files AS f
+JOIN file_upload_grants AS g ON g.file_id = f.id
+JOIN (SELECT unnest(sqlc.arg(file_ids)::bigint[]) AS file_id,
+             unnest(sqlc.arg(access_hashes)::bigint[]) AS access_hash) AS ref ON ref.file_id = f.id
+WHERE g.owner_id = sqlc.arg(owner_id)::bigint
+  AND f.uploader_id = sqlc.arg(owner_id)::bigint
+  AND f.access_hash = ref.access_hash
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND g.created_at >= sqlc.arg(not_before)::timestamptz
+ORDER BY f.id;
+
 -- LockUploadGrants row-locks the caller's named grants in ascending file_id
 -- order. Albums from one caller to different channels share no other lock, so
 -- this order, not the planner's row order in ConsumeUploadGrants, is what

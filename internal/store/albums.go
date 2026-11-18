@@ -54,6 +54,43 @@ type ChannelAlbumResult struct {
 	Duplicate bool
 }
 
+// AlbumPhotoFilesForUpload resolves the stored photo references in an album
+// only when the caller holds a live upload grant for each matching file and
+// access hash. The album write repeats the check while consuming the grants.
+func (s *Store) AlbumPhotoFilesForUpload(ctx context.Context, ownerID int64, items []AlbumItem, ttl time.Duration) (map[int64]File, error) {
+	files := make(map[int64]File, len(items))
+	if len(items) == 0 {
+		return files, nil
+	}
+	if ttl <= 0 {
+		return nil, errors.New("upload grant TTL must be positive")
+	}
+	fileIDs := make([]int64, len(items))
+	accessHashes := make([]int64, len(items))
+	for i, item := range items {
+		if !item.Photo {
+			return nil, ErrMediaInvalid
+		}
+		fileIDs[i], accessHashes[i] = item.FileID, item.AccessHash
+	}
+	rows, err := s.q.AlbumPhotoFilesForUpload(ctx, db.AlbumPhotoFilesForUploadParams{
+		OwnerID:      ownerID,
+		FileIds:      fileIDs,
+		AccessHashes: accessHashes,
+		NotBefore:    pgtype.Timestamptz{Time: time.Now().Add(-ttl), Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("album photo upload grants: %w", err)
+	}
+	if len(rows) != len(items) {
+		return nil, ErrMediaInvalid
+	}
+	for _, row := range rows {
+		files[row.ID] = fileFromRow(row)
+	}
+	return files, nil
+}
+
 // UserAlbumRetry is the read-only dedup an album send runs before it charges
 // the caller. It answers a replay of a whole album the caller already sent to
 // this peer, ErrMediaInvalid for any token that names a deleted row or only

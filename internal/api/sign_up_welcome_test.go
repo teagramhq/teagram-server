@@ -490,10 +490,11 @@ func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
 	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
 		t.Fatalf("join General: %v", err)
 	}
-	blobs := newBlobs(t)
-	photos := make([]store.File, 2)
-	for i, width := range []int32{640, 641} {
-		body := jpegPhotoPayload(t, int(width), 480)
+	blobs := s.PartBlobs()
+	photos := make([]store.File, 4)
+	bodies := [][]byte{jpegPhotoPayload(t, 640, 480), jpegPhotoPayload(t, 641, 480)}
+	for i, width := range []int32{640, 641, 640, 641} {
+		body := bodies[i%len(bodies)]
 		photo, _, err := s.AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
 			ctx, guest.ID, int64(len(body)), "image/jpeg", fmt.Sprintf("album-%d.jpg", i),
 			api.TestMaxUserStorageBytes, time.Hour,
@@ -509,12 +510,18 @@ func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
 		}
 		photos[i] = photo
 	}
-	album := func(randomIDBase int64) *tg.MessagesSendMultiMediaRequest {
+	if _, err := s.AlbumPhotoFilesForUpload(ctx, guest.ID, []store.AlbumItem{
+		{FileID: photos[0].ID, AccessHash: photos[0].AccessHash, Photo: true},
+		{FileID: photos[1].ID, AccessHash: photos[1].AccessHash, Photo: true},
+	}, time.Hour); err != nil {
+		t.Fatalf("resolve authorized album photos: %v", err)
+	}
+	album := func(randomIDBase int64, files []store.File) *tg.MessagesSendMultiMediaRequest {
 		request := &tg.MessagesSendMultiMediaRequest{
 			Peer:       api.InputPeerChannel(guest.ID, channel.ID),
-			MultiMedia: make([]tg.InputSingleMedia, len(photos)),
+			MultiMedia: make([]tg.InputSingleMedia, len(files)),
 		}
-		for i, photo := range photos {
+		for i, photo := range files {
 			request.MultiMedia[i] = tg.InputSingleMedia{
 				Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash}},
 				RandomID: randomIDBase + int64(i),
@@ -522,10 +529,10 @@ func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
 		}
 		return request
 	}
-	if _, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13300)); err != nil {
+	if _, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13300, photos[:2])); err != nil {
 		t.Fatalf("send first uncaptioned General photo album: %v", err)
 	}
-	_, err = api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13310))
+	_, err = api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13310, photos[2:]))
 	var rpcErr *tgerr.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 || !strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_") {
 		t.Fatalf("repeat uncaptioned General photo album = %v, want 420 FLOOD_WAIT", err)

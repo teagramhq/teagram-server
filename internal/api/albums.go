@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -133,17 +136,18 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 			texts[i] = item.Message
 		}
 		var mediaIdentities []string
-		if h.demoGeneralChatEnabled {
-			mediaIdentities = make([]string, len(items))
-			for i, item := range items {
-				mediaIdentities[i] = fmt.Sprintf("photo:%d", item.FileID)
-			}
-		}
-		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong, mediaIdentities...)
+		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		if demoGeneralChat {
+			mediaIdentities, err = h.demoGeneralChatAlbumPhotoIdentities(r.Ctx, r.UserID, items)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if err := h.preflightDemoGeneralChatRateLimits(r, nil, 0, mediaIdentities...); err != nil {
+				return nil, nil, nil, err
+			}
 			if err := h.checkDemoGeneralChatRateLimitBudgets(r, nil, 0, mediaIdentities...); err != nil {
 				return nil, nil, nil, err
 			}
@@ -301,6 +305,35 @@ func albumItems(ctx context.Context, h *handlers, viewerID int64, multi []tg.Inp
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (h *handlers) demoGeneralChatAlbumPhotoIdentities(ctx context.Context, ownerID int64, items []store.AlbumItem) ([]string, error) {
+	files, err := h.store.AlbumPhotoFilesForUpload(ctx, ownerID, items, h.uploadGrantTTL)
+	if errors.Is(err, store.ErrMediaInvalid) {
+		return nil, errMediaInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve General album photo upload grants", "user_id", ownerID, "err", err)
+		return nil, errInternal
+	}
+	identities := make([]string, len(items))
+	for i, item := range items {
+		file, ok := files[item.FileID]
+		if !ok || file.Size <= 0 || file.Size > maxPhotoJPEGBytes {
+			return nil, errMediaInvalid
+		}
+		body, err := h.blobs.ReadAt(ctx, blob.Key(file.ID), 0, file.Size)
+		if errors.Is(err, blob.ErrNotFound) || (err == nil && int64(len(body)) != file.Size) {
+			return nil, errMediaInvalid
+		}
+		if err != nil {
+			h.log.Error("read General album photo for duplicate check", "user_id", ownerID, "file_id", file.ID, "err", err)
+			return nil, errInternal
+		}
+		digest := sha256.Sum256(body)
+		identities[i] = "photo:" + hex.EncodeToString(digest[:])
+	}
+	return identities, nil
 }
 
 // newGroupedID draws a non-zero album id from crypto/rand.
