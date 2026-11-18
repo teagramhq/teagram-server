@@ -115,10 +115,11 @@ signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 `TG_DEMO_GENERAL_CHAT_ENABLED=true` makes the API seed a single `General`
-supergroup owned by `demo_seed_owner` and adds new sign-ups to it. The seeder
-adds the precreated demo guest accounts too, sets 10-second slow mode, and
-verifies the group after setup, weekly wipes, and restarts. Guests join as
-ordinary members: they can send text, photos, and bundled stickers, but cannot
+supergroup owned by `demo_seed_owner` and attempts to add new sign-ups as a
+best-effort post-signup step. The seeder adds the precreated demo guest accounts
+too, sets 10-second slow mode, and verifies the group after setup, weekly wipes,
+and restarts. Guests join as ordinary members: they can send text, photos, and
+bundled stickers, but cannot
 change group details, pin messages, invite members, or delete another guest's
 messages. Default rights also block polls, generic files, other media types,
 and topic management while leaving text, photos, and stickers available.
@@ -129,6 +130,10 @@ all server replicas, in addition to slow mode. Text and captions are limited to
 seconds is refused with a flood-wait response. Guest creation already has a
 five-attempt-per-IP-per-hour server limit; Turnstile remains enabled on public
 sign-up.
+
+General auto-join is best-effort after sign-up commits. A failed join is logged
+without failing sign-up and affects only that guest, who may miss General until
+the next weekly wipe resets and re-seeds the demo.
 
 Run the owner-only moderation command from the demo LXC to remove a General
 message or permanently ban an ordinary member:
