@@ -10,7 +10,6 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
 (
-  demo_active_server() { printf 'teagramd-next\n'; }
   [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == haproxy:2443 ]]
   [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == haproxy:2443 ]]
   [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 1 haproxy:2443)" == haproxy:2443 ]]
