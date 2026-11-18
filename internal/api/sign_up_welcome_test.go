@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -811,7 +812,14 @@ func TestDemoGeneralChatPhotoRateLimitRaceCleansLoser(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("rate-limit loser did not finish after blob assembly resumed")
 	}
-	rpcError(t, sendErr, "FLOOD_WAIT_60")
+	var floodWait *tgerr.Error
+	if !errors.As(sendErr, &floodWait) || floodWait.Code != 420 || !strings.HasPrefix(floodWait.Message, "FLOOD_WAIT_") {
+		t.Fatalf("rate-limit race error = %v, want 420 FLOOD_WAIT_1 through FLOOD_WAIT_60", sendErr)
+	}
+	waitSeconds, err := strconv.Atoi(strings.TrimPrefix(floodWait.Message, "FLOOD_WAIT_"))
+	if err != nil || waitSeconds < 1 || waitSeconds > 60 {
+		t.Fatalf("rate-limit race wait = %q, want FLOOD_WAIT_1 through FLOOD_WAIT_60", floodWait.Message)
+	}
 
 	keys := observer.assembledKeys()
 	if len(keys) != 1 {

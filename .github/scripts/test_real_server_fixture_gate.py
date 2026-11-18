@@ -20,6 +20,7 @@ GATE = Path(__file__).with_name("real_server_fixture_gate.py")
 REQUIRED_TESTS = (
     "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
     "TestRealServerFixtureInstallsPhotoWorkerFromServerRevision",
+    "TestRealServerFixtureDatabaseHealthcheckUsesTCP",
     "TestRealServerFixtureUsesUniqueGitWorktreeRegistrationName",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",
