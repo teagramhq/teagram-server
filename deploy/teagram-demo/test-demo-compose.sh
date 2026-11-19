@@ -2010,6 +2010,14 @@ cat > "$TMP_DIR/demo-env-rollback-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$ENV_ROLLBACK_FUNCTIONS"
 demo_fail() { printf 'unexpected demo env failure: %s\n' "$1" >&2; return 1; }
+# CI runs unprivileged: report files as root-owned and skip the chown.
+stat() {
+  local out
+  out=$(command stat "$@") || return
+  if [[ "$*" == *'%u:%a'* ]]; then out="0:${out#*:}"; fi
+  printf '%s\n' "$out"
+}
+chown() { :; }
 DEMO_ENV_FILE="$TMP_DIR/rollback-demo.env"
 DEMO_ENV_BACKUP=
 cat > "$DEMO_ENV_FILE" <<'ENV'
