@@ -10,7 +10,52 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-func TestRestoreModerationSmokeGuestRestoresMembership(t *testing.T) {
+func TestPrepareModerationSmokeGuestSignsUpWithShortUsername(t *testing.T) {
+	api := &fakeModerationSmokeSignupAPI{}
+	if err := prepareModerationSmokeGuest(context.Background(), api); err != nil {
+		t.Fatalf("sign up moderation smoke guest: %v", err)
+	}
+	if got, want := fmt.Sprint(api.calls), "[send-code sign-up get-full-user]"; got != want {
+		t.Fatalf("moderation smoke guest RPCs = %s, want %s", got, want)
+	}
+	if api.sendCodeRequest == nil || api.sendCodeRequest.PhoneNumber != moderationSmokeShortUsername {
+		t.Fatalf("auth.sendCode request = %+v, want handle %q", api.sendCodeRequest, moderationSmokeShortUsername)
+	}
+	if api.signUpRequest == nil {
+		t.Fatal("auth.signUp was not called")
+	}
+	if api.signUpRequest.PhoneNumber != moderationSmokeShortUsername || api.signUpRequest.PhoneCodeHash != "smoke-code-hash" {
+		t.Fatalf("auth.signUp request = %+v, want new account handle %q and the issued code", api.signUpRequest, moderationSmokeShortUsername)
+	}
+	if api.signUpRequest.FirstName == "" {
+		t.Fatal("auth.signUp did not set a first name")
+	}
+}
+
+type fakeModerationSmokeSignupAPI struct {
+	calls           []string
+	sendCodeRequest *tg.AuthSendCodeRequest
+	signUpRequest   *tg.AuthSignUpRequest
+}
+
+func (api *fakeModerationSmokeSignupAPI) AuthSendCode(_ context.Context, request *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error) {
+	api.calls = append(api.calls, "send-code")
+	api.sendCodeRequest = request
+	return &tg.AuthSentCode{PhoneCodeHash: "smoke-code-hash"}, nil
+}
+
+func (api *fakeModerationSmokeSignupAPI) AuthSignUp(_ context.Context, request *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error) {
+	api.calls = append(api.calls, "sign-up")
+	api.signUpRequest = request
+	return &tg.AuthAuthorization{User: &tg.User{ID: 42}}, nil
+}
+
+func (api *fakeModerationSmokeSignupAPI) UsersGetFullUser(_ context.Context, _ tg.InputUserClass) (*tg.UsersUserFull, error) {
+	api.calls = append(api.calls, "get-full-user")
+	return &tg.UsersUserFull{Users: []tg.UserClass{&tg.User{ID: 42, Username: moderationSmokeShortUsername}}}, nil
+}
+
+func TestCleanupRestoresShortHandleGuestMembershipWithoutRenaming(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		inviteErr error
@@ -21,9 +66,12 @@ func TestRestoreModerationSmokeGuestRestoresMembership(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			rpc := &moderationSmokeMembershipRPC{inviteErr: test.inviteErr}
 			remote := remoteSpace{channelID: 71, accessHash: 93, creator: true}
-			guest := &tg.User{ID: 42, AccessHash: 43}
+			guest := &tg.User{ID: 42, AccessHash: 43, Username: moderationSmokeShortUsername}
 			if err := restoreModerationSmokeGuestMembership(context.Background(), tg.NewClient(rpc), remote, guest); err != nil {
 				t.Fatalf("restore moderation smoke guest membership: %v", err)
+			}
+			if guest.Username != moderationSmokeShortUsername {
+				t.Fatalf("cleanup changed smoke guest handle to %q", guest.Username)
 			}
 			if rpc.unbanCount != 1 || rpc.unbanViewMessages || rpc.unbanUntilDate != 0 {
 				t.Fatalf("unban calls=%d view=%t until=%d, want one empty unban", rpc.unbanCount, rpc.unbanViewMessages, rpc.unbanUntilDate)

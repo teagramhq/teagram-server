@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	moderationSmokeGuestUsername      = "demo_iona"
 	moderationSmokeShortUsername      = "ab"
 	defaultModerationSmokeSessionFile = "/run/secrets/demo-accounts/moderation-smoke.session"
 )
@@ -44,7 +43,6 @@ func prepareGeneralModerationSmoke(
 	cfg apiConfig,
 	options seedOptions,
 	ownerPassword string,
-	inventory map[string]string,
 ) error {
 	if !validModerationSmokeMarker(options.moderationSmokeMarker) {
 		return errors.New("demo General moderation smoke marker is invalid")
@@ -55,50 +53,7 @@ func prepareGeneralModerationSmoke(
 		return fmt.Errorf("inspect General moderation smoke session: %w", err)
 	}
 
-	var guest accountSpec
-	for _, account := range seedAccounts {
-		if account.username == moderationSmokeGuestUsername {
-			guest = account
-			break
-		}
-	}
-	if guest.username == "" || inventory[guest.loginID] == "" {
-		return errors.New("seeded General moderation smoke guest is missing")
-	}
-	if err := withAccountAndStorage(ctx, cfg, options.endpoint, guest, inventory[guest.loginID],
-		&session.FileStorage{Path: defaultModerationSmokeSessionFile}, func(runCtx context.Context, api *tg.Client) error {
-			full, err := api.UsersGetFullUser(runCtx, &tg.InputUserSelf{})
-			if err != nil {
-				return fmt.Errorf("inspect General moderation smoke guest: %w", err)
-			}
-			if len(full.Users) != 1 {
-				return fmt.Errorf("demo General moderation smoke guest profile count = %d, want 1", len(full.Users))
-			}
-			user, ok := full.Users[0].(*tg.User)
-			if !ok || user.ID <= 0 || user.Bot {
-				return errors.New("demo General moderation smoke session is not an ordinary guest")
-			}
-			switch user.Username {
-			case guest.username:
-				if _, err := api.ContactsResolveUsername(runCtx, &tg.ContactsResolveUsernameRequest{
-					Username: moderationSmokeShortUsername,
-				}); !isRPCMessage(err, "USERNAME_NOT_OCCUPIED") {
-					if err == nil {
-						return errors.New("short General moderation test handle is already occupied")
-					}
-					return fmt.Errorf("check short General moderation test handle: %w", err)
-				}
-				if _, err := api.AccountUpdateUsername(runCtx, moderationSmokeShortUsername); err != nil {
-					return fmt.Errorf("set short General moderation test handle: %w", err)
-				}
-			case moderationSmokeShortUsername:
-				// Recover a previous private preparation that stopped after the
-				// username update but before the smoke post was created.
-			default:
-				return fmt.Errorf("unexpected smoke guest username %q", user.Username)
-			}
-			return nil
-		}); err != nil {
+	if err := createModerationSmokeGuest(ctx, cfg, options.endpoint); err != nil {
 		cleanupOptions := options
 		cleanupOptions.moderationSmokeCleanup = true
 		cleanupOptions.moderationSmokePrepare = false
@@ -112,6 +67,15 @@ func prepareGeneralModerationSmoke(
 		cleanupOptions.moderationSmokePrepare = false
 		cleanupErr := cleanupGeneralModerationSmoke(ctx, cfg, cleanupOptions, ownerPassword)
 		return errors.Join(err, cleanupErr)
+	}
+	if err := withModerationSmokeGuest(ctx, cfg, options.endpoint, func(_ context.Context, _ *tg.Client, _ *tg.User) error {
+		return nil
+	}); err != nil {
+		cleanupOptions := options
+		cleanupOptions.moderationSmokeCleanup = true
+		cleanupOptions.moderationSmokePrepare = false
+		cleanupErr := cleanupGeneralModerationSmoke(ctx, cfg, cleanupOptions, ownerPassword)
+		return errors.Join(fmt.Errorf("verify new General moderation smoke guest: %w", err), cleanupErr)
 	}
 
 	var messageID int64
@@ -146,7 +110,7 @@ func verifyGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options se
 		return errors.New("demo General moderation smoke verification arguments are invalid")
 	}
 	var guest *tg.User
-	if err := withModerationSmokeGuest(ctx, cfg, options.endpoint, false, func(_ context.Context, _ *tg.Client, user *tg.User) error {
+	if err := withModerationSmokeGuest(ctx, cfg, options.endpoint, func(_ context.Context, _ *tg.Client, user *tg.User) error {
 		guest = user
 		return nil
 	}); err != nil {
@@ -197,7 +161,7 @@ func verifyGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options se
 		return err
 	}
 
-	err := withModerationSmokeGuest(ctx, cfg, options.endpoint, false, func(runCtx context.Context, api *tg.Client, user *tg.User) error {
+	err := withModerationSmokeGuest(ctx, cfg, options.endpoint, func(runCtx context.Context, api *tg.Client, user *tg.User) error {
 		if user.ID != guest.ID || !strings.EqualFold(user.Username, moderationSmokeShortUsername) {
 			return errors.New("demo General moderation smoke guest identity changed before rejoin check")
 		}
@@ -226,7 +190,7 @@ func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options s
 		return errors.New("demo General moderation smoke marker is invalid")
 	}
 	var guest *tg.User
-	guestErr := withModerationSmokeGuest(ctx, cfg, options.endpoint, true, func(_ context.Context, _ *tg.Client, user *tg.User) error {
+	guestErr := withModerationSmokeGuest(ctx, cfg, options.endpoint, func(_ context.Context, _ *tg.Client, user *tg.User) error {
 		guest = user
 		return nil
 	})
@@ -272,29 +236,7 @@ func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options s
 		return nil
 	})
 
-	var restoreErr error
-	if guest != nil && ownerErr == nil {
-		restoreErr = withModerationSmokeGuest(ctx, cfg, options.endpoint, true, func(runCtx context.Context, api *tg.Client, user *tg.User) error {
-			if user.ID != guest.ID {
-				return errors.New("demo General moderation smoke session changed users during cleanup")
-			}
-			switch strings.ToLower(user.Username) {
-			case moderationSmokeShortUsername:
-				if _, err := api.AccountUpdateUsername(runCtx, moderationSmokeGuestUsername); err != nil {
-					return fmt.Errorf("restore General moderation smoke guest username: %w", err)
-				}
-			case moderationSmokeGuestUsername:
-				return nil
-			default:
-				return fmt.Errorf("unexpected General moderation smoke guest username %q during cleanup", user.Username)
-			}
-			return nil
-		})
-		if errors.Is(restoreErr, os.ErrNotExist) {
-			restoreErr = nil
-		}
-	}
-	if err := errors.Join(guestErr, ownerErr, restoreErr); err != nil {
+	if err := errors.Join(guestErr, ownerErr); err != nil {
 		return err
 	}
 	if guest != nil {
@@ -302,7 +244,7 @@ func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options s
 			return err
 		}
 	}
-	fmt.Println("general moderation smoke fixtures restored")
+	fmt.Println("general moderation smoke post removed and guest membership restored")
 	return nil
 }
 
@@ -323,40 +265,85 @@ func restoreModerationSmokeGuestMembership(ctx context.Context, api *tg.Client, 
 	if _, err := api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
 		Channel: channel, Users: []tg.InputUserClass{&tg.InputUser{UserID: guest.ID, AccessHash: guest.AccessHash}},
 	}); err != nil && !isRPCMessage(err, "USER_ALREADY_PARTICIPANT") && !isRPCMessage(err, "USER_ALREADY_IN_CHANNEL") {
-		return fmt.Errorf("restore seeded guest to General after moderation smoke: %w", err)
+		return fmt.Errorf("restore moderation smoke guest to General after cleanup: %w", err)
 	}
 	result, err := api.ChannelsGetParticipant(ctx, &tg.ChannelsGetParticipantRequest{
 		Channel: channel, Participant: participant,
 	})
 	if err != nil {
-		return fmt.Errorf("verify seeded guest restored to General after moderation smoke: %w", err)
+		return fmt.Errorf("verify moderation smoke guest restored to General after cleanup: %w", err)
 	}
 	member, ok := result.Participant.(*tg.ChannelParticipant)
 	if !ok || member.UserID != guest.ID {
-		return errors.New("seeded guest is not a General member after moderation smoke cleanup")
+		return errors.New("moderation smoke guest is not a General member after cleanup")
 	}
 	return nil
 }
 
-func withAccountAndStorage(
-	ctx context.Context,
-	cfg apiConfig,
-	endpoint string,
-	account accountSpec,
-	password string,
-	storage session.Storage,
-	action apiAction,
-) error {
-	clientOptions, err := accountClientOptions(cfg, endpoint, storage)
+type moderationSmokeSignupAPI interface {
+	authSendCodeAPI
+	AuthSignUp(context.Context, *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error)
+	UsersGetFullUser(context.Context, tg.InputUserClass) (*tg.UsersUserFull, error)
+}
+
+func prepareModerationSmokeGuest(ctx context.Context, api moderationSmokeSignupAPI) error {
+	sent, err := sendAuthCode(ctx, api, moderationSmokeShortUsername)
+	if err != nil {
+		return fmt.Errorf("request General moderation smoke guest sign-up code: %w", err)
+	}
+	sentCode, ok := sent.(*tg.AuthSentCode)
+	if !ok || sentCode.PhoneCodeHash == "" {
+		return fmt.Errorf("unexpected General moderation smoke sign-up code response %T", sent)
+	}
+	authorization, err := api.AuthSignUp(ctx, &tg.AuthSignUpRequest{
+		PhoneNumber:   moderationSmokeShortUsername,
+		PhoneCodeHash: sentCode.PhoneCodeHash,
+		FirstName:     "Moderation",
+		LastName:      "Smoke",
+	})
+	if err != nil {
+		return fmt.Errorf("create General moderation smoke guest through auth.signUp: %w", err)
+	}
+	result, ok := authorization.(*tg.AuthAuthorization)
+	if !ok {
+		return fmt.Errorf("unexpected General moderation smoke sign-up response %T", authorization)
+	}
+	user, ok := result.User.(*tg.User)
+	if !ok || user.ID <= 0 || user.Bot {
+		return errors.New("auth.signUp did not create an ordinary General moderation smoke guest")
+	}
+	full, err := api.UsersGetFullUser(ctx, &tg.InputUserSelf{})
+	if err != nil {
+		return fmt.Errorf("inspect new General moderation smoke guest: %w", err)
+	}
+	if len(full.Users) != 1 {
+		return fmt.Errorf("demo General moderation smoke guest profile count = %d, want 1", len(full.Users))
+	}
+	profile, ok := full.Users[0].(*tg.User)
+	if !ok || profile.ID != user.ID || profile.Bot || !strings.EqualFold(profile.Username, moderationSmokeShortUsername) {
+		return errors.New("auth.signUp did not create the expected short-handle ordinary guest")
+	}
+	return nil
+}
+
+func createModerationSmokeGuest(ctx context.Context, cfg apiConfig, endpoint string) error {
+	clientOptions, err := accountClientOptions(cfg, endpoint, &session.FileStorage{Path: defaultModerationSmokeSessionFile})
 	if err != nil {
 		return err
 	}
 	return runTelegramClient(ctx, clientOptions, func(runCtx context.Context, client *telegram.Client) error {
-		passwordValue := password
-		if err := authenticate(runCtx, client.API(), account, &passwordValue, nil); err != nil {
+		api := client.API()
+		if err := prepareModerationSmokeGuest(runCtx, api); err != nil {
 			return err
 		}
-		return action(runCtx, client.API())
+		password, err := randomPassword()
+		if err != nil {
+			return fmt.Errorf("generate General moderation smoke guest password: %w", err)
+		}
+		if err := setNewPassword(runCtx, api, password); err != nil {
+			return fmt.Errorf("secure General moderation smoke guest: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -364,7 +351,6 @@ func withModerationSmokeGuest(
 	ctx context.Context,
 	cfg apiConfig,
 	endpoint string,
-	allowRestoredUsername bool,
 	action func(context.Context, *tg.Client, *tg.User) error,
 ) error {
 	if err := verifyModerationSmokeSessionFile(); err != nil {
@@ -383,7 +369,7 @@ func withModerationSmokeGuest(
 			return errors.New("demo General moderation smoke guest session is not authorized")
 		}
 		username := strings.ToLower(status.User.Username)
-		if username != moderationSmokeShortUsername && (!allowRestoredUsername || username != moderationSmokeGuestUsername) {
+		if username != moderationSmokeShortUsername {
 			return fmt.Errorf("unexpected General moderation smoke guest username %q", status.User.Username)
 		}
 		return action(runCtx, client.API(), status.User)
@@ -425,7 +411,7 @@ func resolveModerationSmokeGuest(ctx context.Context, api *tg.Client, userID int
 			return user, nil
 		}
 	}
-	return nil, errors.New("demo General moderation smoke handle does not resolve to the seeded guest")
+	return nil, errors.New("demo General moderation smoke handle does not resolve to the smoke guest")
 }
 
 func resolveGeneralChatForGuest(ctx context.Context, api *tg.Client) (remoteSpace, error) {

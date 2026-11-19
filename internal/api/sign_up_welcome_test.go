@@ -117,6 +117,33 @@ func signUpWelcomeTestAccount(t *testing.T, s *store.Store, runner *api.SignUpTe
 	return user
 }
 
+func TestSignUpCreatesTwoCharacterUsernameModeHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.9"), store.RateLimitConfig{}, config.RegistrationOpen, nil)
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{0x7a}, "ab")
+	persisted, found, err := s.UserByID(ctx, user.ID)
+	if err != nil || !found {
+		t.Fatalf("read new guest: found=%t err=%v", found, err)
+	}
+	if persisted.Username == nil || *persisted.Username != "ab" {
+		t.Fatalf("persisted sign-up username = %v, want the two-character handle", persisted.Username)
+	}
+	mode, err := s.UserLoginMode(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("read new guest login mode: %v", err)
+	}
+	if mode != "username" {
+		t.Fatalf("new guest login mode = %q, want username mode", mode)
+	}
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || !found {
+		t.Fatalf("two-character smoke guest General membership = %+v, found=%t err=%v; want auto-joined", member, found, err)
+	}
+}
+
 func TestSignUpJoinsConfiguredPublicChannelAndReturnsLatestMessage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

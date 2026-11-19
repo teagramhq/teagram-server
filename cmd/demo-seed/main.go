@@ -157,11 +157,7 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("read seed-owner password file: %w", err)
 		}
-		inventory, err := readCredentialInventory()
-		if err != nil {
-			return err
-		}
-		return prepareGeneralModerationSmoke(ctx, cfg, options, ownerPassword, inventory)
+		return prepareGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
 	case options.moderationSmokeVerify:
 		ownerPassword, err := readSecretPassword()
 		if err != nil {
