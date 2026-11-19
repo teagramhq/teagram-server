@@ -726,7 +726,12 @@ func sendAuthCode(ctx context.Context, api authSendCodeAPI, loginID string) (tg.
 	return api.AuthSendCode(ctx, request)
 }
 
-func setNewPassword(ctx context.Context, api *tg.Client, password string) error {
+type passwordSetupAPI interface {
+	AccountGetPassword(context.Context) (*tg.AccountPassword, error)
+	AccountUpdatePasswordSettings(context.Context, *tg.AccountUpdatePasswordSettingsRequest) (bool, error)
+}
+
+func setNewPassword(ctx context.Context, api passwordSetupAPI, password string) error {
 	settings, err := api.AccountGetPassword(ctx)
 	if err != nil {
 		return err

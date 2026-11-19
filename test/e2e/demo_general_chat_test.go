@@ -201,3 +201,90 @@ func testSmokeDemoGeneralChat(t *testing.T) {
 		t.Fatalf("second General guest smoke: %v", err)
 	}
 }
+
+func TestDemoGeneralModerationSmokeSignupSetsPasswordBeforeProfileLookup(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixtureWithRegistration(t, config.RegistrationOpen)
+	client := newUsernameClient(f.port, f.key, f.dcID, &session.StorageMemory{})
+	const username = "ab"
+	const password = "demo-moderation-smoke-password"
+
+	if err := client.Run(f.ctx, func(ctx context.Context) error {
+		apiClient := client.API()
+		codeHash, err := sendCodeUsername(ctx, apiClient, username)
+		if err != nil {
+			return fmt.Errorf("send smoke signup code: %w", err)
+		}
+		code, err := f.codes.wait(ctx, username)
+		if err != nil {
+			return fmt.Errorf("wait for smoke signup code: %w", err)
+		}
+		response, err := signInUsername(ctx, apiClient, username, codeHash, code)
+		if err != nil && !isSignUpRequired(err) {
+			return fmt.Errorf("sign in before smoke signup: %w", err)
+		}
+		if err == nil {
+			if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
+				return fmt.Errorf("sign in response = %T, want signup required", response)
+			}
+		}
+
+		response, err = signUpUsername(ctx, apiClient, username, codeHash, "Moderation", "Smoke")
+		if err != nil {
+			return fmt.Errorf("sign up smoke guest: %w", err)
+		}
+		authorization, ok := response.(*tg.AuthAuthorization)
+		if !ok {
+			return fmt.Errorf("signup response = %T, want authorization", response)
+		}
+		user, ok := authorization.User.(*tg.User)
+		if !ok || user.ID <= 0 {
+			return fmt.Errorf("signup user = %T, want persisted user", authorization.User)
+		}
+
+		if _, err := apiClient.UsersGetFullUser(ctx, &tg.InputUserSelf{}); err == nil {
+			return errors.New("profile lookup before password setup succeeded, want AUTH_KEY_UNREGISTERED")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			return fmt.Errorf("profile lookup before password setup = %w, want AUTH_KEY_UNREGISTERED", err)
+		}
+		passwordState, err := apiClient.AccountGetPassword(ctx)
+		if err != nil {
+			return fmt.Errorf("read smoke guest password settings: %w", err)
+		}
+		if passwordState.HasPassword {
+			return errors.New("new smoke guest unexpectedly has a password")
+		}
+		verifier, salt1, salt2, err := testComputeSRPVerifier([]byte(password))
+		if err != nil {
+			return fmt.Errorf("prepare smoke guest password: %w", err)
+		}
+		_, err = apiClient.AccountUpdatePasswordSettings(ctx, &tg.AccountUpdatePasswordSettingsRequest{
+			Password: &tg.InputCheckPasswordEmpty{},
+			NewSettings: tg.AccountPasswordInputSettings{
+				NewAlgo: &tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow{
+					Salt1: salt1,
+					Salt2: salt2,
+				},
+				NewPasswordHash: verifier,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("set smoke guest password: %w", err)
+		}
+
+		full, err := apiClient.UsersGetFullUser(ctx, &tg.InputUserSelf{})
+		if err != nil {
+			return fmt.Errorf("inspect smoke guest after password setup: %w", err)
+		}
+		if len(full.Users) != 1 {
+			return fmt.Errorf("smoke guest profile count = %d, want 1", len(full.Users))
+		}
+		profile, ok := full.Users[0].(*tg.User)
+		if !ok || profile.ID != user.ID || profile.Bot || !strings.EqualFold(profile.Username, username) {
+			return fmt.Errorf("smoke guest profile = %#v, want ordinary user %d with username %q", full.Users[0], user.ID, username)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("real MTProto moderation smoke signup: %v", err)
+	}
+}

@@ -283,17 +283,26 @@ func restoreModerationSmokeGuestMembership(ctx context.Context, api *tg.Client, 
 type moderationSmokeSignupAPI interface {
 	authSendCodeAPI
 	AuthSignUp(context.Context, *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error)
+}
+
+type moderationSmokeProfileAPI interface {
 	UsersGetFullUser(context.Context, tg.InputUserClass) (*tg.UsersUserFull, error)
 }
 
-func prepareModerationSmokeGuest(ctx context.Context, api moderationSmokeSignupAPI) error {
+type moderationSmokeGuestAPI interface {
+	moderationSmokeSignupAPI
+	moderationSmokeProfileAPI
+	passwordSetupAPI
+}
+
+func prepareModerationSmokeGuest(ctx context.Context, api moderationSmokeSignupAPI) (*tg.User, error) {
 	sent, err := sendAuthCode(ctx, api, moderationSmokeShortUsername)
 	if err != nil {
-		return fmt.Errorf("request General moderation smoke guest sign-up code: %w", err)
+		return nil, fmt.Errorf("request General moderation smoke guest sign-up code: %w", err)
 	}
 	sentCode, ok := sent.(*tg.AuthSentCode)
 	if !ok || sentCode.PhoneCodeHash == "" {
-		return fmt.Errorf("unexpected General moderation smoke sign-up code response %T", sent)
+		return nil, fmt.Errorf("unexpected General moderation smoke sign-up code response %T", sent)
 	}
 	authorization, err := api.AuthSignUp(ctx, &tg.AuthSignUpRequest{
 		PhoneNumber:   moderationSmokeShortUsername,
@@ -302,16 +311,20 @@ func prepareModerationSmokeGuest(ctx context.Context, api moderationSmokeSignupA
 		LastName:      "Smoke",
 	})
 	if err != nil {
-		return fmt.Errorf("create General moderation smoke guest through auth.signUp: %w", err)
+		return nil, fmt.Errorf("create General moderation smoke guest through auth.signUp: %w", err)
 	}
 	result, ok := authorization.(*tg.AuthAuthorization)
 	if !ok {
-		return fmt.Errorf("unexpected General moderation smoke sign-up response %T", authorization)
+		return nil, fmt.Errorf("unexpected General moderation smoke sign-up response %T", authorization)
 	}
 	user, ok := result.User.(*tg.User)
 	if !ok || user.ID <= 0 || user.Bot {
-		return errors.New("auth.signUp did not create an ordinary General moderation smoke guest")
+		return nil, errors.New("auth.signUp did not create an ordinary General moderation smoke guest")
 	}
+	return user, nil
+}
+
+func verifyModerationSmokeGuestProfile(ctx context.Context, api moderationSmokeProfileAPI, userID int64) error {
 	full, err := api.UsersGetFullUser(ctx, &tg.InputUserSelf{})
 	if err != nil {
 		return fmt.Errorf("inspect new General moderation smoke guest: %w", err)
@@ -320,10 +333,21 @@ func prepareModerationSmokeGuest(ctx context.Context, api moderationSmokeSignupA
 		return fmt.Errorf("demo General moderation smoke guest profile count = %d, want 1", len(full.Users))
 	}
 	profile, ok := full.Users[0].(*tg.User)
-	if !ok || profile.ID != user.ID || profile.Bot || !strings.EqualFold(profile.Username, moderationSmokeShortUsername) {
+	if !ok || profile.ID != userID || profile.Bot || !strings.EqualFold(profile.Username, moderationSmokeShortUsername) {
 		return errors.New("auth.signUp did not create the expected short-handle ordinary guest")
 	}
 	return nil
+}
+
+func signUpModerationSmokeGuest(ctx context.Context, api moderationSmokeGuestAPI, password string) error {
+	user, err := prepareModerationSmokeGuest(ctx, api)
+	if err != nil {
+		return err
+	}
+	if err := setNewPassword(ctx, api, password); err != nil {
+		return fmt.Errorf("secure General moderation smoke guest: %w", err)
+	}
+	return verifyModerationSmokeGuestProfile(ctx, api, user.ID)
 }
 
 func createModerationSmokeGuest(ctx context.Context, cfg apiConfig, endpoint string) error {
@@ -332,18 +356,11 @@ func createModerationSmokeGuest(ctx context.Context, cfg apiConfig, endpoint str
 		return err
 	}
 	return runTelegramClient(ctx, clientOptions, func(runCtx context.Context, client *telegram.Client) error {
-		api := client.API()
-		if err := prepareModerationSmokeGuest(runCtx, api); err != nil {
-			return err
-		}
 		password, err := randomPassword()
 		if err != nil {
 			return fmt.Errorf("generate General moderation smoke guest password: %w", err)
 		}
-		if err := setNewPassword(runCtx, api, password); err != nil {
-			return fmt.Errorf("secure General moderation smoke guest: %w", err)
-		}
-		return nil
+		return signUpModerationSmokeGuest(runCtx, client.API(), password)
 	})
 }
 

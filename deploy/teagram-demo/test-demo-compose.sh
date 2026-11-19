@@ -283,13 +283,23 @@ for expected in (
     '--prepare-general-moderation-smoke',
     '--verify-general-moderation-smoke',
     '--cleanup-general-moderation-smoke',
-    '--verify-turnstile --endpoint haproxy:2443',
-    'TG_TURNSTILE_SIGNIN_ENABLED=true',
+    'PRODUCTION_TURNSTILE_SIGNIN_ENABLED',
+    'if length == 1 and (.[0] == "true" or .[0] == "false")',
+    'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]',
+    'TG_TURNSTILE_SIGNIN_ENABLED=false',
     'TG_CLIENT_ADDR_TRUST=proxy-v2',
     'if trust=$(docker inspect "$server_id" | jq -er',
 ):
     if expected not in smoke:
         raise SystemExit(f"test-general-moderation-compose.sh: missing production moderation smoke step: {expected}")
+if 'TG_TURNSTILE_SIGNIN_ENABLED=true' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: must preserve either configured sign-in Turnstile value")
+for required_route in (
+    '--verify-general-moderation-smoke',
+    '--cleanup-general-moderation-smoke',
+):
+    if required_route not in smoke or '--endpoint haproxy:2443' not in smoke:
+        raise SystemExit("test-general-moderation-compose.sh: moderation verification and cleanup must use HAProxy")
 if 'MODERATION_ARGS_FILE' in smoke or 'moderate-general.sh" ban-user ab' not in smoke:
     raise SystemExit("test-general-moderation-compose.sh: must invoke the actual moderation wrapper")
 wipe_call = '"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"'

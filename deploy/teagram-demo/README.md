@@ -662,10 +662,13 @@ it before the public edge starts.
 Before reopening the public edge, the weekly wipe also runs
 `test-general-moderation-compose.sh`. It prepares a temporary short-handle
 session and post on the private seed endpoint, then recreates the active server
-with production sign-in Turnstile enabled and runs both moderation commands
-through HAProxy. The test verifies the post is gone and the banned guest cannot
-rejoin, then restores the seeded guest username and removes the temporary
-session before edge startup.
+with the sign-in Turnstile value already configured in `.env` and runs both
+moderation commands through HAProxy. The smoke works with sign-in Turnstile
+enabled or disabled because its sessions are established on the private seed
+listener first. When the configured gate is enabled, the separate Turnstile
+probe also runs through HAProxy. The test verifies the post is gone and the
+banned guest cannot rejoin, then removes the temporary post and session before
+edge startup.
 
 ## Scheduled activity
 

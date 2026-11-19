@@ -11,6 +11,8 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+
+	"github.com/teagramhq/teagram-server/internal/srp"
 )
 
 func TestModerationSmokeDoesNotChangeUsername(t *testing.T) {
@@ -32,12 +34,59 @@ func TestModerationSmokeDoesNotChangeUsername(t *testing.T) {
 	})
 }
 
+func TestModerationSmokeSetsPasswordBeforeProfileLookup(t *testing.T) {
+	fset := token.NewFileSet()
+	source, err := parser.ParseFile(fset, "general_chat_moderation_smoke.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse moderation smoke implementation: %v", err)
+	}
+	var signup *ast.FuncDecl
+	for _, declaration := range source.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "signUpModerationSmokeGuest" {
+			signup = function
+			break
+		}
+	}
+	if signup == nil {
+		t.Fatal("signUpModerationSmokeGuest was not found")
+	}
+	var preparationCall, passwordCall, profileCall token.Pos
+	ast.Inspect(signup.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch name.Name {
+		case "prepareModerationSmokeGuest":
+			preparationCall = call.Pos()
+		case "setNewPassword":
+			passwordCall = call.Pos()
+		case "verifyModerationSmokeGuestProfile":
+			profileCall = call.Pos()
+		}
+		return true
+	})
+	if preparationCall == token.NoPos || passwordCall == token.NoPos || profileCall == token.NoPos ||
+		preparationCall >= passwordCall || passwordCall >= profileCall {
+		t.Fatalf("signup calls at %s, password setup at %s, and profile lookup at %s must be ordered", fset.Position(preparationCall), fset.Position(passwordCall), fset.Position(profileCall))
+	}
+}
+
 func TestPrepareModerationSmokeGuestSignsUpWithShortUsername(t *testing.T) {
 	api := &fakeModerationSmokeSignupAPI{}
-	if err := prepareModerationSmokeGuest(context.Background(), api); err != nil {
+	user, err := prepareModerationSmokeGuest(context.Background(), api)
+	if err != nil {
 		t.Fatalf("sign up moderation smoke guest: %v", err)
 	}
-	if got, want := fmt.Sprint(api.calls), "[send-code sign-up get-full-user]"; got != want {
+	if user.ID != 42 {
+		t.Fatalf("sign-up user ID = %d, want 42", user.ID)
+	}
+	if got, want := fmt.Sprint(api.calls), "[send-code sign-up]"; got != want {
 		t.Fatalf("moderation smoke guest RPCs = %s, want %s", got, want)
 	}
 	if api.sendCodeRequest == nil || api.sendCodeRequest.PhoneNumber != moderationSmokeShortUsername {
@@ -54,10 +103,24 @@ func TestPrepareModerationSmokeGuestSignsUpWithShortUsername(t *testing.T) {
 	}
 }
 
+func TestSignUpModerationSmokeGuestSetsPasswordBeforeProfileLookup(t *testing.T) {
+	api := &fakeModerationSmokeSignupAPI{}
+	if err := signUpModerationSmokeGuest(context.Background(), api, "test-password"); err != nil {
+		t.Fatalf("sign up moderation smoke guest: %v", err)
+	}
+	if got, want := fmt.Sprint(api.calls), "[send-code sign-up get-password set-password get-full-user]"; got != want {
+		t.Fatalf("moderation smoke guest RPCs = %s, want %s", got, want)
+	}
+	if api.passwordRequest == nil || len(api.passwordRequest.NewSettings.NewPasswordHash) == 0 {
+		t.Fatal("password setup did not submit a generated password hash")
+	}
+}
+
 type fakeModerationSmokeSignupAPI struct {
 	calls           []string
 	sendCodeRequest *tg.AuthSendCodeRequest
 	signUpRequest   *tg.AuthSignUpRequest
+	passwordRequest *tg.AccountUpdatePasswordSettingsRequest
 }
 
 func (api *fakeModerationSmokeSignupAPI) AuthSendCode(_ context.Context, request *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error) {
@@ -70,6 +133,24 @@ func (api *fakeModerationSmokeSignupAPI) AuthSignUp(_ context.Context, request *
 	api.calls = append(api.calls, "sign-up")
 	api.signUpRequest = request
 	return &tg.AuthAuthorization{User: &tg.User{ID: 42}}, nil
+}
+
+func (api *fakeModerationSmokeSignupAPI) AccountGetPassword(context.Context) (*tg.AccountPassword, error) {
+	api.calls = append(api.calls, "get-password")
+	return &tg.AccountPassword{
+		NewAlgo: &tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow{
+			Salt1: []byte("initial-salt"),
+			Salt2: []byte("server-salt"),
+			G:     3,
+			P:     srp.PBytes(),
+		},
+	}, nil
+}
+
+func (api *fakeModerationSmokeSignupAPI) AccountUpdatePasswordSettings(_ context.Context, request *tg.AccountUpdatePasswordSettingsRequest) (bool, error) {
+	api.calls = append(api.calls, "set-password")
+	api.passwordRequest = request
+	return true, nil
 }
 
 func (api *fakeModerationSmokeSignupAPI) UsersGetFullUser(_ context.Context, _ tg.InputUserClass) (*tg.UsersUserFull, error) {

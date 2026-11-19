@@ -72,19 +72,28 @@ MODERATION_SMOKE_MESSAGE_ID=${message_ids[0]}
   demo_fail 'private preparation did not persist a root-only short-handle guest session'
 
 # Recreate the active server from the production Compose profile before either
-# moderation command. The seed-owner and guest sessions already exist, so the
-# sign-in Turnstile gate is exercised without a challenge bypass.
+# moderation command. Both sessions were established by the private seed pass;
+# the moderation flow must keep working with the configured sign-in gate value.
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 mapfile -t production_ids < <(demo_compose ps --status running -q "$ACTIVE_SERVER")
 ((${#production_ids[@]} == 1)) || demo_fail 'production moderation smoke requires one active server'
-docker inspect "${production_ids[0]}" | jq -e '
+if ! PRODUCTION_TURNSTILE_SIGNIN_ENABLED=$(docker inspect "${production_ids[0]}" | jq -er '
+  .[0].Config.Env
+  | map(select(startswith("TG_TURNSTILE_SIGNIN_ENABLED=")) | split("=")[1])
+  | if length == 1 and (.[0] == "true" or .[0] == "false") then .[0] else error("invalid sign-in Turnstile setting") end
+'); then
+  demo_fail 'production sign-in Turnstile setting is missing or invalid'
+fi
+docker inspect "${production_ids[0]}" | jq -e --arg signinEnabled "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" '
   .[0].Config.Env as $env
   | ($env | any(. == "TG_CLIENT_ADDR_TRUST=proxy-v2"))
-    and ($env | any(. == "TG_TURNSTILE_SIGNIN_ENABLED=true"))
+    and ($env | any(. == ("TG_TURNSTILE_SIGNIN_ENABLED=" + $signinEnabled)))
     and ($env | any(. == "TG_DEMO_GENERAL_CHAT_ENABLED=true"))
-' >/dev/null || demo_fail 'production moderation smoke requires sign-in Turnstile and PROXY-v2'
+' >/dev/null || demo_fail 'production moderation smoke requires the configured sign-in gate and PROXY-v2'
 [[ -n "$(demo_compose ps --status running -q haproxy)" ]] || demo_fail 'production HAProxy is not running'
-"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]; then
+  "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+fi
 
 "$SCRIPT_DIR/moderate-general.sh" delete-message "$MODERATION_SMOKE_MESSAGE_ID"
 "$SCRIPT_DIR/moderate-general.sh" ban-user ab
