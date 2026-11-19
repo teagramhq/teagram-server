@@ -46,6 +46,15 @@ go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisab
   fi
 )
 
+(
+  demo_seed_compose_input() {
+    printf '%s\n' "$@"
+  }
+  mapfile -t actual < <(demo_seed_owner_admin_command teagramd create-user --username demo_seed_owner)
+  expected=(exec -T --user 0:65532 teagramd /usr/local/bin/teagramd admin create-user --username demo_seed_owner)
+  [[ "${actual[*]}" == "${expected[*]}" ]]
+)
+
 python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
 import sys
 from pathlib import Path
@@ -343,6 +352,8 @@ if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(w
 for expected in (
     'run_signin_mode false',
     'run_signin_mode true',
+    '--profile maintenance run --rm --no-deps teagramd-maintenance',
+    '--profile maintenance run --rm --no-deps --user 0:65532',
     'test-general-moderation-compose.sh',
     'general moderation smoke verified deleted post and refused banned guest rejoin',
     'general moderation smoke post removed and guest membership restored',

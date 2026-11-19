@@ -1204,6 +1204,13 @@ demo_prepare_seed_owner_session() {
   fi
 }
 
+demo_seed_owner_admin_command() {
+  local active_server="$1"
+  shift
+  demo_seed_compose_input exec -T --user 0:65532 "$active_server" \
+    /usr/local/bin/teagramd admin "$@"
+}
+
 demo_prepare_seed_owner() {
   local work_dir="$1" temporary marker_temporary session_temporary active_server
   active_server=$(demo_active_server)
@@ -1258,8 +1265,8 @@ demo_prepare_seed_owner() {
   grep -Eq '^[0-9a-f]{64}$' "$DEMO_SEED_PASSWORD_FILE" ||
     demo_fail 'generated seed-owner password is invalid'
 
-  if ! demo_seed_compose_input exec -T --user 0:65532 "$active_server" \
-    /usr/local/bin/teagramd admin create-user --username "$DEMO_SEED_OWNER_USERNAME" \
+  if ! demo_seed_owner_admin_command "$active_server" create-user \
+    --username "$DEMO_SEED_OWNER_USERNAME" \
     < "$DEMO_SEED_PASSWORD_FILE" \
     > "$work_dir/seed-owner-create.stdout" \
     2> "$work_dir/seed-owner-create.stderr"; then

@@ -34,6 +34,7 @@ SECRET_ROOT_CREATED=0
 ACTIVE_FIXTURE=
 ACTIVE_PROJECT=
 ACTIVE_BLOB_PATH=
+ACTIVE_STAGE=
 
 cleanup() {
   local rc=$? fixture_script
@@ -45,6 +46,12 @@ cleanup() {
       # shellcheck source=deploy/teagram-demo/demo-common.sh
       source "$SCRIPT_DIR/demo-common.sh"
       export TEAGRAM_DEMO_BLOB_PATH="$ACTIVE_BLOB_PATH"
+      if ((rc != 0)); then
+        printf 'isolated moderation Compose failed during %s (exit %s)\n' \
+          "${ACTIVE_STAGE:-unknown stage}" "$rc" >&2
+        demo_compose ps -a >&2 || true
+        demo_compose logs --no-color --tail 80 postgres teagramd migrate haproxy >&2 || true
+      fi
       if ! demo_compose down --volumes --remove-orphans; then
         rc=1
       fi
@@ -112,6 +119,7 @@ run_signin_mode() {
   local signin_enabled="$1" fixture="$TMP_DIR/checkout-$1" seed_dir owner_password
   local client_config seed_output smoke_output
   [[ "$signin_enabled" == true || "$signin_enabled" == false ]] || return 2
+  ACTIVE_STAGE="configure sign-in mode $signin_enabled"
   ACTIVE_FIXTURE="$fixture"
   ACTIVE_PROJECT="teagram-demo-moderation-${signin_enabled}-$$"
   copy_fixture_checkout "$fixture" "$ACTIVE_PROJECT"
@@ -153,12 +161,22 @@ ENV
   # shellcheck source=deploy/teagram-demo/demo-common.sh
   source "$seed_dir/demo-common.sh"
   demo_require_env
+  ACTIVE_STAGE="start private server with sign-in mode $signin_enabled"
   demo_seed_compose up -d --wait --wait-timeout 120 teagramd
+  ACTIVE_STAGE="generate client config with sign-in mode $signin_enabled"
   demo_prepare_client_config_dir
   client_config="$TMP_DIR/client-$signin_enabled.json"
-  demo_server_client_config teagramd > "$client_config"
+  demo_compose --profile maintenance run --rm --no-deps teagramd-maintenance \
+    client-config > "$client_config"
   install -o root -g root -m 0644 "$client_config" "$DEMO_CLIENT_CONFIG"
+  demo_seed_owner_admin_command() {
+    shift
+    demo_compose --profile maintenance run --rm --no-deps --user 0:65532 \
+      teagramd-maintenance admin "$@"
+  }
+  ACTIVE_STAGE="create seed owner with sign-in mode $signin_enabled"
   demo_prepare_seed_owner "$TMP_DIR"
+  ACTIVE_STAGE="seed demo accounts with sign-in mode $signin_enabled"
   seed_output=$("$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
     --owner-username demo_seed_owner --owner-password-file "$SHARED_SECRET_ROOT/secrets/seed-owner-password")
   [[ "$seed_output" == *'demo seed verified'* ]] || {
@@ -168,6 +186,7 @@ ENV
   demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
     -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
   demo_prepare_haproxy_runtime
+  ACTIVE_STAGE="moderation smoke with sign-in mode $signin_enabled"
   smoke_output=$("$seed_dir/test-general-moderation-compose.sh" \
     teagramd:2443 "$(openssl rand -hex 16)")
   for evidence in \
@@ -183,11 +202,13 @@ ENV
     printf 'moderation cleanup retained its guest session in sign-in mode %s\n' "$signin_enabled" >&2
     return 1
   }
+  ACTIVE_STAGE="clean isolated Compose project with sign-in mode $signin_enabled"
   printf '%s\n' "$smoke_output"
   demo_compose down --volumes --remove-orphans
   ACTIVE_FIXTURE=
   ACTIVE_PROJECT=
   ACTIVE_BLOB_PATH=
+  ACTIVE_STAGE=
   rm -f -- \
     "$SHARED_SECRET_ROOT/secrets/seed-owner-password" \
     "$SHARED_SECRET_ROOT/secrets/seed-owner.session" \
