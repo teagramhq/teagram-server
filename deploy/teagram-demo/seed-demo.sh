@@ -23,7 +23,7 @@ Usage:
   seed-demo.sh --check
   seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
-  seed-demo.sh --verify-turnstile [--expect-signin-enabled=true|false] --endpoint haproxy:2443
+  seed-demo.sh --verify-turnstile [--expect-signin-enabled true|false] --endpoint haproxy:2443
   seed-demo.sh --moderate-delete-message --message-id ID [--endpoint haproxy:2443]
   seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint haproxy:2443]
   seed-demo.sh --prepare-general-moderation-smoke --moderation-smoke-marker HEX [--endpoint teagramd:2443|teagramd-next:2443]

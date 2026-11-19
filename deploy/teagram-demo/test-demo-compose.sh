@@ -21,6 +21,36 @@ if " ".join(probe.split()) not in normalized_smoke:
 if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
     raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must not depend on sign-in state")
 PY
+
+python3 - "$SCRIPT_DIR/seed-demo.sh" "$SCRIPT_DIR/README.md" \
+  "$SCRIPT_DIR/test-seed-compose.sh" "$SCRIPT_DIR/test-general-moderation-isolated-compose.sh" <<'PY'
+import sys
+from pathlib import Path
+
+wrapper = Path(sys.argv[1]).read_text(encoding="utf-8")
+readme = Path(sys.argv[2]).read_text(encoding="utf-8")
+seed_test = Path(sys.argv[3]).read_text(encoding="utf-8")
+isolated = Path(sys.argv[4]).read_text(encoding="utf-8")
+
+if "seed-demo.sh --verify-turnstile [--expect-signin-enabled true|false]" not in wrapper:
+    raise SystemExit("seed-demo.sh: help must show the separate-token Turnstile override syntax")
+if "--expect-signin-enabled=true|false" in wrapper:
+    raise SystemExit("seed-demo.sh: help must not document an unsupported inline Turnstile override")
+if "seed-demo.sh --verify-turnstile --endpoint haproxy:2443" not in readme:
+    raise SystemExit("README.md: Turnstile probe must follow the configured sign-in mode")
+if "--expect-signin-enabled=false" in readme:
+    raise SystemExit("README.md: Turnstile probe must not pass an unsupported inline override")
+
+if "assert_general_chat_owner" not in seed_test:
+    raise SystemExit("test-seed-compose.sh: convergence must count persisted General channels and their seed owner")
+if "assert_general_chat_owner" not in isolated or "general_chat_enabled=false" not in isolated:
+    raise SystemExit("isolated Compose test must verify flag-off and seed-owned General state")
+if '"$seed_dir/test-seed-compose.sh"' not in isolated:
+    raise SystemExit("isolated Compose test must exercise init, reseed, and restart convergence")
+if "demo_compose down --volumes --remove-orphans" not in isolated:
+    raise SystemExit("isolated Compose test must cover a fresh database reset")
+PY
+
 go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisabled$' -count=1
 
 (

@@ -122,7 +122,7 @@ PY
 
 run_signin_mode() {
   local signin_enabled="$1" fixture="$TMP_DIR/checkout-$1" seed_dir owner_password
-  local client_config seed_output smoke_output
+  local client_config seed_output smoke_output general_chat_enabled
   [[ "$signin_enabled" == true || "$signin_enabled" == false ]] || return 2
   ACTIVE_STAGE="configure sign-in mode $signin_enabled"
   ACTIVE_FIXTURE="$fixture"
@@ -131,6 +131,10 @@ run_signin_mode() {
   ACTIVE_BLOB_PATH="$fixture/blob-data"
   seed_dir="$fixture/deploy/teagram-demo"
   owner_password=$(openssl rand -hex 32)
+  general_chat_enabled=true
+  if [[ "$signin_enabled" == false ]]; then
+    general_chat_enabled=false
+  fi
   install -d -o root -g root -m 0700 "$SHARED_SECRET_ROOT/secrets/demo-accounts"
   install -d -o root -g root -m 0755 "$fixture/blob-data"
   cat > "$seed_dir/.env" <<ENV
@@ -139,7 +143,7 @@ TG_AUTHKEY_ENC_KEY=$(openssl rand -hex 32)
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
-TG_DEMO_GENERAL_CHAT_ENABLED=true
+TG_DEMO_GENERAL_CHAT_ENABLED=$general_chat_enabled
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_WEBSOCKET_BROWSER_ONLY=true
@@ -184,6 +188,19 @@ ENV
   }
   ACTIVE_STAGE="create seed owner with sign-in mode $signin_enabled"
   demo_prepare_seed_owner "$TMP_DIR"
+  if [[ "$general_chat_enabled" == false ]]; then
+    ACTIVE_STAGE="seed with General disabled"
+    seed_output=$("$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
+      --owner-username demo_seed_owner --owner-password-file "$SHARED_SECRET_ROOT/secrets/seed-owner-password")
+    [[ "$seed_output" == *'general_chat=0'* ]] || {
+      printf 'flag-off seed unexpectedly reported a General group\n' >&2
+      return 1
+    }
+    assert_general_chat_owner 0 0
+    sed -i 's/^TG_DEMO_GENERAL_CHAT_ENABLED=false$/TG_DEMO_GENERAL_CHAT_ENABLED=true/' "$seed_dir/.env"
+    ACTIVE_STAGE="enable General and restart the private server"
+    demo_seed_compose up -d --force-recreate --wait --wait-timeout 120 teagramd
+  fi
   ACTIVE_STAGE="seed demo accounts with sign-in mode $signin_enabled"
   seed_output=$("$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
     --owner-username demo_seed_owner --owner-password-file "$SHARED_SECRET_ROOT/secrets/seed-owner-password")
@@ -191,6 +208,36 @@ ENV
     printf 'private demo seed did not complete in sign-in mode %s\n' "$signin_enabled" >&2
     return 1
   }
+  assert_general_chat_owner 1 1
+  if [[ "$signin_enabled" == false ]]; then
+    ACTIVE_STAGE="verify General convergence after init, reseed, and restart"
+    "$seed_dir/test-seed-compose.sh"
+    assert_general_chat_owner 1 1
+
+    ACTIVE_STAGE="reset isolated database and reseed General"
+    demo_compose down --volumes --remove-orphans
+    rm -rf -- "$ACTIVE_BLOB_PATH"
+    install -d -o root -g root -m 0755 "$ACTIVE_BLOB_PATH"
+    demo_reset_seed_owner_marker
+    rm -f -- "$SHARED_SECRET_ROOT/secrets/demo-accounts/inventory.json"
+    demo_compose --profile maintenance run --rm --no-deps teagramd-maintenance \
+      bootstrap-identity >/dev/null
+    demo_seed_compose up -d --wait --wait-timeout 120 teagramd
+    demo_prepare_client_config_dir
+    client_config="$TMP_DIR/client-reset-$signin_enabled.json"
+    demo_compose --profile maintenance run --rm --no-deps teagramd-maintenance \
+      client-config > "$client_config"
+    install -o root -g root -m 0644 "$client_config" "$DEMO_CLIENT_CONFIG"
+    demo_prepare_seed_owner "$TMP_DIR"
+    ACTIVE_STAGE="seed demo accounts after database reset"
+    seed_output=$("$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
+      --owner-username demo_seed_owner --owner-password-file "$SHARED_SECRET_ROOT/secrets/seed-owner-password")
+    [[ "$seed_output" == *'general_chat=1'* ]] || {
+      printf 'database-reset seed did not report General enabled\n' >&2
+      return 1
+    }
+    assert_general_chat_owner 1 1
+  fi
   demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
     -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
   demo_prepare_haproxy_runtime
@@ -223,6 +270,17 @@ ENV
     "$SHARED_SECRET_ROOT/secrets/seed-owner-created" \
     "$SHARED_SECRET_ROOT/secrets/demo-accounts/inventory.json"
   rmdir -- "$SHARED_SECRET_ROOT/secrets/demo-accounts"
+}
+
+assert_general_chat_owner() {
+  local expected_groups="$1" expected_owner_groups="$2" actual
+  actual=$(demo_compose exec -T postgres psql -Atq -v ON_ERROR_STOP=1 -U postgres -d teagram \
+    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE owner.username = 'demo_seed_owner')::text FROM channels c JOIN users owner ON owner.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup")
+  [[ "$actual" == "$expected_groups|$expected_owner_groups" ]] || {
+    printf 'expected %s General groups with %s owned by demo_seed_owner; got %s\n' \
+      "$expected_groups" "$expected_owner_groups" "$actual" >&2
+    return 1
+  }
 }
 
 run_signin_mode false
