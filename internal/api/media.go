@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"sort"
 	"strings"
@@ -340,6 +342,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	var stickerInput *tg.InputDocument
 	var stickerDocumentID int64
+	var stickerIdentity string
 	if isSticker {
 		if stickerMedia == nil || !stickerMedia.Flags.Zero() || stickerMedia.Spoiler ||
 			stickerMedia.VideoCover != nil || stickerMedia.VideoTimestamp != 0 || stickerMedia.TTLSeconds != 0 || stickerMedia.Query != "" {
@@ -351,6 +354,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 		stickerDocumentID = stickerInput.ID
+		stickerIdentity = fmt.Sprintf("sticker:%d", stickerDocumentID)
 	}
 	// A channel post carries a photo or a poll and nothing else. Polls use the
 	// shared channel-message store path below and never fall through to owner
@@ -614,6 +618,18 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
 		return nil, nil, nil, err
 	}
+	demoGeneralChat := false
+	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
+	if peerType == store.PeerTypeChannel {
+		var err error
+		demoGeneralChat, err = h.checkDemoGeneralChatMessages(r, toID, []string{req.Message}, 1, errMediaCaptionTooLong, stickerIdentity)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if demoGeneralChat {
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, []string{req.Message}, 1, stickerIdentity)
+		}
+	}
 	duplicate := false
 	if peerType == store.PeerTypeChat {
 		duplicate, err = h.store.CheckChatWritePermission(r.Ctx, toID, r.UserID, req.RandomID, mediaRights)
@@ -637,7 +653,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// post transaction repeats every one of these decisions under that lock and
 	// is the authority; this only declines the work.
 	if peerType == store.PeerTypeChannel {
-		if err = h.store.CheckChannelPhotoPostPermission(r.Ctx, toID, r.UserID, mediaRights); err != nil {
+		checkPermission := h.store.CheckChannelPhotoPostPermission
+		if demoGeneralChat {
+			checkPermission = h.store.CheckDemoGeneralChannelMediaPostPermission
+		}
+		if err = checkPermission(r.Ctx, toID, r.UserID, mediaRights); err != nil {
 			if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 				return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 			}
@@ -681,11 +701,21 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 	}
+	if demoGeneralChat && !isSticker {
+		if err := h.checkDemoGeneralChatRateLimitBudgets(r, []string{req.Message}, 1); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	if !existing && !isSticker {
 		var file store.File
 		var aerr error
+		var photoDigest string
 		if isPhoto {
-			file, aerr = h.assemblePhotoFile(r.Ctx, r.UserID, clientFileID, parts, name, photoChecksum)
+			if demoGeneralChat {
+				file, photoDigest, aerr = h.assemblePhotoFileWithIdentity(r.Ctx, r.UserID, clientFileID, parts, name, photoChecksum)
+			} else {
+				file, aerr = h.assemblePhotoFile(r.Ctx, r.UserID, clientFileID, parts, name, photoChecksum)
+			}
 		} else {
 			file, aerr = h.assembleFile(r.Ctx, r.UserID, clientFileID, parts, name, documentMedia.MimeType, documentSubtypeRights(documentMedia.Attributes))
 		}
@@ -693,6 +723,14 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, aerr
 		}
 		fileID = file.ID
+		if demoGeneralChat && isPhoto {
+			photoIdentity := "photo:" + photoDigest
+			if err := h.checkDemoGeneralChatRateLimitBudgets(r, nil, 0, photoIdentity); err != nil {
+				h.discardDemoGeneralChatPhoto(r, fileID, demoGeneralChatRateLimitCharges)
+				return nil, nil, nil, err
+			}
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, []string{req.Message}, 1, photoIdentity)
+		}
 	}
 
 	if peerType == store.PeerTypeChat {
@@ -703,9 +741,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	if peerType == store.PeerTypeChannel {
 		if isSticker {
-			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities)
+			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities, demoGeneralChat, demoGeneralChatRateLimitCharges)
 		}
-		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities)
+		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities, demoGeneralChatRateLimitCharges)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -904,13 +942,18 @@ func (h *handlers) sendChatMedia(
 
 func (h *handlers) sendChannelSticker(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, stickerDocumentID, replyToMsgID int64,
-	entities []store.PollDescriptionEntity,
+	entities []store.PollDescriptionEntity, demoGeneralChat bool, rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelStickerAsWithEntities(
-		r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities,
-	)
+	postSticker := h.store.PostChannelStickerAsWithEntities
+	if demoGeneralChat {
+		postSticker = h.store.PostDemoGeneralChannelStickerAsWithEntities
+	}
+	message, pts, duplicate, err := postSticker(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return nil, nil, nil, mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
@@ -938,15 +981,21 @@ func (h *handlers) sendChannelSticker(
 // read-only precheck in handleSendMediaAfterReplyOnConn exists only to decline
 // assembly, so a ban or demotion winning while the upload was being assembled
 // is caught here and creates no post and no event. The file this call assembled
-// is then simply unreferenced — charged to the sender and reclaimable under the
-// accepted erasure policy, exactly as a refused basic-group send leaves it.
+// is unreferenced on refusal. General rate-limit and slow-mode refusals discard
+// it immediately when the erasure interlocks confirm it is safe; other refusals
+// leave it reclaimable under the existing erasure policy.
 func (h *handlers) sendChannelPhoto(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
-	entities []store.PollDescriptionEntity,
+	entities []store.PollDescriptionEntity, rateLimitCharges []store.RateLimitCharge,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities)
+	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities, rateLimitCharges...)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+		h.discardDemoGeneralChatPhoto(r, fileID, rateLimitCharges)
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		h.discardDemoGeneralChatPhoto(r, fileID, rateLimitCharges)
+		return nil, nil, nil, mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
@@ -981,6 +1030,17 @@ func (h *handlers) sendChannelPhoto(
 		h.notifyChannelPost(r.Ctx, channelID)
 	}
 	return h.channelPhotoSendResponse(r, req, channelID, message, pts)
+}
+
+func (h *handlers) discardDemoGeneralChatPhoto(r *mtproto.Request, fileID int64, rateLimitCharges []store.RateLimitCharge) {
+	if len(rateLimitCharges) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Ctx), demoGeneralChatCleanupTimeout)
+	defer cancel()
+	if err := h.store.DiscardUnreferencedFile(cleanupCtx, fileID); err != nil {
+		h.log.Error("discard refused demo General photo", "user_id", r.UserID, "file_id", fileID, "err", err)
+	}
 }
 
 // channelPhotoSendResponse builds the poster-side Updates for a channel photo
@@ -1203,6 +1263,12 @@ func (h *handlers) assemblePhotoFile(
 	return h.assemblePhotoFileWithGrantMode(ctx, userID, clientFileID, parts, name, checksum, false)
 }
 
+func (h *handlers) assemblePhotoFileWithIdentity(
+	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string,
+) (store.File, string, error) {
+	return h.assemblePhotoFileWithGrantModeAndIdentity(ctx, userID, clientFileID, parts, name, checksum, false, true)
+}
+
 func (h *handlers) assemblePhotoFileWithUploadGrant(
 	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string,
 ) (store.File, error) {
@@ -1212,12 +1278,19 @@ func (h *handlers) assemblePhotoFileWithUploadGrant(
 func (h *handlers) assemblePhotoFileWithGrantMode(
 	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string, createGrant bool,
 ) (store.File, error) {
+	file, _, err := h.assemblePhotoFileWithGrantModeAndIdentity(ctx, userID, clientFileID, parts, name, checksum, createGrant, false)
+	return file, err
+}
+
+func (h *handlers) assemblePhotoFileWithGrantModeAndIdentity(
+	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string, createGrant, captureIdentity bool,
+) (store.File, string, error) {
 	refs, total, err := h.uploadPartsForAssembly(ctx, userID, clientFileID, parts)
 	if err != nil {
-		return store.File{}, err
+		return store.File{}, "", err
 	}
 	if total > maxPhotoJPEGBytes {
-		return store.File{}, errMediaInvalid
+		return store.File{}, "", errMediaInvalid
 	}
 	var lease *photothumb.Lease
 	var capture *photothumb.InputCapture
@@ -1232,9 +1305,18 @@ func (h *handlers) assemblePhotoFileWithGrantMode(
 
 	var missingPartErr error
 	var derivativeCandidate bool
+	var contentDigest string
 	assemble := func(file store.File) (store.PhotoAssembly, error) {
 		reader := newPartsReader(ctx, h.store, refs, total)
-		dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
+		var dimensions photoDimensions
+		var written int64
+		var digest string
+		var assembleErr error
+		if captureIdentity || createGrant {
+			dimensions, written, digest, assembleErr = h.putAndValidateJPEGWithDigest(ctx, blob.Key(file.ID), reader, total, checksum, capture)
+		} else {
+			dimensions, written, assembleErr = h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
+		}
 		reader.stopAndWait()
 		if assembleErr != nil {
 			if lease != nil {
@@ -1255,8 +1337,15 @@ func (h *handlers) assemblePhotoFileWithGrantMode(
 			}
 			return store.PhotoAssembly{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
 		}
+		contentDigest = digest
 		// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
 		assembly := store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}} //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+		if digest != "" {
+			assembly.ContentSHA256, assembleErr = hex.DecodeString(digest)
+			if assembleErr != nil {
+				return store.PhotoAssembly{}, fmt.Errorf("decode photo SHA-256 digest: %w", assembleErr)
+			}
+		}
 		if lease != nil {
 			result, reason := lease.ProcessCaptured(ctx, capture, total, dimensions.width, dimensions.height)
 			if reason == photothumb.FailureNone {
@@ -1280,24 +1369,24 @@ func (h *handlers) assemblePhotoFileWithGrantMode(
 			ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes, assemble)
 	}
 	if errors.Is(err, store.ErrStorageQuota) {
-		return store.File{}, errFileQuota
+		return store.File{}, "", errFileQuota
 	}
 	if errors.Is(err, store.ErrUploadGrantLimit) {
-		return store.File{}, errStorageQuota
+		return store.File{}, "", errStorageQuota
 	}
 	if errors.Is(err, store.ErrInvalidPhotoDimensions) {
-		return store.File{}, errPhotoInvalidDimensions
+		return store.File{}, "", errPhotoInvalidDimensions
 	}
 	if err != nil {
 		if verdictErr := photoValidationRPCError(err); verdictErr != nil {
-			return store.File{}, verdictErr
+			return store.File{}, "", verdictErr
 		}
 		if missingPartErr != nil {
 			h.log.Error("assemble photo", "user_id", userID, "file_id", file.ID, "err", err, "part_read_err", missingPartErr)
-			return store.File{}, errMediaInvalid
+			return store.File{}, "", errMediaInvalid
 		}
 		h.log.Error("assemble photo", "user_id", userID, "file_id", file.ID, "err", err)
-		return store.File{}, errInternal
+		return store.File{}, "", errInternal
 	}
 	if derivativeCandidate && !derivativesStored && h.photoThumbs != nil {
 		h.photoThumbs.RecordFailure(photothumb.FailurePersistence)
@@ -1305,7 +1394,7 @@ func (h *handlers) assemblePhotoFileWithGrantMode(
 	if _, err = h.store.DeleteUploadParts(ctx, userID, clientFileID); err != nil {
 		h.log.Error("delete upload parts", "user_id", userID, "file_id", clientFileID, "err", err)
 	}
-	return file, nil
+	return file, contentDigest, nil
 }
 
 func photoValidationRPCError(err error) error {
@@ -1334,6 +1423,23 @@ func (r sizedPhotoReader) Size() int64 { return r.size }
 func (h *handlers) putAndValidateJPEG(
 	ctx context.Context, key string, source io.Reader, size int64, checksum string, capture *photothumb.InputCapture,
 ) (photoDimensions, int64, error) {
+	dimensions, written, _, err := h.putAndValidateJPEGInternal(ctx, key, source, size, checksum, capture, false)
+	return dimensions, written, err
+}
+
+func (h *handlers) putAndValidateJPEGWithDigest(
+	ctx context.Context, key string, source io.Reader, size int64, checksum string, capture *photothumb.InputCapture,
+) (photoDimensions, int64, string, error) {
+	return h.putAndValidateJPEGInternal(ctx, key, source, size, checksum, capture, true)
+}
+
+func (h *handlers) putAndValidateJPEGInternal(
+	ctx context.Context, key string, source io.Reader, size int64, checksum string, capture *photothumb.InputCapture, captureIdentity bool,
+) (photoDimensions, int64, string, error) {
+	var digest hash.Hash
+	if captureIdentity {
+		digest = sha256.New()
+	}
 	blobReader, blobWriter := io.Pipe()
 	validationReader, validationWriter := io.Pipe()
 	type putResult struct {
@@ -1366,10 +1472,14 @@ func (h *handlers) putAndValidateJPEG(
 		validationDone <- validationResult{dimensions: dimensions, err: err}
 	}()
 
-	destination := io.MultiWriter(blobWriter, validationWriter)
-	if capture != nil {
-		destination = io.MultiWriter(blobWriter, validationWriter, capture)
+	writers := []io.Writer{blobWriter, validationWriter}
+	if digest != nil {
+		writers = append(writers, digest)
 	}
+	if capture != nil {
+		writers = append(writers, capture)
+	}
+	destination := io.MultiWriter(writers...)
 	copied, copyErr := io.Copy(destination, source)
 	if copyErr != nil {
 		copyErr = errors.Join(copyErr, blobWriter.CloseWithError(copyErr))
@@ -1385,13 +1495,16 @@ func (h *handlers) putAndValidateJPEG(
 	put := <-putDone
 	validation := <-validationDone
 	if put.err != nil || copyErr != nil {
-		return photoDimensions{}, put.written, errors.Join(put.err, copyErr)
+		return photoDimensions{}, put.written, "", errors.Join(put.err, copyErr)
 	}
 	if copied != size || put.written != size {
-		return photoDimensions{}, put.written, invalidJPEG()
+		return photoDimensions{}, put.written, "", invalidJPEG()
 	}
 	if validation.err != nil {
-		return photoDimensions{}, put.written, validation.err
+		return photoDimensions{}, put.written, "", validation.err
 	}
-	return validation.dimensions, put.written, nil
+	if digest == nil {
+		return validation.dimensions, put.written, "", nil
+	}
+	return validation.dimensions, put.written, hex.EncodeToString(digest.Sum(nil)), nil
 }

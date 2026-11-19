@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -261,7 +262,8 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		return nil, errUsernameInvalid
 	}
 	username := strings.ToLower(req.PhoneNumber)
-	if isReservedAccountUsername(username) {
+	if isReservedAccountUsername(username) ||
+		(h.demoGeneralChatEnabled && demo.IsReservedGeneralChatUsername(username)) {
 		h.logSignUpRejection(signUpHandleInvalid)
 		return nil, errUsernameInvalid
 	}
@@ -318,6 +320,7 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		c.RecordAuthorizationBinding(user.ID)
 	}
 	h.joinWelcomeChannel(r.Ctx, user.ID)
+	h.joinDemoGeneralChat(r.Ctx, user.ID)
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
 }
 
@@ -350,6 +353,41 @@ func (h *handlers) joinWelcomeChannel(ctx context.Context, userID int64) {
 	if _, _, err := h.store.JoinChannelByUsername(ctx, channel.ID, userID); err != nil {
 		h.log.Warn("welcome channel auto-join failed", "handle", handle, "reason", "join failed", "err", err)
 	}
+}
+
+func (h *handlers) joinDemoGeneralChat(ctx context.Context, userID int64) {
+	if !h.demoGeneralChatEnabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, welcomeChannelJoinTimeout)
+	defer cancel()
+
+	owner, ownerFound, err := h.store.UsernameByHandle(ctx, demo.SeedOwnerUsername)
+	if err != nil {
+		h.log.Warn("demo General chat auto-join failed", "handle", demoGeneralChatUsername, "reason", "owner lookup failed", "err", err)
+		return
+	}
+	if !ownerFound || owner.Kind != store.UsernameKindUser || owner.User.ID <= 0 {
+		h.logDemoGeneralChatResolutionError("seed owner is missing", 0)
+		return
+	}
+	for _, handle := range demo.GeneralChatHandles() {
+		resolved, found, err := h.store.UsernameByHandle(ctx, handle)
+		if err != nil {
+			h.log.Warn("demo General chat auto-join failed", "handle", handle, "reason", "lookup failed", "err", err)
+			return
+		}
+		if !found || resolved.Kind != store.UsernameKindChannel || !resolved.Channel.Megagroup ||
+			resolved.Channel.Username == nil || *resolved.Channel.Username != handle ||
+			resolved.Channel.Title != "General" || resolved.Channel.CreatorID != owner.User.ID {
+			continue
+		}
+		if _, _, err := h.store.JoinChannelByUsername(ctx, resolved.Channel.ID, userID); err != nil {
+			h.log.Warn("demo General chat auto-join failed", "handle", handle, "reason", "join failed", "err", err)
+		}
+		return
+	}
+	h.logDemoGeneralChatResolutionError("no General supergroup is owned by the seed account", 0)
 }
 
 func (h *handlers) warnWelcomeChannel(handle, reason string) {

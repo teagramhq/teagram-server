@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -87,6 +88,14 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	for i, item := range items {
 		randomIDs[i] = item.RandomID
 	}
+	replayAfterRefusal := func(refusal error) (bin.Encoder, *replyUpdate, func(), error) {
+		if peerType == store.PeerTypeChannel {
+			if replay, ok := h.retryCommittedChannelAlbum(r, toID, randomIDs); ok {
+				return h.channelAlbumResponse(r, toID, replay)
+			}
+		}
+		return nil, nil, nil, refusal
+	}
 	// Dedup runs before any charge and before any grant is touched; the send
 	// transaction repeats it under its locks. A channel retry checks posting
 	// rights under the channel state lock first, as a channel photo retry does.
@@ -124,7 +133,32 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	}
 
 	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(items)); err != nil {
-		return nil, nil, nil, err
+		return replayAfterRefusal(err)
+	}
+	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
+	if peerType == store.PeerTypeChannel {
+		texts := make([]string, len(req.MultiMedia))
+		for i, item := range req.MultiMedia {
+			texts[i] = item.Message
+		}
+		var mediaIdentities []string
+		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong)
+		if err != nil {
+			return replayAfterRefusal(err)
+		}
+		if demoGeneralChat {
+			mediaIdentities, err = h.demoGeneralChatAlbumPhotoIdentities(r.Ctx, r.UserID, items)
+			if err != nil {
+				return replayAfterRefusal(err)
+			}
+			if err := h.preflightDemoGeneralChatRateLimits(r, nil, 0, mediaIdentities...); err != nil {
+				return replayAfterRefusal(err)
+			}
+			if err := h.checkDemoGeneralChatRateLimitBudgets(r, nil, 0, mediaIdentities...); err != nil {
+				return replayAfterRefusal(err)
+			}
+			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, texts, len(items), mediaIdentities...)
+		}
 	}
 	groupedID, err := newGroupedID()
 	if err != nil {
@@ -134,8 +168,11 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	album := store.AlbumSend{FromID: r.UserID, Items: items, GroupedID: groupedID, GrantTTL: h.uploadGrantTTL}
 
 	if peerType == store.PeerTypeChannel {
-		result, postErr := h.store.PostChannelAlbumAs(r.Ctx, toID, replyToMsgID, album)
+		result, postErr := h.store.PostChannelAlbumAs(r.Ctx, toID, replyToMsgID, album, demoGeneralChatRateLimitCharges...)
 		if postErr != nil {
+			if replay, ok := h.retryCommittedChannelAlbum(r, toID, randomIDs); ok {
+				return h.channelAlbumResponse(r, toID, replay)
+			}
 			return nil, nil, nil, h.channelAlbumError(r, toID, postErr)
 		}
 		if !result.Duplicate {
@@ -279,6 +316,37 @@ func albumItems(ctx context.Context, h *handlers, viewerID int64, multi []tg.Inp
 	return items, nil
 }
 
+func (h *handlers) retryCommittedChannelAlbum(
+	r *mtproto.Request, channelID int64, randomIDs []int64,
+) (store.ChannelAlbumResult, bool) {
+	replay, err := h.store.ChannelAlbumRetryAs(r.Ctx, channelID, r.UserID, randomIDs)
+	if err != nil {
+		h.log.Error("recheck channel album retry after refusal", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return store.ChannelAlbumResult{}, false
+	}
+	return replay, replay.Duplicate
+}
+
+func (h *handlers) demoGeneralChatAlbumPhotoIdentities(ctx context.Context, ownerID int64, items []store.AlbumItem) ([]string, error) {
+	files, err := h.store.AlbumPhotoFilesForUpload(ctx, ownerID, items, h.uploadGrantTTL)
+	if errors.Is(err, store.ErrMediaInvalid) {
+		return nil, errMediaInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve General album photo upload grants", "user_id", ownerID, "err", err)
+		return nil, errInternal
+	}
+	identities := make([]string, len(items))
+	for i, item := range items {
+		file, ok := files[item.FileID]
+		if !ok || len(file.ContentSHA256) != 32 {
+			return nil, errMediaInvalid
+		}
+		identities[i] = "photo:" + hex.EncodeToString(file.ContentSHA256)
+	}
+	return identities, nil
+}
+
 // newGroupedID draws a non-zero album id from crypto/rand.
 func newGroupedID() (int64, error) {
 	var b [8]byte
@@ -295,6 +363,9 @@ func newGroupedID() (int64, error) {
 func (h *handlers) channelAlbumError(r *mtproto.Request, channelID int64, err error) error {
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return rpcErr(420, slowModeWait.Error())
+	}
+	if mapped, ok := h.demoGeneralChatRateLimitError(r, err); ok {
+		return mapped
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):

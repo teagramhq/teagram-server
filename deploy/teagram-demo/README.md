@@ -86,9 +86,9 @@ both `https://web.teagram.io` and `https://demo.teagram.io`. The demo enables
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-client uploads are disabled by `TG_UPLOADS_DISABLED=true`, and the existing
-500 KB per-file cap, upload-byte budget and 256 MiB per-account storage cap
-remain as defense in depth.
+and client uploads are enabled to support General photo posts. Uploads
+remain bounded by the 500 KB per-file cap, 20 MiB per-account hourly byte
+budget, and 256 MiB per-account lifetime storage cap.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
@@ -114,9 +114,47 @@ mounted into teagramd and the isolated `demo-probe` service for the deploy-time
 signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
-`TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
-older prepared files and rejects a value that would enable client uploads.
-The seed overlay temporarily enables uploads for the private API seeder.
+`TG_DEMO_GENERAL_CHAT_ENABLED=true` makes the API seed a single `General`
+supergroup owned by `demo_seed_owner` and attempts to add new sign-ups as a
+best-effort post-signup step. The seeder adds the precreated demo guest accounts
+too, sets 10-second slow mode, and verifies the group after setup, weekly wipes,
+and restarts. Guests join as ordinary members: they can send text, photos, and
+bundled stickers, but cannot
+change group details, pin messages, invite members, or delete another guest's
+messages. Default rights also block polls, generic files, other media types,
+and topic management while leaving text, photos, and stickers available.
+
+General also enforces five messages per guest per minute and 30 per hour across
+all server replicas, in addition to slow mode. Text and captions are limited to
+1,000 Unicode characters. Repeating the same nonempty text or caption within 30
+seconds is refused with a flood-wait response, including repeated photo bytes
+and the same bundled sticker when the caption is empty. Guest creation already has a
+five-attempt-per-IP-per-hour server limit; Turnstile remains enabled on public
+sign-up.
+
+General auto-join is best-effort after sign-up commits. A failed join is logged
+without failing sign-up and affects only that guest, who may miss General until
+the next weekly wipe resets and re-seeds the demo.
+
+Run the owner-only moderation command from the demo LXC to remove a General
+message or permanently ban an ordinary member. Both commands run with the
+production Compose profile and connect to the internal HAProxy MTProto listener;
+HAProxy supplies the PROXY-v2 header and routes to the active server slot,
+including `teagramd-next` during a rolling deploy. Direct server endpoints are
+rejected:
+
+```sh
+sudo deploy/teagram-demo/moderate-general.sh delete-message MESSAGE_ID
+sudo deploy/teagram-demo/moderate-general.sh ban-user GUEST_USERNAME
+```
+
+The weekly database wipe clears General history and the seed recreates the
+group. No separate message-clear job runs between wipes.
+
+`TG_UPLOADS_DISABLED=false` is persisted in `.env`; deploy preflight migrates
+older prepared files to the approved value. `TG_STICKER_IMPORT=off` keeps users
+from uploading new sticker packs, while bundled catalogue stickers remain
+available to send. The same upload byte and storage caps apply to demo guests.
 Bootstrap and weekly reseed stop edge and HAProxy before seeding, then recreate
 teagramd with production configuration and verify the private path before edge
 starts. During a rolling deploy, the current server continues serving while
@@ -124,31 +162,24 @@ the candidate is seeded. The candidate has no host-published port and is not
 in HAProxy's backend until seed verification finishes and Compose recreates it
 with production configuration; HAProxy enables it only afterward.
 
-### Upload shutdown threat model
+### Demo upload limits
 
 Client uploads may contain personal photos and documents. Their bytes first
 occupy per-user temporary upload parts, then assembled file metadata and blob
-objects; short-lived upload grants bind staged files to their owner. An
-authenticated client could otherwise try the regular or big part RPCs, or
-bypass them through uploaded message media, profile photos, or chat/channel
-photos. With uploads disabled, each of those byte-ingress RPCs returns the
-same `UPLOADS_DISABLED` error before its storage path. The setting is loaded
-at process startup and applies through the shared handler on every listener.
-There is no HTTP file-upload route. Demo sticker import is off, and catalog
-sticker assets are bundled rather than accepted from clients.
+objects; short-lived upload grants bind staged files to their owner. The demo
+allows those upload RPCs so guests can send photos in General. There is no HTTP
+file-upload route. Demo sticker import is off, and catalog sticker assets are
+bundled rather than accepted from clients.
 
 `messages.sendMultiMedia` accepts owner-bound grants created by
-`messages.uploadMedia`; it carries no file bytes, and disabled mode prevents
-new grants from being issued. The switch does not erase parts, blobs, or grants
-accepted before it was enabled. Temporary parts and grants keep their existing
-TTL; completed file reads still enforce file-location and owner checks, and
-`upload.getFile` remains available for authorized existing media. The seed
-override is private to the internal Docker backend:
-bootstrap and weekly wipe stop both public proxy paths, while rolling deploys
-keep the candidate out of HAProxy until production configuration is restored.
-The backend network has no external route or published server port. LXC root
-and containers already attached to that backend are trusted; control of either
-can reach the seed API while the override is active.
+`messages.uploadMedia`; it carries no file bytes. Temporary parts and grants
+keep their existing TTL; completed file reads still enforce file-location and
+owner checks, and `upload.getFile` remains available for authorized media.
+The API seeder uses the internal backend network. Bootstrap and weekly wipe
+stop both public proxy paths, while rolling deploys keep the candidate out of
+HAProxy until seed verification finishes. The backend network has no external
+route or published server port. LXC root and containers already attached to
+that backend are trusted.
 
 For an authorized browser QA run, a test harness can set the demo QA token in
 the web client origin's local storage under the key
@@ -204,8 +235,9 @@ unset IMAGE_DIGEST
 The prepared charlie host already has its `.env` and Siteverify secret, so do
 not rerun `prepare-env.sh` there. The next merged init or deploy script creates
 the QA bypass token once if it is absent. Existing `.env` files may omit
-`TG_ADVERTISE_DEMO_GUEST_SIGN_UP`; Compose supplies the approved `true` default
-and validates the resolved value without rewriting the secrets.
+`TG_ADVERTISE_DEMO_GUEST_SIGN_UP` and `TG_DEMO_GENERAL_CHAT_ENABLED`; Compose
+supplies the approved `true` defaults and validates the resolved values without
+rewriting the secrets.
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
 then creates root-owned `.env` mode 0600 with the site key, the secret-file
@@ -454,15 +486,21 @@ a shell command, echo it, list the process environment or log it.
 ### QA bypass token threat model
 
 The token bypasses Turnstile for demo signup, so anyone who obtains it can
-create demo accounts without that challenge. Treat the active token and its
-root-only recovery snapshot as secrets. Demo host root can read both; the
-server and isolated probe services can read the mounted token as gid 65532. An
-authorized workspace admin transfers the new value into QA's audited custom_env
-entry, where the QA runtime is an intentional consumer. Keep it out of shell
-history and snapshots, CI output, logs and comments; QA reads it only from
-`process.env` and must not log it. The secret mount and runtime variable are
-demo-only; production has no bypass-token mount or configured token. Never
-restore the old snapshot because the old value is compromised.
+create demo accounts without that challenge. It is mounted only in the
+isolated probe service, which verifies signup enforcement; seed and moderation
+commands do not receive it. Production owner moderation reuses the root-only
+MTProto session created by the private seed flow instead of bypassing the
+sign-in challenge. Treat the active token and its root-only recovery snapshot
+as secrets. Demo host root can read both; the server and isolated probe
+service can read the mounted token as gid 65532. An authorized workspace admin
+transfers the new value into QA's audited custom_env entry, where the QA
+runtime is an intentional consumer. Keep it out of shell history and
+snapshots, CI output, logs and comments; QA reads it only from `process.env`
+and must not log it. The secret mount and runtime variable are demo-only;
+production has no bypass-token mount or configured token. Never restore the
+old snapshot because the old value is compromised. The owner session is a
+separate moderation credential: host root and the root-run `demo-seed`
+container can read it, and it must not be copied to QA or emitted in logs.
 
 After enabling public signin, verify signin and signup challenges from the
 public web origin with
@@ -489,10 +527,13 @@ proxy are stopped. The wipe operates on the persisted active server slot.
 It creates the ordinary `demo_seed_owner` account through
 `teagramd admin create-user` to close the first-admin election before seeding.
 Its freshly generated password is kept in the root-only
-`/var/lib/teagram-demo/secrets/seed-owner-password` file. After the seed reports
-all expected handles through the API, the wipe recreates teagramd with the
-production proxy and Turnstile settings, requires a bare sign-up probe to
-return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
+`/var/lib/teagram-demo/secrets/seed-owner-password` file. The private seed
+flow stores the owner authorization in the root-only
+`/var/lib/teagram-demo/secrets/seed-owner.session` file before production
+sign-in Turnstile is restored. After the seed reports all expected handles
+through the API, the wipe recreates teagramd with the production proxy and
+Turnstile settings, requires a bare sign-up probe to return
+`RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
 
 ## Public guest account threat model
 
@@ -602,15 +643,33 @@ passwords are stored in `/var/lib/teagram-demo/secrets/demo-accounts/` as a
 root-owned mode 0600 JSON inventory under a root-owned mode 0700 directory.
 After a weekly database wipe, the accounts receive fresh random passwords;
 password values never appear in process arguments, environment variables,
-logs, or this checkout. The seed container mounts only the client config and
-the credential files it needs, has no database credentials, and runs on the
-internal backend network with a read-only root filesystem.
+logs, or this checkout. The seed owner also has a root-owned mode 0600 MTProto
+session at `/var/lib/teagram-demo/secrets/seed-owner.session`. The private
+seed flow creates it while the sign-in challenge is disabled; moderation
+reuses it through HAProxy after production Turnstile is enabled. It is cleared
+whenever the demo database is reset, and moderation fails closed if it is
+missing or no longer authorized. The seed container mounts only the client
+config and credential files it needs, has no database credentials, and runs
+on the internal backend network with a read-only root filesystem apart from
+its narrowly scoped credential mounts.
 
 `test-seed-compose.sh` runs a second seed pass against the private Compose API
 and checks that verified marker counts and search results stay stable. It also
 checks that the stored wipe generation survives a server restart; the weekly
 wipe passes the previous value so the test confirms a fresh database changed
 it before the public edge starts.
+
+Before reopening the public edge, the weekly wipe also runs
+`test-general-moderation-compose.sh`. It prepares a temporary short-handle
+session and post on the private seed endpoint, then recreates the active server
+with the sign-in Turnstile value already configured in `.env` and runs both
+moderation commands through HAProxy. The smoke works with sign-in Turnstile
+enabled or disabled because its sessions are established on the private seed
+listener first. When the configured gate is enabled, the separate Turnstile
+probe checks both sign-in and sign-up enforcement through HAProxy; with the
+sign-in gate disabled, it still verifies sign-up enforcement. The test verifies
+the post is gone and the banned guest cannot rejoin, then removes the temporary
+post and session before edge startup.
 
 ## Scheduled activity
 

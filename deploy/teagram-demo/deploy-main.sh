@@ -36,12 +36,49 @@ PREV_WEB_RELEASE=
 PREV_WEB_LINK=
 DEMO_PROXY_TMPFS_LEGACY_COMPOSE=
 DEMO_PROXY_TMPFS_ATTEMPTED=()
+DEMO_ENV_BACKUP=
 
 demo_remove_previous_image() {
   local previous_image_id="$1" active_image_id="$2"
   [[ "$previous_image_id" != "$active_image_id" ]] || return 0
   docker image rm "$previous_image_id" ||
     printf 'could not remove previous image %s\n' "$previous_image_id" >&2
+}
+
+demo_capture_env_for_rollback() {
+  [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
+    demo_fail 'demo environment is unavailable for rollback snapshot'
+    return 1
+  }
+  [[ "$(stat -c '%u:%a' "$DEMO_ENV_FILE")" == '0:600' ]] || {
+    demo_fail 'demo environment must be root-owned mode 0600 before rollout'
+    return 1
+  }
+  local backup
+  backup=$(mktemp "$DEMO_ENV_FILE.rollback.XXXXXXXX") || {
+    demo_fail 'demo environment rollback snapshot could not be created'
+    return 1
+  }
+  if ! cp -- "$DEMO_ENV_FILE" "$backup" || ! chown root:root "$backup" || ! chmod 0600 "$backup"; then
+    rm -f -- "$backup"
+    demo_fail 'demo environment rollback snapshot could not be secured'
+    return 1
+  fi
+  DEMO_ENV_BACKUP=$backup
+}
+
+demo_restore_env_after_rollback() {
+  [[ -n "$DEMO_ENV_BACKUP" ]] || return 0
+  [[ -f "$DEMO_ENV_BACKUP" && ! -L "$DEMO_ENV_BACKUP" &&
+    "$(stat -c '%u:%a' "$DEMO_ENV_BACKUP")" == '0:600' ]] || {
+    demo_fail 'demo environment rollback snapshot is unavailable or insecure'
+    return 1
+  }
+  mv -f -- "$DEMO_ENV_BACKUP" "$DEMO_ENV_FILE" || {
+    demo_fail 'demo environment could not be restored after rollout failure'
+    return 1
+  }
+  DEMO_ENV_BACKUP=
 }
 
 demo_restore_legacy_edge_after_rollback() {
@@ -155,6 +192,9 @@ demo_cleanup() {
   local rc=$?
   local rollback_rc=0 rollback_confirmed=1 edge_rollback_rc nginx_rollback_file
   trap - EXIT
+  if (( rc != 0 && CUTOVER_COMMITTED == 0 )); then
+    demo_restore_env_after_rollback || rc=1
+  fi
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
       printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
@@ -246,6 +286,13 @@ demo_cleanup() {
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     rm -rf -- "$TMP_DIR"
   fi
+  if [[ -n "$DEMO_ENV_BACKUP" ]]; then
+    if (( rc == 0 || CUTOVER_COMMITTED == 1 )); then
+      rm -f -- "$DEMO_ENV_BACKUP"
+    else
+      printf 'demo environment rollback snapshot retained at %s\n' "$DEMO_ENV_BACKUP" >&2
+    fi
+  fi
   exit "$rc"
 }
 trap demo_cleanup EXIT
@@ -321,6 +368,7 @@ if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then
   exec 9> "$LOCK_PATH"
   flock -x 9
 fi
+demo_capture_env_for_rollback
 demo_require_env
 [[ "$(git -C "$DEMO_REPO_ROOT" rev-parse HEAD)" == "$SHA" ]] || demo_fail 'checkout is not the requested deployment SHA'
 git -C "$DEMO_REPO_ROOT" fetch -q origin +refs/heads/main:refs/remotes/origin/main
@@ -457,6 +505,7 @@ mapfile -t CANDIDATE_IDS < <(demo_compose ps -q "$CANDIDATE_SERVER")
 CANDIDATE_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${CANDIDATE_IDS[0]}")
 CANDIDATE_IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_IMAGE_ID")
 [[ "$CANDIDATE_IMAGE_REVISION" == "$SHA" ]] || demo_fail 'running candidate image does not match the requested SHA'
+"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"
 "$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"
 demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"
 

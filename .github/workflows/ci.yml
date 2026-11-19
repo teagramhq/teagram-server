@@ -1245,6 +1245,8 @@ jobs:
           bash -n deploy/teagram-demo/publish-web-release.sh
           bash -n deploy/teagram-demo/build-web-artifact.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
+          bash -n deploy/teagram-demo/test-general-moderation-compose.sh
+          bash -n deploy/teagram-demo/test-general-moderation-isolated-compose.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
           bash -n deploy/teagram-demo/run-activity.sh
           bash -n deploy/teagram-demo/activity-credential.sh
@@ -1319,6 +1321,8 @@ jobs:
             deploy/teagram-demo/publish-web-release.sh \
             deploy/teagram-demo/build-web-artifact.sh \
             deploy/teagram-demo/wipe-weekly.sh \
+            deploy/teagram-demo/test-general-moderation-compose.sh \
+            deploy/teagram-demo/test-general-moderation-isolated-compose.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
             deploy/teagram-demo/run-activity.sh \
             deploy/teagram-demo/activity-credential.sh \
@@ -3505,6 +3509,8 @@ jobs:
           bash .github/scripts/pull-base-images.sh
           --image mirror.gcr.io/library/postgres:18-alpine
           --image mirror.gcr.io/arigaio/atlas:1.3.0-alpine
+          --image mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+          --image mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
 
       - name: Build image
         uses: docker/build-push-action@v7.4.0
@@ -3525,6 +3531,10 @@ jobs:
           revision=$(docker image inspect teagramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
+
+      - name: Exercise demo General moderation through isolated Compose
+        timeout-minutes: 20
+        run: sudo -n env "PATH=$PATH" bash deploy/teagram-demo/test-general-moderation-isolated-compose.sh
 
       - name: Assert Compose image contains the gated bundle and loader path
         run: |

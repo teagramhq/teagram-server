@@ -1275,12 +1275,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileSiteKey = cfg.Turnstile.SiteKey
 			verifier = turnstileVerifier
 		}
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuotaAndDemoGeneralChat(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, cfg.PreviousPublicLinkPrefixes, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, cfg.PreviousPublicLinkPrefixes, cfg.DemoGeneralChatEnabled, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

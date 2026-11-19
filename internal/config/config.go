@@ -120,6 +120,9 @@ type Config struct {
 	// AdvertiseDemoGuestSignUp advertises demo guest sign-up availability in
 	// discovery only; it does not change account registration policy.
 	AdvertiseDemoGuestSignUp bool
+	// DemoGeneralChatEnabled creates and auto-joins the demo General chat.
+	// It is disabled unless a demo deployment opts in explicitly.
+	DemoGeneralChatEnabled bool
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
 	// StickerImportMode controls whether accounts may create or add to sticker sets.
@@ -978,6 +981,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	demoGeneralChatEnabled := false
+	if raw := os.Getenv("TG_DEMO_GENERAL_CHAT_ENABLED"); raw != "" {
+		demoGeneralChatEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("TG_DEMO_GENERAL_CHAT_ENABLED must be a boolean")
+		}
+	}
 	identity, err := loadClientIdentityConfig()
 	if err != nil {
 		return Config{}, err
@@ -1060,6 +1070,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		AdvertiseHost:                 identity.AdvertiseHost,
 		AdvertisePort:                 identity.AdvertisePort,
 		AdvertiseDemoGuestSignUp:      identity.AdvertiseDemoGuestSignUp,
+		DemoGeneralChatEnabled:        demoGeneralChatEnabled,
 		DCID:                          identity.DCID,
 		BlobDir:                       envOr("TG_BLOB_DIR", "blobs"),
 

@@ -187,6 +187,11 @@ func (r *SignUpTestRunner) SetWelcomeChannelForTest(handle string) {
 	r.handler.welcomeChannel = handle
 }
 
+// SetDemoGeneralChatEnabledForTest controls demo chat auto-join for sign-up tests.
+func (r *SignUpTestRunner) SetDemoGeneralChatEnabledForTest(enabled bool) {
+	r.handler.demoGeneralChatEnabled = enabled
+}
+
 // SetTurnstileVerifierForTest configures the fake challenge verifier used by
 // sign-up tests.
 func (r *SignUpTestRunner) SetTurnstileVerifierForTest(siteKey string, verifier SignUpTurnstileVerifier) {
@@ -330,6 +335,7 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 	}
 	return &handlers{
 		previousPublicLinkPrefixes: previousPrefixes,
+		demoGeneralChatPolicy:      defaultDemoGeneralChatPolicy(),
 		store:                      s,
 		stickerImportMode:          config.StickerImportOn,
 		cfg:                        &tg.Config{MeURLPrefix: linkPrefix},
@@ -1187,6 +1193,82 @@ func SendMessageForTest(s *store.Store, userID int64, req *tg.MessagesSendMessag
 	return testHandlers(s).handleSendMessage(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SendMessageForTestWithDemoGeneralChat enables the demo-only General chat
+// policies before invoking handleSendMessage.
+func SendMessageForTestWithDemoGeneralChat(s *store.Store, userID int64, req *tg.MessagesSendMessageRequest) (bin.Encoder, error) {
+	return SendMessageForTestWithDemoGeneralChatLimits(s, userID, defaultDemoGeneralChatPolicy().perMinute, defaultDemoGeneralChatPolicy().perHour, req)
+}
+
+// SendMessageForTestWithDemoGeneralChatLimits overrides only the two count
+// windows so the hourly refusal can be verified without waiting an hour.
+func SendMessageForTestWithDemoGeneralChatLimits(
+	s *store.Store,
+	userID int64,
+	perMinute, perHour store.RateLimitConfig,
+	req *tg.MessagesSendMessageRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	h.demoGeneralChatPolicy.perMinute = perMinute
+	h.demoGeneralChatPolicy.perHour = perHour
+	return h.handleSendMessage(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// SendMediaForTestWithDemoGeneralChat invokes the media handler with demo
+// General policies enabled and the supplied upload storage.
+func SendMediaForTestWithDemoGeneralChat(
+	s *store.Store,
+	userID int64,
+	blobs blob.Store,
+	maxUserStorageBytes int64,
+	req *tg.MessagesSendMediaRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	h.blobs, h.maxUserStorageBytes = blobs, maxUserStorageBytes
+	return h.handleSendMedia(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// SendMultiMediaForTestWithDemoGeneralChat invokes the album handler with
+// General chat policies enabled.
+func SendMultiMediaForTestWithDemoGeneralChat(
+	s *store.Store,
+	userID int64,
+	req *tg.MessagesSendMultiMediaRequest,
+) (bin.Encoder, error) {
+	return SendMultiMediaForTestWithContextAndDemoGeneralChat(context.Background(), s, userID, req)
+}
+
+// SendMultiMediaForTestWithContextAndDemoGeneralChat invokes the album handler
+// with an explicit request context and General chat policies enabled.
+func SendMultiMediaForTestWithContextAndDemoGeneralChat(
+	ctx context.Context,
+	s *store.Store,
+	userID int64,
+	req *tg.MessagesSendMultiMediaRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	h.uploadGrantTTL = time.Hour
+	h.blobs = s.PartBlobs()
+	result, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{
+		Ctx: ctx, UserID: userID, Buf: &buf,
+	})
+	return result, err
+}
+
 // UpdatePinnedMessageForTest encodes req and invokes handleUpdatePinnedMessage.
 func UpdatePinnedMessageForTest(s *store.Store, userID int64, req *tg.MessagesUpdatePinnedMessageRequest) (bin.Encoder, error) {
 	var buf bin.Buffer
@@ -1704,11 +1786,23 @@ func UpdateStatusForTest(s *store.Store, userID int64, offline bool) (bin.Encode
 
 // UpdateUsernameForTest invokes handleUpdateUsername for userID with the given username.
 func UpdateUsernameForTest(s *store.Store, userID int64, username string) (bin.Encoder, error) {
+	return updateUsernameForTest(s, userID, username, false)
+}
+
+// UpdateUsernameForTestWithDemoGeneralChat invokes account.updateUsername
+// with the demo General handle reservation enabled.
+func UpdateUsernameForTestWithDemoGeneralChat(s *store.Store, userID int64, username string) (bin.Encoder, error) {
+	return updateUsernameForTest(s, userID, username, true)
+}
+
+func updateUsernameForTest(s *store.Store, userID int64, username string, demoGeneralChat bool) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := (&tg.AccountUpdateUsernameRequest{Username: username}).Encode(&buf); err != nil {
 		return nil, err
 	}
-	return testHandlers(s).handleUpdateUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = demoGeneralChat
+	return h.handleUpdateUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // UpdateProfileForTest invokes handleUpdateProfile for userID.

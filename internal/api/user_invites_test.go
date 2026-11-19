@@ -390,12 +390,12 @@ func assertUserInviteRPCErrorPrefix(t *testing.T, body []byte, wantCode int, pre
 }
 
 func newUserInviteTestHandler(s *store.Store, mode config.RegistrationMode, quota int, minAge time.Duration, logger *slog.Logger) mtproto.Handler {
-	return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+	return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuotaAndDemoGeneralChat(
 		s, 2, &tg.Config{MeURLPrefix: "https://links.example.test/"}, logger, false,
 		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{}, mode, api.NewDialogFilterSync(), nil, config.DefaultUploadPartTTL,
 		"", nil, "", false, config.RecoveryEmailOff, config.DefaultSignUpTermsOfService,
-		nil, config.StickerImportOn, quota, minAge, false, []string{"https://old.example/"},
+		nil, config.StickerImportOn, quota, minAge, false, []string{"https://old.example/"}, false,
 	)
 }
 

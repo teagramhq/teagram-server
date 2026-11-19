@@ -156,6 +156,11 @@ type Store struct {
 	// parallel tests remain isolated.
 	channelPhotoRetryAfterCommitHook func(context.Context, int64, int64, int64) error
 
+	// channelAlbumRetryAfterCommitHook is a test-only pause after a channel
+	// album retry read commits with no existing post. It lets API tests hold
+	// concurrent retries before their preflight and grant checks.
+	channelAlbumRetryAfterCommitHook func(context.Context, int64, int64, []int64) error
+
 	// filteredChannelSearchSnapshotHook is a test-only callback fired after the
 	// filtered channel search transaction starts and before its membership read.
 	// It lets tests commit a ban in the gap after handler admission.

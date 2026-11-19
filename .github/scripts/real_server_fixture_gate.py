@@ -16,6 +16,7 @@ REQUIRED_TESTS = frozenset(
     {
         "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
         "TestRealServerFixtureInstallsPhotoWorkerFromServerRevision",
+        "TestRealServerFixtureDatabaseHealthcheckUsesTCP",
         "TestRealServerFixtureUsesUniqueGitWorktreeRegistrationName",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",

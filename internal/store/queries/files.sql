@@ -15,6 +15,7 @@ SET stored = true,
     media_kind = 'photo',
     width = $2,
     height = $3,
+    content_sha256 = $4,
     subtype_rights = ARRAY['send_photos']::TEXT[]
 WHERE id = $1 AND stored = false;
 

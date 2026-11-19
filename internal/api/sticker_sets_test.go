@@ -17,6 +17,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/reactionassets"
@@ -1436,6 +1437,99 @@ func TestCatalogueStickerRespectsMegagroupAndBroadcastPostRights(t *testing.T) {
 		Message: "admin broadcast sticker", RandomID: 4815162415,
 	}); err != nil {
 		t.Fatalf("admin send catalogue sticker to broadcast: %v", err)
+	}
+}
+
+func TestDemoGeneralGuestCanSendCatalogueSticker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, blobs, creator, guest, _ := downloadFixture(t, "+15551810021", "+15551810022")
+	set := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}, 0).Set
+	full := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetID{ID: set.ID, AccessHash: set.AccessHash}, 0)
+	if len(full.Documents) == 0 {
+		t.Fatal("getStickerSet returned no bundled sticker document")
+	}
+	document, ok := full.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("first sticker document = %T, want *tg.Document", full.Documents[0])
+	}
+
+	general := createGeneralChat(t, s)
+	if _, _, err := s.JoinChannelByUsername(ctx, general.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	request := func(channelID int64, randomID int64) *tg.MessagesSendMediaRequest {
+		return &tg.MessagesSendMediaRequest{
+			Peer:    api.InputPeerChannel(guest.ID, channelID),
+			Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash}},
+			Message: "", RandomID: randomID,
+		}
+	}
+	if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(general.ID, 4815162420)); err != nil {
+		t.Fatalf("send bundled sticker to General: %v", err)
+	}
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(general.ID, 4815162422))
+	if got := rpcMessage(t, err); got != "FLOOD_WAIT_30" {
+		t.Fatalf("repeat uncaptioned sticker send = %q, want FLOOD_WAIT_30", got)
+	}
+	posts, err := s.ChannelHistory(ctx, general.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read General sticker history: %v", err)
+	}
+	var generalStickerFound bool
+	for _, post := range posts {
+		if post.FromID == guest.ID && post.Message == "" && post.StickerDocumentID != nil && *post.StickerDocumentID == document.ID {
+			generalStickerFound = true
+			break
+		}
+	}
+	if !generalStickerFound {
+		t.Fatalf("General history = %+v, want bundled sticker post %d", posts, document.ID)
+	}
+
+	other, err := s.CreateChannel(ctx, creator.ID, "Other sticker megagroup", "", true)
+	if err != nil {
+		t.Fatalf("create other megagroup: %v", err)
+	}
+	joinChannelByInvite(t, s, other, guest.ID)
+	if _, _, err := s.SetChannelDefaultBannedRights(ctx, other.ID, creator.ID, []string{"send_docs"}); err != nil {
+		t.Fatalf("ban documents in other megagroup: %v", err)
+	}
+	_, err = api.SendMediaForTest(s, guest.ID, blobs, api.TestMaxUserStorageBytes, request(other.ID, 4815162421))
+	if got := rpcMessage(t, err); got != "CHAT_WRITE_FORBIDDEN" {
+		t.Fatalf("send bundled sticker to other megagroup = %q, want CHAT_WRITE_FORBIDDEN", got)
+	}
+}
+
+func TestDemoGeneralGuestCanSendCatalogueStickerOnFallbackHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, blobs, creator, guest, _ := downloadFixture(t, "+15551810023", "+15551810024")
+	set := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}, 0).Set
+	full := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetID{ID: set.ID, AccessHash: set.AccessHash}, 0)
+	if len(full.Documents) == 0 {
+		t.Fatal("getStickerSet returned no bundled sticker document")
+	}
+	document, ok := full.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("first sticker document = %T, want *tg.Document", full.Documents[0])
+	}
+
+	general := createGeneralChat(t, s)
+	fallbackHandle := demo.GeneralChatHandles()[1]
+	if err := s.EditChannelUsername(ctx, general.ID, general.CreatorID, fallbackHandle); err != nil {
+		t.Fatalf("move General to fallback handle %q: %v", fallbackHandle, err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, general.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(guest.ID, general.ID),
+		Media:    &tg.InputMediaDocument{ID: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash}},
+		RandomID: 4815162423,
+	})
+	if err != nil {
+		t.Fatalf("send bundled sticker to fallback-owned General: %v", err)
 	}
 }
 

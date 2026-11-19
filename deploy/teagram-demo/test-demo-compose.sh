@@ -9,12 +9,97 @@ source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" <<'PY'
+import sys
+from pathlib import Path
+
+smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
+normalized_smoke = " ".join(smoke.replace("\\\n", " ").split())
+probe = '"$SEED_SCRIPT" --verify-turnstile --expect-signin-enabled "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" --endpoint haproxy:2443'
+if " ".join(probe.split()) not in normalized_smoke:
+    raise SystemExit("test-general-moderation-compose.sh: probe must verify the configured sign-in mode")
+if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must not depend on sign-in state")
+PY
+
+python3 - "$SCRIPT_DIR/seed-demo.sh" "$SCRIPT_DIR/README.md" \
+  "$SCRIPT_DIR/test-seed-compose.sh" "$SCRIPT_DIR/test-general-moderation-isolated-compose.sh" <<'PY'
+import sys
+from pathlib import Path
+
+wrapper = Path(sys.argv[1]).read_text(encoding="utf-8")
+readme = Path(sys.argv[2]).read_text(encoding="utf-8")
+seed_test = Path(sys.argv[3]).read_text(encoding="utf-8")
+isolated = Path(sys.argv[4]).read_text(encoding="utf-8")
+
+if "seed-demo.sh --verify-turnstile [--expect-signin-enabled true|false]" not in wrapper:
+    raise SystemExit("seed-demo.sh: help must show the separate-token Turnstile override syntax")
+if "--expect-signin-enabled=true|false" in wrapper:
+    raise SystemExit("seed-demo.sh: help must not document an unsupported inline Turnstile override")
+if "seed-demo.sh --verify-turnstile --endpoint haproxy:2443" not in readme:
+    raise SystemExit("README.md: Turnstile probe must follow the configured sign-in mode")
+if "--expect-signin-enabled=false" in readme:
+    raise SystemExit("README.md: Turnstile probe must not pass an unsupported inline override")
+
+if "assert_general_chat_owner" not in seed_test:
+    raise SystemExit("test-seed-compose.sh: convergence must count persisted General channels and their seed owner")
+if "c.deleted_at IS NULL" not in seed_test or "creator.username = 'demo_seed_owner'" not in seed_test:
+    raise SystemExit("test-seed-compose.sh: both convergence counts must include only live seed-owned General groups")
+if "assert_general_chat_owner" not in isolated or "general_chat_enabled=false" not in isolated:
+    raise SystemExit("isolated Compose test must verify flag-off and seed-owned General state")
+if '"$seed_dir/test-seed-compose.sh"' not in isolated:
+    raise SystemExit("isolated Compose test must exercise init, reseed, and restart convergence")
+if isolated.count("INSERT INTO channels") < 2 or "deleted_at" not in isolated or "demo_iona" not in isolated:
+    raise SystemExit("isolated Compose test must add a deleted predecessor and guest-owned General lookalike")
+if isolated.count("INSERT INTO channels (id, title, about, creator_id") != 2:
+    raise SystemExit("isolated Compose decoys must provide channel ids explicitly")
+if 'seed_general_count_decoys\n    "$seed_dir/test-seed-compose.sh"' not in isolated:
+    raise SystemExit("isolated Compose test must add count decoys before checking seed convergence")
+if "demo_compose down --volumes --remove-orphans" not in isolated:
+    raise SystemExit("isolated Compose test must cover a fresh database reset")
+PY
+
+go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisabled$' -count=1
+
+(
+  DEMO_ENV_FILE="$TMP_DIR/signin-default.env"
+  : > "$DEMO_ENV_FILE"
+  [[ "$(demo_turnstile_signin_enabled)" == false ]]
+  printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' > "$DEMO_ENV_FILE"
+  [[ "$(demo_turnstile_signin_enabled)" == true ]]
+  printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=maybe' > "$DEMO_ENV_FILE"
+  if demo_turnstile_signin_enabled; then
+    printf 'invalid sign-in Turnstile setting was accepted\n' >&2
+    exit 1
+  fi
+)
+
+(
+  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == haproxy:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == haproxy:2443 ]]
+  [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 1 haproxy:2443)" == haproxy:2443 ]]
+  if demo_resolve_seed_endpoint --moderate-ban-user 1 teagramd-next:2443; then
+    printf 'moderation accepted a direct backend endpoint\n' >&2
+    exit 1
+  fi
+)
+
+(
+  demo_seed_compose_input() {
+    printf '%s\n' "$@"
+  }
+  mapfile -t actual < <(demo_seed_owner_admin_command teagramd create-user --username demo_seed_owner)
+  expected=(exec -T --user 0:65532 teagramd /usr/local/bin/teagramd admin create-user --username demo_seed_owner)
+  [[ "${actual[*]}" == "${expected[*]}" ]]
+)
+
 python3 - "$SCRIPT_DIR/demo-common.sh" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 for expected in (
+    '--project-name teagram-demo',
     'install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir"',
     'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir"',
     '[[ "$(stat -c \'%u:%g:%a\' "$turnstile_tmp_dir")" == \'584792:584792:1777\'',
@@ -45,6 +130,7 @@ TG_AUTHKEY_ENC_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+TG_DEMO_GENERAL_CHAT_ENABLED=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_WEBSOCKET_BROWSER_ONLY=true
@@ -52,7 +138,7 @@ TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
 TG_MAX_USER_STORAGE_BYTES=268435456
-TG_UPLOADS_DISABLED=true
+TG_UPLOADS_DISABLED=false
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 ENV
@@ -136,6 +222,8 @@ jq -e \
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
   and .services.teagramd.environment.GOMAXPROCS == "1"
   and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
   and (.services.teagramd.mem_limit | tostring) == "469762048"
@@ -147,10 +235,10 @@ jq -e \
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
   and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services.teagramd.environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
-  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "true"
+  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
-  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "true"
+  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
@@ -218,15 +306,138 @@ printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' >> "$TMP_DIR/demo-signin.env"
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  docker compose --env-file "$TMP_DIR/demo-signin.env" \
+  docker compose --env-file "$TMP_DIR/demo-signin.env" --profile seed \
     --project-directory "$REPO_ROOT" --project-name teagram-demo \
     --file "$SCRIPT_DIR/compose.yaml" config --format json > "$TMP_DIR/signin.json"
 jq -e '
-  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
+  .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
+  and ((.services.haproxy.ports // []) | length) == 0
+  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
+  and .services["teagramd-next"].environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
+  and .services["demo-seed"].profiles == ["seed"]
+  and (.services["demo-seed"].networks | keys) == ["backend"]
+  and (.services["demo-seed"].ports // [] | length) == 0
+  and (.services["demo-seed"].secrets // [] | length) == 0
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner.session" and (.read_only // false) == false)
+  and any(.services.haproxy.volumes[]; .target == "/usr/local/etc/haproxy" and .read_only)
+  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+  and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
 ' "$TMP_DIR/signin.json" >/dev/null
+
+SEED_VALIDATION_DIR="$TMP_DIR/seed-validation"
+mkdir -p "$SEED_VALIDATION_DIR"
+cp -- "$SCRIPT_DIR/demo-common.sh" "$SEED_VALIDATION_DIR/demo-common.sh"
+cp -- "$SCRIPT_DIR/haproxy.cfg" "$SCRIPT_DIR/render-haproxy-config.py" "$SEED_VALIDATION_DIR/"
+cp -R -- "$SCRIPT_DIR/nginx-config" "$SEED_VALIDATION_DIR/nginx-config"
+cp -- "$SCRIPT_DIR/seed-demo.sh" "$SEED_VALIDATION_DIR/seed-demo-validation.sh"
+set +e
+seed_validation_output=$(TG_DEMO_GENERAL_CHAT_ENABLED=true \
+  "$SEED_VALIDATION_DIR/seed-demo-validation.sh" --moderate-ban-user --username ab 2>&1)
+seed_validation_status=$?
+set -e
+if [[ "$seed_validation_status" -eq 0 || "$seed_validation_output" != *'deploy/teagram-demo/.env is missing'* ||
+  "$seed_validation_output" == *'username must follow signup rules'* ]]; then
+  printf 'seed-demo short-handle validation did not reach the production configuration check: %s\n' \
+    "$seed_validation_output" >&2
+  exit 1
+fi
+
+python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" "$SCRIPT_DIR/wipe-weekly.sh" \
+  "$SCRIPT_DIR/test-general-moderation-isolated-compose.sh" "$REPO_ROOT/.github/workflows/ci.yml" <<'PY'
+import sys
+from pathlib import Path
+
+smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
+wipe = Path(sys.argv[2]).read_text(encoding="utf-8")
+isolated = Path(sys.argv[3]).read_text(encoding="utf-8")
+workflow = Path(sys.argv[4]).read_text(encoding="utf-8")
+for expected in (
+    '"$SCRIPT_DIR/moderate-general.sh" delete-message "$MODERATION_SMOKE_MESSAGE_ID"',
+    '"$SCRIPT_DIR/moderate-general.sh" ban-user ab',
+    '--prepare-general-moderation-smoke',
+    '--verify-general-moderation-smoke',
+    '--cleanup-general-moderation-smoke',
+    '--expect-signin-enabled "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED"',
+    'PRODUCTION_TURNSTILE_SIGNIN_ENABLED',
+    'if length == 1 and (.[0] == "true" or .[0] == "false")',
+    'TG_TURNSTILE_SIGNIN_ENABLED=false',
+    'TG_CLIENT_ADDR_TRUST=proxy-v2',
+    'if trust=$(docker inspect "$server_id" | jq -er',
+):
+    if expected not in smoke:
+        raise SystemExit(f"test-general-moderation-compose.sh: missing production moderation smoke step: {expected}")
+if 'TG_TURNSTILE_SIGNIN_ENABLED=true' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: must preserve either configured sign-in Turnstile value")
+if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must be unconditional")
+for required_route in (
+    '--verify-general-moderation-smoke',
+    '--cleanup-general-moderation-smoke',
+):
+    if required_route not in smoke or '--endpoint haproxy:2443' not in smoke:
+        raise SystemExit("test-general-moderation-compose.sh: moderation verification and cleanup must use HAProxy")
+if 'MODERATION_ARGS_FILE' in smoke or 'moderate-general.sh" ban-user ab' not in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: must invoke the actual moderation wrapper")
+wipe_call = '"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"'
+if wipe_call not in wipe:
+    raise SystemExit("wipe-weekly.sh: production moderation smoke test is not wired into the wipe flow")
+if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(wipe_call) > wipe.index('demo_compose up -d edge'):
+    raise SystemExit("wipe-weekly.sh: moderation smoke must run after private seeding and before public edge startup")
+for expected in (
+    'run_signin_mode false',
+    'run_signin_mode true',
+    'TG_DEMO_GENERAL_CHAT_ENABLED=true',
+    'export TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"',
+    'seed_output=$(TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"',
+    'export TG_DEMO_GENERAL_CHAT_ENABLED=true',
+    'ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"',
+    'bootstrap-identity >/dev/null',
+    '--profile maintenance run --rm --no-deps teagramd-maintenance',
+    'demo_compose_input --profile maintenance run --rm --no-deps --user 0:65532',
+    'test-general-moderation-compose.sh',
+    'general moderation smoke verified deleted post and refused banned guest rejoin',
+    'general moderation smoke post removed and guest membership restored',
+    'production moderation Compose smoke=verified message_deleted=true short_handle_ban=true',
+    'moderation cleanup retained its guest session',
+):
+    if expected not in isolated:
+        raise SystemExit(f"isolated moderation Compose test: missing behavior check: {expected}")
+if isolated.index('bootstrap-identity') > isolated.index(
+    'demo_seed_compose up -d --wait --wait-timeout 120 teagramd'
+):
+    raise SystemExit("isolated moderation Compose test: identity must be bootstrapped before server startup")
+if not (
+    isolated.index('TG_DEMO_GENERAL_CHAT_ENABLED=true')
+    < isolated.index('demo_require_env\n')
+    < isolated.index('export TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"')
+    < isolated.index('demo_seed_compose up -d --wait --wait-timeout 120 teagramd')
+):
+    raise SystemExit("isolated moderation Compose test: flag-off mode must override the validated fixture environment")
+if not (
+    isolated.index('ACTIVE_STAGE="seed with General disabled"')
+    < isolated.index('export TG_DEMO_GENERAL_CHAT_ENABLED=true')
+    < isolated.index('ACTIVE_STAGE="enable General and restart the private server"')
+):
+    raise SystemExit("isolated moderation Compose test: flag-off mode must restore General before reseeding")
+cleanup = isolated.split('cleanup() {', 1)[1].split('\n}\ntrap cleanup EXIT', 1)[0]
+cleanup_guard = 'if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then'
+cleanup_rmdir = 'rmdir -- "$cleanup_path" 2>/dev/null || rc=1'
+if cleanup_guard not in cleanup or cleanup_rmdir not in cleanup:
+    raise SystemExit("isolated moderation Compose test: cleanup must tolerate paths already removed")
+for cleanup_path in (
+    "$SHARED_SECRET_ROOT/secrets/demo-accounts",
+    "$SHARED_SECRET_ROOT/secrets",
+    "$SHARED_SECRET_ROOT",
+):
+    if cleanup_path not in cleanup:
+        raise SystemExit(f"isolated moderation Compose test: cleanup omits {cleanup_path}")
+if 'test-general-moderation-isolated-compose.sh' not in workflow:
+    raise SystemExit("CI Compose job does not run the isolated General moderation smoke")
+PY
 
 (
   demo_compose() {
@@ -836,6 +1047,7 @@ jq -e '
   and (.services["demo-seed"].secrets // [] | length) == 0
   and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner.session" and (.read_only // false) == false)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/demo-accounts" and (.read_only // false) == false)
   and .services["demo-probe"].read_only == true
   and (.services["demo-probe"].volumes | length) == 1
@@ -1034,7 +1246,8 @@ cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
   "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
-  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" <<'PY'
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" \
+  "$REPO_ROOT/cmd/demo-seed/main.go" "$SCRIPT_DIR/test-general-moderation-compose.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1062,10 +1275,12 @@ assert_order(Path(sys.argv[1]), [
     '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
     '"$SCRIPT_DIR/test-seed-compose.sh" "$BEFORE_GENERATION"',
     rate_limit_reset,
-    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    '"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"',
     "demo_compose up -d edge",
 ])
+moderation_smoke = Path(sys.argv[10])
+if not moderation_smoke.stat().st_mode & 0o111:
+    raise SystemExit("test-general-moderation-compose.sh: smoke test must be executable")
 seed_test = Path(sys.argv[6])
 assert_order(seed_test, [
     'before=$(capture_seed_report)',
@@ -1168,6 +1383,7 @@ deploy_steps = [
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"',
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_haproxy_control enable "$CANDIDATE_SERVER"',
@@ -1204,10 +1420,33 @@ assert_order(deploy_path, [
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
 ], start=normal_deploy_start)
+seed_demo = Path(sys.argv[3]).with_name("seed-demo.sh").read_text(encoding="utf-8")
+if 'ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT")' not in seed_demo:
+    raise SystemExit("seed-demo.sh: moderation modes must resolve the internal HAProxy endpoint")
+if seed_demo.count('run_moderation_helper \\\n      --moderate-delete-message "$MESSAGE_ID" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: message moderation must use the production Compose profile")
+if seed_demo.count('run_moderation_helper \\\n      --moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT"') != 1:
+    raise SystemExit("seed-demo.sh: user moderation must use the production Compose profile")
+if 'demo_compose --profile seed run --rm --no-deps --pull never demo-seed "$@"' not in seed_demo:
+    raise SystemExit("seed-demo.sh: moderation must run against the production Compose profile")
+seed_main = Path(sys.argv[9]).read_text(encoding="utf-8")
+owner_flow = seed_main.split("func withSeedOwnerUsingRunner(", 1)[1].split(
+    "\nfunc seedOwnerSessionUsable", 1
+)[0]
+if '&session.FileStorage{Path: defaultOwnerSessionFile}' not in owner_flow:
+    raise SystemExit("demo-seed: owner moderation must reuse the persistent root-only MTProto session")
+if owner_flow.find("client.Auth().Status") < 0 or owner_flow.find("client.Auth().Status") > owner_flow.find("authenticate("):
+    raise SystemExit("demo-seed: owner session must be checked before private sign-in")
+if 'return false, errors.New("seed-owner session is not authorized;' not in seed_main:
+    raise SystemExit("demo-seed: production moderation must fail closed without an authorized owner session")
+send_auth = seed_main.split("func sendAuthCode(", 1)[1].split("\n}", 1)[0]
+if "InvokeWithReCaptcha" in send_auth or "defaultTurnstileQAToken" in send_auth:
+    raise SystemExit("demo-seed: owner sign-in must not reuse the signup-only QA token")
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
@@ -1545,10 +1784,12 @@ env \
   bash "$TMP_DIR/backup-prune-regression.sh"
 
 IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
+printf '%s\n' 'DEMO_ENV_BACKUP=' > "$IMAGE_CLEANUP_FUNCTION"
 sed -n \
   -e '/^demo_cleanup() {$/,/^}/p' \
   -e '/^demo_remove_previous_image() {$/,/^}/p' \
-  "$SCRIPT_DIR/deploy-main.sh" > "$IMAGE_CLEANUP_FUNCTION"
+  -e '/^demo_restore_env_after_rollback() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" >> "$IMAGE_CLEANUP_FUNCTION"
 cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
@@ -1949,6 +2190,44 @@ chmod 0600 "$EDGE_CONFIG_PERMISSION_FILE"
 demo_prepare_edge_config_permissions "$EDGE_CONFIG_PERMISSION_DIR" "$EDGE_CONFIG_PERMISSION_FILE"
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_DIR")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_FILE")" == 644 ]]
+
+ENV_ROLLBACK_FUNCTIONS="$TMP_DIR/demo-env-rollback-functions.sh"
+sed -n '/^demo_capture_env_for_rollback() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$ENV_ROLLBACK_FUNCTIONS"
+sed -n '/^demo_restore_env_after_rollback() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" >> "$ENV_ROLLBACK_FUNCTIONS"
+cat > "$TMP_DIR/demo-env-rollback-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$ENV_ROLLBACK_FUNCTIONS"
+demo_fail() { printf 'unexpected demo env failure: %s\n' "$1" >&2; return 1; }
+# CI runs unprivileged: report files as root-owned and skip the chown.
+stat() {
+  local out
+  out=$(command stat "$@") || return
+  if [[ "$*" == *'%u:%a'* ]]; then out="0:${out#*:}"; fi
+  printf '%s\n' "$out"
+}
+chown() { :; }
+DEMO_ENV_FILE="$TMP_DIR/rollback-demo.env"
+DEMO_ENV_BACKUP=
+cat > "$DEMO_ENV_FILE" <<'ENV'
+TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+TG_UPLOADS_DISABLED=true
+ENV
+chmod 0600 "$DEMO_ENV_FILE"
+legacy_preflight() {
+  [[ "$(sed -n 's/^TG_UPLOADS_DISABLED=//p' "$DEMO_ENV_FILE")" == true ]]
+}
+legacy_preflight || { printf 'previous revision preflight failed before rollout\n' >&2; exit 1; }
+demo_capture_env_for_rollback
+python3 "$SCRIPT_DIR/update-websocket-origins.py" "$DEMO_ENV_FILE" >/dev/null
+[[ "$(sed -n 's/^TG_UPLOADS_DISABLED=//p' "$DEMO_ENV_FILE")" == false ]]
+demo_restore_env_after_rollback
+legacy_preflight || { printf 'previous revision preflight failed after rollback\n' >&2; exit 1; }
+[[ -z "$DEMO_ENV_BACKUP" && "$(stat -c '%u:%a' "$DEMO_ENV_FILE")" == '0:600' ]]
+BASH
+(
+  export ENV_ROLLBACK_FUNCTIONS TMP_DIR SCRIPT_DIR
+  bash "$TMP_DIR/demo-env-rollback-regression.sh"
+)
 
 python3 "$SCRIPT_DIR/test-validate-env.py"
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"

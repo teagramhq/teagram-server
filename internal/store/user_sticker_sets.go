@@ -154,7 +154,8 @@ func (s *Store) StickerFilesForSet(ctx context.Context, ownerID int64, refs []St
 	}
 	files := make([]File, len(rows))
 	for i, row := range rows {
-		files[i] = fileFromRow(row)
+		files[i] = fileFromColumns(row.ID, row.UploaderID, row.AccessHash, row.Size, row.MimeType, row.FileName,
+			row.MediaKind, row.Width, row.Height, row.SubtypeRights, row.Stored, row.Date, nil)
 	}
 	return files, nil
 }
@@ -188,7 +189,8 @@ func (s *Store) StickerFilesForUserSet(ctx context.Context, ownerID, setID int64
 	}
 	files := make([]File, len(rows))
 	for i, row := range rows {
-		files[i] = fileFromRow(row)
+		files[i] = fileFromColumns(row.ID, row.UploaderID, row.AccessHash, row.Size, row.MimeType, row.FileName,
+			row.MediaKind, row.Width, row.Height, row.SubtypeRights, row.Stored, row.Date, nil)
 	}
 	return files, nil
 }

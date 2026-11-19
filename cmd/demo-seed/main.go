@@ -14,8 +14,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +38,7 @@ const (
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
 	defaultActivityInventory = "/run/secrets/demo-activity-inventory.json"
+	defaultOwnerSessionFile  = "/run/secrets/seed-owner.session"
 	defaultTurnstileQAToken  = "/run/secrets/teagram_demo_turnstile_qa_bypass"
 	trustedProxyHost         = "haproxy"
 	trustedProxyEndpoint     = trustedProxyHost + ":2443"
@@ -52,16 +55,27 @@ type clientDocument struct {
 }
 
 type seedOptions struct {
-	check           bool
-	seed            bool
-	verifySeed      bool
-	verifyTurnstile bool
-	activity        bool
-	endpoint        string
-	ownerUsername   string
-	activityTarget  string
-	maxActionsHour  int
-	minActivityGap  time.Duration
+	check                    bool
+	seed                     bool
+	verifySeed               bool
+	verifyTurnstile          bool
+	expectedSigninEnabled    bool
+	expectedSigninModeSet    bool
+	activity                 bool
+	generalChatEnabled       bool
+	moderateDeleteMessageID  int64
+	moderateBanUsername      string
+	moderationSmokePrepare   bool
+	moderationSmokeVerify    bool
+	moderationSmokeCleanup   bool
+	moderationSmokeMarker    string
+	moderationSmokeMessageID int64
+	endpoint                 string
+	endpointExplicit         bool
+	ownerUsername            string
+	activityTarget           string
+	maxActionsHour           int
+	minActivityGap           time.Duration
 }
 
 type apiConfig struct {
@@ -87,13 +101,14 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateEndpointForMode(options.endpoint, options.verifyTurnstile); err != nil {
+	if err := validateEndpointForMode(options.endpoint, options); err != nil {
 		return err
 	}
 	if options.check {
 		return nil
 	}
-	if options.activity {
+	if options.activity || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokePrepare || options.moderationSmokeVerify || options.moderationSmokeCleanup {
 		if err := requireRoot(); err != nil {
 			return err
 		}
@@ -133,8 +148,32 @@ func run(args []string) error {
 			return err
 		}
 		return verifySeed(ctx, cfg, options, ownerPassword, inventory)
+	case options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "":
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return moderateGeneralChat(ctx, cfg, options, ownerPassword)
+	case options.moderationSmokePrepare:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return prepareGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
+	case options.moderationSmokeVerify:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return verifyGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
+	case options.moderationSmokeCleanup:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return cleanupGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
 	case options.verifyTurnstile:
-		return verifyTurnstile(ctx, cfg)
+		return verifyTurnstile(ctx, cfg, options.expectedSigninEnabled)
 	case options.activity:
 		account, ok := seededActivityAccount()
 		if !ok {
@@ -146,7 +185,7 @@ func run(args []string) error {
 		}
 		return runDemoActivity(ctx, cfg, options, account, password)
 	default:
-		return errors.New("select one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
+		return errors.New("select one of --check, --seed, --verify-seed, --verify-turnstile, --activity, or a General moderation operation")
 	}
 }
 
@@ -158,7 +197,15 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.BoolVar(&options.seed, "seed", false, "create demo accounts and content")
 	flags.BoolVar(&options.verifySeed, "verify-seed", false, "verify the seeded public content")
 	flags.BoolVar(&options.verifyTurnstile, "verify-turnstile", false, "verify production sign-up challenge enforcement")
+	flags.BoolVar(&options.expectedSigninEnabled, "expect-signin-enabled", false, "expected production sign-in Turnstile setting for --verify-turnstile")
 	flags.BoolVar(&options.activity, "activity", false, "post one fixed demo activity message")
+	flags.Int64Var(&options.moderateDeleteMessageID, "moderate-delete-message", 0, "delete one General message by ID")
+	flags.StringVar(&options.moderateBanUsername, "moderate-ban-user", "", "permanently ban a General member by username")
+	flags.BoolVar(&options.moderationSmokePrepare, "prepare-general-moderation-smoke", false, "prepare temporary General moderation smoke-test data on a private endpoint")
+	flags.BoolVar(&options.moderationSmokeVerify, "verify-general-moderation-smoke", false, "verify the General moderation smoke-test results through HAProxy")
+	flags.BoolVar(&options.moderationSmokeCleanup, "cleanup-general-moderation-smoke", false, "restore temporary General moderation smoke-test data")
+	flags.StringVar(&options.moderationSmokeMarker, "moderation-smoke-marker", "", "unique marker for a General moderation smoke test")
+	flags.Int64Var(&options.moderationSmokeMessageID, "moderation-smoke-message-id", 0, "message ID created by the General moderation smoke test")
 	flags.StringVar(&options.endpoint, "endpoint", defaultEndpoint, "internal MTProto service endpoint")
 	flags.StringVar(&options.ownerUsername, "owner-username", "demo_seed_owner", "seed-owner login name")
 	flags.StringVar(&options.activityTarget, "target", "river", "seeded megagroup slug for scheduled activity")
@@ -167,20 +214,69 @@ func parseOptions(args []string) (seedOptions, error) {
 	if err := flags.Parse(args); err != nil {
 		return seedOptions{}, err
 	}
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == "endpoint" {
+			options.endpointExplicit = true
+		}
+		if flag.Name == "expect-signin-enabled" {
+			options.expectedSigninModeSet = true
+		}
+	})
+	if raw := os.Getenv("TG_DEMO_GENERAL_CHAT_ENABLED"); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return seedOptions{}, errors.New("TG_DEMO_GENERAL_CHAT_ENABLED must be a boolean")
+		}
+		options.generalChatEnabled = enabled
+	}
 	if flags.NArg() != 0 {
 		return seedOptions{}, errors.New("unexpected positional arguments")
 	}
 	selected := 0
-	for _, value := range []bool{options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity} {
+	for _, value := range []bool{
+		options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity,
+		options.moderateDeleteMessageID != 0, options.moderateBanUsername != "",
+		options.moderationSmokePrepare, options.moderationSmokeVerify, options.moderationSmokeCleanup,
+	} {
 		if value {
 			selected++
 		}
 	}
 	if selected != 1 {
-		return seedOptions{}, errors.New("select exactly one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
+		return seedOptions{}, errors.New("select exactly one demo-seed or General moderation operation")
 	}
-	if (options.seed || options.verifySeed) && options.ownerUsername != "demo_seed_owner" {
+	if options.verifyTurnstile != options.expectedSigninModeSet {
+		return seedOptions{}, errors.New("--expect-signin-enabled is required only with --verify-turnstile")
+	}
+	if options.moderateDeleteMessageID < 0 || options.moderateDeleteMessageID > math.MaxInt32 || (options.moderateDeleteMessageID != 0 && int64(int(options.moderateDeleteMessageID)) != options.moderateDeleteMessageID) {
+		return seedOptions{}, errors.New("moderate-delete-message must be a positive 32-bit message ID")
+	}
+	if options.moderateBanUsername != "" && !validGeneralChatUsername(options.moderateBanUsername) {
+		return seedOptions{}, errors.New("moderate-ban-user must be a username without @")
+	}
+	smokeMode := options.moderationSmokePrepare || options.moderationSmokeVerify || options.moderationSmokeCleanup
+	if smokeMode {
+		if !validModerationSmokeMarker(options.moderationSmokeMarker) {
+			return seedOptions{}, errors.New("moderation smoke marker must be 32 lowercase hexadecimal characters")
+		}
+		if options.moderationSmokeVerify && (options.moderationSmokeMessageID <= 0 || options.moderationSmokeMessageID > math.MaxInt32) {
+			return seedOptions{}, errors.New("moderation smoke verification requires a positive signed 32-bit message ID")
+		}
+		if !options.moderationSmokeVerify && options.moderationSmokeMessageID != 0 {
+			return seedOptions{}, errors.New("moderation smoke message ID applies only to verification")
+		}
+	} else if options.moderationSmokeMarker != "" || options.moderationSmokeMessageID != 0 {
+		return seedOptions{}, errors.New("moderation smoke arguments require a moderation smoke operation")
+	}
+	if (options.seed || options.verifySeed || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" || smokeMode) && options.ownerUsername != "demo_seed_owner" {
 		return seedOptions{}, errors.New("seed owner must use the demo_seed_owner account")
+	}
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" || smokeMode) && !options.generalChatEnabled {
+		return seedOptions{}, errors.New("general moderation requires TG_DEMO_GENERAL_CHAT_ENABLED=true")
+	}
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokeVerify || options.moderationSmokeCleanup) && !options.endpointExplicit {
+		options.endpoint = trustedProxyEndpoint
 	}
 	if options.activity {
 		switch options.activityTarget {
@@ -198,6 +294,22 @@ func parseOptions(args []string) (seedOptions, error) {
 	return options, nil
 }
 
+func validGeneralChatUsername(username string) bool {
+	if len(username) < 2 || len(username) > 32 {
+		return false
+	}
+	for index, char := range username {
+		letter := char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+		if index == 0 && !letter {
+			return false
+		}
+		if !letter && (char < '0' || char > '9') && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 func validateEndpoint(endpoint string) error {
 	_, err := endpointDialHost(endpoint)
 	return err
@@ -209,17 +321,36 @@ func endpointDialHost(endpoint string) (string, error) {
 		return defaultEndpointHost, nil
 	case candidateEndpoint:
 		return candidateEndpointHost, nil
+	case trustedProxyEndpoint:
+		return trustedProxyHost, nil
 	default:
-		return "", errors.New("endpoint must be an internal teagramd service")
+		return "", errors.New("endpoint must be an internal teagramd service or trusted haproxy listener")
 	}
 }
 
-func validateEndpointForMode(endpoint string, verifyTurnstile bool) error {
-	if verifyTurnstile {
+func validateEndpointForMode(endpoint string, options seedOptions) error {
+	moderation := options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokeVerify
+	if options.verifyTurnstile || moderation {
 		if endpoint != trustedProxyEndpoint {
-			return errors.New("turnstile verification must use the trusted internal haproxy:2443 service")
+			if options.verifyTurnstile {
+				return errors.New("turnstile verification must use the trusted internal haproxy:2443 service")
+			}
+			return errors.New("general moderation must use the trusted internal haproxy:2443 service")
 		}
 		return nil
+	}
+	if options.moderationSmokeCleanup {
+		if endpoint == trustedProxyEndpoint {
+			return nil
+		}
+		return validateEndpoint(endpoint)
+	}
+	if options.moderationSmokePrepare && endpoint == trustedProxyEndpoint {
+		return errors.New("demo General moderation smoke preparation must use a private teagramd endpoint")
+	}
+	if endpoint == trustedProxyEndpoint {
+		return errors.New("haproxy:2443 is only supported for Turnstile probes and General moderation")
 	}
 	return validateEndpoint(endpoint)
 }
@@ -447,6 +578,64 @@ func withAccountUsingRunner(ctx context.Context, cfg apiConfig, endpoint string,
 	})
 }
 
+func withSeedOwnerUsingRunner(
+	ctx context.Context,
+	cfg apiConfig,
+	options seedOptions,
+	password string,
+	action apiAction,
+	runner telegramClientRunner,
+) error {
+	account := seedAccounts[0]
+	if account.username != options.ownerUsername {
+		return errors.New("configured seed-owner username does not match the fixed demo owner")
+	}
+	clientOptions, err := accountClientOptions(cfg, options.endpoint, &session.FileStorage{Path: defaultOwnerSessionFile})
+	if err != nil {
+		return err
+	}
+	return runner(ctx, clientOptions, func(runCtx context.Context, client *telegram.Client) error {
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("check seed-owner authorization session: %w", err)
+		}
+		usable, err := seedOwnerSessionUsable(status.Authorized, status.User, account.username, options.endpoint)
+		if err != nil {
+			return err
+		}
+		if !usable {
+			if err := authenticate(runCtx, client.API(), account, &password, nil); err != nil {
+				return err
+			}
+			status, err = client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("verify seed-owner authorization session: %w", err)
+			}
+			usable, err = seedOwnerSessionUsable(status.Authorized, status.User, account.username, options.endpoint)
+			if err != nil {
+				return err
+			}
+			if !usable {
+				return errors.New("seed-owner authentication did not persist an authorized session")
+			}
+		}
+		return action(runCtx, client.API())
+	})
+}
+
+func seedOwnerSessionUsable(authorized bool, user *tg.User, ownerUsername, endpoint string) (bool, error) {
+	if authorized {
+		if user == nil || !strings.EqualFold(user.Username, ownerUsername) {
+			return false, errors.New("seed-owner session is authorized for a different account")
+		}
+		return true, nil
+	}
+	if endpoint == trustedProxyEndpoint {
+		return false, errors.New("seed-owner session is not authorized; run the private seed before production moderation")
+	}
+	return false, nil
+}
+
 func runTelegramClient(ctx context.Context, options telegram.Options, action telegramClientAction) error {
 	client := telegram.NewClient(appID, appHash, options)
 	return client.Run(ctx, func(runCtx context.Context) error {
@@ -455,11 +644,7 @@ func runTelegramClient(ctx context.Context, options telegram.Options, action tel
 }
 
 func authenticate(ctx context.Context, api *tg.Client, account accountSpec, password *string, savePassword func(string) error) error {
-	sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{
-		PhoneNumber: account.loginID,
-		APIID:       appID,
-		APIHash:     appHash,
-	})
+	sent, err := sendAuthCode(ctx, api, account.loginID)
 	if err != nil {
 		return fmt.Errorf("request demo account sign-in code: %w", err)
 	}
@@ -541,7 +726,21 @@ func authenticate(ctx context.Context, api *tg.Client, account accountSpec, pass
 	return nil
 }
 
-func setNewPassword(ctx context.Context, api *tg.Client, password string) error {
+type authSendCodeAPI interface {
+	AuthSendCode(context.Context, *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error)
+}
+
+func sendAuthCode(ctx context.Context, api authSendCodeAPI, loginID string) (tg.AuthSentCodeClass, error) {
+	request := &tg.AuthSendCodeRequest{PhoneNumber: loginID, APIID: appID, APIHash: appHash}
+	return api.AuthSendCode(ctx, request)
+}
+
+type passwordSetupAPI interface {
+	AccountGetPassword(context.Context) (*tg.AccountPassword, error)
+	AccountUpdatePasswordSettings(context.Context, *tg.AccountUpdatePasswordSettingsRequest) (bool, error)
+}
+
+func setNewPassword(ctx context.Context, api passwordSetupAPI, password string) error {
 	settings, err := api.AccountGetPassword(ctx)
 	if err != nil {
 		return err
@@ -633,7 +832,7 @@ type turnstileProbeAPI interface {
 	Invoker() tg.Invoker
 }
 
-func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
+func verifyTurnstile(ctx context.Context, cfg apiConfig, expectedSigninEnabled bool) error {
 	username, err := newProbeUsername()
 	if err != nil {
 		return err
@@ -644,14 +843,21 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 	}
 	client := newTelegramClientAt(cfg, trustedProxyHost)
 	return client.Run(ctx, func(runCtx context.Context) error {
-		return verifyTurnstileWithAPI(runCtx, client.API(), username, qaToken)
+		return verifyTurnstileWithAPI(runCtx, client.API(), username, qaToken, expectedSigninEnabled)
 	})
 }
 
-func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username, signupQAToken string) error {
+func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username, signupQAToken string, expectedSigninEnabled bool) error {
 	sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash}
 	sent, err := api.AuthSendCode(ctx, sendCode)
-	if isSignInCaptchaRequired(err) {
+	signinChallenge := isSignInCaptchaRequired(err)
+	if err != nil && !signinChallenge {
+		return fmt.Errorf("request sign-up probe code: %w", err)
+	}
+	if signinChallenge != expectedSigninEnabled {
+		return fmt.Errorf("production sign-in Turnstile challenge enabled=%t, expected %t", signinChallenge, expectedSigninEnabled)
+	}
+	if signinChallenge {
 		if signupQAToken == "" {
 			return errors.New("sign-in gate is enabled but the signup QA token is unavailable")
 		}
@@ -660,8 +866,6 @@ func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username
 			return fmt.Errorf("request sign-up probe code with signup action: %w", err)
 		}
 		sent = response.SentCode
-	} else if err != nil {
-		return fmt.Errorf("request sign-up probe code: %w", err)
 	}
 	sentCode, ok := sent.(*tg.AuthSentCode)
 	if !ok {

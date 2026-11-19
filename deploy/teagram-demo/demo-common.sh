@@ -25,6 +25,8 @@ DEMO_TURNSTILE_QA_BYPASS_FILE="$DEMO_SEED_SECRET_DIR/turnstile-qa-bypass-token"
 # shellcheck disable=SC2034
 DEMO_SEED_PASSWORD_FILE="$DEMO_SEED_SECRET_DIR/seed-owner-password"
 # shellcheck disable=SC2034
+DEMO_SEED_OWNER_SESSION_FILE="$DEMO_SEED_SECRET_DIR/seed-owner.session"
+# shellcheck disable=SC2034
 DEMO_SEED_ACCOUNT_DIR="$DEMO_SEED_SECRET_DIR/demo-accounts"
 # shellcheck disable=SC2034
 DEMO_SEED_ACCOUNT_PASSWORD_FILE="$DEMO_SEED_ACCOUNT_DIR/inventory.json"
@@ -45,6 +47,24 @@ DEMO_COMPOSE_ARGS=(
 demo_fail() {
   printf 'teagram-demo: %s\n' "$1" >&2
   return 1
+}
+
+demo_valid_signup_username() {
+  [[ "${1:-}" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
+}
+
+demo_turnstile_signin_enabled() {
+  local -a values=()
+  mapfile -t values < <(sed -n 's/^TG_TURNSTILE_SIGNIN_ENABLED=//p' "$DEMO_ENV_FILE")
+  if ((${#values[@]} == 0)); then
+    printf '%s\n' false
+    return 0
+  fi
+  if ((${#values[@]} != 1)) || [[ "${values[0]}" != true && "${values[0]}" != false ]]; then
+    demo_fail 'sign-in Turnstile setting is missing or invalid'
+    return 1
+  fi
+  printf '%s\n' "${values[0]}"
 }
 
 demo_prepare_runtime_tmp_dirs() {
@@ -622,6 +642,40 @@ demo_active_server() {
   printf '%s\n' "$active"
 }
 
+demo_resolve_seed_endpoint() {
+  local mode="$1" explicit="$2" endpoint="$3"
+  if [[ "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ||
+    "$mode" == --verify-general-moderation-smoke ]]; then
+    if [[ "$explicit" == 1 && "$endpoint" != haproxy:2443 ]]; then
+      demo_fail 'moderation commands must use the internal haproxy:2443 listener'
+      return 1
+    fi
+    printf '%s\n' haproxy:2443
+    return 0
+  fi
+  if [[ "$mode" == --cleanup-general-moderation-smoke ]]; then
+    if [[ "$explicit" != 1 ]]; then
+      printf '%s\n' haproxy:2443
+      return 0
+    fi
+    case "$endpoint" in
+      haproxy:2443|teagramd:2443|teagramd-next:2443)
+        printf '%s\n' "$endpoint"
+        return 0
+        ;;
+      *)
+        demo_fail 'General moderation smoke cleanup requires an internal endpoint'
+        return 1
+        ;;
+    esac
+  fi
+  if [[ "$mode" == --prepare-general-moderation-smoke && "$endpoint" == haproxy:2443 ]]; then
+    demo_fail 'General moderation smoke preparation must use a private teagramd endpoint'
+    return 1
+  fi
+  printf '%s\n' "$endpoint"
+}
+
 demo_active_image_ref() {
   local active_file="$DEMO_ACTIVE_RELEASE_FILE" image_ref
   if [[ -e "$active_file" || -L "$active_file" ]]; then
@@ -1058,6 +1112,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_REGISTRATION == "open"
     and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+    and .services.teagramd.environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
+    and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
     and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false" or .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
     and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED
     and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
@@ -1117,17 +1173,54 @@ demo_reset_seed_owner_marker() {
       demo_fail 'seed secret directory has unsafe type or permissions'
   fi
   [[ ! -L "$DEMO_SEED_OWNER_MARKER" ]] || demo_fail 'seed-owner marker must not be a symlink'
+  if [[ -e "$DEMO_SEED_OWNER_SESSION_FILE" || -L "$DEMO_SEED_OWNER_SESSION_FILE" ]]; then
+    [[ -f "$DEMO_SEED_OWNER_SESSION_FILE" && ! -L "$DEMO_SEED_OWNER_SESSION_FILE" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] ||
+      demo_fail 'seed-owner session file has unsafe type or permissions'
+    rm -f -- "$DEMO_SEED_OWNER_SESSION_FILE"
+  fi
+  if [[ -e "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" || -L "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" ]]; then
+    [[ -d "$DEMO_SEED_ACCOUNT_DIR" && ! -L "$DEMO_SEED_ACCOUNT_DIR" &&
+      -f "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" && ! -L "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session")" == '0:600' ]] ||
+      demo_fail 'General moderation smoke session has unsafe type or permissions'
+    rm -f -- "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session"
+  fi
   rm -f -- "$DEMO_SEED_OWNER_MARKER"
 }
 
+demo_prepare_seed_owner_session() {
+  [[ ! -L "$DEMO_SEED_SECRET_DIR" ]] || demo_fail 'seed secret directory must not be a symlink'
+  install -d -o root -g root -m 0700 "$DEMO_SEED_SECRET_DIR"
+  [[ "$(stat -c '%u:%a' "$DEMO_SEED_SECRET_DIR")" == '0:700' ]] ||
+    demo_fail 'seed secret directory must be root-owned mode 0700'
+  if [[ -e "$DEMO_SEED_OWNER_SESSION_FILE" || -L "$DEMO_SEED_OWNER_SESSION_FILE" ]]; then
+    [[ -f "$DEMO_SEED_OWNER_SESSION_FILE" && ! -L "$DEMO_SEED_OWNER_SESSION_FILE" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] ||
+      demo_fail 'seed-owner session file has unsafe type or permissions'
+  else
+    install -o root -g root -m 0600 /dev/null "$DEMO_SEED_OWNER_SESSION_FILE" ||
+      demo_fail 'seed-owner session file could not be created securely'
+  fi
+}
+
+demo_seed_owner_admin_command() {
+  local active_server="$1"
+  shift
+  demo_seed_compose_input exec -T --user 0:65532 "$active_server" \
+    /usr/local/bin/teagramd admin "$@"
+}
+
 demo_prepare_seed_owner() {
-  local work_dir="$1" temporary marker_temporary active_server
+  local work_dir="$1" temporary marker_temporary session_temporary active_server
   active_server=$(demo_active_server)
 
   [[ ! -L "$DEMO_SEED_SECRET_DIR" ]] || demo_fail 'seed secret directory must not be a symlink'
   install -d -o root -g root -m 0700 "$DEMO_SEED_SECRET_DIR"
   [[ "$(stat -c '%u:%a' "$DEMO_SEED_SECRET_DIR")" == '0:700' ]] ||
     demo_fail 'seed secret directory must be root-owned mode 0700'
+
+  demo_prepare_seed_owner_session
 
   if [[ -e "$DEMO_SEED_PASSWORD_FILE" || -L "$DEMO_SEED_PASSWORD_FILE" ]]; then
     [[ -f "$DEMO_SEED_PASSWORD_FILE" && ! -L "$DEMO_SEED_PASSWORD_FILE" &&
@@ -1147,6 +1240,16 @@ demo_prepare_seed_owner() {
     return 0
   fi
 
+  session_temporary=$(mktemp "$DEMO_SEED_SECRET_DIR/.seed-owner.session.XXXXXXXX")
+  if ! {
+    chmod 0600 "$session_temporary" &&
+      chown root:root "$session_temporary" &&
+      mv -f -- "$session_temporary" "$DEMO_SEED_OWNER_SESSION_FILE"
+  }; then
+    rm -f -- "$session_temporary"
+    demo_fail 'seed-owner session file could not be reset for the new database'
+  fi
+
   temporary=$(mktemp "$DEMO_SEED_SECRET_DIR/seed-owner-password.XXXXXXXX")
   if ! {
     chmod 0600 "$temporary" &&
@@ -1162,8 +1265,8 @@ demo_prepare_seed_owner() {
   grep -Eq '^[0-9a-f]{64}$' "$DEMO_SEED_PASSWORD_FILE" ||
     demo_fail 'generated seed-owner password is invalid'
 
-  if ! demo_seed_compose_input exec -T --user 0:65532 "$active_server" \
-    /usr/local/bin/teagramd admin create-user --username "$DEMO_SEED_OWNER_USERNAME" \
+  if ! demo_seed_owner_admin_command "$active_server" create-user \
+    --username "$DEMO_SEED_OWNER_USERNAME" \
     < "$DEMO_SEED_PASSWORD_FILE" \
     > "$work_dir/seed-owner-create.stdout" \
     2> "$work_dir/seed-owner-create.stderr"; then

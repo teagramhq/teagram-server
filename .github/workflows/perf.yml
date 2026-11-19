@@ -9,6 +9,7 @@ on:
       - 'internal/blob/**'
       - 'internal/catalog/**'
       - 'internal/config/**'
+      - 'internal/demo/**'
       - 'internal/discovery/**'
       - 'internal/keycrypt/**'
       - 'internal/linklanding/**'

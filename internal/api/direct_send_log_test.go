@@ -4,10 +4,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -70,6 +74,461 @@ func directSendLogRecords(t *testing.T, logs *strings.Builder) []map[string]any 
 		records = append(records, record)
 	}
 	return records
+}
+
+func TestDemoGeneralChatInvalidResolutionLogsErrorOnce(t *testing.T) {
+	for _, target := range []string{"missing", "wrong channel"} {
+		t.Run(target, func(t *testing.T) {
+			ctx, s, h, logs := newDirectSendLogHarness(t)
+			h.demoGeneralChatEnabled = true
+			var channelID int64 = 999
+			if target == "wrong channel" {
+				owner, err := s.CreateUser(ctx, "+15550001701")
+				if err != nil {
+					t.Fatalf("create owner: %v", err)
+				}
+				channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "Not General", "", false)
+				if err != nil {
+					t.Fatalf("create wrong channel: %v", err)
+				}
+				if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+					t.Fatalf("claim General handle on wrong channel: %v", err)
+				}
+				channelID = channel.ID
+			}
+			for range 2 {
+				if isGeneral, err := h.isDemoGeneralChat(ctx, channelID); err != nil || isGeneral {
+					t.Fatalf("invalid General resolution = %t, err=%v; want false without error", isGeneral, err)
+				}
+			}
+			records := directSendLogRecords(t, logs)
+			if len(records) != 1 {
+				t.Fatalf("invalid General resolution logged %d records, want one: %+v", len(records), records)
+			}
+			if records[0]["level"] != "ERROR" {
+				t.Fatalf("invalid General resolution level = %v, want ERROR", records[0]["level"])
+			}
+		})
+	}
+}
+
+func TestDemoGeneralChatCacheFollowsReclaimedHandle(t *testing.T) {
+	ctx, s, h, _ := newDirectSendLogHarness(t)
+	h.demoGeneralChatEnabled = true
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	owner, err := s.CreateUser(ctx, "+15550001702")
+	if err != nil {
+		t.Fatalf("create first owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username: %v", err)
+	}
+	first, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create first General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, first.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim first General handle: %v", err)
+	}
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || !isGeneral {
+		t.Fatalf("first General resolution = %t, err=%v", isGeneral, err)
+	}
+	if err := s.EditChannelUsername(ctx, first.ID, owner.ID, "previousgeneral"); err != nil {
+		t.Fatalf("move first General handle: %v", err)
+	}
+	second, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create replacement General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, second.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim replacement General handle: %v", err)
+	}
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || !isGeneral {
+		t.Fatalf("old General before cache expiry = %t, err=%v; want cached true", isGeneral, err)
+	}
+	now = now.Add(demoGeneralChatResolutionTTL + time.Nanosecond)
+	if isGeneral, err := h.isDemoGeneralChat(ctx, first.ID); err != nil || isGeneral {
+		t.Fatalf("old General after cache expiry = %t, err=%v; want false", isGeneral, err)
+	}
+	guest, err := s.CreateUser(ctx, "+15550001704")
+	if err != nil {
+		t.Fatalf("create guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, second.ID, guest.ID); err != nil {
+		t.Fatalf("join guest to replacement General: %v", err)
+	}
+	h.rateLimitMessageSend = store.RateLimitConfig{}
+	h.demoGeneralChatPolicy.perMinute = store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	r := &mtproto.Request{Ctx: ctx, UserID: guest.ID}
+	send := func(randomID int64, text string) error {
+		_, err := h.sendChannelMessage(r, second.ID, &tg.MessagesSendMessageRequest{RandomID: randomID, Message: text}, 0, nil)
+		return err
+	}
+	if err := send(70401, "first"); err != nil {
+		t.Fatalf("first replacement General message: %v", err)
+	}
+	err = send(70402, "second")
+	if err == nil || !strings.Contains(err.Error(), "FLOOD_WAIT (60)") {
+		t.Fatalf("second replacement General message = %v, want FLOOD_WAIT_60", err)
+	}
+}
+
+func TestDemoGeneralChatSlowModeRefusalDoesNotSpendLimits(t *testing.T) {
+	ctx, s, h, _, dsn := newDirectSendLogHarnessWithDSN(t)
+	h.demoGeneralChatEnabled = true
+	h.rateLimitMessageSend = store.RateLimitConfig{}
+	owner, err := s.CreateUser(ctx, "+15550001706")
+	if err != nil {
+		t.Fatalf("create General owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create General channel: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+		t.Fatalf("claim General username: %v", err)
+	}
+	if _, changed, err := s.SetChannelSlowMode(ctx, channel.ID, owner.ID, 10); err != nil || !changed {
+		t.Fatalf("set General slow mode changed=%v err=%v", changed, err)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	expireSlowMode := func(userID int64) {
+		t.Helper()
+		_, err := conn.Exec(ctx, `
+			WITH updated_participant AS (
+				UPDATE channel_participants AS participant
+				SET last_post_at = clock_timestamp() - interval '11 seconds'
+				WHERE participant.channel_id = $1 AND participant.user_id = $2
+				RETURNING participant.channel_id, participant.user_id, participant.last_post_at
+			)
+			INSERT INTO channel_post_markers (channel_id, user_id, last_post_at)
+			SELECT channel_id, user_id, last_post_at FROM updated_participant
+			ON CONFLICT (channel_id, user_id) DO UPDATE
+			SET last_post_at = EXCLUDED.last_post_at
+		`, channel.ID, userID)
+		if err != nil {
+			t.Fatalf("expire General slow mode for user %d: %v", userID, err)
+		}
+	}
+	send := func(userID, randomID int64, message string) error {
+		t.Helper()
+		_, err := h.sendChannelMessage(
+			&mtproto.Request{Ctx: ctx, UserID: userID}, channel.ID,
+			&tg.MessagesSendMessageRequest{RandomID: randomID, Message: message}, 0, nil,
+		)
+		return err
+	}
+	newMember := func(phone string) *store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join guest to General: %v", err)
+		}
+		return &user
+	}
+	refusedBySlowMode := func(t *testing.T, userID, randomID int64, text string) {
+		t.Helper()
+		err := send(userID, randomID, text)
+		if err == nil || !strings.Contains(err.Error(), "SLOWMODE_WAIT (") {
+			t.Fatalf("send during slow mode = %v, want SLOWMODE_WAIT", err)
+		}
+		expireSlowMode(userID)
+	}
+
+	t.Run("minute and hour counters", func(t *testing.T) {
+		h.demoGeneralChatPolicy = demoGeneralChatPolicy{
+			perMinute:      store.RateLimitConfig{Limit: 2, Window: time.Minute},
+			perHour:        store.RateLimitConfig{Limit: 2, Window: time.Hour},
+			duplicateLimit: store.RateLimitConfig{Limit: 5, Window: demoGeneralChatDuplicateWindow},
+		}
+		member := newMember("+15550001707")
+		if err := send(member.ID, 70701, "first accepted post"); err != nil {
+			t.Fatalf("first accepted post: %v", err)
+		}
+		refusedBySlowMode(t, member.ID, 70702, "post refused by slow mode")
+		if err := send(member.ID, 70703, "post after slow mode"); err != nil {
+			t.Fatalf("retry after slow mode spent the minute/hour allowance: %v", err)
+		}
+	})
+
+	t.Run("duplicate counter", func(t *testing.T) {
+		h.demoGeneralChatPolicy = demoGeneralChatPolicy{
+			perMinute:      store.RateLimitConfig{Limit: 10, Window: time.Minute},
+			perHour:        store.RateLimitConfig{Limit: 10, Window: time.Hour},
+			duplicateLimit: store.RateLimitConfig{Limit: 1, Window: demoGeneralChatDuplicateWindow},
+		}
+		member := newMember("+15550001708")
+		if err := send(member.ID, 70801, "first accepted post"); err != nil {
+			t.Fatalf("first accepted post: %v", err)
+		}
+		refusedBySlowMode(t, member.ID, 70802, "retry after slow mode")
+		if err := send(member.ID, 70803, "retry after slow mode"); err != nil {
+			t.Fatalf("slow-mode refusal recorded the duplicate: %v", err)
+		}
+	})
+}
+
+func BenchmarkDemoGeneralChatResolutionCacheHit(b *testing.B) {
+	ctx := context.Background()
+	blobs, err := blob.NewLocal(b.TempDir())
+	if err != nil {
+		b.Fatalf("open blob store: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := blobs.Close(); err != nil {
+			b.Errorf("close blob store: %v", err)
+		}
+	})
+	s, err := store.Open(ctx, pgtest.DSN(b), pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			b.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15550001705")
+	if err != nil {
+		b.Fatalf("create owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		b.Fatalf("claim seed-owner username: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		b.Fatalf("create General: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, demoGeneralChatUsername); err != nil {
+		b.Fatalf("claim General handle: %v", err)
+	}
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = true
+	if isGeneral, err := h.isDemoGeneralChat(ctx, channel.ID); err != nil || !isGeneral {
+		b.Fatalf("warm General resolution = %t, err=%v", isGeneral, err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if isGeneral, err := h.isDemoGeneralChat(ctx, channel.ID); err != nil || !isGeneral {
+			b.Fatalf("cached General resolution = %t, err=%v", isGeneral, err)
+		}
+	}
+}
+
+func TestDemoGeneralChatLookupFailureTTLStartsAfterLookup(t *testing.T) {
+	start := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	now := start
+	var lookups atomic.Int32
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+			lookups.Add(1)
+			now = now.Add(3 * time.Second)
+			return store.UsernameResolution{}, false, errors.New("injected username lookup failure")
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("first lookup returned no error")
+	}
+	now = start.Add(6 * time.Second)
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("lookup within five seconds of failed refresh returned no error")
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("lookup within five seconds after refresh performed %d lookups, want one", got)
+	}
+}
+
+func TestDemoGeneralChatLookupFailureIsCachedForRefreshWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	var lookups atomic.Int32
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(context.Context, string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				close(lookupStarted)
+			}
+			<-releaseLookup
+			return store.UsernameResolution{}, false, errors.New("injected username lookup failure")
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 77, expiresAt: now.Add(-time.Nanosecond)})
+
+	const concurrentCalls = 16
+	var wg sync.WaitGroup
+	started := make(chan struct{}, concurrentCalls)
+	for range concurrentCalls {
+		wg.Go(func() {
+			started <- struct{}{}
+			if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+				t.Error("expired cache lookup returned no error")
+			}
+		})
+	}
+	for range concurrentCalls {
+		<-started
+	}
+	<-lookupStarted
+	close(releaseLookup)
+	wg.Wait()
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("concurrent expired-cache calls performed %d lookups, want one", got)
+	}
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("cached lookup failure returned no error")
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("call within failed-refresh window performed %d lookups, want one total", got)
+	}
+	now = now.Add(demoGeneralChatLookupFailureTTL + time.Nanosecond)
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); err == nil {
+		t.Fatal("lookup after failure-cache expiry returned no error")
+	}
+	if got := lookups.Load(); got != 2 {
+		t.Fatalf("call after failed-refresh window performed %d lookups, want two total", got)
+	}
+}
+
+func TestDemoGeneralChatLookupSurvivesCallerCancellation(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var lookups atomic.Int32
+	username := demoGeneralChatUsername
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(ctx context.Context, _ string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				close(lookupStarted)
+			}
+			if _, ok := ctx.Deadline(); !ok {
+				return store.UsernameResolution{}, false, errors.New("lookup has no refresh deadline")
+			}
+			select {
+			case <-ctx.Done():
+				return store.UsernameResolution{}, false, ctx.Err()
+			case <-releaseLookup:
+				if err := ctx.Err(); err != nil {
+					return store.UsernameResolution{}, false, err
+				}
+				return store.UsernameResolution{
+					Kind: store.UsernameKindChannel,
+					User: store.User{ID: 43},
+					Channel: store.Channel{
+						ID: 77, CreatorID: 43, Title: "General", Username: &username, Megagroup: true,
+					},
+				}, true, nil
+			}
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+
+	callerCtx, cancel := context.WithCancel(context.Background())
+	type resolution struct {
+		isGeneral bool
+		err       error
+	}
+	firstResult := make(chan resolution, 1)
+	go func() {
+		isGeneral, err := h.isDemoGeneralChat(callerCtx, 77)
+		firstResult <- resolution{isGeneral: isGeneral, err: err}
+	}()
+	<-lookupStarted
+	cancel()
+
+	secondStarted := make(chan struct{})
+	secondResult := make(chan resolution, 1)
+	go func() {
+		close(secondStarted)
+		isGeneral, err := h.isDemoGeneralChat(context.Background(), 88)
+		secondResult <- resolution{isGeneral: isGeneral, err: err}
+	}()
+	<-secondStarted
+	close(releaseLookup)
+	first := <-firstResult
+	second := <-secondResult
+	if first.err != nil || !first.isGeneral {
+		t.Fatalf("cancelled first caller resolution = %t, err=%v; want shared General refresh", first.isGeneral, first.err)
+	}
+	if second.err != nil || second.isGeneral {
+		t.Fatalf("live non-General caller resolution = %t, err=%v; want false without error", second.isGeneral, second.err)
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("cancelled refresh and live caller performed %d lookups, want one", got)
+	}
+}
+
+func TestDemoGeneralChatContextLookupTimeoutIsSharedAndCached(t *testing.T) {
+	now := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+	var lookups atomic.Int32
+	lookupStarted := make(chan struct{})
+	h := &handlers{
+		now: func() time.Time { return now },
+		demoGeneralChatLookup: func(ctx context.Context, _ string) (store.UsernameResolution, bool, error) {
+			if lookups.Add(1) == 1 {
+				close(lookupStarted)
+			}
+			<-ctx.Done()
+			return store.UsernameResolution{}, false, ctx.Err()
+		},
+	}
+	h.demoGeneralChatTarget.Store(&demoGeneralChatCache{channelID: 11, expiresAt: now.Add(-time.Nanosecond)})
+	const concurrentCalls = 8
+	started := make(chan struct{}, concurrentCalls)
+	errorsByCall := make(chan error, concurrentCalls)
+	var wg sync.WaitGroup
+	start := time.Now()
+	for range concurrentCalls {
+		wg.Go(func() {
+			started <- struct{}{}
+			_, err := h.isDemoGeneralChat(context.Background(), 77)
+			errorsByCall <- err
+		})
+	}
+	for range concurrentCalls {
+		<-started
+	}
+	<-lookupStarted
+	wg.Wait()
+	elapsed := time.Since(start)
+	for range concurrentCalls {
+		if err := <-errorsByCall; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("concurrent lookup error = %v, want context deadline exceeded", err)
+		}
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("8 concurrent callers performed %d timed-out lookups, want one", got)
+	}
+	if elapsed < 2*time.Second || elapsed > demoGeneralChatLookupTimeout+2*time.Second {
+		t.Fatalf("8 concurrent calls took %s, want one %s refresh", elapsed, demoGeneralChatLookupTimeout)
+	}
+	if _, err := h.isDemoGeneralChat(context.Background(), 77); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lookup within cached failure window = %v, want context deadline exceeded", err)
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("call within cached failure window performed %d lookups, want one total", got)
+	}
 }
 
 func uploadDirectSendLogAlbumDocument(t *testing.T, ctx context.Context, s *store.Store, h *handlers, userID, fileID int64) *tg.InputMediaDocument {

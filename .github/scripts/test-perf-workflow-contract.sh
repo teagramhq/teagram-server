@@ -39,6 +39,7 @@ required_pr_paths=(
   '.github/workflows/perf.yml'
   'go.mod'
   'go.sum'
+  'internal/demo/**'
   'migrations/**'
   'test/perf/**'
 )

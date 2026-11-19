@@ -11,6 +11,70 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const albumPhotoFilesForUpload = `-- name: AlbumPhotoFilesForUpload :many
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
+FROM files AS f
+JOIN file_upload_grants AS g ON g.file_id = f.id
+JOIN (SELECT unnest($1::bigint[]) AS file_id,
+             unnest($2::bigint[]) AS access_hash) AS ref ON ref.file_id = f.id
+WHERE g.owner_id = $3::bigint
+  AND f.uploader_id = $3::bigint
+  AND f.access_hash = ref.access_hash
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND g.created_at >= $4::timestamptz
+ORDER BY f.id
+`
+
+type AlbumPhotoFilesForUploadParams struct {
+	FileIds      []int64
+	AccessHashes []int64
+	OwnerID      int64
+	NotBefore    pgtype.Timestamptz
+}
+
+// AlbumPhotoFilesForUpload reads only stored photo blobs the caller can
+// present with a live upload grant. The album transaction repeats this
+// authorization while consuming the grants after it takes its write locks.
+func (q *Queries) AlbumPhotoFilesForUpload(ctx context.Context, arg AlbumPhotoFilesForUploadParams) ([]File, error) {
+	rows, err := q.db.Query(ctx, albumPhotoFilesForUpload,
+		arg.FileIds,
+		arg.AccessHashes,
+		arg.OwnerID,
+		arg.NotBefore,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.UploaderID,
+			&i.AccessHash,
+			&i.Size,
+			&i.MimeType,
+			&i.FileName,
+			&i.Stored,
+			&i.Date,
+			&i.SubtypeRights,
+			&i.MediaKind,
+			&i.Width,
+			&i.Height,
+			&i.ContentSha256,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const bumpChannelStateBy = `-- name: BumpChannelStateBy :one
 UPDATE channel_state
 SET pts = pts + $1::bigint, next_local_id = next_local_id + $1::bigint, date = now()

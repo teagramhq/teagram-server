@@ -515,7 +515,7 @@ docker run --detach --name "$DATABASE" --label "$OWNER_LABEL=$OWNER_TOKEN" --lab
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999 \
 	--env POSTGRES_DB=teagram --env POSTGRES_HOST_AUTH_METHOD=trust \
 	--env PGDATA=/var/lib/postgresql/18/docker \
-	--health-cmd='pg_isready -q -U postgres -d teagram' --health-interval 1s --health-timeout 2s --health-retries 30 \
+	--health-cmd='pg_isready -q -h 127.0.0.1 -U postgres -d teagram' --health-interval 1s --health-timeout 2s --health-retries 30 \
 	mirror.gcr.io/library/postgres:18-alpine >/dev/null
 
 wait_healthy() {

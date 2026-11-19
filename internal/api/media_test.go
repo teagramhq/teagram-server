@@ -136,6 +136,58 @@ type blockingAssembledPut struct {
 	releaseOnce sync.Once
 }
 
+type assembledPutGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *assembledPutGate) wait(ctx context.Context) error {
+	select {
+	case g.entered <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-g.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *assembledPutGate) unblock() {
+	g.once.Do(func() { close(g.release) })
+}
+
+type observedAssembledPutBlob struct {
+	blob.Store
+
+	mu   sync.Mutex
+	keys []string
+	gate *assembledPutGate
+}
+
+func (b *observedAssembledPutBlob) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+	if !strings.HasPrefix(key, blob.PartsPrefix) {
+		b.mu.Lock()
+		b.keys = append(b.keys, key)
+		b.mu.Unlock()
+		if b.gate != nil {
+			if err := b.gate.wait(ctx); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return b.Store.Put(ctx, key, r)
+}
+
+func (b *observedAssembledPutBlob) assembledKeys() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.keys...)
+}
+
 func (b *blockingAssembledPut) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
 	if strings.HasPrefix(key, blob.PartsPrefix) {
 		return b.Store.Put(ctx, key, r)

@@ -507,7 +507,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
 		beforeDelivery, turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
 		recoveryEmailMode, suppressChannelPostDelivery, config.DefaultSignUpTermsOfService,
-		nil, 0, config.StickerImportOn, 0, config.DefaultUserInviteMinAccountAge, false, photoThumbs...,
+		nil, 0, config.StickerImportOn, 0, config.DefaultUserInviteMinAccountAge, false, false, photoThumbs...,
 	)
 }
 
@@ -526,6 +526,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	userInviteQuota int,
 	userInviteMinAccountAge time.Duration,
 	uploadsDisabled bool,
+	demoGeneralChatEnabled bool,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
@@ -540,12 +541,12 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	if uploadMaxFileBytes > 0 {
 		maxFileBytes = uploadMaxFileBytes
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuotaAndDemoGeneralChat(
 		st, dcID, tgcfg, log, true, maxFileBytes, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
-		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge, uploadsDisabled, nil,
+		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge, uploadsDisabled, nil, demoGeneralChatEnabled,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {

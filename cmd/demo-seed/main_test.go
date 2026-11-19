@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -93,18 +94,19 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 			t.Fatalf("internal endpoint %q: %v", endpoint, err)
 		}
 	}
-	if err := validateEndpointForMode(trustedProxyEndpoint, true); err != nil {
+	if err := validateEndpointForMode(trustedProxyEndpoint, seedOptions{verifyTurnstile: true}); err != nil {
 		t.Fatalf("trusted proxy endpoint for Turnstile probe: %v", err)
 	}
 	for _, test := range []struct {
-		endpoint        string
-		verifyTurnstile bool
+		endpoint string
+		options  seedOptions
 	}{
 		{endpoint: trustedProxyEndpoint},
-		{endpoint: defaultEndpoint, verifyTurnstile: true},
+		{endpoint: defaultEndpoint, options: seedOptions{verifyTurnstile: true}},
+		{endpoint: defaultEndpoint, options: seedOptions{moderateDeleteMessageID: 81}},
 	} {
-		if err := validateEndpointForMode(test.endpoint, test.verifyTurnstile); err == nil {
-			t.Fatalf("validateEndpointForMode(%q, %t) succeeded", test.endpoint, test.verifyTurnstile)
+		if err := validateEndpointForMode(test.endpoint, test.options); err == nil {
+			t.Fatalf("validateEndpointForMode(%q, %+v) succeeded", test.endpoint, test.options)
 		}
 	}
 	for _, endpoint := range []string{
@@ -121,6 +123,116 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 				t.Fatalf("validateEndpoint(%q) succeeded", endpoint)
 			}
 		})
+	}
+}
+
+func TestParseVerifyTurnstileRequiresExpectedSigninMode(t *testing.T) {
+	options, err := parseOptions([]string{"--verify-turnstile", "--expect-signin-enabled=false", "--endpoint", trustedProxyEndpoint})
+	if err != nil {
+		t.Fatalf("parse explicit disabled sign-in mode: %v", err)
+	}
+	if !options.verifyTurnstile || !options.expectedSigninModeSet || options.expectedSigninEnabled {
+		t.Fatalf("parsed Turnstile options = %+v, want explicit disabled sign-in mode", options)
+	}
+	if _, err := parseOptions([]string{"--verify-turnstile", "--endpoint", trustedProxyEndpoint}); err == nil {
+		t.Fatal("Turnstile verification accepted an unspecified sign-in mode")
+	}
+	if _, err := parseOptions([]string{"--check", "--expect-signin-enabled=false"}); err == nil {
+		t.Fatal("non-Turnstile operation accepted the expected sign-in mode option")
+	}
+}
+
+func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "true")
+	for _, args := range [][]string{
+		{"--moderate-delete-message", "81"},
+		{"--moderate-ban-user", "freshguest"},
+		{"--moderate-ban-user", "ab"},
+	} {
+		options, err := parseOptions(args)
+		if err != nil {
+			t.Fatalf("parse moderation options %v: %v", args, err)
+		}
+		if options.endpoint != trustedProxyEndpoint {
+			t.Fatalf("moderation options %v endpoint = %q, want trusted production proxy %q", args, options.endpoint, trustedProxyEndpoint)
+		}
+		if err := validateEndpointForMode(options.endpoint, options); err != nil {
+			t.Fatalf("validate moderation endpoint for %v: %v", args, err)
+		}
+	}
+}
+
+func TestGeneralModerationSmokeModeEndpointsAndArguments(t *testing.T) {
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "true")
+	const marker = "0123456789abcdef0123456789abcdef"
+
+	prepare, err := parseOptions([]string{"--prepare-general-moderation-smoke", "--moderation-smoke-marker", marker})
+	if err != nil {
+		t.Fatalf("parse smoke preparation options: %v", err)
+	}
+	if prepare.endpoint != defaultEndpoint || validateEndpointForMode(prepare.endpoint, prepare) != nil {
+		t.Fatalf("smoke preparation endpoint = %q, want private endpoint %q", prepare.endpoint, defaultEndpoint)
+	}
+	if err := validateEndpointForMode(trustedProxyEndpoint, prepare); err == nil {
+		t.Fatal("smoke preparation accepted the production proxy endpoint")
+	}
+
+	verify, err := parseOptions([]string{"--verify-general-moderation-smoke", "--moderation-smoke-marker", marker, "--moderation-smoke-message-id", "81"})
+	if err != nil {
+		t.Fatalf("parse smoke verification options: %v", err)
+	}
+	if verify.endpoint != trustedProxyEndpoint || validateEndpointForMode(verify.endpoint, verify) != nil {
+		t.Fatalf("smoke verification endpoint = %q, want HAProxy %q", verify.endpoint, trustedProxyEndpoint)
+	}
+	if err := validateEndpointForMode(defaultEndpoint, verify); err == nil {
+		t.Fatal("smoke verification accepted a direct backend endpoint")
+	}
+
+	cleanup, err := parseOptions([]string{"--cleanup-general-moderation-smoke", "--moderation-smoke-marker", marker})
+	if err != nil {
+		t.Fatalf("parse smoke cleanup options: %v", err)
+	}
+	if cleanup.endpoint != trustedProxyEndpoint || validateEndpointForMode(cleanup.endpoint, cleanup) != nil {
+		t.Fatalf("smoke cleanup endpoint = %q, want HAProxy %q", cleanup.endpoint, trustedProxyEndpoint)
+	}
+	if err := validateEndpointForMode(defaultEndpoint, cleanup); err != nil {
+		t.Fatalf("private smoke cleanup endpoint: %v", err)
+	}
+
+	if _, err := parseOptions([]string{"--verify-general-moderation-smoke", "--moderation-smoke-marker", marker}); err == nil {
+		t.Fatal("smoke verification accepted a missing message ID")
+	}
+	if _, err := parseOptions([]string{"--prepare-general-moderation-smoke", "--moderation-smoke-marker", "ABC"}); err == nil {
+		t.Fatal("smoke preparation accepted a malformed marker")
+	}
+}
+
+func TestValidGeneralChatUsernameMatchesSignupRules(t *testing.T) {
+	for _, username := range []string{"ab", "abc", "abcd", "a2", "a_", "A7"} {
+		if !validGeneralChatUsername(username) {
+			t.Errorf("validGeneralChatUsername(%q) = false, want signup-compatible username", username)
+		}
+	}
+	for _, username := range []string{"a", "1a", "_a", "a-b", "a@b", " ab", "ab "} {
+		if validGeneralChatUsername(username) {
+			t.Errorf("validGeneralChatUsername(%q) = true, want invalid signup username", username)
+		}
+	}
+}
+
+func TestSeedOwnerSessionCanBeReusedThroughProductionProxy(t *testing.T) {
+	validOwner := &tg.User{Username: "demo_seed_owner"}
+	if usable, err := seedOwnerSessionUsable(true, validOwner, "demo_seed_owner", trustedProxyEndpoint); err != nil || !usable {
+		t.Fatalf("valid seed-owner session usable=%t err=%v, want reusable", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(true, &tg.User{Username: "other"}, "demo_seed_owner", trustedProxyEndpoint); err == nil || usable {
+		t.Fatalf("other-account session usable=%t err=%v, want rejected", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(false, nil, "demo_seed_owner", trustedProxyEndpoint); err == nil || usable {
+		t.Fatalf("missing production session usable=%t err=%v, want rejected without sign-in", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(false, nil, "demo_seed_owner", defaultEndpoint); err != nil || usable {
+		t.Fatalf("missing private seed session usable=%t err=%v, want private re-authentication", usable, err)
 	}
 }
 
@@ -156,8 +268,8 @@ func TestVerifyTurnstileProbePassesWithSigninGateDisabled(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{}
 	const username = "demo_probe_0123456789abcdef"
 
-	if err := verifyTurnstileWithAPI(context.Background(), api, username, ""); err != nil {
-		t.Fatalf("verify Turnstile probe through CAPTCHA challenge: %v", err)
+	if err := verifyTurnstileWithAPI(context.Background(), api, username, "", false); err != nil {
+		t.Fatalf("verify Turnstile probe with sign-in gate disabled: %v", err)
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code,sign-up"; got != want {
 		t.Fatalf("probe API calls = %q, want %q", got, want)
@@ -177,7 +289,7 @@ func TestVerifyTurnstileProbeUsesSignupActionWhenSigninGateIsEnabled(t *testing.
 	)
 	token := strings.Repeat("q", 32)
 
-	if err := verifyTurnstileWithAPI(context.Background(), api, username, token); err != nil {
+	if err := verifyTurnstileWithAPI(context.Background(), api, username, token, true); err != nil {
 		t.Fatalf("verify Turnstile with sign-in gate enabled: %v", err)
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code,send-code-with-signup-action,sign-up"; got != want {
@@ -196,7 +308,7 @@ func TestVerifyTurnstileProbeUsesSignupActionWhenSigninGateIsEnabled(t *testing.
 
 func TestVerifyTurnstileProbeDoesNotRetryOtherSendCodeErrorsWithQAToken(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{sendCodeError: &tgerr.Error{Message: "FLOOD_WAIT_3"}}
-	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32))
+	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32), false)
 	if err == nil {
 		t.Fatal("probe accepted an unrelated sendCode error")
 	}
@@ -207,12 +319,33 @@ func TestVerifyTurnstileProbeDoesNotRetryOtherSendCodeErrorsWithQAToken(t *testi
 
 func TestVerifyTurnstileProbeRequiresQATokenForSigninChallenge(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{signInGateEnabled: true}
-	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", "")
+	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", "", true)
 	if err == nil {
 		t.Fatal("probe accepted a sign-in challenge without the signup QA token")
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code"; got != want {
 		t.Fatalf("probe API calls = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyTurnstileProbeRejectsUnexpectedSigninMode(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		actualSignin, expected bool
+	}{
+		{name: "missing enabled challenge", actualSignin: false, expected: true},
+		{name: "unexpected disabled challenge", actualSignin: true, expected: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeTurnstileProbeAPI{signInGateEnabled: test.actualSignin}
+			err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32), test.expected)
+			if err == nil {
+				t.Fatal("probe accepted a sign-in challenge state different from the expected configuration")
+			}
+			if got, want := strings.Join(api.calls, ","), "send-code"; got != want {
+				t.Fatalf("probe API calls = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -294,6 +427,46 @@ func TestReadTurnstileQATokenTrimsAndValidatesSecret(t *testing.T) {
 	}
 	if _, err := readTurnstileQAToken(link); err == nil {
 		t.Fatal("readTurnstileQAToken accepted a symlink")
+	}
+}
+
+func TestOwnerAuthDoesNotUseSignupQATokenForSignin(t *testing.T) {
+	api := &fakeTurnstileProbeAPI{signInGateEnabled: true}
+	if _, err := sendAuthCode(context.Background(), api, "demo_seed_owner"); !isSignInCaptchaRequired(err) {
+		t.Fatalf("owner auth.sendCode error = %v, want sign-in challenge without the signup token", err)
+	}
+	if api.wrappedSendCodeRequest != nil {
+		t.Fatalf("owner sign-in unexpectedly used the signup QA token: %+v", api.wrappedSendCodeRequest)
+	}
+
+	guestAPI := &fakeTurnstileProbeAPI{signInGateEnabled: true}
+	if _, err := sendAuthCode(context.Background(), guestAPI, "demo_iona"); !isSignInCaptchaRequired(err) {
+		t.Fatalf("guest auth.sendCode error = %v, want the original sign-in challenge", err)
+	}
+	if guestAPI.wrappedSendCodeRequest != nil {
+		t.Fatalf("guest auth.sendCode unexpectedly used the owner QA token: %+v", guestAPI.wrappedSendCodeRequest)
+	}
+}
+
+func TestSeedOwnerUsesPersistentSessionFile(t *testing.T) {
+	var storage session.Storage
+	err := withSeedOwnerUsingRunner(
+		context.Background(),
+		apiConfig{dcID: 2},
+		seedOptions{endpoint: trustedProxyEndpoint, ownerUsername: "demo_seed_owner"},
+		"unused-password",
+		nil,
+		func(_ context.Context, options telegram.Options, _ telegramClientAction) error {
+			storage = options.SessionStorage
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("prepare seed-owner client: %v", err)
+	}
+	fileStorage, ok := storage.(*session.FileStorage)
+	if !ok || fileStorage.Path != defaultOwnerSessionFile {
+		t.Fatalf("seed-owner session storage = %#v, want file storage at %q", storage, defaultOwnerSessionFile)
 	}
 }
 
@@ -491,6 +664,34 @@ func TestCheckModeNeedsNoConfigAndRejectsNonInternalEndpoints(t *testing.T) {
 	}
 }
 
+func TestParseOptionsDemoGeneralChatFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   string
+		enabled bool
+	}{
+		{name: "unset"},
+		{name: "disabled", value: "false"},
+		{name: "enabled", value: "true", enabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", tt.value)
+			options, err := parseOptions([]string{"--seed"})
+			if err != nil {
+				t.Fatalf("parseOptions: %v", err)
+			}
+			if got := options.generalChatEnabled; got != tt.enabled {
+				t.Errorf("general chat seed option = %t, want %t", got, tt.enabled)
+			}
+		})
+	}
+
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "sometimes")
+	if _, err := parseOptions([]string{"--seed"}); err == nil {
+		t.Fatal("parseOptions accepted a non-boolean TG_DEMO_GENERAL_CHAT_ENABLED")
+	}
+}
+
 func TestSeedManifestCoversRequiredPublicSpaces(t *testing.T) {
 	if len(seedAccounts) != 10 {
 		t.Fatalf("seed accounts = %d, want ten", len(seedAccounts))
@@ -535,6 +736,23 @@ func TestSeedManifestCoversRequiredPublicSpaces(t *testing.T) {
 	}
 	if len(conversationLines) != 12 {
 		t.Fatalf("group conversation has %d turns, want 12", len(conversationLines))
+	}
+}
+
+func TestDemoGeneralChatSeedIsOptInAndUnique(t *testing.T) {
+	if specs := generalChatSpaceSpecs(false); len(specs) != 0 {
+		t.Fatalf("general chat specs with flag off = %+v, want none", specs)
+	}
+	specs := generalChatSpaceSpecs(true)
+	if len(specs) != 1 {
+		t.Fatalf("general chat specs with flag on = %d, want one", len(specs))
+	}
+	spec := specs[0]
+	if spec.title != "General" || spec.username != demoGeneralChatUsername || !spec.megagroup {
+		t.Fatalf("general chat spec = %+v, want public General supergroup %q", spec, demoGeneralChatUsername)
+	}
+	if demoGeneralChatSlowmodeSeconds != 10 {
+		t.Fatalf("General chat slow mode = %d, want 10 seconds", demoGeneralChatSlowmodeSeconds)
 	}
 }
 

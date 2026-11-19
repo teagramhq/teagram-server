@@ -35,6 +35,8 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
             b"TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key\n"
             b"TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=/root-only/fixture-secret\n"
             b"TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true\n"
+            b"TG_DEMO_GENERAL_CHAT_ENABLED=true\n"
+            b"TG_UPLOADS_DISABLED=false\n"
         )
         self.env_file.write_bytes(self.environment)
         self.env_file.chmod(0o600)

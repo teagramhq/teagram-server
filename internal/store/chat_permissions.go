@@ -7,6 +7,9 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/demo"
+	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
 var chatMediaSubtypeRights = [...]string{
@@ -23,6 +26,14 @@ func hasChatRight(rights []string, right string) bool {
 }
 
 func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRights []string) error {
+	return checkMessageRestriction(rights, exempt, media, mediaRights, false)
+}
+
+func checkDemoGeneralChatStickerRestriction(rights []string, exempt, media bool, mediaRights []string) error {
+	return checkMessageRestriction(rights, exempt, media, mediaRights, true)
+}
+
+func checkMessageRestriction(rights []string, exempt, media bool, mediaRights []string, allowStickerWithSendDocs bool) error {
 	if exempt {
 		return nil
 	}
@@ -30,9 +41,12 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		return ErrChatWriteForbidden
 	}
 	if media {
-		// Photos have their own restriction and are not documents covered by send_docs.
+		// Photos and stickers have their own restrictions and are not generic
+		// documents covered by send_docs.
 		if hasChatRight(rights, "send_media") ||
-			(hasChatRight(rights, "send_docs") && !hasChatRight(mediaRights, "send_photos")) {
+			(hasChatRight(rights, "send_docs") &&
+				!hasChatRight(mediaRights, "send_photos") &&
+				(!allowStickerWithSendDocs || !hasChatRight(mediaRights, "send_stickers"))) {
 			return ErrChatWriteForbidden
 		}
 		if mediaRights == nil {
@@ -51,6 +65,34 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		return ErrChatWriteForbidden
 	}
 	return nil
+}
+
+func isDemoGeneralChatChannel(ctx context.Context, q *db.Queries, channelID int64) (bool, error) {
+	owner, err := q.GetUserByUsername(ctx, demo.SeedOwnerUsername)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("load demo General owner: %w", err)
+	}
+	if owner.ID <= 0 {
+		return false, nil
+	}
+	for _, handle := range demo.GeneralChatHandles() {
+		row, err := q.GetChannelByUsername(ctx, handle)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			continue
+		case err != nil:
+			return false, fmt.Errorf("load demo General channel %q: %w", handle, err)
+		}
+		channel := channelFromRow(row)
+		if channel.ID == channelID && channel.Title == "General" && channel.Megagroup &&
+			channel.CreatorID == owner.ID && channel.Username != nil && *channel.Username == handle {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CheckChatWritePermission checks a new basic-chat media send before the

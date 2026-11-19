@@ -1,17 +1,29 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -31,6 +43,47 @@ func createWelcomeChannel(t *testing.T, s *store.Store, handle string, megagroup
 		t.Fatalf("claim welcome channel handle: %v", err)
 	}
 	return channel, message
+}
+
+func createGeneralChat(t *testing.T, s *store.Store) store.Channel {
+	t.Helper()
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+15550000119")
+	if err != nil {
+		t.Fatalf("create General chat owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, owner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username: %v", err)
+	}
+	channel, _, _, err := s.CreateChannelWithServiceMessage(ctx, owner.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create General chat: %v", err)
+	}
+	channel, _, err = s.SetChannelDefaultBannedRights(ctx, channel.ID, owner.ID, []string{
+		"change_info", "invite_users", "pin_messages", "manage_topics", "send_polls", "send_games", "send_inline",
+		"send_gifs", "send_videos", "send_roundvideos", "send_audios", "send_voices", "send_docs",
+	})
+	if err != nil {
+		t.Fatalf("restrict General guest permissions: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, demo.GeneralChatHandle); err != nil {
+		t.Fatalf("claim General chat handle: %v", err)
+	}
+	return channel
+}
+
+func assertChannelHistoryContainsText(t *testing.T, s *store.Store, channelID, userID int64, want string) {
+	t.Helper()
+	messages, err := s.ChannelHistory(context.Background(), channelID, 0, 100)
+	if err != nil {
+		t.Fatalf("read General history: %v", err)
+	}
+	for _, message := range messages {
+		if message.FromID == userID && message.Message == want {
+			return
+		}
+	}
+	t.Fatalf("General history = %+v, want stored text %q from user %d", messages, want, userID)
 }
 
 func signUpWelcomeTestAccount(t *testing.T, s *store.Store, runner *api.SignUpTestRunner, keyID [8]byte, username string) *tg.User {
@@ -62,6 +115,33 @@ func signUpWelcomeTestAccount(t *testing.T, s *store.Store, runner *api.SignUpTe
 		t.Fatalf("sign-up user = %T (%+v), want a persisted user", authorization.User, authorization.User)
 	}
 	return user
+}
+
+func TestSignUpCreatesTwoCharacterUsernameModeHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.9"), store.RateLimitConfig{}, config.RegistrationOpen, nil)
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{0x7a}, "ab")
+	persisted, found, err := s.UserByID(ctx, user.ID)
+	if err != nil || !found {
+		t.Fatalf("read new guest: found=%t err=%v", found, err)
+	}
+	if persisted.Username == nil || *persisted.Username != "ab" {
+		t.Fatalf("persisted sign-up username = %v, want the two-character handle", persisted.Username)
+	}
+	mode, err := s.UserLoginMode(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("read new guest login mode: %v", err)
+	}
+	if mode != "username" {
+		t.Fatalf("new guest login mode = %q, want username mode", mode)
+	}
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || !found {
+		t.Fatalf("two-character smoke guest General membership = %+v, found=%t err=%v; want auto-joined", member, found, err)
+	}
 }
 
 func TestSignUpJoinsConfiguredPublicChannelAndReturnsLatestMessage(t *testing.T) {
@@ -140,6 +220,840 @@ func TestSignUpSkipsConfiguredMegagroup(t *testing.T) {
 	}
 	if fields := attrs(logs.records[0]); fields["handle"] != "welcome_group" {
 		t.Fatalf("megagroup warning fields = %#v, want configured handle", fields)
+	}
+}
+
+func TestSignUpDemoGeneralChatAutoJoinIsFlagGated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	for _, allowed := range []string{"send_messages", "send_media", "send_photos", "send_stickers", "send_plain"} {
+		if slices.Contains(channel.DefaultBannedRights, allowed) {
+			t.Errorf("General default banned rights = %v, unexpectedly restricts %s", channel.DefaultBannedRights, allowed)
+		}
+	}
+	logs := &captureHandler{}
+	disabledRunner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.16"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+	disabledUser := signUpWelcomeTestAccount(t, s, disabledRunner, [8]byte{7}, "freshgeneraloff")
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, disabledUser.ID); err != nil || found {
+		t.Fatalf("new account General membership with flag off = %+v, found=%v, err=%v; want no membership", member, found, err)
+	}
+
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.15"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{8}, "freshgeneraluser")
+
+	member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID)
+	if err != nil || !found {
+		t.Fatalf("new account General membership = %+v, found=%v, err=%v; want immediate membership", member, found, err)
+	}
+	if member.Role != 0 || member.AdminChangeInfo {
+		t.Fatalf("new account General role = %+v, want a plain member", member)
+	}
+	response, err := api.GetDialogsForTest(s, user.ID)
+	if err != nil {
+		t.Fatalf("get dialogs after General auto-join: %v", err)
+	}
+	dialogs, ok := response.(*tg.MessagesDialogs)
+	if !ok {
+		t.Fatalf("get dialogs response = %T, want *tg.MessagesDialogs", response)
+	}
+	for _, raw := range dialogs.Dialogs {
+		dialog, ok := raw.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		peer, ok := dialog.Peer.(*tg.PeerChannel)
+		if ok && peer.ChannelID == channel.ID {
+			return
+		}
+	}
+	t.Fatalf("new account dialogs = %+v, want General channel %d", dialogs.Dialogs, channel.ID)
+}
+
+func TestSignUpDoesNotJoinForeignChannelUsingReservedGeneralHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	if err := s.UpdateUsername(ctx, channel.CreatorID, "former_seed_owner"); err != nil {
+		t.Fatalf("release seed-owner username: %v", err)
+	}
+	foreignOwner, err := s.CreateUser(ctx, "+15550001991")
+	if err != nil {
+		t.Fatalf("create replacement seed owner: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, foreignOwner.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim seed-owner username for foreign owner: %v", err)
+	}
+
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.19"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(&captureHandler{}))
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{19}, "freshforeign_general")
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || found {
+		t.Fatalf("foreign General channel membership = %+v, found=%v, err=%v; want no auto-join", member, found, err)
+	}
+}
+
+func TestSignUpAutoJoinsSeedOwnedFallbackGeneralHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	channel := createGeneralChat(t, s)
+	const fallbackHandle = "teagramdemogeneralchat"
+	if err := s.EditChannelUsername(ctx, channel.ID, channel.CreatorID, fallbackHandle); err != nil {
+		t.Fatalf("move seed-owned General to fallback handle: %v", err)
+	}
+
+	runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.20"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(&captureHandler{}))
+	runner.SetDemoGeneralChatEnabledForTest(true)
+	user := signUpWelcomeTestAccount(t, s, runner, [8]byte{20}, "freshfallbackgeneral")
+	if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || !found {
+		t.Fatalf("new account fallback General membership = %+v, found=%v, err=%v; want immediate membership", member, found, err)
+	}
+}
+
+func TestSignUpDemoGeneralChatJoinFailuresAreBestEffort(t *testing.T) {
+	t.Parallel()
+	for _, failure := range []string{"channel lookup", "membership insert"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			s, dsn := openStoreDSN(t)
+			channel := createGeneralChat(t, s)
+			conn, err := pgxpool.New(ctx, dsn)
+			if err != nil {
+				t.Fatalf("open fault-injection connection: %v", err)
+			}
+			defer conn.Close()
+
+			channelsUnavailable := false
+			if failure == "channel lookup" {
+				if _, err := conn.Exec(ctx, `ALTER TABLE channels RENAME TO test_channels_unavailable`); err != nil {
+					t.Fatalf("hide channels table: %v", err)
+				}
+				channelsUnavailable = true
+				defer func() {
+					if channelsUnavailable {
+						if _, err := conn.Exec(context.Background(), `ALTER TABLE test_channels_unavailable RENAME TO channels`); err != nil {
+							t.Errorf("restore channels table: %v", err)
+						}
+					}
+				}()
+			} else {
+				createFunction := fmt.Sprintf(`CREATE FUNCTION test_fail_general_join() RETURNS trigger AS $$
+BEGIN
+  IF NEW.channel_id = %d THEN
+    RAISE EXCEPTION 'injected General membership failure';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql`, channel.ID)
+				if _, err := conn.Exec(ctx, createFunction); err != nil {
+					t.Fatalf("create join failure function: %v", err)
+				}
+				createTrigger := `CREATE TRIGGER test_fail_general_join
+BEFORE INSERT ON channel_participants FOR EACH ROW EXECUTE FUNCTION test_fail_general_join()`
+				if _, err := conn.Exec(ctx, createTrigger); err != nil {
+					t.Fatalf("create join failure trigger: %v", err)
+				}
+			}
+
+			logs := &captureHandler{}
+			runner := api.NewSignUpTestRunner(s, [8]byte{}, netip.MustParseAddr("203.0.113.17"), store.RateLimitConfig{}, config.RegistrationOpen, slog.New(logs))
+			runner.SetDemoGeneralChatEnabledForTest(true)
+			user := signUpWelcomeTestAccount(t, s, runner, [8]byte{9}, "best_effort_"+strings.ReplaceAll(failure, " ", "_"))
+			if failure == "channel lookup" {
+				if _, err := conn.Exec(ctx, `ALTER TABLE test_channels_unavailable RENAME TO channels`); err != nil {
+					t.Fatalf("restore channels table after sign-up: %v", err)
+				}
+				channelsUnavailable = false
+			}
+
+			persisted, found, err := s.UserByID(ctx, user.ID)
+			if err != nil || !found || persisted.ID != user.ID {
+				t.Fatalf("persisted sign-up user = %+v, found=%v, err=%v", persisted, found, err)
+			}
+			if member, found, err := s.ChannelMemberOf(ctx, channel.ID, user.ID); err != nil || found {
+				t.Fatalf("General membership after %s failure = %+v, found=%v, err=%v; want no membership", failure, member, found, err)
+			}
+			if len(logs.records) == 0 {
+				t.Fatal("best-effort General join failure was not logged")
+			}
+		})
+	}
+}
+
+func TestDemoGeneralChatRejectsOversizeDuplicateAndExcessMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+
+	oversizeGuest := newMember("+15550000120")
+	_, err := api.SendMessageForTestWithDemoGeneralChat(s, oversizeGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerChannel(oversizeGuest.ID, channel.ID), Message: strings.Repeat("x", 1001), RandomID: 1,
+	})
+	rpcError(t, err, "MESSAGE_TOO_LONG")
+
+	duplicateGuest := newMember("+15550000121")
+	peer := api.InputPeerChannel(duplicateGuest.ID, channel.ID)
+	if _, err := api.SendMessageForTestWithDemoGeneralChat(s, duplicateGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "same note", RandomID: 2,
+	}); err != nil {
+		t.Fatalf("send first identical-text check message: %v", err)
+	}
+	assertChannelHistoryContainsText(t, s, channel.ID, duplicateGuest.ID, "same note")
+	_, err = api.SendMessageForTestWithDemoGeneralChat(s, duplicateGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "same note", RandomID: 3,
+	})
+	rpcError(t, err, "FLOOD_WAIT_30")
+
+	rateLimitedGuest := newMember("+15550000122")
+	peer = api.InputPeerChannel(rateLimitedGuest.ID, channel.ID)
+	for i := range 5 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChat(s, rateLimitedGuest.ID, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("note %d", i), RandomID: int64(i + 10),
+		}); err != nil {
+			t.Fatalf("send General message %d of 5: %v", i+1, err)
+		}
+		assertChannelHistoryContainsText(t, s, channel.ID, rateLimitedGuest.ID, fmt.Sprintf("note %d", i))
+	}
+	_, err = api.SendMessageForTestWithDemoGeneralChat(s, rateLimitedGuest.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "sixth note", RandomID: 16,
+	})
+	rpcError(t, err, "FLOOD_WAIT_60")
+
+	hourLimitedGuest := newMember("+15550000123")
+	peer = api.InputPeerChannel(hourLimitedGuest.ID, channel.ID)
+	minuteLimit := store.RateLimitConfig{Limit: 100, Window: time.Minute}
+	hourLimit := store.RateLimitConfig{Limit: 2, Window: time.Hour}
+	for i := range 2 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChatLimits(s, hourLimitedGuest.ID, minuteLimit, hourLimit, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("hourly note %d", i), RandomID: int64(i + 30),
+		}); err != nil {
+			t.Fatalf("send hourly General message %d of 2: %v", i+1, err)
+		}
+		assertChannelHistoryContainsText(t, s, channel.ID, hourLimitedGuest.ID, fmt.Sprintf("hourly note %d", i))
+	}
+	_, err = api.SendMessageForTestWithDemoGeneralChatLimits(s, hourLimitedGuest.ID, minuteLimit, hourLimit, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "third hourly note", RandomID: 32,
+	})
+	rpcError(t, err, "FLOOD_WAIT_3600")
+}
+
+func TestDemoGeneralChatLimitsAlbumCaptionsAndItemRate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+	album := func(caption string, count int, fileBase, randomBase int64) *tg.MessagesSendMultiMediaRequest {
+		request := &tg.MessagesSendMultiMediaRequest{
+			Peer:       api.InputPeerChannel(0, channel.ID),
+			MultiMedia: make([]tg.InputSingleMedia, count),
+		}
+		for i := range count {
+			request.MultiMedia[i] = tg.InputSingleMedia{
+				Media:   &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: fileBase + int64(i), AccessHash: 1}},
+				Message: caption, RandomID: randomBase + int64(i),
+			}
+		}
+		return request
+	}
+
+	t.Run("six items exceed per-guest minute limit", func(t *testing.T) {
+		guest := newMember("+15550000125")
+		request := album("photo caption", 6, 12500, 12600)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "FLOOD_WAIT_60")
+	})
+
+	t.Run("duplicate captions are refused", func(t *testing.T) {
+		guest := newMember("+15550000126")
+		request := album("same album caption", 2, 12600, 12700)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "FLOOD_WAIT_30")
+	})
+
+	t.Run("oversized caption is refused", func(t *testing.T) {
+		guest := newMember("+15550000127")
+		request := album(strings.Repeat("x", 1001), 2, 12700, 12800)
+		request.Peer = api.InputPeerChannel(guest.ID, channel.ID)
+		_, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, request)
+		rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+	})
+}
+
+func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	guest, err := s.CreateUser(ctx, "+15550000133")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	blobs := s.PartBlobs()
+	photos := make([]store.File, 4)
+	bodies := [][]byte{jpegPhotoPayload(t, 640, 480), jpegPhotoPayload(t, 641, 480)}
+	for i, width := range []int32{640, 641, 640, 641} {
+		body := bodies[i%len(bodies)]
+		photo, _, err := s.AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+			ctx, guest.ID, int64(len(body)), "image/jpeg", fmt.Sprintf("album-%d.jpg", i),
+			api.TestMaxUserStorageBytes, time.Hour,
+			func(file store.File) (store.PhotoAssembly, error) {
+				if _, err := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(body)); err != nil {
+					return store.PhotoAssembly{}, fmt.Errorf("store album photo bytes: %w", err)
+				}
+				digest := sha256.Sum256(body)
+				return store.PhotoAssembly{
+					Dimensions:    store.PhotoDimensions{Width: width, Height: 480},
+					ContentSHA256: digest[:],
+				}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("create granted album photo %d: %v", i+1, err)
+		}
+		photos[i] = photo
+		if got, want := photo.ContentSHA256, sha256.Sum256(body); !bytes.Equal(got, want[:]) {
+			t.Fatalf("photo %d content digest = %x, want %x", i+1, got, want)
+		}
+		// Once upload has published the photo identity, album sends should need
+		// only the grant and metadata. They must not reread full blobs to hash them.
+		if err := blobs.Remove(ctx, blob.Key(photo.ID)); err != nil {
+			t.Fatalf("remove photo blob after upload %d: %v", i+1, err)
+		}
+	}
+	if _, err := s.AlbumPhotoFilesForUpload(ctx, guest.ID, []store.AlbumItem{
+		{FileID: photos[0].ID, AccessHash: photos[0].AccessHash, Photo: true},
+		{FileID: photos[1].ID, AccessHash: photos[1].AccessHash, Photo: true},
+	}, time.Hour); err != nil {
+		t.Fatalf("resolve authorized album photos: %v", err)
+	}
+	album := func(randomIDBase int64, files []store.File) *tg.MessagesSendMultiMediaRequest {
+		request := &tg.MessagesSendMultiMediaRequest{
+			Peer:       api.InputPeerChannel(guest.ID, channel.ID),
+			MultiMedia: make([]tg.InputSingleMedia, len(files)),
+		}
+		for i, photo := range files {
+			request.MultiMedia[i] = tg.InputSingleMedia{
+				Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash}},
+				RandomID: randomIDBase + int64(i),
+			}
+		}
+		return request
+	}
+	if _, err := api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13300, photos[:2])); err != nil {
+		t.Fatalf("send first uncaptioned General photo album: %v", err)
+	}
+	_, err = api.SendMultiMediaForTestWithDemoGeneralChat(s, guest.ID, album(13310, photos[2:]))
+	var rpcErr *tgerr.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 || !strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_") {
+		t.Fatalf("repeat uncaptioned General photo album = %v, want 420 FLOOD_WAIT", err)
+	}
+}
+
+func TestDemoGeneralChatConcurrentAlbumRetryReturnsCommittedAlbum(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	guest, err := s.CreateUser(ctx, "+15550000134")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	blobs := s.PartBlobs()
+	photos := make([]store.File, 2)
+	for i, dimensions := range []struct {
+		width   int
+		width32 int32
+	}{{width: 640, width32: 640}, {width: 641, width32: 641}} {
+		body := jpegPhotoPayload(t, dimensions.width, 480)
+		photo, _, err := s.AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+			ctx, guest.ID, int64(len(body)), "image/jpeg", fmt.Sprintf("concurrent-album-%d.jpg", i),
+			api.TestMaxUserStorageBytes, time.Hour,
+			func(file store.File) (store.PhotoAssembly, error) {
+				if _, err := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(body)); err != nil {
+					return store.PhotoAssembly{}, fmt.Errorf("store album photo bytes: %w", err)
+				}
+				digest := sha256.Sum256(body)
+				return store.PhotoAssembly{
+					Dimensions:    store.PhotoDimensions{Width: dimensions.width32, Height: 480},
+					ContentSHA256: digest[:],
+				}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("create granted album photo %d: %v", i+1, err)
+		}
+		photos[i] = photo
+	}
+	request := &tg.MessagesSendMultiMediaRequest{
+		Peer:       api.InputPeerChannel(guest.ID, channel.ID),
+		MultiMedia: make([]tg.InputSingleMedia, len(photos)),
+	}
+	for i, photo := range photos {
+		request.MultiMedia[i] = tg.InputSingleMedia{
+			Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash}},
+			RandomID: 13400 + int64(i),
+		}
+	}
+
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	var calls atomic.Int32
+	store.SetChannelAlbumRetryAfterCommitHook(s, func(hookCtx context.Context, gotChannel, gotUser int64, _ []int64) error {
+		if gotChannel != channel.ID || gotUser != guest.ID {
+			return fmt.Errorf("unexpected channel album retry hook channel=%d user=%d", gotChannel, gotUser)
+		}
+		if calls.Add(1) > 2 {
+			return nil
+		}
+		arrived <- struct{}{}
+		select {
+		case <-release:
+			return nil
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+	})
+	t.Cleanup(func() { store.SetChannelAlbumRetryAfterCommitHook(s, nil) })
+	type sendResult struct {
+		response any
+		err      error
+	}
+	done := make(chan sendResult, 2)
+	for range 2 {
+		go func() {
+			response, sendErr := api.SendMultiMediaForTestWithContextAndDemoGeneralChat(ctx, s, guest.ID, request)
+			done <- sendResult{response: response, err: sendErr}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-arrived:
+		case <-ctx.Done():
+			t.Fatal("both concurrent retries did not finish their initial lookup")
+		}
+	}
+	release <- struct{}{}
+	var first sendResult
+	select {
+	case first = <-done:
+	case <-ctx.Done():
+		t.Fatal("winning concurrent album did not finish")
+	}
+	if first.err != nil {
+		t.Fatalf("winning concurrent album: %v", first.err)
+	}
+	release <- struct{}{}
+	var second sendResult
+	select {
+	case second = <-done:
+	case <-ctx.Done():
+		t.Fatal("concurrent album retry did not finish")
+	}
+	if second.err != nil {
+		t.Fatalf("concurrent album retry: %v", second.err)
+	}
+	if !reflect.DeepEqual(first.response, second.response) {
+		t.Fatalf("concurrent retry response differs from committed album: first=%#v second=%#v", first.response, second.response)
+	}
+}
+
+func TestDemoGeneralChatPhotoCaptionAndMinuteLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := newBlobs(t)
+	body := jpegPhotoPayload(t, 640, 480)
+	newMember := func(phone string) store.User {
+		t.Helper()
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create General guest: %v", err)
+		}
+		if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, user.ID); err != nil {
+			t.Fatalf("join General: %v", err)
+		}
+		return user
+	}
+
+	captionGuest := newMember("+15550000128")
+	const oversizedFileID = int64(12801)
+	_, err := api.SendMediaForTestWithDemoGeneralChat(s, captionGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(captionGuest.ID, channel.ID),
+		Media:   uploadedPhoto(oversizedFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message: strings.Repeat("x", 1001), RandomID: oversizedFileID,
+	})
+	rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+
+	rateGuest := newMember("+15550000129")
+	for i := range 5 {
+		fileID := int64(12900 + i)
+		photoBody := jpegPhotoPayload(t, 640+i, 480)
+		saveParts(t, s, rateGuest.ID, fileID, photoBody)
+		if _, err := api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:    api.InputPeerChannel(rateGuest.ID, channel.ID),
+			Media:   uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(photoBody)),
+			Message: fmt.Sprintf("photo %d", i), RandomID: fileID,
+		}); err != nil {
+			t.Fatalf("send General photo %d of 5: %v", i+1, err)
+		}
+	}
+	const sixthFileID = int64(12905)
+	sixthPhoto := jpegPhotoPayload(t, 645, 480)
+	saveParts(t, s, rateGuest.ID, sixthFileID, sixthPhoto)
+	fileIDCeilingBefore, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before refused photo: %v", err)
+	}
+	observedBlobs := &observedAssembledPutBlob{Store: s.PartBlobs()}
+	_, err = api.SendMediaForTestWithDemoGeneralChat(s, rateGuest.ID, observedBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(rateGuest.ID, channel.ID),
+		Media:   uploadedPhoto(sixthFileID, 1, "general.jpg", jpegPhotoMD5(sixthPhoto)),
+		Message: "photo 5", RandomID: sixthFileID,
+	})
+	var floodWait *tgerr.Error
+	if !errors.As(err, &floodWait) || floodWait.Code != 420 || !strings.HasPrefix(floodWait.Message, "FLOOD_WAIT_") {
+		t.Fatalf("sixth General photo error = %v, want 420 FLOOD_WAIT", err)
+	}
+	if keys := observedBlobs.assembledKeys(); len(keys) != 0 {
+		t.Errorf("over-limit photo assembled blobs %v, want no persisted file", keys)
+	}
+	fileIDCeilingAfter, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling after refused photo: %v", err)
+	}
+	if fileIDCeilingAfter != fileIDCeilingBefore {
+		t.Errorf("over-limit photo changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+}
+
+func TestDemoGeneralChatUncaptionedPhotoDuplicateIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := s.PartBlobs()
+	body := jpegPhotoPayload(t, 640, 480)
+	guest, err := s.CreateUser(ctx, "+15550001931")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	for _, fileID := range []int64{193101, 193102} {
+		saveParts(t, s, guest.ID, fileID, body)
+	}
+	if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(guest.ID, channel.ID), Media: uploadedPhoto(193101, 1, "same.jpg", jpegPhotoMD5(body)), RandomID: 193101,
+	}); err != nil {
+		t.Fatalf("send first uncaptioned General photo: %v", err)
+	}
+	fileIDCeilingBefore, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before duplicate refusal: %v", err)
+	}
+	observedBlobs := &observedAssembledPutBlob{Store: blobs}
+	_, err = api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, observedBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(guest.ID, channel.ID), Media: uploadedPhoto(193102, 1, "same.jpg", jpegPhotoMD5(body)), RandomID: 193102,
+	})
+	rpcError(t, err, "FLOOD_WAIT_30")
+	fileIDCeilingAfter, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling after duplicate refusal: %v", err)
+	}
+	if fileIDCeilingAfter != fileIDCeilingBefore {
+		t.Errorf("duplicate refusal changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+	keys := observedBlobs.assembledKeys()
+	if len(keys) != 1 {
+		t.Fatalf("duplicate photo assembled keys = %v, want one discarded file", keys)
+	}
+	if _, err := blobs.ReadAt(ctx, keys[0], 0, 1); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("duplicate photo blob read error = %v, want blob.ErrNotFound", err)
+	}
+	posts, err := s.ChannelHistory(ctx, channel.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read General history: %v", err)
+	}
+	guestPosts := 0
+	for _, post := range posts {
+		if post.FromID == guest.ID && post.FileID != nil {
+			guestPosts++
+			if post.Message != "" {
+				t.Errorf("uncaptioned photo history text = %q, want empty", post.Message)
+			}
+		}
+	}
+	if guestPosts != 1 {
+		t.Errorf("stored uncaptioned guest photos = %d, want one", guestPosts)
+	}
+}
+
+func TestDemoGeneralChatSlowModePhotoRefusalDiscardsFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := s.PartBlobs()
+	body := jpegPhotoPayload(t, 640, 480)
+	guest, err := s.CreateUser(ctx, "+15550000132")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	const firstFileID = int64(13201)
+	saveParts(t, s, guest.ID, firstFileID, body)
+	if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    api.InputPeerChannel(guest.ID, channel.ID),
+		Media:   uploadedPhoto(firstFileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message: "first photo before slow mode", RandomID: firstFileID,
+	}); err != nil {
+		t.Fatalf("send first General photo: %v", err)
+	}
+	const refusedFileID = int64(13202)
+	refusedBody := jpegPhotoPayload(t, 800, 480)
+	saveParts(t, s, guest.ID, refusedFileID, refusedBody)
+	fileIDCeilingBefore, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before slow-mode refusal: %v", err)
+	}
+	gate := &assembledPutGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(gate.unblock)
+	observedBlobs := &observedAssembledPutBlob{Store: blobs, gate: gate}
+	result := make(chan error, 1)
+	go func() {
+		_, sendErr := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, observedBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:    api.InputPeerChannel(guest.ID, channel.ID),
+			Media:   uploadedPhoto(refusedFileID, 1, "general.jpg", jpegPhotoMD5(refusedBody)),
+			Message: "photo refused by slow mode", RandomID: refusedFileID,
+		})
+		result <- sendErr
+	}()
+	select {
+	case <-gate.entered:
+	case sendErr := <-result:
+		gate.unblock()
+		t.Fatalf("photo send exited before assembly gate: %v", sendErr)
+	case <-time.After(30 * time.Second):
+		gate.unblock()
+		t.Fatal("photo did not pass precheck and reach blob assembly")
+	}
+	if _, changed, err := s.SetChannelSlowMode(ctx, channel.ID, channel.CreatorID, 10); err != nil || !changed {
+		gate.unblock()
+		t.Fatalf("set General slow mode during assembly changed=%v err=%v", changed, err)
+	}
+	gate.unblock()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		t.Fatal("slow-mode refused photo did not finish after blob assembly resumed")
+	}
+	var rpcErr *tgerr.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 || !strings.HasPrefix(rpcErr.Message, "SLOWMODE_WAIT_") {
+		t.Fatalf("slow-mode photo refusal = %v, want 420 SLOWMODE_WAIT", err)
+	}
+	fileIDCeilingAfter, err := s.MaxFileID(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling after slow-mode refusal: %v", err)
+	}
+	if fileIDCeilingAfter != fileIDCeilingBefore {
+		t.Errorf("slow-mode refusal changed stored file id ceiling from %d to %d", fileIDCeilingBefore, fileIDCeilingAfter)
+	}
+	keys := observedBlobs.assembledKeys()
+	if len(keys) != 1 {
+		t.Fatalf("slow-mode photo assembled blob keys = %v, want one discarded file", keys)
+	}
+	if _, err := blobs.ReadAt(ctx, keys[0], 0, 1); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("slow-mode refusal blob read error = %v, want blob.ErrNotFound", err)
+	}
+}
+
+func TestDemoGeneralChatPhotoRateLimitRaceCleansLoser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	blobs := s.PartBlobs()
+	guest, err := s.CreateUser(ctx, "+15550000131")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	for i := range 4 {
+		fileID := int64(13100 + i)
+		photoBody := jpegPhotoPayload(t, 640+i, 480)
+		saveParts(t, s, guest.ID, fileID, photoBody)
+		if _, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+			Media:    uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(photoBody)),
+			Message:  fmt.Sprintf("accepted photo %d", i),
+			RandomID: fileID,
+		}); err != nil {
+			t.Fatalf("send General photo %d of 4: %v", i+1, err)
+		}
+	}
+
+	gate := &assembledPutGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(gate.unblock)
+	const racingPhotoFileID = int64(13104)
+	racingPhoto := jpegPhotoPayload(t, 900, 480)
+	saveParts(t, s, guest.ID, racingPhotoFileID, racingPhoto)
+	observer := &observedAssembledPutBlob{Store: blobs, gate: gate}
+	result := make(chan error, 1)
+	go func() {
+		_, sendErr := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, observer, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+			Media:    uploadedPhoto(racingPhotoFileID, 1, "general.jpg", jpegPhotoMD5(racingPhoto)),
+			Message:  "photo raced by a text post",
+			RandomID: racingPhotoFileID,
+		})
+		result <- sendErr
+	}()
+	select {
+	case <-gate.entered:
+	case sendErr := <-result:
+		gate.unblock()
+		t.Fatalf("photo send exited before assembly gate: %v", sendErr)
+	case <-time.After(30 * time.Second):
+		gate.unblock()
+		t.Fatal("photo did not pass preflight and reach blob assembly")
+	}
+
+	if _, err := api.SendMessageForTestWithDemoGeneralChat(s, guest.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerChannel(guest.ID, channel.ID), Message: "consume the final General message token", RandomID: 13199,
+	}); err != nil {
+		gate.unblock()
+		t.Fatalf("post General text while photo assembly is in flight: %v", err)
+	}
+	gate.unblock()
+	var sendErr error
+	select {
+	case sendErr = <-result:
+	case <-time.After(30 * time.Second):
+		t.Fatal("rate-limit loser did not finish after blob assembly resumed")
+	}
+	var floodWait *tgerr.Error
+	if !errors.As(sendErr, &floodWait) || floodWait.Code != 420 || !strings.HasPrefix(floodWait.Message, "FLOOD_WAIT_") {
+		t.Fatalf("rate-limit race error = %v, want 420 FLOOD_WAIT_1 through FLOOD_WAIT_60", sendErr)
+	}
+	waitSeconds, err := strconv.Atoi(strings.TrimPrefix(floodWait.Message, "FLOOD_WAIT_"))
+	if err != nil || waitSeconds < 1 || waitSeconds > 60 {
+		t.Fatalf("rate-limit race wait = %q, want FLOOD_WAIT_1 through FLOOD_WAIT_60", floodWait.Message)
+	}
+
+	keys := observer.assembledKeys()
+	if len(keys) != 1 {
+		t.Fatalf("racing photo assembly keys = %v, want one", keys)
+	}
+	fileID, ok := blob.ParseKey(keys[0])
+	if !ok {
+		t.Fatalf("assembled blob key %q does not identify a file", keys[0])
+	}
+	files, err := s.ExistingFileIDs(ctx, []int64{fileID})
+	if err != nil {
+		t.Fatalf("check racing photo file row %d: %v", fileID, err)
+	}
+	if _, exists := files[fileID]; exists {
+		t.Errorf("rate-limit loser retained file row %d", fileID)
+	}
+	if _, err := blobs.ReadAt(ctx, keys[0], 0, 1); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("rate-limit loser blob read error = %v, want blob.ErrNotFound", err)
+	}
+}
+
+func TestDemoGeneralChatDoesNotLimitOtherMegagroups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	_ = createGeneralChat(t, s)
+	other, _ := createWelcomeChannel(t, s, "ordinary_group", true)
+	guest, err := s.CreateUser(ctx, "+15550000130")
+	if err != nil {
+		t.Fatalf("create guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, other.ID, guest.ID); err != nil {
+		t.Fatalf("join other megagroup: %v", err)
+	}
+	peer := api.InputPeerChannel(guest.ID, other.ID)
+	for i := range 10 {
+		if _, err := api.SendMessageForTestWithDemoGeneralChat(s, guest.ID, &tg.MessagesSendMessageRequest{
+			Peer: peer, Message: fmt.Sprintf("ordinary message %d", i), RandomID: int64(13000 + i),
+		}); err != nil {
+			t.Fatalf("send other-megagroup message %d of 10: %v", i+1, err)
+		}
+	}
+}
+
+func TestDemoGeneralChatAllowsGuestPhotoPosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	guest, err := s.CreateUser(ctx, "+15550000124")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	blobs := newBlobs(t)
+	body := jpegPhotoPayload(t, 640, 480)
+	const fileID = 12401
+	saveParts(t, s, guest.ID, fileID, body)
+	sent, err := api.SendMediaForTestWithDemoGeneralChat(s, guest.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(guest.ID, channel.ID),
+		Media:    uploadedPhoto(fileID, 1, "general.jpg", jpegPhotoMD5(body)),
+		Message:  "a small field photo",
+		RandomID: fileID,
+	})
+	if err != nil {
+		t.Fatalf("send General photo: %v", err)
+	}
+	post, _ := channelPhotoPostOf(t, sent)
+	photo := photoOfMessage(t, post)
+	if photo.ID == 0 || post.Message != "a small field photo" {
+		t.Fatalf("General photo post = id %d caption %q, want a stored photo and its caption", photo.ID, post.Message)
 	}
 }
 

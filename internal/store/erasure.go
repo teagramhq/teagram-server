@@ -463,3 +463,24 @@ func (s *Store) eraseCandidate(ctx context.Context, c ErasureCandidate, olderTha
 	}
 	return erased, nil
 }
+
+// DiscardUnreferencedFile immediately attempts to reclaim one stored file that
+// a refused operation no longer needs. The regular erasure interlocks decide
+// whether it is still safe to delete; a contended or referenced file is left
+// for a later sweep.
+func (s *Store) DiscardUnreferencedFile(ctx context.Context, fileID int64) error {
+	if fileID <= 0 {
+		return fmt.Errorf("discard unreferenced file: invalid id %d", fileID)
+	}
+	outcome, err := s.eraseCandidate(ctx, ErasureCandidate{ID: fileID}, time.Now().Add(time.Second), true)
+	if err != nil {
+		return fmt.Errorf("discard unreferenced file %d: %w", fileID, err)
+	}
+	if outcome != erased {
+		return nil
+	}
+	if err := s.blobs.Remove(ctx, blob.Key(fileID)); err != nil {
+		return fmt.Errorf("discard unreferenced file %d blob: %w", fileID, err)
+	}
+	return nil
+}

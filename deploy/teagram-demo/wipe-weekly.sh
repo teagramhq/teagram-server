@@ -134,11 +134,14 @@ demo_prepare_seed_owner "$TMP_DIR"
 demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
   -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
 
-# Recreate teagramd from the production config and start HAProxy's private
-# MTProto path while edge stays down. The probe must prove Turnstile is active
-# before the public edge starts.
-demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
-"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+# Exercise both operator moderation commands against the production Compose
+# profile while the public edge is stopped. The smoke test prepares its guest
+# session through the private seed lane before enabling sign-in Turnstile.
+MODERATION_SMOKE_MARKER=$(openssl rand -hex 16)
+"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"
+
+# The moderation smoke test leaves the production server and HAProxy ready for
+# the public identity and browser checks below.
 demo_server_client_config "$ACTIVE_SERVER" > "$TMP_DIR/client-after-wipe.json"
 jq -e '
   .version == 1

@@ -54,6 +54,43 @@ type ChannelAlbumResult struct {
 	Duplicate bool
 }
 
+// AlbumPhotoFilesForUpload resolves the stored photo references in an album
+// only when the caller holds a live upload grant for each matching file and
+// access hash. The album write repeats the check while consuming the grants.
+func (s *Store) AlbumPhotoFilesForUpload(ctx context.Context, ownerID int64, items []AlbumItem, ttl time.Duration) (map[int64]File, error) {
+	files := make(map[int64]File, len(items))
+	if len(items) == 0 {
+		return files, nil
+	}
+	if ttl <= 0 {
+		return nil, errors.New("upload grant TTL must be positive")
+	}
+	fileIDs := make([]int64, len(items))
+	accessHashes := make([]int64, len(items))
+	for i, item := range items {
+		if !item.Photo {
+			return nil, ErrMediaInvalid
+		}
+		fileIDs[i], accessHashes[i] = item.FileID, item.AccessHash
+	}
+	rows, err := s.q.AlbumPhotoFilesForUpload(ctx, db.AlbumPhotoFilesForUploadParams{
+		OwnerID:      ownerID,
+		FileIds:      fileIDs,
+		AccessHashes: accessHashes,
+		NotBefore:    pgtype.Timestamptz{Time: time.Now().Add(-ttl), Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("album photo upload grants: %w", err)
+	}
+	if len(rows) != len(items) {
+		return nil, ErrMediaInvalid
+	}
+	for _, row := range rows {
+		files[row.ID] = fileFromRow(row)
+	}
+	return files, nil
+}
+
 // UserAlbumRetry is the read-only dedup an album send runs before it charges
 // the caller. It answers a replay of a whole album the caller already sent to
 // this peer, ErrMediaInvalid for any token that names a deleted row or only
@@ -630,7 +667,18 @@ func (s *Store) ChannelAlbumRetryAs(ctx context.Context, channelID, fromID int64
 	if err = tx.Commit(ctx); err != nil {
 		return ChannelAlbumResult{}, fmt.Errorf("commit channel album retry: %w", err)
 	}
+	if !result.Duplicate && s.channelAlbumRetryAfterCommitHook != nil {
+		if err = s.channelAlbumRetryAfterCommitHook(ctx, channelID, fromID, randomIDs); err != nil {
+			return ChannelAlbumResult{}, fmt.Errorf("after channel album retry commit hook: %w", err)
+		}
+	}
 	return result, nil
+}
+
+// SetChannelAlbumRetryAfterCommitHook installs the test-only synchronization
+// seam used by API concurrency tests. Production callers leave it nil.
+func SetChannelAlbumRetryAfterCommitHook(s *Store, fn func(context.Context, int64, int64, []int64) error) {
+	s.channelAlbumRetryAfterCommitHook = fn
 }
 
 // channelAlbumDedup is userAlbumDedup in a channel's own (channel_id,
@@ -703,7 +751,9 @@ func channelAlbumDedup(ctx context.Context, qtx *db.Queries, channelID, fromID i
 // validation. Grants are consumed after the files-row interlock, which is
 // taken after channel_state and the participant row as in the single-photo
 // path.
-func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID int64, a AlbumSend) (ChannelAlbumResult, error) {
+func (s *Store) PostChannelAlbumAs(
+	ctx context.Context, channelID, replyToMsgID int64, a AlbumSend, rateLimits ...RateLimitCharge,
+) (ChannelAlbumResult, error) {
 	entityPayloads, err := albumEntityPayloads(a)
 	if err != nil {
 		return ChannelAlbumResult{}, err
@@ -842,6 +892,9 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	}
 	if marked != 1 {
 		return ChannelAlbumResult{}, ErrNotMember
+	}
+	if err = s.consumeRateLimitChargesTx(ctx, qtx, fromID, rateLimits); err != nil {
+		return ChannelAlbumResult{}, fmt.Errorf("charge channel album rate limits: %w", err)
 	}
 
 	stored, err := qtx.ChannelMessagesByRandomIDs(ctx, db.ChannelMessagesByRandomIDsParams{ChannelID: channelID, RandomIds: randomIDs})

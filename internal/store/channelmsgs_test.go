@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -149,6 +150,59 @@ func TestPostChannelStickerRetryRequiresSameDocumentID(t *testing.T) {
 	again, againPts, duplicate, err := s.PostChannelStickerAsWithEntities(ctx, ch, author.ID, "sticker", 2401, -2401, 0, nil)
 	if err != nil || !duplicate || again.LocalID != first.LocalID || againPts != firstPts {
 		t.Fatalf("same-sticker retry = %+v, pts %d, duplicate %t, err %v; want original post at pts %d", again, againPts, duplicate, err, firstPts)
+	}
+}
+
+func TestPostChannelStickerRespectsSendDocsBanOutsideDemoGeneral(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551260025")
+	member := mustUser(t, s, "+15551260026")
+	channel, err := s.CreateChannel(ctx, creator.ID, "Sticker permissions", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, "stickerpermissions"); err != nil {
+		t.Fatalf("claim megagroup username: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, member.ID); err != nil {
+		t.Fatalf("join megagroup: %v", err)
+	}
+	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"send_docs"}); err != nil {
+		t.Fatalf("ban generic documents: %v", err)
+	}
+
+	if _, _, _, err := s.PostChannelStickerAsWithEntities(ctx, channel.ID, member.ID, "sticker", 2402, -2402, 0, nil); !errors.Is(err, store.ErrChatWriteForbidden) {
+		t.Fatalf("post sticker outside demo General with send_docs banned = %v, want ErrChatWriteForbidden", err)
+	}
+}
+
+func TestPostDemoGeneralStickerAllowedWhenDefaultBansDocuments(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551260027")
+	if err := s.ClaimUsername(ctx, creator.ID, demo.SeedOwnerUsername); err != nil {
+		t.Fatalf("claim demo seed owner username: %v", err)
+	}
+	member := mustUser(t, s, "+15551260028")
+	channel, err := s.CreateChannel(ctx, creator.ID, "General", "", true)
+	if err != nil {
+		t.Fatalf("create General megagroup: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, "teagramdemogeneral"); err != nil {
+		t.Fatalf("claim General handle: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, member.ID); err != nil {
+		t.Fatalf("join General megagroup: %v", err)
+	}
+	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"send_docs"}); err != nil {
+		t.Fatalf("ban generic documents: %v", err)
+	}
+	post, _, duplicate, err := s.PostDemoGeneralChannelStickerAsWithEntities(ctx, channel.ID, member.ID, "sticker", 2403, -2403, 0, nil)
+	if err != nil || duplicate || post.LocalID == 0 {
+		t.Fatalf("post demo General sticker with send_docs banned = %+v duplicate=%t err=%v; want a new sticker post", post, duplicate, err)
 	}
 }
 
