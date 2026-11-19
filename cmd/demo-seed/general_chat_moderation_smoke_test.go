@@ -3,12 +3,34 @@ package main
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
+
+func TestModerationSmokeDoesNotChangeUsername(t *testing.T) {
+	fset := token.NewFileSet()
+	source, err := parser.ParseFile(fset, "general_chat_moderation_smoke.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse moderation smoke implementation: %v", err)
+	}
+	ast.Inspect(source, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		method, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && method.Sel.Name == "AccountUpdateUsername" {
+			t.Errorf("moderation smoke calls account.updateUsername at %s", fset.Position(call.Pos()))
+		}
+		return true
+	})
+}
 
 func TestPrepareModerationSmokeGuestSignsUpWithShortUsername(t *testing.T) {
 	api := &fakeModerationSmokeSignupAPI{}
