@@ -59,7 +59,7 @@ capture_wipe_generation() {
 assert_general_chat_owner() {
   local expected_groups="$1" expected_owner_groups="$2" actual
   actual=$(demo_compose exec -T postgres psql -Atq -v ON_ERROR_STOP=1 -U postgres -d teagram \
-    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE owner.username = 'demo_seed_owner')::text FROM channels c JOIN users owner ON owner.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup")
+    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE c.deleted_at IS NULL AND creator.username = 'demo_seed_owner')::text FROM channels c JOIN users creator ON creator.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup AND c.deleted_at IS NULL AND creator.username = 'demo_seed_owner'")
   [[ "$actual" == "$expected_groups|$expected_owner_groups" ]] ||
     demo_fail "expected $expected_groups persisted General megagroups, all owned by demo_seed_owner; got $actual"
 }

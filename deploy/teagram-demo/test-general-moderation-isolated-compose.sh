@@ -214,6 +214,7 @@ ENV
   assert_general_chat_owner 1 1
   if [[ "$signin_enabled" == false ]]; then
     ACTIVE_STAGE="verify General convergence after init, reseed, and restart"
+    seed_general_count_decoys
     "$seed_dir/test-seed-compose.sh"
     assert_general_chat_owner 1 1
 
@@ -278,10 +279,43 @@ ENV
 assert_general_chat_owner() {
   local expected_groups="$1" expected_owner_groups="$2" actual
   actual=$(demo_compose exec -T postgres psql -Atq -v ON_ERROR_STOP=1 -U postgres -d teagram \
-    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE owner.username = 'demo_seed_owner')::text FROM channels c JOIN users owner ON owner.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup")
+    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE c.deleted_at IS NULL AND creator.username = 'demo_seed_owner')::text FROM channels c JOIN users creator ON creator.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup AND c.deleted_at IS NULL AND creator.username = 'demo_seed_owner'")
   [[ "$actual" == "$expected_groups|$expected_owner_groups" ]] || {
     printf 'expected %s General groups with %s owned by demo_seed_owner; got %s\n' \
       "$expected_groups" "$expected_owner_groups" "$actual" >&2
+    return 1
+  }
+}
+
+seed_general_count_decoys() {
+  demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram -c "
+    INSERT INTO channels (title, about, creator_id, megagroup, deleted_at)
+    SELECT source.title, source.about, seed_owner.id, true, clock_timestamp()
+    FROM channels source
+    JOIN users seed_owner ON seed_owner.username = 'demo_seed_owner'
+    WHERE source.title = 'General'
+      AND source.about = 'An open chat for demo guests to meet and talk.'
+      AND source.megagroup
+      AND source.deleted_at IS NULL
+    ORDER BY source.id
+    LIMIT 1;
+
+    INSERT INTO channels (title, about, creator_id, megagroup)
+    SELECT source.title, source.about, guest.id, true
+    FROM channels source
+    JOIN users guest ON guest.username = 'demo_iona'
+    WHERE source.title = 'General'
+      AND source.about = 'An open chat for demo guests to meet and talk.'
+      AND source.megagroup
+      AND source.deleted_at IS NULL
+    ORDER BY source.id
+    LIMIT 1;
+  " >/dev/null
+  local actual
+  actual=$(demo_compose exec -T postgres psql -Atq -v ON_ERROR_STOP=1 -U postgres -d teagram \
+    -c "SELECT count(*)::text || '|' || count(*) FILTER (WHERE c.deleted_at IS NOT NULL)::text || '|' || count(*) FILTER (WHERE c.deleted_at IS NULL AND guest.username = 'demo_iona')::text FROM channels c JOIN users guest ON guest.id = c.creator_id WHERE c.title = 'General' AND c.about = 'An open chat for demo guests to meet and talk.' AND c.megagroup AND (c.deleted_at IS NOT NULL OR guest.username = 'demo_iona')")
+  [[ "$actual" == '2|1|1' ]] || {
+    printf 'expected deleted and guest-owned General count decoys, got %s\n' "$actual" >&2
     return 1
   }
 }

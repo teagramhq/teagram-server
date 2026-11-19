@@ -43,10 +43,16 @@ if "--expect-signin-enabled=false" in readme:
 
 if "assert_general_chat_owner" not in seed_test:
     raise SystemExit("test-seed-compose.sh: convergence must count persisted General channels and their seed owner")
+if "c.deleted_at IS NULL" not in seed_test or "creator.username = 'demo_seed_owner'" not in seed_test:
+    raise SystemExit("test-seed-compose.sh: both convergence counts must include only live seed-owned General groups")
 if "assert_general_chat_owner" not in isolated or "general_chat_enabled=false" not in isolated:
     raise SystemExit("isolated Compose test must verify flag-off and seed-owned General state")
 if '"$seed_dir/test-seed-compose.sh"' not in isolated:
     raise SystemExit("isolated Compose test must exercise init, reseed, and restart convergence")
+if isolated.count("INSERT INTO channels") < 2 or "deleted_at" not in isolated or "demo_iona" not in isolated:
+    raise SystemExit("isolated Compose test must add a deleted predecessor and guest-owned General lookalike")
+if 'seed_general_count_decoys\n    "$seed_dir/test-seed-compose.sh"' not in isolated:
+    raise SystemExit("isolated Compose test must add count decoys before checking seed convergence")
 if "demo_compose down --volumes --remove-orphans" not in isolated:
     raise SystemExit("isolated Compose test must cover a fresh database reset")
 PY
