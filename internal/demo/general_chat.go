@@ -31,3 +31,9 @@ func IsGeneralChatHandle(username string) bool {
 	}
 	return false
 }
+
+// IsReservedGeneralChatUsername reports whether username is reserved for the
+// demo General owner or one of its public channel handles.
+func IsReservedGeneralChatUsername(username string) bool {
+	return username == SeedOwnerUsername || IsGeneralChatHandle(username)
+}

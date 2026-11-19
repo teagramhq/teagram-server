@@ -125,6 +125,22 @@ func TestSeedUpgradeUsesFallbackWhenAllExistingGeneralHandlesCollide(t *testing.
 	}
 }
 
+func TestSeedRefusesWhenOrdinaryAccountsHoldEveryGeneralHandle(t *testing.T) {
+	accountHandles := demo.GeneralChatHandles()
+	collisions := make(map[string]bool, len(accountHandles))
+	for _, handle := range accountHandles {
+		collisions[handle] = true
+	}
+	rpc := &generalChatRPC{ordinaryAccountHandles: collisions}
+	_, err := ensureGeneralChat(context.Background(), tg.NewClient(rpc), demoGeneralChatSpace)
+	if err == nil || err.Error() != "all reserved General handles are occupied by other peers" {
+		t.Fatalf("ensure General with every handle held by ordinary accounts = %v, want reserved-handle collision error", err)
+	}
+	if rpc.createCount != 0 || rpc.usernameCount != 0 {
+		t.Fatalf("seed attempted to create or claim a colliding handle: creates=%d usernames=%d", rpc.createCount, rpc.usernameCount)
+	}
+}
+
 func TestInviteGeneralChatAccountsRequiresSeedOwner(t *testing.T) {
 	rpc := &generalChatRPC{}
 	if err := inviteGeneralChatAccounts(context.Background(), tg.NewClient(rpc), remoteSpace{
@@ -141,6 +157,7 @@ type generalChatRPC struct {
 	created                       bool
 	createdUsername               string
 	collidingHandles              map[string]bool
+	ordinaryAccountHandles        map[string]bool
 	createCount                   int
 	usernameCount                 int
 	invited                       map[int64]bool
@@ -155,6 +172,14 @@ type generalChatRPC struct {
 func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
 	switch request := input.(type) {
 	case *tg.ContactsResolveUsernameRequest:
+		if rpc.ordinaryAccountHandles[request.Username] {
+			resolved, ok := output.(*tg.ContactsResolvedPeer)
+			if !ok {
+				return fmt.Errorf("unexpected ordinary-account collision output %T", output)
+			}
+			resolved.Users = []tg.UserClass{&tg.User{ID: 13, AccessHash: 29, Username: request.Username}}
+			return nil
+		}
 		if rpc.collidingHandles[request.Username] {
 			resolved, ok := output.(*tg.ContactsResolvedPeer)
 			if !ok {

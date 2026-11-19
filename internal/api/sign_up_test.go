@@ -19,6 +19,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -564,6 +565,57 @@ func TestSignUpRejectsReservedHandles(t *testing.T) {
 		if !found || key.UserID != 0 || key.PendingUserID != 0 {
 			t.Errorf("signUp %q changed auth key binding: %#v found=%v", handle, key, found)
 		}
+	}
+}
+
+func TestSignUpRejectsDemoGeneralHandlesWhenEnabled(t *testing.T) {
+	t.Parallel()
+	handles := append(demo.GeneralChatHandles(), demo.SeedOwnerUsername)
+	authKeyIDs := [][8]byte{{1}, {2}, {3}, {4}, {5}}
+	for i, handle := range handles {
+		t.Run(handle, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openStore(t)
+			addr := netip.MustParseAddr("10.0.0.13")
+			keyID := int64(i + 1)
+			authKeyID := authKeyIDs[i]
+			if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+
+			sent, err := api.SendCodeForTest(s, addr, store.SendCodeIPLimits{}, handle)
+			if err != nil {
+				t.Fatalf("sendCode: %v", err)
+			}
+			sentCode, ok := sent.(*tg.AuthSentCode)
+			if !ok {
+				t.Fatalf("sendCode result = %T, want *tg.AuthSentCode", sent)
+			}
+			if _, err := api.SignInForTestWithLimits(s, authKeyID, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+				PhoneNumber:   handle,
+				PhoneCodeHash: sentCode.PhoneCodeHash,
+				PhoneCode:     "admission-secret",
+			}); err != nil {
+				t.Fatalf("signIn: %v", err)
+			}
+
+			runner := api.NewSignUpTestRunner(s, authKeyID, addr, store.RateLimitConfig{}, config.RegistrationOpen, nil)
+			runner.SetDemoGeneralChatEnabledForTest(true)
+			_, err = runner.SignUp(&tg.AuthSignUpRequest{
+				PhoneNumber:   handle,
+				PhoneCodeHash: sentCode.PhoneCodeHash,
+				FirstName:     "Reserved",
+			})
+			if got := signUpRPCMessage(err); got != "USERNAME_INVALID" {
+				t.Fatalf("signUp %q: expected USERNAME_INVALID, got %v", handle, err)
+			}
+			if _, found, err := s.UserByUsernameWithLoginMode(ctx, strings.ToLower(handle)); err != nil {
+				t.Fatalf("lookup reserved handle: %v", err)
+			} else if found {
+				t.Fatalf("reserved handle %q created a user", handle)
+			}
+		})
 	}
 }
 

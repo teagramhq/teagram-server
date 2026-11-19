@@ -34,7 +34,7 @@ func (h *handlers) checkDemoGeneralHandleClaim(ctx context.Context, userID int64
 		return nil
 	}
 	username = strings.ToLower(username)
-	if username != demo.SeedOwnerUsername && !demo.IsGeneralChatHandle(username) {
+	if !demo.IsReservedGeneralChatUsername(username) {
 		return nil
 	}
 	user, ok, err := h.store.UserByID(ctx, userID)
