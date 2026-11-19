@@ -382,6 +382,10 @@ if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(w
 for expected in (
     'run_signin_mode false',
     'run_signin_mode true',
+    'TG_DEMO_GENERAL_CHAT_ENABLED=true',
+    'export TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"',
+    'seed_output=$(TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"',
+    'export TG_DEMO_GENERAL_CHAT_ENABLED=true',
     'ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"',
     'bootstrap-identity >/dev/null',
     '--profile maintenance run --rm --no-deps teagramd-maintenance',
@@ -398,6 +402,19 @@ if isolated.index('bootstrap-identity') > isolated.index(
     'demo_seed_compose up -d --wait --wait-timeout 120 teagramd'
 ):
     raise SystemExit("isolated moderation Compose test: identity must be bootstrapped before server startup")
+if not (
+    isolated.index('TG_DEMO_GENERAL_CHAT_ENABLED=true')
+    < isolated.index('demo_require_env\n')
+    < isolated.index('export TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"')
+    < isolated.index('demo_seed_compose up -d --wait --wait-timeout 120 teagramd')
+):
+    raise SystemExit("isolated moderation Compose test: flag-off mode must override the validated fixture environment")
+if not (
+    isolated.index('ACTIVE_STAGE="seed with General disabled"')
+    < isolated.index('export TG_DEMO_GENERAL_CHAT_ENABLED=true')
+    < isolated.index('ACTIVE_STAGE="enable General and restart the private server"')
+):
+    raise SystemExit("isolated moderation Compose test: flag-off mode must restore General before reseeding")
 cleanup = isolated.split('cleanup() {', 1)[1].split('\n}\ntrap cleanup EXIT', 1)[0]
 cleanup_guard = 'if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then'
 cleanup_rmdir = 'rmdir -- "$cleanup_path" 2>/dev/null || rc=1'

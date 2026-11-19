@@ -143,7 +143,8 @@ TG_AUTHKEY_ENC_KEY=$(openssl rand -hex 32)
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
-TG_DEMO_GENERAL_CHAT_ENABLED=$general_chat_enabled
+# validate-env.py requires General enabled; test the off state via process env.
+TG_DEMO_GENERAL_CHAT_ENABLED=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_WEBSOCKET_BROWSER_ONLY=true
@@ -170,6 +171,7 @@ ENV
   # shellcheck source=deploy/teagram-demo/demo-common.sh
   source "$seed_dir/demo-common.sh"
   demo_require_env
+  export TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled"
   ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"
   demo_compose --profile maintenance run --rm --no-deps teagramd-maintenance \
     bootstrap-identity >/dev/null
@@ -190,14 +192,15 @@ ENV
   demo_prepare_seed_owner "$TMP_DIR"
   if [[ "$general_chat_enabled" == false ]]; then
     ACTIVE_STAGE="seed with General disabled"
-    seed_output=$("$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
+    seed_output=$(TG_DEMO_GENERAL_CHAT_ENABLED="$general_chat_enabled" \
+      "$seed_dir/seed-demo.sh" --seed --endpoint teagramd:2443 \
       --owner-username demo_seed_owner --owner-password-file "$SHARED_SECRET_ROOT/secrets/seed-owner-password")
     [[ "$seed_output" == *'general_chat=0'* ]] || {
       printf 'flag-off seed unexpectedly reported a General group\n' >&2
       return 1
     }
     assert_general_chat_owner 0 0
-    sed -i 's/^TG_DEMO_GENERAL_CHAT_ENABLED=false$/TG_DEMO_GENERAL_CHAT_ENABLED=true/' "$seed_dir/.env"
+    export TG_DEMO_GENERAL_CHAT_ENABLED=true
     ACTIVE_STAGE="enable General and restart the private server"
     demo_seed_compose up -d --force-recreate --wait --wait-timeout 120 teagramd
   fi
