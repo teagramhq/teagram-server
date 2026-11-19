@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,19 @@ func TestModerateGeneralChatPermanentlyBansShortSignupUsername(t *testing.T) {
 	}
 }
 
+func TestModerateGeneralChatNormalizesUsernameBeforeResolve(t *testing.T) {
+	rpc := &generalModerationRPC{targetRole: "member"}
+	if err := banGeneralChatGuest(context.Background(), tg.NewClient(rpc), "AB"); err != nil {
+		t.Fatalf("ban short-handle General guest with mixed-case argument: %v", err)
+	}
+	if rpc.resolvedUsername != "ab" {
+		t.Fatalf("resolved username = %q, want normalized lowercase username", rpc.resolvedUsername)
+	}
+	if rpc.banCount != 1 {
+		t.Fatalf("mixed-case short-handle ban calls = %d, want one", rpc.banCount)
+	}
+}
+
 func TestModerateGeneralChatUpgradesTemporaryBanToPermanent(t *testing.T) {
 	rights := tg.ChatBannedRights{ViewMessages: true, UntilDate: int(time.Now().Add(time.Hour).Unix())}
 	rights.SetFlags()
@@ -78,6 +92,7 @@ func TestModerateGeneralChatKeepsPermanentBanIdempotent(t *testing.T) {
 type generalModerationRPC struct {
 	targetRole         string
 	bannedRights       tg.ChatBannedRights
+	resolvedUsername   string
 	deletedMessageID   int
 	deleteCount        int
 	banCount           int
@@ -98,10 +113,11 @@ func (rpc *generalModerationRPC) Invoke(_ context.Context, input bin.Encoder, ou
 			}}
 			return nil
 		}
+		rpc.resolvedUsername = request.Username
 		if request.Username != "freshguest" && request.Username != "ab" {
 			return fmt.Errorf("unexpected moderation target %q", request.Username)
 		}
-		resolved.Users = []tg.UserClass{&tg.User{ID: 42, AccessHash: 43, Username: request.Username}}
+		resolved.Users = []tg.UserClass{&tg.User{ID: 42, AccessHash: 43, Username: strings.ToLower(request.Username)}}
 	case *tg.ChannelsGetParticipantRequest:
 		participant, ok := output.(*tg.ChannelsChannelParticipant)
 		if !ok {

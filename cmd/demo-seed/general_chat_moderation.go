@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/gotd/td/tg"
 )
@@ -47,6 +48,7 @@ func banGeneralChatGuest(ctx context.Context, api *tg.Client, username string) e
 	if !validGeneralChatUsername(username) {
 		return errors.New("general guest username is invalid")
 	}
+	username = strings.ToLower(username)
 	remote, err := resolveModerationGeneralChat(ctx, api)
 	if err != nil {
 		return err
