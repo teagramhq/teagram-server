@@ -91,9 +91,7 @@ docker inspect "${production_ids[0]}" | jq -e --arg signinEnabled "$PRODUCTION_T
     and ($env | any(. == "TG_DEMO_GENERAL_CHAT_ENABLED=true"))
 ' >/dev/null || demo_fail 'production moderation smoke requires the configured sign-in gate and PROXY-v2'
 [[ -n "$(demo_compose ps --status running -q haproxy)" ]] || demo_fail 'production HAProxy is not running'
-if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]; then
-  "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
-fi
+"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 
 "$SCRIPT_DIR/moderate-general.sh" delete-message "$MODERATION_SMOKE_MESSAGE_ID"
 "$SCRIPT_DIR/moderate-general.sh" ban-user ab

@@ -9,6 +9,19 @@ source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" <<'PY'
+import sys
+from pathlib import Path
+
+smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
+probe = '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443'
+if probe not in smoke.splitlines():
+    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must run unconditionally")
+if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must not depend on sign-in state")
+PY
+go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisabled$' -count=1
+
 (
   [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == haproxy:2443 ]]
   [[ "$(demo_resolve_seed_endpoint --moderate-ban-user 0 teagramd:2443)" == haproxy:2443 ]]
@@ -283,9 +296,9 @@ for expected in (
     '--prepare-general-moderation-smoke',
     '--verify-general-moderation-smoke',
     '--cleanup-general-moderation-smoke',
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     'PRODUCTION_TURNSTILE_SIGNIN_ENABLED',
     'if length == 1 and (.[0] == "true" or .[0] == "false")',
-    'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]',
     'TG_TURNSTILE_SIGNIN_ENABLED=false',
     'TG_CLIENT_ADDR_TRUST=proxy-v2',
     'if trust=$(docker inspect "$server_id" | jq -er',
@@ -294,6 +307,8 @@ for expected in (
         raise SystemExit(f"test-general-moderation-compose.sh: missing production moderation smoke step: {expected}")
 if 'TG_TURNSTILE_SIGNIN_ENABLED=true' in smoke:
     raise SystemExit("test-general-moderation-compose.sh: must preserve either configured sign-in Turnstile value")
+if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must be unconditional")
 for required_route in (
     '--verify-general-moderation-smoke',
     '--cleanup-general-moderation-smoke',

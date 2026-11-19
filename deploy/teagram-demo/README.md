@@ -666,9 +666,10 @@ with the sign-in Turnstile value already configured in `.env` and runs both
 moderation commands through HAProxy. The smoke works with sign-in Turnstile
 enabled or disabled because its sessions are established on the private seed
 listener first. When the configured gate is enabled, the separate Turnstile
-probe also runs through HAProxy. The test verifies the post is gone and the
-banned guest cannot rejoin, then removes the temporary post and session before
-edge startup.
+probe checks both sign-in and sign-up enforcement through HAProxy; with the
+sign-in gate disabled, it still verifies sign-up enforcement. The test verifies
+the post is gone and the banned guest cannot rejoin, then removes the temporary
+post and session before edge startup.
 
 ## Scheduled activity
 
