@@ -70,7 +70,7 @@ func (q *Queries) ClearDeletedChannelFileRefs(ctx context.Context, fileID *int64
 }
 
 const currentChannelPeerPhotoForDownload = `-- name: CurrentChannelPeerPhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM channels c
 JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = $1::bigint
 JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
@@ -104,12 +104,13 @@ func (q *Queries) CurrentChannelPeerPhotoForDownload(ctx context.Context, arg Cu
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
 
 const currentChannelPhotoForDownload = `-- name: CurrentChannelPhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM channels c
 JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = $1::bigint
 JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
@@ -146,12 +147,13 @@ func (q *Queries) CurrentChannelPhotoForDownload(ctx context.Context, arg Curren
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
 
 const currentChatPeerPhotoForDownload = `-- name: CurrentChatPeerPhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM chats c
 JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $1::bigint
 JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
@@ -186,12 +188,13 @@ func (q *Queries) CurrentChatPeerPhotoForDownload(ctx context.Context, arg Curre
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
 
 const currentChatPhotoForDownload = `-- name: CurrentChatPhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM chats c
 JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $1::bigint
 JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
@@ -227,6 +230,7 @@ func (q *Queries) CurrentChatPhotoForDownload(ctx context.Context, arg CurrentCh
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
@@ -437,7 +441,7 @@ WITH visible_poll_channels AS MATERIALIZED (
     WHERE cp.user_id = $3
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
 )
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM files f
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256 FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
@@ -620,6 +624,7 @@ func (q *Queries) FileForDownload(ctx context.Context, arg FileForDownloadParams
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
@@ -673,7 +678,7 @@ func (q *Queries) FileUploadGrantCount(ctx context.Context, arg FileUploadGrantC
 }
 
 const filesByIDs = `-- name: FilesByIDs :many
-SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height FROM files WHERE id = ANY($1::bigint[]) AND stored = true
+SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height, content_sha256 FROM files WHERE id = ANY($1::bigint[]) AND stored = true
 `
 
 func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
@@ -698,6 +703,7 @@ func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
 			&i.MediaKind,
 			&i.Width,
 			&i.Height,
+			&i.ContentSha256,
 		); err != nil {
 			return nil, err
 		}
@@ -762,7 +768,7 @@ func (q *Queries) FreshPhotoFileForAttach(ctx context.Context, arg FreshPhotoFil
 const insertFile = `-- name: InsertFile :one
 INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, subtype_rights)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height
+RETURNING id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height, content_sha256
 `
 
 type InsertFileParams struct {
@@ -797,6 +803,7 @@ func (q *Queries) InsertFile(ctx context.Context, arg InsertFileParams) (File, e
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
@@ -973,21 +980,28 @@ SET stored = true,
     media_kind = 'photo',
     width = $2,
     height = $3,
+    content_sha256 = $4,
     subtype_rights = ARRAY['send_photos']::TEXT[]
 WHERE id = $1 AND stored = false
 `
 
 type MarkPhotoFileStoredParams struct {
-	ID     int64
-	Width  *int32
-	Height *int32
+	ID            int64
+	Width         *int32
+	Height        *int32
+	ContentSha256 []byte
 }
 
 // MarkPhotoFileStored makes the bytes and their validated photo metadata
 // visible together. The database check repeats the dimension boundary so no
 // other writer can publish an incomplete photo row.
 func (q *Queries) MarkPhotoFileStored(ctx context.Context, arg MarkPhotoFileStoredParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markPhotoFileStored, arg.ID, arg.Width, arg.Height)
+	result, err := q.db.Exec(ctx, markPhotoFileStored,
+		arg.ID,
+		arg.Width,
+		arg.Height,
+		arg.ContentSha256,
+	)
 	if err != nil {
 		return 0, err
 	}

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -93,18 +94,19 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 			t.Fatalf("internal endpoint %q: %v", endpoint, err)
 		}
 	}
-	if err := validateEndpointForMode(trustedProxyEndpoint, true); err != nil {
+	if err := validateEndpointForMode(trustedProxyEndpoint, seedOptions{verifyTurnstile: true}); err != nil {
 		t.Fatalf("trusted proxy endpoint for Turnstile probe: %v", err)
 	}
 	for _, test := range []struct {
-		endpoint        string
-		verifyTurnstile bool
+		endpoint string
+		options  seedOptions
 	}{
 		{endpoint: trustedProxyEndpoint},
-		{endpoint: defaultEndpoint, verifyTurnstile: true},
+		{endpoint: defaultEndpoint, options: seedOptions{verifyTurnstile: true}},
+		{endpoint: defaultEndpoint, options: seedOptions{moderateDeleteMessageID: 81}},
 	} {
-		if err := validateEndpointForMode(test.endpoint, test.verifyTurnstile); err == nil {
-			t.Fatalf("validateEndpointForMode(%q, %t) succeeded", test.endpoint, test.verifyTurnstile)
+		if err := validateEndpointForMode(test.endpoint, test.options); err == nil {
+			t.Fatalf("validateEndpointForMode(%q, %+v) succeeded", test.endpoint, test.options)
 		}
 	}
 	for _, endpoint := range []string{
@@ -121,6 +123,41 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 				t.Fatalf("validateEndpoint(%q) succeeded", endpoint)
 			}
 		})
+	}
+}
+
+func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "true")
+	for _, args := range [][]string{
+		{"--moderate-delete-message", "81"},
+		{"--moderate-ban-user", "freshguest"},
+	} {
+		options, err := parseOptions(args)
+		if err != nil {
+			t.Fatalf("parse moderation options %v: %v", args, err)
+		}
+		if options.endpoint != trustedProxyEndpoint {
+			t.Fatalf("moderation options %v endpoint = %q, want trusted production proxy %q", args, options.endpoint, trustedProxyEndpoint)
+		}
+		if err := validateEndpointForMode(options.endpoint, options); err != nil {
+			t.Fatalf("validate moderation endpoint for %v: %v", args, err)
+		}
+	}
+}
+
+func TestSeedOwnerSessionCanBeReusedThroughProductionProxy(t *testing.T) {
+	validOwner := &tg.User{Username: "demo_seed_owner"}
+	if usable, err := seedOwnerSessionUsable(true, validOwner, "demo_seed_owner", trustedProxyEndpoint); err != nil || !usable {
+		t.Fatalf("valid seed-owner session usable=%t err=%v, want reusable", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(true, &tg.User{Username: "other"}, "demo_seed_owner", trustedProxyEndpoint); err == nil || usable {
+		t.Fatalf("other-account session usable=%t err=%v, want rejected", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(false, nil, "demo_seed_owner", trustedProxyEndpoint); err == nil || usable {
+		t.Fatalf("missing production session usable=%t err=%v, want rejected without sign-in", usable, err)
+	}
+	if usable, err := seedOwnerSessionUsable(false, nil, "demo_seed_owner", defaultEndpoint); err != nil || usable {
+		t.Fatalf("missing private seed session usable=%t err=%v, want private re-authentication", usable, err)
 	}
 }
 
@@ -297,31 +334,43 @@ func TestReadTurnstileQATokenTrimsAndValidatesSecret(t *testing.T) {
 	}
 }
 
-func TestOwnerAuthSendCodeUsesTurnstileTokenWhenEnabled(t *testing.T) {
-	token := strings.Repeat("q", 32)
-	tokenPath := filepath.Join(t.TempDir(), "qa-token")
-	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
-		t.Fatalf("write QA token fixture: %v", err)
-	}
-
+func TestOwnerAuthDoesNotUseSignupQATokenForSignin(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{signInGateEnabled: true}
-	sent, err := sendAuthCodeForAccount(context.Background(), api, accountSpec{loginID: "demo_seed_owner", owner: true}, tokenPath)
-	if err != nil {
-		t.Fatalf("send owner auth code with Turnstile enabled: %v", err)
+	if _, err := sendAuthCode(context.Background(), api, "demo_seed_owner"); !isSignInCaptchaRequired(err) {
+		t.Fatalf("owner auth.sendCode error = %v, want sign-in challenge without the signup token", err)
 	}
-	if _, ok := sent.(*tg.AuthSentCode); !ok {
-		t.Fatalf("owner auth code response = %T, want *tg.AuthSentCode", sent)
-	}
-	if api.wrappedToken != token || api.wrappedSendCodeRequest == nil || api.wrappedSendCodeRequest.PhoneNumber != "demo_seed_owner" {
-		t.Fatalf("wrapped owner auth.sendCode token/request = %q/%+v", api.wrappedToken, api.wrappedSendCodeRequest)
+	if api.wrappedSendCodeRequest != nil {
+		t.Fatalf("owner sign-in unexpectedly used the signup QA token: %+v", api.wrappedSendCodeRequest)
 	}
 
 	guestAPI := &fakeTurnstileProbeAPI{signInGateEnabled: true}
-	if _, err := sendAuthCodeForAccount(context.Background(), guestAPI, accountSpec{loginID: "demo_iona"}, tokenPath); !isSignInCaptchaRequired(err) {
+	if _, err := sendAuthCode(context.Background(), guestAPI, "demo_iona"); !isSignInCaptchaRequired(err) {
 		t.Fatalf("guest auth.sendCode error = %v, want the original sign-in challenge", err)
 	}
 	if guestAPI.wrappedSendCodeRequest != nil {
 		t.Fatalf("guest auth.sendCode unexpectedly used the owner QA token: %+v", guestAPI.wrappedSendCodeRequest)
+	}
+}
+
+func TestSeedOwnerUsesPersistentSessionFile(t *testing.T) {
+	var storage session.Storage
+	err := withSeedOwnerUsingRunner(
+		context.Background(),
+		apiConfig{dcID: 2},
+		seedOptions{endpoint: trustedProxyEndpoint, ownerUsername: "demo_seed_owner"},
+		"unused-password",
+		nil,
+		func(_ context.Context, options telegram.Options, _ telegramClientAction) error {
+			storage = options.SessionStorage
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("prepare seed-owner client: %v", err)
+	}
+	fileStorage, ok := storage.(*session.FileStorage)
+	if !ok || fileStorage.Path != defaultOwnerSessionFile {
+		t.Fatalf("seed-owner session storage = %#v, want file storage at %q", storage, defaultOwnerSessionFile)
 	}
 }
 

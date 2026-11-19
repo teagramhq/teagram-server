@@ -25,6 +25,8 @@ DEMO_TURNSTILE_QA_BYPASS_FILE="$DEMO_SEED_SECRET_DIR/turnstile-qa-bypass-token"
 # shellcheck disable=SC2034
 DEMO_SEED_PASSWORD_FILE="$DEMO_SEED_SECRET_DIR/seed-owner-password"
 # shellcheck disable=SC2034
+DEMO_SEED_OWNER_SESSION_FILE="$DEMO_SEED_SECRET_DIR/seed-owner.session"
+# shellcheck disable=SC2034
 DEMO_SEED_ACCOUNT_DIR="$DEMO_SEED_SECRET_DIR/demo-accounts"
 # shellcheck disable=SC2034
 DEMO_SEED_ACCOUNT_PASSWORD_FILE="$DEMO_SEED_ACCOUNT_DIR/inventory.json"
@@ -1132,17 +1134,40 @@ demo_reset_seed_owner_marker() {
       demo_fail 'seed secret directory has unsafe type or permissions'
   fi
   [[ ! -L "$DEMO_SEED_OWNER_MARKER" ]] || demo_fail 'seed-owner marker must not be a symlink'
+  if [[ -e "$DEMO_SEED_OWNER_SESSION_FILE" || -L "$DEMO_SEED_OWNER_SESSION_FILE" ]]; then
+    [[ -f "$DEMO_SEED_OWNER_SESSION_FILE" && ! -L "$DEMO_SEED_OWNER_SESSION_FILE" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] ||
+      demo_fail 'seed-owner session file has unsafe type or permissions'
+    rm -f -- "$DEMO_SEED_OWNER_SESSION_FILE"
+  fi
   rm -f -- "$DEMO_SEED_OWNER_MARKER"
 }
 
+demo_prepare_seed_owner_session() {
+  [[ ! -L "$DEMO_SEED_SECRET_DIR" ]] || demo_fail 'seed secret directory must not be a symlink'
+  install -d -o root -g root -m 0700 "$DEMO_SEED_SECRET_DIR"
+  [[ "$(stat -c '%u:%a' "$DEMO_SEED_SECRET_DIR")" == '0:700' ]] ||
+    demo_fail 'seed secret directory must be root-owned mode 0700'
+  if [[ -e "$DEMO_SEED_OWNER_SESSION_FILE" || -L "$DEMO_SEED_OWNER_SESSION_FILE" ]]; then
+    [[ -f "$DEMO_SEED_OWNER_SESSION_FILE" && ! -L "$DEMO_SEED_OWNER_SESSION_FILE" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] ||
+      demo_fail 'seed-owner session file has unsafe type or permissions'
+  else
+    install -o root -g root -m 0600 /dev/null "$DEMO_SEED_OWNER_SESSION_FILE" ||
+      demo_fail 'seed-owner session file could not be created securely'
+  fi
+}
+
 demo_prepare_seed_owner() {
-  local work_dir="$1" temporary marker_temporary active_server
+  local work_dir="$1" temporary marker_temporary session_temporary active_server
   active_server=$(demo_active_server)
 
   [[ ! -L "$DEMO_SEED_SECRET_DIR" ]] || demo_fail 'seed secret directory must not be a symlink'
   install -d -o root -g root -m 0700 "$DEMO_SEED_SECRET_DIR"
   [[ "$(stat -c '%u:%a' "$DEMO_SEED_SECRET_DIR")" == '0:700' ]] ||
     demo_fail 'seed secret directory must be root-owned mode 0700'
+
+  demo_prepare_seed_owner_session
 
   if [[ -e "$DEMO_SEED_PASSWORD_FILE" || -L "$DEMO_SEED_PASSWORD_FILE" ]]; then
     [[ -f "$DEMO_SEED_PASSWORD_FILE" && ! -L "$DEMO_SEED_PASSWORD_FILE" &&
@@ -1160,6 +1185,16 @@ demo_prepare_seed_owner() {
     grep -Eq '^[0-9a-f]{64}$' "$DEMO_SEED_PASSWORD_FILE" ||
       demo_fail 'seed-owner password file has an invalid value'
     return 0
+  fi
+
+  session_temporary=$(mktemp "$DEMO_SEED_SECRET_DIR/.seed-owner.session.XXXXXXXX")
+  if ! {
+    chmod 0600 "$session_temporary" &&
+      chown root:root "$session_temporary" &&
+      mv -f -- "$session_temporary" "$DEMO_SEED_OWNER_SESSION_FILE"
+  }; then
+    rm -f -- "$session_temporary"
+    demo_fail 'seed-owner session file could not be reset for the new database'
   fi
 
   temporary=$(mktemp "$DEMO_SEED_SECRET_DIR/seed-owner-password.XXXXXXXX")

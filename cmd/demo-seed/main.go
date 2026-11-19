@@ -38,6 +38,7 @@ const (
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
 	defaultActivityInventory = "/run/secrets/demo-activity-inventory.json"
+	defaultOwnerSessionFile  = "/run/secrets/seed-owner.session"
 	defaultTurnstileQAToken  = "/run/secrets/teagram_demo_turnstile_qa_bypass"
 	trustedProxyHost         = "haproxy"
 	trustedProxyEndpoint     = trustedProxyHost + ":2443"
@@ -63,6 +64,7 @@ type seedOptions struct {
 	moderateDeleteMessageID int64
 	moderateBanUsername     string
 	endpoint                string
+	endpointExplicit        bool
 	ownerUsername           string
 	activityTarget          string
 	maxActionsHour          int
@@ -92,7 +94,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateEndpointForMode(options.endpoint, options.verifyTurnstile); err != nil {
+	if err := validateEndpointForMode(options.endpoint, options); err != nil {
 		return err
 	}
 	if options.check {
@@ -180,6 +182,11 @@ func parseOptions(args []string) (seedOptions, error) {
 	if err := flags.Parse(args); err != nil {
 		return seedOptions{}, err
 	}
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == "endpoint" {
+			options.endpointExplicit = true
+		}
+	})
 	if raw := os.Getenv("TG_DEMO_GENERAL_CHAT_ENABLED"); raw != "" {
 		enabled, err := strconv.ParseBool(raw)
 		if err != nil {
@@ -213,6 +220,9 @@ func parseOptions(args []string) (seedOptions, error) {
 	}
 	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && !options.generalChatEnabled {
 		return seedOptions{}, errors.New("general moderation requires TG_DEMO_GENERAL_CHAT_ENABLED=true")
+	}
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && !options.endpointExplicit {
+		options.endpoint = trustedProxyEndpoint
 	}
 	if options.activity {
 		switch options.activityTarget {
@@ -254,17 +264,26 @@ func endpointDialHost(endpoint string) (string, error) {
 		return defaultEndpointHost, nil
 	case candidateEndpoint:
 		return candidateEndpointHost, nil
+	case trustedProxyEndpoint:
+		return trustedProxyHost, nil
 	default:
-		return "", errors.New("endpoint must be an internal teagramd service")
+		return "", errors.New("endpoint must be an internal teagramd service or trusted haproxy listener")
 	}
 }
 
-func validateEndpointForMode(endpoint string, verifyTurnstile bool) error {
-	if verifyTurnstile {
+func validateEndpointForMode(endpoint string, options seedOptions) error {
+	moderation := options.moderateDeleteMessageID != 0 || options.moderateBanUsername != ""
+	if options.verifyTurnstile || moderation {
 		if endpoint != trustedProxyEndpoint {
-			return errors.New("turnstile verification must use the trusted internal haproxy:2443 service")
+			if options.verifyTurnstile {
+				return errors.New("turnstile verification must use the trusted internal haproxy:2443 service")
+			}
+			return errors.New("general moderation must use the trusted internal haproxy:2443 service")
 		}
 		return nil
+	}
+	if endpoint == trustedProxyEndpoint {
+		return errors.New("haproxy:2443 is only supported for Turnstile probes and General moderation")
 	}
 	return validateEndpoint(endpoint)
 }
@@ -492,6 +511,64 @@ func withAccountUsingRunner(ctx context.Context, cfg apiConfig, endpoint string,
 	})
 }
 
+func withSeedOwnerUsingRunner(
+	ctx context.Context,
+	cfg apiConfig,
+	options seedOptions,
+	password string,
+	action apiAction,
+	runner telegramClientRunner,
+) error {
+	account := seedAccounts[0]
+	if account.username != options.ownerUsername {
+		return errors.New("configured seed-owner username does not match the fixed demo owner")
+	}
+	clientOptions, err := accountClientOptions(cfg, options.endpoint, &session.FileStorage{Path: defaultOwnerSessionFile})
+	if err != nil {
+		return err
+	}
+	return runner(ctx, clientOptions, func(runCtx context.Context, client *telegram.Client) error {
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("check seed-owner authorization session: %w", err)
+		}
+		usable, err := seedOwnerSessionUsable(status.Authorized, status.User, account.username, options.endpoint)
+		if err != nil {
+			return err
+		}
+		if !usable {
+			if err := authenticate(runCtx, client.API(), account, &password, nil); err != nil {
+				return err
+			}
+			status, err = client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("verify seed-owner authorization session: %w", err)
+			}
+			usable, err = seedOwnerSessionUsable(status.Authorized, status.User, account.username, options.endpoint)
+			if err != nil {
+				return err
+			}
+			if !usable {
+				return errors.New("seed-owner authentication did not persist an authorized session")
+			}
+		}
+		return action(runCtx, client.API())
+	})
+}
+
+func seedOwnerSessionUsable(authorized bool, user *tg.User, ownerUsername, endpoint string) (bool, error) {
+	if authorized {
+		if user == nil || !strings.EqualFold(user.Username, ownerUsername) {
+			return false, errors.New("seed-owner session is authorized for a different account")
+		}
+		return true, nil
+	}
+	if endpoint == trustedProxyEndpoint {
+		return false, errors.New("seed-owner session is not authorized; run the private seed before production moderation")
+	}
+	return false, nil
+}
+
 func runTelegramClient(ctx context.Context, options telegram.Options, action telegramClientAction) error {
 	client := telegram.NewClient(appID, appHash, options)
 	return client.Run(ctx, func(runCtx context.Context) error {
@@ -500,7 +577,7 @@ func runTelegramClient(ctx context.Context, options telegram.Options, action tel
 }
 
 func authenticate(ctx context.Context, api *tg.Client, account accountSpec, password *string, savePassword func(string) error) error {
-	sent, err := sendAuthCodeForAccount(ctx, api, account, defaultTurnstileQAToken)
+	sent, err := sendAuthCode(ctx, api, account.loginID)
 	if err != nil {
 		return fmt.Errorf("request demo account sign-in code: %w", err)
 	}
@@ -584,29 +661,11 @@ func authenticate(ctx context.Context, api *tg.Client, account accountSpec, pass
 
 type authSendCodeAPI interface {
 	AuthSendCode(context.Context, *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error)
-	Invoker() tg.Invoker
 }
 
-func sendAuthCodeForAccount(
-	ctx context.Context, api authSendCodeAPI, account accountSpec, qaTokenPath string,
-) (tg.AuthSentCodeClass, error) {
-	request := &tg.AuthSendCodeRequest{PhoneNumber: account.loginID, APIID: appID, APIHash: appHash}
-	sent, err := api.AuthSendCode(ctx, request)
-	if !isSignInCaptchaRequired(err) {
-		return sent, err
-	}
-	if !account.owner {
-		return nil, err
-	}
-	token, err := readTurnstileQAToken(qaTokenPath)
-	if err != nil {
-		return nil, fmt.Errorf("read owner sign-in Turnstile token: %w", err)
-	}
-	var response tg.AuthSentCodeBox
-	if err := api.Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{Token: token, Query: request}, &response); err != nil {
-		return nil, fmt.Errorf("request owner sign-in code with demo Turnstile token: %w", err)
-	}
-	return response.SentCode, nil
+func sendAuthCode(ctx context.Context, api authSendCodeAPI, loginID string) (tg.AuthSentCodeClass, error) {
+	request := &tg.AuthSendCodeRequest{PhoneNumber: loginID, APIID: appID, APIHash: appHash}
+	return api.AuthSendCode(ctx, request)
 }
 
 func setNewPassword(ctx context.Context, api *tg.Client, password string) error {

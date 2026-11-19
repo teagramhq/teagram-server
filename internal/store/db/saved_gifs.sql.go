@@ -61,7 +61,7 @@ func (q *Queries) InsertSavedGIF(ctx context.Context, arg InsertSavedGIFParams) 
 }
 
 const savedGIFs = `-- name: SavedGIFs :many
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM saved_gifs sg
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256 FROM saved_gifs sg
 JOIN files f ON f.id = sg.file_id
 WHERE sg.owner_id = $1
   AND f.stored = true
@@ -119,6 +119,7 @@ func (q *Queries) SavedGIFs(ctx context.Context, arg SavedGIFsParams) ([]File, e
 			&i.MediaKind,
 			&i.Width,
 			&i.Height,
+			&i.ContentSha256,
 		); err != nil {
 			return nil, err
 		}

@@ -12,7 +12,7 @@ import (
 )
 
 const albumPhotoFilesForUpload = `-- name: AlbumPhotoFilesForUpload :many
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM files AS f
 JOIN file_upload_grants AS g ON g.file_id = f.id
 JOIN (SELECT unnest($1::bigint[]) AS file_id,
@@ -63,6 +63,7 @@ func (q *Queries) AlbumPhotoFilesForUpload(ctx context.Context, arg AlbumPhotoFi
 			&i.MediaKind,
 			&i.Width,
 			&i.Height,
+			&i.ContentSha256,
 		); err != nil {
 			return nil, err
 		}

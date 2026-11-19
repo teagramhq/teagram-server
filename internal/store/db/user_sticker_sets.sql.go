@@ -778,18 +778,33 @@ type StickerFilesForOwnerParams struct {
 	AccessHashes []int64
 }
 
+type StickerFilesForOwnerRow struct {
+	ID            int64
+	UploaderID    int64
+	AccessHash    int64
+	Size          int64
+	MimeType      string
+	FileName      string
+	Stored        bool
+	Date          pgtype.Timestamptz
+	SubtypeRights []string
+	MediaKind     string
+	Width         *int32
+	Height        *int32
+}
+
 // Sticker inputs are resolved together through caller-owned, stored document
 // rows and exact access hashes. Files already assigned to any set are refused
 // before the API reads any blob bytes.
-func (q *Queries) StickerFilesForOwner(ctx context.Context, arg StickerFilesForOwnerParams) ([]File, error) {
+func (q *Queries) StickerFilesForOwner(ctx context.Context, arg StickerFilesForOwnerParams) ([]StickerFilesForOwnerRow, error) {
 	rows, err := q.db.Query(ctx, stickerFilesForOwner, arg.FileIds, arg.UploaderID, arg.AccessHashes)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []File
+	var items []StickerFilesForOwnerRow
 	for rows.Next() {
-		var i File
+		var i StickerFilesForOwnerRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.UploaderID,
@@ -845,9 +860,24 @@ type StickerFilesForUserSetParams struct {
 	SetID        int64
 }
 
+type StickerFilesForUserSetRow struct {
+	ID            int64
+	UploaderID    int64
+	AccessHash    int64
+	Size          int64
+	MimeType      string
+	FileName      string
+	Stored        bool
+	Date          pgtype.Timestamptz
+	SubtypeRights []string
+	MediaKind     string
+	Width         *int32
+	Height        *int32
+}
+
 // Add may reactivate a previously removed item from the same set, but a live
 // item, another set's historical item, or any set thumbnail still owns the file.
-func (q *Queries) StickerFilesForUserSet(ctx context.Context, arg StickerFilesForUserSetParams) ([]File, error) {
+func (q *Queries) StickerFilesForUserSet(ctx context.Context, arg StickerFilesForUserSetParams) ([]StickerFilesForUserSetRow, error) {
 	rows, err := q.db.Query(ctx, stickerFilesForUserSet,
 		arg.FileIds,
 		arg.UploaderID,
@@ -858,9 +888,9 @@ func (q *Queries) StickerFilesForUserSet(ctx context.Context, arg StickerFilesFo
 		return nil, err
 	}
 	defer rows.Close()
-	var items []File
+	var items []StickerFilesForUserSetRow
 	for rows.Next() {
-		var i File
+		var i StickerFilesForUserSetRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.UploaderID,
@@ -1679,7 +1709,7 @@ func (q *Queries) UserCreatedStickerSetSearchCandidatesByEncodedSubstring(ctx co
 }
 
 const userCreatedStickerSetThumbnailForDownload = `-- name: UserCreatedStickerSetThumbnailForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256
 FROM user_created_sticker_sets s
 JOIN files f ON f.id = s.thumb_file_id
 WHERE s.id = $1 AND s.access_hash = $2
@@ -1709,6 +1739,7 @@ func (q *Queries) UserCreatedStickerSetThumbnailForDownload(ctx context.Context,
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }

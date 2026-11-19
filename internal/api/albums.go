@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
-	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -90,6 +88,14 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	for i, item := range items {
 		randomIDs[i] = item.RandomID
 	}
+	replayAfterRefusal := func(refusal error) (bin.Encoder, *replyUpdate, func(), error) {
+		if peerType == store.PeerTypeChannel {
+			if replay, ok := h.retryCommittedChannelAlbum(r, toID, randomIDs); ok {
+				return h.channelAlbumResponse(r, toID, replay)
+			}
+		}
+		return nil, nil, nil, refusal
+	}
 	// Dedup runs before any charge and before any grant is touched; the send
 	// transaction repeats it under its locks. A channel retry checks posting
 	// rights under the channel state lock first, as a channel photo retry does.
@@ -127,7 +133,7 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	}
 
 	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(items)); err != nil {
-		return nil, nil, nil, err
+		return replayAfterRefusal(err)
 	}
 	var demoGeneralChatRateLimitCharges []store.RateLimitCharge
 	if peerType == store.PeerTypeChannel {
@@ -138,18 +144,18 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		var mediaIdentities []string
 		demoGeneralChat, err := h.checkDemoGeneralChatMessages(r, toID, texts, len(items), errMediaCaptionTooLong)
 		if err != nil {
-			return nil, nil, nil, err
+			return replayAfterRefusal(err)
 		}
 		if demoGeneralChat {
 			mediaIdentities, err = h.demoGeneralChatAlbumPhotoIdentities(r.Ctx, r.UserID, items)
 			if err != nil {
-				return nil, nil, nil, err
+				return replayAfterRefusal(err)
 			}
 			if err := h.preflightDemoGeneralChatRateLimits(r, nil, 0, mediaIdentities...); err != nil {
-				return nil, nil, nil, err
+				return replayAfterRefusal(err)
 			}
 			if err := h.checkDemoGeneralChatRateLimitBudgets(r, nil, 0, mediaIdentities...); err != nil {
-				return nil, nil, nil, err
+				return replayAfterRefusal(err)
 			}
 			demoGeneralChatRateLimitCharges = h.demoGeneralChatRateLimitCharges(r, texts, len(items), mediaIdentities...)
 		}
@@ -164,6 +170,9 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if peerType == store.PeerTypeChannel {
 		result, postErr := h.store.PostChannelAlbumAs(r.Ctx, toID, replyToMsgID, album, demoGeneralChatRateLimitCharges...)
 		if postErr != nil {
+			if replay, ok := h.retryCommittedChannelAlbum(r, toID, randomIDs); ok {
+				return h.channelAlbumResponse(r, toID, replay)
+			}
 			return nil, nil, nil, h.channelAlbumError(r, toID, postErr)
 		}
 		if !result.Duplicate {
@@ -307,6 +316,17 @@ func albumItems(ctx context.Context, h *handlers, viewerID int64, multi []tg.Inp
 	return items, nil
 }
 
+func (h *handlers) retryCommittedChannelAlbum(
+	r *mtproto.Request, channelID int64, randomIDs []int64,
+) (store.ChannelAlbumResult, bool) {
+	replay, err := h.store.ChannelAlbumRetryAs(r.Ctx, channelID, r.UserID, randomIDs)
+	if err != nil {
+		h.log.Error("recheck channel album retry after refusal", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return store.ChannelAlbumResult{}, false
+	}
+	return replay, replay.Duplicate
+}
+
 func (h *handlers) demoGeneralChatAlbumPhotoIdentities(ctx context.Context, ownerID int64, items []store.AlbumItem) ([]string, error) {
 	files, err := h.store.AlbumPhotoFilesForUpload(ctx, ownerID, items, h.uploadGrantTTL)
 	if errors.Is(err, store.ErrMediaInvalid) {
@@ -319,19 +339,10 @@ func (h *handlers) demoGeneralChatAlbumPhotoIdentities(ctx context.Context, owne
 	identities := make([]string, len(items))
 	for i, item := range items {
 		file, ok := files[item.FileID]
-		if !ok || file.Size <= 0 || file.Size > maxPhotoJPEGBytes {
+		if !ok || len(file.ContentSHA256) != 32 {
 			return nil, errMediaInvalid
 		}
-		body, err := h.blobs.ReadAt(ctx, blob.Key(file.ID), 0, file.Size)
-		if errors.Is(err, blob.ErrNotFound) || (err == nil && int64(len(body)) != file.Size) {
-			return nil, errMediaInvalid
-		}
-		if err != nil {
-			h.log.Error("read General album photo for duplicate check", "user_id", ownerID, "file_id", file.ID, "err", err)
-			return nil, errInternal
-		}
-		digest := sha256.Sum256(body)
-		identities[i] = "photo:" + hex.EncodeToString(digest[:])
+		identities[i] = "photo:" + hex.EncodeToString(file.ContentSHA256)
 	}
 	return identities, nil
 }

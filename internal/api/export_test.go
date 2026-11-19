@@ -1244,6 +1244,17 @@ func SendMultiMediaForTestWithDemoGeneralChat(
 	userID int64,
 	req *tg.MessagesSendMultiMediaRequest,
 ) (bin.Encoder, error) {
+	return SendMultiMediaForTestWithContextAndDemoGeneralChat(context.Background(), s, userID, req)
+}
+
+// SendMultiMediaForTestWithContextAndDemoGeneralChat invokes the album handler
+// with an explicit request context and General chat policies enabled.
+func SendMultiMediaForTestWithContextAndDemoGeneralChat(
+	ctx context.Context,
+	s *store.Store,
+	userID int64,
+	req *tg.MessagesSendMultiMediaRequest,
+) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
@@ -1253,7 +1264,7 @@ func SendMultiMediaForTestWithDemoGeneralChat(
 	h.uploadGrantTTL = time.Hour
 	h.blobs = s.PartBlobs()
 	result, _, _, err := h.handleSendMultiMediaAfterReplyOnConn(nil, &mtproto.Request{
-		Ctx: context.Background(), UserID: userID, Buf: &buf,
+		Ctx: ctx, UserID: userID, Buf: &buf,
 	})
 	return result, err
 }
@@ -1775,11 +1786,23 @@ func UpdateStatusForTest(s *store.Store, userID int64, offline bool) (bin.Encode
 
 // UpdateUsernameForTest invokes handleUpdateUsername for userID with the given username.
 func UpdateUsernameForTest(s *store.Store, userID int64, username string) (bin.Encoder, error) {
+	return updateUsernameForTest(s, userID, username, false)
+}
+
+// UpdateUsernameForTestWithDemoGeneralChat invokes account.updateUsername
+// with the demo General handle reservation enabled.
+func UpdateUsernameForTestWithDemoGeneralChat(s *store.Store, userID int64, username string) (bin.Encoder, error) {
+	return updateUsernameForTest(s, userID, username, true)
+}
+
+func updateUsernameForTest(s *store.Store, userID int64, username string, demoGeneralChat bool) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := (&tg.AccountUpdateUsernameRequest{Username: username}).Encode(&buf); err != nil {
 		return nil, err
 	}
-	return testHandlers(s).handleUpdateUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = demoGeneralChat
+	return h.handleUpdateUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // UpdateProfileForTest invokes handleUpdateProfile for userID.

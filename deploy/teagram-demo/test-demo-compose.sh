@@ -242,8 +242,8 @@ jq -e '
   and .services["demo-seed"].profiles == ["seed"]
   and (.services["demo-seed"].networks | keys) == ["backend"]
   and (.services["demo-seed"].ports // [] | length) == 0
-  and (.services["demo-seed"].secrets | map(.source) | sort) == ["teagram_demo_turnstile_qa_bypass"]
-  and .services["demo-seed"].secrets[0].target == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and (.services["demo-seed"].secrets // [] | length) == 0
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner.session" and (.read_only // false) == false)
   and any(.services.haproxy.volumes[]; .target == "/usr/local/etc/haproxy" and .read_only)
   and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true"
@@ -858,10 +858,10 @@ jq -e '
   and (.services["demo-seed"].ports // [] | length) == 0
   and .services["demo-seed"].environment.GOMAXPROCS == "1"
   and .services["demo-seed"].environment.GOMEMLIMIT == "192MiB"
-  and (.services["demo-seed"].secrets | map(.source) | sort) == ["teagram_demo_turnstile_qa_bypass"]
-  and .services["demo-seed"].secrets[0].target == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and (.services["demo-seed"].secrets // [] | length) == 0
   and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner.session" and (.read_only // false) == false)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/demo-accounts" and (.read_only // false) == false)
   and .services["demo-probe"].read_only == true
   and (.services["demo-probe"].volumes | length) == 1
@@ -1060,7 +1060,8 @@ cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
   "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
-  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" <<'PY'
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" \
+  "$REPO_ROOT/cmd/demo-seed/main.go" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1245,6 +1246,19 @@ if seed_demo.count('run_moderation_helper \\\n      --moderate-ban-user "$TARGET
     raise SystemExit("seed-demo.sh: user moderation must use the production Compose profile")
 if 'demo_compose --profile seed run --rm --no-deps --pull never demo-seed "$@"' not in seed_demo:
     raise SystemExit("seed-demo.sh: moderation must run against the production Compose profile")
+seed_main = Path(sys.argv[9]).read_text(encoding="utf-8")
+owner_flow = seed_main.split("func withSeedOwnerUsingRunner(", 1)[1].split(
+    "\nfunc seedOwnerSessionUsable", 1
+)[0]
+if '&session.FileStorage{Path: defaultOwnerSessionFile}' not in owner_flow:
+    raise SystemExit("demo-seed: owner moderation must reuse the persistent root-only MTProto session")
+if owner_flow.find("client.Auth().Status") < 0 or owner_flow.find("client.Auth().Status") > owner_flow.find("authenticate("):
+    raise SystemExit("demo-seed: owner session must be checked before private sign-in")
+if 'return false, errors.New("seed-owner session is not authorized;' not in seed_main:
+    raise SystemExit("demo-seed: production moderation must fail closed without an authorized owner session")
+send_auth = seed_main.split("func sendAuthCode(", 1)[1].split("\n}", 1)[0]
+if "InvokeWithReCaptcha" in send_auth or "defaultTurnstileQAToken" in send_auth:
+    raise SystemExit("demo-seed: owner sign-in must not reuse the signup-only QA token")
 if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
     raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
 if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
@@ -1986,6 +2000,34 @@ chmod 0600 "$EDGE_CONFIG_PERMISSION_FILE"
 demo_prepare_edge_config_permissions "$EDGE_CONFIG_PERMISSION_DIR" "$EDGE_CONFIG_PERMISSION_FILE"
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_DIR")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_FILE")" == 644 ]]
+
+ENV_ROLLBACK_FUNCTIONS="$TMP_DIR/demo-env-rollback-functions.sh"
+sed -n '/^demo_capture_env_for_rollback() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$ENV_ROLLBACK_FUNCTIONS"
+sed -n '/^demo_restore_env_after_rollback() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" >> "$ENV_ROLLBACK_FUNCTIONS"
+cat > "$TMP_DIR/demo-env-rollback-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$ENV_ROLLBACK_FUNCTIONS"
+demo_fail() { printf 'unexpected demo env failure: %s\n' "$1" >&2; return 1; }
+DEMO_ENV_FILE="$TMP_DIR/rollback-demo.env"
+DEMO_ENV_BACKUP=
+cat > "$DEMO_ENV_FILE" <<'ENV'
+TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+TG_UPLOADS_DISABLED=true
+ENV
+chmod 0600 "$DEMO_ENV_FILE"
+legacy_preflight() {
+  [[ "$(sed -n 's/^TG_UPLOADS_DISABLED=//p' "$DEMO_ENV_FILE")" == true ]]
+}
+legacy_preflight || { printf 'previous revision preflight failed before rollout\n' >&2; exit 1; }
+demo_capture_env_for_rollback
+python3 "$SCRIPT_DIR/update-websocket-origins.py" "$DEMO_ENV_FILE" >/dev/null
+[[ "$(sed -n 's/^TG_UPLOADS_DISABLED=//p' "$DEMO_ENV_FILE")" == false ]]
+demo_restore_env_after_rollback
+legacy_preflight || { printf 'previous revision preflight failed after rollback\n' >&2; exit 1; }
+[[ -z "$DEMO_ENV_BACKUP" && "$(stat -c '%u:%a' "$DEMO_ENV_FILE")" == '0:600' ]]
+BASH
+ENV_ROLLBACK_FUNCTIONS="$ENV_ROLLBACK_FUNCTIONS" TMP_DIR="$TMP_DIR" SCRIPT_DIR="$SCRIPT_DIR" \
+  bash "$TMP_DIR/demo-env-rollback-regression.sh"
 
 python3 "$SCRIPT_DIR/test-validate-env.py"
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"

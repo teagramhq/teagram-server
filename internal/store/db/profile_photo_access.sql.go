@@ -10,7 +10,7 @@ import (
 )
 
 const currentProfilePhotoForDownload = `-- name: CurrentProfilePhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM profile_photo_state s
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256 FROM profile_photo_state s
 JOIN users u ON u.id = s.user_id
 JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
 JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
@@ -51,6 +51,7 @@ func (q *Queries) CurrentProfilePhotoForDownload(ctx context.Context, arg Curren
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }
@@ -193,7 +194,7 @@ func (q *Queries) ProfilePhotoDerivativeForDownload(ctx context.Context, arg Pro
 }
 
 const profilePhotoForDownload = `-- name: ProfilePhotoForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM user_photos up
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height, f.content_sha256 FROM user_photos up
 JOIN users u ON u.id = up.user_id
 JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
 WHERE up.user_id = $1::bigint
@@ -281,6 +282,7 @@ func (q *Queries) ProfilePhotoForDownload(ctx context.Context, arg ProfilePhotoF
 		&i.MediaKind,
 		&i.Width,
 		&i.Height,
+		&i.ContentSha256,
 	)
 	return i, err
 }

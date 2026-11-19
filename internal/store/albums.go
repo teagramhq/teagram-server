@@ -667,7 +667,18 @@ func (s *Store) ChannelAlbumRetryAs(ctx context.Context, channelID, fromID int64
 	if err = tx.Commit(ctx); err != nil {
 		return ChannelAlbumResult{}, fmt.Errorf("commit channel album retry: %w", err)
 	}
+	if !result.Duplicate && s.channelAlbumRetryAfterCommitHook != nil {
+		if err = s.channelAlbumRetryAfterCommitHook(ctx, channelID, fromID, randomIDs); err != nil {
+			return ChannelAlbumResult{}, fmt.Errorf("after channel album retry commit hook: %w", err)
+		}
+	}
 	return result, nil
+}
+
+// SetChannelAlbumRetryAfterCommitHook installs the test-only synchronization
+// seam used by API concurrency tests. Production callers leave it nil.
+func SetChannelAlbumRetryAfterCommitHook(s *Store, fn func(context.Context, int64, int64, []int64) error) {
+	s.channelAlbumRetryAfterCommitHook = fn
 }
 
 // channelAlbumDedup is userAlbumDedup in a channel's own (channel_id,

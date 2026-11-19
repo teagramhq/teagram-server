@@ -12,6 +12,7 @@ var generalChatHandleCandidates = [...]string{
 	GeneralChatHandle,
 	"teagramdemogeneralchat",
 	"teagramdemo_general",
+	"teagramdemogeneralgroup",
 }
 
 // GeneralChatHandles returns the reserved public handles used to find the demo

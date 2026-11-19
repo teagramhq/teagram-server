@@ -428,6 +428,7 @@ type File struct {
 	MediaKind     string
 	Width         *int32
 	Height        *int32
+	ContentSha256 []byte
 }
 
 type FileUploadGrant struct {

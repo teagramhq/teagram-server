@@ -43,8 +43,9 @@ type PhotoDerivativeInput struct {
 // PhotoAssembly is the validated original's dimensions and optional previews.
 // A nil Derivatives value publishes an original-only photo.
 type PhotoAssembly struct {
-	Dimensions  PhotoDimensions
-	Derivatives *PhotoDerivativeInput
+	Dimensions    PhotoDimensions
+	ContentSHA256 []byte
+	Derivatives   *PhotoDerivativeInput
 }
 
 const PhotoDerivativeQuotaHeadroom int64 = 65_536 + 2_048
@@ -81,6 +82,7 @@ type File struct {
 	SubtypeRights    []string // nil means unknown; a non-nil empty slice means known generic.
 	Stored           bool
 	Date             time.Time
+	ContentSHA256    []byte
 	PhotoDerivatives *PhotoDerivatives
 }
 
@@ -112,26 +114,40 @@ var ErrInvalidPhotoDimensions = errors.New("invalid photo dimensions")
 var ErrUploadGrantLimit = errors.New("upload grant limit exceeded")
 
 func fileFromRow(r db.File) File {
+	return fileFromColumns(r.ID, r.UploaderID, r.AccessHash, r.Size, r.MimeType, r.FileName,
+		r.MediaKind, r.Width, r.Height, r.SubtypeRights, r.Stored, r.Date, r.ContentSha256)
+}
+
+func fileFromColumns(
+	id, uploaderID, accessHash, size int64,
+	mimeType, fileName, mediaKind string,
+	widthValue, heightValue *int32,
+	subtypeRights []string,
+	stored bool,
+	date pgtype.Timestamptz,
+	contentSHA256 []byte,
+) File {
 	var width, height int
-	if r.Width != nil {
-		width = int(*r.Width)
+	if widthValue != nil {
+		width = int(*widthValue)
 	}
-	if r.Height != nil {
-		height = int(*r.Height)
+	if heightValue != nil {
+		height = int(*heightValue)
 	}
 	return File{
-		ID:            r.ID,
-		UploaderID:    r.UploaderID,
-		AccessHash:    r.AccessHash,
-		Size:          r.Size,
-		MimeType:      r.MimeType,
-		FileName:      r.FileName,
-		Kind:          FileKind(r.MediaKind),
+		ID:            id,
+		UploaderID:    uploaderID,
+		AccessHash:    accessHash,
+		Size:          size,
+		MimeType:      mimeType,
+		FileName:      fileName,
+		Kind:          FileKind(mediaKind),
 		Width:         width,
 		Height:        height,
-		SubtypeRights: r.SubtypeRights,
-		Stored:        r.Stored,
-		Date:          r.Date.Time,
+		SubtypeRights: subtypeRights,
+		Stored:        stored,
+		Date:          date.Time,
+		ContentSHA256: contentSHA256,
 	}
 }
 
@@ -490,6 +506,9 @@ func (s *Store) allocateAndCompleteFile(
 	if photo && !validPhotoDimensions(dimensions) {
 		return File{}, ErrInvalidPhotoDimensions
 	}
+	if photo && grantTTL > 0 && len(assembly.ContentSHA256) != 32 {
+		return File{}, errors.New("photo upload grant requires a SHA-256 content digest")
+	}
 	derivativesInserted := false
 	if photo && assembly.Derivatives != nil && validPhotoDerivativeInput(assembly.Derivatives) {
 		if _, err := tx.Exec(ctx, "SAVEPOINT photo_derivative_write"); err != nil {
@@ -542,9 +561,10 @@ func (s *Store) allocateAndCompleteFile(
 	var n int64
 	if photo {
 		n, err = qtx.MarkPhotoFileStored(ctx, db.MarkPhotoFileStoredParams{
-			ID:     file.ID,
-			Width:  &dimensions.Width,
-			Height: &dimensions.Height,
+			ID:            file.ID,
+			Width:         &dimensions.Width,
+			Height:        &dimensions.Height,
+			ContentSha256: assembly.ContentSHA256,
 		})
 	} else {
 		n, err = qtx.MarkFileStored(ctx, file.ID)
@@ -567,6 +587,7 @@ func (s *Store) allocateAndCompleteFile(
 		file.Width = int(dimensions.Width)
 		file.Height = int(dimensions.Height)
 		file.SubtypeRights = []string{"send_photos"}
+		file.ContentSHA256 = assembly.ContentSHA256
 		if derivativesInserted {
 			file.PhotoDerivatives = photoDerivativesFromInput(assembly.Derivatives)
 		}

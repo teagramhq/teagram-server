@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/teagramhq/teagram-server/internal/demo"
@@ -27,6 +28,25 @@ const (
 	demoGeneralChatHourSurface      = "demo_general_message_hour"
 	demoGeneralChatDuplicateSurface = "demo_general_duplicate_"
 )
+
+func (h *handlers) checkDemoGeneralHandleClaim(ctx context.Context, userID int64, username string) error {
+	if !h.demoGeneralChatEnabled {
+		return nil
+	}
+	username = strings.ToLower(username)
+	if username != demo.SeedOwnerUsername && !demo.IsGeneralChatHandle(username) {
+		return nil
+	}
+	user, ok, err := h.store.UserByID(ctx, userID)
+	if err != nil {
+		h.log.Error("check demo General handle reservation", "user_id", userID, "err", err)
+		return errInternal
+	}
+	if !ok || (user.Phone != demo.SeedOwnerUsername && (user.Username == nil || *user.Username != demo.SeedOwnerUsername)) {
+		return errUsernameInvalid
+	}
+	return nil
+}
 
 type demoGeneralChatPolicy struct {
 	perMinute      store.RateLimitConfig

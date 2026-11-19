@@ -1312,7 +1312,7 @@ func (h *handlers) assemblePhotoFileWithGrantModeAndIdentity(
 		var written int64
 		var digest string
 		var assembleErr error
-		if captureIdentity {
+		if captureIdentity || createGrant {
 			dimensions, written, digest, assembleErr = h.putAndValidateJPEGWithDigest(ctx, blob.Key(file.ID), reader, total, checksum, capture)
 		} else {
 			dimensions, written, assembleErr = h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
@@ -1340,6 +1340,12 @@ func (h *handlers) assemblePhotoFileWithGrantModeAndIdentity(
 		contentDigest = digest
 		// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
 		assembly := store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}} //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+		if digest != "" {
+			assembly.ContentSHA256, assembleErr = hex.DecodeString(digest)
+			if assembleErr != nil {
+				return store.PhotoAssembly{}, fmt.Errorf("decode photo SHA-256 digest: %w", assembleErr)
+			}
+		}
 		if lease != nil {
 			result, reason := lease.ProcessCaptured(ctx, capture, total, dimensions.width, dimensions.height)
 			if reason == photothumb.FailureNone {

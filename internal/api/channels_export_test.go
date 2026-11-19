@@ -218,9 +218,21 @@ const MaxGetChannels = maxGetChannels
 
 // EditChannelUsernameForTest encodes req and invokes handleEditChannelUsername for the caller.
 func EditChannelUsernameForTest(s *store.Store, userID int64, req *tg.ChannelsUpdateUsernameRequest) (bin.Encoder, error) {
+	return editChannelUsernameForTest(s, userID, req, false)
+}
+
+// EditChannelUsernameForTestWithDemoGeneralChat invokes the handler with the
+// demo General handle reservation enabled.
+func EditChannelUsernameForTestWithDemoGeneralChat(s *store.Store, userID int64, req *tg.ChannelsUpdateUsernameRequest) (bin.Encoder, error) {
+	return editChannelUsernameForTest(s, userID, req, true)
+}
+
+func editChannelUsernameForTest(s *store.Store, userID int64, req *tg.ChannelsUpdateUsernameRequest, demoGeneralChat bool) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
-	return testHandlers(s).handleEditChannelUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	h := testHandlers(s)
+	h.demoGeneralChatEnabled = demoGeneralChat
+	return h.handleEditChannelUsername(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }

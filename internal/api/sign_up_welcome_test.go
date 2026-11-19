@@ -3,13 +3,16 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -502,13 +505,25 @@ func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
 				if _, err := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(body)); err != nil {
 					return store.PhotoAssembly{}, fmt.Errorf("store album photo bytes: %w", err)
 				}
-				return store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: width, Height: 480}}, nil
+				digest := sha256.Sum256(body)
+				return store.PhotoAssembly{
+					Dimensions:    store.PhotoDimensions{Width: width, Height: 480},
+					ContentSHA256: digest[:],
+				}, nil
 			},
 		)
 		if err != nil {
 			t.Fatalf("create granted album photo %d: %v", i+1, err)
 		}
 		photos[i] = photo
+		if got, want := photo.ContentSHA256, sha256.Sum256(body); !bytes.Equal(got, want[:]) {
+			t.Fatalf("photo %d content digest = %x, want %x", i+1, got, want)
+		}
+		// Once upload has published the photo identity, album sends should need
+		// only the grant and metadata. They must not reread full blobs to hash them.
+		if err := blobs.Remove(ctx, blob.Key(photo.ID)); err != nil {
+			t.Fatalf("remove photo blob after upload %d: %v", i+1, err)
+		}
 	}
 	if _, err := s.AlbumPhotoFilesForUpload(ctx, guest.ID, []store.AlbumItem{
 		{FileID: photos[0].ID, AccessHash: photos[0].AccessHash, Photo: true},
@@ -536,6 +551,118 @@ func TestDemoGeneralChatRepeatedUncaptionedPhotoAlbumIsRefused(t *testing.T) {
 	var rpcErr *tgerr.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 || !strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_") {
 		t.Fatalf("repeat uncaptioned General photo album = %v, want 420 FLOOD_WAIT", err)
+	}
+}
+
+func TestDemoGeneralChatConcurrentAlbumRetryReturnsCommittedAlbum(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := openStore(t)
+	channel := createGeneralChat(t, s)
+	guest, err := s.CreateUser(ctx, "+15550000134")
+	if err != nil {
+		t.Fatalf("create General guest: %v", err)
+	}
+	if _, _, err := s.JoinChannelByUsername(ctx, channel.ID, guest.ID); err != nil {
+		t.Fatalf("join General: %v", err)
+	}
+	blobs := s.PartBlobs()
+	photos := make([]store.File, 2)
+	for i, dimensions := range []struct {
+		width   int
+		width32 int32
+	}{{width: 640, width32: 640}, {width: 641, width32: 641}} {
+		body := jpegPhotoPayload(t, dimensions.width, 480)
+		photo, _, err := s.AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+			ctx, guest.ID, int64(len(body)), "image/jpeg", fmt.Sprintf("concurrent-album-%d.jpg", i),
+			api.TestMaxUserStorageBytes, time.Hour,
+			func(file store.File) (store.PhotoAssembly, error) {
+				if _, err := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(body)); err != nil {
+					return store.PhotoAssembly{}, fmt.Errorf("store album photo bytes: %w", err)
+				}
+				digest := sha256.Sum256(body)
+				return store.PhotoAssembly{
+					Dimensions:    store.PhotoDimensions{Width: dimensions.width32, Height: 480},
+					ContentSHA256: digest[:],
+				}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("create granted album photo %d: %v", i+1, err)
+		}
+		photos[i] = photo
+	}
+	request := &tg.MessagesSendMultiMediaRequest{
+		Peer:       api.InputPeerChannel(guest.ID, channel.ID),
+		MultiMedia: make([]tg.InputSingleMedia, len(photos)),
+	}
+	for i, photo := range photos {
+		request.MultiMedia[i] = tg.InputSingleMedia{
+			Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash}},
+			RandomID: 13400 + int64(i),
+		}
+	}
+
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	var calls atomic.Int32
+	store.SetChannelAlbumRetryAfterCommitHook(s, func(hookCtx context.Context, gotChannel, gotUser int64, _ []int64) error {
+		if gotChannel != channel.ID || gotUser != guest.ID {
+			return fmt.Errorf("unexpected channel album retry hook channel=%d user=%d", gotChannel, gotUser)
+		}
+		if calls.Add(1) > 2 {
+			return nil
+		}
+		arrived <- struct{}{}
+		select {
+		case <-release:
+			return nil
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+	})
+	t.Cleanup(func() { store.SetChannelAlbumRetryAfterCommitHook(s, nil) })
+	type sendResult struct {
+		response any
+		err      error
+	}
+	done := make(chan sendResult, 2)
+	for range 2 {
+		go func() {
+			response, sendErr := api.SendMultiMediaForTestWithContextAndDemoGeneralChat(ctx, s, guest.ID, request)
+			done <- sendResult{response: response, err: sendErr}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-arrived:
+		case <-ctx.Done():
+			t.Fatal("both concurrent retries did not finish their initial lookup")
+		}
+	}
+	release <- struct{}{}
+	var first sendResult
+	select {
+	case first = <-done:
+	case <-ctx.Done():
+		t.Fatal("winning concurrent album did not finish")
+	}
+	if first.err != nil {
+		t.Fatalf("winning concurrent album: %v", first.err)
+	}
+	release <- struct{}{}
+	var second sendResult
+	select {
+	case second = <-done:
+	case <-ctx.Done():
+		t.Fatal("concurrent album retry did not finish")
+	}
+	if second.err != nil {
+		t.Fatalf("concurrent album retry: %v", second.err)
+	}
+	if !reflect.DeepEqual(first.response, second.response) {
+		t.Fatalf("concurrent retry response differs from committed album: first=%#v second=%#v", first.response, second.response)
 	}
 }
 

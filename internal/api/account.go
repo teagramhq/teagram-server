@@ -317,6 +317,9 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		return nil, err
 	}
 	if username != "" {
+		if err := h.checkDemoGeneralHandleClaim(r.Ctx, r.UserID, username); err != nil {
+			return nil, err
+		}
 		if err := h.checkUsernameClaimQuota(r, username); err != nil {
 			return nil, err
 		}

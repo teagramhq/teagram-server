@@ -142,6 +142,9 @@ check_seed_secret_files() {
   [[ -f "$OWNER_PASSWORD_FILE" && ! -L "$OWNER_PASSWORD_FILE" ]] || demo_fail 'seed-owner password file is missing or unsafe'
   [[ "$(stat -c '%u:%a' "$OWNER_PASSWORD_FILE")" == '0:600' ]] || demo_fail 'seed-owner password file must be root-owned mode 0600'
   grep -Eq '^[0-9a-f]{64}$' "$OWNER_PASSWORD_FILE" || demo_fail 'seed-owner password file has an invalid value'
+  demo_prepare_seed_owner_session
+  [[ -f "$DEMO_SEED_OWNER_SESSION_FILE" && ! -L "$DEMO_SEED_OWNER_SESSION_FILE" ]] || demo_fail 'seed-owner session file is missing or unsafe'
+  [[ "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] || demo_fail 'seed-owner session file must be root-owned mode 0600'
   [[ "$(stat -c '%u:%a' "$DEMO_SEED_SECRET_DIR")" == '0:700' ]] || demo_fail 'seed secret directory must be root-owned mode 0700'
   if [[ ! -e "$DEMO_SEED_ACCOUNT_DIR" ]]; then
     install -d -o root -g root -m 0700 "$DEMO_SEED_ACCOUNT_DIR"

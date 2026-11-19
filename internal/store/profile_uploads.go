@@ -805,9 +805,10 @@ func (s *Store) profileComplete(
 	// statement, so no reader can see a stored photo whose dimensions were not
 	// the ones that were validated.
 	rows, err := qtx.MarkPhotoFileStored(ctx, db.MarkPhotoFileStoredParams{
-		ID:     file.ID,
-		Width:  &dimensions.Width,
-		Height: &dimensions.Height,
+		ID:            file.ID,
+		Width:         &dimensions.Width,
+		Height:        &dimensions.Height,
+		ContentSha256: nil,
 	})
 	if err != nil {
 		return ProfileUploadResult{}, fmt.Errorf("mark profile file stored: %w", err)

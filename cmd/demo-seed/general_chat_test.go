@@ -101,6 +101,30 @@ func TestSeedUpgradeUsesReservedFallbackWhenGeneralHandleCollides(t *testing.T) 
 	}
 }
 
+func TestSeedUpgradeUsesFallbackWhenAllExistingGeneralHandlesCollide(t *testing.T) {
+	previousHandles := []string{
+		demo.GeneralChatHandle,
+		"teagramdemogeneralchat",
+		"teagramdemo_general",
+	}
+	collisions := make(map[string]bool, len(previousHandles))
+	for _, handle := range previousHandles {
+		collisions[handle] = true
+	}
+	rpc := &generalChatRPC{collidingHandles: collisions}
+	remote, err := ensureGeneralChat(context.Background(), tg.NewClient(rpc), demoGeneralChatSpace)
+	if err != nil {
+		t.Fatalf("upgrade General after all previous candidate handles collide: %v", err)
+	}
+	want := demo.GeneralChatHandles()[len(demo.GeneralChatHandles())-1]
+	if remote.spec.username != want || !remote.creator {
+		t.Fatalf("upgraded General = %+v, want seed-owned fallback handle %q", remote, want)
+	}
+	if rpc.createCount != 1 || rpc.createdUsername != want {
+		t.Fatalf("fallback General creates=%d handle=%q, want one create on %q", rpc.createCount, rpc.createdUsername, want)
+	}
+}
+
 func TestInviteGeneralChatAccountsRequiresSeedOwner(t *testing.T) {
 	rpc := &generalChatRPC{}
 	if err := inviteGeneralChatAccounts(context.Background(), tg.NewClient(rpc), remoteSpace{

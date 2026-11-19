@@ -467,11 +467,7 @@ func verifyAccountProfile(ctx context.Context, api *tg.Client, account accountSp
 }
 
 func withSeedOwner(ctx context.Context, cfg apiConfig, options seedOptions, password string, action apiAction) error {
-	account := seedAccounts[0]
-	if account.username != options.ownerUsername {
-		return errors.New("configured seed-owner username does not match the fixed demo owner")
-	}
-	return withAccount(ctx, cfg, options.endpoint, account, password, nil, action)
+	return withSeedOwnerUsingRunner(ctx, cfg, options, password, action, runTelegramClient)
 }
 
 func withSeedAccount(ctx context.Context, cfg apiConfig, options seedOptions, account accountSpec, ownerPassword string, inventory map[string]string, action apiAction) error {

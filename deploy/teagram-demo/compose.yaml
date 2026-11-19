@@ -170,12 +170,14 @@ services:
         target: /run/secrets/seed-owner-password
         read_only: true
       - type: bind
+        source: /var/lib/teagram-demo/secrets/seed-owner.session
+        target: /run/secrets/seed-owner.session
+        read_only: false
+      - type: bind
         source: /var/lib/teagram-demo/secrets/demo-accounts
         target: /run/secrets/demo-accounts
-    # The seed owner may use the QA token only to pass the production sign-in
-    # challenge for seed and moderation commands; guests never receive it.
-    secrets:
-      - teagram_demo_turnstile_qa_bypass
+    # The owner session is created on the private seed listener and reused for
+    # production moderation through HAProxy; no Turnstile bypass is mounted.
     networks: [backend]
     logging: *logging
 

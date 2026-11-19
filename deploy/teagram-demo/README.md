@@ -486,18 +486,21 @@ a shell command, echo it, list the process environment or log it.
 ### QA bypass token threat model
 
 The token bypasses Turnstile for demo signup, so anyone who obtains it can
-create demo accounts without that challenge. The seed-owner helper also uses
-it only to wrap `auth.sendCode` when production sign-in Turnstile challenges an
-owner-only seed or moderation command; the owner password is still required
-and guests never use this fallback. Treat the active token and its root-only
-recovery snapshot as secrets. Demo host root can read both; the server, seed
-helper and isolated probe services can read the mounted token as gid 65532. An
-authorized workspace admin transfers the new value into QA's audited custom_env
-entry, where the QA runtime is an intentional consumer. Keep it out of shell
-history and snapshots, CI output, logs and comments; QA reads it only from
-`process.env` and must not log it. The secret mount and runtime variable are
-demo-only; production has no bypass-token mount or configured token. Never
-restore the old snapshot because the old value is compromised.
+create demo accounts without that challenge. It is mounted only in the
+isolated probe service, which verifies signup enforcement; seed and moderation
+commands do not receive it. Production owner moderation reuses the root-only
+MTProto session created by the private seed flow instead of bypassing the
+sign-in challenge. Treat the active token and its root-only recovery snapshot
+as secrets. Demo host root can read both; the server and isolated probe
+service can read the mounted token as gid 65532. An authorized workspace admin
+transfers the new value into QA's audited custom_env entry, where the QA
+runtime is an intentional consumer. Keep it out of shell history and
+snapshots, CI output, logs and comments; QA reads it only from `process.env`
+and must not log it. The secret mount and runtime variable are demo-only;
+production has no bypass-token mount or configured token. Never restore the
+old snapshot because the old value is compromised. The owner session is a
+separate moderation credential: host root and the root-run `demo-seed`
+container can read it, and it must not be copied to QA or emitted in logs.
 
 After enabling public signin, verify signin and signup challenges from the
 public web origin with
@@ -524,10 +527,13 @@ proxy are stopped. The wipe operates on the persisted active server slot.
 It creates the ordinary `demo_seed_owner` account through
 `teagramd admin create-user` to close the first-admin election before seeding.
 Its freshly generated password is kept in the root-only
-`/var/lib/teagram-demo/secrets/seed-owner-password` file. After the seed reports
-all expected handles through the API, the wipe recreates teagramd with the
-production proxy and Turnstile settings, requires a bare sign-up probe to
-return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
+`/var/lib/teagram-demo/secrets/seed-owner-password` file. The private seed
+flow stores the owner authorization in the root-only
+`/var/lib/teagram-demo/secrets/seed-owner.session` file before production
+sign-in Turnstile is restored. After the seed reports all expected handles
+through the API, the wipe recreates teagramd with the production proxy and
+Turnstile settings, requires a bare sign-up probe to return
+`RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
 
 ## Public guest account threat model
 
@@ -637,9 +643,15 @@ passwords are stored in `/var/lib/teagram-demo/secrets/demo-accounts/` as a
 root-owned mode 0600 JSON inventory under a root-owned mode 0700 directory.
 After a weekly database wipe, the accounts receive fresh random passwords;
 password values never appear in process arguments, environment variables,
-logs, or this checkout. The seed container mounts only the client config and
-the credential files it needs, has no database credentials, and runs on the
-internal backend network with a read-only root filesystem.
+logs, or this checkout. The seed owner also has a root-owned mode 0600 MTProto
+session at `/var/lib/teagram-demo/secrets/seed-owner.session`. The private
+seed flow creates it while the sign-in challenge is disabled; moderation
+reuses it through HAProxy after production Turnstile is enabled. It is cleared
+whenever the demo database is reset, and moderation fails closed if it is
+missing or no longer authorized. The seed container mounts only the client
+config and credential files it needs, has no database credentials, and runs
+on the internal backend network with a read-only root filesystem apart from
+its narrowly scoped credential mounts.
 
 `test-seed-compose.sh` runs a second seed pass against the private Compose API
 and checks that verified marker counts and search results stay stable. It also
