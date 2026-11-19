@@ -51,6 +51,8 @@ if '"$seed_dir/test-seed-compose.sh"' not in isolated:
     raise SystemExit("isolated Compose test must exercise init, reseed, and restart convergence")
 if isolated.count("INSERT INTO channels") < 2 or "deleted_at" not in isolated or "demo_iona" not in isolated:
     raise SystemExit("isolated Compose test must add a deleted predecessor and guest-owned General lookalike")
+if isolated.count("INSERT INTO channels (id, title, about, creator_id") != 2:
+    raise SystemExit("isolated Compose decoys must provide channel ids explicitly")
 if 'seed_general_count_decoys\n    "$seed_dir/test-seed-compose.sh"' not in isolated:
     raise SystemExit("isolated Compose test must add count decoys before checking seed convergence")
 if "demo_compose down --volumes --remove-orphans" not in isolated:

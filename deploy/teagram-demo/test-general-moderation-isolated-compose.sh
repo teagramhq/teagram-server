@@ -289,9 +289,14 @@ assert_general_chat_owner() {
 
 seed_general_count_decoys() {
   demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram -c "
-    INSERT INTO channels (title, about, creator_id, megagroup, deleted_at)
-    SELECT source.title, source.about, seed_owner.id, true, clock_timestamp()
+    WITH fixture_channel_id AS (
+      SELECT COALESCE(MAX(id) FILTER (WHERE id < 2147483648), 0) + 1 AS id
+      FROM channels
+    )
+    INSERT INTO channels (id, title, about, creator_id, megagroup, deleted_at)
+    SELECT fixture_channel_id.id, source.title, source.about, seed_owner.id, true, clock_timestamp()
     FROM channels source
+    CROSS JOIN fixture_channel_id
     JOIN users seed_owner ON seed_owner.username = 'demo_seed_owner'
     WHERE source.title = 'General'
       AND source.about = 'An open chat for demo guests to meet and talk.'
@@ -300,9 +305,14 @@ seed_general_count_decoys() {
     ORDER BY source.id
     LIMIT 1;
 
-    INSERT INTO channels (title, about, creator_id, megagroup)
-    SELECT source.title, source.about, guest.id, true
+    WITH fixture_channel_id AS (
+      SELECT COALESCE(MAX(id) FILTER (WHERE id < 2147483648), 0) + 1 AS id
+      FROM channels
+    )
+    INSERT INTO channels (id, title, about, creator_id, megagroup)
+    SELECT fixture_channel_id.id, source.title, source.about, guest.id, true
     FROM channels source
+    CROSS JOIN fixture_channel_id
     JOIN users guest ON guest.username = 'demo_iona'
     WHERE source.title = 'General'
       AND source.about = 'An open chat for demo guests to meet and talk.'
