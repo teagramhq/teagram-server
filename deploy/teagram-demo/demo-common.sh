@@ -630,13 +630,34 @@ demo_active_server() {
 
 demo_resolve_seed_endpoint() {
   local mode="$1" explicit="$2" endpoint="$3"
-  if [[ "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ]]; then
+  if [[ "$mode" == --moderate-delete-message || "$mode" == --moderate-ban-user ||
+    "$mode" == --verify-general-moderation-smoke ]]; then
     if [[ "$explicit" == 1 && "$endpoint" != haproxy:2443 ]]; then
       demo_fail 'moderation commands must use the internal haproxy:2443 listener'
       return 1
     fi
     printf '%s\n' haproxy:2443
     return 0
+  fi
+  if [[ "$mode" == --cleanup-general-moderation-smoke ]]; then
+    if [[ "$explicit" != 1 ]]; then
+      printf '%s\n' haproxy:2443
+      return 0
+    fi
+    case "$endpoint" in
+      haproxy:2443|teagramd:2443|teagramd-next:2443)
+        printf '%s\n' "$endpoint"
+        return 0
+        ;;
+      *)
+        demo_fail 'General moderation smoke cleanup requires an internal endpoint'
+        return 1
+        ;;
+    esac
+  fi
+  if [[ "$mode" == --prepare-general-moderation-smoke && "$endpoint" == haproxy:2443 ]]; then
+    demo_fail 'General moderation smoke preparation must use a private teagramd endpoint'
+    return 1
   fi
   printf '%s\n' "$endpoint"
 }
@@ -1143,6 +1164,13 @@ demo_reset_seed_owner_marker() {
       "$(stat -c '%u:%a' "$DEMO_SEED_OWNER_SESSION_FILE")" == '0:600' ]] ||
       demo_fail 'seed-owner session file has unsafe type or permissions'
     rm -f -- "$DEMO_SEED_OWNER_SESSION_FILE"
+  fi
+  if [[ -e "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" || -L "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" ]]; then
+    [[ -d "$DEMO_SEED_ACCOUNT_DIR" && ! -L "$DEMO_SEED_ACCOUNT_DIR" &&
+      -f "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" && ! -L "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session" &&
+      "$(stat -c '%u:%a' "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session")" == '0:600' ]] ||
+      demo_fail 'General moderation smoke session has unsafe type or permissions'
+    rm -f -- "$DEMO_SEED_ACCOUNT_DIR/moderation-smoke.session"
   fi
   rm -f -- "$DEMO_SEED_OWNER_MARKER"
 }

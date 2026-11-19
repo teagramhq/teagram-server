@@ -253,28 +253,15 @@ jq -e '
   and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
 ' "$TMP_DIR/signin.json" >/dev/null
 
-MODERATION_WRAPPER_DIR="$TMP_DIR/moderation-wrapper"
-mkdir -p "$MODERATION_WRAPPER_DIR"
-cp -- "$SCRIPT_DIR/moderate-general.sh" "$MODERATION_WRAPPER_DIR/moderate-general.sh"
-cp -- "$SCRIPT_DIR/demo-common.sh" "$MODERATION_WRAPPER_DIR/demo-common.sh"
-cp -- "$SCRIPT_DIR/haproxy.cfg" "$SCRIPT_DIR/render-haproxy-config.py" "$MODERATION_WRAPPER_DIR/"
-cp -R -- "$SCRIPT_DIR/nginx-config" "$MODERATION_WRAPPER_DIR/nginx-config"
-cat > "$MODERATION_WRAPPER_DIR/seed-demo.sh" <<'SH'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-printf '%s\n' "$@" > "$MODERATION_ARGS_FILE"
-SH
-chmod 755 "$MODERATION_WRAPPER_DIR/seed-demo.sh"
-MODERATION_ARGS_FILE="$TMP_DIR/moderation-args.txt" \
-  "$MODERATION_WRAPPER_DIR/moderate-general.sh" ban-user ab
-diff -u \
-  <(printf '%s\n' '--moderate-ban-user' '--username' 'ab') \
-  "$TMP_DIR/moderation-args.txt"
-
-cp -- "$SCRIPT_DIR/seed-demo.sh" "$MODERATION_WRAPPER_DIR/seed-demo-validation.sh"
+SEED_VALIDATION_DIR="$TMP_DIR/seed-validation"
+mkdir -p "$SEED_VALIDATION_DIR"
+cp -- "$SCRIPT_DIR/demo-common.sh" "$SEED_VALIDATION_DIR/demo-common.sh"
+cp -- "$SCRIPT_DIR/haproxy.cfg" "$SCRIPT_DIR/render-haproxy-config.py" "$SEED_VALIDATION_DIR/"
+cp -R -- "$SCRIPT_DIR/nginx-config" "$SEED_VALIDATION_DIR/nginx-config"
+cp -- "$SCRIPT_DIR/seed-demo.sh" "$SEED_VALIDATION_DIR/seed-demo-validation.sh"
 set +e
 seed_validation_output=$(TG_DEMO_GENERAL_CHAT_ENABLED=true \
-  "$MODERATION_WRAPPER_DIR/seed-demo-validation.sh" --moderate-ban-user --username ab 2>&1)
+  "$SEED_VALIDATION_DIR/seed-demo-validation.sh" --moderate-ban-user --username ab 2>&1)
 seed_validation_status=$?
 set -e
 if [[ "$seed_validation_status" -eq 0 || "$seed_validation_output" != *'deploy/teagram-demo/.env is missing'* ||
@@ -283,6 +270,34 @@ if [[ "$seed_validation_status" -eq 0 || "$seed_validation_output" != *'deploy/t
     "$seed_validation_output" >&2
   exit 1
 fi
+
+python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" "$SCRIPT_DIR/wipe-weekly.sh" <<'PY'
+import sys
+from pathlib import Path
+
+smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
+wipe = Path(sys.argv[2]).read_text(encoding="utf-8")
+for expected in (
+    '"$SCRIPT_DIR/moderate-general.sh" delete-message "$MODERATION_SMOKE_MESSAGE_ID"',
+    '"$SCRIPT_DIR/moderate-general.sh" ban-user ab',
+    '--prepare-general-moderation-smoke',
+    '--verify-general-moderation-smoke',
+    '--cleanup-general-moderation-smoke',
+    '--verify-turnstile --endpoint haproxy:2443',
+    'TG_TURNSTILE_SIGNIN_ENABLED=true',
+    'TG_CLIENT_ADDR_TRUST=proxy-v2',
+    'if trust=$(docker inspect "$server_id" | jq -er',
+):
+    if expected not in smoke:
+        raise SystemExit(f"test-general-moderation-compose.sh: missing production moderation smoke step: {expected}")
+if 'MODERATION_ARGS_FILE' in smoke or 'moderate-general.sh" ban-user ab' not in smoke:
+    raise SystemExit("test-general-moderation-compose.sh: must invoke the actual moderation wrapper")
+wipe_call = '"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"'
+if wipe_call not in wipe:
+    raise SystemExit("wipe-weekly.sh: production moderation smoke test is not wired into the wipe flow")
+if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(wipe_call) > wipe.index('demo_compose up -d edge'):
+    raise SystemExit("wipe-weekly.sh: moderation smoke must run after private seeding and before public edge startup")
+PY
 
 (
   demo_compose() {
@@ -1092,7 +1107,7 @@ python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
   "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" \
   "$SCRIPT_DIR/ops/weekly-wipe.sh" "$TMP_DIR" \
-  "$REPO_ROOT/cmd/demo-seed/main.go" <<'PY'
+  "$REPO_ROOT/cmd/demo-seed/main.go" "$SCRIPT_DIR/test-general-moderation-compose.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1120,10 +1135,12 @@ assert_order(Path(sys.argv[1]), [
     '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
     '"$SCRIPT_DIR/test-seed-compose.sh" "$BEFORE_GENERATION"',
     rate_limit_reset,
-    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    '"$SCRIPT_DIR/test-general-moderation-compose.sh" "$ACTIVE_ENDPOINT" "$MODERATION_SMOKE_MARKER"',
     "demo_compose up -d edge",
 ])
+moderation_smoke = Path(sys.argv[10])
+if not moderation_smoke.stat().st_mode & 0o111:
+    raise SystemExit("test-general-moderation-compose.sh: smoke test must be executable")
 seed_test = Path(sys.argv[6])
 assert_order(seed_test, [
     'before=$(capture_seed_report)',

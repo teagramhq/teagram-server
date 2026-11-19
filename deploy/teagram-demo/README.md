@@ -659,6 +659,14 @@ checks that the stored wipe generation survives a server restart; the weekly
 wipe passes the previous value so the test confirms a fresh database changed
 it before the public edge starts.
 
+Before reopening the public edge, the weekly wipe also runs
+`test-general-moderation-compose.sh`. It prepares a temporary short-handle
+session and post on the private seed endpoint, then recreates the active server
+with production sign-in Turnstile enabled and runs both moderation commands
+through HAProxy. The test verifies the post is gone and the banned guest cannot
+rejoin, then restores the seeded guest username and removes the temporary
+session before edge startup.
+
 ## Scheduled activity
 
 Scheduled activity is disabled until explicitly installed. From

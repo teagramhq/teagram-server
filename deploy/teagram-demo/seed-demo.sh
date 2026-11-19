@@ -13,6 +13,8 @@ OWNER_USERNAME=demo_seed_owner
 OWNER_PASSWORD_FILE="$DEMO_SEED_PASSWORD_FILE"
 MESSAGE_ID=
 TARGET_USERNAME=
+MODERATION_SMOKE_MARKER=
+MODERATION_SMOKE_MESSAGE_ID=
 
 usage() {
   cat <<'EOF'
@@ -23,13 +25,17 @@ Usage:
   seed-demo.sh --verify-turnstile --endpoint haproxy:2443
   seed-demo.sh --moderate-delete-message --message-id ID [--endpoint haproxy:2443]
   seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint haproxy:2443]
+  seed-demo.sh --prepare-general-moderation-smoke --moderation-smoke-marker HEX [--endpoint teagramd:2443|teagramd-next:2443]
+  seed-demo.sh --verify-general-moderation-smoke --moderation-smoke-marker HEX --moderation-smoke-message-id ID [--endpoint haproxy:2443]
+  seed-demo.sh --cleanup-general-moderation-smoke --moderation-smoke-marker HEX [--endpoint haproxy:2443|teagramd:2443|teagramd-next:2443]
   Moderation commands route through the internal HAProxy listener.
 EOF
 }
 
 while (($#)); do
   case "$1" in
-    --check|--seed|--verify-seed|--verify-turnstile|--moderate-delete-message|--moderate-ban-user)
+    --check|--seed|--verify-seed|--verify-turnstile|--moderate-delete-message|--moderate-ban-user|\
+      --prepare-general-moderation-smoke|--verify-general-moderation-smoke|--cleanup-general-moderation-smoke)
       [[ -z "$MODE" ]] || { usage >&2; demo_fail 'select exactly one mode'; }
       MODE="$1"
       shift
@@ -60,6 +66,16 @@ while (($#)); do
       TARGET_USERNAME="$2"
       shift 2
       ;;
+    --moderation-smoke-marker)
+      (($# >= 2)) || { usage >&2; demo_fail '--moderation-smoke-marker requires a value'; }
+      MODERATION_SMOKE_MARKER="$2"
+      shift 2
+      ;;
+    --moderation-smoke-message-id)
+      (($# >= 2)) || { usage >&2; demo_fail '--moderation-smoke-message-id requires a value'; }
+      MODERATION_SMOKE_MESSAGE_ID="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -74,9 +90,16 @@ done
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
 ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT") ||
   demo_fail 'resolve endpoint for demo seed operation'
-if [[ "$MODE" == --verify-turnstile || "$MODE" == --moderate-delete-message || "$MODE" == --moderate-ban-user ]]; then
+if [[ "$MODE" == --verify-turnstile || "$MODE" == --moderate-delete-message || "$MODE" == --moderate-ban-user ||
+  "$MODE" == --verify-general-moderation-smoke ]]; then
   [[ "$ENDPOINT" == haproxy:2443 ]] ||
     demo_fail "endpoint for $MODE must be the internal haproxy:2443 listener"
+elif [[ "$MODE" == --prepare-general-moderation-smoke ]]; then
+  [[ "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
+    demo_fail 'General moderation smoke preparation must use a private teagramd endpoint'
+elif [[ "$MODE" == --cleanup-general-moderation-smoke ]]; then
+  [[ "$ENDPOINT" == haproxy:2443 || "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
+    demo_fail 'General moderation smoke cleanup requires an internal endpoint'
 else
   [[ "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
     demo_fail "endpoint for $MODE must be an internal teagramd service"
@@ -89,6 +112,29 @@ elif [[ "$MODE" == --moderate-ban-user ]]; then
   demo_valid_signup_username "$TARGET_USERNAME" || demo_fail '--username must follow signup rules and must not include @'
 else
   [[ -z "$MESSAGE_ID" && -z "$TARGET_USERNAME" ]] || demo_fail '--message-id and --username require a moderation mode'
+fi
+if [[ "$MODE" == --prepare-general-moderation-smoke || "$MODE" == --verify-general-moderation-smoke ||
+  "$MODE" == --cleanup-general-moderation-smoke ]]; then
+  [[ "$MODERATION_SMOKE_MARKER" =~ ^[a-f0-9]{32}$ ]] ||
+    demo_fail '--moderation-smoke-marker must be 32 lowercase hexadecimal characters'
+  [[ -z "$MESSAGE_ID" && -z "$TARGET_USERNAME" ]] ||
+    demo_fail '--message-id and --username do not apply to moderation smoke operations'
+  if [[ "$MODE" == --verify-general-moderation-smoke ]]; then
+    [[ "$MODERATION_SMOKE_MESSAGE_ID" =~ ^[1-9][0-9]*$ ]] ||
+      demo_fail '--moderation-smoke-message-id must be a positive integer'
+    python3 - "$MODERATION_SMOKE_MESSAGE_ID" <<'PY'
+import sys
+
+if int(sys.argv[1]) > 2_147_483_647:
+    raise SystemExit("teagram-demo: moderation smoke message ID exceeds signed 32-bit MTProto range")
+PY
+  else
+    [[ -z "$MODERATION_SMOKE_MESSAGE_ID" ]] ||
+      demo_fail '--moderation-smoke-message-id applies only to verification'
+  fi
+else
+  [[ -z "$MODERATION_SMOKE_MARKER" && -z "$MODERATION_SMOKE_MESSAGE_ID" ]] ||
+    demo_fail 'moderation smoke arguments require a moderation smoke operation'
 fi
 
 check_dependencies() {
@@ -116,6 +162,7 @@ check_source_wiring() {
   [[ -f "$DEMO_SCRIPT_DIR/compose.seed.yaml" ]] || demo_fail 'seed Compose overlay is missing'
   [[ -x "$DEMO_SCRIPT_DIR/moderate-general.sh" ]] || demo_fail 'General moderation command is missing or not executable'
   [[ -x "$DEMO_SCRIPT_DIR/test-seed-compose.sh" ]] || demo_fail 'seed convergence Compose API test is missing or not executable'
+  [[ -x "$DEMO_SCRIPT_DIR/test-general-moderation-compose.sh" ]] || demo_fail 'General moderation Compose smoke test is missing or not executable'
   grep -Fq 'go build -o /demo-seed ./cmd/demo-seed' "$DEMO_REPO_ROOT/Dockerfile" ||
     demo_fail 'Dockerfile does not build the demo-seed binary'
   grep -Fq 'entrypoint: ["/usr/local/bin/demo-seed"]' "$DEMO_SCRIPT_DIR/compose.yaml" ||
@@ -202,6 +249,34 @@ case "$MODE" in
     run_moderation_helper \
       --moderate-ban-user "$TARGET_USERNAME" --endpoint "$ENDPOINT" \
       --owner-username "$OWNER_USERNAME"
+    ;;
+  --prepare-general-moderation-smoke)
+    demo_require_env
+    check_seed_secret_files
+    run_seed_helper demo-seed \
+      --prepare-general-moderation-smoke --moderation-smoke-marker "$MODERATION_SMOKE_MARKER" \
+      --endpoint "$ENDPOINT" --owner-username "$OWNER_USERNAME"
+    ;;
+  --verify-general-moderation-smoke)
+    demo_require_env
+    check_seed_secret_files
+    run_moderation_helper \
+      --verify-general-moderation-smoke --moderation-smoke-marker "$MODERATION_SMOKE_MARKER" \
+      --moderation-smoke-message-id "$MODERATION_SMOKE_MESSAGE_ID" --endpoint "$ENDPOINT" \
+      --owner-username "$OWNER_USERNAME"
+    ;;
+  --cleanup-general-moderation-smoke)
+    demo_require_env
+    check_seed_secret_files
+    if [[ "$ENDPOINT" == haproxy:2443 ]]; then
+      run_moderation_helper \
+        --cleanup-general-moderation-smoke --moderation-smoke-marker "$MODERATION_SMOKE_MARKER" \
+        --endpoint "$ENDPOINT" --owner-username "$OWNER_USERNAME"
+    else
+      run_seed_helper demo-seed \
+        --cleanup-general-moderation-smoke --moderation-smoke-marker "$MODERATION_SMOKE_MARKER" \
+        --endpoint "$ENDPOINT" --owner-username "$OWNER_USERNAME"
+    fi
     ;;
   --verify-turnstile)
     demo_require_env

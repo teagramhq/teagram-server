@@ -146,6 +146,51 @@ func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
 	}
 }
 
+func TestGeneralModerationSmokeModeEndpointsAndArguments(t *testing.T) {
+	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "true")
+	const marker = "0123456789abcdef0123456789abcdef"
+
+	prepare, err := parseOptions([]string{"--prepare-general-moderation-smoke", "--moderation-smoke-marker", marker})
+	if err != nil {
+		t.Fatalf("parse smoke preparation options: %v", err)
+	}
+	if prepare.endpoint != defaultEndpoint || validateEndpointForMode(prepare.endpoint, prepare) != nil {
+		t.Fatalf("smoke preparation endpoint = %q, want private endpoint %q", prepare.endpoint, defaultEndpoint)
+	}
+	if err := validateEndpointForMode(trustedProxyEndpoint, prepare); err == nil {
+		t.Fatal("smoke preparation accepted the production proxy endpoint")
+	}
+
+	verify, err := parseOptions([]string{"--verify-general-moderation-smoke", "--moderation-smoke-marker", marker, "--moderation-smoke-message-id", "81"})
+	if err != nil {
+		t.Fatalf("parse smoke verification options: %v", err)
+	}
+	if verify.endpoint != trustedProxyEndpoint || validateEndpointForMode(verify.endpoint, verify) != nil {
+		t.Fatalf("smoke verification endpoint = %q, want HAProxy %q", verify.endpoint, trustedProxyEndpoint)
+	}
+	if err := validateEndpointForMode(defaultEndpoint, verify); err == nil {
+		t.Fatal("smoke verification accepted a direct backend endpoint")
+	}
+
+	cleanup, err := parseOptions([]string{"--cleanup-general-moderation-smoke", "--moderation-smoke-marker", marker})
+	if err != nil {
+		t.Fatalf("parse smoke cleanup options: %v", err)
+	}
+	if cleanup.endpoint != trustedProxyEndpoint || validateEndpointForMode(cleanup.endpoint, cleanup) != nil {
+		t.Fatalf("smoke cleanup endpoint = %q, want HAProxy %q", cleanup.endpoint, trustedProxyEndpoint)
+	}
+	if err := validateEndpointForMode(defaultEndpoint, cleanup); err != nil {
+		t.Fatalf("private smoke cleanup endpoint: %v", err)
+	}
+
+	if _, err := parseOptions([]string{"--verify-general-moderation-smoke", "--moderation-smoke-marker", marker}); err == nil {
+		t.Fatal("smoke verification accepted a missing message ID")
+	}
+	if _, err := parseOptions([]string{"--prepare-general-moderation-smoke", "--moderation-smoke-marker", "ABC"}); err == nil {
+		t.Fatal("smoke preparation accepted a malformed marker")
+	}
+}
+
 func TestValidGeneralChatUsernameMatchesSignupRules(t *testing.T) {
 	for _, username := range []string{"ab", "abc", "abcd", "a2", "a_", "A7"} {
 		if !validGeneralChatUsername(username) {

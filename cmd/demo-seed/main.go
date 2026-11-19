@@ -55,20 +55,25 @@ type clientDocument struct {
 }
 
 type seedOptions struct {
-	check                   bool
-	seed                    bool
-	verifySeed              bool
-	verifyTurnstile         bool
-	activity                bool
-	generalChatEnabled      bool
-	moderateDeleteMessageID int64
-	moderateBanUsername     string
-	endpoint                string
-	endpointExplicit        bool
-	ownerUsername           string
-	activityTarget          string
-	maxActionsHour          int
-	minActivityGap          time.Duration
+	check                    bool
+	seed                     bool
+	verifySeed               bool
+	verifyTurnstile          bool
+	activity                 bool
+	generalChatEnabled       bool
+	moderateDeleteMessageID  int64
+	moderateBanUsername      string
+	moderationSmokePrepare   bool
+	moderationSmokeVerify    bool
+	moderationSmokeCleanup   bool
+	moderationSmokeMarker    string
+	moderationSmokeMessageID int64
+	endpoint                 string
+	endpointExplicit         bool
+	ownerUsername            string
+	activityTarget           string
+	maxActionsHour           int
+	minActivityGap           time.Duration
 }
 
 type apiConfig struct {
@@ -100,7 +105,8 @@ func run(args []string) error {
 	if options.check {
 		return nil
 	}
-	if options.activity || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" {
+	if options.activity || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokePrepare || options.moderationSmokeVerify || options.moderationSmokeCleanup {
 		if err := requireRoot(); err != nil {
 			return err
 		}
@@ -146,6 +152,28 @@ func run(args []string) error {
 			return fmt.Errorf("read seed-owner password file: %w", err)
 		}
 		return moderateGeneralChat(ctx, cfg, options, ownerPassword)
+	case options.moderationSmokePrepare:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		inventory, err := readCredentialInventory()
+		if err != nil {
+			return err
+		}
+		return prepareGeneralModerationSmoke(ctx, cfg, options, ownerPassword, inventory)
+	case options.moderationSmokeVerify:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return verifyGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
+	case options.moderationSmokeCleanup:
+		ownerPassword, err := readSecretPassword()
+		if err != nil {
+			return fmt.Errorf("read seed-owner password file: %w", err)
+		}
+		return cleanupGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
 	case options.verifyTurnstile:
 		return verifyTurnstile(ctx, cfg)
 	case options.activity:
@@ -159,7 +187,7 @@ func run(args []string) error {
 		}
 		return runDemoActivity(ctx, cfg, options, account, password)
 	default:
-		return errors.New("select one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
+		return errors.New("select one of --check, --seed, --verify-seed, --verify-turnstile, --activity, or a General moderation operation")
 	}
 }
 
@@ -174,6 +202,11 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.BoolVar(&options.activity, "activity", false, "post one fixed demo activity message")
 	flags.Int64Var(&options.moderateDeleteMessageID, "moderate-delete-message", 0, "delete one General message by ID")
 	flags.StringVar(&options.moderateBanUsername, "moderate-ban-user", "", "permanently ban a General member by username")
+	flags.BoolVar(&options.moderationSmokePrepare, "prepare-general-moderation-smoke", false, "prepare temporary General moderation smoke-test data on a private endpoint")
+	flags.BoolVar(&options.moderationSmokeVerify, "verify-general-moderation-smoke", false, "verify the General moderation smoke-test results through HAProxy")
+	flags.BoolVar(&options.moderationSmokeCleanup, "cleanup-general-moderation-smoke", false, "restore temporary General moderation smoke-test data")
+	flags.StringVar(&options.moderationSmokeMarker, "moderation-smoke-marker", "", "unique marker for a General moderation smoke test")
+	flags.Int64Var(&options.moderationSmokeMessageID, "moderation-smoke-message-id", 0, "message ID created by the General moderation smoke test")
 	flags.StringVar(&options.endpoint, "endpoint", defaultEndpoint, "internal MTProto service endpoint")
 	flags.StringVar(&options.ownerUsername, "owner-username", "demo_seed_owner", "seed-owner login name")
 	flags.StringVar(&options.activityTarget, "target", "river", "seeded megagroup slug for scheduled activity")
@@ -201,6 +234,7 @@ func parseOptions(args []string) (seedOptions, error) {
 	for _, value := range []bool{
 		options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity,
 		options.moderateDeleteMessageID != 0, options.moderateBanUsername != "",
+		options.moderationSmokePrepare, options.moderationSmokeVerify, options.moderationSmokeCleanup,
 	} {
 		if value {
 			selected++
@@ -215,13 +249,28 @@ func parseOptions(args []string) (seedOptions, error) {
 	if options.moderateBanUsername != "" && !validGeneralChatUsername(options.moderateBanUsername) {
 		return seedOptions{}, errors.New("moderate-ban-user must be a username without @")
 	}
-	if (options.seed || options.verifySeed || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && options.ownerUsername != "demo_seed_owner" {
+	smokeMode := options.moderationSmokePrepare || options.moderationSmokeVerify || options.moderationSmokeCleanup
+	if smokeMode {
+		if !validModerationSmokeMarker(options.moderationSmokeMarker) {
+			return seedOptions{}, errors.New("moderation smoke marker must be 32 lowercase hexadecimal characters")
+		}
+		if options.moderationSmokeVerify && (options.moderationSmokeMessageID <= 0 || options.moderationSmokeMessageID > math.MaxInt32) {
+			return seedOptions{}, errors.New("moderation smoke verification requires a positive signed 32-bit message ID")
+		}
+		if !options.moderationSmokeVerify && options.moderationSmokeMessageID != 0 {
+			return seedOptions{}, errors.New("moderation smoke message ID applies only to verification")
+		}
+	} else if options.moderationSmokeMarker != "" || options.moderationSmokeMessageID != 0 {
+		return seedOptions{}, errors.New("moderation smoke arguments require a moderation smoke operation")
+	}
+	if (options.seed || options.verifySeed || options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" || smokeMode) && options.ownerUsername != "demo_seed_owner" {
 		return seedOptions{}, errors.New("seed owner must use the demo_seed_owner account")
 	}
-	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && !options.generalChatEnabled {
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" || smokeMode) && !options.generalChatEnabled {
 		return seedOptions{}, errors.New("general moderation requires TG_DEMO_GENERAL_CHAT_ENABLED=true")
 	}
-	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "") && !options.endpointExplicit {
+	if (options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokeVerify || options.moderationSmokeCleanup) && !options.endpointExplicit {
 		options.endpoint = trustedProxyEndpoint
 	}
 	if options.activity {
@@ -275,7 +324,8 @@ func endpointDialHost(endpoint string) (string, error) {
 }
 
 func validateEndpointForMode(endpoint string, options seedOptions) error {
-	moderation := options.moderateDeleteMessageID != 0 || options.moderateBanUsername != ""
+	moderation := options.moderateDeleteMessageID != 0 || options.moderateBanUsername != "" ||
+		options.moderationSmokeVerify
 	if options.verifyTurnstile || moderation {
 		if endpoint != trustedProxyEndpoint {
 			if options.verifyTurnstile {
@@ -284,6 +334,15 @@ func validateEndpointForMode(endpoint string, options seedOptions) error {
 			return errors.New("general moderation must use the trusted internal haproxy:2443 service")
 		}
 		return nil
+	}
+	if options.moderationSmokeCleanup {
+		if endpoint == trustedProxyEndpoint {
+			return nil
+		}
+		return validateEndpoint(endpoint)
+	}
+	if options.moderationSmokePrepare && endpoint == trustedProxyEndpoint {
+		return errors.New("demo General moderation smoke preparation must use a private teagramd endpoint")
 	}
 	if endpoint == trustedProxyEndpoint {
 		return errors.New("haproxy:2443 is only supported for Turnstile probes and General moderation")

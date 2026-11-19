@@ -1245,6 +1245,7 @@ jobs:
           bash -n deploy/teagram-demo/publish-web-release.sh
           bash -n deploy/teagram-demo/build-web-artifact.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
+          bash -n deploy/teagram-demo/test-general-moderation-compose.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
           bash -n deploy/teagram-demo/run-activity.sh
           bash -n deploy/teagram-demo/activity-credential.sh
@@ -1319,6 +1320,7 @@ jobs:
             deploy/teagram-demo/publish-web-release.sh \
             deploy/teagram-demo/build-web-artifact.sh \
             deploy/teagram-demo/wipe-weekly.sh \
+            deploy/teagram-demo/test-general-moderation-compose.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
             deploy/teagram-demo/run-activity.sh \
             deploy/teagram-demo/activity-credential.sh \
