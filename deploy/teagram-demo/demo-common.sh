@@ -53,6 +53,20 @@ demo_valid_signup_username() {
   [[ "${1:-}" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
 }
 
+demo_turnstile_signin_enabled() {
+  local -a values=()
+  mapfile -t values < <(sed -n 's/^TG_TURNSTILE_SIGNIN_ENABLED=//p' "$DEMO_ENV_FILE")
+  if ((${#values[@]} == 0)); then
+    printf '%s\n' false
+    return 0
+  fi
+  if ((${#values[@]} != 1)) || [[ "${values[0]}" != true && "${values[0]}" != false ]]; then
+    demo_fail 'sign-in Turnstile setting is missing or invalid'
+    return 1
+  fi
+  printf '%s\n' "${values[0]}"
+}
+
 demo_prepare_runtime_tmp_dirs() {
   local runtime_tmp_dir="$DEMO_STATE_DIR/tmp"
   local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"

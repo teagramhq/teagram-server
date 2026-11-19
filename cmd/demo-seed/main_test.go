@@ -126,6 +126,22 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 	}
 }
 
+func TestParseVerifyTurnstileRequiresExpectedSigninMode(t *testing.T) {
+	options, err := parseOptions([]string{"--verify-turnstile", "--expect-signin-enabled=false", "--endpoint", trustedProxyEndpoint})
+	if err != nil {
+		t.Fatalf("parse explicit disabled sign-in mode: %v", err)
+	}
+	if !options.verifyTurnstile || !options.expectedSigninModeSet || options.expectedSigninEnabled {
+		t.Fatalf("parsed Turnstile options = %+v, want explicit disabled sign-in mode", options)
+	}
+	if _, err := parseOptions([]string{"--verify-turnstile", "--endpoint", trustedProxyEndpoint}); err == nil {
+		t.Fatal("Turnstile verification accepted an unspecified sign-in mode")
+	}
+	if _, err := parseOptions([]string{"--check", "--expect-signin-enabled=false"}); err == nil {
+		t.Fatal("non-Turnstile operation accepted the expected sign-in mode option")
+	}
+}
+
 func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
 	t.Setenv("TG_DEMO_GENERAL_CHAT_ENABLED", "true")
 	for _, args := range [][]string{
@@ -252,8 +268,8 @@ func TestVerifyTurnstileProbePassesWithSigninGateDisabled(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{}
 	const username = "demo_probe_0123456789abcdef"
 
-	if err := verifyTurnstileWithAPI(context.Background(), api, username, ""); err != nil {
-		t.Fatalf("verify Turnstile probe through CAPTCHA challenge: %v", err)
+	if err := verifyTurnstileWithAPI(context.Background(), api, username, "", false); err != nil {
+		t.Fatalf("verify Turnstile probe with sign-in gate disabled: %v", err)
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code,sign-up"; got != want {
 		t.Fatalf("probe API calls = %q, want %q", got, want)
@@ -273,7 +289,7 @@ func TestVerifyTurnstileProbeUsesSignupActionWhenSigninGateIsEnabled(t *testing.
 	)
 	token := strings.Repeat("q", 32)
 
-	if err := verifyTurnstileWithAPI(context.Background(), api, username, token); err != nil {
+	if err := verifyTurnstileWithAPI(context.Background(), api, username, token, true); err != nil {
 		t.Fatalf("verify Turnstile with sign-in gate enabled: %v", err)
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code,send-code-with-signup-action,sign-up"; got != want {
@@ -292,7 +308,7 @@ func TestVerifyTurnstileProbeUsesSignupActionWhenSigninGateIsEnabled(t *testing.
 
 func TestVerifyTurnstileProbeDoesNotRetryOtherSendCodeErrorsWithQAToken(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{sendCodeError: &tgerr.Error{Message: "FLOOD_WAIT_3"}}
-	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32))
+	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32), false)
 	if err == nil {
 		t.Fatal("probe accepted an unrelated sendCode error")
 	}
@@ -303,12 +319,33 @@ func TestVerifyTurnstileProbeDoesNotRetryOtherSendCodeErrorsWithQAToken(t *testi
 
 func TestVerifyTurnstileProbeRequiresQATokenForSigninChallenge(t *testing.T) {
 	api := &fakeTurnstileProbeAPI{signInGateEnabled: true}
-	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", "")
+	err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", "", true)
 	if err == nil {
 		t.Fatal("probe accepted a sign-in challenge without the signup QA token")
 	}
 	if got, want := strings.Join(api.calls, ","), "send-code"; got != want {
 		t.Fatalf("probe API calls = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyTurnstileProbeRejectsUnexpectedSigninMode(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		actualSignin, expected bool
+	}{
+		{name: "missing enabled challenge", actualSignin: false, expected: true},
+		{name: "unexpected disabled challenge", actualSignin: true, expected: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeTurnstileProbeAPI{signInGateEnabled: test.actualSignin}
+			err := verifyTurnstileWithAPI(context.Background(), api, "demo_probe_0123456789abcdef", strings.Repeat("q", 32), test.expected)
+			if err == nil {
+				t.Fatal("probe accepted a sign-in challenge state different from the expected configuration")
+			}
+			if got, want := strings.Join(api.calls, ","), "send-code"; got != want {
+				t.Fatalf("probe API calls = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

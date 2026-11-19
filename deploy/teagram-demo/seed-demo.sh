@@ -15,6 +15,7 @@ MESSAGE_ID=
 TARGET_USERNAME=
 MODERATION_SMOKE_MARKER=
 MODERATION_SMOKE_MESSAGE_ID=
+EXPECT_SIGNIN_ENABLED=
 
 usage() {
   cat <<'EOF'
@@ -22,7 +23,7 @@ Usage:
   seed-demo.sh --check
   seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
-  seed-demo.sh --verify-turnstile --endpoint haproxy:2443
+  seed-demo.sh --verify-turnstile [--expect-signin-enabled=true|false] --endpoint haproxy:2443
   seed-demo.sh --moderate-delete-message --message-id ID [--endpoint haproxy:2443]
   seed-demo.sh --moderate-ban-user --username USERNAME [--endpoint haproxy:2443]
   seed-demo.sh --prepare-general-moderation-smoke --moderation-smoke-marker HEX [--endpoint teagramd:2443|teagramd-next:2443]
@@ -76,6 +77,13 @@ while (($#)); do
       MODERATION_SMOKE_MESSAGE_ID="$2"
       shift 2
       ;;
+    --expect-signin-enabled)
+      (($# >= 2)) || { usage >&2; demo_fail '--expect-signin-enabled requires true or false'; }
+      EXPECT_SIGNIN_ENABLED="$2"
+      [[ "$EXPECT_SIGNIN_ENABLED" == true || "$EXPECT_SIGNIN_ENABLED" == false ]] ||
+        demo_fail '--expect-signin-enabled must be true or false'
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -88,6 +96,9 @@ while (($#)); do
 done
 
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
+if [[ "$MODE" != --verify-turnstile && -n "$EXPECT_SIGNIN_ENABLED" ]]; then
+  demo_fail '--expect-signin-enabled applies only to --verify-turnstile'
+fi
 ENDPOINT=$(demo_resolve_seed_endpoint "$MODE" "$ENDPOINT_EXPLICIT" "$ENDPOINT") ||
   demo_fail 'resolve endpoint for demo seed operation'
 if [[ "$MODE" == --verify-turnstile || "$MODE" == --moderate-delete-message || "$MODE" == --moderate-ban-user ||
@@ -280,6 +291,9 @@ case "$MODE" in
     ;;
   --verify-turnstile)
     demo_require_env
-    run_seed_helper demo-probe --verify-turnstile --endpoint "$ENDPOINT"
+    if [[ -z "$EXPECT_SIGNIN_ENABLED" ]]; then
+      EXPECT_SIGNIN_ENABLED=$(demo_turnstile_signin_enabled) || demo_fail 'read sign-in Turnstile setting'
+    fi
+    run_seed_helper demo-probe --verify-turnstile "--expect-signin-enabled=$EXPECT_SIGNIN_ENABLED" --endpoint "$ENDPOINT"
     ;;
 esac

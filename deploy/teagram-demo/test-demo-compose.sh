@@ -14,13 +14,27 @@ import sys
 from pathlib import Path
 
 smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
-probe = '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443'
-if probe not in smoke.splitlines():
-    raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must run unconditionally")
+normalized_smoke = " ".join(smoke.replace("\\\n", " ").split())
+probe = '"$SEED_SCRIPT" --verify-turnstile --expect-signin-enabled "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" --endpoint haproxy:2443'
+if " ".join(probe.split()) not in normalized_smoke:
+    raise SystemExit("test-general-moderation-compose.sh: probe must verify the configured sign-in mode")
 if 'if [[ "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED" == true ]]' in smoke:
     raise SystemExit("test-general-moderation-compose.sh: signup Turnstile probe must not depend on sign-in state")
 PY
 go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisabled$' -count=1
+
+(
+  DEMO_ENV_FILE="$TMP_DIR/signin-default.env"
+  : > "$DEMO_ENV_FILE"
+  [[ "$(demo_turnstile_signin_enabled)" == false ]]
+  printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' > "$DEMO_ENV_FILE"
+  [[ "$(demo_turnstile_signin_enabled)" == true ]]
+  printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=maybe' > "$DEMO_ENV_FILE"
+  if demo_turnstile_signin_enabled; then
+    printf 'invalid sign-in Turnstile setting was accepted\n' >&2
+    exit 1
+  fi
+)
 
 (
   [[ "$(demo_resolve_seed_endpoint --moderate-delete-message 0 teagramd:2443)" == haproxy:2443 ]]
@@ -38,6 +52,7 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 for expected in (
+    '--project-name teagram-demo',
     'install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir"',
     'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir"',
     '[[ "$(stat -c \'%u:%g:%a\' "$turnstile_tmp_dir")" == \'584792:584792:1777\'',
@@ -284,19 +299,22 @@ if [[ "$seed_validation_status" -eq 0 || "$seed_validation_output" != *'deploy/t
   exit 1
 fi
 
-python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" "$SCRIPT_DIR/wipe-weekly.sh" <<'PY'
+python3 - "$SCRIPT_DIR/test-general-moderation-compose.sh" "$SCRIPT_DIR/wipe-weekly.sh" \
+  "$SCRIPT_DIR/test-general-moderation-isolated-compose.sh" "$REPO_ROOT/.github/workflows/ci.yml" <<'PY'
 import sys
 from pathlib import Path
 
 smoke = Path(sys.argv[1]).read_text(encoding="utf-8")
 wipe = Path(sys.argv[2]).read_text(encoding="utf-8")
+isolated = Path(sys.argv[3]).read_text(encoding="utf-8")
+workflow = Path(sys.argv[4]).read_text(encoding="utf-8")
 for expected in (
     '"$SCRIPT_DIR/moderate-general.sh" delete-message "$MODERATION_SMOKE_MESSAGE_ID"',
     '"$SCRIPT_DIR/moderate-general.sh" ban-user ab',
     '--prepare-general-moderation-smoke',
     '--verify-general-moderation-smoke',
     '--cleanup-general-moderation-smoke',
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    '--expect-signin-enabled "$PRODUCTION_TURNSTILE_SIGNIN_ENABLED"',
     'PRODUCTION_TURNSTILE_SIGNIN_ENABLED',
     'if length == 1 and (.[0] == "true" or .[0] == "false")',
     'TG_TURNSTILE_SIGNIN_ENABLED=false',
@@ -322,6 +340,19 @@ if wipe_call not in wipe:
     raise SystemExit("wipe-weekly.sh: production moderation smoke test is not wired into the wipe flow")
 if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(wipe_call) > wipe.index('demo_compose up -d edge'):
     raise SystemExit("wipe-weekly.sh: moderation smoke must run after private seeding and before public edge startup")
+for expected in (
+    'run_signin_mode false',
+    'run_signin_mode true',
+    'test-general-moderation-compose.sh',
+    'general moderation smoke verified deleted post and refused banned guest rejoin',
+    'general moderation smoke post removed and guest membership restored',
+    'production moderation Compose smoke=verified message_deleted=true short_handle_ban=true',
+    'moderation cleanup retained its guest session',
+):
+    if expected not in isolated:
+        raise SystemExit(f"isolated moderation Compose test: missing behavior check: {expected}")
+if 'test-general-moderation-isolated-compose.sh' not in workflow:
+    raise SystemExit("CI Compose job does not run the isolated General moderation smoke")
 PY
 
 (

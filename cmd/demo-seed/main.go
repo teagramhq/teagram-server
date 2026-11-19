@@ -59,6 +59,8 @@ type seedOptions struct {
 	seed                     bool
 	verifySeed               bool
 	verifyTurnstile          bool
+	expectedSigninEnabled    bool
+	expectedSigninModeSet    bool
 	activity                 bool
 	generalChatEnabled       bool
 	moderateDeleteMessageID  int64
@@ -171,7 +173,7 @@ func run(args []string) error {
 		}
 		return cleanupGeneralModerationSmoke(ctx, cfg, options, ownerPassword)
 	case options.verifyTurnstile:
-		return verifyTurnstile(ctx, cfg)
+		return verifyTurnstile(ctx, cfg, options.expectedSigninEnabled)
 	case options.activity:
 		account, ok := seededActivityAccount()
 		if !ok {
@@ -195,6 +197,7 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.BoolVar(&options.seed, "seed", false, "create demo accounts and content")
 	flags.BoolVar(&options.verifySeed, "verify-seed", false, "verify the seeded public content")
 	flags.BoolVar(&options.verifyTurnstile, "verify-turnstile", false, "verify production sign-up challenge enforcement")
+	flags.BoolVar(&options.expectedSigninEnabled, "expect-signin-enabled", false, "expected production sign-in Turnstile setting for --verify-turnstile")
 	flags.BoolVar(&options.activity, "activity", false, "post one fixed demo activity message")
 	flags.Int64Var(&options.moderateDeleteMessageID, "moderate-delete-message", 0, "delete one General message by ID")
 	flags.StringVar(&options.moderateBanUsername, "moderate-ban-user", "", "permanently ban a General member by username")
@@ -214,6 +217,9 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.Visit(func(flag *flag.Flag) {
 		if flag.Name == "endpoint" {
 			options.endpointExplicit = true
+		}
+		if flag.Name == "expect-signin-enabled" {
+			options.expectedSigninModeSet = true
 		}
 	})
 	if raw := os.Getenv("TG_DEMO_GENERAL_CHAT_ENABLED"); raw != "" {
@@ -238,6 +244,9 @@ func parseOptions(args []string) (seedOptions, error) {
 	}
 	if selected != 1 {
 		return seedOptions{}, errors.New("select exactly one demo-seed or General moderation operation")
+	}
+	if options.verifyTurnstile != options.expectedSigninModeSet {
+		return seedOptions{}, errors.New("--expect-signin-enabled is required only with --verify-turnstile")
 	}
 	if options.moderateDeleteMessageID < 0 || options.moderateDeleteMessageID > math.MaxInt32 || (options.moderateDeleteMessageID != 0 && int64(int(options.moderateDeleteMessageID)) != options.moderateDeleteMessageID) {
 		return seedOptions{}, errors.New("moderate-delete-message must be a positive 32-bit message ID")
@@ -823,7 +832,7 @@ type turnstileProbeAPI interface {
 	Invoker() tg.Invoker
 }
 
-func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
+func verifyTurnstile(ctx context.Context, cfg apiConfig, expectedSigninEnabled bool) error {
 	username, err := newProbeUsername()
 	if err != nil {
 		return err
@@ -834,14 +843,21 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 	}
 	client := newTelegramClientAt(cfg, trustedProxyHost)
 	return client.Run(ctx, func(runCtx context.Context) error {
-		return verifyTurnstileWithAPI(runCtx, client.API(), username, qaToken)
+		return verifyTurnstileWithAPI(runCtx, client.API(), username, qaToken, expectedSigninEnabled)
 	})
 }
 
-func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username, signupQAToken string) error {
+func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username, signupQAToken string, expectedSigninEnabled bool) error {
 	sendCode := &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash}
 	sent, err := api.AuthSendCode(ctx, sendCode)
-	if isSignInCaptchaRequired(err) {
+	signinChallenge := isSignInCaptchaRequired(err)
+	if err != nil && !signinChallenge {
+		return fmt.Errorf("request sign-up probe code: %w", err)
+	}
+	if signinChallenge != expectedSigninEnabled {
+		return fmt.Errorf("production sign-in Turnstile challenge enabled=%t, expected %t", signinChallenge, expectedSigninEnabled)
+	}
+	if signinChallenge {
 		if signupQAToken == "" {
 			return errors.New("sign-in gate is enabled but the signup QA token is unavailable")
 		}
@@ -850,8 +866,6 @@ func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username
 			return fmt.Errorf("request sign-up probe code with signup action: %w", err)
 		}
 		sent = response.SentCode
-	} else if err != nil {
-		return fmt.Errorf("request sign-up probe code: %w", err)
 	}
 	sentCode, ok := sent.(*tg.AuthSentCode)
 	if !ok {

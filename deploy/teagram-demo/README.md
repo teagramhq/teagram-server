@@ -631,7 +631,7 @@ deploy/teagram-demo/seed-demo.sh --verify-seed \
   --endpoint teagramd:2443 \
   --owner-username demo_seed_owner \
   --owner-password-file /var/lib/teagram-demo/secrets/seed-owner-password
-deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint haproxy:2443
+deploy/teagram-demo/seed-demo.sh --verify-turnstile --expect-signin-enabled=false --endpoint haproxy:2443
 ```
 
 The seed endpoint is available only on the demo's internal Docker network. The
