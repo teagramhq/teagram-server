@@ -1596,10 +1596,12 @@ env \
   bash "$TMP_DIR/backup-prune-regression.sh"
 
 IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
+printf '%s\n' 'DEMO_ENV_BACKUP=' > "$IMAGE_CLEANUP_FUNCTION"
 sed -n \
   -e '/^demo_cleanup() {$/,/^}/p' \
   -e '/^demo_remove_previous_image() {$/,/^}/p' \
-  "$SCRIPT_DIR/deploy-main.sh" > "$IMAGE_CLEANUP_FUNCTION"
+  -e '/^demo_restore_env_after_rollback() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" >> "$IMAGE_CLEANUP_FUNCTION"
 cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
