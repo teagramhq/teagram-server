@@ -355,7 +355,7 @@ for expected in (
     'ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"',
     'bootstrap-identity >/dev/null',
     '--profile maintenance run --rm --no-deps teagramd-maintenance',
-    '--profile maintenance run --rm --no-deps --user 0:65532',
+    'demo_compose_input --profile maintenance run --rm --no-deps --user 0:65532',
     'test-general-moderation-compose.sh',
     'general moderation smoke verified deleted post and refused banned guest rejoin',
     'general moderation smoke post removed and guest membership restored',

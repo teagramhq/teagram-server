@@ -174,7 +174,7 @@ ENV
   install -o root -g root -m 0644 "$client_config" "$DEMO_CLIENT_CONFIG"
   demo_seed_owner_admin_command() {
     shift
-    demo_compose --profile maintenance run --rm --no-deps --user 0:65532 \
+    demo_compose_input --profile maintenance run --rm --no-deps --user 0:65532 \
       teagramd-maintenance admin "$@"
   }
   ACTIVE_STAGE="create seed owner with sign-in mode $signin_enabled"
