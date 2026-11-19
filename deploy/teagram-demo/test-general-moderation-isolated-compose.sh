@@ -37,7 +37,7 @@ ACTIVE_BLOB_PATH=
 ACTIVE_STAGE=
 
 cleanup() {
-  local rc=$? fixture_script
+  local rc=$? fixture_script cleanup_path
   trap - EXIT
   if [[ -n "$ACTIVE_FIXTURE" && -n "$ACTIVE_PROJECT" ]]; then
     fixture_script="$ACTIVE_FIXTURE/deploy/teagram-demo/test-general-moderation-compose.sh"
@@ -66,9 +66,14 @@ cleanup() {
       "$SHARED_SECRET_ROOT/secrets/turnstile-qa-bypass-token" \
       "$SHARED_SECRET_ROOT/secrets/demo-accounts/inventory.json" \
       "$SHARED_SECRET_ROOT/secrets/demo-accounts/moderation-smoke.session"
-    rmdir -- "$SHARED_SECRET_ROOT/secrets/demo-accounts" 2>/dev/null || rc=1
-    rmdir -- "$SHARED_SECRET_ROOT/secrets" 2>/dev/null || rc=1
-    rmdir -- "$SHARED_SECRET_ROOT" 2>/dev/null || rc=1
+    for cleanup_path in \
+      "$SHARED_SECRET_ROOT/secrets/demo-accounts" \
+      "$SHARED_SECRET_ROOT/secrets" \
+      "$SHARED_SECRET_ROOT"; do
+      if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then
+        rmdir -- "$cleanup_path" 2>/dev/null || rc=1
+      fi
+    done
   fi
   rm -rf -- "$TMP_DIR"
   exit "$rc"

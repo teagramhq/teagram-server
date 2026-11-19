@@ -368,6 +368,18 @@ if isolated.index('bootstrap-identity') > isolated.index(
     'demo_seed_compose up -d --wait --wait-timeout 120 teagramd'
 ):
     raise SystemExit("isolated moderation Compose test: identity must be bootstrapped before server startup")
+cleanup = isolated.split('cleanup() {', 1)[1].split('\n}\ntrap cleanup EXIT', 1)[0]
+cleanup_guard = 'if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then'
+cleanup_rmdir = 'rmdir -- "$cleanup_path" 2>/dev/null || rc=1'
+if cleanup_guard not in cleanup or cleanup_rmdir not in cleanup:
+    raise SystemExit("isolated moderation Compose test: cleanup must tolerate paths already removed")
+for cleanup_path in (
+    "$SHARED_SECRET_ROOT/secrets/demo-accounts",
+    "$SHARED_SECRET_ROOT/secrets",
+    "$SHARED_SECRET_ROOT",
+):
+    if cleanup_path not in cleanup:
+        raise SystemExit(f"isolated moderation Compose test: cleanup omits {cleanup_path}")
 if 'test-general-moderation-isolated-compose.sh' not in workflow:
     raise SystemExit("CI Compose job does not run the isolated General moderation smoke")
 PY
