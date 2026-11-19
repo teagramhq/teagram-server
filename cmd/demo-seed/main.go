@@ -241,12 +241,15 @@ func parseOptions(args []string) (seedOptions, error) {
 }
 
 func validGeneralChatUsername(username string) bool {
-	if len(username) < 5 || len(username) > 32 || strings.TrimSpace(username) != username || strings.HasPrefix(username, "@") {
+	if len(username) < 2 || len(username) > 32 {
 		return false
 	}
-	for _, char := range username {
-		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
-			(char < '0' || char > '9') && char != '_' {
+	for index, char := range username {
+		letter := char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+		if index == 0 && !letter {
+			return false
+		}
+		if !letter && (char < '0' || char > '9') && char != '_' {
 			return false
 		}
 	}

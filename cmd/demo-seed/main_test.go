@@ -131,6 +131,7 @@ func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
 	for _, args := range [][]string{
 		{"--moderate-delete-message", "81"},
 		{"--moderate-ban-user", "freshguest"},
+		{"--moderate-ban-user", "ab"},
 	} {
 		options, err := parseOptions(args)
 		if err != nil {
@@ -141,6 +142,19 @@ func TestModerationDefaultsToTrustedProxyEndpoint(t *testing.T) {
 		}
 		if err := validateEndpointForMode(options.endpoint, options); err != nil {
 			t.Fatalf("validate moderation endpoint for %v: %v", args, err)
+		}
+	}
+}
+
+func TestValidGeneralChatUsernameMatchesSignupRules(t *testing.T) {
+	for _, username := range []string{"ab", "abc", "abcd", "a2", "a_", "A7"} {
+		if !validGeneralChatUsername(username) {
+			t.Errorf("validGeneralChatUsername(%q) = false, want signup-compatible username", username)
+		}
+	}
+	for _, username := range []string{"a", "1a", "_a", "a-b", "a@b", " ab", "ab "} {
+		if validGeneralChatUsername(username) {
+			t.Errorf("validGeneralChatUsername(%q) = true, want invalid signup username", username)
 		}
 	}
 }

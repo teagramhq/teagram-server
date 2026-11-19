@@ -101,6 +101,43 @@ func TestSeedUpgradeUsesReservedFallbackWhenGeneralHandleCollides(t *testing.T) 
 	}
 }
 
+func TestSeedUpgradeSkipsGeneralHandleWhenOwnerIsNotAMember(t *testing.T) {
+	first, second := demo.GeneralChatHandles()[0], demo.GeneralChatHandles()[1]
+	rpc := &generalChatRPC{unjoinedGeneralHandles: map[string]bool{first: true}}
+	remote, err := ensureGeneralChat(context.Background(), tg.NewClient(rpc), demoGeneralChatSpace)
+	if err != nil {
+		t.Fatalf("ensure General after an unjoined existing channel occupies the first handle: %v", err)
+	}
+	if remote.spec.username != second || !remote.creator {
+		t.Fatalf("General after an unjoined handle collision = %+v, want seed-owned fallback %q", remote, second)
+	}
+	if rpc.createCount != 1 || rpc.createdUsername != second {
+		t.Fatalf("fallback General creates=%d handle=%q, want one create on %q", rpc.createCount, rpc.createdUsername, second)
+	}
+}
+
+func TestSeedRecoversUnassignedGeneralAfterInterruptedHandleAssignment(t *testing.T) {
+	rpc := &generalChatRPC{failNextUsernameAssignment: true}
+	api := tg.NewClient(rpc)
+	if _, err := ensureGeneralChat(context.Background(), api, demoGeneralChatSpace); err == nil {
+		t.Fatal("first General provisioning unexpectedly succeeded despite simulated interruption")
+	}
+	if rpc.createCount != 1 || rpc.usernameCount != 1 {
+		t.Fatalf("interrupted General provisioning creates/usernames=%d/%d, want one channel and one failed assignment", rpc.createCount, rpc.usernameCount)
+	}
+
+	remote, err := ensureGeneralChat(context.Background(), api, demoGeneralChatSpace)
+	if err != nil {
+		t.Fatalf("retry General provisioning after interrupted handle assignment: %v", err)
+	}
+	if remote.channelID != 71 || remote.spec.username != demo.GeneralChatHandles()[0] || !remote.creator {
+		t.Fatalf("recovered General = %+v, want existing channel 71 with first reserved handle", remote)
+	}
+	if rpc.createCount != 1 || rpc.usernameCount != 2 {
+		t.Fatalf("recovered General creates/usernames=%d/%d, want one create and two assignment attempts", rpc.createCount, rpc.usernameCount)
+	}
+}
+
 func TestSeedUpgradeUsesFallbackWhenAllExistingGeneralHandlesCollide(t *testing.T) {
 	previousHandles := []string{
 		demo.GeneralChatHandle,
@@ -158,6 +195,8 @@ type generalChatRPC struct {
 	createdUsername               string
 	collidingHandles              map[string]bool
 	ordinaryAccountHandles        map[string]bool
+	unjoinedGeneralHandles        map[string]bool
+	failNextUsernameAssignment    bool
 	createCount                   int
 	usernameCount                 int
 	invited                       map[int64]bool
@@ -180,17 +219,21 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 			resolved.Users = []tg.UserClass{&tg.User{ID: 13, AccessHash: 29, Username: request.Username}}
 			return nil
 		}
-		if rpc.collidingHandles[request.Username] {
+		if rpc.collidingHandles[request.Username] || rpc.unjoinedGeneralHandles[request.Username] {
 			resolved, ok := output.(*tg.ContactsResolvedPeer)
 			if !ok {
 				return fmt.Errorf("unexpected collision resolution output %T", output)
 			}
-			resolved.Chats = []tg.ChatClass{&tg.Channel{
-				ID: 13, AccessHash: 29, Username: request.Username, Title: "Unrelated public channel", Broadcast: true,
-			}}
+			channel := &tg.Channel{ID: 13, AccessHash: 29, Username: request.Username, Title: "Unrelated public channel", Broadcast: true}
+			if rpc.unjoinedGeneralHandles[request.Username] {
+				channel.Title = demoGeneralChatSpace.title
+				channel.Broadcast = false
+				channel.Megagroup = true
+			}
+			resolved.Chats = []tg.ChatClass{channel}
 			return nil
 		}
-		if !rpc.created {
+		if !rpc.created || rpc.createdUsername == "" || rpc.createdUsername != request.Username {
 			return tgerr.New(400, "USERNAME_NOT_OCCUPIED")
 		}
 		resolved, ok := output.(*tg.ContactsResolvedPeer)
@@ -222,12 +265,28 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 		}}}
 	case *tg.ChannelsUpdateUsernameRequest:
 		rpc.usernameCount++
+		if rpc.failNextUsernameAssignment {
+			rpc.failNextUsernameAssignment = false
+			return tgerr.New(500, "SIMULATED_INTERRUPTION")
+		}
 		rpc.createdUsername = request.Username
 		result, ok := output.(*tg.BoolBox)
 		if !ok {
 			return fmt.Errorf("unexpected update-username output %T", output)
 		}
 		result.Bool = &tg.BoolTrue{}
+	case *tg.MessagesGetDialogsRequest:
+		result, ok := output.(*tg.MessagesDialogsBox)
+		if !ok {
+			return fmt.Errorf("unexpected dialogs output %T", output)
+		}
+		if rpc.created && rpc.createdUsername == "" {
+			result.Dialogs = &tg.MessagesDialogs{Chats: []tg.ChatClass{&tg.Channel{
+				ID: 71, AccessHash: 93, Title: demoGeneralChatSpace.title, Megagroup: true, Creator: true,
+			}}}
+		} else {
+			result.Dialogs = &tg.MessagesDialogs{}
+		}
 	case *tg.ContactsSearchRequest:
 		found, ok := output.(*tg.ContactsFound)
 		if !ok {
@@ -272,6 +331,12 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 		}
 		switch target := request.Participant.(type) {
 		case *tg.InputPeerSelf:
+			if rpc.unjoinedGeneralHandles != nil {
+				channel, ok := request.Channel.(*tg.InputChannel)
+				if ok && channel.ChannelID == 13 {
+					return tgerr.New(400, "PEER_ID_INVALID")
+				}
+			}
 			participant.Participant = &tg.ChannelParticipantCreator{}
 		case *tg.InputPeerUser:
 			switch {
@@ -290,7 +355,7 @@ func (rpc *generalChatRPC) Invoke(_ context.Context, input bin.Encoder, output b
 		if !ok {
 			return fmt.Errorf("unexpected full-channel output %T", output)
 		}
-		channel := &tg.ChannelFull{}
+		channel := &tg.ChannelFull{About: demoGeneralChatSpace.about}
 		if rpc.slowmodeSeconds > 0 {
 			channel.SetSlowmodeSeconds(rpc.slowmodeSeconds)
 		}

@@ -253,6 +253,37 @@ jq -e '
   and .services["teagramd-next"].environment.TG_DEMO_GENERAL_CHAT_ENABLED == "true"
 ' "$TMP_DIR/signin.json" >/dev/null
 
+MODERATION_WRAPPER_DIR="$TMP_DIR/moderation-wrapper"
+mkdir -p "$MODERATION_WRAPPER_DIR"
+cp -- "$SCRIPT_DIR/moderate-general.sh" "$MODERATION_WRAPPER_DIR/moderate-general.sh"
+cp -- "$SCRIPT_DIR/demo-common.sh" "$MODERATION_WRAPPER_DIR/demo-common.sh"
+cp -- "$SCRIPT_DIR/haproxy.cfg" "$SCRIPT_DIR/render-haproxy-config.py" "$MODERATION_WRAPPER_DIR/"
+cp -R -- "$SCRIPT_DIR/nginx-config" "$MODERATION_WRAPPER_DIR/nginx-config"
+cat > "$MODERATION_WRAPPER_DIR/seed-demo.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$@" > "$MODERATION_ARGS_FILE"
+SH
+chmod 755 "$MODERATION_WRAPPER_DIR/seed-demo.sh"
+MODERATION_ARGS_FILE="$TMP_DIR/moderation-args.txt" \
+  "$MODERATION_WRAPPER_DIR/moderate-general.sh" ban-user ab
+diff -u \
+  <(printf '%s\n' '--moderate-ban-user' '--username' 'ab') \
+  "$TMP_DIR/moderation-args.txt"
+
+cp -- "$SCRIPT_DIR/seed-demo.sh" "$MODERATION_WRAPPER_DIR/seed-demo-validation.sh"
+set +e
+seed_validation_output=$(TG_DEMO_GENERAL_CHAT_ENABLED=true \
+  "$MODERATION_WRAPPER_DIR/seed-demo-validation.sh" --moderate-ban-user --username ab 2>&1)
+seed_validation_status=$?
+set -e
+if [[ "$seed_validation_status" -eq 0 || "$seed_validation_output" != *'deploy/teagram-demo/.env is missing'* ||
+  "$seed_validation_output" == *'username must follow signup rules'* ]]; then
+  printf 'seed-demo short-handle validation did not reach the production configuration check: %s\n' \
+    "$seed_validation_output" >&2
+  exit 1
+fi
+
 (
   demo_compose() {
     cat "$TMP_DIR/target.json"

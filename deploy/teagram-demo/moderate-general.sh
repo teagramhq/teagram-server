@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=deploy/teagram-demo/demo-common.sh
+source "$SCRIPT_DIR/demo-common.sh"
 
 usage() {
   cat <<'EOF'
@@ -22,7 +24,7 @@ case "$1" in
     exec "$SCRIPT_DIR/seed-demo.sh" --moderate-delete-message --message-id "$2"
     ;;
   ban-user)
-    [[ "$2" =~ ^[A-Za-z0-9_]{5,32}$ ]] || { usage >&2; echo 'username must be 5 to 32 letters, digits, or underscores without @' >&2; exit 2; }
+    demo_valid_signup_username "$2" || { usage >&2; echo 'username must follow signup rules and must not include @' >&2; exit 2; }
     exec "$SCRIPT_DIR/seed-demo.sh" --moderate-ban-user --username "$2"
     ;;
   *)

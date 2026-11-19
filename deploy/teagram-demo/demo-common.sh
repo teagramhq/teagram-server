@@ -49,6 +49,10 @@ demo_fail() {
   return 1
 }
 
+demo_valid_signup_username() {
+  [[ "${1:-}" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
+}
+
 demo_prepare_runtime_tmp_dirs() {
   local runtime_tmp_dir="$DEMO_STATE_DIR/tmp"
   local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"

@@ -41,6 +41,16 @@ func TestModerateGeneralChatPermanentlyBansMemberOnly(t *testing.T) {
 	}
 }
 
+func TestModerateGeneralChatPermanentlyBansShortSignupUsername(t *testing.T) {
+	rpc := &generalModerationRPC{targetRole: "member"}
+	if err := banGeneralChatGuest(context.Background(), tg.NewClient(rpc), "ab"); err != nil {
+		t.Fatalf("ban short-handle General guest: %v", err)
+	}
+	if rpc.banCount != 1 || !rpc.bannedViewMessages || rpc.bannedUntilDate != 0 {
+		t.Fatalf("short-handle General ban calls=%d view=%t until=%d, want one permanent view ban", rpc.banCount, rpc.bannedViewMessages, rpc.bannedUntilDate)
+	}
+}
+
 func TestModerateGeneralChatUpgradesTemporaryBanToPermanent(t *testing.T) {
 	rights := tg.ChatBannedRights{ViewMessages: true, UntilDate: int(time.Now().Add(time.Hour).Unix())}
 	rights.SetFlags()
@@ -88,7 +98,7 @@ func (rpc *generalModerationRPC) Invoke(_ context.Context, input bin.Encoder, ou
 			}}
 			return nil
 		}
-		if request.Username != "freshguest" {
+		if request.Username != "freshguest" && request.Username != "ab" {
 			return fmt.Errorf("unexpected moderation target %q", request.Username)
 		}
 		resolved.Users = []tg.UserClass{&tg.User{ID: 42, AccessHash: 43, Username: request.Username}}

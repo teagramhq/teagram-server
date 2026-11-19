@@ -86,7 +86,7 @@ if [[ "$MODE" == --moderate-delete-message ]]; then
   [[ -z "$TARGET_USERNAME" ]] || demo_fail '--username applies only to --moderate-ban-user'
 elif [[ "$MODE" == --moderate-ban-user ]]; then
   [[ -z "$MESSAGE_ID" ]] || demo_fail '--message-id applies only to --moderate-delete-message'
-  [[ "$TARGET_USERNAME" =~ ^[A-Za-z0-9_]{5,32}$ ]] || demo_fail '--username must be a username without @'
+  demo_valid_signup_username "$TARGET_USERNAME" || demo_fail '--username must follow signup rules and must not include @'
 else
   [[ -z "$MESSAGE_ID" && -z "$TARGET_USERNAME" ]] || demo_fail '--message-id and --username require a moderation mode'
 fi
