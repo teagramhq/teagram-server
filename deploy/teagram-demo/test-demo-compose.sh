@@ -2026,8 +2026,10 @@ demo_restore_env_after_rollback
 legacy_preflight || { printf 'previous revision preflight failed after rollback\n' >&2; exit 1; }
 [[ -z "$DEMO_ENV_BACKUP" && "$(stat -c '%u:%a' "$DEMO_ENV_FILE")" == '0:600' ]]
 BASH
-ENV_ROLLBACK_FUNCTIONS="$ENV_ROLLBACK_FUNCTIONS" TMP_DIR="$TMP_DIR" SCRIPT_DIR="$SCRIPT_DIR" \
+(
+  export ENV_ROLLBACK_FUNCTIONS TMP_DIR SCRIPT_DIR
   bash "$TMP_DIR/demo-env-rollback-regression.sh"
+)
 
 python3 "$SCRIPT_DIR/test-validate-env.py"
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
