@@ -352,6 +352,8 @@ if wipe.index("DELETE FROM rate_limits") > wipe.index(wipe_call) or wipe.index(w
 for expected in (
     'run_signin_mode false',
     'run_signin_mode true',
+    'ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"',
+    'bootstrap-identity >/dev/null',
     '--profile maintenance run --rm --no-deps teagramd-maintenance',
     '--profile maintenance run --rm --no-deps --user 0:65532',
     'test-general-moderation-compose.sh',
@@ -362,6 +364,10 @@ for expected in (
 ):
     if expected not in isolated:
         raise SystemExit(f"isolated moderation Compose test: missing behavior check: {expected}")
+if isolated.index('bootstrap-identity') > isolated.index(
+    'demo_seed_compose up -d --wait --wait-timeout 120 teagramd'
+):
+    raise SystemExit("isolated moderation Compose test: identity must be bootstrapped before server startup")
 if 'test-general-moderation-isolated-compose.sh' not in workflow:
     raise SystemExit("CI Compose job does not run the isolated General moderation smoke")
 PY

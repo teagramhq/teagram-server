@@ -161,6 +161,9 @@ ENV
   # shellcheck source=deploy/teagram-demo/demo-common.sh
   source "$seed_dir/demo-common.sh"
   demo_require_env
+  ACTIVE_STAGE="bootstrap server identity with sign-in mode $signin_enabled"
+  demo_compose --profile maintenance run --rm --no-deps teagramd-maintenance \
+    bootstrap-identity >/dev/null
   ACTIVE_STAGE="start private server with sign-in mode $signin_enabled"
   demo_seed_compose up -d --wait --wait-timeout 120 teagramd
   ACTIVE_STAGE="generate client config with sign-in mode $signin_enabled"
