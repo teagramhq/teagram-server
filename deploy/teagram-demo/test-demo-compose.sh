@@ -1058,6 +1058,8 @@ jq -e '
   and .services["demo-probe"].environment.GOMAXPROCS == "1"
   and .services["demo-probe"].environment.GOMEMLIMIT == "192MiB"
   and (.services["demo-probe"].networks | keys) == ["backend"]
+  and .services["demo-probe"].networks.backend.ipv4_address == "198.18.130.4"
+  and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
 ' "$TMP_DIR/seed-profile.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \

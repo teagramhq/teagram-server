@@ -204,7 +204,12 @@ services:
     # The deploy-time probe uses the QA token to inspect signup and sign-in gates.
     secrets:
       - teagram_demo_turnstile_qa_bypass
-    networks: [backend]
+    # Reserve a stable source address outside the dynamic range used by the
+    # private seed helpers. Their elevated key-exchange counters share Postgres
+    # with production and must not throttle this deploy-time probe.
+    networks:
+      backend:
+        ipv4_address: 198.18.130.4
     logging: *logging
 
   demo-activity:
