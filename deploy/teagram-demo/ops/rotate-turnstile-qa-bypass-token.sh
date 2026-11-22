@@ -7,7 +7,7 @@ readonly OPS_SHA=${OPS_SHA:-}
 readonly OPS_NAME=${OPS_NAME:-}
 readonly OP_NAME=rotate-turnstile-qa-bypass-token
 readonly SOURCE_FILES="deploy/teagram-demo/demo-common.sh
-deploy/teagram-demo/compose.yaml
+docker-compose.yml
 deploy/teagram-demo/haproxy.cfg
 deploy/teagram-demo/render-haproxy-config.py
 deploy/teagram-demo/nginx-config/nginx.conf

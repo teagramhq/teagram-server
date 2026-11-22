@@ -93,8 +93,7 @@ show_env_names() {
 show_fingerprints() {
   for path in \
     "$REPO/deploy/teagram-demo/.env" \
-    "$REPO/deploy/teagram-demo/compose.yaml" \
-    "$REPO/deploy/teagram-demo/compose.empty-overrides.yaml" \
+    "$REPO/docker-compose.yml" \
     "$REPO/deploy/teagram-demo/haproxy.cfg" \
     "$REPO/deploy/teagram-demo/nginx.conf" \
     /root/.ssh/authorized_keys \

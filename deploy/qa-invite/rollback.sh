@@ -12,16 +12,16 @@ rollback_failed_up() {
     printf '%s\n' 'qa-invite: project containers remain running; database restore skipped' >&2
   fi
   if [[ "$restore_ok" == 1 && -n "$dump" && -s "$dump" ]]; then
-    compose up -d --wait postgres || restore_ok=0
-    compose exec -T postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
-    compose exec -T postgres createdb -U postgres teagram_rollback || restore_ok=0
-    if compose exec -T postgres pg_restore -U postgres --no-owner --no-privileges \
+    compose up -d --wait qa-invite-postgres || restore_ok=0
+    compose exec -T qa-invite-postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
+    compose exec -T qa-invite-postgres createdb -U postgres teagram_rollback || restore_ok=0
+    if compose exec -T qa-invite-postgres pg_restore -U postgres --no-owner --no-privileges \
       --exit-on-error -d teagram_rollback < "$dump" &&
-      compose exec -T postgres dropdb -U postgres teagram </dev/null &&
-      compose exec -T postgres createdb -U postgres teagram </dev/null &&
-      compose exec -T postgres pg_restore -U postgres --no-owner --no-privileges \
+      compose exec -T qa-invite-postgres dropdb -U postgres teagram </dev/null &&
+      compose exec -T qa-invite-postgres createdb -U postgres teagram </dev/null &&
+      compose exec -T qa-invite-postgres pg_restore -U postgres --no-owner --no-privileges \
         --exit-on-error -d teagram < "$dump"; then
-      compose exec -T postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
+      compose exec -T qa-invite-postgres dropdb -U postgres --if-exists teagram_rollback || restore_ok=0
     else
       restore_ok=0
       printf '%s\n' 'qa-invite: automatic database restore failed; preserve the dump for manual recovery' >&2
@@ -29,7 +29,7 @@ rollback_failed_up() {
   fi
   if [[ -n "$previous_ref" && "$restore_ok" == 1 ]]; then
     write_env "$previous_ref"
-    compose up -d --wait --no-deps teagramd tls-edge haproxy || {
+    compose up -d --wait --no-deps qa-invite-teagramd qa-invite-tls-edge qa-invite-haproxy || {
       restore_ok=0
       printf '%s\n' 'qa-invite: previous image could not be restored automatically' >&2
     }

@@ -41,7 +41,8 @@ DEMO_COMPOSE_ARGS=(
   --env-file "$DEMO_ENV_FILE"
   --project-directory "$DEMO_REPO_ROOT"
   --project-name teagram-demo
-  --file "$DEMO_SCRIPT_DIR/compose.yaml"
+  --file "$DEMO_REPO_ROOT/docker-compose.yml"
+  --profile demo
 )
 
 demo_fail() {
@@ -993,6 +994,17 @@ demo_haproxy_control() {
 
 demo_compose_with_file() {
   local compose_file="$1" image_ref
+  local -a compose_args=(
+    --env-file "$DEMO_ENV_FILE"
+    --project-directory "$DEMO_REPO_ROOT"
+    --project-name teagram-demo
+  )
+  if [[ "$compose_file" != "$DEMO_REPO_ROOT/docker-compose.yml" ]]; then
+    compose_args+=(--file "$compose_file")
+  else
+    compose_args+=(--file "$DEMO_REPO_ROOT/docker-compose.yml")
+  fi
+  compose_args+=(--profile demo)
   shift
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
@@ -1003,12 +1015,23 @@ demo_compose_with_file() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    docker compose --env-file "$DEMO_ENV_FILE" --project-directory "$DEMO_REPO_ROOT" \
-      --project-name teagram-demo --file "$compose_file" "$@" </dev/null
+    docker compose "${compose_args[@]}" "$@" </dev/null
 }
 
 demo_compose() {
-  demo_compose_with_file "$DEMO_SCRIPT_DIR/compose.yaml" "$@"
+  local arg server=''
+  if [[ "${1:-}" == up ]]; then
+    for arg in "$@"; do
+      case "$arg" in
+        teagramd|teagramd-next) server="$arg" ;;
+      esac
+    done
+  fi
+  if [[ -n "$server" ]]; then
+    demo_seed_compose stop "$server" || return 1
+    demo_seed_compose rm -f "$server" || return 1
+  fi
+  demo_compose_with_file "$DEMO_REPO_ROOT/docker-compose.yml" "$@"
 }
 
 demo_validation_compose() {
@@ -1040,7 +1063,14 @@ demo_compose_input() {
 }
 
 demo_bootstrap_compose() {
-  local image_ref
+  local image_ref arg
+  local -a mapped_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      teagramd) mapped_args+=(teagramd-bootstrap) ;;
+      *) mapped_args+=("$arg") ;;
+    esac
+  done
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
@@ -1050,13 +1080,24 @@ demo_bootstrap_compose() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    docker compose "${DEMO_COMPOSE_ARGS[@]}" \
-      --file "$DEMO_SCRIPT_DIR/compose.bootstrap.yaml" \
-      --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
+    docker compose "${DEMO_COMPOSE_ARGS[@]}" --profile bootstrap \
+      "${mapped_args[@]}" </dev/null
 }
 
 demo_seed_compose() {
-  local image_ref
+  local image_ref arg server=''
+  local -a mapped_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      teagramd) mapped_args+=(teagramd-seed); server="$arg" ;;
+      teagramd-next) mapped_args+=(teagramd-next-seed); server="$arg" ;;
+      *) mapped_args+=("$arg") ;;
+    esac
+  done
+  if [[ "${1:-}" == up && -n "$server" ]]; then
+    demo_bootstrap_compose stop "$server" || return 1
+    demo_bootstrap_compose rm -f "$server" || return 1
+  fi
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
@@ -1066,12 +1107,20 @@ demo_seed_compose() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    docker compose "${DEMO_COMPOSE_ARGS[@]}" \
-      --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
+    docker compose "${DEMO_COMPOSE_ARGS[@]}" --profile seed \
+      "${mapped_args[@]}" </dev/null
 }
 
 demo_seed_compose_input() {
-  local image_ref
+  local image_ref arg
+  local -a mapped_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      teagramd) mapped_args+=(teagramd-seed) ;;
+      teagramd-next) mapped_args+=(teagramd-next-seed) ;;
+      *) mapped_args+=("$arg") ;;
+    esac
+  done
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
@@ -1081,8 +1130,8 @@ demo_seed_compose_input() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    docker compose "${DEMO_COMPOSE_ARGS[@]}" \
-      --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@"
+    docker compose "${DEMO_COMPOSE_ARGS[@]}" --profile seed \
+      "${mapped_args[@]}"
 }
 
 demo_check_blob_mount() {

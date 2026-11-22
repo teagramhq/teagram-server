@@ -4,14 +4,14 @@ import test from "node:test";
 
 import { parse } from "yaml";
 
-const compose = parse(readFileSync(new URL("./compose.yaml", import.meta.url), "utf8"));
+const compose = parse(readFileSync(new URL("../../docker-compose.yml", import.meta.url), "utf8"));
 const dockerfile = readFileSync(new URL("./Dockerfile", import.meta.url), "utf8");
 const packageLock = JSON.parse(readFileSync(new URL("./package-lock.json", import.meta.url), "utf8"));
 const runner = readFileSync(new URL("./run.sh", import.meta.url), "utf8");
 
-test("fixed project contains only the isolated browser and CONNECT observer", () => {
-  assert.equal(compose.name, "teagram-browser-acceptance");
-  assert.deepEqual(Object.keys(compose.services).sort(), ["browser", "observer"]);
+test("browser acceptance profile contains the isolated browser and CONNECT observer", () => {
+  assert.deepEqual(compose.services.browser.profiles, ["browser-acceptance"]);
+  assert.deepEqual(compose.services.observer.profiles, ["browser-acceptance"]);
   assert.equal(compose.networks["browser-internal"].internal, true);
   assert.equal(compose.networks["observer-egress"].driver, "bridge");
   assert.equal(compose.services.browser.depends_on.observer.condition, "service_healthy");
@@ -24,7 +24,7 @@ test("fixed project contains only the isolated browser and CONNECT observer", ()
 });
 
 test("services cannot publish ports, mount extra host data, or write Docker logs", () => {
-  for (const service of Object.values(compose.services)) {
+  for (const service of [compose.services.browser, compose.services.observer]) {
     assert.equal(service.logging.driver, "none");
     assert.equal(service.read_only, true);
     assert.deepEqual(service.cap_drop, ["ALL"]);
@@ -78,6 +78,8 @@ test("image and npm dependencies remain locked to the reviewed versions", () => 
 
 test("wrapper fixes the project, closes stdin for readiness and removes only local images", () => {
   assert.ok(runner.includes("--env-file /dev/null"));
+  assert.ok(runner.includes("--profile browser-acceptance"));
+  assert.ok(runner.includes("docker-compose.yml"));
   assert.ok(runner.includes("--project-name teagram-browser-acceptance"));
   assert.ok(runner.includes("run --no-deps --rm -T"));
   assert.ok(runner.includes("exec </dev/null"));

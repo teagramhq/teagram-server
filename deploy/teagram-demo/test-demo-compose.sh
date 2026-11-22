@@ -151,7 +151,8 @@ compose=(
   --env-file "$TMP_DIR/demo.env"
   --project-directory "$REPO_ROOT"
   --project-name teagram-demo
-  --file "$SCRIPT_DIR/compose.yaml"
+  --file "$REPO_ROOT/docker-compose.yml"
+  --profile demo
 )
 TG_UPLOADS_DISABLED=false env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_UPLOAD_MAX_BYTES -u TG_RATE_LIMIT_UPLOAD_BYTES \
@@ -308,7 +309,7 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   docker compose --env-file "$TMP_DIR/demo-signin.env" --profile seed \
     --project-directory "$REPO_ROOT" --project-name teagram-demo \
-    --file "$SCRIPT_DIR/compose.yaml" config --format json > "$TMP_DIR/signin.json"
+    --file "$REPO_ROOT/docker-compose.yml" --profile demo config --format json > "$TMP_DIR/signin.json"
 jq -e '
   .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and ((.services.haproxy.ports // []) | length) == 0
@@ -445,7 +446,7 @@ PY
   }
   demo_compose_with_file() {
     docker compose --project-directory "$REPO_ROOT" --project-name teagram-demo \
-      --file "$1" "${@:2}"
+      --file "$1" --profile demo "${@:2}"
   }
   LEGACY_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
   LEGACY_HASH=$(demo_edge_legacy_compose_hash "$LEGACY_SOURCE_HASH")
@@ -498,7 +499,7 @@ PY
     fi
   }
   demo_compose_with_file() {
-    docker compose --file "$1" "${@:2}"
+    docker compose --file "$1" --profile demo "${@:2}"
   }
   docker() {
     if [[ "$1" == compose ]]; then
@@ -613,7 +614,7 @@ PY
   mkdir -p "$MIGRATION_TEST_DIR/state"
   MIGRATION_CALLS="$MIGRATION_TEST_DIR/calls"
   MIGRATION_PREVIOUS_SHA=1111111111111111111111111111111111111111
-  MIGRATION_PREVIOUS_COMPOSE="$SCRIPT_DIR/testdata/proxy-tmpfs-compose.yaml"
+  MIGRATION_PREVIOUS_COMPOSE="$SCRIPT_DIR/testdata/proxy-tmpfs.fixture"
   MIGRATION_FAIL_SERVICE=
   MIGRATION_BAD_BIND_SERVICE=
   MIGRATION_EGRESS_CHANGED=0
@@ -624,12 +625,16 @@ PY
   DEMO_PROXY_TMPFS_ATTEMPTED=()
 
   migration_hash() {
+    local -a files=(--file "$1")
+    if [[ "$1" != "$MIGRATION_PREVIOUS_COMPOSE" ]]; then
+      files+=(--profile demo)
+    fi
     docker compose --env-file "$TMP_DIR/demo.env" --project-directory "$REPO_ROOT" \
-      --project-name teagram-demo --file "$1" config --hash "$2" | awk '{print $2}'
+      --project-name teagram-demo "${files[@]}" config --hash "$2" | awk '{print $2}'
   }
   for service in turnstile-egress haproxy edge; do
     migration_hash "$MIGRATION_PREVIOUS_COMPOSE" "$service" > "$MIGRATION_TEST_DIR/$service.old"
-    migration_hash "$SCRIPT_DIR/compose.yaml" "$service" > "$MIGRATION_TEST_DIR/$service.current"
+  migration_hash "$REPO_ROOT/docker-compose.yml" "$service" > "$MIGRATION_TEST_DIR/$service.current"
     printf 'old\n' > "$MIGRATION_TEST_DIR/state/$service"
   done
   : > "$MIGRATION_CALLS"
@@ -955,83 +960,77 @@ jq -e '
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  "${compose[@]}" --file "$SCRIPT_DIR/compose.bootstrap.yaml" \
-  --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/bootstrap.json"
+  "${compose[@]}" --profile bootstrap config --format json > "$TMP_DIR/bootstrap.json"
 jq -e '
-  (.services.teagramd.volumes | map(.target) | sort) == ["/var/lib/teagramd", "/var/lib/teagramd-blobs"]
-  and .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
-  and .services.teagramd.environment.HTTP_PROXY == ""
-  and .services.teagramd.environment.HTTPS_PROXY == ""
-  and (.services.teagramd.depends_on | keys) == ["migrate"]
-  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
-  and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  (.services["teagramd-bootstrap"].volumes | map(.target) | sort) == ["/var/lib/teagramd", "/var/lib/teagramd-blobs"]
+  and .services["teagramd-bootstrap"].environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+  and .services["teagramd-bootstrap"].environment.HTTP_PROXY == ""
+  and .services["teagramd-bootstrap"].environment.HTTPS_PROXY == ""
+  and (.services["teagramd-bootstrap"].depends_on | keys) == ["migrate"]
+  and .services["teagramd-bootstrap"].environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services["teagramd-bootstrap"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
   and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
-  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
+  and .services["teagramd-bootstrap"].environment.TG_UPLOADS_DISABLED == "false"
   and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
-  and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-bootstrap"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
   and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
-  and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-bootstrap"].environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
-  and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
-  and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
-  and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
-  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
-  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
-  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-bootstrap"].environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_SITE_KEY == ""
+  and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
   and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
+  and .services["teagramd-bootstrap"].environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
+  and .services["teagramd-bootstrap"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-bootstrap"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
+  and .services["teagramd-bootstrap"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/bootstrap.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
+  "${compose[@]}" --profile seed config --format json > "$TMP_DIR/seed.json"
 jq -e '
-  .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
-  and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
-  and .services["teagramd-next"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
-  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
-  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
-  and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
-  and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
-  and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
-  and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
-  and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
-  and .services.teagramd.environment.HTTP_PROXY == ""
-  and .services.teagramd.environment.HTTPS_PROXY == ""
-  and (.services.teagramd.depends_on | keys) == ["migrate"]
-  and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
-  and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
-  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
-  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
-  and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
-  and .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
-  and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
-  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
-  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
+  .services["teagramd-seed"].environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services["teagramd-seed"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  and .services["teagramd-next-seed"].environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
+  and .services["teagramd-seed"].environment.TG_UPLOADS_DISABLED == "false"
+  and .services["teagramd-next-seed"].environment.TG_UPLOADS_DISABLED == "false"
+  and .services["teagramd-seed"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-next-seed"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
+  and .services["teagramd-seed"].environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-next-seed"].environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-seed"].environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and .services["teagramd-seed"].environment.HTTP_PROXY == ""
+  and .services["teagramd-seed"].environment.HTTPS_PROXY == ""
+  and (.services["teagramd-seed"].depends_on | keys) == ["migrate"]
+  and .services["teagramd-seed"].environment.TG_TURNSTILE_SITE_KEY == ""
+  and .services["teagramd-seed"].environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services["teagramd-seed"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-next-seed"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-seed"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-next-seed"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
+  and .services["teagramd-next-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "256"
+  and .services["teagramd-next-seed"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
+  and .services["teagramd-seed"].environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  "${compose[@]}" --profile seed --file "$SCRIPT_DIR/compose.seed.yaml" \
-  config --format json > "$TMP_DIR/seed-profile.json"
+  "${compose[@]}" --profile seed config --format json > "$TMP_DIR/seed-profile.json"
 jq -e '
   .services["demo-seed"].profiles == ["seed"]
   and .services["demo-seed"].image == "teagramd:local"
@@ -1173,11 +1172,12 @@ python3 "$SCRIPT_DIR/blob-mode/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/bootstrap.json" > "$TMP_DIR/bootstrap-inventory.json"
 jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
   (.services | map(.name)) == ["teagramd", "teagramd-next"]
+  and ($bootstrap[0].services | map(.name)) == ["teagramd"]
   and all(.services[]; .initial_local_guard_environment == {
     "TG_REPLICA_COUNT": "1",
     "TG_CLIENT_ADDR_TRUST": "socket"
   })
-  and all(.services[]; . as $seed | any($bootstrap[0].services[];
+  and (.services[0] as $seed | any($bootstrap[0].services[];
     .name == $seed.name
     and .tg_environment_sha256 == $seed.tg_environment_sha256
     and .network == $seed.network
@@ -1210,7 +1210,7 @@ grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.c
 grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'uwsgi_temp_path /tmp/uwsgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'scgi_temp_path /tmp/scgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR/compose.yaml"
+grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$REPO_ROOT/docker-compose.yml"
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"

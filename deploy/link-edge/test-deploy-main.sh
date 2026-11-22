@@ -9,7 +9,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/repo/deploy/link-edge" "$tmp/state"
 cp "$script" "$tmp/repo/deploy/link-edge/deploy-main.sh"
 cp "$script_dir/validate-discovery.py" "$tmp/repo/deploy/link-edge/validate-discovery.py"
-: > "$tmp/repo/deploy/link-edge/compose.yaml"
+: > "$tmp/repo/docker-compose.yml"
 script="$tmp/repo/deploy/link-edge/deploy-main.sh"
 
 cat > "$tmp/bin/docker" <<'DOCKER'
@@ -148,7 +148,7 @@ export TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
 export TG_INVITE_DESKTOP_URL=
 export MOCK_DOCKER_STATE="$tmp/state"
 export MOCK_DOCKER_LOG="$tmp/docker.log"
-export MOCK_COMPOSE_FILE="$tmp/repo/deploy/link-edge/compose.yaml"
+export MOCK_COMPOSE_FILE="$tmp/repo/docker-compose.yml"
 export PATH="$tmp/bin:$PATH"
 
 if env -u TG_INVITE_WEB_SIGNUP_URL bash "$script" 0123456789abcdef0123456789abcdef01234567 >"$tmp/missing-target.log" 2>&1; then

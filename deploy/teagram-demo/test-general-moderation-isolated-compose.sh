@@ -96,9 +96,10 @@ copy_fixture_checkout() {
   rm -f -- "$destination/deploy/teagram-demo/.env"
   cp -a -- "$REPO_ROOT/migrations" "$destination/migrations"
   cp -- "$REPO_ROOT/Dockerfile" "$destination/Dockerfile"
+  cp -- "$REPO_ROOT/docker-compose.yml" "$destination/docker-compose.yml"
   cp -- "$REPO_ROOT/cmd/demo-seed/main.go" "$REPO_ROOT/cmd/demo-seed/seed.go" \
     "$destination/cmd/demo-seed/"
-  python3 - "$destination/deploy/teagram-demo/compose.yaml" "$project_name" \
+  python3 - "$destination/docker-compose.yml" "$project_name" \
     "$destination/deploy/teagram-demo/demo-common.sh" <<'PY'
 import pathlib
 import sys

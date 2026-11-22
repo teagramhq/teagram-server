@@ -20,13 +20,19 @@ SPEC.loader.exec_module(CHECKER)
 def resolved_compose() -> dict[str, Any]:
     services = {
         name: {"restart": "no"}
-        for name in CHECKER.ONE_SHOT_SERVICES
+        for name in CHECKER.NO_RESTART_SERVICES
     }
     services.update(
         {
-            "postgres": {"restart": "unless-stopped"},
+            "local-postgres": {"restart": "unless-stopped"},
             "rustfs": {"restart": "unless-stopped"},
+            "local-teagramd": {"restart": "unless-stopped"},
+            "postgres": {"restart": "unless-stopped"},
             "teagramd": {"restart": "unless-stopped"},
+            "qa-invite-postgres": {"restart": "unless-stopped"},
+            "qa-invite-teagramd": {"restart": "unless-stopped"},
+            "linklanding": {"restart": "unless-stopped"},
+            "selector": {"restart": "unless-stopped"},
             "public-haproxy": {"restart": "unless-stopped"},
             "teagramd-public-1": {"restart": "unless-stopped"},
             "teagramd-public-2": {"restart": "unless-stopped"},

@@ -378,7 +378,7 @@ case "$1" in
         exit 42
       fi
       # Compose omits services whose profiles are inactive from config output.
-      if [[ " $* " != *' --profile migration config --format json'* ]]; then
+      if [[ " $* " != *' --profile local --profile migration config --format json'* ]]; then
         jq -cn --arg key "$FIXTURE_KEY_DIR" \
           '{services:{teagramd:{image:"teagramd:local",
             environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys"},

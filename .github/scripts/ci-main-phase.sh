@@ -11,7 +11,7 @@ run_phase_command() {
     build)
       export TG_INVITE_WEB_SIGNUP_URL=https://web.example.invalid/signup
       export TG_INVITE_DESKTOP_URL=
-      env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+      env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge build
       ;;
     label-check)
       for image in teagram-linklanding:local teagram-linkselector:local; do

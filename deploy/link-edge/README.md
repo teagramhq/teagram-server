@@ -49,8 +49,8 @@ service settings and build only these images:
 ```sh
 export TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
 unset TG_INVITE_DESKTOP_URL
-docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config
-docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge config
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge build
 ```
 
 Set `TG_INVITE_DESKTOP_URL` only when the desktop invite destination is ready;
@@ -98,8 +98,8 @@ listeners.
 The rollout starts and stops this project only:
 
 ```sh
-docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml up -d --build
-docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml ps -a
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge up -d --build
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge ps -a
 ```
 
 Before changing Serve, verify the health checks and synthetic landing over
@@ -108,7 +108,7 @@ Before changing Serve, verify the health checks and synthetic landing over
 binding for landing and confirm the 8082 listener with `netstat`:
 
 ```sh
-docker port "$(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml ps --quiet linklanding)" 8082/tcp
+docker port "$(POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge ps --quiet linklanding)" 8082/tcp
 netstat -ltn | grep -w 8082
 ```
 
@@ -153,7 +153,7 @@ To manually restore the last selector image, from `/opt/teagram` run:
 docker image tag teagram-linkselector:rollback teagram-linkselector:local
 docker compose --env-file /dev/null \
   --project-directory /opt/teagram/deploy/link-edge \
-  --file /opt/teagram/deploy/link-edge/compose.yaml \
+  --file /opt/teagram/docker-compose.yml --profile link-edge \
   --project-name teagram-link-edge \
   up -d --no-deps --wait --wait-timeout 60 selector
 ```
@@ -169,7 +169,7 @@ Restore only HTTPS `/` to Web at `http://127.0.0.1:8080`, confirm `/apiws`,
 ```sh
 tailscale serve --bg --https=443 --set-path=/ http://127.0.0.1:8080
 tailscale serve status --json
-docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml down
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge down
 ```
 
 This removes only the selector, landing container, and this project's private

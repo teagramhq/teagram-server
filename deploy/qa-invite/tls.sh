@@ -45,7 +45,7 @@ wait_for_qa_tls() {
   return 1
 }
 
-reload_qa_tls() { compose exec -T tls-edge nginx -s reload; }
+reload_qa_tls() { compose exec -T qa-invite-tls-edge nginx -s reload; }
 
 validate_qa_ca() {
   local ca_key=$1 ca_cert=$2 ca_constraints expected_constraints ca_eku ca_public ca_key_public

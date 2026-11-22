@@ -430,7 +430,7 @@ python3 "$MODE_HELPER" validate \
   --report-root "$DEMO_STATE_DIR/reports" \
   --containers "$TMP_DIR/containers.json" \
   --compose "$TARGET_INVENTORY" \
-  --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
+  --override /dev/null \
   --checkout "$DEMO_REPO_ROOT"
 
 mapfile -t SERVER_IDS < <(demo_compose ps -q "$ACTIVE_SERVER")

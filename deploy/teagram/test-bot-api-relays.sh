@@ -17,7 +17,7 @@ trap cleanup EXIT
 
 published=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://example.invalid \
-  docker compose -f "$ROOT/docker-compose.yml" --profile bot-api-qa config --format json |
+  docker compose -f "$ROOT/docker-compose.yml" --profile local --profile bot-api-qa config --format json |
   jq --arg name "$project" --arg port "$published" '
     .services as $s
     | {name:$name, services:{

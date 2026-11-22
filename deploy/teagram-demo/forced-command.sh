@@ -111,7 +111,7 @@ if [[ "$ACTION" == qa-invite ]]; then
       "$(stat -c '%u:%a' "$RELEASE_DIR")" == '0:700' &&
       -d "$RELEASE_DIR/deploy" && ! -L "$RELEASE_DIR/deploy" &&
       -d "$RELEASE_DIR/deploy/qa-invite" && ! -L "$RELEASE_DIR/deploy/qa-invite" &&
-      -f "$RELEASE_DIR/deploy/qa-invite/compose.yaml" && ! -L "$RELEASE_DIR/deploy/qa-invite/compose.yaml" &&
+      -f "$RELEASE_DIR/docker-compose.yml" && ! -L "$RELEASE_DIR/docker-compose.yml" &&
       -f "$RELEASE_DIR/deploy/qa-invite/remote.sh" && ! -L "$RELEASE_DIR/deploy/qa-invite/remote.sh" &&
       -f "$RELEASE_DIR/deploy/qa-invite/postgresql.conf" && ! -L "$RELEASE_DIR/deploy/qa-invite/postgresql.conf" &&
       -f "$RELEASE_DIR/deploy/qa-invite/nginx.conf" && ! -L "$RELEASE_DIR/deploy/qa-invite/nginx.conf" &&
@@ -127,7 +127,7 @@ if [[ "$ACTION" == qa-invite ]]; then
     verify_release || { echo 'existing reviewed QA snapshot is unsafe or incomplete' >&2; exit 1; }
   else
     WORK_DIR=$(mktemp -d "$RELEASES_DIR/.${SHA}.XXXXXXXX")
-    git -C "$REPO" archive --format=tar "$SHA" deploy/qa-invite migrations |
+    git -C "$REPO" archive --format=tar "$SHA" docker-compose.yml deploy/qa-invite migrations |
       tar -xf - -C "$WORK_DIR" || {
         echo 'could not extract the reviewed QA invite project' >&2
         exit 1

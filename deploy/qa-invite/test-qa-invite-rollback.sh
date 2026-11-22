@@ -39,7 +39,7 @@ grep -Fq 'project containers remain running; database restore skipped' "$TMP/run
   printf '%s\n' 'qa-invite rollback test: failed shutdown was not reported' >&2
   exit 1
 }
-if grep -Fq 'compose up -d --wait postgres' "$events"; then
+if grep -Fq 'compose up -d --wait qa-invite-postgres' "$events"; then
   printf '%s\n' 'qa-invite rollback test: database restore ran while a project container remained running' >&2
   exit 1
 fi
@@ -49,13 +49,13 @@ grep -Fq 'could not verify that project containers stopped; database restore ski
   printf '%s\n' 'qa-invite rollback test: failed container verification was not reported' >&2
   exit 1
 }
-if grep -Fq 'compose up -d --wait postgres' "$events"; then
+if grep -Fq 'compose up -d --wait qa-invite-postgres' "$events"; then
   printf '%s\n' 'qa-invite rollback test: database restore ran without container-state verification' >&2
   exit 1
 fi
 
 run_fixture '' 0 0 2> "$TMP/safe.stderr"
-grep -Fq 'compose up -d --wait postgres' "$events" || {
+grep -Fq 'compose up -d --wait qa-invite-postgres' "$events" || {
   printf '%s\n' 'qa-invite rollback test: safe recovery did not restore Postgres' >&2
   exit 1
 }

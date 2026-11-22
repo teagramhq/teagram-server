@@ -273,7 +273,7 @@ configure_compose() {
   compose_stderr="$EVIDENCE_ROOT/compose-render-$RUN_ID.stderr"
   [[ ! -e "$compose_stderr" && ! -L "$compose_stderr" ]] || \
     ops_fail 'Compose render diagnostic path already exists'
-  if ! "${COMPOSE[@]}" --profile migration config --format json </dev/null \
+  if ! "${COMPOSE[@]}" --profile local --profile migration config --format json </dev/null \
     > "$OPS_TEMP_DIR/compose.json" 2> "$compose_stderr"; then
     chmod 600 -- "$compose_stderr" || ops_fail 'cannot protect Compose render diagnostics'
     ops_fail "live Compose render failed; private diagnostic retained at $compose_stderr"
@@ -447,7 +447,7 @@ run_migration_job() {
   [[ ! -e "$result_path" && ! -L "$result_path" && ! -e "$stderr_path" && ! -L "$stderr_path" ]] || \
     ops_fail 'media migration evidence path already exists'
   verify_migration_image
-  if "${COMPOSE[@]}" --profile migration run --rm --no-deps blob-encrypt-migrate "${job_args[@]}" \
+  if "${COMPOSE[@]}" --profile local --profile migration run --rm --no-deps blob-encrypt-migrate "${job_args[@]}" \
     > "$OPS_TEMP_DIR/job.json" 2> "$stderr_path"; then
     chmod 600 -- "$stderr_path" || ops_fail 'cannot protect migration diagnostics'
   else

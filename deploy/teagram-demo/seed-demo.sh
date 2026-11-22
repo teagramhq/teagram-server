@@ -170,13 +170,13 @@ PY
 check_source_wiring() {
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/main.go" ]] || demo_fail 'demo-seed source is missing'
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/seed.go" ]] || demo_fail 'demo-seed API implementation is missing'
-  [[ -f "$DEMO_SCRIPT_DIR/compose.seed.yaml" ]] || demo_fail 'seed Compose overlay is missing'
+  [[ -f "$DEMO_REPO_ROOT/docker-compose.yml" ]] || demo_fail 'root Compose file is missing'
   [[ -x "$DEMO_SCRIPT_DIR/moderate-general.sh" ]] || demo_fail 'General moderation command is missing or not executable'
   [[ -x "$DEMO_SCRIPT_DIR/test-seed-compose.sh" ]] || demo_fail 'seed convergence Compose API test is missing or not executable'
   [[ -x "$DEMO_SCRIPT_DIR/test-general-moderation-compose.sh" ]] || demo_fail 'General moderation Compose smoke test is missing or not executable'
   grep -Fq 'go build -o /demo-seed ./cmd/demo-seed' "$DEMO_REPO_ROOT/Dockerfile" ||
     demo_fail 'Dockerfile does not build the demo-seed binary'
-  grep -Fq 'entrypoint: ["/usr/local/bin/demo-seed"]' "$DEMO_SCRIPT_DIR/compose.yaml" ||
+  grep -Fq 'entrypoint: ["/usr/local/bin/demo-seed"]' "$DEMO_REPO_ROOT/docker-compose.yml" ||
     demo_fail 'Compose does not wire the demo-seed binary'
 }
 

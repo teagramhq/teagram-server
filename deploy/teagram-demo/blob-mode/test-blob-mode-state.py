@@ -786,6 +786,40 @@ class BlobModeStateTests(unittest.TestCase):
             "teagramd", blob_mode.MODE_TARGET, blob_mode.BLOB_TARGET, blob_mode.KEY_TARGET,
         )
 
+    def test_initial_local_inventory_accepts_bootstrap_alias_and_unstarted_next_slot(self) -> None:
+        self.assert_initial_local_inventory(
+            "teagramd",
+            blob_mode.MODE_TARGET,
+            blob_mode.BLOB_TARGET,
+            blob_mode.KEY_TARGET,
+            container_service="teagramd-bootstrap",
+            include_next_slot=True,
+        )
+
+    def test_compose_inventory_selects_and_canonicalizes_profile_services(self) -> None:
+        self.assertEqual(
+            blob_mode.compose_runtime_services({
+                "teagramd": {},
+                "teagramd-next": {},
+                "teagramd-bootstrap": {},
+            }),
+            {"teagramd-bootstrap"},
+        )
+        self.assertEqual(
+            blob_mode.compose_runtime_services({
+                "teagramd": {},
+                "teagramd-next": {},
+                "teagramd-seed": {},
+                "teagramd-next-seed": {},
+            }),
+            {"teagramd-seed", "teagramd-next-seed"},
+        )
+        self.assertEqual(blob_mode.canonical_runtime_service("teagramd-bootstrap"), "teagramd")
+        self.assertEqual(blob_mode.canonical_runtime_service("teagramd-seed"), "teagramd")
+        self.assertEqual(blob_mode.canonical_runtime_service("teagramd-next-seed"), "teagramd-next")
+        with self.assertRaises(blob_mode.Reject):
+            blob_mode.compose_runtime_services({"teagramd-bootstrap": {}, "teagramd-seed": {}})
+
     def test_initial_local_environment_ignores_only_disabled_public_websocket_defaults(self) -> None:
         baseline = {
             "TG_RSA_KEY_PATH": blob_mode.IMAGE_ENV_DEFAULTS["TG_RSA_KEY_PATH"],
@@ -854,7 +888,15 @@ class BlobModeStateTests(unittest.TestCase):
             "telegramd", "/run/telegramd/blob-mode", "/var/lib/telegramd-blobs", "/var/lib/telegramd",
         )
 
-    def assert_initial_local_inventory(self, service: str, mode_target: str, blob_target: str, key_target: str) -> None:
+    def assert_initial_local_inventory(
+        self,
+        service: str,
+        mode_target: str,
+        blob_target: str,
+        key_target: str,
+        container_service: str | None = None,
+        include_next_slot: bool = False,
+    ) -> None:
         mode_mount = {
             "type": "bind", "source": self.mode_source,
             "target": mode_target, "read_only": True,
@@ -894,13 +936,17 @@ class BlobModeStateTests(unittest.TestCase):
             },
             "networks": {"default": {"name": "teagram-server_default"}},
         }
+        if include_next_slot:
+            compose["services"]["teagramd-next"] = dict(compose["services"][service])
         rendered = blob_mode.compose_inventory(compose, pathlib.Path("/srv/teagram-server"))
+        if include_next_slot:
+            self.assertEqual([item["name"] for item in rendered["services"]], ["teagramd", "teagramd-next"])
         self.assertEqual(rendered["services"][0]["tg_environment_sha256"], blob_mode.teagramd_environment_sha256(desired_environment))
         inspected = [{
             "Id": "a" * 64,
             "Config": {
                 "Env": [f"{key}={value}" for key, value in desired_environment.items() if key not in blob_mode.INITIAL_LOCAL_GUARD_ENV],
-                "Labels": {"com.docker.compose.service": service},
+                "Labels": {"com.docker.compose.service": container_service or service},
             },
             "State": {"Status": "running"},
             "HostConfig": {
@@ -1756,7 +1802,7 @@ class BlobModeStateTests(unittest.TestCase):
             ("changed application environment", lambda c, t: t["services"][0].update(tg_environment_sha256="f" * 64), "initial-render-environment"),
             ("unapproved replica count", lambda c, t: t["services"][0]["initial_local_guard_environment"].update(TG_REPLICA_COUNT="2"), "initial-render-guard-environment"),
             ("S3 baseline", lambda c, t: c["containers"][0].update(backend={"kind": "s3", "endpoint": "https://objects.invalid", "bucket": "fixture", "prefix": "fixture/"}), "initial-baseline-not-local"),
-            ("conflicting target replica", lambda c, t: t["services"].append({"name": "teagramd-replica", "backend": backend, "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}), "running-service-not-rendered"),
+            ("conflicting target replica", lambda c, t: t["services"].append({"name": "teagramd-replica", "backend": backend, "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}), "initial-render-network"),
         ]
         for name, mutate, reason in cases:
             with self.subTest(name=name):

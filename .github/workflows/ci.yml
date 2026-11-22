@@ -359,7 +359,9 @@ jobs:
         env:
           SECCOMP_PROFILE: ${{ github.workspace }}/deploy/browser-acceptance/seccomp-browser.json
         run: |
-          docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json >"$RUNNER_TEMP/browser-acceptance-compose.json"
+          env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+            docker compose --env-file /dev/null --project-directory . --file docker-compose.yml \
+              --profile browser-acceptance config --format json >"$RUNNER_TEMP/browser-acceptance-compose.json"
           jq -e '
             .name == "teagram-browser-acceptance"
             and (.services | keys | sort) == ["browser", "observer"]
@@ -456,7 +458,7 @@ jobs:
 
       - name: Resolve Playwright from the mounted QA runner path
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
+          compose=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile browser-acceptance --project-name teagram-browser-acceptance)
           resolved="$("${compose[@]}" run --no-deps --rm -T \
             --volume "$PWD/deploy/browser-acceptance/private-browser-acceptance-v2.mjs:/opt/browser-acceptance/approved-qa.mjs:ro" \
             --entrypoint node browser --input-type=module -e '
@@ -472,7 +474,7 @@ jobs:
 
       - name: Smoke sandbox, denied CONNECT, browser egress isolation, and real readiness
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
+          compose=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile browser-acceptance --project-name teagram-browser-acceptance)
           cleanup() { "${compose[@]}" down --rmi local >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           "${compose[@]}" up --detach --wait observer
@@ -600,6 +602,7 @@ jobs:
       # reaper to reap here; it is pure risk. Leave it on locally, where a leaked
       # container does outlive the run.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      COMPOSE_PROFILES: local
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -674,7 +677,9 @@ jobs:
           TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
           TG_INVITE_DESKTOP_URL: ''
         run: |
-          docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config --format json >"$RUNNER_TEMP/link-edge-compose.json"
+          env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+            docker compose --env-file /dev/null --project-directory . --file docker-compose.yml \
+              --profile link-edge config --format json >"$RUNNER_TEMP/link-edge-compose.json"
           jq -e '
             (.services | keys | sort) == ["linklanding", "selector"]
             and all(.services[]; .read_only == true)
@@ -735,7 +740,9 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
           test -z "$(git status --porcelain)"
-          docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+          env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+            docker compose --env-file /dev/null --project-directory . --file docker-compose.yml \
+              --profile link-edge build
           for image in teagram-linklanding:local teagram-linkselector:local; do
             source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
             revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
@@ -750,7 +757,7 @@ jobs:
           TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
           TG_INVITE_DESKTOP_URL: ''
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
+          compose=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge)
           output_file="$RUNNER_TEMP/link-edge-provenance-rejection.log"
           expect_rejection() {
             name="$1"
@@ -783,7 +790,7 @@ jobs:
           TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
           TG_INVITE_DESKTOP_URL: ''
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
+          compose=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge)
           docker network create teagram-web-edge-net
           cleanup() {
             "${compose[@]}" down --remove-orphans
@@ -3444,6 +3451,7 @@ jobs:
 
     env:
       TEAGRAMD_SOURCE_REVISION: ${{ github.sha }}
+      COMPOSE_PROFILES: local
       BUSYBOX_IMAGE: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
       # The remote media gate below uses the same testcontainers Postgres
       # harness as `make test`; the runner is disposable, so its reaper only
@@ -3527,8 +3535,9 @@ jobs:
             31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
             "$fixture" | sha256sum --check
 
-          compose=(docker compose --env-file /dev/null --project-name photothumb-qualification \
-            --file deploy/photothumb-runtime/compose.yaml)
+          compose=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+            docker compose --env-file /dev/null --project-directory . --project-name photothumb-qualification \
+            --file docker-compose.yml --profile photothumb-qualification)
           "${compose[@]}" config --format json > "$RUNNER_TEMP/photothumb-compose.json"
           jq -e '
             (.services | keys) == ["worker"]
@@ -3609,7 +3618,7 @@ jobs:
 
           # Compose omits inactive profile services, so include migration to
           # inspect its read-only mount.
-          docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
+          docker compose --profile local --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
           # Include every profile so the restart contract covers production
           # replicas and proxy services as well as the default stack.
           docker compose --profile '*' config --format json >"$RUNNER_TEMP/teagram-server-all-compose.json"
@@ -3619,33 +3628,33 @@ jobs:
             (.name == "teagram")
             and (.volumes.pgdata.name == "teagram_pgdata")
             and (.volumes.tgkey.name == "teagram_tgkey")
-            and (.volumes.tgblobs.name == "teagram_tgblobs")
+            and (.volumes.local_tgblobs.name == "teagram_tgblobs")
             and (.volumes.rustfsdata.name == "teagram_rustfsdata")
             and (.volumes.blob_key_rotate_reports.name == "teagram_blob_key_rotate_reports")
             and (.volumes.blob_key_rotate_reports.driver == "local")
             and ((.volumes.blob_key_rotate_reports.driver_opts // {}) == {})
-            and (.services.postgres.environment.POSTGRES_DB == "teagram")
-            and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
-            and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
+            and (.services["local-postgres"].environment.POSTGRES_DB == "teagram")
+            and (.services["local-teagramd"].environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
+            and (any(.services["local-migrate"].command[]; endswith("/teagram?sslmode=disable")))
             and (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
-            and (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == $revision)
+            and (.services["local-teagramd"].build.args.TEAGRAMD_SOURCE_REVISION == $revision)
             and ((.services.rustfs.ports // []) | length == 0)
             and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
-            and (.services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
-            and (.services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram")
-            and (.services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/")
-            and (.services.teagramd.environment.TG_MEDIA_KEY_DIR == "/run/teagramd/media-keys")
-            and (.services.teagramd.environment.TG_MEDIA_KEY_CURRENT == "1")
-            and (.services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
-            and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
-            and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
-            and any(.services.teagramd.volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
+            and (.services["local-teagramd"].environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
+            and (.services["local-teagramd"].environment.TG_BLOB_S3_BUCKET == "teagram")
+            and (.services["local-teagramd"].environment.TG_BLOB_S3_PREFIX == "teagramd/")
+            and (.services["local-teagramd"].environment.TG_MEDIA_KEY_DIR == "/run/teagramd/media-keys")
+            and (.services["local-teagramd"].environment.TG_MEDIA_KEY_CURRENT == "1")
+            and (.services["local-teagramd"].depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services["local-teagramd"].volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
+            and any(.services["local-teagramd"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and any(.services["local-teagramd"].volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
             and any(.services["blob-encrypt-migrate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and (.read_only // false) == false)
             and (.services["blob-key-rotate"].profiles == ["migration"])
             and (.services["blob-key-rotate"].entrypoint == ["/usr/local/bin/blob-key-rotate"])
             and (.services["blob-key-rotate"].user == "0:0")
             and (.services["blob-key-rotate"].read_only == true)
-            and (.services["blob-key-rotate"].depends_on["postgres"].condition == "service_healthy")
+            and (.services["blob-key-rotate"].depends_on["local-postgres"].condition == "service_healthy")
             and (.services["blob-key-rotate"].depends_on["rustfs-init"].condition == "service_completed_successfully")
             and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
             and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .source == "blob_key_rotate_reports" and .target == "/run/teagramd/reports" and (.read_only // false) == false)
@@ -3653,7 +3662,7 @@ jobs:
             and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .target == "/var/lib/teagramd" and .read_only == true)
             and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
             and any(.services["blob-key-rotate"].secrets[]; .source == "teagramd_blob_secret_key" and .target == "teagramd-blob-secret-key")
-            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate" and .key != "blob-key-rotate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "local-teagramd" and .key != "blob-encrypt-migrate" and .key != "blob-key-rotate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
@@ -3670,19 +3679,19 @@ jobs:
             docker compose --env-file /dev/null --file docker-compose.yml config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-public-turnstile-default.json"
           jq -e '
-            .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
-            and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io"
+            .services["local-teagramd"].environment.TG_TURNSTILE_TEST_MODE == "false"
+            and .services["local-teagramd"].environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io"
           ' "$RUNNER_TEMP/teagram-server-compose-public-turnstile-default.json"
 
           env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
             -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
           jq -e '
-            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "")
-            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
-            and (.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "")
-            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
-            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            (.services["local-teagramd"].environment.TG_TURNSTILE_SITE_KEY == "")
+            and (.services["local-teagramd"].environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
+            and (.services["local-teagramd"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "")
+            and (.services["local-teagramd"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
+            and any(.services["local-teagramd"].secrets[]; .target == "teagramd-turnstile")
             and (.secrets.teagramd_turnstile.file == "/dev/null")
           ' "$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
 
@@ -3691,25 +3700,25 @@ jobs:
             TG_TURNSTILE_SIGNIN_ENABLED=true docker compose config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
           jq -e --arg secret_file "$PWD/.secrets/teagramd-blob-secret-key" '
-            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "turnstile-site-key")
-            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile")
-            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
-            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            (.services["local-teagramd"].environment.TG_TURNSTILE_SITE_KEY == "turnstile-site-key")
+            and (.services["local-teagramd"].environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile")
+            and (.services["local-teagramd"].environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
+            and any(.services["local-teagramd"].secrets[]; .target == "teagramd-turnstile")
             and (.secrets.teagramd_turnstile.file == $secret_file)
           ' "$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
 
-          env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
+          env -u TEAGRAMD_SOURCE_REVISION docker compose --profile local --profile migration config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
           jq -e '
-            (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == "")
+            (.services["local-teagramd"].build.args.TEAGRAMD_SOURCE_REVISION == "")
           ' "$RUNNER_TEMP/teagram-server-compose-no-revision.json"
 
           default_path=$(docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["local-teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$default_path" = /var/lib/teagramd/enc_key.hex ] \
             || { echo "compose default key path is $default_path"; exit 1; }
           override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/other.hex docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["local-teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
@@ -3732,10 +3741,10 @@ jobs:
           }
 
           # Create the persistent RSA identity before starting the read-only server.
-          compose run --rm --no-deps teagramd bootstrap-identity
+          compose run --rm --no-deps local-teagramd bootstrap-identity
 
           # Start the local development stack on a throwaway, empty S3 authority.
-          compose up -d postgres migrate teagramd rustfs rustfs-init
+          compose up -d local-postgres local-migrate local-teagramd rustfs rustfs-init
 
           # RustFS has a real readiness endpoint, unlike the distroless
           # teagramd image. Check it directly so a failed dependency cannot be
@@ -3755,10 +3764,10 @@ jobs:
 
           wait_listening() {
             for _ in $(seq 60); do
-              if compose logs teagramd 2>&1 | grep -q 'msg=listening'; then
-                if [ -z "$(compose ps --status running -q teagramd)" ]; then
+              if compose logs local-teagramd 2>&1 | grep -q 'msg=listening'; then
+                if [ -z "$(compose ps --status running -q local-teagramd)" ]; then
                   compose ps -a
-                  compose logs teagramd
+                  compose logs local-teagramd
                   echo "teagramd logged msg=listening then stopped"
                   return 1
                 fi
@@ -3772,7 +3781,7 @@ jobs:
             return 1
           }
           wait_listening
-          compose logs teagramd
+          compose logs local-teagramd
 
           # Seed one known object for the negative public-access checks and a
           # second object whose content is checked only after a RustFS restart.
@@ -3885,7 +3894,7 @@ jobs:
             echo "runner reached RustFS through its private container address"
             exit 1
           fi
-          app_cid=$(compose ps -q teagramd)
+          app_cid=$(compose ps -q local-teagramd)
           app_networks=$(docker inspect "$app_cid" --format '{{json .NetworkSettings.Networks}}')
           default_network=$(jq -er --arg private "$rustfs_network" \
             'keys | map(select(. != $private)) | if length == 1 then .[0] else error("teagramd network inventory mismatch") end' \
@@ -3936,9 +3945,9 @@ jobs:
             *TestMediaRoundTrip*) ;;
             *) echo "the S3 media e2e test left no objects in its RustFS prefix"; exit 1 ;;
           esac
-          compose up -d --force-recreate --no-deps teagramd
+          compose up -d --force-recreate --no-deps local-teagramd
           wait_listening
-          if compose logs teagramd | grep -q 'S3 media encryption remains disabled for accepted plaintext cutover'; then
+          if compose logs local-teagramd | grep -q 'S3 media encryption remains disabled for accepted plaintext cutover'; then
             echo "authority-free S3 restart selected accepted plaintext mode"
             exit 1
           fi
@@ -3974,8 +3983,8 @@ jobs:
       - name: Smoke featured bundle packs through the real client
         run: |
           go mod download
-          teagramd_id=$(docker compose ps -q teagramd)
-          postgres_id=$(docker compose ps -q postgres)
+          teagramd_id=$(docker compose ps -q local-teagramd)
+          postgres_id=$(docker compose ps -q local-postgres)
           test -n "$teagramd_id" && test -n "$postgres_id"
           key_volume=$(docker inspect "$teagramd_id" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
           test -n "$key_volume"

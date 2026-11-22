@@ -21,10 +21,21 @@ from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / "deploy/link-edge/control-compose.yaml"
+FIXTURE = ROOT / "docker-compose.yml"
 IDENTITY_GATE = ROOT / "deploy/link-edge/container-identity-gate.sh"
 IMAGE_SOURCE = "https://github.com/teagramhq/teagram-server"
 SERVICES = ("selector", "linklanding", "web", "probe")
+COMPOSE_SERVICES = {
+    "selector": "control-selector",
+    "linklanding": "control-linklanding",
+    "web": "web",
+    "probe": "control-probe",
+}
+COMPOSE_NETWORKS = {
+    "web-edge": "control-web-edge",
+    "private-edge": "control-private-edge",
+    "landing-publish": "control-landing-publish",
+}
 REQUIRED_CASES = (
     "baseline",
     "web_stopped",
@@ -346,6 +357,9 @@ class LinkEdgeControl:
         self.env = os.environ.copy()
         self.env.update(
             {
+                "POSTGRES_PASSWORD": "compose-config-only",
+                "TG_PUBLIC_LINK_PREFIX": "https://invalid.example/",
+                "COMPOSE_PROFILES": "link-edge-control",
                 "EDGE_IMAGE_SOURCE": IMAGE_SOURCE,
                 "EDGE_IMAGE_REVISION": "",
                 "LINK_EDGE_CONTROL_PROJECT": self.project,
@@ -414,12 +428,14 @@ class LinkEdgeControl:
                 "--env-file",
                 "/dev/null",
                 "--project-directory",
-                str(FIXTURE.parent),
+                str(ROOT),
                 "--file",
                 str(FIXTURE),
+                "--profile",
+                "link-edge-control",
                 "--project-name",
                 self.project,
-                *args,
+                *(COMPOSE_SERVICES.get(arg, arg) for arg in args),
             ],
             reason,
             timeout,
@@ -489,12 +505,30 @@ class LinkEdgeControl:
         self.record({"record_type": "compose_config", "verdict": "pass"})
 
     def validate_projection(self, config: dict[str, object]) -> None:
-        services = config.get("services")
-        networks = config.get("networks")
-        if not isinstance(services, dict) or set(services) != {"linklanding", "selector", "web", "probe"}:
+        resolved_services = config.get("services")
+        resolved_networks = config.get("networks")
+        if not isinstance(resolved_services, dict) or set(resolved_services) != set(COMPOSE_SERVICES.values()):
             raise ControlFailure("compose_policy_failed")
-        if not isinstance(networks, dict) or set(networks) != {"web-edge", "private-edge", "landing-publish"}:
+        if not isinstance(resolved_networks, dict) or set(resolved_networks) != set(COMPOSE_NETWORKS.values()):
             raise ControlFailure("compose_policy_failed")
+        reverse_services = {value: key for key, value in COMPOSE_SERVICES.items()}
+        reverse_networks = {value: key for key, value in COMPOSE_NETWORKS.items()}
+        services = {}
+        for logical_name, compose_name in COMPOSE_SERVICES.items():
+            service = dict(resolved_services[compose_name])
+            service["networks"] = {
+                reverse_networks[name]: value
+                for name, value in service.get("networks", {}).items()
+            }
+            service["depends_on"] = {
+                reverse_services.get(name, name): value
+                for name, value in service.get("depends_on", {}).items()
+            }
+            services[logical_name] = service
+        networks = {
+            logical_name: resolved_networks[compose_name]
+            for logical_name, compose_name in COMPOSE_NETWORKS.items()
+        }
         expected_invite_environment = {
             "TG_INVITE_WEB_SIGNUP_URL": self.env.get("TG_INVITE_WEB_SIGNUP_URL"),
             "TG_INVITE_DESKTOP_URL": self.env.get("TG_INVITE_DESKTOP_URL", ""),

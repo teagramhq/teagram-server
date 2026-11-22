@@ -17,15 +17,17 @@ case "$SHA" in *[!0-9a-f]*|"") fail 'commit SHA must be a full 40-hex value' ;; 
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
-COMPOSE_FILE="$REPO_ROOT/deploy/link-edge/compose.yaml"
+COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 IMAGE_SOURCE=https://github.com/teagramhq/teagram-server
 PUBLIC_BASE_URL=https://teagram.tailaa4918.ts.net
 ROLLBACK_IMAGE=teagram-linkselector:rollback
 COMPOSE=(
+  env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
   docker compose
   --env-file /dev/null
-  --project-directory "$REPO_ROOT/deploy/link-edge"
+  --project-directory "$REPO_ROOT"
   --file "$COMPOSE_FILE"
+  --profile link-edge
   --project-name teagram-link-edge
 )
 

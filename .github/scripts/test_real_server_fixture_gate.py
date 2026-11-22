@@ -210,7 +210,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         run = step.group("body").split("        run: |\n", 1)[1]
         for relative_path in (
             "deploy/qa-invite/test-qa-invite-browser-flow.sh",
-            "deploy/qa-invite/compose.yaml",
+            "docker-compose.yml",
         ):
             source = (repo_root / relative_path).read_text(encoding="utf-8")
             self.assertNotRegex(source, r"(?i)(?:GITHUB_TOKEN|GH_TOKEN|github\.token|secrets\.)")
