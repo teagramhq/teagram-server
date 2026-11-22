@@ -113,7 +113,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             patch.object(operation, "REPORT_ROOT", report_root),
             patch.object(operation, "ARCHIVE_ROOT", archive_root),
             patch.object(operation, "LOCK_PATH", lock_path),
-            patch.object(operation.transition, "acquire_lock"),
+            patch.object(operation, "acquire_lock"),
             patch.object(operation.mode, "require_runner_lock"),
             patch.object(operation.mode, "file_stat", side_effect=self.fixture.allow_unowned_private_files),
             patch.object(operation.mode.os, "fchown"),
@@ -705,6 +705,36 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 )
                 self.assertTrue(self.operation.recovery_marker_path().exists())
 
+    def test_attestation_compose_environment_adds_parked_credential_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-compose-env.") as temporary:
+            checkout = pathlib.Path(temporary)
+            (checkout / "docker-compose.yml").write_text("services: {}\n", encoding="ascii")
+            (checkout / "docker-compose.override.yml").write_text("services: {}\n", encoding="ascii")
+            env_files = [str(checkout / ".env"), str(checkout / ".env.rustfs-parked")]
+            with patch.object(
+                self.operation.transition,
+                "rustfs_compose_environment_files",
+                return_value=env_files,
+            ):
+                environment = self.operation.compose_environment_for_files(
+                    checkout,
+                    ["docker-compose.yml", "docker-compose.override.yml"],
+                    include_rustfs_credentials=True,
+                )
+
+        self.assertEqual(
+            environment["COMPOSE_FILE"],
+            f"{checkout / 'docker-compose.yml'}:{checkout / 'docker-compose.override.yml'}",
+        )
+        self.assertEqual(environment[self.operation.COMPOSE_ENV_FILES], os.pathsep.join(env_files))
+        self.assertEqual(
+            self.operation.compose_command(["docker", "compose", "config"], environment),
+            [
+                "docker", "compose", "--env-file", env_files[0],
+                "--env-file", env_files[1], "config",
+            ],
+        )
+
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:
         calls: list[list[str]] = []
         reasons: list[str] = []
@@ -775,7 +805,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(
-                    self.operation.transition,
+                    self.operation,
                     "compose_environment_for_files",
                     return_value=environment,
                 ) as compose_environment,
@@ -883,9 +913,9 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 for item in patches:
                     stack.enter_context(item)
                 with patch.object(
-                    self.operation.transition,
+                    self.operation,
                     "acquire_lock",
-                    side_effect=self.operation.transition.TransitionReject("deployment-lock-held"),
+                    side_effect=self.operation.AttestationReject("deployment-lock-held"),
                 ):
                     with self.assertRaises(self.operation.AttestationReject) as caught:
                         self.operation.run_attestation()

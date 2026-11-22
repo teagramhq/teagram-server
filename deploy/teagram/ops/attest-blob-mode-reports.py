@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -22,6 +23,7 @@ ARCHIVE_ROOT = pathlib.Path("/var/lib/teagram-blob-mode-archives")
 LOCK_PATH = pathlib.Path("/tmp/teagram-deploy.lock")
 ROOT_UID = 0
 TEST_MODE = False
+COMPOSE_ENV_FILES = "BLOB_TRANSITION_COMPOSE_ENV_FILES"
 
 ATTESTATION_SCHEMA = "teagram.blob-mode-report-loss-attestation/v1"
 ARCHIVE_SCHEMA = "teagram.blob-mode-report-loss-archive/v1"
@@ -69,6 +71,97 @@ def import_helper(name: str, path: pathlib.Path):
 
 mode = import_helper("attestation_blob_mode_state", MODE_HELPER)
 transition = import_helper("attestation_blob_transition_runner", SCRIPT_DIR / "blob-transition-runner.py")
+
+
+def acquire_lock(path: pathlib.Path) -> None:
+    if os.geteuid() != 0:
+        reject("root-required")
+    try:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            fd = os.open(
+                path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+            os.fchown(fd, ROOT_UID, 0)
+            os.fchmod(fd, 0o600)
+            os.close(fd)
+            info = path.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != ROOT_UID
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            reject("shared-lock-invalid")
+        fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        os.dup2(fd, 9, inheritable=True)
+        if fd != 9:
+            os.close(fd)
+        fcntl.flock(9, fcntl.LOCK_EX)
+        after = os.fstat(9)
+        current = path.stat()
+        if (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino):
+            reject("shared-lock-changed")
+    except AttestationReject:
+        raise
+    except OSError:
+        reject("shared-lock-unavailable")
+
+
+def compose_command(args: list[str], env: dict[str, str] | None) -> list[str]:
+    if args[:2] != ["docker", "compose"] or env is None:
+        return args
+    configured = env.get(COMPOSE_ENV_FILES)
+    if not configured:
+        return args
+    files = configured.split(os.pathsep)
+    if not files or any(not item for item in files):
+        reject("compose-environment-files-invalid")
+    prefix = ["docker", "compose"]
+    for path in files:
+        prefix.extend(("--env-file", path))
+    return [*prefix, *args[2:]]
+
+
+def compose_environment(checkout: pathlib.Path) -> dict[str, str]:
+    path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+    files = ["docker-compose.yml"]
+    if (checkout / "docker-compose.override.yml").is_file():
+        files.append("docker-compose.override.yml")
+    return {
+        "PATH": path,
+        "HOME": os.environ.get("HOME", "/root"),
+        "COMPOSE_FILE": ":".join(files),
+    }
+
+
+def compose_environment_for_files(
+    checkout: pathlib.Path,
+    files: list[str],
+    *,
+    include_rustfs_credentials: bool = False,
+) -> dict[str, str]:
+    paths = []
+    for name in files:
+        path = checkout / name
+        try:
+            info = path.lstat()
+        except OSError:
+            reject("compose-file-unavailable")
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            reject("compose-file-invalid")
+        paths.append(str(path))
+    environment = compose_environment(checkout)
+    environment["COMPOSE_FILE"] = ":".join(paths)
+    if include_rustfs_credentials and not TEST_MODE:
+        environment[COMPOSE_ENV_FILES] = os.pathsep.join(
+            transition.rustfs_compose_environment_files(checkout)
+        )
+    return environment
 
 
 def require_directory(path: pathlib.Path, expected_mode: int | None = None, create: bool = False) -> None:
@@ -788,7 +881,7 @@ def validate_live_census(
 
 def run_compose(command: list[str], environment: dict[str, str], *, reason: str) -> bytes:
     try:
-        full_command = transition.compose_command(command, environment)
+        full_command = compose_command(command, environment)
         result = subprocess.run(
             full_command,
             cwd=CHECKOUT,
@@ -797,7 +890,7 @@ def run_compose(command: list[str], environment: dict[str, str], *, reason: str)
             stderr=subprocess.PIPE,
             check=False,
         )
-    except transition.TransitionReject:
+    except (AttestationReject, transition.TransitionReject):
         reject(f"{reason}-rejected")
     except OSError:
         reject(f"{reason}-unavailable")
@@ -890,12 +983,12 @@ def capture_live_census(record: dict[str, object]) -> tuple[bytes, bytes]:
         env_files = transition.rustfs_compose_environment_files(CHECKOUT)
         if len(env_files) != 2 or env_files[0] != str(CHECKOUT / ".env"):
             reject("live-census-credentials-invalid")
-        environment = transition.compose_environment_for_files(
+        environment = compose_environment_for_files(
             CHECKOUT,
             ["docker-compose.yml", "docker-compose.override.yml"],
             include_rustfs_credentials=True,
         )
-    except transition.TransitionReject as error:
+    except (AttestationReject, transition.TransitionReject) as error:
         reject(str(error))
     validate_composed_authority(record, environment)
     s3_manifest = run_compose(
@@ -1150,9 +1243,9 @@ def publish_attestation(report_root: pathlib.Path, document: dict[str, object]) 
 def run_attestation() -> dict[str, object]:
     require_production_scope()
     try:
-        transition.acquire_lock(LOCK_PATH)
+        acquire_lock(LOCK_PATH)
         mode.require_runner_lock(LOCK_PATH)
-    except transition.TransitionReject as error:
+    except (AttestationReject, transition.TransitionReject) as error:
         reject(str(error))
     except mode.Reject as error:
         reject(str(error))
