@@ -242,8 +242,11 @@ ENV
     }
     assert_general_chat_owner 1 1
   fi
+  # The seed owner spends this shared budget while searching seeded accounts
+  # and resolving public channels. Start moderation with a fresh fixture
+  # budget so their result does not depend on how many seed lookups ran first.
   demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
-    -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
+    -c 'DELETE FROM username_lookups; DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
   demo_prepare_haproxy_runtime
   ACTIVE_STAGE="moderation smoke with sign-in mode $signin_enabled"
   smoke_output=$("$seed_dir/test-general-moderation-compose.sh" \

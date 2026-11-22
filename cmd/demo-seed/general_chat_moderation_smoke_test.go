@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/srp"
 )
 
@@ -246,6 +247,116 @@ func (rpc *moderationSmokeMembershipRPC) Invoke(_ context.Context, input bin.Enc
 		participant.Participant = &tg.ChannelParticipant{UserID: 42}
 	default:
 		return fmt.Errorf("unexpected smoke cleanup request %T", input)
+	}
+	return nil
+}
+
+func TestModerationSmokeCleanupFindsGuestWithoutUsernameLookup(t *testing.T) {
+	for _, banned := range []bool{false, true} {
+		name := "member"
+		if banned {
+			name = "banned guest"
+		}
+		t.Run(name, func(t *testing.T) {
+			rpc := &moderationSmokeGuestLookupRPC{banned: banned}
+			api := tg.NewClient(rpc)
+			general, err := findOwnedGeneralChatForModerationSmoke(context.Background(), api)
+			if err != nil {
+				t.Fatalf("find General for moderation cleanup without username lookup: %v", err)
+			}
+			guest, err := findModerationSmokeGuestInGeneralChat(context.Background(), api, general, 42, "ab")
+			if err != nil {
+				t.Fatalf("find moderation smoke guest without username lookup: %v", err)
+			}
+			if guest.ID != 42 || guest.AccessHash != 43 || guest.Username != "ab" || guest.Bot {
+				t.Fatalf("moderation smoke guest = %+v, want ordinary user 42 with owner-scoped hash", guest)
+			}
+			if rpc.lookupCalls != 0 {
+				t.Fatalf("quota-charged username lookup calls = %d, want 0", rpc.lookupCalls)
+			}
+			if banned && rpc.bannedFilterCalls != 1 {
+				t.Fatalf("banned filter calls = %d, want 1", rpc.bannedFilterCalls)
+			}
+		})
+	}
+}
+
+type moderationSmokeGuestLookupRPC struct {
+	banned            bool
+	lookupCalls       int
+	bannedFilterCalls int
+}
+
+func (rpc *moderationSmokeGuestLookupRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	const channelID int64 = 71
+	const channelHash int64 = 93
+	switch request := input.(type) {
+	case *tg.ContactsResolveUsernameRequest:
+		rpc.lookupCalls++
+		return fmt.Errorf("username lookup quota exhausted for %q", request.Username)
+	case *tg.ContactsSearchRequest:
+		rpc.lookupCalls++
+		return fmt.Errorf("username search quota exhausted for %q", request.Q)
+	case *tg.MessagesGetDialogsRequest:
+		response, ok := output.(*tg.MessagesDialogsBox)
+		if !ok {
+			return fmt.Errorf("unexpected dialogs output %T", output)
+		}
+		response.Dialogs = &tg.MessagesDialogs{Chats: []tg.ChatClass{&tg.Channel{
+			ID: channelID, AccessHash: channelHash, Username: demo.GeneralChatHandle,
+			Title: demoGeneralChatSpace.title, Megagroup: true, Creator: true,
+		}}}
+	case *tg.ChannelsGetFullChannelRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash {
+			return fmt.Errorf("unexpected General full-info request: %+v", request.Channel)
+		}
+		response, ok := output.(*tg.MessagesChatFull)
+		if !ok {
+			return fmt.Errorf("unexpected full-channel output %T", output)
+		}
+		response.FullChat = &tg.ChannelFull{About: demoGeneralChatSpace.about}
+	case *tg.ChannelsGetParticipantsRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash || request.Limit != 200 {
+			return fmt.Errorf("unexpected participant roster request: %+v", request)
+		}
+		var includeGuest bool
+		switch filter := request.Filter.(type) {
+		case *tg.ChannelParticipantsSearch:
+			if filter.Q != "ab" {
+				return fmt.Errorf("member search = %q, want ab", filter.Q)
+			}
+			includeGuest = !rpc.banned
+		case *tg.ChannelParticipantsBanned:
+			rpc.bannedFilterCalls++
+			if filter.Q != "ab" {
+				return fmt.Errorf("banned search = %q, want ab", filter.Q)
+			}
+			includeGuest = rpc.banned
+		default:
+			return fmt.Errorf("unexpected participant filter %T", request.Filter)
+		}
+		response, ok := output.(*tg.ChannelsChannelParticipantsBox)
+		if !ok {
+			return fmt.Errorf("unexpected participant roster output %T", output)
+		}
+		roster := &tg.ChannelsChannelParticipants{Chats: []tg.ChatClass{&tg.Channel{
+			ID: channelID, AccessHash: channelHash, Username: demo.GeneralChatHandle,
+			Title: demoGeneralChatSpace.title, Megagroup: true, Creator: true,
+		}}}
+		if includeGuest {
+			roster.Count = 1
+			roster.Users = []tg.UserClass{&tg.User{ID: 42, AccessHash: 43, Username: "ab"}}
+			if rpc.banned {
+				roster.Participants = []tg.ChannelParticipantClass{&tg.ChannelParticipantBanned{Peer: &tg.PeerUser{UserID: 42}}}
+			} else {
+				roster.Participants = []tg.ChannelParticipantClass{&tg.ChannelParticipant{UserID: 42}}
+			}
+		}
+		response.ChannelParticipants = roster
+	default:
+		return fmt.Errorf("unexpected smoke guest lookup request %T", input)
 	}
 	return nil
 }
