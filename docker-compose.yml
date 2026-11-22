@@ -1261,7 +1261,9 @@ services:
     depends_on:
       qa-invite-migrate:
         condition: service_completed_successfully
-    networks: [qa_invite_backend]
+    networks:
+      qa_invite_backend:
+        aliases: [teagramd]
     restart: unless-stopped
     logging: *demo-logging
 
@@ -1313,6 +1315,7 @@ services:
     networks:
       qa_invite_backend:
         ipv4_address: 198.18.131.3
+        aliases: [tls-edge]
     restart: unless-stopped
     logging: *demo-logging
 

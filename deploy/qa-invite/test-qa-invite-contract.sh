@@ -128,11 +128,13 @@ jq -e '
   and .volumes.qa_invite_tgblobs.name == "teagram-qa-invite-blobs"
   and .services["qa-invite-teagramd"].environment.TG_CLIENT_ADDR_TRUST == "cf-connecting-ip"
   and .services["qa-invite-teagramd"].environment.TG_CLIENT_ADDR_CF_PROXY_CIDRS == "198.18.131.3/32"
+  and ((.services["qa-invite-teagramd"].networks.qa_invite_backend.aliases // []) | index("teagramd")) != null
+  and ((.services["qa-invite-tls-edge"].networks.qa_invite_backend.aliases // []) | index("tls-edge")) != null
   and .services["qa-invite-haproxy"].networks.qa_invite_backend.ipv4_address == "198.18.131.2"
   and .services["qa-invite-tls-edge"].networks.qa_invite_backend.ipv4_address == "198.18.131.3"
   and .networks.qa_invite_backend.ipam.config[0].subnet == "198.18.131.0/24"
   and .networks.qa_invite_backend.ipam.config[0].ip_range == "198.18.131.128/26"
-' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'QA WebSocket limits do not trust only the fixed TLS edge client address'
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'QA service aliases or fixed TLS-edge trust settings do not match proxy configuration'
 jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/teagram-demo/public-client \
   --slurpfile live "$LIVE_SNAPSHOT" '
   . as $config
