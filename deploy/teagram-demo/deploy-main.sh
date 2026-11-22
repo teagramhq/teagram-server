@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/demo-common.sh"
 readonly SHA=${DEPLOY_SHA:-}
 readonly IMAGE_DIGEST=${DEPLOY_IMAGE_DIGEST:-}
 readonly PREV_SHA=${PREVIOUS_SHA:-}
-readonly MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
+readonly MODE_HELPER="$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py"
 ACTIVE_SERVER=$(demo_active_server)
 CANDIDATE_SERVER=$(demo_inactive_server)
 readonly ACTIVE_SERVER CANDIDATE_SERVER

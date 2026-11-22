@@ -22,15 +22,12 @@ teagram-ops verbs (read-only unless noted):
   logs <since>              teagramd logs since an RFC3339 UTC time (same as teagram-logs)
   env-names                 names of keys in /opt/teagram/.env, never values
   fingerprints              sha256 of .env, override, rollout-env record and compose files
-  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
+  run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
                             runs an allowlisted script from that commit only if
                             the commit is on origin/main
-                            apply-user-invite-quota default mutates live state;
-                            verify is read-only
                             invite-web-signup-url default (apply) and --rollback
                             mutate the live .env; --check is read-only
                             start-server starts only the existing server containers
-                            bot-api-qa configures the tailnet Bot API QA path
                             bot-api-qa-bot manages only the pinned QA test bot
                             backup-media-key creates a private media key backup
                             encrypt-media backs up and encrypts referenced media
@@ -59,7 +56,7 @@ case "$VERB" in
     ;;
   env-names) sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$REPO/.env" | sort -u ;;
   fingerprints)
-    for f in "$REPO/.env" "$REPO/docker-compose.override.yml" "$REPO/.state/rollout-env" "$REPO/docker-compose.yml" "$REPO/docker-compose.local-blobs.yml"; do
+    for f in "$REPO/.env" "$REPO/docker-compose.override.yml" "$REPO/.state/rollout-env" "$REPO/docker-compose.yml"; do
       [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
     done
     ;;
@@ -71,7 +68,7 @@ case "$VERB" in
     case "$NAME" in [a-z0-9]*) ;; *) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in *[!a-z0-9-]*) echo "teagram-ops: bad script name" >&2; exit 64 ;; esac
     case "$NAME" in
-      target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps) ;;
+      target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps) ;;
       *)
         logger -t teagram-ops "refused operation: $NAME"
         echo "teagram-ops: operation is not allowlisted" >&2

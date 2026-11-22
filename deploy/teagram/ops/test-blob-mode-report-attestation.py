@@ -21,7 +21,10 @@ from unittest.mock import patch
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 OPERATION = SCRIPT_DIR / "attest-blob-mode-reports.py"
-MODE_FIXTURES = SCRIPT_DIR / "test-blob-mode-state.py"
+REPO_ROOT = SCRIPT_DIR.parents[2]
+BLOB_MODE_DIR = REPO_ROOT / "deploy" / "teagram-demo" / "blob-mode"
+BLOB_MODE_HELPER = BLOB_MODE_DIR / "blob-mode-state.py"
+MODE_FIXTURES = BLOB_MODE_DIR / "test-blob-mode-state.py"
 FIXTURE_SPEC = importlib.util.spec_from_file_location("report_attestation_mode_fixtures", MODE_FIXTURES)
 assert FIXTURE_SPEC is not None and FIXTURE_SPEC.loader is not None
 mode_fixtures = importlib.util.module_from_spec(FIXTURE_SPEC)
@@ -60,6 +63,27 @@ def git_blob_oid(content: bytes) -> str:
         check=True,
     )
     return result.stdout.decode("ascii").strip()
+
+
+@contextlib.contextmanager
+def preserve_fd9():
+    try:
+        saved_fd = os.dup(9)
+    except OSError:
+        saved_fd = None
+        saved_inheritable = False
+    else:
+        saved_inheritable = os.get_inheritable(9)
+    try:
+        yield
+    finally:
+        try:
+            os.close(9)
+        except OSError:
+            pass
+        if saved_fd is not None:
+            os.dup2(saved_fd, 9, inheritable=saved_inheritable)
+            os.close(saved_fd)
 
 
 class BlobModeReportAttestationTests(unittest.TestCase):
@@ -110,7 +134,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             patch.object(operation, "REPORT_ROOT", report_root),
             patch.object(operation, "ARCHIVE_ROOT", archive_root),
             patch.object(operation, "LOCK_PATH", lock_path),
-            patch.object(operation.transition, "acquire_lock"),
+            patch.object(operation, "acquire_lock"),
             patch.object(operation.mode, "require_runner_lock"),
             patch.object(operation.mode, "file_stat", side_effect=self.fixture.allow_unowned_private_files),
             patch.object(operation.mode.os, "fchown"),
@@ -136,7 +160,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         key_dir.mkdir(mode=0o700)
         evidence_root = report_root / "teagram-media-encryption"
         evidence_root.mkdir(mode=0o700)
-        actual_common = SCRIPT_DIR.parents[2] / "deploy" / "teagram" / "ops" / "blob-encryption-common.inc"
+        actual_common = SCRIPT_DIR / "blob-encryption-common.inc"
         common_source = actual_common.read_text(encoding="utf-8")
         self.assertIn('readonly EVIDENCE_ROOT="$REPORT_ROOT/teagram-media-encryption"', common_source)
         replacements = {
@@ -188,7 +212,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         )
         (runtime_dir / "blob-transition-runner.py").chmod(0o600)
         (runtime_dir / "blob-mode-state.py").write_bytes(
-            (SCRIPT_DIR / "blob-mode-state.py").read_bytes()
+            BLOB_MODE_HELPER.read_bytes()
         )
         (runtime_dir / "blob-mode-state.py").chmod(0o600)
 
@@ -252,7 +276,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             {
                 "BLOB_TEST_COMMON": str(common_path),
                 "BLOB_TEST_COMPOSE_JSON": str(compose_path),
-                "BLOB_TEST_MODE_HELPER": str(SCRIPT_DIR / "blob-mode-state.py"),
+                "BLOB_TEST_MODE_HELPER": str(BLOB_MODE_HELPER),
                 "BLOB_TRANSITION_TEST_MODE": "1",
                 "OPS_TEMP_DIR": str(runtime_dir),
                 "PATH": f"{bin_dir}:{environment.get('PATH', '')}",
@@ -702,11 +726,41 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 )
                 self.assertTrue(self.operation.recovery_marker_path().exists())
 
+    def test_attestation_compose_environment_adds_parked_credential_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-compose-env.") as temporary:
+            checkout = pathlib.Path(temporary)
+            (checkout / "docker-compose.yml").write_text("services: {}\n", encoding="ascii")
+            (checkout / "docker-compose.override.yml").write_text("services: {}\n", encoding="ascii")
+            env_files = [str(checkout / ".env"), str(checkout / ".env.rustfs-parked")]
+            with patch.object(
+                self.operation.transition,
+                "rustfs_compose_environment_files",
+                return_value=env_files,
+            ):
+                environment = self.operation.compose_environment_for_files(
+                    checkout,
+                    ["docker-compose.yml", "docker-compose.override.yml"],
+                    include_rustfs_credentials=True,
+                )
+
+        self.assertEqual(
+            environment["COMPOSE_FILE"],
+            f"{checkout / 'docker-compose.yml'}:{checkout / 'docker-compose.override.yml'}",
+        )
+        self.assertEqual(environment[self.operation.COMPOSE_ENV_FILES], os.pathsep.join(env_files))
+        self.assertEqual(
+            self.operation.compose_command(["docker", "compose", "config"], environment),
+            [
+                "docker", "compose", "--env-file", env_files[0],
+                "--env-file", env_files[1], "config",
+            ],
+        )
+
     def test_live_census_uses_compose_config_s3_census_and_database_select_only(self) -> None:
         calls: list[list[str]] = []
         reasons: list[str] = []
         environment = {"TG_BLOB_S3_SECRET_ACCESS_KEY": "never-print-this"}
-        checkout = SCRIPT_DIR.parents[2]
+        checkout = REPO_ROOT
         sql_source = (checkout / "internal/store/queries/uploads.sql").read_text(encoding="utf-8")
         query_start = sql_source.index("SELECT 'file'::text AS kind")
         query_end = sql_source.index(";", query_start) + 1
@@ -772,7 +826,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(
-                    self.operation.transition,
+                    self.operation,
                     "compose_environment_for_files",
                     return_value=environment,
                 ) as compose_environment,
@@ -803,7 +857,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         self.assertNotIn("never-print-this", repr(calls))
 
     def test_reference_query_refuses_staged_bytes_that_do_not_match_reviewed_git_blob(self) -> None:
-        checkout = SCRIPT_DIR.parents[2]
+        checkout = REPO_ROOT
         sql_bytes = (checkout / "internal/store/queries/uploads.sql").read_bytes()
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -880,9 +934,9 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 for item in patches:
                     stack.enter_context(item)
                 with patch.object(
-                    self.operation.transition,
+                    self.operation,
                     "acquire_lock",
-                    side_effect=self.operation.transition.TransitionReject("deployment-lock-held"),
+                    side_effect=self.operation.AttestationReject("deployment-lock-held"),
                 ):
                     with self.assertRaises(self.operation.AttestationReject) as caught:
                         self.operation.run_attestation()
@@ -891,6 +945,120 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             self.assertEqual(snapshot_files(state_dir), before_state)
             self.assertEqual(snapshot_files(report_root), before_reports)
             self.assertFalse((root / "archives").exists())
+
+    def test_acquire_lock_rejects_non_root_caller(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-root.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            non_root_uid = os.geteuid() or 1
+            with patch.object(self.operation.os, "geteuid", return_value=non_root_uid):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^root-required$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-symlink.") as temporary:
+            root = pathlib.Path(temporary)
+            target = root / "target"
+            target.write_text("", encoding="ascii")
+            path = root / "deploy.lock"
+            path.symlink_to(target)
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_non_root_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-owner.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            if path.stat().st_uid == 0:
+                os.chown(path, 65534, -1)
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_wrong_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-mode.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o640)
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_hard_linked_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-links.") as temporary:
+            root = pathlib.Path(temporary)
+            path = root / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            os.link(path, root / "other-link")
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_non_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-type.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.mkdir(mode=0o700)
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_inode_swap(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-inode.") as temporary:
+            root = pathlib.Path(temporary)
+            path = root / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.write_text("", encoding="ascii")
+            original_stat = pathlib.Path.stat
+
+            def swapped_stat(candidate, *args, **kwargs):
+                if candidate == path and kwargs.get("follow_symlinks", True):
+                    return original_stat(replacement, *args, **kwargs)
+                return original_stat(candidate, *args, **kwargs)
+
+            with (
+                preserve_fd9(),
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+                patch.object(pathlib.Path, "stat", new=swapped_stat),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-changed$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_unavailable_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-unavailable.") as temporary:
+            path = pathlib.Path(temporary) / "missing" / "deploy.lock"
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-unavailable$"
+                ):
+                    self.operation.acquire_lock(path)
 
     def test_write_private_file_names_file_when_cleanup_unlink_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1063,7 +1231,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                 self.assertFalse((root / "archives").exists())
 
     def test_attestation_outputs_and_wrapper_never_expose_secrets_or_restart_services(self) -> None:
-        wrapper = SCRIPT_DIR.parents[1] / "teagram" / "ops" / "attest-blob-mode-reports.sh"
+        wrapper = SCRIPT_DIR / "attest-blob-mode-reports.sh"
         self.assertTrue(wrapper.is_file(), "forced-command wrapper is missing")
         source = wrapper.read_text(encoding="utf-8")
         self.assertNotIn("docker restart", source)

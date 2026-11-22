@@ -81,7 +81,7 @@ chmod 0700 "$TMP_DIR"
 TARGET_RENDER="$TMP_DIR/target-render.json"
 INITIAL_RENDER="$TMP_DIR/initial-render.json"
 INITIAL_INVENTORY="$TMP_DIR/initial-inventory.json"
-MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
+MODE_HELPER="$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py"
 
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"

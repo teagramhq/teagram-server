@@ -1,11 +1,11 @@
 package mtproto_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/binary"
-	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -18,6 +18,7 @@ import (
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/mtproxy"
 	"github.com/gotd/td/mtproxy/obfuscator"
+	"github.com/gotd/td/proto"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
 
@@ -26,18 +27,18 @@ import (
 
 const webSocketAbridgedLongFormThreshold = 508
 
-var errStopAfterSecondExchangeReply = errors.New("stop after second exchange reply")
+var (
+	webSocketExchangeKeyOnce sync.Once
+	webSocketExchangeKey     *rsa.PrivateKey
+	errWebSocketExchangeKey  error
+)
 
 func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-
-	rsaKey, err := rsa.GenerateKey(rand.Reader, crypto.RSAKeyBits)
-	if err != nil {
-		t.Fatal("generate synthetic RSA identity")
-	}
+	rsaKey := webSocketTestExchangeKey(t)
 	server := mtproto.New(
 		exchange.PrivateKey{RSA: rsaKey},
 		2,
@@ -75,27 +76,95 @@ func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testin
 	if err != nil {
 		t.Fatal("initialize abridged client transport")
 	}
-	responses := &stopAfterSecondExchangeReply{Conn: client}
-	_, err = exchange.NewExchanger(responses, 2).
-		Client([]exchange.PublicKey{exchange.PrivateKey{RSA: rsaKey}.Public()}).
-		Run(ctx)
-	if !errors.Is(err, errStopAfterSecondExchangeReply) {
-		t.Fatal("client exchange did not reach the second server reply")
+
+	var reqPQ mt.ReqPqMultiRequest
+	nonce, err := crypto.RandInt128(rand.Reader)
+	if err != nil {
+		t.Fatal("generate client nonce")
 	}
-	if len(responses.frames) != 2 {
-		t.Fatal("client transport did not reassemble both server replies")
+	reqPQ.Nonce = nonce
+	if err := sendPlainExchangeRequest(ctx, client, time.Unix(1_700_000_000, 0), &reqPQ); err != nil {
+		t.Fatal("send req_pq_multi")
+	}
+
+	resPQEnvelope, resPQFrame, err := receivePlainExchangeReply(ctx, client)
+	if err != nil {
+		t.Fatalf("receive resPQ: %v", err)
+	}
+	var resPQ mt.ResPQ
+	if err := decodePlainExchangeReply(resPQEnvelope, &resPQ); err != nil {
+		t.Fatalf("decode resPQ: %v", err)
+	}
+	const serverPQ = "17ed48941a08f981"
+	wantPQ := []byte{0x17, 0xed, 0x48, 0x94, 0x1a, 0x08, 0xf9, 0x81}
+	if !bytes.Equal(resPQ.Pq, wantPQ) {
+		t.Fatalf("server test pq = %x, want %s", resPQ.Pq, serverPQ)
+	}
+
+	// gotd's test server always uses this documented pq fixture. Supplying its
+	// factors directly keeps this transport framing test out of the randomized
+	// factorization proof-of-work performed by exchange.Client.
+	p := []byte{0x49, 0x4c, 0x55, 0x3b}
+	q := []byte{0x53, 0x91, 0x10, 0x73}
+	newNonce, err := crypto.RandInt256(rand.Reader)
+	if err != nil {
+		t.Fatal("generate new nonce")
+	}
+	innerData := &mt.PQInnerDataDC{
+		Pq:          resPQ.Pq,
+		P:           p,
+		Q:           q,
+		Nonce:       nonce,
+		ServerNonce: resPQ.ServerNonce,
+		NewNonce:    newNonce,
+		DC:          2,
+	}
+	var innerDataBuffer bin.Buffer
+	if err := innerData.Encode(&innerDataBuffer); err != nil {
+		t.Fatal("encode p_q_inner_data_dc")
+	}
+	encryptedData, err := crypto.RSAPad(innerDataBuffer.Buf, &rsaKey.PublicKey, rand.Reader)
+	if err != nil {
+		t.Fatal("encrypt p_q_inner_data_dc")
+	}
+	publicKey := exchange.PrivateKey{RSA: rsaKey}.Public()
+	reqDH := &mt.ReqDHParamsRequest{
+		Nonce:                nonce,
+		ServerNonce:          resPQ.ServerNonce,
+		P:                    p,
+		Q:                    q,
+		PublicKeyFingerprint: publicKey.Fingerprint(),
+		EncryptedData:        encryptedData,
+	}
+	if err := sendPlainExchangeRequest(ctx, client, time.Unix(1_700_000_004, 0), reqDH); err != nil {
+		t.Fatal("send req_DH_params")
+	}
+
+	serverDHEnvelope, serverDHFrame, err := receivePlainExchangeReply(ctx, client)
+	if err != nil {
+		t.Fatalf("receive server_DH_params: %v", err)
+	}
+	var serverDH bin.Buffer
+	serverDH.ResetTo(serverDHEnvelope.MessageData)
+	serverDHParams, err := mt.DecodeServerDHParams(&serverDH)
+	if err != nil {
+		t.Fatalf("decode server_DH_params: %v", err)
+	}
+	if _, ok := serverDHParams.(*mt.ServerDHParamsOk); !ok {
+		t.Fatalf("server_DH_params type = %T, want *mt.ServerDHParamsOk", serverDHParams)
 	}
 
 	wireFrames := parseCapturedAbridgedFrames(t, deobfuscated.snapshot())
 	if len(wireFrames) != 2 {
 		t.Fatal("WebSocket stream did not contain exactly two exchange replies")
 	}
+	responseFrames := [][]byte{resPQFrame, serverDHFrame}
 	for i := range wireFrames {
-		assertPlainExchangeEnvelope(t, responses.frames[i], []uint32{
+		assertPlainExchangeEnvelope(t, responseFrames[i], []uint32{
 			mt.ResPQTypeID,
 			mt.ServerDHParamsOkTypeID,
 		}[i])
-		if len(wireFrames[i].payload) != len(responses.frames[i]) {
+		if len(wireFrames[i].payload) != len(responseFrames[i]) {
 			t.Fatal("abridged frame length did not match its reassembled reply")
 		}
 	}
@@ -107,21 +176,50 @@ func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testin
 	}
 }
 
-type stopAfterSecondExchangeReply struct {
-	transport.Conn
-
-	frames [][]byte
+func webSocketTestExchangeKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	webSocketExchangeKeyOnce.Do(func() {
+		webSocketExchangeKey, errWebSocketExchangeKey = rsa.GenerateKey(rand.Reader, crypto.RSAKeyBits)
+	})
+	if errWebSocketExchangeKey != nil {
+		t.Fatal("generate synthetic RSA identity")
+	}
+	return webSocketExchangeKey
 }
 
-func (c *stopAfterSecondExchangeReply) Recv(ctx context.Context, b *bin.Buffer) error {
-	if err := c.Conn.Recv(ctx, b); err != nil {
+func sendPlainExchangeRequest(ctx context.Context, conn transport.Conn, at time.Time, request bin.Encoder) error {
+	var requestData bin.Buffer
+	if err := request.Encode(&requestData); err != nil {
 		return err
 	}
-	c.frames = append(c.frames, b.Copy())
-	if len(c.frames) == 2 {
-		return errStopAfterSecondExchangeReply
+	message := proto.UnencryptedMessage{
+		MessageID:   int64(proto.NewMessageID(at, proto.MessageFromClient)),
+		MessageData: requestData.Copy(),
 	}
-	return nil
+	var frame bin.Buffer
+	if err := message.Encode(&frame); err != nil {
+		return err
+	}
+	return conn.Send(ctx, &frame)
+}
+
+func receivePlainExchangeReply(ctx context.Context, conn transport.Conn) (proto.UnencryptedMessage, []byte, error) {
+	var frame bin.Buffer
+	if err := conn.Recv(ctx, &frame); err != nil {
+		return proto.UnencryptedMessage{}, nil, err
+	}
+	wireFrame := frame.Copy()
+	var message proto.UnencryptedMessage
+	if err := message.Decode(&frame); err != nil {
+		return proto.UnencryptedMessage{}, nil, err
+	}
+	return message, wireFrame, nil
+}
+
+func decodePlainExchangeReply(message proto.UnencryptedMessage, response bin.Decoder) error {
+	var body bin.Buffer
+	body.ResetTo(message.MessageData)
+	return response.Decode(&body)
 }
 
 type deobfuscatedCaptureConn struct {

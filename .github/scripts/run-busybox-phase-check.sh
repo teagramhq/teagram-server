@@ -19,7 +19,7 @@ report_failure() {
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || commit="unavailable"
   [[ "$exit_value" =~ ^[0-9]{1,3}$ ]] || exit_value="unavailable"
   case "$phase" in
-    container-launch|version-guard|package-setup|wrapper-tests|path-preflight|unavailable) ;;
+    container-launch|version-guard|package-setup|wrapper-tests|unavailable) ;;
     *) phase="unavailable" ;;
   esac
   printf '::error::%s failed (category: phase-failure; phase: %s; exit: %s; checked-out commit: %s; details redacted)\n' \
@@ -52,19 +52,6 @@ printf '%s' package-setup > /phase/current
 apk add --no-cache bash curl jq
 printf '%s' wrapper-tests > /phase/current
 node --test deploy/browser-acceptance/run-wrapper.test.mjs
-SCRIPT
-)
-    ;;
-  compose-path)
-    lane="compose-path"
-    container_script=$(cat <<'SCRIPT'
-set -eu
-printf '%s' version-guard > /phase/current
-busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
-printf '%s' package-setup > /phase/current
-apk add --no-cache bash
-printf '%s' path-preflight > /phase/current
-bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
 SCRIPT
 )
     ;;
@@ -153,7 +140,7 @@ if [[ -d "$phase_dir" && ! -L "$phase_dir" ]]; then
       if ((${#evidence} == evidence_size)); then
         case "$lane:$evidence" in
           browser-wrapper:version-guard|browser-wrapper:package-setup|browser-wrapper:wrapper-tests|\
-          compose-path:version-guard|compose-path:package-setup|compose-path:path-preflight)
+          browser-wrapper:version-guard|browser-wrapper:package-setup|browser-wrapper:wrapper-tests)
             phase="$evidence"
             ;;
         esac

@@ -64,11 +64,11 @@ if [[ "$3" == diff && "$4" == --quiet && "$5" == "$FIXTURE_SHA" && "$6" == -- &&
 fi
 [[ "$3" == show ]] || { echo "unexpected fixture git command: $*" >&2; exit 99; }
 case "$4" in
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/rustfs-inert-surfaces.sql"|\
-  "$FIXTURE_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql")
+  "$FIXTURE_SHA:deploy/teagram/ops/blob-transition-runner.py"|\
+  "$FIXTURE_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py"|\
+  "$FIXTURE_SHA:deploy/teagram-demo/blob-mode/qualify-rustfs-transition.py"|\
+  "$FIXTURE_SHA:deploy/teagram-demo/blob-mode/rustfs-inert-surfaces.sql"|\
+  "$FIXTURE_SHA:deploy/teagram-demo/blob-mode/rustfs-r70-inert-surfaces.sql")
     printf '# fixture helper\n'
     ;;
   "$FIXTURE_SHA:deploy/teagram/ops/bot-api-qa.sh") cat "$FIXTURE_BOT_API_QA" ;;
@@ -321,7 +321,7 @@ assert_no_event '^start:'
 printf '%s\n' 'PASS rejects a paused teagramd container before starting services'
 
 setup_case mismatched-teagramd
-MOCK_TEAGRAMD_FILES="$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.local-blobs.yml"
+MOCK_TEAGRAMD_FILES="$FIXTURE_REPO/docker-compose.yml"
 export MOCK_TEAGRAMD_FILES
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
@@ -330,7 +330,7 @@ assert_no_event '^start:'
 printf '%s\n' 'PASS rejects teagramd from a different Compose selection before starting services'
 
 setup_case unapproved-compose
-MOCK_COMPOSE_FILES="$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.override.yml,$FIXTURE_REPO/docker-compose.local-blobs.yml"
+MOCK_COMPOSE_FILES="$FIXTURE_REPO/docker-compose.yml"
 export MOCK_COMPOSE_FILES
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
@@ -339,7 +339,7 @@ assert_no_event '^start:'
 printf '%s\n' 'PASS rejects a changed live Compose selection before starting services'
 
 setup_case mismatched-postgres
-MOCK_POSTGRES_FILES="$FIXTURE_REPO/docker-compose.yml,$FIXTURE_REPO/docker-compose.local-blobs.yml"
+MOCK_POSTGRES_FILES="$FIXTURE_REPO/docker-compose.yml"
 export MOCK_POSTGRES_FILES
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]

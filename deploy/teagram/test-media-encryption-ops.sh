@@ -123,8 +123,8 @@ case "$1" in
         ;;
       "$FIXTURE_SHA:deploy/teagram/ops/bot-api-qa.sh") cat "$FIXTURE_BOT_API_QA" ;;
       "$FIXTURE_SHA:deploy/teagram/ops/quarantine_unaccounted_media.py") cat "$FIXTURE_QUARANTINE_HELPER" ;;
-      "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py"|\
-      "$FIXTURE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py")
+      "$FIXTURE_SHA:deploy/teagram/ops/blob-transition-runner.py"|\
+      "$FIXTURE_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py")
         printf '# fixture helper\n'
         ;;
       *) echo "unexpected fixture git show: $2" >&2; exit 99 ;;
