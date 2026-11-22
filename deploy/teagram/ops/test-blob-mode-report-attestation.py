@@ -65,6 +65,27 @@ def git_blob_oid(content: bytes) -> str:
     return result.stdout.decode("ascii").strip()
 
 
+@contextlib.contextmanager
+def preserve_fd9():
+    try:
+        saved_fd = os.dup(9)
+    except OSError:
+        saved_fd = None
+        saved_inheritable = False
+    else:
+        saved_inheritable = os.get_inheritable(9)
+    try:
+        yield
+    finally:
+        try:
+            os.close(9)
+        except OSError:
+            pass
+        if saved_fd is not None:
+            os.dup2(saved_fd, 9, inheritable=saved_inheritable)
+            os.close(saved_fd)
+
+
 class BlobModeReportAttestationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.operation = import_operation(self)
@@ -924,6 +945,120 @@ class BlobModeReportAttestationTests(unittest.TestCase):
             self.assertEqual(snapshot_files(state_dir), before_state)
             self.assertEqual(snapshot_files(report_root), before_reports)
             self.assertFalse((root / "archives").exists())
+
+    def test_acquire_lock_rejects_non_root_caller(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-root.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            non_root_uid = os.geteuid() or 1
+            with patch.object(self.operation.os, "geteuid", return_value=non_root_uid):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^root-required$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-symlink.") as temporary:
+            root = pathlib.Path(temporary)
+            target = root / "target"
+            target.write_text("", encoding="ascii")
+            path = root / "deploy.lock"
+            path.symlink_to(target)
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_non_root_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-owner.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            if path.stat().st_uid == 0:
+                os.chown(path, 65534, -1)
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_wrong_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-mode.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o640)
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_hard_linked_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-links.") as temporary:
+            root = pathlib.Path(temporary)
+            path = root / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            os.link(path, root / "other-link")
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_non_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-type.") as temporary:
+            path = pathlib.Path(temporary) / "deploy.lock"
+            path.mkdir(mode=0o700)
+            with (
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-invalid$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_inode_swap(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-inode.") as temporary:
+            root = pathlib.Path(temporary)
+            path = root / "deploy.lock"
+            path.write_text("", encoding="ascii")
+            path.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.write_text("", encoding="ascii")
+            original_stat = pathlib.Path.stat
+
+            def swapped_stat(candidate, *args, **kwargs):
+                if candidate == path and kwargs.get("follow_symlinks", True):
+                    return original_stat(replacement, *args, **kwargs)
+                return original_stat(candidate, *args, **kwargs)
+
+            with (
+                preserve_fd9(),
+                patch.object(self.operation.os, "geteuid", return_value=0),
+                patch.object(self.operation, "ROOT_UID", path.stat().st_uid),
+                patch.object(pathlib.Path, "stat", new=swapped_stat),
+            ):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-changed$"
+                ):
+                    self.operation.acquire_lock(path)
+
+    def test_acquire_lock_rejects_unavailable_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="attestation-lock-unavailable.") as temporary:
+            path = pathlib.Path(temporary) / "missing" / "deploy.lock"
+            with patch.object(self.operation.os, "geteuid", return_value=0):
+                with self.assertRaisesRegex(
+                    self.operation.AttestationReject, "^shared-lock-unavailable$"
+                ):
+                    self.operation.acquire_lock(path)
 
     def test_write_private_file_names_file_when_cleanup_unlink_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
