@@ -160,9 +160,9 @@ run_pg_restore_database() {
 }
 
 stage_runtime_helpers() {
-  git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py" \
+  git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/blob-transition-runner.py" \
     > "$OPS_TEMP_DIR/blob-transition-runner.py" || ops_fail 'cannot stage the reviewed blob transition verifier'
-  git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py" \
+  git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py" \
     > "$OPS_TEMP_DIR/blob-mode-state.py" || ops_fail 'cannot stage the reviewed blob authority verifier'
   git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot-api-qa.sh" \
     > "$OPS_TEMP_DIR/bot-api-qa.sh" || ops_fail 'cannot stage the reviewed Bot API relay recovery helper'

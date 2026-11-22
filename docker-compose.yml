@@ -1,4 +1,4 @@
-# Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
+# Local development stack: Postgres, migrations, RustFS, and the server.
 # Existing blob-mode authorities always control serving. A first S3 boot may
 # use an empty authority directory; all nonempty authority state is validated,
 # and existing `s3-accepted` data stays plaintext.

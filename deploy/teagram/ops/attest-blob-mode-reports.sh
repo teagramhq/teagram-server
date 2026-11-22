@@ -40,11 +40,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/attest-blob-mode-reports.py" \
   > "$TEMP_DIR/attest-blob-mode-reports.py" || fail 'cannot stage the reviewed report attestation operation'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py" \
   > "$TEMP_DIR/blob-mode-state.py" || fail 'cannot stage the reviewed blob authority validator'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/blob-transition-runner.py" \
   > "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot stage the reviewed deployment authority validator'
 git -C "$REPO" show "$OPS_SHA:internal/store/queries/uploads.sql" \
   > "$TEMP_DIR/uploads.sql" || fail 'cannot stage the reviewed blob inventory query'

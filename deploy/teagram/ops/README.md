@@ -8,20 +8,23 @@ procedures here as historical, not instructions for the live production stack.
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
 ```
 
-The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the thirteen current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
-`encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
-`bot-api-qa`, `bot-api-qa-bot`, `quarantine-unaccounted-media`, and
-`qa-password-timestamps`. A script's
-presence in an older main commit does not authorize a retired operation. The allowlist lives in
-`teagram-ops.sh`; tests cover retired names
-at an older main SHA. Keep every operation narrowly scoped to its named
-purpose. Validate arguments before using them, fail closed, and never put
-secrets in arguments, logs, or output.
+The current dispatcher accepts only these eleven operations:
+`target-failure-report`, `rollout-evidence`, `invite-web-signup-url`,
+`start-server`, `encrypt-media`, `cleanup-media`, `backup-media-key`,
+`attest-blob-mode-reports`, `bot-api-qa-bot`, `quarantine-unaccounted-media`,
+and `qa-password-timestamps`. The operation-name allowlist is checked before
+the dispatcher performs any Git lookup. A retired name such as `bot-api-qa`
+or `apply-user-invite-quota` is rejected with exit 64 even when the requested
+older `main` commit still contains its script; historical presence cannot
+restore root access through the runner. Only after a name passes that check
+does the dispatcher fetch `origin/main`, verify commit ancestry, and require
+the matching script blob at that commit. The allowlist lives in
+`teagram-ops.sh`; tests cover retired names at an older `main` SHA. Keep every
+operation narrowly scoped to its named purpose. Validate arguments before
+using them, fail closed, and never put secrets in arguments, logs, or output.
 
 ## QA account state and password timestamps
 
@@ -78,39 +81,25 @@ Run it from its merged `main` commit:
 ssh teagram run <reviewed-main-sha> qa-password-timestamps
 ```
 
-## Bot API QA
+## Bot API QA relays
 
-The optional `bot-api-qa` Compose profile uses two pinned TCP relays. The
-host publishes the ingress relay on `127.0.0.1:2447` on a dedicated bridge
-network. Only the two relays mount the private socket volume; the inner relay
-shares teagramd's network namespace and forwards that socket to the Bot API
-listener on `127.0.0.1:2447`. Tailscale Serve is the only tailnet entry point
-and supplies a PROXY v1 header. The relays pass the bytes unchanged.
+The optional `bot-api-qa` Compose profile uses two pinned TCP relays. The host
+publishes the ingress relay on `127.0.0.1:2447` on a dedicated bridge network.
+Only the two relays mount the private socket volume; the inner relay shares
+teagramd's network namespace and forwards that socket to the Bot API listener
+on `127.0.0.1:2447`.
 
-After deploying the reviewed SHA, run `ssh teagram run <sha> bot-api-qa check`
-to check the live environment and Serve port, followed by `ssh teagram run
-<sha> bot-api-qa apply`. Apply enables the listener through the named rollout
-path, recreates the inner relay in teagramd's current network namespace,
-starts the ingress relay and creates the Serve mapping without overwriting a
-foreign mapping. Repeating apply recovers an inner relay left in an old
-teagramd network namespace. `ssh teagram run <sha> bot-api-qa verify` checks the mapping,
-container topology, health and volume isolation. Repeating apply preserves the
-original mapping record. `ssh teagram run <sha> bot-api-qa rollback` restores
-the previous Serve mapping without touching other ports. When the previous port
-was absent, the rollback takes effect as soon as Tailscale applies the command,
-leaving the listener and relays reachable only on host loopback. The operation
-does not remove the listener environment setting or the relay containers.
+`bot-api-qa.sh` is a sourced recovery helper used by `start-server.sh`,
+`encrypt-media.sh` and `cleanup-media.sh`. In optional mode it leaves the
+relays absent when the listener is unset. When enabled, it recreates the inner
+relay in teagramd's current network namespace and verifies both relay health
+checks. The former `bot-api-qa` remote operation has been retired; the helper
+does not change the server environment or configure Tailscale Serve.
 
-Enabling the listener runs the server rollout and can interrupt all connected
-clients during replacement. A wrong relay or Serve mapping can also make the QA
-endpoint unreachable or permit peer-address forgery. There is no staging LXC.
-The CI fixture previews the resolved Compose isolation and exercises Serve
-apply, repeat, refusal and rollback against a mock. The relays expose Docker
-health status and bounded connection logs; inspect them and run `verify` after
-deployment. The retired Compose runner recreated them after a server restart
-so the inner relay joined the previous network namespace. The former production
-acceptance plan also required `getMe` and the cross-peer revoked-token isolation
-test.
+The relay configuration fixture checks Compose isolation, and the recovery
+fixture covers the optional restore path. A wrong relay configuration can make
+the QA endpoint unreachable or permit peer-address forgery. The relays expose
+Docker health status and bounded connection logs for diagnosis.
 
 ## Bot API QA test bot
 
@@ -200,27 +189,6 @@ and rollback summary shapes; every other line is omitted. If the target failure
 marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
-
-`apply-user-invite-quota.sh` adds `TG_USER_INVITE_QUOTA=5` through the named
-rollout environment path. It requires the invite-mode listener and unset
-account-age override, saves the prior `.env` under `/opt/teagram/.state`, and
-verifies `help.getAppConfig` from the deployed image after the runner applies
-the change. Run it only after the invite RPC release is live:
-
-```sh
-ssh teagram run <reviewed-main-sha> apply-user-invite-quota
-```
-
-If the rollout succeeds but the final `help.getAppConfig` probe fails, retry
-with the read-only verification path:
-
-```sh
-ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
-```
-
-It checks that the recorded environment is exactly the saved `.env` plus the
-quota setting, then reruns the probe against the current live image without
-applying another rollout.
 
 ## Restarting the existing server containers
 

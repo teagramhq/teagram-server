@@ -242,8 +242,9 @@ ENV
     }
     assert_general_chat_owner 1 1
   fi
+  # Isolate this username-based moderation smoke from lookup budget spent by seeding.
   demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
-    -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
+    -c "DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones; DELETE FROM username_lookups WHERE caller_id = (SELECT id FROM users WHERE username = 'demo_seed_owner');"
   demo_prepare_haproxy_runtime
   ACTIVE_STAGE="moderation smoke with sign-in mode $signin_enabled"
   smoke_output=$("$seed_dir/test-general-moderation-compose.sh" \

@@ -2431,22 +2431,10 @@ assert_busybox_phase_case browser-package-setup browser-wrapper package-setup va
   package-setup 2
 assert_busybox_phase_case browser-wrapper-tests browser-wrapper wrapper-tests valid 1 \
   wrapper-tests 1
-assert_busybox_phase_case compose-version-guard compose-path version-guard valid 1 \
-  version-guard 1
-assert_busybox_phase_case compose-container-launch compose-path '' missing 125 \
-  container-launch 125
-assert_busybox_phase_case compose-package-setup compose-path package-setup valid 2 \
-  package-setup 2
-assert_busybox_phase_case compose-path-preflight compose-path path-preflight valid 1 \
-  path-preflight 1
 assert_busybox_phase_case browser-plain-unterminated browser-wrapper wrapper-tests valid 37 \
   wrapper-tests 37 "$busybox_mock_bin:$PATH" plain-unterminated
 assert_busybox_phase_case browser-forged-command-unterminated browser-wrapper wrapper-tests valid 37 \
   wrapper-tests 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
-assert_busybox_phase_case compose-plain-unterminated compose-path path-preflight valid 37 \
-  path-preflight 37 "$busybox_mock_bin:$PATH" plain-unterminated
-assert_busybox_phase_case compose-forged-command-unterminated compose-path path-preflight valid 37 \
-  path-preflight 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
 assert_busybox_phase_case unknown-phase browser-wrapper unknown unknown 2 unavailable 2
 assert_busybox_phase_case duplicate-phase browser-wrapper package-setup duplicate 2 unavailable 2
 assert_busybox_phase_case trailing-phase browser-wrapper package-setup trailing 2 unavailable 2
@@ -2454,7 +2442,6 @@ assert_busybox_phase_case oversized-phase browser-wrapper package-setup oversize
 assert_busybox_phase_case symlink-phase browser-wrapper package-setup symlink 2 unavailable 2
 assert_busybox_phase_case non-regular-phase browser-wrapper package-setup non-regular 2 unavailable 2
 assert_busybox_phase_case duplicate-source browser-wrapper package-setup extra-file 2 unavailable 2
-assert_busybox_phase_case wrong-lane-phase compose-path wrapper-tests valid 1 unavailable 1
 assert_busybox_phase_case phase-reporter-crash browser-wrapper package-setup valid 2 \
   unavailable 2 "$busybox_reader_crash_bin:$busybox_mock_bin:$PATH"
 

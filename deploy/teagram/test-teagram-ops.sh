@@ -24,7 +24,6 @@ printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$
 printf 'override fixture\n' > "$tmp/repo/docker-compose.override.yml"
 printf 'state fixture\n' > "$tmp/repo/.state/rollout-env"
 printf 'compose fixture\n' > "$tmp/repo/docker-compose.yml"
-printf 'local blobs fixture\n' > "$tmp/repo/docker-compose.local-blobs.yml"
 printf 'fixture env only\n' > "$tmp/repo/.env.rustfs-parked"
 
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -50,13 +49,19 @@ printf '%s\n' 'qa-password-timestamps fixture'
 TIMESTAMPS
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
-export MOCK_SHOW_LOG="$tmp/show.log"
+export MOCK_SHOW_LOG="$tmp/show.log" MOCK_GIT_LOG="$tmp/git.log"
 export MOCK_ROOT="$tmp/root"
 export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
+MOCK_OLD_MAIN_OPS_DIR="$tmp/old-main/deploy/teagram/ops"
+export MOCK_OLD_MAIN_OPS_DIR
+mkdir -p "$MOCK_OLD_MAIN_OPS_DIR"
+printf '#!/bin/sh\nexit 0\n' > "$MOCK_OLD_MAIN_OPS_DIR/bot-api-qa.sh"
+printf '#!/bin/sh\nexit 0\n' > "$MOCK_OLD_MAIN_OPS_DIR/apply-user-invite-quota.sh"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_GIT_LOG"
 [[ "$1" == -C ]] || { echo "unexpected git call: $*" >&2; exit 99; }
 shift 2
 case "$1" in
@@ -86,6 +91,10 @@ case "$1" in
     case "${3:-}" in
       "$OPS_SHA:deploy/teagram/ops/"*.sh)
         [[ -f "$MOCK_OPS_DIR/${3##*/}" ]]
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/bot-api-qa.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/apply-user-invite-quota.sh")
+        [[ -f "$MOCK_OLD_MAIN_OPS_DIR/${3##*/}" ]]
         ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
@@ -122,7 +131,7 @@ case "$1" in
       "$OPS_SHA:deploy/teagram/ops/qa-password-timestamps.sh")
         cat "$MOCK_PASSWORD_TIMESTAMPS_SCRIPT"
         ;;
-      "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
+      "$OPS_SHA:deploy/teagram/ops/attest-blob-mode-reports.py")
         cat <<'PY'
 import os
 from pathlib import Path
@@ -135,8 +144,8 @@ assert re.search(r"^-- name: BlobInventoryReferences :many\n.*;$", (helper_dir /
 print("attestation-operation fixture")
 PY
         ;;
-      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
-      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py")
+      "$OPS_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py"|\
+      "$OPS_SHA:deploy/teagram/ops/blob-transition-runner.py")
         printf '%s\n' '# staged reviewed helper fixture'
         ;;
       "$OPS_SHA:internal/store/queries/uploads.sql")
@@ -146,6 +155,10 @@ PY
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
         printf '#!/bin/sh\ntouch "%s"\n' "$MOCK_RETIRED_SCRIPT_MARKER"
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/bot-api-qa.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/apply-user-invite-quota.sh")
+        cat "$MOCK_OLD_MAIN_OPS_DIR/${2##*/}"
         ;;
       *) exit 1 ;;
     esac
@@ -253,6 +266,16 @@ expect_status() {
     return 1
   fi
 }
+expect_retired_without_git_lookup() {
+  local operation=$1
+  : > "$MOCK_GIT_LOG"
+  expect_status 64 "run $OLD_MAIN_SHA $operation"
+  [[ ! -s "$MOCK_GIT_LOG" ]] || {
+    printf 'FAIL retired operation %s performed Git lookups: %s\n' \
+      "$operation" "$(cat "$MOCK_GIT_LOG")" >&2
+    return 1
+  }
+}
 
 [[ "$(run_command hostname)" == fixture-host ]]
 live=$(run_command live)
@@ -266,14 +289,12 @@ env_output=$(run_command env-names)
 [[ "$env_output" == $'FIXTURE_EMPTY\nTG_RSA_KEY_FINGERPRINT' ]]
 [[ "$env_output" != *fixture-value-never-print* ]]
 fingerprints=$(run_command fingerprints)
-[[ "$(printf '%s\n' "$fingerprints" | wc -l | tr -d ' ')" == 5 ]]
+[[ "$(printf '%s\n' "$fingerprints" | wc -l | tr -d ' ')" == 4 ]]
 [[ "$fingerprints" != *fixture-value-never-print* ]]
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps'* ]]
-  [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
-    "$help_output" == *'verify is read-only'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
   [[ "$help_output" == *'encrypt-media backs up and encrypts referenced media'* ]]
@@ -287,6 +308,10 @@ active_operation_count=0
 for operation_path in "$ops_dir"/*.sh; do
   operation_name=${operation_path##*/}
   operation_name=${operation_name%.sh}
+  # This helper is sourced by other operations; it is not a teagram-ops target.
+  if [[ "$operation_name" == bot-api-qa ]]; then
+    continue
+  fi
   active_operation_count=$((active_operation_count + 1))
   export MOCK_STOP_AT_SHOW=true MOCK_ALLOWED_NAME="$operation_name"
   expect_status 67 "run $OPS_SHA $operation_name"
@@ -335,6 +360,8 @@ expect_status 64 "run $OPS_SHA rollback-public-websocket"
 expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
 expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
 expect_status 64 "run $OLD_MAIN_SHA replay-check"
+expect_retired_without_git_lookup bot-api-qa
+expect_retired_without_git_lookup apply-user-invite-quota
 expect_status 66 "run $OLD_MAIN_SHA start-server"
 expect_status 66 "run $OLD_MAIN_SHA encrypt-media"
 expect_status 66 "run $OLD_MAIN_SHA cleanup-media"

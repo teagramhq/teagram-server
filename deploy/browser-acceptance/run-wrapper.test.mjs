@@ -692,15 +692,11 @@ function readBusyboxPhaseOutput(output) {
   };
 }
 
-test("BusyBox phase runner reports only bounded evidence for both lanes", async (t) => {
+test("BusyBox phase runner reports only bounded browser-wrapper evidence", async (t) => {
   const cases = [
     ["browser-wrapper", "package-setup", "valid", 2, "package-setup", 2],
     ["browser-wrapper", "version-guard", "valid", 1, "version-guard", 1],
     ["browser-wrapper", "wrapper-tests", "valid", 1, "wrapper-tests", 1],
-    ["compose-path", "version-guard", "valid", 1, "version-guard", 1],
-    ["compose-path", "package-setup", "valid", 2, "package-setup", 2],
-    ["compose-path", "path-preflight", "valid", 1, "path-preflight", 1],
-    ["compose-path", "", "missing", 125, "container-launch", 125],
   ];
 
   for (const [lane, phase, mode, childStatus, expectedPhase, expectedStatus] of cases) {
@@ -721,17 +717,12 @@ test("BusyBox phase runner reports only bounded evidence for both lanes", async 
     assert.ok(args.includes(":/phase:rw"));
     assert.ok(args.includes("printf '%s' version-guard > /phase/current"));
     assert.ok(args.includes("printf '%s' package-setup > /phase/current"));
-    if (lane === "browser-wrapper") {
-      assert.ok(args.includes("printf '%s' wrapper-tests > /phase/current"));
-      assert.ok(args.includes("node --test deploy/browser-acceptance/run-wrapper.test.mjs"));
-    } else {
-      assert.ok(args.includes("printf '%s' path-preflight > /phase/current"));
-      assert.ok(args.includes("bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh"));
-    }
+    assert.ok(args.includes("printf '%s' wrapper-tests > /phase/current"));
+    assert.ok(args.includes("node --test deploy/browser-acceptance/run-wrapper.test.mjs"));
   }
 });
 
-test("BusyBox phase runner resumes commands after unterminated child output in both lanes", async (t) => {
+test("BusyBox phase runner resumes commands after unterminated child output", async (t) => {
   const fixtures = [
     ["plain-unterminated", "plain child output without a trailing newline"],
     [
@@ -740,7 +731,7 @@ test("BusyBox phase runner resumes commands after unterminated child output in b
     ],
   ];
 
-  for (const [lane, phase] of [["browser-wrapper", "wrapper-tests"], ["compose-path", "path-preflight"]]) {
+  for (const [lane, phase] of [["browser-wrapper", "wrapper-tests"]]) {
     for (const [outputMode, expectedRawOutput] of fixtures) {
       const { result } = await invokeBusyboxPhase(t, lane, { phase, status: 37, outputMode });
       assert.equal(result.status, 37, result.stderr);

@@ -146,7 +146,7 @@ func parseBlobInventoryCensusReferences(t *testing.T, tsv []byte) []censusRefere
 		t.Fatal("locate store test source")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
-	parserPath := filepath.Join(repoRoot, "deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
+	parserPath := filepath.Join(repoRoot, "deploy/teagram/ops/attest-blob-mode-reports.py")
 	// Register the parser source with go test's cache; subprocess reads aren't tracked.
 	if _, err := os.ReadFile(parserPath); err != nil {
 		t.Fatalf("read census parser source: %v", err)

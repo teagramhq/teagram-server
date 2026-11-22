@@ -25,16 +25,11 @@ ACTIVE_IMAGE_CONFIGS = (
     "deploy/browser-acceptance/compose.yaml",
     "deploy/link-edge/compose.yaml",
     "deploy/link-edge/control-compose.yaml",
-    "deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml",
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
     ".github/scripts/run-busybox-phase-check.sh",
-    "deploy/teagramd/rollout-runner/README.md",
-    "deploy/teagramd/rollout-runner/qualify-rustfs-transition.py",
-    "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh",
-    "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh",
-    "deploy/teagramd/rollout-runner/test-stack-move-runner.sh",
+    "deploy/teagram-demo/blob-mode/qualify-rustfs-transition.py",
     "test/e2e/real_server_fixture/start.sh",
 )
 DIRECT_HUB_IMAGE = re.compile(
@@ -165,8 +160,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn('docker pull "$rustfs_image"', job)
         self.assertIn(f"image: {image}", job)
         self.assertIn(
-            "export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml:"
-            "$RUNNER_TEMP/rustfs-ci-image.yml",
+            "export COMPOSE_FILE=docker-compose.yml:$RUNNER_TEMP/rustfs-ci-image.yml",
             job,
         )
         self.assertLess(
@@ -194,7 +188,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn("docker login ghcr.io", job)
         self.assertIn(f"BUSYBOX_IMAGE: {image}", job)
         self.assertIn('docker pull "$BUSYBOX_IMAGE"', job)
-        self.assertIn('docker run --rm -v "$1":/blobs "$BUSYBOX_IMAGE"', job)
+        self.assertIn('docker run --rm -v "$key_volume":/key "$BUSYBOX_IMAGE"', job)
         self.assertNotIn("mirror.gcr.io/library/busybox:1.37", job)
 
     def test_dockerfile_hub_bases_use_the_mirror(self) -> None:
@@ -239,15 +233,6 @@ class DockerImageMirrorTests(unittest.TestCase):
                         f"{relative_path} pulls {match.group(0)} directly from Docker Hub"
                     )
 
-    def test_rustfs_schema_fixture_waits_for_postgres_tcp(self) -> None:
-        script = (
-            ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            "--health-cmd 'pg_isready -h 127.0.0.1 -U postgres -d teagram'",
-            script,
-        )
-
     def test_rpc_performance_postgres_waits_for_final_tcp_server(self) -> None:
         script = (ROOT / ".github/scripts/perf-postgres.sh").read_text(
             encoding="utf-8"
@@ -291,88 +276,6 @@ class DockerImageMirrorTests(unittest.TestCase):
             compose,
         )
 
-        postgres_schema = (
-            ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
-        ).read_text(encoding="utf-8")
-        isolated_restore = (
-            ROOT / "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh"
-        ).read_text(encoding="utf-8")
-        stack_move = (
-            ROOT / "deploy/teagramd/rollout-runner/test-stack-move-runner.sh"
-        ).read_text(encoding="utf-8")
-        postgres16 = "ghcr.io/teagramhq/teagram-server-postgres:16-alpine"
-        postgres16_digest = (
-            "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
-        )
-        postgres18 = "ghcr.io/teagramhq/teagram-server-postgres:18-alpine"
-        postgres18_digest = (
-            "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
-        )
-        busybox = "ghcr.io/teagramhq/teagram-server-busybox:1.37"
-        busybox_digest = (
-            "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
-        )
-        self.assertIn(
-            postgres18,
-            postgres_schema,
-        )
-        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres18_digest}', postgres_schema)
-        self.assertIn('docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST"', postgres_schema)
-        self.assertIn(
-            'docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"',
-            postgres_schema,
-        )
-        self.assertIn(
-            postgres16,
-            isolated_restore,
-        )
-        self.assertIn(f'SOURCE_POSTGRES_IMAGE_DIGEST={postgres16_digest}', isolated_restore)
-        self.assertIn(f'RESTORE_POSTGRES_IMAGE_DIGEST={postgres18_digest}', isolated_restore)
-        self.assertIn(
-            'docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST"',
-            isolated_restore,
-        )
-        self.assertIn(
-            'docker pull "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST"',
-            isolated_restore,
-        )
-        self.assertIn(
-            'docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"',
-            isolated_restore,
-        )
-        self.assertIn(
-            'docker image tag "$RESTORE_POSTGRES_IMAGE_ID" "$RESTORE_POSTGRES_IMAGE"',
-            isolated_restore,
-        )
-        self.assertIn(postgres16, stack_move)
-        self.assertIn(postgres18, isolated_restore)
-        self.assertIn(postgres18, stack_move)
-        self.assertIn(busybox, stack_move)
-        self.assertIn(f'SOURCE_POSTGRES_IMAGE_DIGEST={postgres16_digest}', stack_move)
-        self.assertIn(f'TARGET_POSTGRES_IMAGE_DIGEST={postgres18_digest}', stack_move)
-        self.assertIn(f'BUSYBOX_IMAGE_DIGEST={busybox_digest}', stack_move)
-        self.assertIn(
-            'docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST"',
-            stack_move,
-        )
-        self.assertIn(
-            'docker pull "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST"',
-            stack_move,
-        )
-        self.assertIn('docker pull "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST"', stack_move)
-        self.assertIn("command -v aws >/dev/null", stack_move)
-        self.assertIn(
-            'docker image tag "$BUSYBOX_IMAGE_ID" "$BUSYBOX_IMAGE"', stack_move
-        )
-        self.assertIn(
-            'docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"',
-            stack_move,
-        )
-        self.assertIn(
-            'docker image tag "$TARGET_POSTGRES_IMAGE_ID" "$TARGET_POSTGRES_IMAGE"',
-            stack_move,
-        )
-
     def test_busybox_phase_check_falls_back_when_mirror_pull_fails(self) -> None:
         script = ROOT / ".github/scripts/run-busybox-phase-check.sh"
         mirror_image = (
@@ -411,7 +314,7 @@ esac
             )
             fake_docker.chmod(0o755)
             result = subprocess.run(
-                ["bash", str(script), "compose-path"],
+                ["bash", str(script), "browser-wrapper"],
                 env={
                     **os.environ,
                     "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",

@@ -1167,9 +1167,9 @@ assert_text_order(wipe, "wipe-weekly.sh activity gate", [
 ])
 PY
 
-python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
+python3 "$SCRIPT_DIR/blob-mode/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
-python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
+python3 "$SCRIPT_DIR/blob-mode/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/bootstrap.json" > "$TMP_DIR/bootstrap-inventory.json"
 jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
   (.services | map(.name)) == ["teagramd", "teagramd-next"]

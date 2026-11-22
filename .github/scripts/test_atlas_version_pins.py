@@ -10,13 +10,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-# Rollout artifacts are sha256-pinned by their own tests and stay on the
-# version they were qualified with until they are regenerated.
-FROZEN_ROLLOUT_ARTIFACTS = re.compile(
-    r"^deploy/teagramd/rollout-runner/(?:(?:initial-)?local-compose-[0-9a-f]+\.yml"
-    r"|test-local-compose-[0-9a-f]+\.sh"
-    r"|test-qualify-rustfs-transition\.py)$"
-)
 IMAGE_PIN = re.compile(r"arigaio/atlas:(\d+\.\d+\.\d+)-alpine")
 ESCAPED_IMAGE_PIN = re.compile(r"arigaio/atlas:(\d+\\\.\d+\\\.\d+)-alpine")
 LINT_PIN = re.compile(r"ATLAS_VERSION=v?(\d+\.\d+\.\d+)")
@@ -24,22 +17,15 @@ BINARY_PIN = re.compile(r"atlas version v(\d+\.\d+\.\d+)")
 SETUP_ATLAS = re.compile(r"ariga/setup-atlas@")
 SETUP_VERSION = re.compile(r"^\s*version:\s*v?(\d+\.\d+\.\d+)\s*$")
 EXPECTED_VERSION = "1.3.0"
-# The rollout guard recognizes this exact live-baseline image to preflight the
-# one-time migration to the current pin; it is never an accepted target image.
-LEGACY_ROLLOUT_BASELINE_PINS = (
-    ("deploy/teagramd/rollout-runner/rollout-verifier.sh", "1.2.0", "image"),
-    (
-        "deploy/teagramd/rollout-runner/test-rollout-verifier-env-additions.sh",
-        "1.2.0",
-        "image",
-    ),
+# The transition fixture records an older Atlas migration image as evidence.
+FROZEN_FIXTURE_PINS = (
+    ("deploy/teagram-demo/blob-mode/test-qualify-rustfs-transition.py", "1.2.0", "image"),
 )
 REQUIRED_PIN_FILES = (
     "docker-compose.yml",
     "deploy/k8s/Dockerfile.migrations",
     "deploy/teagram-demo/compose.yaml",
     "deploy/qa-invite/compose.yaml",
-    "deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/perf.yml",
 )
@@ -59,8 +45,6 @@ def collect_pins() -> list[tuple[str, str, str]]:
     """Return (path, version, source) for every Atlas version pin in the repo."""
     pins: list[tuple[str, str, str]] = []
     for relative_path in tracked_files():
-        if FROZEN_ROLLOUT_ARTIFACTS.match(relative_path):
-            continue
         if relative_path.startswith(".github/scripts/test_atlas_version_pins"):
             continue
         path = ROOT / relative_path
@@ -101,7 +85,7 @@ class AtlasVersionPinTests(unittest.TestCase):
         mismatched = [
             pin
             for pin in pins
-            if pin[1] != EXPECTED_VERSION and pin not in LEGACY_ROLLOUT_BASELINE_PINS
+            if pin[1] != EXPECTED_VERSION and pin not in FROZEN_FIXTURE_PINS
         ]
         self.assertEqual(
             [],
@@ -110,9 +94,9 @@ class AtlasVersionPinTests(unittest.TestCase):
             f"{EXPECTED_VERSION}: {mismatched}",
         )
 
-    def test_legacy_rollout_baseline_allowlist_is_exact(self) -> None:
-        legacy_pins = [pin for pin in collect_pins() if pin[1] != EXPECTED_VERSION]
-        self.assertEqual(sorted(LEGACY_ROLLOUT_BASELINE_PINS), sorted(legacy_pins))
+    def test_frozen_fixture_pins_are_exact(self) -> None:
+        frozen = [pin for pin in collect_pins() if pin[1] != EXPECTED_VERSION]
+        self.assertEqual(sorted(FROZEN_FIXTURE_PINS), sorted(frozen))
 
     def test_scans_escaped_mirror_image_pin(self) -> None:
         self.assertIn(
