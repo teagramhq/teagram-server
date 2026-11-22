@@ -284,6 +284,10 @@ active_operation_count=0
 for operation_path in "$ops_dir"/*.sh; do
   operation_name=${operation_path##*/}
   operation_name=${operation_name%.sh}
+  # This helper is sourced by other operations; it is not a teagram-ops target.
+  if [[ "$operation_name" == bot-api-qa ]]; then
+    continue
+  fi
   active_operation_count=$((active_operation_count + 1))
   export MOCK_STOP_AT_SHOW=true MOCK_ALLOWED_NAME="$operation_name"
   expect_status 67 "run $OPS_SHA $operation_name"
