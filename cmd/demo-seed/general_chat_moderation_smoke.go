@@ -120,12 +120,9 @@ func verifyGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options se
 	var general remoteSpace
 	if err := withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
 		var err error
-		general, _, err = resolveOwnedGeneralChat(runCtx, api, demoGeneralChatSpace)
+		general, err = findOwnedGeneralChatForModerationSmoke(runCtx, api)
 		if err != nil {
 			return err
-		}
-		if !general.creator {
-			return errors.New("seed owner does not own General during moderation smoke verification")
 		}
 		messages, err := historyMessages(runCtx, api, general.peer())
 		if err != nil {
@@ -138,7 +135,9 @@ func verifyGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options se
 			}
 		}
 
-		resolvedGuest, err := resolveModerationSmokeGuest(runCtx, api, guest.ID, moderationSmokeShortUsername)
+		resolvedGuest, err := findModerationSmokeGuestInGeneralChat(
+			runCtx, api, general, guest.ID, moderationSmokeShortUsername,
+		)
 		if err != nil {
 			return err
 		}
@@ -185,12 +184,44 @@ func verifyGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options se
 	return nil
 }
 
-func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string) error {
+type moderationSmokeCleanupDependencies struct {
+	withGuest   func(context.Context, apiConfig, string, func(context.Context, *tg.Client, *tg.User) error) error
+	withOwner   func(context.Context, apiConfig, seedOptions, string, apiAction) error
+	sessionFile string
+}
+
+func cleanupGeneralModerationSmoke(
+	ctx context.Context,
+	cfg apiConfig,
+	options seedOptions,
+	ownerPassword string,
+	dependencyOverrides ...moderationSmokeCleanupDependencies,
+) error {
 	if !validModerationSmokeMarker(options.moderationSmokeMarker) {
 		return errors.New("demo General moderation smoke marker is invalid")
 	}
+	if len(dependencyOverrides) > 1 {
+		return errors.New("multiple General moderation smoke cleanup dependency sets")
+	}
+	dependencies := moderationSmokeCleanupDependencies{
+		withGuest:   withModerationSmokeGuest,
+		withOwner:   withSeedOwner,
+		sessionFile: defaultModerationSmokeSessionFile,
+	}
+	if len(dependencyOverrides) == 1 {
+		overrides := dependencyOverrides[0]
+		if overrides.withGuest != nil {
+			dependencies.withGuest = overrides.withGuest
+		}
+		if overrides.withOwner != nil {
+			dependencies.withOwner = overrides.withOwner
+		}
+		if overrides.sessionFile != "" {
+			dependencies.sessionFile = overrides.sessionFile
+		}
+	}
 	var guest *tg.User
-	guestErr := withModerationSmokeGuest(ctx, cfg, options.endpoint, func(_ context.Context, _ *tg.Client, user *tg.User) error {
+	guestErr := dependencies.withGuest(ctx, cfg, options.endpoint, func(_ context.Context, _ *tg.Client, user *tg.User) error {
 		guest = user
 		return nil
 	})
@@ -198,16 +229,13 @@ func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options s
 		guestErr = nil
 	}
 
-	ownerErr := withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
-		remote, _, err := resolveOwnedGeneralChat(runCtx, api, demoGeneralChatSpace)
+	ownerErr := dependencies.withOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
+		remote, err := findOwnedGeneralChatForModerationSmoke(runCtx, api)
 		if err != nil {
 			return err
 		}
-		if !remote.creator {
-			return errors.New("seed owner does not own General during moderation smoke cleanup")
-		}
 		if guest != nil {
-			resolved, err := resolveModerationSmokeGuest(runCtx, api, guest.ID, guest.Username)
+			resolved, err := findModerationSmokeGuestInGeneralChat(runCtx, api, remote, guest.ID, guest.Username)
 			if err != nil {
 				return err
 			}
@@ -240,7 +268,7 @@ func cleanupGeneralModerationSmoke(ctx context.Context, cfg apiConfig, options s
 		return err
 	}
 	if guest != nil {
-		if err := removeModerationSmokeSessionFile(); err != nil {
+		if err := removeModerationSmokeSessionFileAt(dependencies.sessionFile); err != nil {
 			return err
 		}
 	}
@@ -394,7 +422,11 @@ func withModerationSmokeGuest(
 }
 
 func verifyModerationSmokeSessionFile() error {
-	info, err := os.Lstat(defaultModerationSmokeSessionFile)
+	return verifyModerationSmokeSessionFileAt(defaultModerationSmokeSessionFile)
+}
+
+func verifyModerationSmokeSessionFileAt(path string) error {
+	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("inspect General moderation smoke guest session: %w", err)
 	}
@@ -404,31 +436,89 @@ func verifyModerationSmokeSessionFile() error {
 	return nil
 }
 
-func removeModerationSmokeSessionFile() error {
-	if err := verifyModerationSmokeSessionFile(); err != nil {
+func removeModerationSmokeSessionFileAt(path string) error {
+	if err := verifyModerationSmokeSessionFileAt(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	if err := os.Remove(defaultModerationSmokeSessionFile); err != nil {
+	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove General moderation smoke guest session: %w", err)
 	}
 	return nil
 }
 
-func resolveModerationSmokeGuest(ctx context.Context, api *tg.Client, userID int64, username string) (*tg.User, error) {
-	resolved, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
+func findOwnedGeneralChatForModerationSmoke(ctx context.Context, api *tg.Client) (remoteSpace, error) {
+	dialogs, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      100,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve General moderation smoke guest: %w", err)
+		return remoteSpace{}, fmt.Errorf("list seed-owner dialogs for moderation smoke: %w", err)
 	}
-	for _, candidate := range resolved.Users {
-		user, ok := candidate.(*tg.User)
-		if ok && user.ID == userID && strings.EqualFold(user.Username, username) && user.AccessHash != 0 && !user.Bot {
-			return user, nil
+	var chats []tg.ChatClass
+	switch result := dialogs.(type) {
+	case *tg.MessagesDialogs:
+		chats = result.Chats
+	case *tg.MessagesDialogsSlice:
+		chats = result.Chats
+	default:
+		return remoteSpace{}, fmt.Errorf("seed-owner dialogs for moderation smoke returned %T", dialogs)
+	}
+	for _, handle := range demo.GeneralChatHandles() {
+		for _, candidate := range chats {
+			channel, ok := candidate.(*tg.Channel)
+			if !ok || channel.ID <= 0 || channel.AccessHash == 0 || channel.Username != handle ||
+				channel.Title != demoGeneralChatSpace.title || channel.Megagroup != demoGeneralChatSpace.megagroup ||
+				channel.Broadcast == demoGeneralChatSpace.megagroup {
+				continue
+			}
+			if !channel.Creator {
+				continue
+			}
+			return remoteSpace{
+				spec: demoGeneralChatSpace, channelID: channel.ID,
+				accessHash: channel.AccessHash, creator: true,
+			}, nil
 		}
 	}
-	return nil, errors.New("demo General moderation smoke handle does not resolve to the smoke guest")
+	return remoteSpace{}, errors.New("seed owner does not have a joined General chat for moderation smoke")
+}
+
+func findModerationSmokeGuestInGeneralChat(
+	ctx context.Context,
+	api *tg.Client,
+	general remoteSpace,
+	userID int64,
+	username string,
+) (*tg.User, error) {
+	if general.channelID <= 0 || general.accessHash == 0 || !general.creator {
+		return nil, errors.New("refuse to resolve moderation smoke guest outside seed-owned General")
+	}
+	filters := []tg.ChannelParticipantsFilterClass{
+		&tg.ChannelParticipantsSearch{Q: username},
+		&tg.ChannelParticipantsBanned{Q: username},
+	}
+	for _, filter := range filters {
+		participantsResult, err := api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+			Channel: general.inputChannel(), Filter: filter, Limit: 200,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("find General moderation smoke guest in participant list: %w", err)
+		}
+		participants, ok := participantsResult.(*tg.ChannelsChannelParticipants)
+		if !ok {
+			return nil, fmt.Errorf("general moderation smoke participant result = %T, want *tg.ChannelsChannelParticipants", participantsResult)
+		}
+		for _, candidate := range participants.Users {
+			user, ok := candidate.(*tg.User)
+			if ok && user.ID == userID && strings.EqualFold(user.Username, username) && user.AccessHash != 0 && !user.Bot {
+				return user, nil
+			}
+		}
+	}
+	return nil, errors.New("demo General participant lists do not contain the moderation smoke guest")
 }
 
 func resolveGeneralChatForGuest(ctx context.Context, api *tg.Client) (remoteSpace, error) {

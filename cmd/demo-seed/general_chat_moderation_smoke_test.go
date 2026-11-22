@@ -2,16 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
+	"github.com/teagramhq/teagram-server/internal/demo"
 	"github.com/teagramhq/teagram-server/internal/srp"
 )
 
@@ -246,6 +251,229 @@ func (rpc *moderationSmokeMembershipRPC) Invoke(_ context.Context, input bin.Enc
 		participant.Participant = &tg.ChannelParticipant{UserID: 42}
 	default:
 		return fmt.Errorf("unexpected smoke cleanup request %T", input)
+	}
+	return nil
+}
+
+func TestFindOwnedGeneralChatForModerationSmokeSkipsNonOwnedAndIgnoresDescription(t *testing.T) {
+	rpc := &moderationSmokeDialogsRPC{}
+	general, err := findOwnedGeneralChatForModerationSmoke(context.Background(), tg.NewClient(rpc))
+	if err != nil {
+		t.Fatalf("find owned General from dialogs: %v", err)
+	}
+	if general.channelID != 72 || general.accessHash != 94 || !general.creator {
+		t.Fatalf("resolved General = %+v, want owned fallback handle channel 72", general)
+	}
+	if rpc.fullInfoCalls != 0 {
+		t.Fatalf("full-channel description lookups = %d, want 0", rpc.fullInfoCalls)
+	}
+}
+
+type moderationSmokeDialogsRPC struct {
+	fullInfoCalls int
+}
+
+func (rpc *moderationSmokeDialogsRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch input.(type) {
+	case *tg.MessagesGetDialogsRequest:
+		response, ok := output.(*tg.MessagesDialogsBox)
+		if !ok {
+			return fmt.Errorf("unexpected dialogs output %T", output)
+		}
+		response.Dialogs = &tg.MessagesDialogs{Chats: []tg.ChatClass{
+			&tg.Channel{
+				ID: 71, AccessHash: 93, Username: demo.GeneralChatHandle,
+				Title: demoGeneralChatSpace.title, Megagroup: true,
+			},
+			&tg.Channel{
+				ID: 72, AccessHash: 94, Username: demo.GeneralChatHandles()[1],
+				Title: demoGeneralChatSpace.title, Megagroup: true, Creator: true,
+			},
+		}}
+	case *tg.ChannelsGetFullChannelRequest:
+		rpc.fullInfoCalls++
+		return errors.New("unexpected full-channel description lookup")
+	default:
+		return fmt.Errorf("unexpected General dialog lookup request %T", input)
+	}
+	return nil
+}
+
+func TestCleanupGeneralModerationSmokeRestoresMembershipAndRemovesArtifactsWithLookupQuotaExhausted(t *testing.T) {
+	sessionFile := filepath.Join(t.TempDir(), "moderation-smoke.session")
+	if err := os.WriteFile(sessionFile, []byte("session"), 0600); err != nil {
+		t.Fatalf("create smoke guest session: %v", err)
+	}
+	rpc := &moderationSmokeCleanupRPC{}
+	guestCalls := 0
+	ownerCalls := 0
+	dependencies := moderationSmokeCleanupDependencies{
+		withGuest: func(ctx context.Context, _ apiConfig, _ string, action func(context.Context, *tg.Client, *tg.User) error) error {
+			guestCalls++
+			return action(ctx, tg.NewClient(rpc), &tg.User{ID: 42, AccessHash: 43, Username: moderationSmokeShortUsername})
+		},
+		withOwner: func(ctx context.Context, _ apiConfig, _ seedOptions, _ string, action apiAction) error {
+			ownerCalls++
+			return action(ctx, tg.NewClient(rpc))
+		},
+		sessionFile: sessionFile,
+	}
+	options := seedOptions{moderationSmokeMarker: strings.Repeat("a", 32)}
+	if err := cleanupGeneralModerationSmoke(context.Background(), apiConfig{}, options, "unused", dependencies); err != nil {
+		t.Fatalf("cleanup General moderation smoke: %v", err)
+	}
+	if guestCalls != 1 || ownerCalls != 1 {
+		t.Fatalf("cleanup runners guest=%d owner=%d, want one each", guestCalls, ownerCalls)
+	}
+	if rpc.usernameLookupCalls != 0 {
+		t.Fatalf("quota-charged username lookups = %d, want 0", rpc.usernameLookupCalls)
+	}
+	if rpc.unbanCalls != 1 || rpc.inviteCalls != 1 || rpc.participantChecks != 1 || !rpc.memberRestored {
+		t.Fatalf("membership cleanup unban=%d invite=%d verify=%d, want one each", rpc.unbanCalls, rpc.inviteCalls, rpc.participantChecks)
+	}
+	if rpc.deletedMessageID != 81 {
+		t.Fatalf("deleted moderation marker post ID = %d, want 81", rpc.deletedMessageID)
+	}
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Fatalf("moderation smoke session stat error = %v, want removed session", err)
+	}
+}
+
+type moderationSmokeCleanupRPC struct {
+	usernameLookupCalls int
+	unbanCalls          int
+	inviteCalls         int
+	participantChecks   int
+	memberRestored      bool
+	deletedMessageID    int
+}
+
+func (rpc *moderationSmokeCleanupRPC) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	const channelID int64 = 72
+	const channelHash int64 = 94
+	switch request := input.(type) {
+	case *tg.ContactsResolveUsernameRequest:
+		rpc.usernameLookupCalls++
+		return tgerr.New(420, "FLOOD_WAIT_86400")
+	case *tg.ContactsSearchRequest:
+		rpc.usernameLookupCalls++
+		return tgerr.New(420, "FLOOD_WAIT_86400")
+	case *tg.MessagesGetDialogsRequest:
+		response, ok := output.(*tg.MessagesDialogsBox)
+		if !ok {
+			return fmt.Errorf("unexpected dialogs output %T", output)
+		}
+		response.Dialogs = &tg.MessagesDialogs{Chats: []tg.ChatClass{
+			&tg.Channel{ID: 71, AccessHash: 93, Username: demo.GeneralChatHandle, Title: demoGeneralChatSpace.title, Megagroup: true},
+			&tg.Channel{ID: channelID, AccessHash: channelHash, Username: demo.GeneralChatHandles()[1], Title: demoGeneralChatSpace.title, Megagroup: true, Creator: true},
+		}}
+	case *tg.ChannelsGetFullChannelRequest:
+		return fmt.Errorf("cleanup must not fetch General description: %+v", request.Channel)
+	case *tg.ChannelsGetParticipantsRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash || request.Limit != 200 {
+			return fmt.Errorf("unexpected moderation guest roster request: %+v", request)
+		}
+		var includeGuest bool
+		switch filter := request.Filter.(type) {
+		case *tg.ChannelParticipantsSearch:
+			if filter.Q != moderationSmokeShortUsername {
+				return fmt.Errorf("member filter = %+v, want smoke username", filter)
+			}
+		case *tg.ChannelParticipantsBanned:
+			if filter.Q != moderationSmokeShortUsername {
+				return fmt.Errorf("banned filter = %+v, want smoke username", filter)
+			}
+			includeGuest = true
+		default:
+			return fmt.Errorf("unexpected moderation guest roster filter: %T %+v", request.Filter, request.Filter)
+		}
+		response, ok := output.(*tg.ChannelsChannelParticipantsBox)
+		if !ok {
+			return fmt.Errorf("unexpected participant roster output %T", output)
+		}
+		roster := &tg.ChannelsChannelParticipants{}
+		if includeGuest {
+			roster.Count = 1
+			roster.Users = []tg.UserClass{&tg.User{ID: 42, AccessHash: 43, Username: moderationSmokeShortUsername}}
+			roster.Participants = []tg.ChannelParticipantClass{&tg.ChannelParticipantBanned{Peer: &tg.PeerUser{UserID: 42}}}
+		}
+		response.ChannelParticipants = roster
+	case *tg.ChannelsEditBannedRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash {
+			return fmt.Errorf("unexpected unban channel: %+v", request.Channel)
+		}
+		target, ok := request.Participant.(*tg.InputPeerUser)
+		if !ok || target.UserID != 42 || target.AccessHash != 43 || request.BannedRights.ViewMessages || request.BannedRights.UntilDate != 0 {
+			return fmt.Errorf("unexpected unban target or rights: %+v", request)
+		}
+		rpc.unbanCalls++
+		updates, ok := output.(*tg.UpdatesBox)
+		if !ok {
+			return fmt.Errorf("unexpected unban output %T", output)
+		}
+		updates.Updates = &tg.Updates{}
+	case *tg.ChannelsInviteToChannelRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash || len(request.Users) != 1 {
+			return fmt.Errorf("unexpected invite request: %+v", request)
+		}
+		user, ok := request.Users[0].(*tg.InputUser)
+		if !ok || user.UserID != 42 || user.AccessHash != 43 {
+			return fmt.Errorf("unexpected invite target: %+v", request.Users)
+		}
+		rpc.inviteCalls++
+		if rpc.unbanCalls != 1 {
+			return errors.New("smoke guest was invited before its ban was cleared")
+		}
+		rpc.memberRestored = true
+		if _, ok := output.(*tg.MessagesInvitedUsers); !ok {
+			return fmt.Errorf("unexpected invite output %T", output)
+		}
+	case *tg.ChannelsGetParticipantRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash {
+			return fmt.Errorf("unexpected membership check channel: %+v", request.Channel)
+		}
+		target, ok := request.Participant.(*tg.InputPeerUser)
+		if !ok || target.UserID != 42 || target.AccessHash != 43 {
+			return fmt.Errorf("unexpected membership check target: %+v", request.Participant)
+		}
+		participant, ok := output.(*tg.ChannelsChannelParticipant)
+		if !ok {
+			return fmt.Errorf("unexpected participant output %T", output)
+		}
+		rpc.participantChecks++
+		if !rpc.memberRestored {
+			return tgerr.New(400, "USER_NOT_PARTICIPANT")
+		}
+		participant.Participant = &tg.ChannelParticipant{UserID: 42}
+	case *tg.MessagesGetHistoryRequest:
+		channel, ok := request.Peer.(*tg.InputPeerChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash {
+			return fmt.Errorf("unexpected General history peer: %+v", request.Peer)
+		}
+		response, ok := output.(*tg.MessagesMessagesBox)
+		if !ok {
+			return fmt.Errorf("unexpected history output %T", output)
+		}
+		response.Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 81, Message: moderationSmokeMessage(strings.Repeat("a", 32)).text},
+		}}
+	case *tg.ChannelsDeleteMessagesRequest:
+		channel, ok := request.Channel.(*tg.InputChannel)
+		if !ok || channel.ChannelID != channelID || channel.AccessHash != channelHash || len(request.ID) != 1 || request.ID[0] != 81 {
+			return fmt.Errorf("unexpected moderation marker delete request: %+v", request)
+		}
+		result, ok := output.(*tg.MessagesAffectedMessages)
+		if !ok {
+			return fmt.Errorf("unexpected delete output %T", output)
+		}
+		result.PtsCount = 1
+		rpc.deletedMessageID = request.ID[0]
+	default:
+		return fmt.Errorf("unexpected moderation cleanup request %T", input)
 	}
 	return nil
 }
