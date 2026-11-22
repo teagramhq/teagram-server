@@ -36,7 +36,8 @@ var (
 func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
 	rsaKey := webSocketTestExchangeKey(t)
 	server := mtproto.New(
 		exchange.PrivateKey{RSA: rsaKey},
@@ -88,11 +89,11 @@ func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testin
 
 	resPQEnvelope, resPQFrame, err := receivePlainExchangeReply(ctx, client)
 	if err != nil {
-		t.Fatal("receive resPQ")
+		t.Fatalf("receive resPQ: %v", err)
 	}
 	var resPQ mt.ResPQ
 	if err := decodePlainExchangeReply(resPQEnvelope, &resPQ); err != nil {
-		t.Fatal("decode resPQ")
+		t.Fatalf("decode resPQ: %v", err)
 	}
 	const serverPQ = "17ed48941a08f981"
 	wantPQ := []byte{0x17, 0xed, 0x48, 0x94, 0x1a, 0x08, 0xf9, 0x81}
@@ -141,13 +142,13 @@ func TestServeWebSocketEmitsPlainExchangeRepliesOverObfuscatedAbridged(t *testin
 
 	serverDHEnvelope, serverDHFrame, err := receivePlainExchangeReply(ctx, client)
 	if err != nil {
-		t.Fatal("receive server_DH_params")
+		t.Fatalf("receive server_DH_params: %v", err)
 	}
 	var serverDH bin.Buffer
 	serverDH.ResetTo(serverDHEnvelope.MessageData)
 	serverDHParams, err := mt.DecodeServerDHParams(&serverDH)
 	if err != nil {
-		t.Fatal("decode server_DH_params")
+		t.Fatalf("decode server_DH_params: %v", err)
 	}
 	if _, ok := serverDHParams.(*mt.ServerDHParamsOk); !ok {
 		t.Fatalf("server_DH_params type = %T, want *mt.ServerDHParamsOk", serverDHParams)
