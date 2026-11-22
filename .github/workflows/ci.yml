@@ -1278,6 +1278,7 @@ jobs:
             deploy/teagram/ops/bot-api-qa.sh \
             deploy/teagram/ops/bot-api-qa-bot.sh \
             deploy/teagram/test-bot-api-qa-bot-ops.sh \
+            deploy/teagram/test-bot-api-qa-optional-restore.sh \
             deploy/teagram/test-bot-api-relays.sh \
             deploy/teagram/ops/encrypt-media.sh \
             deploy/teagram/ops/cleanup-media.sh \
@@ -1357,6 +1358,7 @@ jobs:
       - name: Check Bot API QA bot and relay fixtures
         run: |
           bash deploy/teagram/test-bot-api-qa-bot-ops.sh
+          bash deploy/teagram/test-bot-api-qa-optional-restore.sh
           bash deploy/teagram/test-bot-api-relays.sh
 
       - name: Check media encryption and cleanup operations
@@ -1365,7 +1367,10 @@ jobs:
           python3 -B deploy/teagram/test-quarantine-unaccounted-media.py
 
       - name: Check demo blob-mode authority helpers
-        run: python3 -B deploy/teagram-demo/blob-mode/test-blob-mode-state.py
+        run: |
+          python3 -B deploy/teagram-demo/blob-mode/test-blob-mode-state.py
+          python3 -B deploy/teagram/ops/test-blob-transition-runner.py
+          python3 -B deploy/teagram/ops/test-blob-mode-report-attestation.py
 
       - name: Pull PostgreSQL 18 image for media dump validation
         run: >-
