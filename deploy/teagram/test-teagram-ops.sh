@@ -24,7 +24,6 @@ printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$
 printf 'override fixture\n' > "$tmp/repo/docker-compose.override.yml"
 printf 'state fixture\n' > "$tmp/repo/.state/rollout-env"
 printf 'compose fixture\n' > "$tmp/repo/docker-compose.yml"
-printf 'local blobs fixture\n' > "$tmp/repo/docker-compose.local-blobs.yml"
 printf 'fixture env only\n' > "$tmp/repo/.env.rustfs-parked"
 
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -122,7 +121,7 @@ case "$1" in
       "$OPS_SHA:deploy/teagram/ops/qa-password-timestamps.sh")
         cat "$MOCK_PASSWORD_TIMESTAMPS_SCRIPT"
         ;;
-      "$OPS_SHA:deploy/teagramd/rollout-runner/attest-blob-mode-reports.py")
+      "$OPS_SHA:deploy/teagram/ops/attest-blob-mode-reports.py")
         cat <<'PY'
 import os
 from pathlib import Path
@@ -135,8 +134,8 @@ assert re.search(r"^-- name: BlobInventoryReferences :many\n.*;$", (helper_dir /
 print("attestation-operation fixture")
 PY
         ;;
-      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py"|\
-      "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py")
+      "$OPS_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py"|\
+      "$OPS_SHA:deploy/teagram/ops/blob-transition-runner.py")
         printf '%s\n' '# staged reviewed helper fixture'
         ;;
       "$OPS_SHA:internal/store/queries/uploads.sql")
@@ -266,14 +265,12 @@ env_output=$(run_command env-names)
 [[ "$env_output" == $'FIXTURE_EMPTY\nTG_RSA_KEY_FINGERPRINT' ]]
 [[ "$env_output" != *fixture-value-never-print* ]]
 fingerprints=$(run_command fingerprints)
-[[ "$(printf '%s\n' "$fingerprints" | wc -l | tr -d ' ')" == 5 ]]
+[[ "$(printf '%s\n' "$fingerprints" | wc -l | tr -d ' ')" == 4 ]]
 [[ "$fingerprints" != *fixture-value-never-print* ]]
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps'* ]]
-  [[ "$help_output" == *'apply-user-invite-quota default mutates live state;'* && \
-    "$help_output" == *'verify is read-only'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
   [[ "$help_output" == *'encrypt-media backs up and encrypts referenced media'* ]]

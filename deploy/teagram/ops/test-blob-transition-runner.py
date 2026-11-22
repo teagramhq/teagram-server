@@ -20,8 +20,9 @@ from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNNER = SCRIPT_DIR / "blob-transition-runner.py"
-QUALIFIER_FIXTURES = SCRIPT_DIR / "test-qualify-rustfs-transition.py"
-MODE_FIXTURES = SCRIPT_DIR / "test-blob-mode-state.py"
+BLOB_MODE_DIR = SCRIPT_DIR.parent.parent / "teagram-demo" / "blob-mode"
+QUALIFIER_FIXTURES = BLOB_MODE_DIR / "test-qualify-rustfs-transition.py"
+MODE_FIXTURES = BLOB_MODE_DIR / "test-blob-mode-state.py"
 FILE_KEY = "02/258"
 PART_KEY = "parts/aa/" + "b" * 32
 MANIFEST = f"{FILE_KEY}\t5\t{'a' * 64}\n{PART_KEY}\t3\t{'b' * 64}\n"
@@ -76,7 +77,7 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
     def test_live_authority_rejection_keeps_its_reason(self) -> None:
         runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
-        mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")
+        mode = import_from_path("blob_mode_authority_rejection", BLOB_MODE_DIR / "blob-mode-state.py")
         container_id = "a" * 64
         inspected = {
             "Id": container_id,
@@ -120,7 +121,7 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
     def test_compose_authority_rejection_keeps_its_reason(self) -> None:
         runner = import_from_path("blob_transition_runner_compose_rejection", RUNNER)
         mode = import_from_path(
-            "blob_mode_compose_rejection", RUNNER.parent / "blob-mode-state.py"
+            "blob_mode_compose_rejection", BLOB_MODE_DIR / "blob-mode-state.py"
         )
         with patch.object(
             mode,
@@ -422,8 +423,8 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
 class BlobTransitionEvidenceTests(unittest.TestCase):
     def schema_document(self, release_set: str = "60-66") -> tuple[Any, dict[str, Any], dict[str, str]]:
-        mode = import_from_path("blob_transition_state", SCRIPT_DIR / "blob-mode-state.py")
-        qualifier = import_from_path("transition_evidence_qualifier", SCRIPT_DIR / "qualify-rustfs-transition.py")
+        mode = import_from_path("blob_transition_state", BLOB_MODE_DIR / "blob-mode-state.py")
+        qualifier = import_from_path("transition_evidence_qualifier", BLOB_MODE_DIR / "qualify-rustfs-transition.py")
         migration = qualifier_fixtures.good_migration_evidence(release_set)
         observed = live_schema_observation(release_set)
         dump_sha256 = "d" * 64
@@ -1581,7 +1582,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         schema_path = self.report_root / report["phase_files"]["schema_evidence_sha256"]
         schema_evidence = json.loads(schema_path.read_text(encoding="utf-8"))
         live_capture = schema_evidence["live_capture"]
-        qualifier = import_from_path("runner_qualifier", SCRIPT_DIR / "qualify-rustfs-transition.py")
+        qualifier = import_from_path("runner_qualifier", BLOB_MODE_DIR / "qualify-rustfs-transition.py")
         self.assertEqual(live_capture["dump_sha256"], report["phase_digests"]["dump_sha256"])
         self.assertEqual(
             live_capture["observed"]["revision_detail"],

@@ -22,8 +22,10 @@ from typing import Any
 
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
-QUALIFIER = SCRIPT_DIR / "qualify-rustfs-transition.sh"
-MODE_HELPER = SCRIPT_DIR / "blob-mode-state.py"
+BLOB_MODE_DIR = SCRIPT_DIR.parent.parent / "teagram-demo" / "blob-mode"
+HELPER_DIR = SCRIPT_DIR if (SCRIPT_DIR / "blob-mode-state.py").is_file() else BLOB_MODE_DIR
+QUALIFIER = HELPER_DIR / "qualify-rustfs-transition.sh"
+MODE_HELPER = HELPER_DIR / "blob-mode-state.py"
 TEST_MODE = os.environ.get("BLOB_TRANSITION_TEST_MODE") == "1"
 TEST_FIXTURE_ROOT: pathlib.Path | None = None
 TEST_FIXTURE_DOCKER: pathlib.Path | None = None
@@ -985,7 +987,7 @@ def capture_live_r70_inert_surfaces(
     name: str,
 ) -> str:
     qualifier = import_qualifier()
-    query_path = SCRIPT_DIR / "rustfs-r70-inert-surfaces.sql"
+    query_path = HELPER_DIR / "rustfs-r70-inert-surfaces.sql"
     try:
         query_bytes = query_path.read_bytes()
         query = query_bytes.decode("utf-8")
@@ -1360,7 +1362,7 @@ def import_mode_helper() -> Any:
 
 
 def import_qualifier() -> Any:
-    spec = importlib.util.spec_from_file_location("qualify_rustfs_transition", SCRIPT_DIR / "qualify-rustfs-transition.py")
+    spec = importlib.util.spec_from_file_location("qualify_rustfs_transition", HELPER_DIR / "qualify-rustfs-transition.py")
     if spec is None or spec.loader is None:
         reject("qualification-helper-unavailable")
     module = importlib.util.module_from_spec(spec)

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 repo_root = pathlib.Path(sys.argv[1]).resolve()
 fixture_root = pathlib.Path(sys.argv[2]).resolve()
-fixture_path = repo_root / "deploy/teagramd/rollout-runner/test-blob-mode-state.py"
+fixture_path = repo_root / "deploy/teagram-demo/blob-mode/test-blob-mode-state.py"
 spec = importlib.util.spec_from_file_location("blob_mode_state_test_fixtures", fixture_path)
 if spec is None or spec.loader is None:
     raise RuntimeError("could not load blob-mode-state test fixtures")

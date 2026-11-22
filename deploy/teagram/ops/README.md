@@ -8,14 +8,13 @@ procedures here as historical, not instructions for the live production stack.
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|apply-user-invite-quota|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the thirteen current operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `apply-user-invite-quota`, `start-server`,
-`encrypt-media`, `cleanup-media`, `backup-media-key`, `attest-blob-mode-reports`,
-`bot-api-qa`, `bot-api-qa-bot`, `quarantine-unaccounted-media`, and
+the eleven retained operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, `start-server`, `encrypt-media`, `cleanup-media`,
+`backup-media-key`, `attest-blob-mode-reports`, `bot-api-qa-bot`, `quarantine-unaccounted-media`, and
 `qa-password-timestamps`. A script's
 presence in an older main commit does not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover retired names

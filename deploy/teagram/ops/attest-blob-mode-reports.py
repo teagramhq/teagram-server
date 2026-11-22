@@ -41,6 +41,10 @@ REPORT_LOSS_CENSUS_MANIFEST = CENSUS_MANIFEST_NAME
 REFERENCE_QUERY_NAME = "BlobInventoryReferences"
 REFERENCE_QUERY_SOURCE = SCRIPT_DIR / "uploads.sql"
 REFERENCE_QUERY_BLOB_OID = SCRIPT_DIR / "uploads.sql.git-blob"
+BLOB_MODE_DIR = SCRIPT_DIR.parent.parent / "teagram-demo" / "blob-mode"
+MODE_HELPER = SCRIPT_DIR / "blob-mode-state.py"
+if not MODE_HELPER.is_file():
+    MODE_HELPER = BLOB_MODE_DIR / "blob-mode-state.py"
 
 
 class AttestationReject(Exception):
@@ -63,7 +67,7 @@ def import_helper(name: str, path: pathlib.Path):
     return module
 
 
-mode = import_helper("attestation_blob_mode_state", SCRIPT_DIR / "blob-mode-state.py")
+mode = import_helper("attestation_blob_mode_state", MODE_HELPER)
 transition = import_helper("attestation_blob_transition_runner", SCRIPT_DIR / "blob-transition-runner.py")
 
 

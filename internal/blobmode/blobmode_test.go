@@ -289,7 +289,7 @@ func assertRolloutAuthorityAccepts(t *testing.T, statePath, reportRoot string) {
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
 	// #nosec G204 -- This is the repository's fixed rollout validator with private test fixture paths.
 	command := exec.CommandContext(t.Context(), "python3",
-		filepath.Join(repoRoot, "deploy/teagramd/rollout-runner/blob-mode-state.py"),
+		filepath.Join(repoRoot, "deploy/teagram-demo/blob-mode/blob-mode-state.py"),
 		"authority", "--state-dir", statePath, "--report-root", reportRoot,
 	)
 	if output, err := command.CombinedOutput(); err != nil {

@@ -59,11 +59,11 @@ mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 [[ -z "$(demo_compose ps --status running -q "$INACTIVE_SERVER")" ]] ||
   demo_fail 'inactive server slot is running; reconcile the rollout before wiping demo data'
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
-python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" containers \
+python3 "$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py" containers \
   --checkout "$DEMO_REPO_ROOT" < "$TMP_DIR/containers.raw.json" > "$TMP_DIR/containers.json"
-python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
+python3 "$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py" compose \
   --checkout "$DEMO_REPO_ROOT" < "$TARGET_RENDER" > "$TARGET_INVENTORY"
-python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" validate \
+python3 "$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py" validate \
   --state-dir "$DEMO_AUTHORITY_DIR" \
   --report-root "$DEMO_STATE_DIR/reports" \
   --containers "$TMP_DIR/containers.json" \

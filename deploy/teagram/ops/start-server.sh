@@ -101,15 +101,15 @@ inspect_container "$SERVER_CONTAINER"
   fail 'teagramd Compose selection changed during preflight'
 }
 
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-transition-runner.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/blob-transition-runner.py" \
   > "$TEMP_DIR/blob-transition-runner.py" || fail 'cannot stage the reviewed blob authority validator'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py" \
   > "$TEMP_DIR/blob-mode-state.py" || fail 'cannot stage the reviewed blob state validator'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/qualify-rustfs-transition.py" \
   > "$TEMP_DIR/qualify-rustfs-transition.py" || fail 'cannot stage the reviewed transition report validator'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-inert-surfaces.sql" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/rustfs-inert-surfaces.sql" \
   > "$TEMP_DIR/rustfs-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-69 transition query'
-git -C "$REPO" show "$OPS_SHA:deploy/teagramd/rollout-runner/rustfs-r70-inert-surfaces.sql" \
+git -C "$REPO" show "$OPS_SHA:deploy/teagram-demo/blob-mode/rustfs-r70-inert-surfaces.sql" \
   > "$TEMP_DIR/rustfs-r70-inert-surfaces.sql" || fail 'cannot stage the reviewed 60-70 transition query'
 git -C "$REPO" show "$OPS_SHA:deploy/teagram/ops/bot-api-qa.sh" \
   > "$TEMP_DIR/bot-api-qa.sh" || fail 'cannot stage the reviewed Bot API relay recovery helper'
