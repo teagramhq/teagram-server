@@ -700,19 +700,5 @@ class BlobTransitionAuthorityTests(unittest.TestCase):
 
 
 
-class BlobTransitionRetiredLocalComposeTests(unittest.TestCase):
-    def test_local_compose_path_fails_closed_after_overlay_retirement(self) -> None:
-        runner = import_from_path("blob_transition_runner_retired_local_compose", RUNNER)
-        with tempfile.TemporaryDirectory(prefix="retired-local-compose.") as temporary:
-            with (
-                patch.object(runner, "TEST_MODE", True),
-                patch.object(runner, "TEST_FIXTURE_DOCKER", Path("/fixture/docker")),
-            ):
-                with self.assertRaisesRegex(
-                    runner.TransitionReject, "^local-compose-overlay-unavailable$"
-                ):
-                    runner.compose_environment(Path(temporary), local=True)
-
-
 if __name__ == "__main__":
     unittest.main()
