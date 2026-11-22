@@ -1367,7 +1367,7 @@ jobs:
       - name: Check demo blob-mode authority helpers
         run: |
           python3 -B deploy/teagram-demo/blob-mode/test-blob-mode-state.py
-          python3 -B deploy/teagram-demo/blob-mode/test-qualify-rustfs-transition.py
+          sudo -n env TMPDIR=/root python3 -B deploy/teagram-demo/blob-mode/test-qualify-rustfs-transition.py
 
       - name: Pull PostgreSQL 18 image for media dump validation
         run: >-
@@ -3577,8 +3577,7 @@ jobs:
           media_key_dir="$RUNNER_TEMP/teagramd-media-keys"
           media_key_file="$RUNNER_TEMP/teagramd-media-key"
           sudo install -d -o 65532 -g 65532 -m 0700 "$media_key_dir"
-          printf '%s\n' 6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d \
-            >"$media_key_file"
+          printf '%064d' 0 > "$media_key_file"
           sudo install -o 65532 -g 65532 -m 0600 "$media_key_file" "$media_key_dir/1.key"
           rm "$media_key_file"
           cat > .env <<'ENV'
