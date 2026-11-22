@@ -1065,7 +1065,7 @@ jobs:
     name: 'check: deploy-workflow'
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
 
@@ -3727,6 +3727,9 @@ jobs:
           compose() {
             docker compose "$@"
           }
+
+          # Create the persistent RSA identity before starting the read-only server.
+          compose run --rm --no-deps teagramd bootstrap-identity
 
           # Start the local development stack on a throwaway, empty S3 authority.
           compose up -d postgres migrate teagramd rustfs rustfs-init
