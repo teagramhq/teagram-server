@@ -11,16 +11,20 @@ Ops scripts run as root in `/tmp` through the forced command:
 ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|start-server|encrypt-media|cleanup-media|backup-media-key|attest-blob-mode-reports|bot-api-qa-bot|quarantine-unaccounted-media|qa-password-timestamps> [args]
 ```
 
-The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-the eleven retained operations: `target-failure-report`, `rollout-evidence`,
-`invite-web-signup-url`, `start-server`, `encrypt-media`, `cleanup-media`,
-`backup-media-key`, `attest-blob-mode-reports`, `bot-api-qa-bot`, `quarantine-unaccounted-media`, and
-`qa-password-timestamps`. A script's
-presence in an older main commit does not authorize a retired operation. The allowlist lives in
-`teagram-ops.sh`; tests cover retired names
-at an older main SHA. Keep every operation narrowly scoped to its named
-purpose. Validate arguments before using them, fail closed, and never put
-secrets in arguments, logs, or output.
+The current dispatcher accepts only these eleven operations:
+`target-failure-report`, `rollout-evidence`, `invite-web-signup-url`,
+`start-server`, `encrypt-media`, `cleanup-media`, `backup-media-key`,
+`attest-blob-mode-reports`, `bot-api-qa-bot`, `quarantine-unaccounted-media`,
+and `qa-password-timestamps`. The operation-name allowlist is checked before
+the dispatcher performs any Git lookup. A retired name such as `bot-api-qa`
+or `apply-user-invite-quota` is rejected with exit 64 even when the requested
+older `main` commit still contains its script; historical presence cannot
+restore root access through the runner. Only after a name passes that check
+does the dispatcher fetch `origin/main`, verify commit ancestry, and require
+the matching script blob at that commit. The allowlist lives in
+`teagram-ops.sh`; tests cover retired names at an older `main` SHA. Keep every
+operation narrowly scoped to its named purpose. Validate arguments before
+using them, fail closed, and never put secrets in arguments, logs, or output.
 
 ## QA account state and password timestamps
 

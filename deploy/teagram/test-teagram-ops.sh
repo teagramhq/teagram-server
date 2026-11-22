@@ -49,13 +49,19 @@ printf '%s\n' 'qa-password-timestamps fixture'
 TIMESTAMPS
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
-export MOCK_SHOW_LOG="$tmp/show.log"
+export MOCK_SHOW_LOG="$tmp/show.log" MOCK_GIT_LOG="$tmp/git.log"
 export MOCK_ROOT="$tmp/root"
 export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
+MOCK_OLD_MAIN_OPS_DIR="$tmp/old-main/deploy/teagram/ops"
+export MOCK_OLD_MAIN_OPS_DIR
+mkdir -p "$MOCK_OLD_MAIN_OPS_DIR"
+printf '#!/bin/sh\nexit 0\n' > "$MOCK_OLD_MAIN_OPS_DIR/bot-api-qa.sh"
+printf '#!/bin/sh\nexit 0\n' > "$MOCK_OLD_MAIN_OPS_DIR/apply-user-invite-quota.sh"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_GIT_LOG"
 [[ "$1" == -C ]] || { echo "unexpected git call: $*" >&2; exit 99; }
 shift 2
 case "$1" in
@@ -85,6 +91,10 @@ case "$1" in
     case "${3:-}" in
       "$OPS_SHA:deploy/teagram/ops/"*.sh)
         [[ -f "$MOCK_OPS_DIR/${3##*/}" ]]
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/bot-api-qa.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/apply-user-invite-quota.sh")
+        [[ -f "$MOCK_OLD_MAIN_OPS_DIR/${3##*/}" ]]
         ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
@@ -145,6 +155,10 @@ PY
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
         printf '#!/bin/sh\ntouch "%s"\n' "$MOCK_RETIRED_SCRIPT_MARKER"
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/bot-api-qa.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/apply-user-invite-quota.sh")
+        cat "$MOCK_OLD_MAIN_OPS_DIR/${2##*/}"
         ;;
       *) exit 1 ;;
     esac
@@ -252,6 +266,16 @@ expect_status() {
     return 1
   fi
 }
+expect_retired_without_git_lookup() {
+  local operation=$1
+  : > "$MOCK_GIT_LOG"
+  expect_status 64 "run $OLD_MAIN_SHA $operation"
+  [[ ! -s "$MOCK_GIT_LOG" ]] || {
+    printf 'FAIL retired operation %s performed Git lookups: %s\n' \
+      "$operation" "$(cat "$MOCK_GIT_LOG")" >&2
+    return 1
+  }
+}
 
 [[ "$(run_command hostname)" == fixture-host ]]
 live=$(run_command live)
@@ -336,6 +360,8 @@ expect_status 64 "run $OPS_SHA rollback-public-websocket"
 expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
 expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
 expect_status 64 "run $OLD_MAIN_SHA replay-check"
+expect_retired_without_git_lookup bot-api-qa
+expect_retired_without_git_lookup apply-user-invite-quota
 expect_status 66 "run $OLD_MAIN_SHA start-server"
 expect_status 66 "run $OLD_MAIN_SHA encrypt-media"
 expect_status 66 "run $OLD_MAIN_SHA cleanup-media"
