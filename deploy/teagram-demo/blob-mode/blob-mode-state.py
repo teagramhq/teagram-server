@@ -69,6 +69,7 @@ IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/teagramd/server_key.pem"}
 # retain the legacy blob path while its copied local authority remains active.
 RUNTIME_LAYOUTS = {
     "teagramd": {"mode": MODE_TARGET, "blobs": BLOB_TARGET, "key": KEY_TARGET},
+    "local-teagramd": {"mode": MODE_TARGET, "blobs": BLOB_TARGET, "key": KEY_TARGET},
     "telegramd": {
         "mode": "/run/telegramd/blob-mode",
         "blobs": MOVED_BLOB_TARGET,
@@ -521,9 +522,15 @@ def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
     raw = compose.get("volumes", {})
     if not isinstance(raw, dict):
         reject("compose-volumes")
+    services = compose.get("services", {})
+    blob_volume_key = (
+        "local_tgblobs"
+        if isinstance(services, dict) and "local-teagramd" in services
+        else "tgblobs"
+    )
     result: dict[str, str] = {}
     for key in ("tgblobs", "rustfsdata"):
-        item = raw.get(key)
+        item = raw.get(blob_volume_key if key == "tgblobs" else key)
         if key == "rustfsdata" and item is None:
             result[key] = None
             continue
@@ -571,7 +578,8 @@ def service_mounts(
         if target in mode_targets or source_is_mode_dir:
             mode_mounts.append({"type": kind, "source": source, "target": target, "read_only": read_only})
         if target in blob_targets:
-            if kind != "volume" or source != "tgblobs":
+            volume_key = "local_tgblobs" if service_name == "local-teagramd" else "tgblobs"
+            if kind != "volume" or source != volume_key:
                 reject("compose-blob-mount")
             blob_mounts.append({
                 "type": kind,
@@ -629,7 +637,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
             reject("compose-service")
         modes, _ = service_mounts(service, mode_source, compose)
         if name == "blob-key-rotate":
-            serving = services.get("teagramd")
+            serving = services.get("teagramd") if "teagramd" in services else services.get("local-teagramd")
             if not isinstance(serving, dict):
                 reject("mode-mount-helper")
             validate_key_rotation_service(
@@ -639,7 +647,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         elif modes:
             if name != "blob-encrypt-migrate":
                 reject("mode-mount-helper")
-            serving = services.get("teagramd")
+            serving = services.get("teagramd") if "teagramd" in services else services.get("local-teagramd")
             if not isinstance(serving, dict):
                 reject("mode-mount-helper")
             validate_encryption_migration_service(
@@ -647,7 +655,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
                 raw_environment_map(serving.get("environment", {}), True),
             )
     postgres_mounts: list[dict[str, object]] = []
-    postgres = services.get("postgres")
+    postgres = services.get("local-postgres") if "local-postgres" in services else services.get("postgres")
     if postgres is not None:
         if not isinstance(postgres, dict):
             reject("compose-service")

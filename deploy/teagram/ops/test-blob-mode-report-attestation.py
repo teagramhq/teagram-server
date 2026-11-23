@@ -760,42 +760,36 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         calls: list[list[str]] = []
         reasons: list[str] = []
         environment = {"TG_BLOB_S3_SECRET_ACCESS_KEY": "never-print-this"}
-        checkout = REPO_ROOT
-        sql_source = (checkout / "internal/store/queries/uploads.sql").read_text(encoding="utf-8")
+        sql_source = (REPO_ROOT / "internal/store/queries/uploads.sql").read_text(encoding="utf-8")
         query_start = sql_source.index("SELECT 'file'::text AS kind")
         query_end = sql_source.index(";", query_start) + 1
         canonical_query = sql_source[query_start:query_end]
         record = {
             "backend": {
                 "kind": "s3",
-                "endpoint": "https://s3.example.test",
+                "endpoint": "http://rustfs:9000",
                 "bucket": "teagram",
-                "prefix": "blobs/",
+                "prefix": "teagramd/",
             },
-        }
-        rendered = {
-            "services": {
-                "blob-migrate": {
-                    "profiles": ["migration"],
-                    "environment": {},
-                },
-                "blob-encrypt-migrate": {
-                    "volumes": [{
-                        "type": "bind",
-                        "source": str(self.operation.REPORT_ROOT),
-                        "target": self.operation.mode.REPORT_TARGET,
-                    }],
-                },
+            "outcome": "s3-accepted",
+            "volumes": {
+                "tgblobs": "teagram_tgblobs",
+                "rustfsdata": "teagram_rustfsdata",
             },
         }
         expected = [
-            ["docker", "compose", "--profile", "migration", "config", "--format", "json"],
             [
-                "docker", "compose", "--profile", "migration", "run", "--rm", "--no-deps",
+                "docker", "compose", "--profile", "local", "--profile", "migration",
+                "config", "--format", "json",
+            ],
+            [
+                "docker", "compose", "--profile", "local", "--profile", "migration",
+                "run", "--rm", "--no-deps",
                 "blob-migrate", "--direction", "s3-census", "--manifest", "stdout",
             ],
             [
-                "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
+                "docker", "compose", "--profile", "local", "--profile", "migration",
+                "exec", "-T", "local-postgres", "psql",
                 "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
                 "--single-transaction", "-c", f"SET TRANSACTION READ ONLY;\n{canonical_query}",
             ],
@@ -811,9 +805,41 @@ class BlobModeReportAttestationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             staged_dir = pathlib.Path(temporary)
+            checkout = staged_dir / "checkout"
+            checkout.mkdir()
+            (checkout / "docker-compose.override.yml").write_text("", encoding="utf-8")
+            state_parent = checkout / ".state"
+            state_parent.mkdir()
+            state_source = REPO_ROOT / ".state" / "blob-mode"
+            (state_parent / "blob-mode").symlink_to(state_source, target_is_directory=True)
+            env_file = staged_dir / "compose.env"
+            env_file.write_text(
+                "POSTGRES_PASSWORD=fixture-only\nTG_PUBLIC_LINK_PREFIX=https://web.teagram.io\n",
+                encoding="utf-8",
+            )
+            compose_env = os.environ.copy()
+            for key in list(compose_env):
+                if key.startswith(("TG_", "TEAGRAM_")) or key == "POSTGRES_PASSWORD":
+                    compose_env.pop(key)
+            rendered_result = subprocess.run(
+                [
+                    "docker", "compose", "--project-directory", str(REPO_ROOT),
+                    "--project-name", "teagram", "--env-file", str(env_file),
+                    "--file", str(REPO_ROOT / "docker-compose.yml"),
+                    "--file", str(checkout / "docker-compose.override.yml"),
+                    "--profile", "local", "--profile", "migration", "config", "--format", "json",
+                ],
+                cwd=REPO_ROOT,
+                env=compose_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(rendered_result.returncode, 0, rendered_result.stderr)
+            rendered = json.loads(rendered_result.stdout)
             staged_query = staged_dir / "uploads.sql"
             staged_blob_oid = staged_dir / "uploads.sql.git-blob"
-            sql_bytes = (checkout / "internal/store/queries/uploads.sql").read_bytes()
+            sql_bytes = (REPO_ROOT / "internal/store/queries/uploads.sql").read_bytes()
             staged_query.write_bytes(sql_bytes)
             staged_blob_oid.write_text(git_blob_oid(sql_bytes) + "\n", encoding="ascii")
             with (
@@ -831,11 +857,19 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                     return_value=environment,
                 ) as compose_environment,
                 patch.object(self.operation, "CHECKOUT", checkout),
+                patch.object(self.operation, "STATE_DIR", checkout / ".state" / "blob-mode"),
                 patch.object(self.operation, "REFERENCE_QUERY_SOURCE", staged_query),
                 patch.object(self.operation, "REFERENCE_QUERY_BLOB_OID", staged_blob_oid),
-                patch.object(self.operation.mode, "compose_inventory", return_value=object()) as compose_inventory,
-                patch.object(self.operation.mode, "assert_compose_matches") as assert_compose_matches,
-                patch.object(self.operation.mode, "backend_from_values", return_value=record["backend"]),
+                patch.object(
+                    self.operation.mode,
+                    "compose_inventory",
+                    wraps=self.operation.mode.compose_inventory,
+                ) as compose_inventory,
+                patch.object(
+                    self.operation.mode,
+                    "assert_compose_matches",
+                    wraps=self.operation.mode.assert_compose_matches,
+                ) as assert_compose_matches,
                 patch.object(self.operation, "run_compose", side_effect=run_compose),
             ):
                 s3_manifest, reference_rows = self.operation.capture_live_census(record)
@@ -853,6 +887,8 @@ class BlobModeReportAttestationTests(unittest.TestCase):
         )
         compose_inventory.assert_called_once_with(rendered, checkout)
         assert_compose_matches.assert_called_once()
+        self.assertEqual(rendered["volumes"]["local_tgblobs"]["name"], record["volumes"]["tgblobs"])
+        self.assertIn("local-teagramd", rendered["services"])
         self.assertFalse(any(command in ("restart", "up", "stop") for call in calls for command in call))
         self.assertNotIn("never-print-this", repr(calls))
 
