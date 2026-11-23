@@ -201,8 +201,9 @@ volume, and both server containers would be database writers.
 
 During a maintenance window, set `SHA` to the reviewed 40-character main commit
 before running the cutover block. It holds the deployment lock, checks that the
-checkout is clean and exactly at `SHA`, stages the authority helpers from that
-commit, and renders the Compose config before stopping the old pair.
+checkout is clean apart from the required local `docker-compose.override.yml`
+and exactly at `SHA`, stages the authority helpers from that commit, and
+renders the Compose config before stopping the old pair.
 
 ```sh
 SHA=REPLACE_WITH_REVIEWED_MAIN_SHA
@@ -217,7 +218,7 @@ exec 9>/tmp/teagram-deploy.lock
 flock -x 9
 checkout_sha=$(git -C "$REPO" rev-parse HEAD)
 [[ "$checkout_sha" == "$SHA" ]]
-[[ -z "$(git -C "$REPO" status --porcelain)" ]]
+[[ -z "$(git -C "$REPO" status --porcelain -- . ":(exclude)docker-compose.override.yml")" ]]
 git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
 temp_dir=$(mktemp -d /tmp/teagram-cutover.XXXXXXXX)
 [[ -d "$temp_dir" && ! -L "$temp_dir" && "$(stat -c '%a' -- "$temp_dir")" == 700 ]]
@@ -277,7 +278,7 @@ for old_container in teagram-teagramd-1 teagram-postgres-1; do
 done
 checkout_sha=$(git -C "$REPO" rev-parse HEAD)
 [[ "$checkout_sha" == "$SHA" ]]
-[[ -z "$(git -C "$REPO" status --porcelain)" ]]
+[[ -z "$(git -C "$REPO" status --porcelain -- . ":(exclude)docker-compose.override.yml")" ]]
 git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
 "${COMPOSE[@]}" --profile local up -d local-postgres local-teagramd
 ' cutover "$SHA"
