@@ -264,7 +264,7 @@ case "$1" in
       exit
     fi
     case "$container" in
-      teagram-postgres-1) service=postgres; state_file=$FIXTURE_POSTGRES_STATE ;;
+      teagram-local-postgres-1) service=local-postgres; state_file=$FIXTURE_POSTGRES_STATE ;;
       teagram-local-teagramd-1) service=local-teagramd; state_file=$FIXTURE_SERVER_STATE ;;
       teagram-rustfs-1) service=rustfs; state_file=$FIXTURE_RUSTFS_STATE ;;
       *) echo "unexpected fixture container inspect: $container" >&2; exit 99 ;;
@@ -322,7 +322,7 @@ case "$1" in
     printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
     ;;
   exec)
-    if [[ "$2" == -i && "$3" == teagram-postgres-1 && "$4" == pg_dump ]]; then
+    if [[ "$2" == -i && "$3" == teagram-local-postgres-1 && "$4" == pg_dump ]]; then
       printf 'pg_dump\n' >> "$FIXTURE_EVENTS"
       [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
       printf 'fixture archive\n'

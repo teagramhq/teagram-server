@@ -21,7 +21,7 @@ from typing import Callable, Iterable, Protocol
 INVENTORY_SCHEMA = "teagram.blob-encryption-inventory/v1"
 PROGRESS_SCHEMA = "teagram.blob-encryption-progress/v1"
 MANIFEST_SCHEMA = "teagram.media-quarantine/v1"
-POSTGRES_CONTAINER = "teagram-postgres-1"
+POSTGRES_CONTAINER = "teagram-local-postgres-1"
 MC_SERVICE = "rustfs-init"
 ENVELOPE_INVENTORY_SERVICE = "blob-key-rotate"
 ENVELOPE_INVENTORY_BINARY = "/usr/local/bin/blob-inventory"

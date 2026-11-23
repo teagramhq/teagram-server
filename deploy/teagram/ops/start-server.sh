@@ -3,10 +3,10 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO=/opt/teagram
-readonly POSTGRES_CONTAINER=teagram-postgres-1
+readonly POSTGRES_CONTAINER=teagram-local-postgres-1
 readonly SERVER_CONTAINER=teagram-local-teagramd-1
 readonly EXPECTED_COMPOSE_FILES="$REPO/docker-compose.yml,$REPO/docker-compose.override.yml"
-readonly EXPECTED_POSTGRES_SERVICE=postgres
+readonly EXPECTED_POSTGRES_SERVICE=local-postgres
 readonly EXPECTED_SERVER_SERVICE=local-teagramd
 readonly CONTAINER_REVISION_FORMAT='{{index .Config.Labels "org.opencontainers.image.revision"}}'
 

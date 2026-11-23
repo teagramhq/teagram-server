@@ -131,7 +131,7 @@ if [[ "$1" == inspect ]]; then
     exit
   fi
   case "$container" in
-    teagram-postgres-1) service=postgres; state_file=$MOCK_POSTGRES_STATE_FILE; project=${MOCK_POSTGRES_PROJECT:-teagram}; files=${MOCK_POSTGRES_FILES:-$MOCK_COMPOSE_FILES} ;;
+    teagram-local-postgres-1) service=local-postgres; state_file=$MOCK_POSTGRES_STATE_FILE; project=${MOCK_POSTGRES_PROJECT:-teagram}; files=${MOCK_POSTGRES_FILES:-$MOCK_COMPOSE_FILES} ;;
     teagram-local-teagramd-1) service=local-teagramd; state_file=$MOCK_TEAGRAMD_STATE_FILE; project=${MOCK_TEAGRAMD_PROJECT:-teagram}; files=${MOCK_TEAGRAMD_FILES:-$MOCK_COMPOSE_FILES} ;;
     *) echo "unexpected fixture container: $container" >&2; exit 99 ;;
   esac
@@ -165,10 +165,10 @@ elif [[ "$1" == compose ]]; then
 elif [[ "$1" == start ]]; then
   [[ "$#" == 2 ]] || { echo "unexpected fixture start args: $*" >&2; exit 99; }
   case "$2" in
-    teagram-postgres-1)
-      service=postgres
+    teagram-local-postgres-1)
+      service=local-postgres
       state_file=$MOCK_POSTGRES_STATE_FILE
-      failure_service=postgres
+      failure_service=local-postgres
       failure_status=42
       ;;
     teagram-local-teagramd-1)
@@ -183,7 +183,7 @@ elif [[ "$1" == start ]]; then
   [[ "${MOCK_START_FAIL_SERVICE:-}" != "$failure_service" ]] || exit "$failure_status"
   printf 'running\n' > "$state_file"
 elif [[ "$1" == exec ]]; then
-  [[ "$#" == 7 && "$2" == teagram-postgres-1 && "$3" == pg_isready &&
+  [[ "$#" == 7 && "$2" == teagram-local-postgres-1 && "$3" == pg_isready &&
      "$4" == -U && "$5" == postgres && "$6" == -d && "$7" == teagram ]] || {
     echo "unexpected fixture exec: $*" >&2
     exit 99
@@ -263,7 +263,7 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 0 ]]
 [[ "$output" == *'postgres=ready teagramd=running compose_selection=verified'* ]]
 [[ "$output" != *'fixture-secret-value'* && "$output" != *'fixture-parked-secret'* ]]
-[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:local-postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 [[ "$(cat "$MOCK_MIGRATE_STATE_FILE")" == exited ]]
 printf '%s\n' 'PASS starts Postgres before only the existing teagramd container, without starting migration dependencies'
 
@@ -376,11 +376,11 @@ assert_no_event '^start:teagramd$'
 printf '%s\n' 'PASS leaves teagramd stopped when Postgres never becomes ready'
 
 setup_case postgres-start-fails
-MOCK_START_FAIL_SERVICE=postgres
+MOCK_START_FAIL_SERVICE=local-postgres
 export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'could not start the existing postgres container'* ]]
+[[ "$output" == *'could not start the existing local-postgres container'* ]]
 assert_no_event '^start:teagramd$'
 printf '%s\n' 'PASS does not start teagramd when Postgres startup fails'
 
@@ -399,7 +399,7 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Bot API inner relay did not become healthy after recreation'* ]]
 [[ "$output" == *'teagramd remains running without healthy Bot API relays; rerunning start-server is safe'* ]]
-[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner' ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:local-postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner' ]]
 [[ "$(cat "$MOCK_TEAGRAMD_STATE_FILE")" == running ]]
 unset MOCK_START_FAIL_SERVICE
 : > "$MOCK_EVENTS"
@@ -415,7 +415,7 @@ export MOCK_STALE_INNER_NETWORK
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
 [[ "$output" == *'Bot API relays are not healthy in the current teagramd network namespace'* ]]
-[[ "$(cat "$MOCK_EVENTS")" == $'start:postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
+[[ "$(cat "$MOCK_EVENTS")" == $'start:local-postgres\nsleep:5\nreadiness:postgres\nstart:teagramd\nrestore:bot-api-inner\nrestore:bot-api-ingress' ]]
 printf '%s\n' 'PASS rejects an inner relay attached to a stale teagramd network namespace'
 
 setup_case relay-inner-unhealthy

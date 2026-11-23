@@ -1390,7 +1390,9 @@ jobs:
         run: bash deploy/teagram/test-media-encryption-pg18.sh
 
       - name: Check teagram server start operation
-        run: bash deploy/teagram/test-start-server.sh
+        run: |
+          python3 -B deploy/teagram/test-local-compose-ops-contract.py
+          bash deploy/teagram/test-start-server.sh
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh

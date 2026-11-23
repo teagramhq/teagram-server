@@ -190,6 +190,33 @@ marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
 
+## Cutting over to the local Compose profile
+
+The local profile changes the container identities to
+`teagram-local-postgres-1` and `teagram-local-teagramd-1`, while retaining the
+existing `teagram_pgdata`, `teagram_tgkey` and `teagram_tgblobs` volumes. Do not
+start the new profile beside the old `teagram-postgres-1` and
+`teagram-teagramd-1` pair: two Postgres instances must never open the same data
+volume, and both server containers would be database writers.
+
+During a maintenance window, stop the old pair and confirm neither is running
+before starting the local profile:
+
+```sh
+incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
+incus exec teagram -- docker ps --filter name=teagram-teagramd-1 --format '{{.Names}}'
+incus exec teagram -- docker ps --filter name=teagram-postgres-1 --format '{{.Names}}'
+incus exec teagram -- bash -lc 'cd /opt/teagram && docker compose --project-name teagram --profile local up -d local-postgres local-teagramd'
+```
+
+The two `docker ps` checks must print no names before the final command. Compose
+starts the migration and RustFS dependencies as required. The named volumes are
+preserved; do not remove them during the cutover. If the new pair must be rolled
+back, stop `teagram-local-teagramd-1` and `teagram-local-postgres-1`, verify
+neither is running, start `teagram-postgres-1`, wait for `pg_isready`, then start
+`teagram-teagramd-1`. Never start the old pair while either local container is
+running.
+
 ## Restarting the existing server containers
 
 `start-server.sh` recovers the existing S3-backed server stack after its
@@ -221,7 +248,7 @@ named volumes; `teagramd` can take up to 120 seconds to finish its configured
 graceful stop.
 
 ```sh
-incus exec teagram -- docker stop teagram-local-teagramd-1 teagram-postgres-1
+incus exec teagram -- docker stop teagram-local-teagramd-1 teagram-local-postgres-1
 ```
 
 ## User-invite quota threat model

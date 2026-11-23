@@ -5,7 +5,8 @@ readonly STATE_DIR="$REPO/.state"
 readonly AUTHORITY_DIR="$STATE_DIR/blob-mode"
 readonly LOCK_FILE=/tmp/teagram-deploy.lock
 readonly EXPECTED_COMPOSE_FILES="$REPO/docker-compose.yml,$REPO/docker-compose.override.yml"
-readonly POSTGRES_CONTAINER=teagram-postgres-1
+readonly POSTGRES_CONTAINER=teagram-local-postgres-1
+readonly POSTGRES_SERVICE=local-postgres
 readonly SERVER_CONTAINER=teagram-local-teagramd-1
 readonly SERVER_SERVICE=local-teagramd
 readonly RUSTFS_CONTAINER=teagram-rustfs-1
@@ -233,7 +234,7 @@ validate_live_stack() {
   SERVER_IMAGE_ID=$INSPECT_IMAGE
   LIVE_IMAGE_SHA=$INSPECT_REVISION
 
-  inspect_container "$POSTGRES_CONTAINER" postgres
+  inspect_container "$POSTGRES_CONTAINER" "$POSTGRES_SERVICE"
   [[ "$INSPECT_STATE" == running && "$INSPECT_HEALTH" == healthy ]] || \
     ops_fail 'Postgres is not healthy'
   inspect_container "$RUSTFS_CONTAINER" rustfs
