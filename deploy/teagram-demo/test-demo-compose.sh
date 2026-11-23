@@ -57,7 +57,44 @@ if 'seed_general_count_decoys\n    "$seed_dir/test-seed-compose.sh"' not in isol
     raise SystemExit("isolated Compose test must add count decoys before checking seed convergence")
 if "demo_compose down --volumes --remove-orphans" not in isolated:
     raise SystemExit("isolated Compose test must cover a fresh database reset")
+down_helper = isolated.split("demo_test_compose_down() {", 1)[1].split("\n}", 1)[0]
+if not (
+    down_helper.index("demo_seed_compose down --remove-orphans")
+    < down_helper.index("demo_compose down --volumes --remove-orphans")
+):
+    raise SystemExit("isolated Compose teardown must stop seed-profile services before removing shared volumes")
+if isolated.count("demo_test_compose_down") != 3:
+    raise SystemExit("isolated Compose cleanup and database reset must use the all-profile teardown")
 PY
+
+COMPOSE_DOWN_FUNCTION="$TMP_DIR/test-profile-compose-down-function.sh"
+COMPOSE_DOWN_TEST="$TMP_DIR/test-profile-compose-down.sh"
+sed -n '/^demo_test_compose_down() {$/,/^}/p' \
+  "$SCRIPT_DIR/test-general-moderation-isolated-compose.sh" > "$COMPOSE_DOWN_FUNCTION"
+cat > "$COMPOSE_DOWN_TEST" <<'BASH'
+set -Eeuo pipefail
+source "$COMPOSE_DOWN_HELPER"
+calls=()
+demo_seed_compose() {
+  [[ "$*" == 'down --remove-orphans' ]] || return 2
+  calls+=(seed)
+  [[ "${FAIL_SEED_DOWN:-false}" != true ]]
+}
+demo_compose() {
+  [[ "$*" == 'down --volumes --remove-orphans' ]] || return 2
+  calls+=(demo)
+}
+demo_test_compose_down
+[[ "${calls[*]}" == 'seed demo' ]]
+calls=()
+if FAIL_SEED_DOWN=true demo_test_compose_down; then
+  printf 'seed-profile teardown failure was ignored\n' >&2
+  exit 1
+fi
+[[ "${calls[*]}" == 'seed demo' ]]
+BASH
+env COMPOSE_DOWN_HELPER="$COMPOSE_DOWN_FUNCTION" \
+  bash "$COMPOSE_DOWN_TEST"
 
 go test ./cmd/demo-seed -run '^TestVerifyTurnstileProbePassesWithSigninGateDisabled$' -count=1
 

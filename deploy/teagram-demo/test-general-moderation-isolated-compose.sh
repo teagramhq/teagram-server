@@ -36,6 +36,13 @@ ACTIVE_PROJECT=
 ACTIVE_BLOB_PATH=
 ACTIVE_STAGE=
 
+demo_test_compose_down() {
+  local rc=0
+  demo_seed_compose down --remove-orphans || rc=1
+  demo_compose down --volumes --remove-orphans || rc=1
+  return "$rc"
+}
+
 cleanup() {
   local rc=$? fixture_script cleanup_path
   trap - EXIT
@@ -52,7 +59,7 @@ cleanup() {
         demo_compose ps -a >&2 || true
         demo_compose logs --no-color --tail 80 postgres teagramd migrate haproxy >&2 || true
       fi
-      if ! demo_compose down --volumes --remove-orphans; then
+      if ! demo_test_compose_down; then
         rc=1
       fi
     fi
@@ -220,7 +227,7 @@ ENV
     assert_general_chat_owner 1 1
 
     ACTIVE_STAGE="reset isolated database and reseed General"
-    demo_compose down --volumes --remove-orphans
+    demo_test_compose_down
     rm -rf -- "$ACTIVE_BLOB_PATH"
     install -d -o root -g root -m 0755 "$ACTIVE_BLOB_PATH"
     demo_reset_seed_owner_marker
