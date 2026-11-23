@@ -1381,7 +1381,7 @@ volumes:
       o: bind
       device: ${TEAGRAM_DEMO_BLOB_PATH:-/nonexistent}
   local_tgblobs:
-    name: teagram_tgblobs
+    name: ${COMPOSE_PROJECT_NAME:-teagram}_tgblobs
   qa_invite_pgdata:
     name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}-postgres
     external: true

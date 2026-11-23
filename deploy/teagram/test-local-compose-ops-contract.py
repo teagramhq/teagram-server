@@ -60,7 +60,7 @@ def assert_service_identity(
             )
 
 
-def main() -> None:
+def render_local_config(project_name: str) -> dict[str, object]:
     env = os.environ.copy()
     env["POSTGRES_PASSWORD"] = "fixture-only"
     env["TG_PUBLIC_LINK_PREFIX"] = "https://web.teagram.io"
@@ -71,7 +71,7 @@ def main() -> None:
             "--project-directory",
             str(ROOT),
             "--project-name",
-            "teagram",
+            project_name,
             "--file",
             str(ROOT / "docker-compose.yml"),
             "--profile",
@@ -88,8 +88,12 @@ def main() -> None:
     )
     if rendered.returncode != 0:
         raise SystemExit(f"could not render local Compose config: {rendered.stderr.strip()}")
+    return json.loads(rendered.stdout)
 
-    config = json.loads(rendered.stdout)
+
+def main() -> None:
+    config = render_local_config("teagram")
+    custom_config = render_local_config("custom-local")
     shell_ops = [
         "deploy/teagram/ops/start-server.sh",
         "deploy/teagram/ops/blob-encryption-common.inc",
@@ -116,6 +120,12 @@ def main() -> None:
             ("deploy/teagram/ops/qa-password-timestamps.sh", "SERVER_SERVICE"),
         ],
     )
+    default_blobs = config.get("volumes", {}).get("local_tgblobs", {}).get("name")
+    custom_blobs = custom_config.get("volumes", {}).get("local_tgblobs", {}).get("name")
+    if default_blobs != "teagram_tgblobs":
+        raise AssertionError(f"default local blob volume changed from teagram_tgblobs: {default_blobs!r}")
+    if custom_blobs != "custom-local_tgblobs":
+        raise AssertionError(f"custom local project shares the wrong blob volume: {custom_blobs!r}")
     print("local Compose service and operator identities match")
 
 

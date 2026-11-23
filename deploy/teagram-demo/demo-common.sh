@@ -1116,6 +1116,58 @@ demo_seed_compose() {
       "${mapped_args[@]}" </dev/null
 }
 
+demo_seed_candidate_image_id() {
+  local server="$1" expected_sha="$2" candidate_ids_output image_id revision
+  local -a candidate_ids=()
+
+  case "$server" in
+    teagramd|teagramd-next) ;;
+    *) demo_fail 'candidate server is not a known demo slot'; return 1 ;;
+  esac
+  candidate_ids_output=$(demo_seed_compose ps --status running -q "$server") || return 1
+  if [[ -n "$candidate_ids_output" ]]; then
+    mapfile -t candidate_ids <<< "$candidate_ids_output"
+  fi
+  ((${#candidate_ids[@]} == 1)) || {
+    demo_fail 'running seed candidate is missing or ambiguous'
+    return 1
+  }
+  image_id=$(docker inspect --format '{{.Image}}' "${candidate_ids[0]}") || {
+    demo_fail 'running seed candidate image could not be inspected'
+    return 1
+  }
+  revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id") || {
+    demo_fail 'running seed candidate revision could not be inspected'
+    return 1
+  }
+  [[ "$revision" == "$expected_sha" ]] || {
+    demo_fail 'running seed candidate image does not match the requested SHA'
+    return 1
+  }
+  printf '%s\n' "$image_id"
+}
+
+demo_remove_candidate_services() {
+  local server="$1" rc=0 production_running seed_running
+
+  demo_compose stop "$server" || rc=1
+  demo_seed_compose stop "$server" || rc=1
+  demo_seed_compose rm -f "$server" || rc=1
+  if ! production_running=$(demo_compose ps --status running -q "$server"); then
+    rc=1
+  elif [[ -n "$production_running" ]]; then
+    demo_fail 'production candidate is still running after rollback'
+    rc=1
+  fi
+  if ! seed_running=$(demo_seed_compose ps --status running -q "$server"); then
+    rc=1
+  elif [[ -n "$seed_running" ]]; then
+    demo_fail 'seed candidate is still running after rollback'
+    rc=1
+  fi
+  return "$rc"
+}
+
 demo_seed_compose_input() {
   local image_ref arg
   local -a mapped_args=()

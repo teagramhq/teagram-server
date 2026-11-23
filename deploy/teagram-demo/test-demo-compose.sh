@@ -1343,7 +1343,34 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+common = Path(sys.argv[4]).read_text(encoding="utf-8")
 cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
+if 'demo_remove_candidate_services "$CANDIDATE_SERVER" || rc=1' not in cleanup:
+    raise SystemExit("deploy-main.sh: rollback must stop, remove, and verify both candidate services")
+seed_wrapper = common.split("demo_seed_compose() {", 1)[1].split("\n}", 1)[0]
+for mapping in (
+    'teagramd) mapped_args+=(teagramd-seed)',
+    'teagramd-next) mapped_args+=(teagramd-next-seed)',
+):
+    if mapping not in seed_wrapper:
+        raise SystemExit(f"demo-common.sh: seed profile is missing candidate mapping {mapping}")
+candidate_image_helper = common.split("demo_seed_candidate_image_id() {", 1)[1].split("\n}", 1)[0]
+for fragment in (
+    'demo_seed_compose ps --status running -q "$server"',
+    'docker image inspect --format',
+    '[[ "$revision" == "$expected_sha" ]]',
+):
+    if fragment not in candidate_image_helper:
+        raise SystemExit(f"demo-common.sh: seed candidate image check is missing {fragment}")
+candidate_cleanup_helper = common.split("demo_remove_candidate_services() {", 1)[1].split("\n}", 1)[0]
+for fragment in (
+    'demo_seed_compose stop "$server"',
+    'demo_seed_compose rm -f "$server"',
+    'demo_compose ps --status running -q "$server"',
+    'demo_seed_compose ps --status running -q "$server"',
+):
+    if fragment not in candidate_cleanup_helper:
+        raise SystemExit(f"demo-common.sh: rollback candidate cleanup is missing {fragment}")
 if 'cat-file -e \\\n      "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf"' not in cleanup:
     raise SystemExit("deploy-main.sh: rollback must distinguish old directory and file mounts")
 if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanup:
@@ -1425,6 +1452,7 @@ deploy_steps = [
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_compose run --rm --no-deps teagramd-maintenance client-config > "$TMP_DIR/client.json"',
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    'CANDIDATE_IMAGE_ID=$(demo_seed_candidate_image_id "$CANDIDATE_SERVER" "$SHA")',
     '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
@@ -1462,6 +1490,7 @@ assert_order(deploy_path, [
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    'CANDIDATE_IMAGE_ID=$(demo_seed_candidate_image_id "$CANDIDATE_SERVER" "$SHA")',
     '"$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
@@ -1667,6 +1696,79 @@ assert_text_order(wipe, "wipe-weekly.sh persistent identity check", [
     '[[ "$ACTIVE_GENERATION" == "$AFTER_GENERATION" ]]',
 ])
 PY
+
+SEED_SLOT_BIN="$TMP_DIR/seed-slot-bin"
+SEED_SLOT_STATE="$TMP_DIR/seed-slot-state"
+SEED_SLOT_CALLS="$TMP_DIR/seed-slot-calls"
+mkdir -p "$SEED_SLOT_BIN" "$SEED_SLOT_STATE"
+cat > "$SEED_SLOT_BIN/docker" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$SEED_SLOT_CALLS"
+if [[ "$1" == compose ]]; then
+  case "$*" in
+    *'ps --status running -q teagramd-seed'*)
+      [[ ! -f "$SEED_SLOT_STATE/teagramd-seed" ]] || printf '%s\n' container-teagramd-seed
+      ;;
+    *'ps --status running -q teagramd-next-seed'*)
+      [[ ! -f "$SEED_SLOT_STATE/teagramd-next-seed" ]] || printf '%s\n' container-teagramd-next-seed
+      ;;
+    *'stop teagramd-seed'*) rm -f -- "$SEED_SLOT_STATE/teagramd-seed" ;;
+    *'stop teagramd-next-seed'*) rm -f -- "$SEED_SLOT_STATE/teagramd-next-seed" ;;
+    *'rm -f teagramd-seed'*) rm -f -- "$SEED_SLOT_STATE/teagramd-seed" ;;
+    *'rm -f teagramd-next-seed'*) rm -f -- "$SEED_SLOT_STATE/teagramd-next-seed" ;;
+    *) printf 'unexpected mock Compose call: %s\n' "$*" >&2; exit 2 ;;
+  esac
+elif [[ "$1" == inspect ]]; then
+  case "$4" in
+    container-teagramd-seed) printf '%s\n' sha256:image-teagramd-seed ;;
+    container-teagramd-next-seed) printf '%s\n' sha256:image-teagramd-next-seed ;;
+    *) printf 'unexpected candidate container: %s\n' "$4" >&2; exit 2 ;;
+  esac
+elif [[ "$1 $2" == 'image inspect' ]]; then
+  printf '%s\n' "$SEED_TEST_SHA"
+else
+  printf 'unexpected mock docker call: %s\n' "$*" >&2
+  exit 2
+fi
+BASH
+chmod +x "$SEED_SLOT_BIN/docker"
+(
+  export PATH="$SEED_SLOT_BIN:$PATH"
+  export SEED_SLOT_STATE SEED_SLOT_CALLS
+  export SEED_TEST_SHA=0123456789abcdef0123456789abcdef01234567
+  DEMO_COMPOSE_ARGS=(--project-name teagram-demo --file "$REPO_ROOT/docker-compose.yml" --profile demo)
+  DEMO_REPO_ROOT="$REPO_ROOT"
+  DEMO_ENV_FILE="$TMP_DIR/seed-candidate.env"
+  demo_compose_image_ref() { printf '%s\n' teagramd:fixture; }
+  demo_prepare_runtime_tmp_dirs_for_up() { return 0; }
+  demo_compose() {
+    printf 'production %s\n' "$*" >> "$SEED_SLOT_CALLS"
+    case "$*" in
+      'stop teagramd'|'stop teagramd-next'|'ps --status running -q teagramd'|'ps --status running -q teagramd-next') return 0 ;;
+      *) printf 'unexpected production Compose call: %s\n' "$*" >&2; return 2 ;;
+    esac
+  }
+  for slot in teagramd teagramd-next; do
+    case "$slot" in
+      teagramd) seed_service=teagramd-seed; expected_image=sha256:image-teagramd-seed ;;
+      teagramd-next) seed_service=teagramd-next-seed; expected_image=sha256:image-teagramd-next-seed ;;
+    esac
+    : > "$SEED_SLOT_STATE/$seed_service"
+    image_id=$(demo_seed_candidate_image_id "$slot" "$SEED_TEST_SHA")
+    [[ "$image_id" == "$expected_image" ]]
+    if demo_seed_candidate_image_id "$slot" wrong-revision; then
+      printf 'seed candidate image with the wrong revision was accepted for %s\n' "$slot" >&2
+      exit 1
+    fi
+    demo_remove_candidate_services "$slot"
+    [[ ! -f "$SEED_SLOT_STATE/$seed_service" ]]
+    grep -Fq "ps --status running -q $seed_service" "$SEED_SLOT_CALLS"
+    grep -Fq "stop $seed_service" "$SEED_SLOT_CALLS"
+    grep -Fq "rm -f $seed_service" "$SEED_SLOT_CALLS"
+    grep -Fq "production stop $slot" "$SEED_SLOT_CALLS"
+  done
+)
 
 CLIENT_CONFIG_HELPER="$TMP_DIR/demo-server-client-config.sh"
 sed -n '/^demo_server_client_config() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$CLIENT_CONFIG_HELPER"
