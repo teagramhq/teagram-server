@@ -258,6 +258,9 @@ esac
 for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
   [[ -f "$env_file" && ! -L "$env_file" ]]
 done
+for compose_file in "$REPO/docker-compose.yml" "$REPO/docker-compose.override.yml"; do
+  [[ -f "$compose_file" && ! -L "$compose_file" ]]
+done
 COMPOSE=(docker compose --project-directory "$REPO" --project-name teagram \
   --file "$REPO/docker-compose.yml" --file "$REPO/docker-compose.override.yml" \
   --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}")
