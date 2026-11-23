@@ -1733,42 +1733,48 @@ else
 fi
 BASH
 chmod +x "$SEED_SLOT_BIN/docker"
-(
-  export PATH="$SEED_SLOT_BIN:$PATH"
-  export SEED_SLOT_STATE SEED_SLOT_CALLS
-  export SEED_TEST_SHA=0123456789abcdef0123456789abcdef01234567
-  DEMO_COMPOSE_ARGS=(--project-name teagram-demo --file "$REPO_ROOT/docker-compose.yml" --profile demo)
-  DEMO_REPO_ROOT="$REPO_ROOT"
-  DEMO_ENV_FILE="$TMP_DIR/seed-candidate.env"
-  demo_compose_image_ref() { printf '%s\n' teagramd:fixture; }
-  demo_prepare_runtime_tmp_dirs_for_up() { return 0; }
-  demo_compose() {
-    printf 'production %s\n' "$*" >> "$SEED_SLOT_CALLS"
-    case "$*" in
-      'stop teagramd'|'stop teagramd-next'|'ps --status running -q teagramd'|'ps --status running -q teagramd-next') return 0 ;;
-      *) printf 'unexpected production Compose call: %s\n' "$*" >&2; return 2 ;;
-    esac
-  }
-  for slot in teagramd teagramd-next; do
-    case "$slot" in
-      teagramd) seed_service=teagramd-seed; expected_image=sha256:image-teagramd-seed ;;
-      teagramd-next) seed_service=teagramd-next-seed; expected_image=sha256:image-teagramd-next-seed ;;
-    esac
-    : > "$SEED_SLOT_STATE/$seed_service"
-    image_id=$(demo_seed_candidate_image_id "$slot" "$SEED_TEST_SHA")
-    [[ "$image_id" == "$expected_image" ]]
-    if demo_seed_candidate_image_id "$slot" wrong-revision; then
-      printf 'seed candidate image with the wrong revision was accepted for %s\n' "$slot" >&2
-      exit 1
-    fi
-    demo_remove_candidate_services "$slot"
-    [[ ! -f "$SEED_SLOT_STATE/$seed_service" ]]
-    grep -Fq "ps --status running -q $seed_service" "$SEED_SLOT_CALLS"
-    grep -Fq "stop $seed_service" "$SEED_SLOT_CALLS"
-    grep -Fq "rm -f $seed_service" "$SEED_SLOT_CALLS"
-    grep -Fq "production stop $slot" "$SEED_SLOT_CALLS"
-  done
-)
+cat > "$TMP_DIR/seed-slot-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$DEMO_COMMON"
+DEMO_COMPOSE_ARGS=(--project-name teagram-demo --file "$REPO_ROOT/docker-compose.yml" --profile demo)
+DEMO_ENV_FILE="$SEED_SLOT_STATE/fixture.env"
+demo_compose_image_ref() { printf '%s\n' teagramd:fixture; }
+demo_prepare_runtime_tmp_dirs_for_up() { return 0; }
+demo_compose() {
+  printf 'production %s\n' "$*" >> "$SEED_SLOT_CALLS"
+  case "$*" in
+    'stop teagramd'|'stop teagramd-next'|'ps --status running -q teagramd'|'ps --status running -q teagramd-next') return 0 ;;
+    *) printf 'unexpected production Compose call: %s\n' "$*" >&2; return 2 ;;
+  esac
+}
+for slot in teagramd teagramd-next; do
+  case "$slot" in
+    teagramd) seed_service=teagramd-seed; expected_image=sha256:image-teagramd-seed ;;
+    teagramd-next) seed_service=teagramd-next-seed; expected_image=sha256:image-teagramd-next-seed ;;
+  esac
+  : > "$SEED_SLOT_STATE/$seed_service"
+  image_id=$(demo_seed_candidate_image_id "$slot" "$SEED_TEST_SHA")
+  [[ "$image_id" == "$expected_image" ]]
+  if demo_seed_candidate_image_id "$slot" wrong-revision; then
+    printf 'seed candidate image with the wrong revision was accepted for %s\n' "$slot" >&2
+    exit 1
+  fi
+  demo_remove_candidate_services "$slot"
+  [[ ! -f "$SEED_SLOT_STATE/$seed_service" ]]
+  grep -Fq "ps --status running -q $seed_service" "$SEED_SLOT_CALLS"
+  grep -Fq "stop $seed_service" "$SEED_SLOT_CALLS"
+  grep -Fq "rm -f $seed_service" "$SEED_SLOT_CALLS"
+  grep -Fq "production stop $slot" "$SEED_SLOT_CALLS"
+done
+BASH
+env \
+  PATH="$SEED_SLOT_BIN:$PATH" \
+  SEED_SLOT_STATE="$SEED_SLOT_STATE" \
+  SEED_SLOT_CALLS="$SEED_SLOT_CALLS" \
+  SEED_TEST_SHA=0123456789abcdef0123456789abcdef01234567 \
+  DEMO_COMMON="$SCRIPT_DIR/demo-common.sh" \
+  REPO_ROOT="$REPO_ROOT" \
+  bash "$TMP_DIR/seed-slot-regression.sh"
 
 CLIENT_CONFIG_HELPER="$TMP_DIR/demo-server-client-config.sh"
 sed -n '/^demo_server_client_config() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$CLIENT_CONFIG_HELPER"
