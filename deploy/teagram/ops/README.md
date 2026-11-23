@@ -206,7 +206,38 @@ before starting the local profile:
 incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
 incus exec teagram -- docker ps --filter name=teagram-teagramd-1 --format '{{.Names}}'
 incus exec teagram -- docker ps --filter name=teagram-postgres-1 --format '{{.Names}}'
-incus exec teagram -- bash -lc 'cd /opt/teagram && docker compose --project-name teagram --profile local up -d local-postgres local-teagramd'
+incus exec teagram -- bash -lc '
+set -Eeuo pipefail
+umask 077
+cd /opt/teagram
+exec 9>/tmp/teagram-deploy.lock
+flock -x 9
+for old_container in teagram-teagramd-1 teagram-postgres-1; do
+  if docker ps --format "{{.Names}}" | grep -Fxq "$old_container"; then
+    printf "refusing cutover while %s is running\\n" "$old_container" >&2
+    exit 1
+  fi
+done
+report_root=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+authority_json=$(python3 deploy/teagram/ops/blob-transition-runner.py deployment-env \
+  --checkout /opt/teagram --state-dir /opt/teagram/.state/blob-mode \
+  --report-root "$report_root" --lock-path /tmp/teagram-deploy.lock)
+env_file_lines=$(jq -er "select(.outcome == \"s3-accepted\") | .env_files | if type == \"array\" and length == 2 and all(.[]; type == \"string\" and length > 0) then .[] else error(\"invalid environment file list\") end" <<< "$authority_json")
+mapfile -t COMPOSE_ENV_FILE_PATHS <<< "$env_file_lines"
+[[ "${#COMPOSE_ENV_FILE_PATHS[@]}" == 2 && "${COMPOSE_ENV_FILE_PATHS[0]}" == /opt/teagram/.env ]]
+legacy_parked=/opt/telegram-server/.env.rustfs-parked
+case "${COMPOSE_ENV_FILE_PATHS[1]}" in
+  /opt/teagram/.env.rustfs-parked|"$legacy_parked"|/root/.env.rustfs-parked) ;;
+  *) exit 1 ;;
+esac
+for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
+  [[ -f "$env_file" && ! -L "$env_file" ]]
+done
+docker compose --project-directory /opt/teagram --project-name teagram \
+  --file /opt/teagram/docker-compose.yml --file /opt/teagram/docker-compose.override.yml \
+  --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}" \
+  --profile local up -d local-postgres local-teagramd
+'
 ```
 
 The two `docker ps` checks must print no names before the final command. Compose
@@ -224,9 +255,9 @@ containers stop. It takes the deployment lock, validates both containers'
 Compose project, service names and recorded file selection, then checks the
 S3 authority and environment-file paths with the reviewed blob-transition
 helper. Only the live `docker-compose.yml` plus `docker-compose.override.yml`
-selection is accepted. It starts the existing `postgres` container, waits five
-seconds and checks `pg_isready` for up to 60 seconds before starting only the
-inspected `teagramd` container. It uses `docker start` on each existing
+selection is accepted. It starts the existing `local-postgres` container, waits
+five seconds and checks `pg_isready` for up to 60 seconds before starting only
+the inspected `teagramd` container. It uses `docker start` on each existing
 container, not Compose dependency startup, so this recovery cannot restart the
 `migrate` container. When the Bot API listener is enabled, it recreates the
 inner relay in the started server's network namespace and waits for both relay
