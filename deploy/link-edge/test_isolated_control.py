@@ -140,16 +140,16 @@ class TimingAndCleanupTests(unittest.TestCase):
         }
         config = {
             "services": {
-                "linklanding": {
+                "control-linklanding": {
                     **secure_service,
                     "environment": {
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
                     },
-                    "networks": {"private-edge": None, "landing-publish": None},
+                    "networks": {"control-private-edge": None, "control-landing-publish": None},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "landing"]},
                 },
-                "selector": {
+                "control-selector": {
                     **secure_service,
                     "command": [
                         "-listen-address",
@@ -161,14 +161,14 @@ class TimingAndCleanupTests(unittest.TestCase):
                         "-web-upstream",
                         "http://web:8080",
                         "-landing-upstream",
-                        "http://linklanding:8082",
+                        "http://control-linklanding:8082",
                     ],
                     "environment": {
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
                     },
-                    "networks": {"web-edge": None, "private-edge": None},
-                    "depends_on": {"linklanding": {"condition": "service_healthy"}},
+                    "networks": {"control-web-edge": None, "control-private-edge": None},
+                    "depends_on": {"control-linklanding": {"condition": "service_healthy"}},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "selector"]},
                 },
                 "web": {
@@ -177,21 +177,21 @@ class TimingAndCleanupTests(unittest.TestCase):
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
                     },
-                    "networks": {"web-edge": None},
+                    "networks": {"control-web-edge": None},
                 },
-                "probe": {
+                "control-probe": {
                     **secure_service,
-                    "networks": {"private-edge": None},
-                    "depends_on": {"selector": {"condition": "service_started"}},
+                    "networks": {"control-private-edge": None},
+                    "depends_on": {"control-selector": {"condition": "service_started"}},
                     "entrypoint": ["/usr/local/bin/linkprobe"],
                     "command": ["hold"],
                 },
             },
             "networks": {
-                "web-edge": {"internal": True},
-                "private-edge": {"internal": True},
+                "control-web-edge": {"internal": True},
+                "control-private-edge": {"internal": True},
                 # Compose omits internal=false from its normalized projection.
-                "landing-publish": {
+                "control-landing-publish": {
                     "driver": "bridge",
                     "driver_opts": {"com.docker.network.bridge.enable_ip_masquerade": "false"},
                 },
@@ -210,14 +210,14 @@ class TimingAndCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
             runner.validate_projection(invalid_config)
         invalid_invite_config = copy.deepcopy(config)
-        invalid_invite_config["services"]["selector"]["environment"]["UNAPPROVED"] = "unexpected"
+        invalid_invite_config["services"]["control-selector"]["environment"]["UNAPPROVED"] = "unexpected"
         with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
             runner.validate_projection(invalid_invite_config)
 
         for invalid_upstream in (None, "http://teagramd:2446"):
             with self.subTest(invalid_upstream=invalid_upstream):
                 invalid_server_api_config = copy.deepcopy(config)
-                selector_command = invalid_server_api_config["services"]["selector"]["command"]
+                selector_command = invalid_server_api_config["services"]["control-selector"]["command"]
                 upstream_option = selector_command.index("-server-upstream")
                 if invalid_upstream is None:
                     del selector_command[upstream_option : upstream_option + 2]

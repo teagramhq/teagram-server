@@ -360,7 +360,7 @@ jobs:
           SECCOMP_PROFILE: ${{ github.workspace }}/deploy/browser-acceptance/seccomp-browser.json
         run: |
           env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
-            docker compose --env-file /dev/null --project-directory . --file docker-compose.yml \
+            docker compose --env-file /dev/null --project-directory . --project-name teagram-browser-acceptance --file docker-compose.yml \
               --profile browser-acceptance config --format json >"$RUNNER_TEMP/browser-acceptance-compose.json"
           jq -e '
             .name == "teagram-browser-acceptance"

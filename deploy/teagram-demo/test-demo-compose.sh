@@ -977,6 +977,7 @@ jq -e '
   and .services["teagramd-bootstrap"].environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-bootstrap"].environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and ((.services["teagramd-bootstrap"].networks.backend.aliases // []) | index("teagramd")) != null
   and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_SITE_KEY == ""
   and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services["teagramd-bootstrap"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
@@ -1007,6 +1008,8 @@ jq -e '
   and .services["teagramd-seed"].environment.HTTP_PROXY == ""
   and .services["teagramd-seed"].environment.HTTPS_PROXY == ""
   and (.services["teagramd-seed"].depends_on | keys) == ["migrate"]
+  and ((.services["teagramd-seed"].networks.backend.aliases // []) | index("teagramd")) != null
+  and ((.services["teagramd-next-seed"].networks.backend.aliases // []) | index("teagramd-next")) != null
   and .services["teagramd-seed"].environment.TG_TURNSTILE_SITE_KEY == ""
   and .services["teagramd-seed"].environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services["teagramd-seed"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""

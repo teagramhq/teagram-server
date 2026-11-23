@@ -61,7 +61,7 @@ ensure_tls
 [[ "$(sha256sum "$TLS_PUBLIC_DIR/server.crt" | cut -d' ' -f1)" == "$CERT_SHA" ]] ||
   fail 'a healthy certificate was unnecessarily replaced'
 reload_qa_tls
-[[ "$(<"$TEST_ROOT/reloads")" == 'exec -T tls-edge nginx -s reload' ]] || fail 'up did not reconcile the TLS edge'
+[[ "$(<"$TEST_ROOT/reloads")" == 'exec -T qa-invite-tls-edge nginx -s reload' ]] || fail 'up did not reconcile the TLS edge'
 
 openssl req -x509 -new -key "$TLS_PRIVATE_DIR/ca.key" -sha256 -days 2 -subj '/CN=Teagram QA Invite Root CA' \
   -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign,cRLSign' \

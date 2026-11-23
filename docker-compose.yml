@@ -656,6 +656,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.253
+        aliases: [teagramd]
 
   teagramd-seed:
     <<: *demo-server
@@ -668,6 +669,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.253
+        aliases: [teagramd]
 
   teagramd-next-seed:
     <<: *demo-server
@@ -680,6 +682,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.251
+        aliases: [teagramd-next]
 
   demo-seed:
     image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
