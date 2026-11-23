@@ -203,7 +203,7 @@ During a maintenance window, stop the old pair and confirm neither is running
 before starting the local profile:
 
 ```sh
-incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
+incus exec teagram -- docker stop --time 120 teagram-teagramd-1 teagram-postgres-1
 incus exec teagram -- docker ps --filter name=teagram-teagramd-1 --format '{{.Names}}'
 incus exec teagram -- docker ps --filter name=teagram-postgres-1 --format '{{.Names}}'
 incus exec teagram -- bash -lc '
