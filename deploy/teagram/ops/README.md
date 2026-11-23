@@ -199,48 +199,92 @@ start the new profile beside the old `teagram-postgres-1` and
 `teagram-teagramd-1` pair: two Postgres instances must never open the same data
 volume, and both server containers would be database writers.
 
-During a maintenance window, stop the old pair and confirm neither is running
-before starting the local profile:
+During a maintenance window, set `SHA` to the reviewed 40-character main commit
+before running the cutover block. It holds the deployment lock, checks that the
+checkout is clean and exactly at `SHA`, stages the authority helpers from that
+commit, and renders the Compose config before stopping the old pair.
 
 ```sh
-incus exec teagram -- docker stop --time 120 teagram-teagramd-1 teagram-postgres-1
-incus exec teagram -- docker ps --filter name=teagram-teagramd-1 --format '{{.Names}}'
-incus exec teagram -- docker ps --filter name=teagram-postgres-1 --format '{{.Names}}'
+SHA=REPLACE_WITH_REVIEWED_MAIN_SHA
 incus exec teagram -- bash -lc '
 set -Eeuo pipefail
 umask 077
-cd /opt/teagram
+REPO=/opt/teagram
+SHA=${1:?reviewed main SHA is required}
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+cd "$REPO"
 exec 9>/tmp/teagram-deploy.lock
 flock -x 9
+checkout_sha=$(git -C "$REPO" rev-parse HEAD)
+[[ "$checkout_sha" == "$SHA" ]]
+[[ -z "$(git -C "$REPO" status --porcelain)" ]]
+git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
+temp_dir=$(mktemp -d /tmp/teagram-cutover.XXXXXXXX)
+[[ -d "$temp_dir" && ! -L "$temp_dir" && "$(stat -c '%a' -- "$temp_dir")" == 700 ]]
+cleanup() {
+  local status=$?
+  trap - EXIT
+  case "${temp_dir:-}" in
+    /tmp/teagram-cutover.????????)
+      if [[ -d "$temp_dir" && ! -L "$temp_dir" ]]; then
+        rm -rf -- "$temp_dir" || status=1
+      else
+        status=1
+      fi
+      ;;
+    *) status=1 ;;
+  esac
+  exit "$status"
+}
+trap cleanup EXIT
+git -C "$REPO" show "$SHA:deploy/teagram/ops/blob-transition-runner.py" \
+  > "$temp_dir/blob-transition-runner.py"
+git -C "$REPO" show "$SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py" \
+  > "$temp_dir/blob-mode-state.py"
+chmod 600 "$temp_dir/blob-transition-runner.py" "$temp_dir/blob-mode-state.py"
+report_root=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+authority_json=$(python3 "$temp_dir/blob-transition-runner.py" deployment-env \
+  --checkout "$REPO" --state-dir "$REPO/.state/blob-mode" \
+  --report-root "$report_root" --lock-path /tmp/teagram-deploy.lock)
+env_file_lines=$(jq -er "select(.outcome == \"s3-accepted\") | .env_files | if type == \"array\" and length == 2 and all(.[]; type == \"string\" and length > 0) then .[] else error(\"invalid environment file list\") end" <<< "$authority_json")
+mapfile -t COMPOSE_ENV_FILE_PATHS <<< "$env_file_lines"
+[[ "${#COMPOSE_ENV_FILE_PATHS[@]}" == 2 && "${COMPOSE_ENV_FILE_PATHS[0]}" == "$REPO/.env" ]]
+legacy_parked="$(dirname "$REPO")/telegram-server/.env.rustfs-parked"
+case "${COMPOSE_ENV_FILE_PATHS[1]}" in
+  "$REPO/.env.rustfs-parked"|"$legacy_parked"|/root/.env.rustfs-parked) ;;
+  *) exit 1 ;;
+esac
+for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
+  [[ -f "$env_file" && ! -L "$env_file" ]]
+done
+COMPOSE=(docker compose --project-directory "$REPO" --project-name teagram \
+  --file "$REPO/docker-compose.yml" --file "$REPO/docker-compose.override.yml" \
+  --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}")
+"${COMPOSE[@]}" --profile local config --quiet
+for new_container in teagram-local-teagramd-1 teagram-local-postgres-1; do
+  if docker ps --format "{{.Names}}" | grep -Fxq "$new_container"; then
+    printf "refusing cutover while %s is running\\n" "$new_container" >&2
+    exit 1
+  fi
+done
+docker stop --time 120 teagram-teagramd-1
+docker stop --time 120 teagram-postgres-1
 for old_container in teagram-teagramd-1 teagram-postgres-1; do
   if docker ps --format "{{.Names}}" | grep -Fxq "$old_container"; then
     printf "refusing cutover while %s is running\\n" "$old_container" >&2
     exit 1
   fi
 done
-report_root=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
-authority_json=$(python3 deploy/teagram/ops/blob-transition-runner.py deployment-env \
-  --checkout /opt/teagram --state-dir /opt/teagram/.state/blob-mode \
-  --report-root "$report_root" --lock-path /tmp/teagram-deploy.lock)
-env_file_lines=$(jq -er "select(.outcome == \"s3-accepted\") | .env_files | if type == \"array\" and length == 2 and all(.[]; type == \"string\" and length > 0) then .[] else error(\"invalid environment file list\") end" <<< "$authority_json")
-mapfile -t COMPOSE_ENV_FILE_PATHS <<< "$env_file_lines"
-[[ "${#COMPOSE_ENV_FILE_PATHS[@]}" == 2 && "${COMPOSE_ENV_FILE_PATHS[0]}" == /opt/teagram/.env ]]
-legacy_parked=/opt/telegram-server/.env.rustfs-parked
-case "${COMPOSE_ENV_FILE_PATHS[1]}" in
-  /opt/teagram/.env.rustfs-parked|"$legacy_parked"|/root/.env.rustfs-parked) ;;
-  *) exit 1 ;;
-esac
-for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
-  [[ -f "$env_file" && ! -L "$env_file" ]]
-done
-docker compose --project-directory /opt/teagram --project-name teagram \
-  --file /opt/teagram/docker-compose.yml --file /opt/teagram/docker-compose.override.yml \
-  --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}" \
-  --profile local up -d local-postgres local-teagramd
-'
+checkout_sha=$(git -C "$REPO" rev-parse HEAD)
+[[ "$checkout_sha" == "$SHA" ]]
+[[ -z "$(git -C "$REPO" status --porcelain)" ]]
+git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
+"${COMPOSE[@]}" --profile local up -d local-postgres local-teagramd
+' cutover "$SHA"
 ```
 
-The two `docker ps` checks must print no names before the final command. Compose
+The cutover stops the old pair with a 120-second timeout, then verifies both
+containers are no longer running before Compose starts the new pair. Compose
 starts the migration and RustFS dependencies as required. The named volumes are
 preserved; do not remove them during the cutover. If the new pair must be rolled
 back, stop `teagram-local-teagramd-1` and `teagram-local-postgres-1`, verify
