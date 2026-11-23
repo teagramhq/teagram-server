@@ -195,7 +195,7 @@ class BlobModeReportAttestationTests(unittest.TestCase):
                     "volumes": migration_mounts,
                     "networks": {"default": {}, "rustfs_private": {}},
                 },
-                "teagramd": {
+                "local-teagramd": {
                     "image": "teagramd:local",
                     "environment": {
                         "TG_MEDIA_KEY_CURRENT": "1",
