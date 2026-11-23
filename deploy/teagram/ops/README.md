@@ -190,6 +190,112 @@ marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
 
+## Cutting over to the local Compose profile
+
+The local profile changes the container identities to
+`teagram-local-postgres-1` and `teagram-local-teagramd-1`, while retaining the
+existing `teagram_pgdata`, `teagram_tgkey` and `teagram_tgblobs` volumes. Do not
+start the new profile beside the old `teagram-postgres-1` and
+`teagram-teagramd-1` pair: two Postgres instances must never open the same data
+volume, and both server containers would be database writers.
+
+During a maintenance window, set `SHA` to the reviewed 40-character main commit
+before running the cutover block. It holds the deployment lock, checks that the
+checkout is clean apart from the required local `docker-compose.override.yml`
+and exactly at `SHA`, stages the authority helpers from that commit, and
+renders the Compose config before stopping the old pair.
+
+```sh
+SHA=REPLACE_WITH_REVIEWED_MAIN_SHA
+incus exec teagram -- bash -lc '
+set -Eeuo pipefail
+umask 077
+REPO=/opt/teagram
+SHA=${1:?reviewed main SHA is required}
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+cd "$REPO"
+exec 9>/tmp/teagram-deploy.lock
+flock -x 9
+checkout_sha=$(git -C "$REPO" rev-parse HEAD)
+[[ "$checkout_sha" == "$SHA" ]]
+[[ -z "$(git -C "$REPO" status --porcelain -- . ":(exclude)docker-compose.override.yml")" ]]
+git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
+temp_dir=$(mktemp -d /tmp/teagram-cutover.XXXXXXXX)
+[[ -d "$temp_dir" && ! -L "$temp_dir" && "$(stat -c '%a' -- "$temp_dir")" == 700 ]]
+cleanup() {
+  local status=$?
+  trap - EXIT
+  case "${temp_dir:-}" in
+    /tmp/teagram-cutover.????????)
+      if [[ -d "$temp_dir" && ! -L "$temp_dir" ]]; then
+        rm -rf -- "$temp_dir" || status=1
+      else
+        status=1
+      fi
+      ;;
+    *) status=1 ;;
+  esac
+  exit "$status"
+}
+trap cleanup EXIT
+git -C "$REPO" show "$SHA:deploy/teagram/ops/blob-transition-runner.py" \
+  > "$temp_dir/blob-transition-runner.py"
+git -C "$REPO" show "$SHA:deploy/teagram-demo/blob-mode/blob-mode-state.py" \
+  > "$temp_dir/blob-mode-state.py"
+chmod 600 "$temp_dir/blob-transition-runner.py" "$temp_dir/blob-mode-state.py"
+report_root=${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/var/lib/teagram-blob-mode-reports}
+authority_json=$(python3 "$temp_dir/blob-transition-runner.py" deployment-env \
+  --checkout "$REPO" --state-dir "$REPO/.state/blob-mode" \
+  --report-root "$report_root" --lock-path /tmp/teagram-deploy.lock)
+env_file_lines=$(jq -er "select(.outcome == \"s3-accepted\") | .env_files | if type == \"array\" and length == 2 and all(.[]; type == \"string\" and length > 0) then .[] else error(\"invalid environment file list\") end" <<< "$authority_json")
+mapfile -t COMPOSE_ENV_FILE_PATHS <<< "$env_file_lines"
+[[ "${#COMPOSE_ENV_FILE_PATHS[@]}" == 2 && "${COMPOSE_ENV_FILE_PATHS[0]}" == "$REPO/.env" ]]
+legacy_parked="$(dirname "$REPO")/telegram-server/.env.rustfs-parked"
+case "${COMPOSE_ENV_FILE_PATHS[1]}" in
+  "$REPO/.env.rustfs-parked"|"$legacy_parked"|/root/.env.rustfs-parked) ;;
+  *) exit 1 ;;
+esac
+for env_file in "${COMPOSE_ENV_FILE_PATHS[@]}"; do
+  [[ -f "$env_file" && ! -L "$env_file" ]]
+done
+for compose_file in "$REPO/docker-compose.yml" "$REPO/docker-compose.override.yml"; do
+  [[ -f "$compose_file" && ! -L "$compose_file" ]]
+done
+COMPOSE=(docker compose --project-directory "$REPO" --project-name teagram \
+  --file "$REPO/docker-compose.yml" --file "$REPO/docker-compose.override.yml" \
+  --env-file "${COMPOSE_ENV_FILE_PATHS[0]}" --env-file "${COMPOSE_ENV_FILE_PATHS[1]}")
+"${COMPOSE[@]}" --profile local config --quiet
+for new_container in teagram-local-teagramd-1 teagram-local-postgres-1; do
+  if docker ps --format "{{.Names}}" | grep -Fxq "$new_container"; then
+    printf "refusing cutover while %s is running\\n" "$new_container" >&2
+    exit 1
+  fi
+done
+docker stop --time 120 teagram-teagramd-1
+docker stop --time 120 teagram-postgres-1
+for old_container in teagram-teagramd-1 teagram-postgres-1; do
+  if docker ps --format "{{.Names}}" | grep -Fxq "$old_container"; then
+    printf "refusing cutover while %s is running\\n" "$old_container" >&2
+    exit 1
+  fi
+done
+checkout_sha=$(git -C "$REPO" rev-parse HEAD)
+[[ "$checkout_sha" == "$SHA" ]]
+[[ -z "$(git -C "$REPO" status --porcelain -- . ":(exclude)docker-compose.override.yml")" ]]
+git -C "$REPO" diff --quiet "$SHA" -- docker-compose.yml
+"${COMPOSE[@]}" --profile local up -d local-postgres local-teagramd
+' cutover "$SHA"
+```
+
+The cutover stops the old pair with a 120-second timeout, then verifies both
+containers are no longer running before Compose starts the new pair. Compose
+starts the migration and RustFS dependencies as required. The named volumes are
+preserved; do not remove them during the cutover. If the new pair must be rolled
+back, stop `teagram-local-teagramd-1` and `teagram-local-postgres-1`, verify
+neither is running, start `teagram-postgres-1`, wait for `pg_isready`, then start
+`teagram-teagramd-1`. Never start the old pair while either local container is
+running.
+
 ## Restarting the existing server containers
 
 `start-server.sh` recovers the existing S3-backed server stack after its
@@ -197,9 +303,9 @@ containers stop. It takes the deployment lock, validates both containers'
 Compose project, service names and recorded file selection, then checks the
 S3 authority and environment-file paths with the reviewed blob-transition
 helper. Only the live `docker-compose.yml` plus `docker-compose.override.yml`
-selection is accepted. It starts the existing `postgres` container, waits five
-seconds and checks `pg_isready` for up to 60 seconds before starting only the
-inspected `teagramd` container. It uses `docker start` on each existing
+selection is accepted. It starts the existing `local-postgres` container, waits
+five seconds and checks `pg_isready` for up to 60 seconds before starting only
+the inspected `teagramd` container. It uses `docker start` on each existing
 container, not Compose dependency startup, so this recovery cannot restart the
 `migrate` container. When the Bot API listener is enabled, it recreates the
 inner relay in the started server's network namespace and waits for both relay
@@ -221,7 +327,7 @@ named volumes; `teagramd` can take up to 120 seconds to finish its configured
 graceful stop.
 
 ```sh
-incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
+incus exec teagram -- docker stop teagram-local-teagramd-1 teagram-local-postgres-1
 ```
 
 ## User-invite quota threat model

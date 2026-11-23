@@ -10,19 +10,39 @@ from pathlib import Path
 from typing import Any
 
 
-# These commands intentionally run once and exit. Adding another one-shot
-# service requires explicitly classifying it here before the contract passes.
-ONE_SHOT_SERVICES = frozenset(
+# These workers and disposable stacks are short-lived by design. Adding a
+# service without a restart policy requires explicitly classifying it here.
+NO_RESTART_SERVICES = frozenset(
     {
+        "local-migrate",
         "migrate",
+        "qa-invite-migrate",
         "rustfs-init",
         "blob-migrate",
         "blob-restore",
         "blob-encrypt-migrate",
         "blob-key-rotate",
+        "browser",
+        "observer",
+        "worker",
+        "demo-activity",
+        "demo-probe",
+        "demo-seed",
     }
 )
-REQUIRED_SERVICES = frozenset({"postgres", "rustfs", "teagramd"})
+REQUIRED_SERVICES = frozenset(
+    {
+        "local-postgres",
+        "rustfs",
+        "local-teagramd",
+        "postgres",
+        "teagramd",
+        "qa-invite-postgres",
+        "qa-invite-teagramd",
+        "linklanding",
+        "selector",
+    }
+)
 ON_FAILURE_RETRIES = re.compile(r"on-failure:[1-9][0-9]*\Z")
 
 
@@ -43,9 +63,9 @@ def validate_compose(compose: Any) -> list[str]:
     if missing_required:
         errors.append(f"missing required production services: {', '.join(missing_required)}")
 
-    missing_one_shots = sorted(ONE_SHOT_SERVICES - services.keys())
-    if missing_one_shots:
-        errors.append(f"missing one-shot service classifications: {', '.join(missing_one_shots)}")
+    missing_no_restart = sorted(NO_RESTART_SERVICES - services.keys())
+    if missing_no_restart:
+        errors.append(f"missing no-restart service classifications: {', '.join(missing_no_restart)}")
 
     for name, service in sorted(services.items()):
         if not isinstance(service, dict):
@@ -53,7 +73,7 @@ def validate_compose(compose: Any) -> list[str]:
             continue
 
         policy = service.get("restart", "no")
-        if name in ONE_SHOT_SERVICES:
+        if name in NO_RESTART_SERVICES:
             if policy is not None and policy != "no":
                 errors.append(f"one-shot service {name!r} must not restart (got {policy!r})")
         elif not valid_restart_policy(policy):
@@ -81,10 +101,10 @@ def main(argv: list[str]) -> int:
             print(error, file=sys.stderr)
         return 1
 
-    long_running_count = sum(name not in ONE_SHOT_SERVICES for name in compose["services"])
+    long_running_count = sum(name not in NO_RESTART_SERVICES for name in compose["services"])
     print(
         f"PASS restart policies cover {long_running_count} long-running services; "
-        f"{len(ONE_SHOT_SERVICES)} one-shot services remain excluded"
+        f"{len(NO_RESTART_SERVICES)} short-lived services remain excluded"
     )
     return 0
 

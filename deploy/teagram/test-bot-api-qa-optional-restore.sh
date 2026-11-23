@@ -20,14 +20,14 @@ docker() {
   case "$*" in
     "inspect --format {{json .Config.Env}} $server_container") printf '%s\n' "$server_env" ;;
     "inspect --format {{.Id}} $server_container") printf '%s\n' "$mock_server_id" ;;
-    "compose --profile bot-api-qa ps --all -q bot-api-inner")
+    "compose --profile local --profile bot-api-qa ps --all -q bot-api-inner")
       [[ -z "$orphan_inner_id" ]] || printf '%s\n' "$orphan_inner_id"
       ;;
-    "compose --profile bot-api-qa ps --all -q bot-api-ingress") ;;
-    "compose --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner") ;;
-    "compose --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress") ;;
-    "compose --profile bot-api-qa ps -q bot-api-inner") printf '%s\n' "$mock_inner_id" ;;
-    "compose --profile bot-api-qa ps -q bot-api-ingress") printf '%s\n' "$mock_ingress_id" ;;
+    "compose --profile local --profile bot-api-qa ps --all -q bot-api-ingress") ;;
+    "compose --profile local --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner") ;;
+    "compose --profile local --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress") ;;
+    "compose --profile local --profile bot-api-qa ps -q bot-api-inner") printf '%s\n' "$mock_inner_id" ;;
+    "compose --profile local --profile bot-api-qa ps -q bot-api-ingress") printf '%s\n' "$mock_ingress_id" ;;
     "inspect --format {{.State.Health.Status}} $mock_inner_id"|"inspect --format {{.State.Health.Status}} $mock_ingress_id") printf '%s\n' healthy ;;
     "inspect --format {{.HostConfig.NetworkMode}} $mock_inner_id") printf 'container:%s\n' "$mock_server_id" ;;
     *) printf 'unexpected docker call: %s\n' "$*" >&2; return 1 ;;
@@ -46,7 +46,7 @@ if restore_bot_api_inner optional "$server_container" docker compose; then
   printf '%s\n' 'optional restore accepted existing relays without a Bot API listener' >&2
   exit 1
 fi
-grep -Fq 'compose --profile bot-api-qa ps --all -q bot-api-inner' "$calls"
+grep -Fq 'compose --profile local --profile bot-api-qa ps --all -q bot-api-inner' "$calls"
 if grep -Fq ' up ' "$calls"; then
   printf '%s\n' 'optional restore started orphan relays without a Bot API listener' >&2
   exit 1
@@ -56,6 +56,6 @@ fi
 orphan_inner_id=
 server_env='["TG_BOT_API_LISTEN_ADDR=127.0.0.1:2447"]'
 restore_bot_api_inner optional "$server_container" docker compose
-grep -Fq 'compose --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner' "$calls"
-grep -Fq 'compose --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress' "$calls"
+grep -Fq 'compose --profile local --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner' "$calls"
+grep -Fq 'compose --profile local --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress' "$calls"
 printf '%s\n' 'optional Bot API relay restoration verified'

@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly REPO=/opt/teagram
-readonly SERVICE=teagram-teagramd-1
+readonly SERVICE=teagram-local-teagramd-1
 readonly BOT_USERNAME=teagram_qa_test_bot
 readonly BOT_FIRST_NAME='Teagram QA Test'
 readonly AGE_RECIPIENT=age1p5s5le72wnxu465pe2xz5a3qv8mdykwp5leezpjk0zm6p0m3e5hs36fydn

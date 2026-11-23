@@ -17,13 +17,15 @@ trap cleanup EXIT
 
 published=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://example.invalid \
-  docker compose -f "$ROOT/docker-compose.yml" --profile bot-api-qa config --format json |
+  docker compose -f "$ROOT/docker-compose.yml" --profile local --profile bot-api-qa config --format json |
   jq --arg name "$project" --arg port "$published" '
     .services as $s
     | {name:$name, services:{
         teagramd:{image:$s["bot-api-inner"].image,
           command:["TCP-LISTEN:2447,bind=127.0.0.1,fork","EXEC:/bin/cat"],networks:{default:null}},
-        "bot-api-inner":($s["bot-api-inner"] | del(.profiles)),
+        "bot-api-inner":($s["bot-api-inner"] | del(.profiles) |
+          .network_mode = "service:teagramd" |
+          .depends_on = {teagramd: $s["bot-api-inner"].depends_on["local-teagramd"]}),
         "bot-api-ingress":($s["bot-api-ingress"] | del(.profiles) | .ports[0].published=$port)
       }, networks:{default:{},bot_api_ingress:{driver:"bridge",enable_ipv6:false}},volumes:{bot_api_socket:{}}}
   ' > "$tmp/fixture.json"

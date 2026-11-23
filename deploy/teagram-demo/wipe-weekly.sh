@@ -68,7 +68,7 @@ python3 "$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py" validate \
   --report-root "$DEMO_STATE_DIR/reports" \
   --containers "$TMP_DIR/containers.json" \
   --compose "$TARGET_INVENTORY" \
-  --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
+  --override /dev/null \
   --checkout "$DEMO_REPO_ROOT"
 
 CLIENT_CONFIG="$DEMO_CLIENT_CONFIG"

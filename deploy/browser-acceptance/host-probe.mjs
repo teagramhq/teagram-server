@@ -835,7 +835,11 @@ async function main() {
     const record = JSON.parse(await readFile(options.get("--manifest"), "utf8"));
     validateRelease(record);
     const directory = dirname(fileURLToPath(import.meta.url));
-    const compose = ["compose", "--env-file", "/dev/null", "--project-directory", directory, "--file", `${directory}/compose.yaml`,
+    process.env.POSTGRES_PASSWORD ||= "compose-config-only";
+    process.env.TG_PUBLIC_LINK_PREFIX ||= "https://invalid.example/";
+    const repository = resolve(directory, "../..");
+    const compose = ["compose", "--env-file", "/dev/null", "--project-directory", repository,
+      "--file", `${repository}/docker-compose.yml`, "--profile", "browser-acceptance",
       "--project-name", "teagram-browser-acceptance"];
     let containers;
     result = await probeAcceptance(record.sourceCommit, {

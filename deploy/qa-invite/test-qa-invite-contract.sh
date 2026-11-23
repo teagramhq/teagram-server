@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
-COMPOSE=$SCRIPT_DIR/compose.yaml
+COMPOSE=$REPO_ROOT/docker-compose.yml
 WORKFLOW=$REPO_ROOT/.github/workflows/deploy-qa-invite.yml
 BROWSER_WORKFLOW=$REPO_ROOT/.github/workflows/real-client-browser-flow.yml
 CI_WORKFLOW=$REPO_ROOT/.github/workflows/ci.yml
@@ -78,12 +78,9 @@ if ! grep -Fq 'HTTP/[0-9.]+' "$QA_BROWSER_FLOW" || ! grep -Fq ' 101(' "$QA_BROWS
   fail 'QA browser smoke does not assert accepted WebSocket upgrades'
 fi
 
-[[ $(grep -c '^[[:space:]]*ports:' "$COMPOSE") -eq 1 ]] || fail 'Compose must publish exactly one service port'
 grep -Fq 'TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70' "$SCRIPT_DIR/.env.example" || fail 'Compose bind is not private to the demo LXC address'
-grep -Fq 'name: teagram-qa-invite' "$COMPOSE" || fail 'Compose project name changed'
-grep -Fq 'name: teagram-qa-invite-postgres' "$COMPOSE" || fail 'QA Postgres volume is not isolated'
-grep -Fq 'name: teagram-qa-invite-identity' "$COMPOSE" || fail 'QA identity volume is not isolated'
-grep -Fq 'name: teagram-qa-invite-blobs' "$COMPOSE" || fail 'QA blob volume is not isolated'
+grep -Fq 'TEAGRAM_QA_INVITE_PROJECT_NAME=teagram-qa-invite' "$REMOTE" || fail 'Compose project name changed'
+grep -Fq 'external: true' "$COMPOSE" || fail 'QA persistent volumes must be externally retained'
 grep -Fq 'internal: true' "$COMPOSE" || fail 'QA backend network must be internal'
 grep -Fq 'TG_REGISTRATION: invite' "$COMPOSE" || fail 'raw MTProto registration must use invite mode'
 grep -Fq 'TG_USER_INVITE_QUOTA: "5"' "$COMPOSE" || fail 'invite quota must be five'
@@ -107,7 +104,7 @@ grep -Fq 'mv -T -- "$WORK_DIR" "$RELEASE_DIR"' "$FORCED_COMMAND" || fail 'releas
 ! grep -Fq 'mktemp -d /tmp/teagram-qa-invite.' "$FORCED_COMMAND" || fail 'reviewed Compose snapshots must not be extracted under /tmp'
 test_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 test_state_dir=/opt/teagram-demo/.state/qa-invite
-test_project_dir=$test_state_dir/releases/$test_sha/deploy/qa-invite
+test_project_dir=$test_state_dir/releases/$test_sha
 cat > "$CONTRACT_TMP/qa-invite.env" <<ENV
 POSTGRES_PASSWORD=0000000000000000000000000000000000000000000000000000000000000000
 TG_AUTHKEY_ENC_KEY=1111111111111111111111111111111111111111111111111111111111111111
@@ -115,28 +112,40 @@ TEAGRAM_QA_INVITE_IMAGE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:aaaaaaa
 TEAGRAM_QA_INVITE_BIND_ADDRESS=10.96.46.70
 TEAGRAM_QA_INVITE_STATE_DIR=$test_state_dir
 ENV
-docker compose --project-name teagram-qa-invite --project-directory "$test_project_dir" \
-  --env-file "$CONTRACT_TMP/qa-invite.env" --file "$COMPOSE" config --format json > "$CONTRACT_TMP/compose.json" ||
+TEAGRAM_QA_INVITE_PROJECT_NAME=teagram-qa-invite TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+  docker compose --project-name teagram-qa-invite --project-directory "$test_project_dir" \
+  --env-file "$CONTRACT_TMP/qa-invite.env" --file "$COMPOSE" --profile qa-invite \
+  config --format json > "$CONTRACT_TMP/compose.json" ||
   fail 'could not render QA Compose bind sources'
 jq -e '
-  .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "cf-connecting-ip"
-  and .services.teagramd.environment.TG_CLIENT_ADDR_CF_PROXY_CIDRS == "198.18.131.3/32"
-  and .services.haproxy.networks.backend.ipv4_address == "198.18.131.2"
-  and .services["tls-edge"].networks.backend.ipv4_address == "198.18.131.3"
-  and .networks.backend.ipam.config[0].subnet == "198.18.131.0/24"
-  and .networks.backend.ipam.config[0].ip_range == "198.18.131.128/26"
-' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'QA WebSocket limits do not trust only the fixed TLS edge client address'
+  (.services | keys | sort) == ["qa-invite-haproxy", "qa-invite-migrate", "qa-invite-postgres", "qa-invite-teagramd", "qa-invite-tls-edge"]
+  and ([.services[] | select((.ports // []) | length > 0)] | length == 1)
+  and .volumes.qa_invite_pgdata.external == true
+  and .volumes.qa_invite_tgkey.external == true
+  and .volumes.qa_invite_tgblobs.external == true
+  and .volumes.qa_invite_pgdata.name == "teagram-qa-invite-postgres"
+  and .volumes.qa_invite_tgkey.name == "teagram-qa-invite-identity"
+  and .volumes.qa_invite_tgblobs.name == "teagram-qa-invite-blobs"
+  and .services["qa-invite-teagramd"].environment.TG_CLIENT_ADDR_TRUST == "cf-connecting-ip"
+  and .services["qa-invite-teagramd"].environment.TG_CLIENT_ADDR_CF_PROXY_CIDRS == "198.18.131.3/32"
+  and ((.services["qa-invite-teagramd"].networks.qa_invite_backend.aliases // []) | index("teagramd")) != null
+  and ((.services["qa-invite-tls-edge"].networks.qa_invite_backend.aliases // []) | index("tls-edge")) != null
+  and .services["qa-invite-haproxy"].networks.qa_invite_backend.ipv4_address == "198.18.131.2"
+  and .services["qa-invite-tls-edge"].networks.qa_invite_backend.ipv4_address == "198.18.131.3"
+  and .networks.qa_invite_backend.ipam.config[0].subnet == "198.18.131.0/24"
+  and .networks.qa_invite_backend.ipam.config[0].ip_range == "198.18.131.128/26"
+' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'QA service aliases or fixed TLS-edge trust settings do not match proxy configuration'
 jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/teagram-demo/public-client \
   --slurpfile live "$LIVE_SNAPSHOT" '
   . as $config
   | $live[0] as $snapshot
   | ($config.name == $snapshot.projectName)
-    and all($snapshot.activeServices[]; $config.services[.] != null)
-    and $config.services.haproxy.ports[0].host_ip == $snapshot.bindAddress
-    and ($config.services.haproxy.ports[0].published | tonumber) == $snapshot.bindPort
-    and $config.services.teagramd.environment.TG_REGISTRATION == $snapshot.registrationMode
-    and ($config.services.teagramd.environment.TG_USER_INVITE_QUOTA | tonumber) == $snapshot.inviteQuota
-    and ($config.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == ($snapshot.turnstileEnabled | tostring))
+    and all($snapshot.activeServices[]; (if . == "postgres" then "qa-invite-postgres" elif . == "teagramd" then "qa-invite-teagramd" elif . == "tls-edge" then "qa-invite-tls-edge" elif . == "haproxy" then "qa-invite-haproxy" else . end) as $name | $config.services[$name] != null)
+    and $config.services["qa-invite-haproxy"].ports[0].host_ip == $snapshot.bindAddress
+    and ($config.services["qa-invite-haproxy"].ports[0].published | tonumber) == $snapshot.bindPort
+    and $config.services["qa-invite-teagramd"].environment.TG_REGISTRATION == $snapshot.registrationMode
+    and ($config.services["qa-invite-teagramd"].environment.TG_USER_INVITE_QUOTA | tonumber) == $snapshot.inviteQuota
+    and ($config.services["qa-invite-teagramd"].environment.TG_TURNSTILE_SIGNIN_ENABLED == ($snapshot.turnstileEnabled | tostring))
     and (($config.volumes | [to_entries[].value.name] | sort) == ($snapshot.persistentVolumeNames | sort))
     and ($snapshot.publicDemo == "separate-compose-project")
     and (
@@ -154,10 +163,10 @@ jq -e --arg state "$test_state_dir" --arg web_source /opt/teagram-demo/.state/te
       [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
       startswith($state + "/") or . == $web_source
     )
-    and .services["tls-edge"].read_only == true
-    and .services.haproxy.read_only == true
+    and .services["qa-invite-tls-edge"].read_only == true
+    and .services["qa-invite-haproxy"].read_only == true
     and ([.services[] | .tmpfs[]? | select(startswith("/tmp"))] | length == 0)
-    and any(.services["tls-edge"].tmpfs[]; startswith("/var/cache/nginx:"))
+    and any(.services["qa-invite-tls-edge"].tmpfs[]; startswith("/var/cache/nginx:"))
     and all(
       [$config.services[] | .volumes[]? | select(.type == "bind") | .source][];
       startswith("/tmp/") | not
@@ -170,7 +179,7 @@ jq -e --arg state "$test_state_dir" '
 ' "$CONTRACT_TMP/compose.json" >/dev/null || fail 'a QA bind source is missing, outside persistent state, or under /tmp'
 jq -e '
   . as $config
-  | (.networks.backend.internal == true)
+  | (.networks.qa_invite_backend.internal == true)
     and ([ $config.services[]
       | select((.ports // []) | length > 0)
       | (.networks // {} | keys[]) as $network
@@ -191,7 +200,7 @@ grep -Fq 'alias /run/qa-invite/tls/ca.crt;' "$NGINX" || fail 'QA root certificat
 grep -Fq 'proxy_read_timeout 1h;' "$NGINX" || fail 'QA API WebSockets have a shorter idle timeout than the public edge'
 grep -Fq 'proxy_buffering off;' "$NGINX" || fail 'QA API WebSocket proxy buffering is enabled'
 ! grep -Fq 'SSL_CERT_FILE=' "$SCRIPT_DIR/README.md" || fail 'smoke instructions must use normal system trust'
-grep -Fq -- '--project-directory "$REPO_ROOT/deploy/qa-invite"' "$REMOTE" || fail 'Compose must resolve bind sources from the persistent release'
+grep -Fq -- '--project-directory "$REPO_ROOT"' "$REMOTE" || fail 'Compose must resolve bind sources from the persistent release'
 grep -Fq 'source "$REPO_ROOT/deploy/qa-invite/rollback.sh"' "$REMOTE" || fail 'up rollback helper is not loaded'
 grep -Fq 'compose down --remove-orphans' "$ROLLBACK" || fail 'rollback must stop QA project containers'
 ! grep -Eq 'compose down .*--volumes|compose down .* -v' "$REMOTE" || fail 'down must preserve isolated state'

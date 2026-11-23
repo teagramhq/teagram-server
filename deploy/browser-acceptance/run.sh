@@ -11,7 +11,7 @@ readonly SERVED_MANIFEST_MAX_BYTES=16384
 # Four account-slot sockets, one authenticated replacement, and one logout reconnect.
 readonly WSS_CONNECTION_CEILING=6
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
+readonly COMPOSE=(env -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory "$PROJECT_DIR" --file "$PROJECT_DIR/docker-compose.yml" --profile browser-acceptance --project-name teagram-browser-acceptance)
 
 RESULT_JSON=''
 RESULT_STATUS=1

@@ -24,8 +24,6 @@ FROZEN_FIXTURE_PINS = (
 REQUIRED_PIN_FILES = (
     "docker-compose.yml",
     "deploy/k8s/Dockerfile.migrations",
-    "deploy/teagram-demo/compose.yaml",
-    "deploy/qa-invite/compose.yaml",
     ".github/workflows/ci.yml",
     ".github/workflows/perf.yml",
 )

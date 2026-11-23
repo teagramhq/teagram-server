@@ -99,7 +99,7 @@ check_ci_contract() {
     ci_fail 'the migrations lane must use the digest-pinned multi-arch PostgreSQL image'
   grep -Fq "POSTGRES_IMAGE=\"\${POSTGRES_IMAGE:-$expected_postgres_image}\"" .githooks/pre-push ||
     ci_fail 'the pre-push migration check must use the migrations lane PostgreSQL image pin'
-  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_production_postgres_image" ]] ||
+  [[ "$(yq -r '.services.postgres.image' docker-compose.yml)" == "$expected_production_postgres_image" ]] ||
     ci_fail 'the production PostgreSQL image pin changed outside the migration-check fix'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.CHECK_DEMO_WEB_PIN_RESULT // ""')" == '' ]] ||
     ci_fail 'the required CI gate must not receive the demo web pin result'

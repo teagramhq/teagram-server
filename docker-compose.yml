@@ -32,10 +32,100 @@ x-media-keys: &media-keys
   TG_MEDIA_KEY_DIR: /run/teagramd/media-keys
   TG_MEDIA_KEY_CURRENT: ${TG_MEDIA_KEY_CURRENT:-1}
 
+x-demo-dsn: &demo-dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the demo environment}@postgres:5432/teagram?sslmode=disable"
+x-demo-logging: &demo-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+x-demo-server-environment: &demo-server-environment
+  TG_POSTGRES_DSN: *demo-dsn
+  TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in the demo environment}
+  TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-demo.teagram.io:443}
+  TG_ADVERTISE_DEMO_GUEST_SIGN_UP: ${TG_ADVERTISE_DEMO_GUEST_SIGN_UP:-true}
+  TG_DEMO_GENERAL_CHAT_ENABLED: ${TG_DEMO_GENERAL_CHAT_ENABLED:-true}
+  TG_WEBSOCKET_LISTEN_ADDR: ${TG_WEBSOCKET_LISTEN_ADDR:-:2446}
+  TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:-https://web.teagram.io}
+  TG_WEBSOCKET_BROWSER_ONLY: ${TG_WEBSOCKET_BROWSER_ONLY:-false}
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: "20"
+  TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-false}
+  TG_LOG_AUTH_KEY_UNBINDS: "true"
+  TG_REGISTRATION: ${TG_REGISTRATION:-open}
+  TG_WELCOME_CHANNEL: teagramdemowelcome
+  TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
+  TG_STICKER_IMPORT: "off"
+  TG_MAX_FILE_BYTES: ${TG_MAX_FILE_BYTES:-16777216}
+  TG_MAX_USER_STORAGE_BYTES: ${TG_MAX_USER_STORAGE_BYTES:-268435456}
+  TG_UPLOAD_MAX_BYTES: ${TG_UPLOAD_MAX_BYTES:-512000}
+  TG_UPLOADS_DISABLED: "false"
+  TG_RATE_LIMIT_UPLOAD_BYTES: ${TG_RATE_LIMIT_UPLOAD_BYTES:-20971520}
+  TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
+  TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+  TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+  HTTP_PROXY: http://turnstile-egress:3128
+  HTTPS_PROXY: http://turnstile-egress:3128
+  NO_PROXY: localhost,127.0.0.1,postgres,teagramd,teagramd-next
+  TG_REPLICA_COUNT: "1"
+  TG_CLIENT_ADDR_TRUST: proxy-v2
+  TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
+  TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:-}
+  TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
+  TG_TURNSTILE_TEST_MODE: "false"
+  TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
+  TG_BLOB_DIR: /var/lib/teagramd-blobs
+  GOMAXPROCS: "1"
+  GOMEMLIMIT: 320MiB
+x-demo-seed-environment: &demo-seed-environment
+  TG_UPLOADS_DISABLED: "false"
+  TG_CLIENT_ADDR_TRUST: socket
+  TG_CLIENT_ADDR_PROXY_CIDRS: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  TG_TURNSTILE_SITE_KEY: ""
+  TG_TURNSTILE_SECRET_KEY_FILE: ""
+  TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: ""
+  TG_TURNSTILE_SIGNIN_ENABLED: "false"
+  TG_RATE_LIMIT_SIGN_UP_IP: "32"
+  TG_RATE_LIMIT_SIGN_UP_IP_WINDOW: 1h
+  TG_RATE_LIMIT_SEND_CODE_IP: "256"
+  TG_RATE_LIMIT_SEND_CODE_IP_WINDOW: 1h
+  TG_RATE_LIMIT_SEND_CODE_IP_PHONES: "32"
+  TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
+  TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP: "256"
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET: "256"
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
+  TG_RATE_LIMIT_SEND: "0"
+x-demo-server: &demo-server
+  image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
+  stop_grace_period: 120s
+  mem_limit: 448m
+  memswap_limit: 448m
+  cpus: "1.0"
+  pids_limit: 256
+  environment: *demo-server-environment
+  read_only: true
+  volumes:
+    - tgkey:/var/lib/teagramd
+    - tgblobs:/var/lib/teagramd-blobs
+    - .state/blob-mode:/run/teagramd/blob-mode:ro
+  secrets:
+    - teagram_demo_turnstile
+    - teagram_demo_turnstile_qa_bypass
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    turnstile-egress:
+      condition: service_healthy
+  restart: unless-stopped
+  logging: *demo-logging
+
 services:
   # MAIN-1974 restores the PostgreSQL 16 source volume into this PostgreSQL 18
   # layout during the stack move.
-  postgres:
+  local-postgres:
+    profiles: [local]
     image: mirror.gcr.io/library/postgres:18-alpine
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -50,8 +140,11 @@ services:
       timeout: 5s
       retries: 20
     restart: unless-stopped
+    networks:
+      default:
+        aliases: [postgres]
     # No ports: on purpose. The server reaches Postgres by service name on the
-    # compose network, and psql is `docker compose exec postgres psql -U postgres
+    # compose network, and psql is `docker compose exec local-postgres psql -U postgres
     # teagram` — so publishing 5432 would buy nothing and put the database on
     # every interface of the host.
     volumes:
@@ -61,7 +154,8 @@ services:
   # Applies the migrations and exits 0. No restart policy: a re-run against an
   # already migrated database is a no-op, so a restart loop could only hide a
   # real failure.
-  migrate:
+  local-migrate:
+    profiles: [local]
     # Pinned to the version the ariga/setup-atlas steps in ci.yml use, so the
     # stack and CI cannot apply migrations with different atlas versions.
     image: mirror.gcr.io/arigaio/atlas:1.3.0-alpine
@@ -80,10 +174,11 @@ services:
     volumes:
       - ./migrations:/migrations:ro
     depends_on:
-      postgres:
+      local-postgres:
         condition: service_healthy
 
   rustfs:
+    profiles: [local]
     # The multi-platform digest selects the verified amd64 CI image or the
     # arm64 production image without allowing either tag to move.
     image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
@@ -126,6 +221,7 @@ services:
     # do not publish either one on the LXC or a developer workstation.
 
   rustfs-init:
+    profiles: [local]
     image: teagramd-mc-init:local
     build:
       context: .
@@ -160,7 +256,7 @@ services:
       - source: teagramd_blob_secret_key
         target: teagramd-blob-secret-key
     volumes:
-      - tgblobs:/source:ro
+      - local_tgblobs:/source:ro
     profiles: ["migration"]
     networks:
       - rustfs_private
@@ -180,7 +276,7 @@ services:
       - source: teagramd_blob_secret_key
         target: teagramd-blob-secret-key
     volumes:
-      - tgblobs:/destination
+      - local_tgblobs:/destination
     profiles: ["migration"]
     networks:
       - rustfs_private
@@ -228,7 +324,7 @@ services:
       - default
       - rustfs_private
     depends_on:
-      postgres:
+      local-postgres:
         condition: service_healthy
       rustfs-init:
         condition: service_completed_successfully
@@ -269,12 +365,13 @@ services:
       - default
       - rustfs_private
     depends_on:
-      postgres:
+      local-postgres:
         condition: service_healthy
       rustfs-init:
         condition: service_completed_successfully
 
-  teagramd:
+  local-teagramd:
+    profiles: [local]
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done
     # outside compose — CI builds it with a layer cache — be picked up here
@@ -390,7 +487,7 @@ services:
       # are read-only. The runner-owned authority directory stays root-owned
       # and is mounted read-only so the server cannot change its backend mode.
       - tgkey:/var/lib/teagramd
-      - tgblobs:/var/lib/teagramd-blobs:ro
+      - local_tgblobs:/var/lib/teagramd-blobs:ro
       - ./.state/blob-mode:/run/teagramd/blob-mode:ro
       - type: bind
         source: ${TEAGRAM_MEDIA_KEY_SOURCE_DIR:-/etc/teagramd/media-keys}
@@ -406,7 +503,7 @@ services:
     # store.Open refuses to start against an unmigrated schema
     # (internal/store/store.go:69), so the ordering is load-bearing, not cosmetic.
     depends_on:
-      migrate:
+      local-migrate:
         condition: service_completed_successfully
       rustfs-init:
         condition: service_completed_successfully
@@ -414,9 +511,9 @@ services:
   bot-api-inner:
     image: mirror.gcr.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
     profiles: ["bot-api-qa"]
-    network_mode: service:teagramd
+    network_mode: service:local-teagramd
     depends_on:
-      teagramd:
+      local-teagramd:
         condition: service_started
     command: ["-d", "-d", "-T120", "UNIX-LISTEN:/run/bot-api/relay.sock,fork,unlink-early,mode=0600,max-children=128", "TCP:127.0.0.1:2447"]
     volumes:
@@ -465,12 +562,835 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # The demo shares this Compose file but runs in its own project and profiles.
+  postgres:
+    profiles: [demo]
+    image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+    platform: linux/amd64
+    mem_limit: 320m
+    memswap_limit: 320m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the demo environment}
+      POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teagram"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - type: bind
+        source: ./deploy/teagram-demo/postgresql.conf
+        target: /etc/postgresql/postgresql.conf
+        read_only: true
+    networks:
+      backend:
+        ipv4_address: 198.18.130.3
+    restart: unless-stopped
+    logging: *demo-logging
+
+  migrate:
+    profiles: [demo]
+    image: mirror.gcr.io/arigaio/atlas:1.3.0-alpine@sha256:bb21d31eaf260e43513a35b87be575cecf8ab556795aa8c039e7bb3b43bdd3fe
+    platform: linux/amd64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.25"
+    pids_limit: 64
+    command:
+      - migrate
+      - apply
+      - --dir
+      - file:///migrations
+      - --url
+      - *demo-dsn
+    volumes:
+      - type: bind
+        source: ./migrations
+        target: /migrations
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    logging: *demo-logging
+
+  teagramd:
+    <<: *demo-server
+    profiles: [demo]
+    networks:
+      backend:
+        ipv4_address: 198.18.130.253
+
+  teagramd-next:
+    <<: *demo-server
+    profiles: [demo]
+    networks:
+      backend:
+        ipv4_address: 198.18.130.251
+
+  teagramd-maintenance:
+    <<: *demo-server
+    profiles: [maintenance]
+    networks: [backend]
+
+  teagramd-bootstrap:
+    <<: *demo-server
+    profiles: [bootstrap]
+    environment:
+      <<: [*demo-seed-environment, *demo-server-environment]
+      TG_CLIENT_ADDR_TRUST: socket
+      TG_CLIENT_ADDR_PROXY_CIDRS: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+    volumes:
+      - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      backend:
+        ipv4_address: 198.18.130.253
+        aliases: [teagramd]
+
+  teagramd-seed:
+    <<: *demo-server
+    profiles: [seed]
+    environment:
+      <<: [*demo-seed-environment, *demo-server-environment]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      backend:
+        ipv4_address: 198.18.130.253
+        aliases: [teagramd]
+
+  teagramd-next-seed:
+    <<: *demo-server
+    profiles: [seed]
+    environment:
+      <<: [*demo-seed-environment, *demo-server-environment]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      backend:
+        ipv4_address: 198.18.130.251
+        aliases: [teagramd-next]
+
+  demo-seed:
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
+    profiles: [seed]
+    entrypoint: ["/usr/local/bin/demo-seed"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
+      TG_DEMO_GENERAL_CHAT_ENABLED: ${TG_DEMO_GENERAL_CHAT_ENABLED:-true}
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/public-client/client
+        target: /run/teagram-demo/client.json
+        read_only: true
+      - type: bind
+        source: /var/lib/teagram-demo/secrets/seed-owner-password
+        target: /run/secrets/seed-owner-password
+        read_only: true
+      - type: bind
+        source: /var/lib/teagram-demo/secrets/seed-owner.session
+        target: /run/secrets/seed-owner.session
+        read_only: false
+      - type: bind
+        source: /var/lib/teagram-demo/secrets/demo-accounts
+        target: /run/secrets/demo-accounts
+    networks: [backend]
+    logging: *demo-logging
+
+  demo-probe:
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
+    profiles: [seed]
+    entrypoint: ["/usr/local/bin/demo-seed"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/public-client/client
+        target: /run/teagram-demo/client.json
+        read_only: true
+    secrets:
+      - teagram_demo_turnstile_qa_bypass
+    networks:
+      backend:
+        ipv4_address: 198.18.130.4
+    logging: *demo-logging
+
+  demo-activity:
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
+    profiles: [activity]
+    entrypoint: ["/usr/local/bin/demo-seed"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/public-client/client
+        target: /run/teagram-demo/client.json
+        read_only: true
+      - type: bind
+        source: /var/lib/teagram-demo-activity
+        target: /var/lib/teagram-demo-activity
+    networks: [backend]
+    logging: *demo-logging
+
+  turnstile-egress:
+    profiles: [demo]
+    image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
+    platform: linux/amd64
+    user: "584792:584792"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /run:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0755
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0750
+      - /var/spool/squid:rw,noexec,nosuid,nodev,size=32m,uid=584792,gid=584792,mode=0750
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/turnstile-egress
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/teagram-demo/turnstile-egress.conf
+        target: /etc/squid/squid.conf
+        read_only: true
+      - type: bind
+        source: ./deploy/teagram-demo/pebble-health.yaml
+        target: /var/lib/pebble/default/layers/002-demo-health.yaml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "/usr/bin/pebble", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      backend:
+        ipv4_address: 198.18.130.252
+    restart: unless-stopped
+    logging: *demo-logging
+
+  haproxy:
+    profiles: [demo]
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    labels:
+      com.teagram.demo.haproxy-config-sha256: ${TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/haproxy
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.state/teagram-demo/haproxy-config
+        target: /usr/local/etc/haproxy
+        read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/haproxy-run
+        target: /run/haproxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      turnstile-egress:
+        condition: service_healthy
+    networks:
+      backend:
+        ipv4_address: 198.18.130.2
+    restart: unless-stopped
+    logging: *demo-logging
+
+  edge:
+    profiles: [demo]
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    entrypoint: ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
+    user: "101:101"
+    ports:
+      - "${TEAGRAM_DEMO_EDGE_BIND:-127.0.0.1:8080}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/edge
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/teagram-demo/nginx-config
+        target: /etc/nginx/demo
+        read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/public-client
+        target: /usr/share/nginx/html/.well-known/teagramd
+        read_only: true
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks: [backend, edge]
+    restart: unless-stopped
+    logging: *demo-logging
+
+  # Browser isolation, link routing, and the photo worker are CI-only profiles.
+  worker:
+    profiles: [photothumb-qualification]
+    image: teagramd:local
+    entrypoint: ["/usr/local/bin/photothumb"]
+    command: ["worker", "10485760", "1600", "1600", "2560000"]
+    user: "65532:65532"
+    working_dir: /
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    mem_limit: 320m
+    memswap_limit: 320m
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 224MiB
+    stdin_open: true
+    tty: false
+
+  observer:
+    profiles: [browser-acceptance]
+    image: teagram-browser-acceptance:local
+    entrypoint: ["node", "/opt/browser-acceptance/observer-service.mjs"]
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${SECCOMP_PROFILE:-/opt/teagram/deploy/browser-acceptance/seccomp-browser.json}
+    networks:
+      browser-internal:
+        aliases: [browser-observer]
+      observer-egress: {}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /home/pwuser:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=1000,gid=1000
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    logging:
+      driver: none
+    healthcheck:
+      test: ["CMD", "node", "/opt/browser-acceptance/healthcheck.mjs"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+      start_period: 2s
+
+  browser:
+    profiles: [browser-acceptance]
+    image: teagram-browser-acceptance:local
+    build:
+      context: .
+      dockerfile: deploy/browser-acceptance/Dockerfile
+      args:
+        PLAYWRIGHT_IMAGE: ${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321}
+    platform: ${PLAYWRIGHT_PLATFORM:-linux/arm64}
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${SECCOMP_PROFILE:-/opt/teagram/deploy/browser-acceptance/seccomp-browser.json}
+    depends_on:
+      observer:
+        condition: service_healthy
+    networks: [browser-internal]
+    environment:
+      HOME: /home/pwuser
+      TMPDIR: /tmp
+      TMP: /tmp
+      TEMP: /tmp
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      NODE_USE_ENV_PROXY: "1"
+      HTTP_PROXY: http://browser-observer:3128
+      HTTPS_PROXY: http://browser-observer:3128
+      NO_PROXY: browser-observer,localhost,127.0.0.1
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /home/pwuser:rw,noexec,nosuid,nodev,size=128m,mode=0700,uid=1000,gid=1000
+      - /dev/shm:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    cpus: "1.0"
+    pids_limit: 256
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    logging:
+      driver: none
+
+  linklanding:
+    profiles: [link-edge]
+    build:
+      context: .
+      dockerfile: deploy/link-edge/Dockerfile
+      target: linklanding
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:-}
+    image: teagram-linklanding:local
+    command: ["-listen-address", "0.0.0.0", "-port", "8082"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
+    ports: ["127.0.0.1:8082:8082"]
+    networks: [private-edge, landing-publish]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "landing"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  selector:
+    profiles: [link-edge]
+    build:
+      context: .
+      dockerfile: deploy/link-edge/Dockerfile
+      target: selector
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:-}
+    image: teagram-linkselector:local
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
+    command:
+      - "-listen-address"
+      - "0.0.0.0"
+      - "-port"
+      - "8081"
+      - "-web-upstream"
+      - "http://web:8080"
+      - "-landing-upstream"
+      - "http://linklanding:8082"
+    ports: ["127.0.0.1:8081:8081"]
+    networks: [web-edge, private-edge]
+    depends_on:
+      linklanding:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "selector"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  control-linklanding:
+    profiles: [link-edge-control]
+    build:
+      context: .
+      dockerfile: deploy/link-edge/Dockerfile
+      target: linklanding
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:-}
+    image: ${LINK_EDGE_CONTROL_PROJECT:-link-edge-control}-linklanding:control
+    command: ["-listen-address", "0.0.0.0", "-port", "8082"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
+    networks:
+      control-private-edge:
+        aliases: [linklanding]
+      control-landing-publish: null
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "landing"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  web:
+    profiles: [link-edge-control]
+    image: ${LINK_EDGE_CONTROL_PROJECT:-link-edge-control}-linklanding:control
+    pull_policy: never
+    command: ["-listen-address", "0.0.0.0", "-port", "8080"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
+    networks: [control-web-edge]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+
+  control-selector:
+    profiles: [link-edge-control]
+    build:
+      context: .
+      dockerfile: deploy/link-edge/Dockerfile
+      target: selector
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:-}
+    image: ${LINK_EDGE_CONTROL_PROJECT:-link-edge-control}-linkselector:control
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
+    command:
+      - "-listen-address"
+      - "0.0.0.0"
+      - "-port"
+      - "8081"
+      - "-server-upstream"
+      - "http://127.0.0.1:2446"
+      - "-web-upstream"
+      - "http://web:8080"
+      - "-landing-upstream"
+      - "http://control-linklanding:8082"
+    networks:
+      control-web-edge: null
+      control-private-edge:
+        aliases: [selector]
+    depends_on:
+      control-linklanding:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "selector"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  control-probe:
+    profiles: [link-edge-control]
+    image: ${LINK_EDGE_CONTROL_PROJECT:-link-edge-control}-linkselector:control
+    pull_policy: never
+    entrypoint: ["/usr/local/bin/linkprobe"]
+    command: ["hold"]
+    networks: [control-private-edge]
+    depends_on:
+      control-selector:
+        condition: service_started
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
+    restart: unless-stopped
+    logging: *demo-logging
+
+  qa-invite-postgres:
+    profiles: [qa-invite]
+    image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+    platform: linux/amd64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 96
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teagram"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - qa_invite_pgdata:/var/lib/postgresql
+      - type: bind
+        source: ./deploy/qa-invite/postgresql.conf
+        target: /etc/postgresql/postgresql.conf
+        read_only: true
+    networks:
+      qa_invite_backend: {}
+    restart: unless-stopped
+    logging: *demo-logging
+
+  qa-invite-migrate:
+    profiles: [qa-invite]
+    image: mirror.gcr.io/arigaio/atlas:1.3.0-alpine@sha256:bb21d31eaf260e43513a35b87be575cecf8ab556795aa8c039e7bb3b43bdd3fe
+    platform: linux/amd64
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.25"
+    pids_limit: 48
+    command:
+      - migrate
+      - apply
+      - --dir
+      - file:///migrations
+      - --url
+      - postgres://postgres:${POSTGRES_PASSWORD:-}@qa-invite-postgres:5432/teagram?sslmode=disable
+    volumes:
+      - type: bind
+        source: ./migrations
+        target: /migrations
+        read_only: true
+    depends_on:
+      qa-invite-postgres:
+        condition: service_healthy
+    networks: [qa_invite_backend]
+    logging: *demo-logging
+
+  qa-invite-teagramd:
+    profiles: [qa-invite]
+    image: ${TEAGRAM_QA_INVITE_IMAGE_REF:-teagramd:local}
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: "1.0"
+    pids_limit: 192
+    stop_grace_period: 30s
+    environment:
+      TG_POSTGRES_DSN: postgres://postgres:${POSTGRES_PASSWORD:-}@qa-invite-postgres:5432/teagram?sslmode=disable
+      TG_PUBLIC_LINK_PREFIX: https://teagram-demo.incus/
+      TG_LISTEN_ADDR: ":2443"
+      TG_ADVERTISE_ADDR: teagram-demo.incus:443
+      TG_WEBSOCKET_LISTEN_ADDR: ""
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ""
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ":2446"
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: teagram-demo.incus:443
+      TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://teagram-demo.incus
+      TG_CLIENT_ADDR_TRUST: cf-connecting-ip
+      TG_CLIENT_ADDR_CF_PROXY_CIDRS: 198.18.131.3/32
+      TG_REGISTRATION: invite
+      TG_USER_INVITE_QUOTA: "5"
+      TG_USER_INVITE_MIN_ACCOUNT_AGE: 0
+      TG_PUBLIC_REGISTRATION: invite
+      TG_TURNSTILE_SIGNIN_ENABLED: "false"
+      TG_LOG_LOGIN_CODES: "false"
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      TG_AUTHKEY_ENC_KEY_FILE: /var/lib/teagramd/enc_key.hex
+      TG_RSA_KEY_PATH: /var/lib/teagramd/server_key.pem
+      TG_STICKER_IMPORT: "off"
+      TG_UPLOADS_DISABLED: "true"
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
+      TG_MAX_FILE_BYTES: "16777216"
+      TG_MAX_USER_STORAGE_BYTES: "268435456"
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 384MiB
+    read_only: true
+    volumes:
+      - qa_invite_tgkey:/var/lib/teagramd
+      - qa_invite_tgblobs:/var/lib/teagramd-blobs
+    depends_on:
+      qa-invite-migrate:
+        condition: service_completed_successfully
+    networks:
+      qa_invite_backend:
+        aliases: [teagramd]
+    restart: unless-stopped
+    logging: *demo-logging
+
+  qa-invite-tls-edge:
+    profiles: [qa-invite]
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    user: "101:101"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.25"
+    pids_limit: 48
+    tmpfs: ["/var/cache/nginx:size=16m,uid=101,gid=101,mode=0750"]
+    volumes:
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:-/nonexistent}/tmp/tls-edge
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/qa-invite/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:-/nonexistent}/tls/identity/public
+        target: /run/qa-invite/tls
+        read_only: true
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:-/nonexistent}/client
+        target: /run/qa-invite/client
+        read_only: true
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_PUBLIC_CLIENT_DIR:-/opt/teagram-demo/.state/teagram-demo/public-client}
+        target: /usr/share/nginx/html/.well-known/teagramd
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:9443/.well-known/teagramd/client"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      qa-invite-teagramd:
+        condition: service_started
+    networks:
+      qa_invite_backend:
+        ipv4_address: 198.18.131.3
+        aliases: [tls-edge]
+    restart: unless-stopped
+    logging: *demo-logging
+
+  qa-invite-haproxy:
+    profiles: [qa-invite]
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    user: "584792:584792"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.25"
+    pids_limit: 48
+    ports:
+      - "${TEAGRAM_QA_INVITE_BIND_ADDRESS:-127.0.0.1}:443:8444/tcp"
+    volumes:
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:-/nonexistent}/tmp/haproxy
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/qa-invite/haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      qa-invite-tls-edge:
+        condition: service_healthy
+    networks:
+      qa_invite_backend:
+        ipv4_address: 198.18.131.2
+      qa_invite_publish: {}
+    restart: unless-stopped
+    logging: *demo-logging
+
 volumes:
   pgdata:
   tgkey:
   # Retained local data for the later verified transition and recovery. The
-  # default S3 render mounts it read-only; the local overlay writes it.
+  # default S3 render mounts it read-only; the local stack writes its own volume.
   tgblobs:
+    name: teagram-demo_tgblobs
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${TEAGRAM_DEMO_BLOB_PATH:-/nonexistent}
+  local_tgblobs:
+    name: ${COMPOSE_PROJECT_NAME:-teagram}_tgblobs
+  qa_invite_pgdata:
+    name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}-postgres
+    external: true
+  qa_invite_tgkey:
+    name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}-identity
+    external: true
+  qa_invite_tgblobs:
+    name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}-blobs
+    external: true
   rustfsdata:
   bot_api_socket:
   blob_key_rotate_reports:
@@ -491,6 +1411,55 @@ networks:
     driver_opts:
       com.docker.network.bridge.gateway_mode_ipv4: isolated
 
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.18.130.0/24
+          ip_range: 198.18.130.128/26
+  edge:
+    driver: bridge
+  egress:
+    driver: bridge
+  browser-internal:
+    name: teagram-browser-acceptance-internal
+    internal: true
+  observer-egress:
+    name: teagram-browser-acceptance-egress
+    driver: bridge
+  web-edge:
+    name: teagram-web-edge-net
+    external: true
+  private-edge:
+    internal: true
+  landing-publish:
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  control-web-edge:
+    internal: true
+  control-private-edge:
+    internal: true
+  control-landing-publish:
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  qa_invite_backend:
+    name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}_backend
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.18.131.0/24
+          ip_range: 198.18.131.128/26
+  qa_invite_publish:
+    name: ${TEAGRAM_QA_INVITE_PROJECT_NAME:-teagram-qa-invite}_publish
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
 secrets:
   rustfs_root_access_key:
     environment: RUSTFS_ROOT_ACCESS_KEY
@@ -505,3 +1474,7 @@ secrets:
     # by the non-root teagramd uid (65532); keep it under a mode-0700 .secrets
     # directory and use mode 0444, as for the existing app secret.
     file: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:-/dev/null}
+  teagram_demo_turnstile:
+    file: ${TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE:-/dev/null}
+  teagram_demo_turnstile_qa_bypass:
+    file: /var/lib/teagram-demo/secrets/turnstile-qa-bypass-token

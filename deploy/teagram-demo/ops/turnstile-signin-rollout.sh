@@ -38,7 +38,7 @@ for tracked in \
   deploy/teagram-demo/ops/turnstile-signin-rollout.sh \
   deploy/teagram-demo/ops/turnstile-signin-rollback.sh \
   deploy/teagram-demo/update_turnstile_signin.py \
-  deploy/teagram-demo/compose.yaml \
+  docker-compose.yml \
   deploy/teagram-demo/validate-env.py \
   deploy/teagram-demo/probe_tailnet_isolation.py \
   deploy/teagram-demo/demo-common.sh \

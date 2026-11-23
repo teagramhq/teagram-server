@@ -390,7 +390,7 @@ class RotateQABypassOperationTests(unittest.TestCase):
         (demo_dir / "nginx-config").mkdir(parents=True)
         tracked_files = (
             "deploy/teagram-demo/demo-common.sh",
-            "deploy/teagram-demo/compose.yaml",
+            "docker-compose.yml",
             "deploy/teagram-demo/haproxy.cfg",
             "deploy/teagram-demo/render-haproxy-config.py",
             "deploy/teagram-demo/nginx-config/nginx.conf",

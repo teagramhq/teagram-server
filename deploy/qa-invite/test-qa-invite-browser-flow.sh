@@ -24,12 +24,13 @@ CLIENT_DIR=$STATE_DIR/client
 TLS_DIR=$STATE_DIR/tls
 CLIENT_CONFIG=$CLIENT_DIR/teagram-config.json
 ENV_FILE=$TMP_ROOT/qa-invite.env
-COMPOSE_FILE=$TMP_ROOT/compose.yaml
+COMPOSE_FILE=$REPO_ROOT/docker-compose.yml
 IMAGE_BUILD_LOG=$TMP_ROOT/server-image-build.log
 TEST_HOME=$TMP_ROOT/home
 ACCOUNT_FILE=$TMP_ROOT/account-password
 COMPOSE_READY=0
 IMAGE_BUILT=0
+VOLUMES_CREATED=0
 
 fail() {
   printf 'qa-invite browser flow: %s\n' "$1" >&2
@@ -38,11 +39,16 @@ fail() {
 }
 
 compose() {
-  docker compose \
+  TEAGRAM_QA_INVITE_PROJECT_NAME="$PROJECT" \
+    TEAGRAM_QA_INVITE_PUBLIC_CLIENT_DIR="$WEB_CLIENT_DIR" \
+    COMPOSE_PROFILES=qa-invite \
+    TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+    docker compose \
     --project-name "$PROJECT" \
-    --project-directory "$SCRIPT_DIR" \
+    --project-directory "$REPO_ROOT" \
     --env-file "$ENV_FILE" \
     --file "$COMPOSE_FILE" \
+    --profile qa-invite \
     "$@"
 }
 
@@ -53,10 +59,19 @@ cleanup() {
   local result=$?
   trap - EXIT
   if ((COMPOSE_READY)); then
-    if ! compose down --volumes --remove-orphans >/dev/null; then
+    if ! compose down --remove-orphans >/dev/null; then
       printf 'qa-invite browser flow: isolated Compose cleanup failed\n' >&2
       result=1
     fi
+  fi
+  if ((VOLUMES_CREATED)); then
+    local volume
+    for volume in "$PROJECT-postgres" "$PROJECT-identity" "$PROJECT-blobs"; do
+      if docker volume inspect "$volume" >/dev/null 2>&1 && ! docker volume rm "$volume" >/dev/null; then
+        printf 'qa-invite browser flow: isolated volume cleanup failed\n' >&2
+        result=1
+      fi
+    done
   fi
   if ((IMAGE_BUILT)) && docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
     if ! docker image rm "$IMAGE_REF" >/dev/null; then result=1; fi
@@ -197,15 +212,11 @@ TEAGRAM_QA_INVITE_STATE_DIR=$STATE_DIR
 ENV
 chmod 0600 "$ENV_FILE"
 
-sed \
-  -e "s/^name: teagram-qa-invite$/name: $PROJECT/" \
-  -e "s/name: teagram-qa-invite-postgres/name: $PROJECT-postgres/" \
-  -e "s/name: teagram-qa-invite-identity/name: $PROJECT-identity/" \
-  -e "s/name: teagram-qa-invite-blobs/name: $PROJECT-blobs/" \
-  -e "s#source: /opt/teagram-demo/.state/teagram-demo/public-client#source: $WEB_CLIENT_DIR#" \
-  "$SCRIPT_DIR/compose.yaml" > "$COMPOSE_FILE"
-grep -Fq "name: $PROJECT" "$COMPOSE_FILE" || fail 'isolated Compose project name was not set'
-grep -Fq "source: $WEB_CLIENT_DIR" "$COMPOSE_FILE" || fail 'QA Web artifact mount was not redirected to isolated state'
+grep -Fq 'profiles: [qa-invite]' "$COMPOSE_FILE" || fail 'root Compose file does not expose the QA invite profile'
+VOLUMES_CREATED=1
+docker volume create "$PROJECT-postgres" >/dev/null
+docker volume create "$PROJECT-identity" >/dev/null
+docker volume create "$PROJECT-blobs" >/dev/null
 [[ -s "$STICKER_BUNDLE_DIR/manifest.json" ]] || fail 'validated sticker bundle is unavailable'
 
 if ! docker buildx build --progress=plain \
@@ -216,13 +227,13 @@ if ! docker buildx build --progress=plain \
   fail 'could not build the server image for the isolated invite stack'
 fi
 IMAGE_BUILT=1
-compose pull postgres migrate tls-edge haproxy >/dev/null || fail 'could not pull the pinned QA stack support images'
+compose pull qa-invite-postgres qa-invite-migrate qa-invite-tls-edge qa-invite-haproxy >/dev/null || fail 'could not pull the pinned QA stack support images'
 COMPOSE_READY=1
-compose run --rm --no-deps teagramd bootstrap-identity >/dev/null || fail 'could not initialize the isolated server identity'
+compose run --rm --no-deps qa-invite-teagramd bootstrap-identity >/dev/null || fail 'could not initialize the isolated server identity'
 compose up -d --wait || fail 'isolated invite stack did not become healthy'
 
 DISCOVERY_FILE=$WEB_CLIENT_DIR/client
-compose exec -T teagramd /usr/local/bin/teagramd client-config > "$DISCOVERY_FILE" || fail 'QA discovery configuration could not be read from the invite stack'
+compose exec -T qa-invite-teagramd /usr/local/bin/teagramd client-config > "$DISCOVERY_FILE" || fail 'QA discovery configuration could not be read from the invite stack'
 jq -e --arg host "$HOST_NAME" '.mtproto.endpoint == ($host + ":443") and .websocket.endpoint == ("wss://" + $host + "/apiws")' \
   "$DISCOVERY_FILE" >/dev/null || fail 'QA invite stack advertised unexpected MTProto or WebSocket endpoints'
 jq -er '.mtproto.rsa_spki' "$DISCOVERY_FILE" | base64 -d > "$TMP_ROOT/server-public-key.der" ||
@@ -232,7 +243,7 @@ openssl pkey -pubin -inform DER -in "$TMP_ROOT/server-public-key.der" -noout >/d
 QA_KEY_SHA=$(sha256sum "$TMP_ROOT/server-public-key.der" | cut -d' ' -f1)
 [[ "$QA_KEY_SHA" != "$PUBLIC_KEY_SHA" ]] || fail 'QA server key unexpectedly matches the demo Web embedded key'
 
-compose exec -T --user 0:0 teagramd /usr/local/bin/teagramd admin create-user --username qa_browser_smoke < "$ACCOUNT_FILE" >/dev/null 2>&1 ||
+compose exec -T --user 0:0 qa-invite-teagramd /usr/local/bin/teagramd admin create-user --username qa_browser_smoke < "$ACCOUNT_FILE" >/dev/null 2>&1 ||
   fail 'could not create the isolated QA browser account'
 
 curl --fail --silent --show-error --cacert "$TLS_PUBLIC_DIR/ca.crt" --resolve "$HOST_NAME:443:$HOST_ADDRESS" \
@@ -261,7 +272,7 @@ QA_INVITE_PROBE_KEY="$TMP_ROOT/outside.key" \
 HOME="$TEST_HOME" \
   node "$SCRIPT_DIR/test-qa-invite-browser-flow.cjs" || fail 'trusted browser sign-in or repeated WebSocket flow failed'
 
-compose logs --no-color tls-edge > "$TMP_ROOT/tls-edge.log" 2>&1 || fail 'could not collect QA edge WebSocket upgrade logs'
+compose logs --no-color qa-invite-tls-edge > "$TMP_ROOT/tls-edge.log" 2>&1 || fail 'could not collect QA edge WebSocket upgrade logs'
 UPGRADES=$(grep -Ec '"GET /apiws HTTP/[0-9.]+" 101([[:space:]]|$)' "$TMP_ROOT/tls-edge.log" || true)
 if [[ ! "$UPGRADES" =~ ^[0-9]+$ ]] || ((UPGRADES < 3)); then
   fail "QA edge accepted only $UPGRADES API WebSocket connections; expected at least three"

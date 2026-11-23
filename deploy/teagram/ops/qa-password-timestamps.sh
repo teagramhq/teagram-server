@@ -3,8 +3,10 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO=/opt/teagram
-readonly SERVER_CONTAINER=teagram-teagramd-1
-readonly POSTGRES_CONTAINER=teagram-postgres-1
+readonly SERVER_CONTAINER=teagram-local-teagramd-1
+readonly SERVER_SERVICE=local-teagramd
+readonly POSTGRES_CONTAINER=teagram-local-postgres-1
+readonly POSTGRES_SERVICE=local-postgres
 readonly EXPECTED_COMPOSE_FILES="$REPO/docker-compose.yml,$REPO/docker-compose.override.yml"
 
 fail() {
@@ -31,8 +33,8 @@ inspect_container() {
   }
 }
 
-inspect_container "$SERVER_CONTAINER" teagramd
-inspect_container "$POSTGRES_CONTAINER" postgres
+inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
+inspect_container "$POSTGRES_CONTAINER" "$POSTGRES_SERVICE"
 
 if ! docker exec "$POSTGRES_CONTAINER" pg_isready --quiet --username postgres --dbname teagram >/dev/null 2>&1; then
   fail 'Postgres is not ready'

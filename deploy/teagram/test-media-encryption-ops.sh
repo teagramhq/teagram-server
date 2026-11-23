@@ -206,9 +206,13 @@ case "$1" in
     ;;
   ps)
     if [[ "$*" == *"{{.Names}}|{{.Label"* ]]; then
-      printf 'teagram-teagramd-1|teagramd\n'
+      printf 'teagram-local-teagramd-1|local-teagramd\n'
     else
-      printf 'teagram-teagramd-1\n'
+      [[ "$*" == *'label=com.docker.compose.service=local-teagramd'* ]] || {
+        echo "fixture server query used the wrong Compose service: $*" >&2
+        exit 99
+      }
+      printf 'teagram-local-teagramd-1\n'
     fi
     ;;
   inspect)
@@ -220,7 +224,7 @@ case "$1" in
       printf 'media-backup\n'
       exit
     fi
-    if [[ "$container" == teagram-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
+    if [[ "$container" == teagram-local-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
       case "$FIXTURE_SCENARIO" in
         quarantine-prefix-mismatch)
           printf '["TG_BLOB_S3_PREFIX=live-prefix/"]\n'
@@ -231,7 +235,7 @@ case "$1" in
             chmod 644 "$FIXTURE_REPO/.state/blob-mode/mode.changed"
             mv "$FIXTURE_REPO/.state/blob-mode/mode.changed" "$FIXTURE_REPO/.state/blob-mode/mode.json"
           fi
-          printf '["TG_BLOB_S3_PREFIX=teagramd"]\n'
+          printf '["TG_BLOB_S3_PREFIX=fixture-prefix/"]\n'
           ;;
         *)
           if [[ "$FIXTURE_BOT_API_ENABLED" == 1 ]]; then
@@ -243,7 +247,7 @@ case "$1" in
       esac
       exit
     fi
-    if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
+    if [[ "$container" == teagram-local-teagramd-1 && "$format" == '{{.Id}}' ]]; then
       printf '%s\n' "$FIXTURE_SERVER_ID"
       exit
     fi
@@ -260,8 +264,8 @@ case "$1" in
       exit
     fi
     case "$container" in
-      teagram-postgres-1) service=postgres; state_file=$FIXTURE_POSTGRES_STATE ;;
-      teagram-teagramd-1) service=teagramd; state_file=$FIXTURE_SERVER_STATE ;;
+      teagram-local-postgres-1) service=local-postgres; state_file=$FIXTURE_POSTGRES_STATE ;;
+      teagram-local-teagramd-1) service=local-teagramd; state_file=$FIXTURE_SERVER_STATE ;;
       teagram-rustfs-1) service=rustfs; state_file=$FIXTURE_RUSTFS_STATE ;;
       *) echo "unexpected fixture container inspect: $container" >&2; exit 99 ;;
     esac
@@ -293,7 +297,7 @@ case "$1" in
   stop)
     [[ "$2" == --time ]] || { echo "unexpected stop: $*" >&2; exit 99; }
     case "$4" in
-      teagram-teagramd-1)
+      teagram-local-teagramd-1)
         printf 'stop:server\n' >> "$FIXTURE_EVENTS"
         printf 'exited\n' > "$FIXTURE_SERVER_STATE"
         ;;
@@ -305,7 +309,7 @@ case "$1" in
     ;;
   start)
     case "$2" in
-      teagram-teagramd-1) printf 'start:server\n' >> "$FIXTURE_EVENTS"; printf 'running\n' > "$FIXTURE_SERVER_STATE" ;;
+      teagram-local-teagramd-1) printf 'start:server\n' >> "$FIXTURE_EVENTS"; printf 'running\n' > "$FIXTURE_SERVER_STATE" ;;
       teagram-rustfs-1) printf 'start:rustfs\n' >> "$FIXTURE_EVENTS"; printf 'running\n' > "$FIXTURE_RUSTFS_STATE" ;;
       *) echo "unexpected fixture start: $*" >&2; exit 99 ;;
     esac
@@ -318,7 +322,7 @@ case "$1" in
     printf 'running\n' > "$FIXTURE_RUSTFS_STATE"
     ;;
   exec)
-    if [[ "$2" == -i && "$3" == teagram-postgres-1 && "$4" == pg_dump ]]; then
+    if [[ "$2" == -i && "$3" == teagram-local-postgres-1 && "$4" == pg_dump ]]; then
       printf 'pg_dump\n' >> "$FIXTURE_EVENTS"
       [[ "$FIXTURE_SCENARIO" != backup-failure ]] || { echo 'fixture pg_dump failure' >&2; exit 42; }
       printf 'fixture archive\n'
@@ -378,7 +382,7 @@ case "$1" in
         exit 42
       fi
       # Compose omits services whose profiles are inactive from config output.
-      if [[ " $* " != *' --profile migration config --format json'* ]]; then
+      if [[ " $* " != *' --profile local --profile migration config --format json'* ]]; then
         jq -cn --arg key "$FIXTURE_KEY_DIR" \
           '{services:{teagramd:{image:"teagramd:local",
             environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys"},
@@ -386,7 +390,7 @@ case "$1" in
         exit
       fi
       jq -cn --arg key "$FIXTURE_KEY_DIR" --arg evidence "$FIXTURE_EVIDENCE" \
-        --arg scenario "$FIXTURE_SCENARIO" \
+        --arg scenario "$FIXTURE_SCENARIO" --arg prefix 'fixture-prefix/' \
         --arg state "$FIXTURE_REPO/.state/blob-mode" '
         {services:{
           "blob-encrypt-migrate":{
@@ -398,8 +402,8 @@ case "$1" in
               {source:$evidence,target:"/run/teagramd/reports"},
               {source:$state,target:"/run/teagramd/blob-mode"}
             ],networks:{default:{},rustfs_private:{}}},
-          teagramd:{image:"teagramd:local",
-            environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys"},
+          "local-teagramd":{image:"teagramd:local",
+            environment:{TG_MEDIA_KEY_CURRENT:"1",TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",TG_BLOB_S3_PREFIX:$prefix},
             volumes:[{source:$key,target:"/run/teagramd/media-keys",read_only:true}]}
         }}'
       exit

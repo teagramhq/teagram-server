@@ -22,9 +22,6 @@ ACTIVE_DOCKERFILES = (
 ACTIVE_IMAGE_CONFIGS = (
     ".github/workflows/ci.yml",
     "docker-compose.yml",
-    "deploy/browser-acceptance/compose.yaml",
-    "deploy/link-edge/compose.yaml",
-    "deploy/link-edge/control-compose.yaml",
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
@@ -165,7 +162,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertLess(
             job.index('docker pull "$rustfs_image"'),
-            job.index("compose up -d postgres migrate teagramd rustfs rustfs-init"),
+            job.index("compose up -d local-postgres local-migrate local-teagramd rustfs rustfs-init"),
         )
 
     def test_compose_lane_uses_the_pinned_ghcr_busybox_mirror(self) -> None:

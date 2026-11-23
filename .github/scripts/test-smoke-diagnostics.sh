@@ -73,7 +73,7 @@ if [[ ! -f "$ci_main_phase_script" ]]; then
   exit 1
 fi
 require_literal "$ci_main_phase_script" \
-  'env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build'
+  'env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION -u COMPOSE_PROFILES POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge build'
 require_literal "$ci_main_phase_script" \
   'docker image inspect "$image" --format '\''{{json .Config.Labels}}'\'''
 require_literal "$ci_main_phase_script" \
@@ -2214,7 +2214,7 @@ unset CI_MAIN_FIXTURE_BUILD_STATUS CI_MAIN_FIXTURE_LABEL_STATUS \
   CI_MAIN_FIXTURE_CHILD_OUTPUT CI_MAIN_PHASE CI_MAIN_FIXTURE_GIT_DIR \
   CI_MAIN_FIXTURE_PATH
 ci_main_run_case build-success build 0 build
-if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge build' ]]; then
   printf 'successful ci-main build command drifted\n' >&2
   exit 1
 fi
@@ -2229,7 +2229,7 @@ fi
 
 CI_MAIN_FIXTURE_BUILD_STATUS=7 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
   CI_MAIN_PHASE=label-check ci_main_run_case build-failure build 7 build
-if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile link-edge build' ]]; then
   printf 'ci-main build failure continued into another command\n' >&2
   exit 1
 fi

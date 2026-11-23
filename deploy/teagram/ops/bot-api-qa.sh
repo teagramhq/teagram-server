@@ -25,8 +25,8 @@ restore_bot_api_inner() {
     return 1
   }
   if [[ "$mode" == optional && -z "$listener" ]]; then
-    inner_id=$("$@" --profile bot-api-qa ps --all -q bot-api-inner) || return 1
-    ingress_id=$("$@" --profile bot-api-qa ps --all -q bot-api-ingress) || return 1
+    inner_id=$("$@" --profile local --profile bot-api-qa ps --all -q bot-api-inner) || return 1
+    ingress_id=$("$@" --profile local --profile bot-api-qa ps --all -q bot-api-ingress) || return 1
     [[ -z "$inner_id" && -z "$ingress_id" ]] && return 0
   fi
   [[ "$listener" == "$expected_listener" ]] || {
@@ -34,18 +34,18 @@ restore_bot_api_inner() {
     return 1
   }
 
-  if ! "$@" --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner </dev/null; then
+  if ! "$@" --profile local --profile bot-api-qa up -d --no-deps --force-recreate --wait --wait-timeout 60 bot-api-inner </dev/null; then
     printf '%s\n' 'Bot API inner relay did not become healthy after recreation' >&2
     return 1
   fi
-  if ! "$@" --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress </dev/null; then
+  if ! "$@" --profile local --profile bot-api-qa up -d --no-deps --wait --wait-timeout 60 bot-api-ingress </dev/null; then
     printf '%s\n' 'Bot API ingress relay did not become healthy after teagramd startup' >&2
     return 1
   fi
 
   server_id=$(docker inspect --format '{{.Id}}' "$server_container") || return 1
-  inner_id=$("$@" --profile bot-api-qa ps -q bot-api-inner) || return 1
-  ingress_id=$("$@" --profile bot-api-qa ps -q bot-api-ingress) || return 1
+  inner_id=$("$@" --profile local --profile bot-api-qa ps -q bot-api-inner) || return 1
+  ingress_id=$("$@" --profile local --profile bot-api-qa ps -q bot-api-ingress) || return 1
   [[ "$server_id" =~ ^[0-9a-f]{64}$ && "$inner_id" =~ ^[0-9a-f]{64}$ &&
      "$ingress_id" =~ ^[0-9a-f]{64}$ ]] || {
     printf '%s\n' 'Bot API relay container identities are invalid after recovery' >&2

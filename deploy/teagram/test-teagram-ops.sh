@@ -171,7 +171,7 @@ cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  'ps '*) printf '%s\n' 'teagram-teagramd-1 image:fixture Up 1 minute' ;;
+  'ps '*) printf '%s\n' 'teagram-local-teagramd-1 image:fixture Up 1 minute' ;;
   *'{{.Id}}'*) printf '%s\n' "$CONTAINER_ID" ;;
   *'{{.Image}}'*) printf '%s\n' 'sha256:fixture' ;;
   *'{{.State.StartedAt}}'*) printf '%s\n' '2026-10-26T00:00:00Z' ;;
@@ -280,7 +280,7 @@ expect_retired_without_git_lookup() {
 [[ "$(run_command hostname)" == fixture-host ]]
 live=$(run_command live)
 [[ "$live" == *"live_sha=$TARGET_SHA"* && "$live" == *'dirty_paths=1'* && "$live" == *'container_id='* ]]
-[[ "$(run_command ps)" == *'teagram-teagramd-1 image:fixture Up 1 minute'* ]]
+[[ "$(run_command ps)" == *'teagram-local-teagramd-1 image:fixture Up 1 minute'* ]]
 [[ "$(run_command 'logs 2026-10-26T00:00:00Z')" == 'log_reader=2026-10-26T00:00:00Z' ]]
 expect_status 64 'logs'
 expect_status 64 'logs now extra'

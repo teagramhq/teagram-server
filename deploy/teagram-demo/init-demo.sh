@@ -114,7 +114,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     --report-root "$DEMO_STATE_DIR/reports" \
     --containers "$TMP_DIR/containers.json" \
     --compose "$INITIAL_INVENTORY" \
-    --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
+    --override /dev/null \
     --checkout "$DEMO_REPO_ROOT" \
     --allow-empty-containers \
     --allow-unguarded-initial-local \
@@ -217,7 +217,7 @@ docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/current-containers.raw.json"
 python3 "$MODE_HELPER" containers --checkout "$DEMO_REPO_ROOT" \
   < "$TMP_DIR/current-containers.raw.json" > "$TMP_DIR/current-containers.json"
 cp "$INITIAL_INVENTORY" "$TMP_DIR/target-preflight.json"
-TARGET_ARTIFACT_SHA=$(sha256sum "$SCRIPT_DIR/compose.yaml")
+TARGET_ARTIFACT_SHA=$(sha256sum "$DEMO_REPO_ROOT/docker-compose.yml")
 TARGET_ARTIFACT_SHA=${TARGET_ARTIFACT_SHA%% *}
 LOCK_PATH=$(realpath -m "$LOCK_PATH")
 
@@ -229,7 +229,7 @@ python3 "$MODE_HELPER" initialize-local \
   --preflight-target-compose "$TMP_DIR/target-preflight.json" \
   --target-compose "$INITIAL_INVENTORY" \
   --target-artifact-sha256 "$TARGET_ARTIFACT_SHA" \
-  --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
+  --override /dev/null \
   --checkout "$DEMO_REPO_ROOT" \
   --target-sha "$SHA" \
   --baseline-sha "$SHA" \

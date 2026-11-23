@@ -141,11 +141,11 @@ case "$current_authority" in
     verify_encrypted_inventory
     latest_backup_manifest
     check_progress_journal
-    inspect_container "$SERVER_CONTAINER" teagramd
+    inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
     [[ "$INSPECT_STATE" == running ]] || ops_fail 'teagramd must be running before encrypted-media verification'
     SERVER_STOPPED=1
     docker stop --time 120 "$SERVER_CONTAINER" >/dev/null || ops_fail 'could not gracefully stop teagramd writers'
-    inspect_container "$SERVER_CONTAINER" teagramd
+    inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
     [[ "$INSPECT_STATE" == exited ]] || ops_fail 'teagramd writers did not stop'
 
     RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${OPS_SHA:0:7}"
@@ -177,11 +177,11 @@ case "$current_authority" in
   *) ops_fail 'live authority is not accepted plaintext S3' ;;
 esac
 
-inspect_container "$SERVER_CONTAINER" teagramd
+inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
 [[ "$INSPECT_STATE" == running ]] || ops_fail 'teagramd must be running before migration'
 SERVER_STOPPED=1
 docker stop --time 120 "$SERVER_CONTAINER" >/dev/null || ops_fail 'could not gracefully stop teagramd writers'
-inspect_container "$SERVER_CONTAINER" teagramd
+inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
 [[ "$INSPECT_STATE" == exited ]] || ops_fail 'teagramd writers did not stop'
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${OPS_SHA:0:7}"
@@ -193,7 +193,7 @@ restore_start="$EVIDENCE_ROOT/pgrestore-pre-migration-$RUN_ID.start.stderr"
 for path in "$dump_path" "$manifest_path" "$dump_stderr" "$restore_stderr" "$restore_start"; do
   [[ ! -e "$path" && ! -L "$path" ]] || ops_fail 'database backup evidence path already exists'
 done
-inspect_container "$POSTGRES_CONTAINER" postgres
+inspect_container "$POSTGRES_CONTAINER" "$POSTGRES_SERVICE"
 PG_IMAGE_ID=$INSPECT_IMAGE
 [[ "$PG_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || ops_fail 'Postgres image identity is invalid'
 DUMP_TMP=$(mktemp "$EVIDENCE_ROOT/.pgdump-pre-migration.XXXXXXXX") || ops_fail 'cannot allocate database dump evidence'

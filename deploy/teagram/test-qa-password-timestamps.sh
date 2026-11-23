@@ -32,8 +32,8 @@ case "$1" in
   inspect)
     [[ "$2" == --format ]] || exit 91
     case "$4" in
-      teagram-teagramd-1) service=teagramd ;;
-      teagram-postgres-1) service=postgres ;;
+      teagram-local-teagramd-1) service=local-teagramd ;;
+      teagram-local-postgres-1) service=local-postgres ;;
       *) exit 92 ;;
     esac
     [[ "${MOCK_INSPECT_FAIL:-}" != "$service" ]] || exit 97
@@ -42,7 +42,7 @@ case "$1" in
     printf 'running|teagram|%s|%s\n' "$service" "$compose_files"
     ;;
   exec)
-    [[ "$2" == teagram-postgres-1 ]] || exit 93
+    [[ "$2" == teagram-local-postgres-1 ]] || exit 93
     case "$3" in
       pg_isready)
         [[ "${MOCK_PG_NOT_READY:-}" != true ]]
@@ -112,7 +112,7 @@ if grep -Eiq '\b(phone|first_name|last_name|salt1|salt2|verifier)\b|users\.usern
 fi
 grep -Fq "users.login_mode = 'username'" "$MOCK_ORPHAN_SQL_PATH"
 grep -Fq "username.owner_type = 'user' AND username.owner_id = users.id" "$MOCK_ORPHAN_SQL_PATH"
-[[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
+[[ "$(grep -c '^exec teagram-local-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
 
 expect_failure() {
   local expected=$1 status=0 output
@@ -127,19 +127,19 @@ export OPS_SHA
 expect_failure 1
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export OPS_SHA
-[[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
+[[ "$(grep -c '^exec teagram-local-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
 
-MOCK_BAD_COMPOSE=postgres
+MOCK_BAD_COMPOSE=local-postgres
 export MOCK_BAD_COMPOSE
 expect_failure 1
 unset MOCK_BAD_COMPOSE
-[[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
+[[ "$(grep -c '^exec teagram-local-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
 
-MOCK_INSPECT_FAIL=teagramd
+MOCK_INSPECT_FAIL=local-teagramd
 export MOCK_INSPECT_FAIL
 expect_failure 1
 unset MOCK_INSPECT_FAIL
-[[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
+[[ "$(grep -c '^exec teagram-local-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
 
 MOCK_PG_NOT_READY=true
 export MOCK_PG_NOT_READY

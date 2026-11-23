@@ -933,7 +933,10 @@ def blob_inventory_references_query() -> str:
 
 def validate_composed_authority(record: dict[str, object], environment: dict[str, str]) -> None:
     raw = run_compose(
-        ["docker", "compose", "--profile", "migration", "config", "--format", "json"],
+        [
+            "docker", "compose", "--profile", "local", "--profile", "migration",
+            "config", "--format", "json",
+        ],
         environment,
         reason="live-compose-config",
     )
@@ -952,6 +955,11 @@ def validate_composed_authority(record: dict[str, object], environment: dict[str
     except mode.Reject as error:
         reject(str(error))
     services = rendered.get("services") if isinstance(rendered, dict) else None
+    for service_name in ("local-teagramd", "local-postgres"):
+        service = services.get(service_name) if isinstance(services, dict) else None
+        profiles = service.get("profiles") if isinstance(service, dict) else None
+        if not isinstance(profiles, list) or "local" not in profiles:
+            reject("live-census-service-invalid")
     migration = services.get("blob-migrate") if isinstance(services, dict) else None
     profiles = migration.get("profiles") if isinstance(migration, dict) else None
     if not isinstance(profiles, list) or "migration" not in profiles:
@@ -993,7 +1001,8 @@ def capture_live_census(record: dict[str, object]) -> tuple[bytes, bytes]:
     validate_composed_authority(record, environment)
     s3_manifest = run_compose(
         [
-            "docker", "compose", "--profile", "migration", "run", "--rm", "--no-deps",
+            "docker", "compose", "--profile", "local", "--profile", "migration",
+            "run", "--rm", "--no-deps",
             "blob-migrate", "--direction", "s3-census", "--manifest", "stdout",
         ],
         environment,
@@ -1001,7 +1010,8 @@ def capture_live_census(record: dict[str, object]) -> tuple[bytes, bytes]:
     )
     reference_rows = run_compose(
         [
-            "docker", "compose", "--profile", "migration", "exec", "-T", "postgres", "psql",
+            "docker", "compose", "--profile", "local", "--profile", "migration",
+            "exec", "-T", "local-postgres", "psql",
             "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram",
             "--single-transaction", "-c",
             f"SET TRANSACTION READ ONLY;\n{blob_inventory_references_query()}",

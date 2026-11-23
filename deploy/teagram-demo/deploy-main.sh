@@ -236,7 +236,7 @@ demo_cleanup() {
       fi
       if (( CANDIDATE_STARTED == 1 )); then
         if (( rollback_confirmed == 1 )); then
-          demo_compose stop "$CANDIDATE_SERVER" || rc=1
+          demo_remove_candidate_services "$CANDIDATE_SERVER" || rc=1
         else
           printf 'demo rollout left candidate server=%s running because rollback was not confirmed\n' \
             "$CANDIDATE_SERVER" >&2
@@ -430,7 +430,7 @@ python3 "$MODE_HELPER" validate \
   --report-root "$DEMO_STATE_DIR/reports" \
   --containers "$TMP_DIR/containers.json" \
   --compose "$TARGET_INVENTORY" \
-  --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
+  --override /dev/null \
   --checkout "$DEMO_REPO_ROOT"
 
 mapfile -t SERVER_IDS < <(demo_compose ps -q "$ACTIVE_SERVER")
@@ -500,11 +500,7 @@ if [[ -n "$BACKUP_GENERATION" ]]; then
 fi
 CANDIDATE_STARTED=1
 demo_seed_compose up -d "$CANDIDATE_SERVER"
-mapfile -t CANDIDATE_IDS < <(demo_compose ps -q "$CANDIDATE_SERVER")
-(("${#CANDIDATE_IDS[@]}" == 1)) || demo_fail 'candidate server is missing or ambiguous'
-CANDIDATE_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${CANDIDATE_IDS[0]}")
-CANDIDATE_IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_IMAGE_ID")
-[[ "$CANDIDATE_IMAGE_REVISION" == "$SHA" ]] || demo_fail 'running candidate image does not match the requested SHA'
+CANDIDATE_IMAGE_ID=$(demo_seed_candidate_image_id "$CANDIDATE_SERVER" "$SHA")
 "$SCRIPT_DIR/seed-demo.sh" --seed --endpoint "$CANDIDATE_ENDPOINT"
 "$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"
 demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"

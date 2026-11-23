@@ -14,7 +14,7 @@ readonly CLIENT_CONFIG=$CLIENT_DIR/teagram-config.json
 readonly ACCOUNT_DIR=$STATE_DIR/accounts
 readonly BACKUP_DIR=$STATE_DIR/backups
 readonly RUNTIME_TMP_DIR=$STATE_DIR/tmp
-readonly COMPOSE_FILE=$REPO_ROOT/deploy/qa-invite/compose.yaml
+readonly COMPOSE_FILE=$REPO_ROOT/docker-compose.yml
 readonly IMAGE_REPOSITORY=ghcr.io/teagramhq/teagram-server-demo
 readonly HOST_ADDRESS=10.96.46.70
 readonly HOST_NAME=teagram-demo.incus
@@ -114,11 +114,13 @@ ENV
 }
 
 compose() {
-  docker compose \
+  COMPOSE_PROFILES=qa-invite TEAGRAM_QA_INVITE_PROJECT_NAME=teagram-qa-invite TG_PUBLIC_LINK_PREFIX=https://invalid.example/ \
+    docker compose \
     --project-name teagram-qa-invite \
-    --project-directory "$REPO_ROOT/deploy/qa-invite" \
+    --project-directory "$REPO_ROOT" \
     --env-file "$ENV_FILE" \
     --file "$COMPOSE_FILE" \
+    --profile qa-invite \
     "$@"
 }
 
@@ -184,7 +186,7 @@ verify_image() {
 ensure_identity() {
   local volume_path
   if ! volume_path=$(docker volume inspect --format '{{.Mountpoint}}' teagram-qa-invite-identity 2>/dev/null); then
-    compose run --rm --no-deps teagramd bootstrap-identity >/dev/null || {
+    compose run --rm --no-deps qa-invite-teagramd bootstrap-identity >/dev/null || {
       printf '%s\n' 'qa-invite: could not create the persistent server identity' >&2
       return 1
     }
@@ -207,12 +209,12 @@ backup_database() {
   stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$ || return 1
   dump=$BACKUP_DIR/postgres-$stamp.dump
   list=$BACKUP_DIR/postgres-$stamp.list
-  if ! compose exec -T postgres pg_dump -U postgres -Fc teagram </dev/null > "$dump"; then
+  if ! compose exec -T qa-invite-postgres pg_dump -U postgres -Fc teagram </dev/null > "$dump"; then
     rm -f -- "$dump" "$list"
     return 1
   fi
   if ! chown root:root "$dump" || ! chmod 0600 "$dump" || [[ ! -s "$dump" ]] ||
-    ! compose exec -T postgres pg_restore --list < "$dump" > "$list"; then
+    ! compose exec -T qa-invite-postgres pg_restore --list < "$dump" > "$list"; then
     rm -f -- "$dump" "$list"
     return 1
   fi
@@ -222,6 +224,57 @@ backup_database() {
   fi
   rm -f -- "$list" || return 1
   printf '%s\n' "$dump"
+}
+
+backup_legacy_database() {
+  local container=$1 stamp dump list
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$ || return 1
+  dump=$BACKUP_DIR/postgres-$stamp.dump
+  list=$BACKUP_DIR/postgres-$stamp.list
+  if ! docker exec -i "$container" pg_dump -U postgres -Fc teagram </dev/null > "$dump"; then
+    rm -f -- "$dump" "$list"
+    return 1
+  fi
+  if ! chown root:root "$dump" || ! chmod 0600 "$dump" || [[ ! -s "$dump" ]] ||
+    ! docker exec -i "$container" pg_restore --list < "$dump" > "$list"; then
+    rm -f -- "$dump" "$list"
+    return 1
+  fi
+  if ! grep -q 'TABLE DATA' "$list"; then
+    rm -f -- "$dump" "$list"
+    return 1
+  fi
+  rm -f -- "$list" || return 1
+  printf '%s\n' "$dump"
+}
+
+stop_legacy_services() {
+  local service ids id network
+  for service in haproxy tls-edge teagramd migrate postgres; do
+    ids=$(docker ps --all --quiet \
+      --filter label=com.docker.compose.project=teagram-qa-invite \
+      --filter "label=com.docker.compose.service=$service") || return 1
+    [[ -z "$ids" ]] && continue
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$(docker inspect --format '{{.State.Running}}' "$id")" == true ]]; then
+        docker stop "$id" >/dev/null || return 1
+      fi
+      docker rm "$id" >/dev/null || return 1
+    done <<< "$ids"
+  done
+  for network in teagram-qa-invite_backend teagram-qa-invite_publish; do
+    if docker network inspect "$network" >/dev/null 2>&1; then
+      docker network rm "$network" >/dev/null || return 1
+    fi
+  done
+}
+
+ensure_persistent_volumes() {
+  local suffix
+  for suffix in postgres identity blobs; do
+    docker volume create "teagram-qa-invite-$suffix" >/dev/null || return 1
+  done
 }
 
 probe_endpoint() {
@@ -244,7 +297,7 @@ probe_endpoint() {
 }
 
 do_up() {
-  local sha=$1 digest=$2 image_ref previous_ref='' dump='' active_file=$STATE_DIR/active-image temp
+  local sha=$1 digest=$2 image_ref previous_ref='' dump='' active_file=$STATE_DIR/active-image temp legacy_postgres running
   image_ref=$(verify_image "$sha" "$digest")
   if [[ -e "$active_file" || -L "$active_file" ]]; then
     [[ -f "$active_file" && ! -L "$active_file" && "$(stat -c '%u:%a' "$active_file")" == '0:600' ]] ||
@@ -256,22 +309,37 @@ do_up() {
   ensure_client_assets
   write_env "$image_ref"
   prepare_runtime_tmp_dirs
-  if ! ensure_identity; then
-    [[ -z "$previous_ref" ]] || write_env "$previous_ref"
-    fail 'could not verify the persistent server identity'
-  fi
   if ! compose config --quiet; then
     [[ -z "$previous_ref" ]] || write_env "$previous_ref"
     fail 'resolved QA Compose configuration is invalid'
   fi
+  ensure_persistent_volumes || fail 'could not verify the persistent QA volumes'
+  if ! ensure_identity; then
+    [[ -z "$previous_ref" ]] || write_env "$previous_ref"
+    fail 'could not verify the persistent server identity'
+  fi
   if [[ -f "$active_file" ]]; then
-    compose up -d --wait postgres || {
-      [[ -z "$previous_ref" ]] || write_env "$previous_ref"
-      fail 'Postgres did not become healthy before the safety dump'
-    }
-    if ! dump=$(backup_database); then
-      [[ -z "$previous_ref" ]] || write_env "$previous_ref"
-      fail 'could not create a validated rollback database dump'
+    legacy_postgres=$(docker ps --all --quiet \
+      --filter label=com.docker.compose.project=teagram-qa-invite \
+      --filter label=com.docker.compose.service=postgres) || fail 'could not inspect the previous QA database container'
+    if [[ -n "$legacy_postgres" ]]; then
+      [[ "$legacy_postgres" != *$'\n'* ]] || fail 'previous QA database container is ambiguous'
+      running=$(docker inspect --format '{{.State.Running}}' "$legacy_postgres") || fail 'could not inspect the previous QA database state'
+      [[ "$running" == true ]] || fail 'previous QA database is stopped; start it before the Compose profile migration'
+      if ! dump=$(backup_legacy_database "$legacy_postgres"); then
+        [[ -z "$previous_ref" ]] || write_env "$previous_ref"
+        fail 'could not create a validated rollback database dump from the previous Compose stack'
+      fi
+      stop_legacy_services || fail 'could not stop the previous QA services after the database backup'
+    else
+      compose up -d --wait qa-invite-postgres || {
+        [[ -z "$previous_ref" ]] || write_env "$previous_ref"
+        fail 'Postgres did not become healthy before the safety dump'
+      }
+      if ! dump=$(backup_database); then
+        [[ -z "$previous_ref" ]] || write_env "$previous_ref"
+        fail 'could not create a validated rollback database dump'
+      fi
     fi
   fi
   if ! compose up -d --wait || ! reload_qa_tls || ! probe_endpoint; then
@@ -337,7 +405,7 @@ do_create_account() {
   [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || fail 'QA stack has not been initialized'
   [[ "$(stat -c '%u:%a' "$ENV_FILE")" == '0:600' ]] || fail 'private env file has unsafe ownership or mode'
   validate_env
-  containers=$(compose ps -q teagramd)
+  containers=$(compose ps -q qa-invite-teagramd)
   [[ -n "$containers" ]] || fail 'QA server is not running'
   password_file=$(mktemp "$ACCOUNT_DIR/.password.XXXXXXXX")
   stderr_file=$(mktemp "$ACCOUNT_DIR/.create.XXXXXXXX")
@@ -346,7 +414,7 @@ do_create_account() {
   chown root:root "$password_file" "$stderr_file"
   chmod 0600 "$password_file" "$stderr_file"
   grep -Eq '^[0-9a-f]{64}$' "$password_file" || fail 'password input must be a 64-character hex secret'
-  if ! compose exec -T --user 0:0 teagramd /usr/local/bin/teagramd admin create-user \
+  if ! compose exec -T --user 0:0 qa-invite-teagramd /usr/local/bin/teagramd admin create-user \
     --username "$name" < "$password_file" > /dev/null 2> "$stderr_file"; then
     fail 'could not create the requested operator account'
   fi

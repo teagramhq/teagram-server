@@ -218,7 +218,7 @@ volumes.
 Inspect the resolved Compose policy from the repository root:
 
 ```sh
-docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile browser-acceptance config --format json
 ```
 
 `compose-policy.test.mjs` asserts the resolved service, network, mount,
@@ -248,7 +248,7 @@ The expected verification set for this directory is:
 npm ci --prefix deploy/browser-acceptance --ignore-scripts --no-audit --no-fund
 node --test deploy/browser-acceptance/*.test.mjs
 for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
-docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile browser-acceptance config --format json
 ```
 
 The Compose policy and synthetic tests validate this harness. They do not
@@ -257,7 +257,7 @@ the required `real-client-browser-flow` check for pull-request browser
 coverage. Roll back a harness change by reverting the PR, then run:
 
 ```sh
-docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance down --rmi local
+POSTGRES_PASSWORD=compose-config-only TG_PUBLIC_LINK_PREFIX=https://invalid.example/ docker compose --env-file /dev/null --project-directory . --file docker-compose.yml --profile browser-acceptance --project-name teagram-browser-acceptance down --rmi local
 ```
 
 ## QA adapter contract
