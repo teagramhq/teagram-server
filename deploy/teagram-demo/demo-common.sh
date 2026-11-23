@@ -106,9 +106,14 @@ demo_prepare_runtime_tmp_dirs_for_up() {
 }
 
 demo_server_client_config() {
-  local service="$1" server_ids_output
+  local service="$1" compose_fn=demo_compose server_ids_output
   local -a server_ids=()
-  server_ids_output=$(demo_compose ps --status running -q "$service") || return 1
+  case "${2:-demo}" in
+    demo) compose_fn=demo_compose ;;
+    seed) compose_fn=demo_seed_compose ;;
+    *) demo_fail 'client-config Compose context must be demo or seed'; return 1 ;;
+  esac
+  server_ids_output=$("$compose_fn" ps --status running -q "$service") || return 1
   if [[ -n "$server_ids_output" ]]; then
     mapfile -t server_ids <<< "$server_ids_output"
   fi
@@ -116,7 +121,7 @@ demo_server_client_config() {
     demo_fail "client-config requires exactly one running $service container"
     return 1
   }
-  demo_compose exec -T "$service" /usr/local/bin/teagramd client-config
+  "$compose_fn" exec -T "$service" /usr/local/bin/teagramd client-config
 }
 
 [[ -f "$DEMO_SCRIPT_DIR/haproxy.cfg" && -f "$DEMO_SCRIPT_DIR/render-haproxy-config.py" &&

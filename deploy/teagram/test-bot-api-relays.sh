@@ -23,7 +23,9 @@ POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://example.invalid \
     | {name:$name, services:{
         teagramd:{image:$s["bot-api-inner"].image,
           command:["TCP-LISTEN:2447,bind=127.0.0.1,fork","EXEC:/bin/cat"],networks:{default:null}},
-        "bot-api-inner":($s["bot-api-inner"] | del(.profiles)),
+        "bot-api-inner":($s["bot-api-inner"] | del(.profiles) |
+          .network_mode = "service:teagramd" |
+          .depends_on = {teagramd: $s["bot-api-inner"].depends_on["local-teagramd"]}),
         "bot-api-ingress":($s["bot-api-ingress"] | del(.profiles) | .ports[0].published=$port)
       }, networks:{default:{},bot_api_ingress:{driver:"bridge",enable_ipv6:false}},volumes:{bot_api_socket:{}}}
   ' > "$tmp/fixture.json"

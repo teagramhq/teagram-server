@@ -1506,8 +1506,8 @@ assert_text_order(deploy, "deploy-main.sh client config after migrations", [
 ])
 if 'capture_wipe_generation()' not in seed_test.read_text(encoding="utf-8"):
     raise SystemExit("test-seed-compose.sh: must verify the stored wipe generation remains stable during seed convergence")
-if 'output=$(demo_server_client_config "$ACTIVE_SERVER")' not in seed_test.read_text(encoding="utf-8"):
-    raise SystemExit("test-seed-compose.sh: must read wipe generation from the running server container")
+if 'output=$(demo_server_client_config "$ACTIVE_SERVER" seed)' not in seed_test.read_text(encoding="utf-8"):
+    raise SystemExit("test-seed-compose.sh: must read wipe generation from the running seed-profile server")
 for script_path in [Path(sys.argv[1]), Path(sys.argv[2]), deploy_path, Path(sys.argv[6])]:
     script = script_path.read_text(encoding="utf-8")
     if 'demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config' in script:
@@ -1658,8 +1658,16 @@ demo_compose() {
 }
 config=$(demo_server_client_config "$ACTIVE_SERVER")
 jq -e '.demo.wipe_generation == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' <<< "$config" >/dev/null
+: > "$SEED_COMPOSE_CALLS"
+demo_seed_compose() {
+  printf '%s\n' "$*" >> "$SEED_COMPOSE_CALLS"
+  demo_compose "$@"
+}
+config=$(demo_server_client_config "$ACTIVE_SERVER" seed)
+jq -e '.demo.wipe_generation == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' <<< "$config" >/dev/null
+[[ "$(<"$SEED_COMPOSE_CALLS")" == $'ps --status running -q teagramd-next\nexec -T teagramd-next /usr/local/bin/teagramd client-config' ]]
 BASH
-env CLIENT_CONFIG_HELPER="$CLIENT_CONFIG_HELPER" ACTIVE_SERVER_UP=true \
+env CLIENT_CONFIG_HELPER="$CLIENT_CONFIG_HELPER" ACTIVE_SERVER_UP=true SEED_COMPOSE_CALLS="$TMP_DIR/seed-compose-calls" \
   bash "$TMP_DIR/client-config-active-server-regression.sh"
 
 MOCK_BIN="$TMP_DIR/weekly-wipe-bin"

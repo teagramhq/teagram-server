@@ -560,6 +560,13 @@ class LinkEdgeControl:
         for name, names in expected_networks.items():
             if set(services[name].get("networks", {})) != names:
                 raise ControlFailure("compose_policy_failed")
+        for service_name, network_name, alias in (
+            ("linklanding", "private-edge", "linklanding"),
+            ("selector", "private-edge", "selector"),
+        ):
+            network = services[service_name].get("networks", {}).get(network_name)
+            if not isinstance(network, dict) or alias not in network.get("aliases", []):
+                raise ControlFailure("compose_policy_failed")
         selector_command = services["selector"].get("command")
         if not isinstance(selector_command, list):
             raise ControlFailure("compose_policy_failed")

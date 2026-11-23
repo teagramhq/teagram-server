@@ -52,7 +52,7 @@ capture_seed_report() {
 
 capture_wipe_generation() {
   local output
-  output=$(demo_server_client_config "$ACTIVE_SERVER")
+  output=$(demo_server_client_config "$ACTIVE_SERVER" seed)
   jq -er '.demo.wipe_generation | select(type == "string" and test("^[0-9a-f]{64}$"))' <<< "$output"
 }
 

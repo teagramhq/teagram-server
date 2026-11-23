@@ -1078,7 +1078,10 @@ services:
     environment:
       TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:-}
       TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
-    networks: [control-private-edge, control-landing-publish]
+    networks:
+      control-private-edge:
+        aliases: [linklanding]
+      control-landing-publish: null
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -1132,7 +1135,10 @@ services:
       - "http://web:8080"
       - "-landing-upstream"
       - "http://control-linklanding:8082"
-    networks: [control-web-edge, control-private-edge]
+    networks:
+      control-web-edge: null
+      control-private-edge:
+        aliases: [selector]
     depends_on:
       control-linklanding:
         condition: service_healthy

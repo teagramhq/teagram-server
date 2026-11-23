@@ -146,7 +146,10 @@ class TimingAndCleanupTests(unittest.TestCase):
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
                     },
-                    "networks": {"control-private-edge": None, "control-landing-publish": None},
+                    "networks": {
+                        "control-private-edge": {"aliases": ["linklanding"]},
+                        "control-landing-publish": None,
+                    },
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "landing"]},
                 },
                 "control-selector": {
@@ -167,7 +170,10 @@ class TimingAndCleanupTests(unittest.TestCase):
                         "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
                         "TG_INVITE_DESKTOP_URL": "",
                     },
-                    "networks": {"control-web-edge": None, "control-private-edge": None},
+                    "networks": {
+                        "control-web-edge": None,
+                        "control-private-edge": {"aliases": ["selector"]},
+                    },
                     "depends_on": {"control-linklanding": {"condition": "service_healthy"}},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "selector"]},
                 },
@@ -213,6 +219,16 @@ class TimingAndCleanupTests(unittest.TestCase):
         invalid_invite_config["services"]["control-selector"]["environment"]["UNAPPROVED"] = "unexpected"
         with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
             runner.validate_projection(invalid_invite_config)
+
+        for service, network, alias in (
+            ("control-linklanding", "control-private-edge", "linklanding"),
+            ("control-selector", "control-private-edge", "selector"),
+        ):
+            with self.subTest(service=service, alias=alias):
+                invalid_alias_config = copy.deepcopy(config)
+                invalid_alias_config["services"][service]["networks"][network]["aliases"] = []
+                with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
+                    runner.validate_projection(invalid_alias_config)
 
         for invalid_upstream in (None, "http://teagramd:2446"):
             with self.subTest(invalid_upstream=invalid_upstream):
