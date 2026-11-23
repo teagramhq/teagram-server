@@ -32,7 +32,7 @@ case "$1" in
   inspect)
     [[ "$2" == --format ]] || exit 91
     case "$4" in
-      teagram-teagramd-1) service=teagramd ;;
+      teagram-local-teagramd-1) service=local-teagramd ;;
       teagram-postgres-1) service=postgres ;;
       *) exit 92 ;;
     esac
@@ -135,7 +135,7 @@ expect_failure 1
 unset MOCK_BAD_COMPOSE
 [[ "$(grep -c '^exec teagram-postgres-1 psql ' "$MOCK_DOCKER_LOG")" == 2 ]]
 
-MOCK_INSPECT_FAIL=teagramd
+MOCK_INSPECT_FAIL=local-teagramd
 export MOCK_INSPECT_FAIL
 expect_failure 1
 unset MOCK_INSPECT_FAIL

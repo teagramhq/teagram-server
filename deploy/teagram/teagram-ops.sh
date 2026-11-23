@@ -44,10 +44,10 @@ case "$VERB" in
     printf 'live_sha=%s\n' "$(git -C "$REPO" rev-parse HEAD)"
     printf 'branch=%s\n' "$(git -C "$REPO" branch --show-current)"
     printf 'dirty_paths=%s\n' "$(git -C "$REPO" status --porcelain | wc -l | tr -d ' ')"
-    printf 'image_revision=%s\n' "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagram-teagramd-1)"
-    printf 'compose_files=%s\n' "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' teagram-teagramd-1)"
-    printf 'container_id=%s\n' "$(docker inspect --format '{{.Id}}' teagram-teagramd-1)"
-    printf 'started_at=%s\n' "$(docker inspect --format '{{.State.StartedAt}}' teagram-teagramd-1)"
+    printf 'image_revision=%s\n' "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagram-local-teagramd-1)"
+    printf 'compose_files=%s\n' "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' teagram-local-teagramd-1)"
+    printf 'container_id=%s\n' "$(docker inspect --format '{{.Id}}' teagram-local-teagramd-1)"
+    printf 'started_at=%s\n' "$(docker inspect --format '{{.State.StartedAt}}' teagram-local-teagramd-1)"
     ;;
   ps) docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' ;;
   logs)

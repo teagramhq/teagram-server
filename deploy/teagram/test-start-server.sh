@@ -104,15 +104,15 @@ if [[ "$1" == inspect ]]; then
   [[ "$2" == --format && "$#" == 4 ]] || { echo "unexpected inspect: $*" >&2; exit 99; }
   format=$3
   container=$4
-  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
+  if [[ "$container" == teagram-local-teagramd-1 && "$format" == '{{json .Config.Env}}' ]]; then
     printf '%s\n' "${MOCK_TELEGRAMD_ENV_JSON:-[]}"
     exit
   fi
-  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{index .Config.Labels "org.opencontainers.image.revision"}}' ]]; then
+  if [[ "$container" == teagram-local-teagramd-1 && "$format" == '{{index .Config.Labels "org.opencontainers.image.revision"}}' ]]; then
     printf '%s\n' "${MOCK_SERVER_IMAGE_REVISION:-$FIXTURE_SHA}"
     exit
   fi
-  if [[ "$container" == teagram-teagramd-1 && "$format" == '{{.Id}}' ]]; then
+  if [[ "$container" == teagram-local-teagramd-1 && "$format" == '{{.Id}}' ]]; then
     printf '%s\n' "$FIXTURE_SERVER_ID"
     exit
   fi
@@ -132,7 +132,7 @@ if [[ "$1" == inspect ]]; then
   fi
   case "$container" in
     teagram-postgres-1) service=postgres; state_file=$MOCK_POSTGRES_STATE_FILE; project=${MOCK_POSTGRES_PROJECT:-teagram}; files=${MOCK_POSTGRES_FILES:-$MOCK_COMPOSE_FILES} ;;
-    teagram-teagramd-1) service=teagramd; state_file=$MOCK_TEAGRAMD_STATE_FILE; project=${MOCK_TEAGRAMD_PROJECT:-teagram}; files=${MOCK_TEAGRAMD_FILES:-$MOCK_COMPOSE_FILES} ;;
+    teagram-local-teagramd-1) service=local-teagramd; state_file=$MOCK_TEAGRAMD_STATE_FILE; project=${MOCK_TEAGRAMD_PROJECT:-teagram}; files=${MOCK_TEAGRAMD_FILES:-$MOCK_COMPOSE_FILES} ;;
     *) echo "unexpected fixture container: $container" >&2; exit 99 ;;
   esac
   case "$format" in
@@ -171,7 +171,7 @@ elif [[ "$1" == start ]]; then
       failure_service=postgres
       failure_status=42
       ;;
-    teagram-teagramd-1)
+    teagram-local-teagramd-1)
       service=teagramd
       state_file=$MOCK_TEAGRAMD_STATE_FILE
       failure_service=teagramd
@@ -316,7 +316,7 @@ setup_case paused-teagramd
 printf 'paused\n' > "$MOCK_TEAGRAMD_STATE_FILE"
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'existing teagram-teagramd-1 container state is not restartable'* ]]
+[[ "$output" == *'existing teagram-local-teagramd-1 container state is not restartable'* ]]
 assert_no_event '^start:'
 printf '%s\n' 'PASS rejects a paused teagramd container before starting services'
 
@@ -389,7 +389,7 @@ MOCK_START_FAIL_SERVICE=teagramd
 export MOCK_START_FAIL_SERVICE
 output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 1 ]]
-[[ "$output" == *'could not start the existing teagramd container'* ]]
+[[ "$output" == *'could not start the existing local-teagramd container'* ]]
 printf '%s\n' 'PASS reports a teagramd startup failure after Postgres is ready'
 
 setup_case relay-recovery-fails

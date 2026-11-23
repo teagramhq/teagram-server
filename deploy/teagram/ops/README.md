@@ -221,7 +221,7 @@ named volumes; `teagramd` can take up to 120 seconds to finish its configured
 graceful stop.
 
 ```sh
-incus exec teagram -- docker stop teagram-teagramd-1 teagram-postgres-1
+incus exec teagram -- docker stop teagram-local-teagramd-1 teagram-postgres-1
 ```
 
 ## User-invite quota threat model

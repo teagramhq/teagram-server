@@ -6,7 +6,8 @@ readonly AUTHORITY_DIR="$STATE_DIR/blob-mode"
 readonly LOCK_FILE=/tmp/teagram-deploy.lock
 readonly EXPECTED_COMPOSE_FILES="$REPO/docker-compose.yml,$REPO/docker-compose.override.yml"
 readonly POSTGRES_CONTAINER=teagram-postgres-1
-readonly SERVER_CONTAINER=teagram-teagramd-1
+readonly SERVER_CONTAINER=teagram-local-teagramd-1
+readonly SERVER_SERVICE=local-teagramd
 readonly RUSTFS_CONTAINER=teagram-rustfs-1
 readonly EXPECTED_ROOT_UID=0
 readonly KEY_DIR=/etc/teagramd/media-keys
@@ -209,7 +210,7 @@ inspect_container() {
 validate_live_stack() {
   local names writer_names writer_name writer_service
   names=$(docker ps -a --filter 'label=com.docker.compose.project=teagram' \
-    --filter 'label=com.docker.compose.service=teagramd' --format '{{.Names}}') || \
+    --filter "label=com.docker.compose.service=$SERVER_SERVICE" --format '{{.Names}}') || \
     ops_fail 'cannot list teagramd containers'
   mapfile -t SERVER_CONTAINERS <<< "$names"
   [[ "${#SERVER_CONTAINERS[@]}" == 1 && "${SERVER_CONTAINERS[0]}" == "$SERVER_CONTAINER" ]] || \
@@ -219,13 +220,14 @@ validate_live_stack() {
     ops_fail 'cannot list containers to verify all teagramd writers'
   while IFS='|' read -r writer_name writer_service; do
     [[ -n "$writer_name" && -n "$writer_service" ]] || continue
-    if [[ "$writer_service" == teagramd* && \
-      ( "$writer_name" != "$SERVER_CONTAINER" || "$writer_service" != teagramd ) ]]; then
-      ops_fail 'an additional teagramd writer container is present'
+    if [[ "$writer_service" == teagramd* || "$writer_service" == "$SERVER_SERVICE" ]]; then
+      if [[ "$writer_name" != "$SERVER_CONTAINER" || "$writer_service" != "$SERVER_SERVICE" ]]; then
+        ops_fail 'an additional teagramd writer container is present'
+      fi
     fi
   done <<< "$writer_names"
 
-  inspect_container "$SERVER_CONTAINER" teagramd
+  inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
   [[ "$INSPECT_STATE" == running && "$INSPECT_REVISION" =~ ^[0-9a-f]{40}$ && \
      "$INSPECT_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || ops_fail 'teagramd is not running a verified image'
   SERVER_IMAGE_ID=$INSPECT_IMAGE
@@ -307,16 +309,16 @@ configure_compose() {
     '((.services // {})["blob-encrypt-migrate"] // {} | .networks // {} | if type == "object" then keys | sort else [] end)' \
     '["default","rustfs_private"]' || preflight_failed=1
   check_compose_invariant server_image \
-    '((.services // {}).teagramd // {}).image // null' \
+    '((.services // {})["local-teagramd"] // {}).image // null' \
     '"teagramd:local"' || preflight_failed=1
   check_compose_invariant server_media_key_current \
-    '((.services // {}).teagramd // {} | .environment // {}).TG_MEDIA_KEY_CURRENT // null' \
+    '((.services // {})["local-teagramd"] // {} | .environment // {}).TG_MEDIA_KEY_CURRENT // null' \
     '"1"' || preflight_failed=1
   check_compose_invariant server_media_key_dir \
-    '((.services // {}).teagramd // {} | .environment // {}).TG_MEDIA_KEY_DIR // null' \
+    '((.services // {})["local-teagramd"] // {} | .environment // {}).TG_MEDIA_KEY_DIR // null' \
     '"/run/teagramd/media-keys"' || preflight_failed=1
   check_compose_invariant server_media_key_mount \
-    '((.services // {}).teagramd // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
+    '((.services // {})["local-teagramd"] // {} | .volumes // [] | if type == "array" then . else [] end) | [ .[] | select(type == "object" and .target == "/run/teagramd/media-keys") | {source:(.source // null),target:(.target // null),read_only:(.read_only // null)} ]' \
     "$(jq -cnS --arg source "$KEY_DIR" '[{source:$source,target:"/run/teagramd/media-keys",read_only:true}]')" || preflight_failed=1
   [[ "$preflight_failed" == 0 ]] || ops_fail 'Compose migration or media-key mount failed reviewed preflight'
 }
@@ -491,13 +493,13 @@ restart_rustfs() {
 
 start_server_and_smoke() {
   local smoke_log=$1
-  inspect_container "$SERVER_CONTAINER" teagramd
+  inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
   if [[ "$INSPECT_STATE" != running ]]; then
     SERVER_STOPPED=1
     docker start "$SERVER_CONTAINER" >/dev/null || ops_fail 'could not start teagramd'
   fi
   for _ in {1..60}; do
-    inspect_container "$SERVER_CONTAINER" teagramd
+    inspect_container "$SERVER_CONTAINER" "$SERVER_SERVICE"
     [[ "$INSPECT_STATE" == running ]] && break
     sleep 1
   done

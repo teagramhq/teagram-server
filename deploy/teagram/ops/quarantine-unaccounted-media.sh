@@ -79,7 +79,7 @@ check_progress_journal
 INVENTORY_SHA=$(jq -er '.evidence.encrypted_inventory_sha256 | select(test("^[0-9a-f]{64}$"))' \
   "$AUTHORITY_DIR/mode.json") || ops_fail 'encrypted inventory digest is invalid'
 AUTHORITY_SHA_BEFORE=$(sha256_file_contents "$AUTHORITY_DIR/mode.json") || ops_fail 'cannot fingerprint encrypted authority'
-S3_PREFIX=$(jq -r '((.services.teagramd.environment // {}).TG_BLOB_S3_PREFIX // "teagramd") | select(type == "string")' \
+S3_PREFIX=$(jq -r '((.services["local-teagramd"].environment // {}).TG_BLOB_S3_PREFIX // "teagramd") | select(type == "string")' \
   "$OPS_TEMP_DIR/compose.json") || ops_fail 'live S3 prefix is invalid'
 [[ -z "$S3_PREFIX" || "$S3_PREFIX" =~ ^[A-Za-z0-9._/-]+$ ]] || ops_fail 'live S3 prefix is unsupported'
 [[ "$S3_PREFIX" != /* && "$S3_PREFIX" != *..* ]] || ops_fail 'live S3 prefix is unsafe'
