@@ -10,8 +10,12 @@ EXPECTED_LIMIT=$((40 * 1024 * 1024))
 MEMORY_CGROUP_DIR=
 MEMORY_PEAK_FILE=
 MEMORY_EVENTS_FILE=
+MEMORY_SAMPLE_PEAK_FILE=
+MEMORY_SAMPLE_EVENTS_FILE=
+MEMORY_SAMPLER_PID=
 IMAGE_REVISION=
 MEMORY_MAX_BYTES=unknown
+MEMORY_METRICS_SOURCE=unavailable
 PROBE_PHASE=server_startup
 UPLOAD_OUTCOME=not_started
 
@@ -20,27 +24,41 @@ finish() {
   trap - EXIT
   set +e
 
-  if [[ -r $MEMORY_PEAK_FILE ]]; then
-    local peak_bytes peak_mib events oom oom_kill max_events
+  if [[ -n $MEMORY_SAMPLER_PID ]]; then
+    kill "$MEMORY_SAMPLER_PID" 2>/dev/null
+    wait "$MEMORY_SAMPLER_PID" 2>/dev/null
+  fi
+
+  local peak_bytes='' events=''
+  if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; then
     peak_bytes=$(<"$MEMORY_PEAK_FILE")
-    peak_mib=$(awk -v bytes="$peak_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }')
     events=$(<"$MEMORY_EVENTS_FILE")
+    MEMORY_METRICS_SOURCE=live_cgroup
+  elif [[ -r $MEMORY_SAMPLE_PEAK_FILE && -r $MEMORY_SAMPLE_EVENTS_FILE ]]; then
+    peak_bytes=$(<"$MEMORY_SAMPLE_PEAK_FILE")
+    events=$(<"$MEMORY_SAMPLE_EVENTS_FILE")
+    MEMORY_METRICS_SOURCE=last_sample
+  fi
+
+  if [[ -n $peak_bytes && -n $events ]]; then
+    local peak_mib oom oom_kill max_events
+    peak_mib=$(awk -v bytes="$peak_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }')
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
     max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
-    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s revision=%s peak_mib=%s peak_bytes=%s memory_max_bytes=%s max_events=%s oom=%s oom_kill=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s revision=%s peak_mib=%s peak_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-      "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
+      "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Result | Phase | Uploads | Image | Revision | Peak cgroup memory | memory.max | max events | OOM events | OOM kills |\n'
-        printf '| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n'
-        printf '| %s | %s | %s | %s | %s | %s MiB (%s bytes) | %s bytes | %s | %s | %s |\n' \
+        printf '| Result | Phase | Uploads | Image | Revision | Peak cgroup memory | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
+        printf '| --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |\n'
+        printf '| %s | %s | %s | %s | %s | %s MiB (%s bytes) | %s bytes | %s | %s | %s | %s |\n' \
           "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
           "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
-          "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
+          "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
   fi
@@ -85,6 +103,37 @@ docker run --detach --name "$CONTAINER" \
   --env GOMAXPROCS=1 --env GOMEMLIMIT=24MiB \
   "$LIMA_SERVICE_IMAGE" >/dev/null
 
+# Setup CLI processes do not belong in the server's measured 40 MiB cgroup.
+run_setup_command() {
+  local -a docker_flags=(
+    --rm
+    --read-only
+    --network host
+    --volume "$KEY_VOLUME:/var/lib/teagramd"
+    --volume "$BLOB_VOLUME:/var/lib/teagramd-blobs"
+    --env TG_POSTGRES_DSN
+    --env TG_AUTHKEY_ENC_KEY
+    --env TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+    --env TG_ADVERTISE_ADDR=127.0.0.1:2443
+    --env TG_LISTEN_ADDR=:2443
+    --env TG_REGISTRATION=closed
+    --env TG_PG_MAX_CONNS=3
+  )
+  if [[ ${1:-} == --interactive ]]; then
+    docker_flags+=(--interactive --user 0)
+    shift
+  fi
+  docker run "${docker_flags[@]}" "$LIMA_SERVICE_IMAGE" "$@"
+}
+
+sample_memory_cgroup() {
+  while [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; do
+    cat "$MEMORY_PEAK_FILE" >"$MEMORY_SAMPLE_PEAK_FILE" || break
+    cat "$MEMORY_EVENTS_FILE" >"$MEMORY_SAMPLE_EVENTS_FILE" || break
+    sleep 0.05
+  done
+}
+
 container_pid=$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")
 if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
   cgroup_path=$(awk -F: '$1 == "0" { print $3 }' "/proc/$container_pid/cgroup")
@@ -92,12 +141,17 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_CGROUP_DIR="/sys/fs/cgroup$cgroup_path"
     MEMORY_PEAK_FILE="$MEMORY_CGROUP_DIR/memory.peak"
     MEMORY_EVENTS_FILE="$MEMORY_CGROUP_DIR/memory.events"
+    MEMORY_SAMPLE_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-peak"
+    MEMORY_SAMPLE_EVENTS_FILE="$RUNNER_TEMP/lima-memory-sampled-events"
     if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CGROUP_DIR/memory.max ]]; then
       MEMORY_MAX_BYTES=$(<"$MEMORY_CGROUP_DIR/memory.max")
     else
       echo 'service container cgroup does not expose memory.peak, memory.max, and memory.events' >&2
       exit 1
     fi
+
+    sample_memory_cgroup &
+    MEMORY_SAMPLER_PID=$!
   else
     echo 'runner does not expose the service container cgroup v2 path' >&2
     exit 1
@@ -128,7 +182,7 @@ if [[ $memory_limit != "$EXPECTED_LIMIT" ]]; then
   exit 1
 fi
 
-docker exec "$CONTAINER" /usr/local/bin/teagramd client-config >"$RUNNER_TEMP/lima-memory-client.json"
+run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"
 go build -o "$RUNNER_TEMP/mtproto-smoke" ./cmd/mtproto-smoke
 go build -o "$RUNNER_TEMP/generate-lima-memory-photo" ./.github/scripts/lima-profile-photo-fixture
@@ -142,8 +196,7 @@ for suffix in a b; do
   username_file="$RUNNER_TEMP/lima-memory-username-$suffix"
   printf '%s\n' "$username" >"$username_file"
   chmod 600 "$username_file"
-  docker exec --interactive --user 0 "$CONTAINER" \
-    /usr/local/bin/teagramd admin create-user --username "$username" <"$password_file"
+  run_setup_command --interactive admin create-user --username "$username" <"$password_file"
 done
 
 PROBE_PHASE=photo_client_setup
