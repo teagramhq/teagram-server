@@ -4,9 +4,21 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORK_DIR=$(mktemp -d /tmp/teagram-demo-scheduling-test.XXXXXXXX)
 HOLDER_PID=''
+ACTIVITY_PID=''
+LEGACY_WIPE_PID=''
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
+  : > "$WORK_DIR/handoff-inspect-release"
+  : > "$WORK_DIR/handoff-compose-release"
+  if [[ -n "$ACTIVITY_PID" ]]; then
+    kill "$ACTIVITY_PID" 2>/dev/null || true
+    wait "$ACTIVITY_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$LEGACY_WIPE_PID" ]]; then
+    kill "$LEGACY_WIPE_PID" 2>/dev/null || true
+    wait "$LEGACY_WIPE_PID" 2>/dev/null || true
+  fi
   if [[ -n "$HOLDER_PID" ]]; then
     kill "$HOLDER_PID" 2>/dev/null || true
     wait "$HOLDER_PID" 2>/dev/null || true
@@ -48,6 +60,25 @@ stop_holder() {
   kill "$HOLDER_PID" 2>/dev/null || true
   wait "$HOLDER_PID" 2>/dev/null || true
   HOLDER_PID=''
+}
+
+start_blocked_wipe() {
+  local lock=$1 attempted=$2 acquired=$3
+  rm -f -- "$attempted" "$acquired"
+  (
+    exec 7<"$lock"
+    : > "$attempted"
+    flock -x 7
+    : > "$acquired"
+    exec sleep 60
+  ) &
+  LEGACY_WIPE_PID=$!
+  local tries=0
+  until [[ -e "$attempted" ]]; do
+    tries=$((tries + 1))
+    ((tries < 200)) || fail 'legacy wipe did not start its lock attempt'
+    sleep 0.01
+  done
 }
 
 # Cron helpers: the crontab and pgrep are mocked, so the test needs no daemon.
@@ -188,31 +219,94 @@ demo_activity_inventory_check "$WORK_DIR/missing.json" "$OWNER" && fail 'missing
 RUNNER_STATE="$WORK_DIR/activity-runner-state"
 RUNNER_INVENTORY="$WORK_DIR/activity-runner-inventory.json"
 RUNNER_BIN="$WORK_DIR/activity-runner-bin"
-mkdir -m 0700 "$RUNNER_STATE" "$RUNNER_BIN"
-printf '{}\n' > "$RUNNER_INVENTORY"
+RUNNER_PRIVATE_TMP="$WORK_DIR/activity-private-tmp"
+ACTIVITY_LEGACY_READER="$WORK_DIR/legacy-activity-credential-reader"
+ACTIVITY_REAL_MKTEMP=$(command -v mktemp)
+mkdir -m 0700 "$RUNNER_STATE" "$RUNNER_BIN" "$RUNNER_PRIVATE_TMP"
+go build -o "$ACTIVITY_LEGACY_READER" "$SCRIPT_DIR/testdata/legacy-activity-credential-reader.go"
+printf '%s\n' '{"demo_ren":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' > "$RUNNER_INVENTORY"
 chmod 0600 "$RUNNER_INVENTORY"
+cat > "$RUNNER_BIN/mktemp" <<'SH'
+#!/bin/sh
+set -eu
+case "${2:-}" in
+  /run/teagram-demo-activity.*)
+    exec "$ACTIVITY_REAL_MKTEMP" -d "$ACTIVITY_COMPAT_TEMP_ROOT/teagram-demo-activity.XXXXXXXX"
+    ;;
+esac
+exec "$ACTIVITY_REAL_MKTEMP" "$@"
+SH
 cat > "$RUNNER_BIN/docker" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 case "${1:-} ${2:-}" in
   'image inspect')
     printf '%s\n' image-inspect >> "$ACTIVITY_DOCKER_CALLS"
+    if [[ -n "${ACTIVITY_INSPECT_STARTED:-}" ]]; then
+      : > "$ACTIVITY_INSPECT_STARTED"
+      until [[ -e "$ACTIVITY_INSPECT_RELEASE" ]]; do sleep 0.01; done
+    fi
     printf '%s\n' "${ACTIVITY_IMAGE_LOCK_LABEL:-<no value>}"
     ;;
   'compose run')
     printf '%s\n' compose >> "$ACTIVITY_DOCKER_CALLS"
     printf '%s\n' "$@" >> "$ACTIVITY_DOCKER_ARGS"
+    inventory_source=''
+    legacy_lock_source=''
+    while (($#)); do
+      if [[ "$1" == --volume ]]; then
+        volume=$2
+        case "$volume" in
+          *:/run/secrets/demo-activity-inventory.json:ro)
+            inventory_source=${volume%:/run/secrets/demo-activity-inventory.json:ro}
+            ;;
+          *:/var/lib/teagram-demo-activity/activity.lock:rw)
+            legacy_lock_source=${volume%:/var/lib/teagram-demo-activity/activity.lock:rw}
+            ;;
+        esac
+        shift 2
+      else
+        shift
+      fi
+    done
+    [[ -n "$inventory_source" ]] || { printf '%s\n' 'inventory bind mount is missing' >&2; exit 1; }
     if [[ "${ACTIVITY_IMAGE_LOCK_LABEL:-<no value>}" == container-activity.lock ]]; then
+      [[ "$inventory_source" == "$ACTIVITY_TEST_INVENTORY" ]] || {
+        printf '%s\n' 'new image did not receive the host inventory directly' >&2
+        exit 1
+      }
+      [[ "$(stat -c '%a' "$inventory_source")" == 600 ]] || {
+        printf '%s\n' 'new image inventory mode changed unexpectedly' >&2
+        exit 1
+      }
       if (exec 8<"$ACTIVITY_TEST_STATE/activity.lock"; flock -x -n 8); then
         printf '%s\n' 'new image did not inherit the host activity lock' >&2
         exit 1
       fi
-    else
-      if ! (exec 8<"$ACTIVITY_TEST_STATE/activity.lock"; flock -x -n 8); then
-        printf '%s\n' 'old image could not acquire its legacy activity lock' >&2
-        exit 1
+      if [[ ! -e "$ACTIVITY_TEST_STATE/container-activity.lock" ]]; then
+        : > "$ACTIVITY_TEST_STATE/container-activity.lock"
+        chmod 0600 "$ACTIVITY_TEST_STATE/container-activity.lock"
       fi
-      printf '%s\n' legacy-exclusive-acquired >> "$ACTIVITY_DOCKER_CALLS"
+    else
+      [[ -n "$legacy_lock_source" && "$legacy_lock_source" == "$ACTIVITY_TEST_STATE/container-activity.lock" ]] || {
+        printf '%s\n' 'legacy image activity lock was not aliased to the common container lock' >&2
+        exit 1
+      }
+      [[ "$(stat -c '%u:%a' "$legacy_lock_source")" == "$ACTIVITY_TEST_OWNER:600" ]] || {
+        printf '%s\n' 'legacy image activity lock alias is unsafe' >&2
+        exit 1
+      }
+      "$ACTIVITY_LEGACY_READER" "$inventory_source" >> "$ACTIVITY_DOCKER_CALLS"
+      [[ "$(stat -c '%u:%a' "$inventory_source")" == "$ACTIVITY_TEST_OWNER:400" ]] || {
+        printf '%s\n' 'legacy inventory was not copied with mode 0400' >&2
+        exit 1
+      }
+    fi
+    exec 8<"$ACTIVITY_TEST_STATE/container-activity.lock"
+    flock -x -n 8 || { printf '%s\n' 'container activity lock is busy' >&2; exit 1; }
+    if [[ -n "${ACTIVITY_COMPOSE_STARTED:-}" ]]; then
+      : > "$ACTIVITY_COMPOSE_STARTED"
+      until [[ -e "$ACTIVITY_COMPOSE_RELEASE" ]]; do sleep 0.01; done
     fi
     ;;
   *)
@@ -221,7 +315,7 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 SH
-chmod 0755 "$RUNNER_BIN/docker"
+chmod 0755 "$RUNNER_BIN/mktemp" "$RUNNER_BIN/docker"
 cat > "$WORK_DIR/run-activity-harness.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -245,6 +339,9 @@ export ACTIVITY_TEST_OWNER="$OWNER"
 export ACTIVITY_TEST_SETTINGS="$WORK_DIR/missing-activity-settings"
 export ACTIVITY_DOCKER_CALLS="$WORK_DIR/activity-docker-calls"
 export ACTIVITY_DOCKER_ARGS="$WORK_DIR/activity-docker-args"
+export ACTIVITY_LEGACY_READER
+export ACTIVITY_REAL_MKTEMP
+export ACTIVITY_COMPAT_TEMP_ROOT="$RUNNER_PRIVATE_TMP"
 export ACTIVITY_TEST_IMAGE_REF=teagramd:fixture
 export ACTIVITY_IMAGE_LOCK_LABEL=container-activity.lock
 
@@ -330,16 +427,84 @@ grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$
   fail 'activity runner did not pass the read-only inventory bind mount'
 
 # A pre-migration image still takes activity.lock exclusively inside the
-# container. The runner must release its temporary shared hold before Compose.
+# container and requires a mode 0400 inventory. The runner aliases its old
+# lock path to the common container lock and copies credentials privately.
 : > "$ACTIVITY_DOCKER_CALLS"
 : > "$ACTIVITY_DOCKER_ARGS"
 ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" \
   "$WORK_DIR/run-activity-harness.sh" || fail 'legacy activity image could not run with the host wrapper'
-grep -Fxq 'legacy-exclusive-acquired' "$ACTIVITY_DOCKER_CALLS" ||
-  fail 'legacy image could not acquire activity.lock exclusively'
+grep -Fxq 'legacy activity credential read' "$ACTIVITY_DOCKER_CALLS" ||
+  fail 'pre-change activity reader could not read its mode 0400 credential copy'
 grep -Fxq 'compose' "$ACTIVITY_DOCKER_CALLS" || fail 'legacy image did not reach Docker Compose'
-grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$ACTIVITY_DOCKER_ARGS" ||
-  fail 'legacy image run did not pass the read-only inventory bind mount'
+grep -Eq '^/tmp/teagram-demo-scheduling-test\.[^:]+/activity-private-tmp/teagram-demo-activity\.[^:]+/inventory.json:/run/secrets/demo-activity-inventory.json:ro$' "$ACTIVITY_DOCKER_ARGS" ||
+  fail 'legacy image run did not pass the private read-only inventory copy'
+grep -Fq -- "$RUNNER_STATE/container-activity.lock:/var/lib/teagram-demo-activity/activity.lock:rw" "$ACTIVITY_DOCKER_ARGS" ||
+  fail 'legacy image activity lock was not mapped to the common container lock'
+[[ ! -e "$(find "$RUNNER_PRIVATE_TMP" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]] ||
+  fail 'legacy credential copy survived the activity run'
+
+# A systemd wipe can select the legacy lock before the runner creates wipe.lock.
+# If it starts during image preparation, it must wait until the activity run exits.
+HANDOFF_STATE="$WORK_DIR/legacy-handoff-state"
+mkdir -m 0700 "$HANDOFF_STATE"
+: > "$HANDOFF_STATE/activity.lock"
+chmod 0600 "$HANDOFF_STATE/activity.lock"
+HANDOFF_SELECTED_LOCK=$(
+  demo_wipe_lock_state_dir_writable() { return 1; }
+  demo_wipe_lock_select "$HANDOFF_STATE/wipe.lock" "$OWNER" 2>/dev/null
+)
+[[ "$HANDOFF_SELECTED_LOCK" == "$HANDOFF_STATE/activity.lock" && ! -e "$HANDOFF_STATE/wipe.lock" ]] ||
+  fail 'legacy wipe did not select activity.lock before the new lock existed'
+: > "$ACTIVITY_DOCKER_CALLS"
+: > "$ACTIVITY_DOCKER_ARGS"
+HANDOFF_INSPECT_STARTED="$WORK_DIR/handoff-inspect-started"
+HANDOFF_INSPECT_RELEASE="$WORK_DIR/handoff-inspect-release"
+HANDOFF_COMPOSE_STARTED="$WORK_DIR/handoff-compose-started"
+HANDOFF_COMPOSE_RELEASE="$WORK_DIR/handoff-compose-release"
+rm -f -- "$HANDOFF_INSPECT_STARTED" "$HANDOFF_INSPECT_RELEASE" \
+  "$HANDOFF_COMPOSE_STARTED" "$HANDOFF_COMPOSE_RELEASE" \
+  "$WORK_DIR/handoff-wipe-attempted" "$WORK_DIR/handoff-wipe-acquired"
+ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_TEST_STATE="$HANDOFF_STATE" \
+  ACTIVITY_INSPECT_STARTED="$HANDOFF_INSPECT_STARTED" \
+  ACTIVITY_INSPECT_RELEASE="$HANDOFF_INSPECT_RELEASE" \
+  ACTIVITY_COMPOSE_STARTED="$HANDOFF_COMPOSE_STARTED" \
+  ACTIVITY_COMPOSE_RELEASE="$HANDOFF_COMPOSE_RELEASE" \
+  ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/handoff-activity.out" 2>&1 &
+ACTIVITY_PID=$!
+tries=0
+until [[ -e "$HANDOFF_INSPECT_STARTED" ]]; do
+  tries=$((tries + 1))
+  ((tries < 200)) || fail 'activity runner did not reach image inspection'
+  sleep 0.01
+done
+start_blocked_wipe "$HANDOFF_SELECTED_LOCK" "$WORK_DIR/handoff-wipe-attempted" "$WORK_DIR/handoff-wipe-acquired"
+sleep 0.05
+[[ ! -e "$WORK_DIR/handoff-wipe-acquired" ]] || fail 'legacy wipe acquired activity.lock during image inspection'
+: > "$HANDOFF_INSPECT_RELEASE"
+tries=0
+until [[ -e "$HANDOFF_COMPOSE_STARTED" ]]; do
+  tries=$((tries + 1))
+  ((tries < 200)) || fail 'activity runner did not start the legacy container'
+  sleep 0.01
+done
+sleep 0.05
+[[ ! -e "$WORK_DIR/handoff-wipe-acquired" ]] || fail 'legacy wipe acquired activity.lock during container startup'
+: > "$HANDOFF_COMPOSE_RELEASE"
+if ! wait "$ACTIVITY_PID"; then
+  cat "$WORK_DIR/handoff-activity.out" >&2
+  fail 'legacy activity run failed during the lock handoff test'
+fi
+ACTIVITY_PID=''
+tries=0
+until [[ -e "$WORK_DIR/handoff-wipe-acquired" ]]; do
+  tries=$((tries + 1))
+  ((tries < 200)) || fail 'legacy wipe did not acquire activity.lock after activity exited'
+  sleep 0.01
+done
+kill "$LEGACY_WIPE_PID" 2>/dev/null || true
+wait "$LEGACY_WIPE_PID" 2>/dev/null || true
+LEGACY_WIPE_PID=''
 
 grep -Fq 'com.teagram.demo.activity-lock="container-activity.lock"' "$SCRIPT_DIR/../../Dockerfile" ||
   fail 'runtime image does not declare its activity lock protocol'

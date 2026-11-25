@@ -12,13 +12,31 @@ ACTIVITY_SETTINGS=/etc/default/teagram-demo-activity
 ACTIVITY_STATE_DIR=/var/lib/teagram-demo-activity
 ACTIVITY_INVENTORY=/var/lib/teagram-demo/secrets/demo-accounts/inventory.json
 
-demo_run_activity() {
+demo_run_activity() (
   local state_dir=${1:-$ACTIVITY_STATE_DIR}
   local inventory=${2:-$ACTIVITY_INVENTORY}
+  local activity_inventory=$inventory
   local owner=${3:-0}
   local settings=${4:-$ACTIVITY_SETTINGS}
-  local wipe_lock="$state_dir/wipe.lock" legacy_lock="$state_dir/activity.lock" lock_status
+  local wipe_lock="$state_dir/wipe.lock" legacy_lock="$state_dir/activity.lock"
+  local container_lock="$state_dir/container-activity.lock" lock_status
   local image_ref image_lock_protocol
+  local compatibility_dir=''
+  local -a extra_volumes=()
+
+  demo_activity_cleanup_compat() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$compatibility_dir" ]] && ! rm -rf -- "$compatibility_dir"; then
+      demo_fail 'could not remove the temporary legacy activity credential copy'
+      status=1
+    fi
+    exit "$status"
+  }
+  trap demo_activity_cleanup_compat EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   demo_require_root || return $?
 
@@ -95,9 +113,32 @@ demo_run_activity() {
       # keep the shared legacy lock for the full activity run.
       ;;
     ''|'<no value>')
-      # Older images still take activity.lock exclusively inside the
-      # container. Release the temporary host hold so that lock can work.
-      exec 10>&-
+      # Older images require a 0400 inventory and use activity.lock inside
+      # the container. Copy the credential privately and alias that old lock
+      # path to the current container lock, keeping the host wipe lock held.
+      compatibility_dir=$(mktemp -d /run/teagram-demo-activity.XXXXXXXX) || {
+        demo_fail 'could not create a private temporary directory for legacy activity credentials'
+        return 1
+      }
+      [[ -d "$compatibility_dir" && ! -L "$compatibility_dir" &&
+        "$(stat -c '%u:%a' -- "$compatibility_dir")" == "$owner:700" ]] || {
+        demo_fail 'legacy activity credential directory must be a private owner-owned mode 0700 directory'
+        return 1
+      }
+      if ! install -o "$owner" -m 0400 -- "$inventory" "$compatibility_dir/inventory.json"; then
+        demo_fail 'could not prepare the legacy activity credential copy'
+        return 1
+      fi
+      [[ "$(stat -c '%u:%a' -- "$compatibility_dir/inventory.json")" == "$owner:400" ]] || {
+        demo_fail 'legacy activity credential copy must be owner-owned mode 0400'
+        return 1
+      }
+      activity_inventory="$compatibility_dir/inventory.json"
+      demo_wipe_lock_prepare "$container_lock" "$owner" || {
+        demo_fail 'container activity lock is missing or unsafe'
+        return 1
+      }
+      extra_volumes+=(--volume "$container_lock:/var/lib/teagram-demo-activity/activity.lock:rw")
       ;;
     *)
       demo_fail "unsupported activity image lock protocol: $image_lock_protocol"
@@ -112,13 +153,14 @@ demo_run_activity() {
   MAX_PER_HOUR="${TEAGRAM_DEMO_ACTIVITY_MAX_PER_HOUR:-6}"
   MIN_INTERVAL="${TEAGRAM_DEMO_ACTIVITY_MIN_INTERVAL:-5m}"
   demo_compose run --rm --no-deps --pull never \
-    --volume "$inventory:/run/secrets/demo-activity-inventory.json:ro" \
+    --volume "$activity_inventory:/run/secrets/demo-activity-inventory.json:ro" \
+    "${extra_volumes[@]}" \
     demo-activity \
     --activity \
     --target "$TARGET" \
     --max-actions-per-hour "$MAX_PER_HOUR" \
     --min-interval "$MIN_INTERVAL" || return $?
-}
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   demo_run_activity

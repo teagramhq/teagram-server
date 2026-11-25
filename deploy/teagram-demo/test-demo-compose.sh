@@ -1160,7 +1160,7 @@ for name, text, fragments in [
     ]),
     ("activity runner", runner, [
         'ACTIVITY_SETTINGS=/etc/default/teagram-demo-activity',
-        '--volume "$inventory:/run/secrets/demo-activity-inventory.json:ro"',
+        '--volume "$activity_inventory:/run/secrets/demo-activity-inventory.json:ro"',
         "--activity",
         '--target "$TARGET"',
         "skipped: wipe running",
@@ -1179,6 +1179,10 @@ assert_text_order(runner, "activity runner inventory and lock gate", [
     'demo_wipe_lock_prepare "$legacy_lock" "$owner"',
     'demo_activity_try_shared_lock "$wipe_lock" 9',
     'demo_activity_try_shared_lock "$legacy_lock" 10',
+    'case "$image_lock_protocol" in',
+    'compatibility_dir=$(mktemp -d /run/teagram-demo-activity.XXXXXXXX)',
+    'install -o "$owner" -m 0400 -- "$inventory"',
+    'demo_wipe_lock_prepare "$container_lock" "$owner"',
     "demo_compose run --rm --no-deps --pull never",
 ])
 for fragment in [

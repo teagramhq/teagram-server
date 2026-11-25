@@ -2,10 +2,9 @@
 # Guards shared by scheduled activity, the weekly wipe, and their tests. Sourced only.
 #
 # The wipe holds the wipe lock and legacy activity lock exclusively for the
-# whole reset. Activity holds both shared and non-blocking while it identifies
-# the image protocol. Current images keep both holds for the run; legacy images
-# release the activity lock so their container can acquire it exclusively.
-# Current containers use container-activity.lock to prevent overlapping posts.
+# whole reset. Activity holds both shared and non-blocking through the run.
+# Current containers use container-activity.lock; legacy images receive that
+# same file at their old activity.lock path so the host lock remains held.
 
 demo_activity_inventory_check() {
   local inventory=$1 owner=$2

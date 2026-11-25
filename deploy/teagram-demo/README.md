@@ -694,9 +694,11 @@ The activity session and persistent rate limit live in
 `/var/lib/teagram-demo-activity`, outside the weekly wipe. The runner bind-mounts
 the seed's root-only account inventory read-only into the one-off activity
 container for each run. It refuses to start if that file is missing, a symlink,
-or not root-owned mode 0600. The password is not passed in arguments,
-environment variables, or logs. The activity container can reach only the
-internal backend network and has no database credentials.
+or not root-owned mode 0600. Images built before the activity lock protocol
+label require mode 0400, so the runner makes a private copy under `/run`, mounts
+that copy read-only, and removes it when the run exits. The password is not
+passed in arguments, environment variables, or logs. The activity container can
+reach only the internal backend network and has no database credentials.
 
 ### Activity credential threat model
 
@@ -713,24 +715,27 @@ internal backend network reduce host access but do not protect mounted data
 from the container itself.
 
 The inventory remains root-owned mode 0600 on the host between runs and is
-rewritten with fresh random account passwords during each weekly reseed. Each
-activity container is one-off and removed after its run; its read-only
-credential mount disappears with it. The activity MTProto session is stored
-separately in `/var/lib/teagram-demo-activity/session.json` and remains on the
-host across wipes, but the database reset invalidates that session and the next
-activity run removes it before signing in with the newly seeded password. A
-compromise of host root or the Docker daemon crosses this boundary and can read
-both the inventory and persisted session.
+rewritten with fresh random account passwords during each weekly reseed. For an
+older image, the host creates a root-only mode 0400 copy under `/run` for the
+duration of the run and removes it on exit; the container sees either inventory
+mount as read-only. Each activity container is one-off and removed after its
+run. The activity MTProto session is stored separately in
+`/var/lib/teagram-demo-activity/session.json` and remains on the host across
+wipes, but the database reset invalidates that session and the next activity
+run removes it before signing in with the newly seeded password. A compromise
+of host root or the Docker daemon crosses this boundary and can read both the
+inventory and persisted session.
 
 The weekly wipe and activity share `/var/lib/teagram-demo-activity/wipe.lock`;
 they also coordinate through the legacy `activity.lock` so manually installed
 systemd wipes remain safe during migration. The current wipe holds both locks
-exclusively for the reset. Each activity run takes both shared and without
-waiting, so it exits 0 with `skipped: wipe running` if either wipe lock is
-held. The wipe waits up to 20 minutes for an in-flight activity run; if that
-run is still going, the wipe fails before it stops any public path or deletes
-any data. The container uses its separate `container-activity.lock` to prevent
-overlapping activity posts while the host runner holds the legacy lock shared.
+exclusively for the reset. Each activity run holds both shared locks through
+container exit and skips without waiting if either is busy. The wipe waits up to
+20 minutes for an in-flight activity run; if that run is still going, the wipe
+fails before it stops any public path or deletes any data. Current images use
+`container-activity.lock` to prevent overlapping posts. For a legacy image, the
+runner mounts that same lock file at the old `activity.lock` container path,
+allowing the host to retain the shared lock that blocks an older systemd wipe.
 An old wipe service that cannot create `wipe.lock` under its read-only
 filesystem uses the existing `activity.lock`.
 
