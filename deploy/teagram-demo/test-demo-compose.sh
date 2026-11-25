@@ -2391,6 +2391,7 @@ python3 "$SCRIPT_DIR/test-validate-env.py"
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
+"$SCRIPT_DIR/lima/test-lima-compose.sh"
 if systemctl --system show-environment >/dev/null 2>&1; then
   if [[ "$EUID" -eq 0 ]]; then
     "$SCRIPT_DIR/test-activity-credential-handoff.sh"
