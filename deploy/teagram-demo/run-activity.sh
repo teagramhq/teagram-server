@@ -24,6 +24,8 @@ demo_run_activity() (
   local compatibility_dir=''
   local -a extra_volumes=()
 
+  # cleanup runs from the EXIT trap, which ShellCheck cannot follow.
+  # shellcheck disable=SC2329
   demo_activity_cleanup_compat() {
     local status=$?
     trap - EXIT
