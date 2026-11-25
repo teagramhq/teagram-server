@@ -247,6 +247,12 @@ func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) 
 	if password != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 		t.Fatal("readActivityPasswordAt returned a different credential")
 	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readActivityPasswordAt(path, account); err != nil {
+		t.Fatalf("read activity credential from read-only bind source mode 0600: %v", err)
+	}
 	if err := os.Chmod(path, 0644); err != nil { // #nosec G302 -- deliberately weaken permissions to test rejection.
 		t.Fatal(err)
 	}
@@ -254,6 +260,9 @@ func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) 
 		t.Fatal("readActivityPasswordAt accepted a group/world-readable credential")
 	}
 	if err := os.WriteFile(path, []byte(`{"demo_iona":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readActivityPasswordAt(path, account); err == nil {
