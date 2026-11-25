@@ -17,6 +17,7 @@ BLOB_DATA=$BLOB_MOUNT/data
 BLOB_MIN_BYTES=$((3 * 1024 * 1024 * 1024))
 BLOB_MAX_BYTES=$((4 * 1024 * 1024 * 1024))
 MEMORY_BUDGET_BYTES=$((200 * 1024 * 1024))
+COMPOSE_RENDER_COMMAND='docker compose --env-file <lima.env> --project-directory <checkout> -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo --profile candidate config --format json'
 DEMO_SUBNETS=(198.18.130.0/24 198.18.132.0/24 198.18.133.0/24)
 REQUIRED_ENV_KEYS=(POSTGRES_PASSWORD TG_PUBLIC_LINK_PREFIX TG_AUTHKEY_ENC_KEY TEAGRAM_DEMO_TURNSTILE_SITE_KEY TEAGRAM_DEMO_IMAGE_REF)
 SECRET_FILES=(turnstile-secret-key turnstile-qa-bypass-token)
@@ -65,7 +66,7 @@ check_env_file() {
 }
 
 check_secrets() {
-  local name path missing=() bad=() owner_mode
+  local name path missing=() empty=() bad=() owner_mode
   if [[ ! -d $SECRETS_DIR || -L $SECRETS_DIR ]]; then
     fail secrets "missing or unsafe directory $SECRETS_DIR"
     return 0
@@ -82,6 +83,8 @@ check_secrets() {
     path=$SECRETS_DIR/$name
     if [[ ! -f $path || -L $path ]]; then
       missing+=("$name")
+    elif [[ ! -s $path ]]; then
+      empty+=("$name")
     elif ! owner_mode=$(stat -c '%u:%g:%a' -- "$path" 2>/dev/null); then
       bad+=("$name (could not inspect ownership and mode)")
     elif [[ $owner_mode != '0:65532:440' ]]; then
@@ -103,6 +106,10 @@ check_secrets() {
     fail secrets "missing: ${missing[*]}"
     return 0
   fi
+  if ((${#empty[@]} > 0)); then
+    fail secrets "empty: ${empty[*]}"
+    return 0
+  fi
   if ((${#bad[@]} > 0)); then
     fail secrets "wrong ownership or mode on: ${bad[*]}"
     return 0
@@ -113,15 +120,22 @@ check_secrets() {
 # Renders the stack the way deploy will. The output is kept in a variable and
 # never printed.
 render_config() {
+  local stdout_fd stderr status=0
   # Compose lets shell variables override --env-file, so an exported value
   # would silently replace the one the operator wrote to the env file.
-  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  exec {stdout_fd}>&1
+  stderr=$(env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u POSTGRES_PASSWORD -u TG_PUBLIC_LINK_PREFIX -u TG_AUTHKEY_ENC_KEY \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
     docker compose --env-file "$ENV_FILE" --project-directory "$REPO_ROOT" \
     -f "$COMPOSE_FILE" --project-name teagram-demo --profile candidate \
-    config --format json 2>/dev/null
+    config --format json 2>&1 1>&"$stdout_fd") || status=$?
+  exec {stdout_fd}>&-
+  if [[ -n $stderr ]]; then
+    printf 'compose-config diagnostic: %s\n' "${stderr%%$'\n'*}" >&2
+  fi
+  return "$status"
 }
 
 # Each check below reads the rendered JSON from CONFIG_JSON.
@@ -153,9 +167,9 @@ check_config_shape() {
     fail mem-limits "no memory limit: $(tr '\n' ' ' <<<"$no_limit")"
   else
     local sum
-    sum=$(jq '[.services[] | select(.restart != null) | .mem_limit | tonumber] | add' <<<"$CONFIG_JSON")
+    sum=$(jq '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add' <<<"$CONFIG_JSON")
     if (( sum > MEMORY_BUDGET_BYTES )); then
-      fail mem-limits "long-running limits total $((sum / 1048576)) MiB, budget is 200 MiB"
+      fail mem-limits "all services except one-shot migrate total $((sum / 1048576)) MiB, budget is 200 MiB"
     else
       pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB with candidate enabled)"
     fi
@@ -206,12 +220,30 @@ check_blob_cap() {
   pass blob-cap
 }
 
+# Captures Docker stdout while retaining only the first stderr line. A failed
+# command returns a marker so callers can include the diagnostic in FAIL.
+capture_docker() {
+  local stdout_fd stderr status=0
+  exec {stdout_fd}>&1
+  stderr=$(docker "$@" 2>&1 1>&"$stdout_fd") || status=$?
+  exec {stdout_fd}>&-
+  if ((status != 0)); then
+    printf '\n__DOCKER_ERROR__%s\n' "${stderr%%$'\n'*}"
+    return "$status"
+  fi
+  if [[ -n $stderr ]]; then
+    printf 'docker diagnostic: %s\n' "${stderr%%$'\n'*}" >&2
+  fi
+  return 0
+}
+
 # The demo subnets must not overlap any network this host already has, other
 # than the demo's own networks from an earlier deploy.
 check_subnet_overlap() {
-  local ids=() ids_output id other overlaps
-  if ! ids_output=$(docker network ls -q 2>/dev/null); then
-    fail subnets-host "docker network ls failed"
+  local ids=() ids_output id other overlaps diagnostic
+  if ! ids_output=$(capture_docker network ls -q); then
+    diagnostic=${ids_output##*$'\n__DOCKER_ERROR__'}
+    fail subnets-host "docker network ls failed: ${diagnostic:-no diagnostic}"
     return 0
   fi
   while IFS= read -r id; do
@@ -219,9 +251,14 @@ check_subnet_overlap() {
   done <<<"$ids_output"
   other=""
   if ((${#ids[@]} > 0)); then
-    other=$(docker network inspect "${ids[@]}" 2>/dev/null \
-      | jq -r '.[] | select(.Name | startswith("teagram-demo_") | not) | .IPAM.Config[]?.Subnet // empty') \
-      || { fail subnets-host "docker network inspect failed"; return 0; }
+    local inspect_json
+    if ! inspect_json=$(capture_docker network inspect "${ids[@]}"); then
+      diagnostic=${inspect_json##*$'\n__DOCKER_ERROR__'}
+      fail subnets-host "docker network inspect failed: ${diagnostic:-no diagnostic}"
+      return 0
+    fi
+    other=$(jq -r '.[] | select(.Name | startswith("teagram-demo_") | not) | .IPAM.Config[]?.Subnet // empty' <<<"$inspect_json") \
+      || { fail subnets-host "docker network inspect returned invalid JSON"; return 0; }
   fi
   overlaps=$(printf '%s\n' "$other" | python3 -I -c '
 import ipaddress, sys
@@ -248,7 +285,7 @@ if CONFIG_JSON=$(render_config) && [[ -n $CONFIG_JSON ]]; then
   check_config_shape
   check_blob_cap
 else
-  fail compose-config "docker compose config failed; rerun that command by hand to read the error (its output holds secrets, so do not paste it)"
+  fail compose-config "render failed; first diagnostic is printed above; command: $COMPOSE_RENDER_COMMAND"
 fi
 check_subnet_overlap
 
