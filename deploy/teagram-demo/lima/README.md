@@ -41,7 +41,7 @@ when the `candidate` profile is enabled.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 56 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image) |
-| teagramd | 40 | 46 on Charlie before the Lima cap; 33.0 MiB in the ARM64 API-path cgroup probe below |
+| teagramd | 40 | 46 on Charlie before the Lima cap; 30.09 MiB for the pinned amd64 service in hosted CI during concurrent profile-photo uploads |
 | teagramd-next (candidate) | 40 | Same image and `GOMEMLIMIT` as teagramd; not measured at the new setting |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
@@ -56,15 +56,13 @@ sampled 43.82 MiB under the 56 MiB container limit. The local host is ARM64,
 so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
 Compose image remains pinned to linux/amd64.
 
-A separate stress probe used a 40 MiB cgroup with swap capped at 40 MiB,
-`GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and the Lima pool limit of three. It submitted
-two concurrent 1600×1600 `photos.uploadProfilePhoto` requests and two concurrent
-`messages.sendMedia` photo assembly requests. The peak was 33.0 MiB, with no
-memory high, max, or OOM events. This was measured using the API test process
-and its `photothumb` child on ARM64, not the pinned linux/amd64 service image.
-`photos.uploadProfilePhoto` does not launch `photothumb`; the pool cap gives
-each server one media assembly slot, so the two media requests serialize their
-thumbnail work.
+Hosted x86 CI measured the pinned linux/amd64 service image in a 40 MiB cgroup
+with swap capped at 40 MiB, `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
+`TG_PG_MAX_CONNS=3`. Two synchronized 1600×1600 `photos.uploadProfilePhoto`
+requests both passed. Peak cgroup memory was 30.09 MiB (31,555,584 bytes) with
+`memory.max=41,943,040`, `max=0`, `oom=0`, and `oom_kill=0`. The image was
+`ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6`, revision
+`609ae698dbacbb94d1028d6d6e45327a82078080` ([hosted CI run](https://github.com/teagramhq/teagram-server/actions/runs/45662146460)).
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd
