@@ -28,12 +28,6 @@ fail() {
   failures=$((failures + 1))
 }
 
-# Mode bits of a file as octal digits, e.g. 600.
-mode_of() { stat -c '%a' -- "$1"; }
-
-# Succeeds when no group or other bits are set.
-private_mode() { (( ((8#$1) & 077) == 0 )); }
-
 check_tools() {
   local tool missing=()
   for tool in docker jq python3 stat mountpoint; do
@@ -47,13 +41,17 @@ check_tools() {
 }
 
 check_env_file() {
-  local key missing=()
-  if [[ ! -f $ENV_FILE ]]; then
-    fail env-file "missing $ENV_FILE"
+  local key missing=() owner_mode
+  if [[ ! -f $ENV_FILE || -L $ENV_FILE ]]; then
+    fail env-file "missing or unsafe file $ENV_FILE"
     return 0
   fi
-  if ! private_mode "$(mode_of "$ENV_FILE")"; then
-    fail env-file "$ENV_FILE is readable by group or other"
+  if ! owner_mode=$(stat -c '%u:%g:%a' -- "$ENV_FILE" 2>/dev/null); then
+    fail env-file "could not inspect $ENV_FILE ownership and mode"
+    return 0
+  fi
+  if [[ $owner_mode != '0:0:600' ]]; then
+    fail env-file "$ENV_FILE must be root-owned mode 0600"
     return 0
   fi
   for key in "${REQUIRED_ENV_KEYS[@]}"; do
@@ -67,30 +65,38 @@ check_env_file() {
 }
 
 check_secrets() {
-  local name path missing=() bad=()
-  if [[ ! -d $SECRETS_DIR ]]; then
-    fail secrets "missing directory $SECRETS_DIR"
+  local name path missing=() bad=() owner_mode
+  if [[ ! -d $SECRETS_DIR || -L $SECRETS_DIR ]]; then
+    fail secrets "missing or unsafe directory $SECRETS_DIR"
     return 0
   fi
-  if ! private_mode "$(mode_of "$SECRETS_DIR")"; then
-    fail secrets "$SECRETS_DIR is readable by group or other"
+  if ! owner_mode=$(stat -c '%u:%g:%a' -- "$SECRETS_DIR" 2>/dev/null); then
+    fail secrets "could not inspect $SECRETS_DIR ownership and mode"
+    return 0
+  fi
+  if [[ $owner_mode != '0:0:700' ]]; then
+    fail secrets "$SECRETS_DIR must be root-owned mode 0700"
     return 0
   fi
   for name in "${SECRET_FILES[@]}"; do
     path=$SECRETS_DIR/$name
-    if [[ ! -f $path ]]; then
+    if [[ ! -f $path || -L $path ]]; then
       missing+=("$name")
-    # Readable by the non-root server uid through the bind mount, but not
-    # writable by group or other.
-    elif (( (8#$(mode_of "$path")) & 022 )); then
-      bad+=("$name")
+    elif ! owner_mode=$(stat -c '%u:%g:%a' -- "$path" 2>/dev/null); then
+      bad+=("$name (could not inspect ownership and mode)")
+    elif [[ $owner_mode != '0:65532:440' ]]; then
+      bad+=("$name ($owner_mode; expected root:65532 mode 0440)")
     fi
   done
   path=$SECRETS_DIR/cloudflared.env
-  if [[ ! -f $path ]]; then
+  if [[ ! -f $path || -L $path ]]; then
     missing+=(cloudflared.env)
   else
-    private_mode "$(mode_of "$path")" || bad+=(cloudflared.env)
+    if ! owner_mode=$(stat -c '%u:%g:%a' -- "$path" 2>/dev/null); then
+      bad+=("cloudflared.env (could not inspect ownership and mode)")
+    elif [[ $owner_mode != '0:0:600' ]]; then
+      bad+=("cloudflared.env ($owner_mode; expected root:root mode 0600)")
+    fi
     grep -q '^TUNNEL_TOKEN=.' -- "$path" || missing+=("cloudflared.env:TUNNEL_TOKEN")
   fi
   if ((${#missing[@]} > 0)); then
@@ -98,7 +104,7 @@ check_secrets() {
     return 0
   fi
   if ((${#bad[@]} > 0)); then
-    fail secrets "wrong mode on: ${bad[*]}"
+    fail secrets "wrong ownership or mode on: ${bad[*]}"
     return 0
   fi
   pass secrets
@@ -114,7 +120,8 @@ render_config() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
     docker compose --env-file "$ENV_FILE" --project-directory "$REPO_ROOT" \
-    -f "$COMPOSE_FILE" --project-name teagram-demo config --format json 2>/dev/null
+    -f "$COMPOSE_FILE" --project-name teagram-demo --profile candidate \
+    config --format json 2>/dev/null
 }
 
 # Each check below reads the rendered JSON from CONFIG_JSON.
@@ -150,7 +157,7 @@ check_config_shape() {
     if (( sum > MEMORY_BUDGET_BYTES )); then
       fail mem-limits "long-running limits total $((sum / 1048576)) MiB, budget is 200 MiB"
     else
-      pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB)"
+      pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB with candidate enabled)"
     fi
   fi
 
@@ -202,8 +209,14 @@ check_blob_cap() {
 # The demo subnets must not overlap any network this host already has, other
 # than the demo's own networks from an earlier deploy.
 check_subnet_overlap() {
-  local ids=() other overlaps
-  mapfile -t ids < <(docker network ls -q 2>/dev/null) || { fail subnets-host "docker network ls failed"; return 0; }
+  local ids=() ids_output id other overlaps
+  if ! ids_output=$(docker network ls -q 2>/dev/null); then
+    fail subnets-host "docker network ls failed"
+    return 0
+  fi
+  while IFS= read -r id; do
+    [[ -n $id ]] && ids+=("$id")
+  done <<<"$ids_output"
   other=""
   if ((${#ids[@]} > 0)); then
     other=$(docker network inspect "${ids[@]}" 2>/dev/null \

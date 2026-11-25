@@ -9,7 +9,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | File | Purpose |
 | --- | --- |
 | `compose.yaml` | The stack: postgres, migrate, teagramd, teagramd-next (profile `candidate`), turnstile-egress, haproxy, edge, cloudflared. |
-| `postgresql.conf` | Postgres settings sized for its 64 MiB limit. |
+| `postgresql.conf` | Postgres settings sized for its 56 MiB limit. |
 | `prepare-blobs.sh` | Root, idempotent: 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`. Run once at cutover. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
@@ -20,11 +20,11 @@ Nothing secret is in the repository.
 
 | Path | Mode | Contents |
 | --- | --- | --- |
-| `/var/lib/teagram-demo/lima.env` | 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, `TEAGRAM_DEMO_IMAGE_REF` (a `name@sha256:` reference). |
-| `/var/lib/teagram-demo/secrets/` | 0700 | Directory. |
-| `.../secrets/turnstile-secret-key` | 0444 | Siteverify secret, read by the server uid through a bind mount. |
-| `.../secrets/turnstile-qa-bypass-token` | 0444 | QA bypass token. |
-| `.../secrets/cloudflared.env` | 0600 | `TUNNEL_TOKEN=...` and nothing else. |
+| `/var/lib/teagram-demo/lima.env` | root:root 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, `TEAGRAM_DEMO_IMAGE_REF` (a `name@sha256:` reference). |
+| `/var/lib/teagram-demo/secrets/` | root:root 0700 | Directory. |
+| `.../secrets/turnstile-secret-key` | root:65532 0440 | Siteverify secret, readable by the server uid through its group. |
+| `.../secrets/turnstile-qa-bypass-token` | root:65532 0440 | QA bypass token, readable by the server uid through its group. |
+| `.../secrets/cloudflared.env` | root:root 0600 | `TUNNEL_TOKEN=...` and nothing else. |
 
 `TEAGRAM_DEMO_LIMA_ENV_FILE` and `TEAGRAM_DEMO_SECRETS_DIR` override the
 default paths, for tests only.
@@ -34,20 +34,23 @@ the tunnel token. Never print it to a log, a comment or a PR.
 
 ## Memory budget
 
-Limits of the long-running services, in MiB. The sum must stay at or below 200.
+Limits of the long-running services, in MiB. The sum stays at or below 200 even
+when the `candidate` profile is enabled.
 
 | Service | Limit | Measured on charlie |
 | --- | --- | --- |
-| postgres | 64 | 83 (128 MB `shared_buffers`) |
-| teagramd | 48 | 46 |
-| cloudflared | 32 | 25 |
-| turnstile-egress (squid) | 32 | 23 |
-| haproxy | 16 | 10 |
-| edge (nginx) | 8 | 2 |
-| **Total** | **200** | 189 |
+| postgres | 56 | 83 (128 MB `shared_buffers`); 52 with the lima config under 8-client pgbench |
+| teagramd | 40 | 46 before the lima `GOMEMLIMIT` reduction to 24 MiB |
+| teagramd-next (candidate) | 40 | Same image and `GOMEMLIMIT` as teagramd; not measured at the new setting |
+| cloudflared | 25 | 25 |
+| turnstile-egress (squid) | 24 | 23 |
+| haproxy | 10 | 10 |
+| edge (nginx) | 4 | 2 |
+| **Total with candidate** | **199** | |
 
-migrate (64 MiB) is one-shot and outside the sum. teagramd-next (48 MiB) runs
-only as a rollout candidate, and its headroom is the deploy's concern.
+The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
+outside the sum. The candidate is included because it can run beside teagramd
+during rollout.
 
 ## Blobs
 
@@ -56,8 +59,10 @@ only as a rollout candidate, and its headroom is the deploy's concern.
 mounts it at `/srv/teagram-demo-blobs` through `/etc/fstab`. The demo's
 `/srv/teagram-demo-blobs/data` directory (owner 65532, mode 0700) is a bind
 mount, so a write past 4 GiB fails inside the demo with ENOSPC. The rest of the
-root disk is untouched. The script refuses to format anything that is not ext4,
-and refuses to mount over a non-empty directory.
+root disk is untouched. The script formats only an image it created during that
+invocation. An existing image must be identified as ext4; unknown images and
+`blkid` errors are rejected without formatting. It also refuses to mount over a
+non-empty directory.
 
 ## Checking
 
