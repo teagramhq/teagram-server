@@ -8,13 +8,15 @@ set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
+qa_workflow="${QA_INVITE_DEPLOY_WORKFLOW:-.github/workflows/deploy-qa-invite.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_build_if="(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')"
-expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
+expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
+expected_dev_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && needs.check-dev-deploy-target.result == 'success' && needs.check-dev-deploy-target.outputs.configured == 'true' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
@@ -40,6 +42,10 @@ query() {
 
 demo_query() {
   yq -r "$1" "$demo_workflow"
+}
+
+qa_query() {
+  yq -r "$1" "$qa_workflow"
 }
 
 ci_fail() {
@@ -381,7 +387,7 @@ check_demo_image_digest_download() (
   set -euo pipefail
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .run' > "$tmp/download.sh"
+  demo_query '.jobs."check-demo-deploy-target".steps[] | select(.id == "image") | .run' > "$tmp/download.sh"
   cat > "$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -429,7 +435,7 @@ check_demo_deploy_target_download() (
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  demo_query '.jobs.deploy-demo.steps[] | select(.id == "target") | .run' > "$tmp/download.sh"
+  demo_query '.jobs."check-demo-deploy-target".steps[] | select(.id == "target") | .run' > "$tmp/download.sh"
   cat > "$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -532,6 +538,69 @@ SH
     bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1; then
     fail 'a direct demo deploy must reject a current main SHA without successful push CI'
   fi
+)
+
+check_deploy_target_validator() (
+  set -euo pipefail
+  local tmp output status known_hosts
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  known_hosts='[100.100.162.10]:2223 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKQL+Dd24X1rDWRMeron0VAqflJ3S+c2BvDMIzQX570n'
+
+  bash .github/scripts/validate-deploy-target.sh \
+    QA_INVITE_DEPLOY_HOST 100.100.162.10 \
+    QA_INVITE_DEPLOY_PORT 2223 \
+    QA_INVITE_DEPLOY_KNOWN_HOSTS "$known_hosts" \
+    QA_INVITE_DEPLOY_USER root
+
+  assert_invalid() {
+    local host_name=$1 port_name=$2 known_hosts_name=$3 user_name=$4 expected=$5
+    local host=$6 port=$7 pinned_hosts=$8 user=$9 result=0 message
+    message=$(bash .github/scripts/validate-deploy-target.sh \
+      "$host_name" "$host" \
+      "$port_name" "$port" \
+      "$known_hosts_name" "$pinned_hosts" \
+      "$user_name" "$user" 2>&1) || result=$?
+    [[ "$result" != 0 && "$message" == *"::error::$expected is "* ]] ||
+      fail "deployment target validation must reject $expected with its variable name"
+  }
+
+  assert_invalid QA_INVITE_DEPLOY_HOST QA_INVITE_DEPLOY_PORT QA_INVITE_DEPLOY_KNOWN_HOSTS QA_INVITE_DEPLOY_USER QA_INVITE_DEPLOY_HOST '' 2223 "$known_hosts" root
+  assert_invalid QA_INVITE_DEPLOY_HOST QA_INVITE_DEPLOY_PORT QA_INVITE_DEPLOY_KNOWN_HOSTS QA_INVITE_DEPLOY_USER QA_INVITE_DEPLOY_PORT 100.100.162.10 '' "$known_hosts" root
+  assert_invalid QA_INVITE_DEPLOY_HOST QA_INVITE_DEPLOY_PORT QA_INVITE_DEPLOY_KNOWN_HOSTS QA_INVITE_DEPLOY_USER QA_INVITE_DEPLOY_KNOWN_HOSTS 100.100.162.10 2223 '' root
+  assert_invalid QA_INVITE_DEPLOY_HOST QA_INVITE_DEPLOY_PORT QA_INVITE_DEPLOY_KNOWN_HOSTS QA_INVITE_DEPLOY_USER QA_INVITE_DEPLOY_USER 100.100.162.10 2223 "$known_hosts" ''
+  assert_invalid QA_INVITE_DEPLOY_HOST QA_INVITE_DEPLOY_PORT QA_INVITE_DEPLOY_KNOWN_HOSTS QA_INVITE_DEPLOY_USER QA_INVITE_DEPLOY_HOST 'bad host' 2223 "$known_hosts" root
+  assert_invalid DEV_DEPLOY_HOST DEV_DEPLOY_PORT DEV_DEPLOY_KNOWN_HOSTS DEV_DEPLOY_USER DEV_DEPLOY_PORT 100.100.162.10 65536 "$known_hosts" deploy
+  assert_invalid DEMO_DEPLOY_HOST DEMO_DEPLOY_PORT DEMO_DEPLOY_KNOWN_HOSTS DEMO_DEPLOY_USER DEMO_DEPLOY_KNOWN_HOSTS 100.100.162.10 2223 '[100.100.162.10]:2223 ssh-ed25519 invalid!' root
+  assert_invalid DEV_DEPLOY_HOST DEV_DEPLOY_PORT DEV_DEPLOY_KNOWN_HOSTS DEV_DEPLOY_USER DEV_DEPLOY_USER 100.100.162.10 2223 "$known_hosts" 'root@charlie'
+
+  demo_query '.jobs."check-dev-deploy-target".steps[] | select(.id == "target") | .run' > "$tmp/dev-gate.sh"
+  : > "$tmp/output"
+  output=$(DEV_DEPLOY_HOST='' GITHUB_OUTPUT="$tmp/output" \
+    bash -euo pipefail "$tmp/dev-gate.sh" 2>&1)
+  [[ "$output" == *'::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset' ]] ||
+    fail 'an unset dev host must produce a skip notice'
+  [[ "$(grep -Fc '::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset' <<< "$output")" == 1 &&
+    "$(cat "$tmp/output")" == 'configured=false' ]] ||
+    fail 'an unset dev host must produce one notice and skip the deploy job'
+
+  demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .run' > "$tmp/dev-target.sh"
+
+  : > "$tmp/output"
+  output=$(DEV_DEPLOY_HOST=100.100.162.10 DEV_DEPLOY_PORT=2223 DEV_DEPLOY_KNOWN_HOSTS="$known_hosts" \
+    DEV_DEPLOY_USER=deploy DEMO_DEPLOY_SSH_KEY=fixture-key TS_OAUTH_CLIENT_ID=fixture-id \
+    TS_OAUTH_SECRET=fixture-secret GITHUB_OUTPUT="$tmp/output" \
+    bash -euo pipefail "$tmp/dev-target.sh" 2>&1)
+  [[ -z "$output" && "$(cat "$tmp/output")" == 'enabled=true' ]] ||
+    fail 'a complete dev target must pass validation and enable the deploy steps'
+
+  : > "$tmp/output"
+  output=$(DEV_DEPLOY_HOST=100.100.162.10 DEV_DEPLOY_PORT=65536 DEV_DEPLOY_KNOWN_HOSTS="$known_hosts" \
+    DEV_DEPLOY_USER=deploy DEMO_DEPLOY_SSH_KEY=fixture-key TS_OAUTH_CLIENT_ID=fixture-id \
+    TS_OAUTH_SECRET=fixture-secret GITHUB_OUTPUT="$tmp/output" \
+    bash -euo pipefail "$tmp/dev-target.sh" 2>&1) || status=$?
+  [[ "${status:-0}" != 0 && "$output" == *'::error::DEV_DEPLOY_PORT is malformed'* ]] ||
+    fail 'a malformed dev port must fail with its variable name before connecting'
 )
 
 check_demo_manual_request() (
@@ -639,6 +708,7 @@ check_demo_credential_gate() (
 )
 
 check_contract() {
+  local qa_ssh_runs demo_dev_run qa_validate_index qa_tailnet_index dev_target_index dev_tailnet_index
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
   [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
@@ -784,6 +854,37 @@ check_contract() {
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .run')" == *'deploy/k8s/deploy-release.sh'* ]] ||
     fail 'the production workflow must delegate apply, rollback, and smoke to the release runner'
 
+  [[ "$(qa_query '.name')" == 'Deploy qa-invite.' ]] ||
+    fail 'the QA invite workflow name must remain stable'
+  [[ "$(qa_query '.jobs.qa-invite.environment')" == 'demo' ]] ||
+    fail 'qa-invite must keep using the demo environment and shared deployment key'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_HOST')" == '${{ vars.QA_INVITE_DEPLOY_HOST }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_PORT')" == '${{ vars.QA_INVITE_DEPLOY_PORT }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_KNOWN_HOSTS')" == '${{ vars.QA_INVITE_DEPLOY_KNOWN_HOSTS }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' ]] ||
+    fail 'qa-invite must read its host, port, known host, and login user from QA_INVITE_DEPLOY_*'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ vars.QA_INVITE_DEPLOY_HOST }}' ]] ||
+    fail 'qa-invite must ping its pinned QA invite host'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .run')" == *'.github/scripts/validate-deploy-target.sh'* ]] ||
+    fail 'qa-invite must validate all target variables before joining the tailnet'
+  qa_validate_index="$(qa_query '.jobs.qa-invite.steps | map(.name) | to_entries | .[] | select(.value == "Validate operation and deployment settings") | .key')"
+  qa_tailnet_index="$(qa_query '.jobs.qa-invite.steps | map(.name) | to_entries | .[] | select(.value == "Join the tailnet") | .key')"
+  [[ -n "$qa_validate_index" && -n "$qa_tailnet_index" && "$qa_validate_index" -lt "$qa_tailnet_index" ]] ||
+    fail 'qa-invite target variables must be validated before connecting to the tailnet'
+  ! grep -Eq 'DEMO_DEPLOY_(HOST|PORT|KNOWN_HOSTS|USER)' "$qa_workflow" ||
+    fail 'qa-invite must not read the mutable demo target variables'
+  ! grep -Fq 'root@' "$qa_workflow" || fail 'qa-invite must not hard-code root as its deploy login'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' ]] ||
+    fail 'all qa-invite deploy commands must use the configured login user'
+  qa_ssh_runs="$(qa_query '.jobs.qa-invite.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run')"
+  grep -Fq '"$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST"' <<< "$qa_ssh_runs" ||
+    fail 'qa-invite SSH commands must use the configured target login and host'
+  grep -Fq 'ssh -T -p "$QA_INVITE_DEPLOY_PORT"' <<< "$qa_ssh_runs" ||
+    fail 'qa-invite SSH commands must use the configured target port'
+  grep -Fq 'StrictHostKeyChecking=yes' <<< "$qa_ssh_runs" ||
+    fail 'qa-invite SSH commands must verify the pinned target host key'
+
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
   [[ "$(demo_query '.run-name')" == "$expected_demo_run_name" ]] ||
@@ -810,14 +911,39 @@ check_contract() {
     fail 'demo deploys must share their own concurrency group'
   [[ "$(demo_query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'demo deploys must not cancel an in-progress rollout'
-  [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'build-demo-web,check-server-deploy-result,deploy-demo' ]] ||
-    fail 'the demo workflow must verify the triggering deploy before deploying'
+  [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'build-demo-web,check-demo-deploy-target,check-dev-deploy-target,check-server-deploy-result,deploy-demo,deploy-dev' ]] ||
+    fail 'the demo workflow must resolve one tested target for independent demo and dev deployments'
   [[ "$(demo_query '.jobs.check-server-deploy-result.name')" == 'check: server-deploy-result' ]] ||
     fail 'the server deploy verification job must follow the check-stage naming contract'
   [[ "$(demo_query '.jobs.check-server-deploy-result.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read' ]] ||
     fail 'the verification job must use actions: read only'
   [[ "$(demo_query '.jobs.check-server-deploy-result.outputs.succeeded')" == '${{ steps.verify.outputs.succeeded || steps.manual.outputs.succeeded }}' ]] ||
     fail 'the verified deploy or direct-request result must gate the demo job'
+  [[ "$(demo_query '.jobs.check-demo-deploy-target.name')" == 'check: demo-deploy-target' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.needs')" == 'check-server-deploy-result' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.if')" == "\${{ needs.check-server-deploy-result.outputs.succeeded == 'true' }}" ]] ||
+    fail 'the shared deploy target must resolve only after the server deploy succeeds'
+  [[ "$(demo_query '.jobs.check-demo-deploy-target.outputs.sha')" == '${{ steps.target.outputs.sha }}' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.outputs.ci_run_id')" == '${{ steps.target.outputs.ci_run_id }}' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.outputs.digest')" == '${{ steps.image.outputs.digest }}' ]] ||
+    fail 'the shared deploy target must expose the tested SHA and image digest to both deployments'
+  [[ "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.EVENT_NAME')" == '${{ github.event_name }}' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.ISSUE_KEY')" == '${{ inputs.issue }}' ]] ||
+    fail 'target resolution must distinguish workflow_run and direct demo deployments'
+  [[ "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .env.CI_RUN_ID')" == '${{ steps.target.outputs.ci_run_id }}' &&
+    "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'the shared image digest must come from the CI run selected for the target SHA'
+  [[ "$(demo_query '.jobs.check-dev-deploy-target.name')" == 'check: dev-deploy-target' &&
+    "$(demo_query '.jobs.check-dev-deploy-target.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target' &&
+    "$(demo_query '.jobs.check-dev-deploy-target.outputs.configured')" == '${{ steps.target.outputs.configured }}' &&
+    "$(demo_query '.jobs.check-dev-deploy-target.environment')" == 'demo' ]] ||
+    fail 'the dev target gate must report configuration after successful target resolution'
+  [[ "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
+    fail 'the dev target gate must inspect the demo-environment host variable'
+  [[ "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'configured=false'* &&
+    "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset'* ]] ||
+    fail 'an unset dev host must report one notice and skip the deploy job'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify").if')" == '${{ github.event_name == '"'"'workflow_run'"'"' }}' ]] ||
     fail 'the server deploy check must run only for workflow_run events'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "manual").if')" == '${{ github.event_name == '"'"'workflow_dispatch'"'"' }}' ]] ||
@@ -867,8 +993,8 @@ check_contract() {
     fail 'the uploaded web archive must include its checksum'
   [[ "$(demo_query '.jobs."build-demo-web".steps[] | select(.name == "Upload the verified web artifact") | .with."if-no-files-found"')" == 'error' ]] ||
     fail 'the web archive upload must fail when files are missing'
-  [[ "$(demo_query '.jobs.deploy-demo.needs | join(",")')" == 'check-server-deploy-result,build-demo-web' ]] ||
-    fail 'the demo deployment must wait for server verification and the deploy-time web build'
+  [[ "$(demo_query '.jobs.deploy-demo.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target,build-demo-web' ]] ||
+    fail 'the demo deployment must wait for server verification, shared target resolution, and the deploy-time web build'
   [[ "$(demo_query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
     fail 'the demo job must require both workflow success and a successful server deploy job'
   [[ "$(demo_query '.jobs.deploy-demo.continue-on-error // ""')" == '' ]] ||
@@ -883,12 +1009,6 @@ check_contract() {
     fail 'the demo gate must read the Tailscale OAuth client ID from the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
     fail 'the demo gate must read the Tailscale OAuth secret from the demo environment'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
-    fail 'workflow_run deploys must select the target artifact by the triggering Deploy. run ID'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.EVENT_NAME')" == '${{ github.event_name }}' ]] ||
-    fail 'target resolution must distinguish automatic and direct demo deployments'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.ISSUE_KEY')" == '${{ inputs.issue }}' ]] ||
-    fail 'direct target resolution must receive the issue key'
   local demo_gate_run
   demo_gate_run="$(query '.jobs.deploy-demo.steps[0].run')"
   [[ "$demo_gate_run" == *'enabled=true'* && "$demo_gate_run" == *'enabled=false'* ]] ||
@@ -897,8 +1017,6 @@ check_contract() {
     fail 'the demo gate must skip when either Tailscale OAuth credential is missing'
   grep -Fq '::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing' <<< "$demo_gate_run" ||
     fail 'the demo gate must report when it skips for missing Tailscale OAuth credentials'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo image download must run only when public demo deployment is enabled'
   [[ "$(query '[.jobs.deploy-demo.steps[] | select(has("continue-on-error")) | .id] | join(",")')" == '' ]] ||
     fail 'the demo deploy steps must not suppress errors'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_BUILD_RESULT')" == '${{ needs.build-demo-web.outputs.result }}' && "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_JOB_RESULT')" == '${{ needs.build-demo-web.result }}' ]] ||
@@ -913,14 +1031,21 @@ check_contract() {
     fail 'the demo tailnet connection must run only when public demo deployment is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .if')" == "$expected_demo_step_if" ]] ||
     fail 'the demo key installation must run only when public demo deployment is enabled'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
+  local demo_validate_index demo_tailnet_index
+  demo_validate_index="$(query '.jobs.deploy-demo.steps | map(.name) | to_entries | .[] | select(.value == "Install the demo deploy key") | .key')"
+  demo_tailnet_index="$(query '.jobs.deploy-demo.steps | map(.name) | to_entries | .[] | select(.value == "Join the tailnet") | .key')"
+  [[ -n "$demo_validate_index" && -n "$demo_tailnet_index" && "$demo_validate_index" -lt "$demo_tailnet_index" ]] ||
+    fail 'the demo target must be validated before connecting to the tailnet'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .run')" == *'.github/scripts/validate-deploy-target.sh'* ]] ||
+    fail 'the demo target must use the shared variable validator before connecting'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .if')" == "$expected_demo_step_if" ]] ||
     fail 'the demo server deployment must run when public demo deployment is enabled, regardless of web pin state'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail if the live web publication is not deployable") | .if')" == "$expected_demo_web_failure_if" ]] ||
     fail 'a rejected live web publication must fail visibly after the public server deployment'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .if')" == "$expected_demo_web_step_if" ]] ||
     fail 'the web publish step must require a deployable live publication'
   local demo_server_step_index demo_resolver_failure_step_index demo_web_download_step_index demo_web_pin_failure_step_index
-  demo_server_step_index="$(grep -nF -m1 '      - name: Deploy the tested server commit after the dev deploy' "$demo_workflow" | cut -d: -f1)"
+  demo_server_step_index="$(grep -nF -m1 '      - name: Deploy the tested server commit to demo' "$demo_workflow" | cut -d: -f1)"
   demo_resolver_failure_step_index="$(grep -nF -m1 '      - name: Fail after server deploy when web build failed' "$demo_workflow" | cut -d: -f1)"
   demo_web_download_step_index="$(grep -nF -m1 '      - name: Download the web artifact from this deploy run' "$demo_workflow" | cut -d: -f1)"
   demo_web_pin_failure_step_index="$(grep -nF -m1 '      - name: Fail if the live web publication is not deployable' "$demo_workflow" | cut -d: -f1)"
@@ -932,7 +1057,7 @@ check_contract() {
       demo_web_download_step_index >= demo_web_pin_failure_step_index )); then
     fail 'web publication or artifact failures must not prevent the public server deployment from running'
   fi
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .id')" == 'server-deploy' ]] ||
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .id')" == 'server-deploy' ]] ||
     fail 'the server deployment must expose its result to the resolver failure gate'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail after server deploy when web build failed") | .if')" == "\${{ always() && steps.demo-gate.outputs.enabled == 'true' && (needs.build-demo-web.result != 'success' || needs.build-demo-web.outputs.result != 'success') && steps.server-deploy.outcome == 'success' }}" ]] ||
     fail 'resolver errors must fail visibly only after a successful demo server deployment'
@@ -999,17 +1124,15 @@ check_contract() {
     fail 'the deploy workflow must not name the deleted teagram LXC address'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
   [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the Deploy. run'
-  query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .run' |
-    grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' ||
-    fail 'the demo ssh step must send the tested SHA and trusted image digest to the separate demo host'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
-    fail 'the demo ssh step must take its image digest from the trusted CI artifact'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .env.CI_RUN_ID')" == '${{ steps.target.outputs.ci_run_id }}' ]] ||
-    fail 'the demo digest must be downloaded from the selected CI run'
+  query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .run' |
+    grep -Fq '"$DEMO_DEPLOY_USER@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' ||
+    fail 'the demo ssh step must send the tested SHA and trusted image digest using the configured login'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ needs.check-demo-deploy-target.outputs.digest }}' ]] ||
+    fail 'the demo ssh step must use the shared tested image digest'
   local digest_run
-  digest_run="$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .run')"
+  digest_run="$(demo_query '.jobs."check-demo-deploy-target".steps[] | select(.id == "image") | .run')"
   grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$digest_run" ||
     fail 'the demo image digest must be read from the trusted CI run artifact'
   grep -Fq 'demo-image-digest-$DEPLOY_SHA' <<< "$digest_run" ||
@@ -1053,24 +1176,76 @@ check_contract() {
     fail 'the workflow must bind rollback to its own manual dispatch run'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_SOURCE_SHA')" == '${{ needs.build-demo-web.outputs.source_commit }}' && "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ARTIFACT_DIGEST')" == '${{ needs.build-demo-web.outputs.artifact_digest }}' ]] ||
     fail 'the published web identity must come from the deploy-time build'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.DEMO_DEPLOY_USER')" == '${{ vars.DEMO_DEPLOY_USER }}' ]] ||
+    fail 'the web publish command must use the configured demo login user'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'the demo key step must validate the configured SSH port'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_HOST')" == '${{ vars.DEMO_DEPLOY_HOST }}' ]] ||
+    fail 'the demo key step must validate the configured SSH host'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_USER')" == '${{ vars.DEMO_DEPLOY_USER }}' ]] ||
+    fail 'the demo key step must use the configured login user'
   [[ "$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT] | unique | .[0]')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'both demo SSH steps must use the configured SSH port'
   demo_ssh_runs="$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run')"
   grep -Fq 'ssh -T -p "$DEMO_DEPLOY_PORT"' <<< "$demo_ssh_runs" ||
     fail 'demo SSH must pass the non-default port'
   demo_port_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .run')"
-  grep -Fq '[[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]' <<< "$demo_port_run" ||
-    fail 'demo SSH port must contain only decimal digits'
-  grep -Fq '(( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))' <<< "$demo_port_run" ||
-    fail 'demo SSH port must be within 1..65535'
+  grep -Fq 'DEMO_DEPLOY_PORT "$DEMO_DEPLOY_PORT"' <<< "$demo_port_run" ||
+    fail 'demo SSH port must be validated by the shared deploy target validator'
+  grep -Fq 'DEMO_DEPLOY_USER "$DEMO_DEPLOY_USER"' <<< "$demo_port_run" ||
+    fail 'demo SSH user must be validated by the shared deploy target validator'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
     grep -F 'StrictHostKeyChecking=yes' >/dev/null || fail 'the demo ssh step must verify the host key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
     fail 'the demo job must use its environment-scoped deploy key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||
     fail 'the demo job must use its pinned known-hosts value'
+  ! grep -Fq 'root@' "$demo_workflow" || fail 'the demo workflow must not hard-code root as a deploy login'
+
+  [[ "$(demo_query '.jobs.deploy-dev.name')" == 'deploy: dev' &&
+    "$(demo_query '.jobs.deploy-dev.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target,check-dev-deploy-target' &&
+    "$(demo_query '.jobs.deploy-dev.if')" == "$expected_dev_if" &&
+    "$(demo_query '.jobs.deploy-dev.environment')" == 'demo' ]] ||
+    fail 'the dev deploy must be a separate sibling job using the shared target in the demo environment'
+  [[ "$(demo_query '.jobs.deploy-dev.permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=read,contents=read' ]] ||
+    fail 'the dev deploy must use read-only repository and artifact permissions'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_PORT')" == '${{ vars.DEV_DEPLOY_PORT }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEV_DEPLOY_KNOWN_HOSTS }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
+    fail 'the dev job must read all four dev target variables from the demo environment'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ needs.check-demo-deploy-target.outputs.digest }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
+    fail 'the dev job must deploy the same tested commit and image digest as demo'
+  demo_dev_run="$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .run')"
+  grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' <<< "$demo_dev_run" ||
+    fail 'the dev job must send the shared SHA and digest using its configured user and host'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
+    fail 'the dev job must connect only after target validation and ping its configured host'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.TS_OAUTH_CLIENT_ID')" == '${{ secrets.TS_OAUTH_CLIENT_ID }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
+    fail 'the dev deploy must check its shared SSH key and tailnet credentials before connecting'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Install the dev deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Install the dev deploy key") | .env.DEV_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEV_DEPLOY_KNOWN_HOSTS }}' ]] ||
+    fail 'the dev deploy must install the shared key with its pinned host key'
+  dev_target_index="$(demo_query '.jobs.deploy-dev.steps | map(.name) | to_entries | .[] | select(.value == "Validate the dev deployment target") | .key')"
+  dev_tailnet_index="$(demo_query '.jobs.deploy-dev.steps | map(.name) | to_entries | .[] | select(.value == "Join the tailnet") | .key')"
+  [[ -n "$dev_target_index" && -n "$dev_tailnet_index" && "$dev_target_index" -lt "$dev_tailnet_index" ]] ||
+    fail 'dev target variables must be validated before connecting to the tailnet'
+  [[ "$(demo_query '.jobs.deploy-dev.if')" == *"needs.check-dev-deploy-target.outputs.configured == 'true'"* ]] ||
+    fail 'the deploy-dev job must be skipped when its target is unset'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .run')" == *'.github/scripts/validate-deploy-target.sh'* ]] ||
+    fail 'a configured dev target must use the shared deploy target validator'
+  [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Install the dev deploy key") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' ]] ||
+    fail 'an unset dev host must skip key installation and deployment'
+  ! grep -Fq 'deploy-dev' < <(demo_query '.jobs.deploy-demo.needs[]') ||
+    fail 'the public demo deploy must not depend on the independent dev deploy'
+  ! grep -Fq 'deploy-demo' < <(demo_query '.jobs.deploy-dev.needs[]') ||
+    fail 'the dev deploy must not depend on the independent public demo deploy'
   [[ "$(query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
     fail 'run blocks must not interpolate ${{ }}; pass values through env'
   [[ "$(demo_query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
@@ -1150,8 +1325,23 @@ self_test() {
     fi
   done
 
+  local qa_mutations=(
+    '(.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_HOST) = "${{ vars.DEMO_DEPLOY_HOST }}"'
+    'del(.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings").env.QA_INVITE_DEPLOY_USER)'
+  )
+  for mutation in "${qa_mutations[@]}"; do
+    yq "$mutation" "$qa_workflow" > "$tmp/deploy-qa-invite.yml"
+    if QA_INVITE_DEPLOY_WORKFLOW="$tmp/deploy-qa-invite.yml" "$0" --contract-only 2>/dev/null; then
+      printf 'contract accepted a broken QA invite workflow: %s\n' "$mutation" >&2
+      exit 1
+    fi
+  done
+
   local demo_mutations=(
     'del(.jobs."deploy-demo")'
+    'del(.jobs."check-demo-deploy-target")'
+    'del(.jobs."check-dev-deploy-target")'
+    'del(.jobs."deploy-dev")'
     '.jobs."deploy-demo".needs = []'
     '.jobs."deploy-demo".if = "${{ always() }}"'
     '.jobs."deploy-demo".continue-on-error = true'
@@ -1168,7 +1358,7 @@ self_test() {
     '(.jobs."deploy-demo".steps[] | select(.id == "demo-web-artifact") | .run) |= sub("GITHUB_RUN_ID"; "CI_RUN_ID")'
     '.jobs."deploy-demo".steps[0].run = "echo enabled=true"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .if) = "${{ always() }}"'
-    '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if) = "${{ always() }}"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit to demo") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
     '.jobs."deploy-demo".steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED = "true"'
     'del(.jobs."deploy-demo".steps[] | select(.id == "web-gate").env.DEMO_WEB_BUILD_RESULT)'
@@ -1180,8 +1370,11 @@ self_test() {
     '.jobs."deploy-demo".environment = "production"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT) = "${{ vars.WRONG_PORT }}"'
-    '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .run) |= sub(">= 1"; ">= 0")'
-    '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .run) |= sub("<= 65535"; "<= 65536")'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_USER) = "${{ vars.WRONG_USER }}"'
+    '.jobs."deploy-dev".if = "${{ always() }}"'
+    '(.jobs."deploy-dev".steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_IMAGE_DIGEST) = "${{ github.sha }}"'
+    '.jobs."deploy-dev".needs += ["deploy-demo"]'
+    '(.jobs."deploy-dev".steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER) = "${{ vars.DEMO_DEPLOY_USER }}"'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run) |= sub("StrictHostKeyChecking=yes"; "StrictHostKeyChecking=no")'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run) |= sub("ssh -T -p"; "ssh -T")'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEPLOY_SHA) = "${{ github.sha }}"'
@@ -1225,6 +1418,7 @@ if [[ "${1:-}" != '--contract-only' ]]; then
   check_demo_manual_request
   check_demo_deploy_result
   check_demo_deploy_target_download
+  check_deploy_target_validator
   self_test
   printf 'deploy workflow contract holds\n'
 fi

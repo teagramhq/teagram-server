@@ -1338,6 +1338,7 @@ jobs:
             deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
+            .github/scripts/validate-deploy-target.sh \
             .github/scripts/test-deploy-workflow-contract.sh
           shellcheck --shell=bash deploy/teagram/ops/blob-encryption-common.inc
           shellcheck deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh

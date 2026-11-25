@@ -50,26 +50,53 @@ jobs:
           REQUESTED_ACTION: ${{ inputs.action }}
           ACCOUNT_NAME: ${{ inputs.account_name }}
           ISSUE_KEY: ${{ inputs.issue }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_HOST: ${{ vars.QA_INVITE_DEPLOY_HOST }}
+          QA_INVITE_DEPLOY_PORT: ${{ vars.QA_INVITE_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_KNOWN_HOSTS: ${{ vars.QA_INVITE_DEPLOY_KNOWN_HOSTS }}
+          QA_INVITE_DEPLOY_USER: ${{ vars.QA_INVITE_DEPLOY_USER }}
+          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
           QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
+          QA_ACCOUNTS_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
+          QA_ACCOUNTS_SSH_KEY: ${{ inputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
         run: |
+          set -euo pipefail
           [[ "$GITHUB_REF" == refs/heads/main ]] || {
             echo "::error::Deploy qa-invite may run only from main"
             exit 1
           }
-          [[ "$ISSUE_KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]
-          [[ "$REQUESTED_ACTION" =~ ^(up|down|status|create-account)$ ]]
-          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
-          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
+          [[ "$ISSUE_KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || {
+            echo "::error::Issue key is malformed"
+            exit 1
+          }
+          [[ "$REQUESTED_ACTION" =~ ^(up|down|status|create-account)$ ]] || {
+            echo "::error::Requested action is malformed"
+            exit 1
+          }
+          bash .github/scripts/validate-deploy-target.sh \
+            QA_INVITE_DEPLOY_HOST "$QA_INVITE_DEPLOY_HOST" \
+            QA_INVITE_DEPLOY_PORT "$QA_INVITE_DEPLOY_PORT" \
+            QA_INVITE_DEPLOY_KNOWN_HOSTS "$QA_INVITE_DEPLOY_KNOWN_HOSTS" \
+            QA_INVITE_DEPLOY_USER "$QA_INVITE_DEPLOY_USER"
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" ]] || {
+            echo "::error::DEMO_DEPLOY_SSH_KEY is empty"
+            exit 1
+          }
           if [[ "$REQUESTED_ACTION" == create-account ]]; then
-            [[ "$ACCOUNT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]
+            [[ "$ACCOUNT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]] || {
+              echo "::error::Account name is malformed"
+              exit 1
+            }
             ACCOUNT_NAME=${ACCOUNT_NAME,,}
-            [[ "$QA_ACCOUNTS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-            [[ "$QA_ACCOUNTS_PORT" =~ ^[0-9]{1,5}$ ]]
-            (( 10#$QA_ACCOUNTS_PORT >= 1 && 10#$QA_ACCOUNTS_PORT <= 65535 ))
+            bash .github/scripts/validate-deploy-target.sh \
+              QA_ACCOUNTS_HOST "$QA_ACCOUNTS_HOST" \
+              QA_ACCOUNTS_PORT "$QA_ACCOUNTS_PORT" \
+              QA_ACCOUNTS_KNOWN_HOSTS "$QA_ACCOUNTS_KNOWN_HOSTS" \
+              QA_ACCOUNTS_USER qa
+            [[ -n "$QA_ACCOUNTS_SSH_KEY" ]] || {
+              echo "::error::QA_ACCOUNTS_SSH_KEY is empty"
+              exit 1
+            }
           fi
           printf 'action=%s\naccount_name=%s\n' "$REQUESTED_ACTION" "$ACCOUNT_NAME" >> "$GITHUB_OUTPUT"
 
@@ -99,27 +126,20 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-deploy
-          ping: ${{ vars.DEMO_DEPLOY_HOST }}
+          ping: ${{ vars.QA_INVITE_DEPLOY_HOST }}
 
       - name: Install the restricted deployment keys
         env:
+          REQUESTED_ACTION: ${{ steps.input.outputs.action }}
           DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
-          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
+          QA_INVITE_DEPLOY_KNOWN_HOSTS: ${{ vars.QA_INVITE_DEPLOY_KNOWN_HOSTS }}
           QA_ACCOUNTS_SSH_KEY: ${{ steps.input.outputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
           QA_ACCOUNTS_KNOWN_HOSTS: ${{ steps.input.outputs.action == 'create-account' && vars.QA_ACCOUNTS_KNOWN_HOSTS || '' }}
         run: |
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" ]] || {
-            echo "::error::Demo deployment credentials are not configured"
-            exit 1
-          }
           install -d -m 0700 "$RUNNER_TEMP/ssh-qa-invite"
           (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_demo")
-          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"
-          if [[ "${{ steps.input.outputs.action }}" == create-account ]]; then
-            [[ -n "$QA_ACCOUNTS_SSH_KEY" && -n "$QA_ACCOUNTS_KNOWN_HOSTS" ]] || {
-              echo "::error::QA account-writer credentials are not configured"
-              exit 1
-            }
+          printf '%s\n' "$QA_INVITE_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"
+          if [[ "$REQUESTED_ACTION" == create-account ]]; then
             (umask 077 && printf '%s\n' "$QA_ACCOUNTS_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_qa")
             printf '%s\n' "$QA_ACCOUNTS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/qa_known_hosts"
           fi
@@ -145,8 +165,9 @@ jobs:
           ACCOUNT_NAME: ${{ steps.input.outputs.account_name }}
           QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
           QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_HOST: ${{ vars.QA_INVITE_DEPLOY_HOST }}
+          QA_INVITE_DEPLOY_PORT: ${{ vars.QA_INVITE_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_USER: ${{ vars.QA_INVITE_DEPLOY_USER }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -Eeuo pipefail
@@ -173,11 +194,11 @@ jobs:
             echo "::error::QA credential storage confirmation was invalid; reconcile before retrying"
             exit 1
           fi
-          if ! ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
+          if ! ssh -T -p "$QA_INVITE_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "qa-invite $SOURCE_SHA create-account $ACCOUNT_NAME" \
+            "$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST" "qa-invite $SOURCE_SHA create-account $ACCOUNT_NAME" \
             < "$password_file" > "$result_file" 2> "$error_file"; then
             echo "::error::Operator account result is unknown; its QA credential was retained for reconciliation"
             exit 1
@@ -200,8 +221,9 @@ jobs:
         shell: bash
         env:
           REQUESTED_ACTION: ${{ steps.input.outputs.action }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_HOST: ${{ vars.QA_INVITE_DEPLOY_HOST }}
+          QA_INVITE_DEPLOY_PORT: ${{ vars.QA_INVITE_DEPLOY_PORT }}
+          QA_INVITE_DEPLOY_USER: ${{ vars.QA_INVITE_DEPLOY_USER }}
           SOURCE_SHA: ${{ github.sha }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
@@ -212,11 +234,11 @@ jobs:
           else
             remote_command="qa-invite $SOURCE_SHA $REQUESTED_ACTION"
           fi
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
+          ssh -T -p "$QA_INVITE_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-qa-invite/id_demo" \
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "$remote_command" </dev/null | tee "$RUNNER_TEMP/qa-invite-operation-result"
+            "$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST" "$remote_command" </dev/null | tee "$RUNNER_TEMP/qa-invite-operation-result"
           cat "$RUNNER_TEMP/qa-invite-operation-result" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove deployment keys
