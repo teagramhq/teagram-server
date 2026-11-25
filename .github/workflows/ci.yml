@@ -3434,7 +3434,9 @@ jobs:
         if: always()
         run: docker rm -f teagramd
 
-      - name: Measure pinned Lima service memory during concurrent photo uploads
+      - name: Measure the built Lima image with concurrent photo uploads and WebSocket
+        env:
+          LIMA_SERVICE_IMAGE: teagramd:ci
         run: .github/scripts/test-lima-server-memory.sh
 
   # Brings the compose stack up the way a developer does, then restarts it to

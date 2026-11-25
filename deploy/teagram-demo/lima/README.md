@@ -41,7 +41,7 @@ when the `candidate` profile is enabled.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; 37.72 MiB combined profile and media-photo uploads at 44 MiB in hosted CI |
+| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined profile and media-photo runs at 37.72 MiB and 43.25 MiB in hosted CI |
 | teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
@@ -61,12 +61,18 @@ Hosted x86 CI measured the pinned linux/amd64 service image in a 44 MiB memory
 and swap cgroup with `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
 `TG_PG_MAX_CONNS=3`. One synchronized 1600×1600 profile-photo upload and one
 media-photo send both passed in phase
-`concurrent_profile_and_media_photo_uploads`. Peak cgroup memory was 37.72 MiB
-(39,555,072 bytes), with `memory.max=46,137,344`, `max=0`, `oom=0`, and
-`oom_kill=0`. An earlier run at 40 MiB reached that cap (`max=1`), prompting
-the server-slot rebalance. The image was
+`concurrent_profile_and_media_photo_uploads`. Run
+[`45710872548`](https://github.com/teagramhq/teagram-server/actions/runs/45710872548)
+peaked at 37.72 MiB (39,555,072 bytes); run
+[`45715431287`](https://github.com/teagramhq/teagram-server/actions/runs/45715431287)
+peaked at 43.25 MiB (45,346,816 bytes), 0.75 MiB below the cap. Both had
+`memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed.
+These pinned release runs did not enable the WebSocket listener. The image was
 `ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6`, revision
-`609ae698dbacbb94d1028d6d6e45327a82078080` ([hosted CI run](https://github.com/teagramhq/teagram-server/actions/runs/45710872548)).
+`609ae698dbacbb94d1028d6d6e45327a82078080`. The follow-on CI gate measures
+the image built by that workflow, verifies its revision label, and enables the
+Lima WebSocket listener at `:2446` with the Compose origin and browser-only
+settings; this current-image measurement determines the final headroom.
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Immutable published demo image from the successful main CI run at 609ae698.
-LIMA_SERVICE_IMAGE='ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6'
+LIMA_SERVICE_IMAGE=${LIMA_SERVICE_IMAGE:-teagramd:ci}
 CONTAINER=teagramd-lima-memory
 KEY_VOLUME=tg-lima-memory-key
 BLOB_VOLUME=tg-lima-memory-blobs
@@ -14,6 +13,7 @@ MEMORY_SAMPLE_PEAK_FILE=
 MEMORY_SAMPLE_EVENTS_FILE=
 MEMORY_SAMPLER_PID=
 IMAGE_REVISION=
+IMAGE_ID=
 MEMORY_MAX_BYTES=unknown
 MEMORY_METRICS_SOURCE=unavailable
 PROBE_PHASE=server_startup
@@ -46,18 +46,18 @@ finish() {
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
     max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
-    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s revision=%s peak_mib=%s peak_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s image_id=%s revision=%s websocket_listener=:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-      "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
+      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Result | Phase | Uploads | Image | Revision | Peak cgroup memory | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
-        printf '| --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |\n'
-        printf '| %s | %s | %s | %s | %s | %s MiB (%s bytes) | %s bytes | %s | %s | %s | %s |\n' \
+        printf '| Result | Phase | Uploads | Image | Image ID | Revision | WebSocket settings | Peak cgroup memory | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
+        printf '| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |\n'
+        printf '| %s | %s | %s | %s | %s | %s | :2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s | %s | %s | %s |\n' \
           "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-          "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
+          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
           "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
@@ -78,17 +78,29 @@ if [[ $(uname -m) != x86_64 ]]; then
   echo 'Lima service memory probe requires an x86_64 runner' >&2
   exit 1
 fi
-docker pull "$LIMA_SERVICE_IMAGE"
-image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$LIMA_SERVICE_IMAGE")
-if [[ $image_platform != linux/amd64 ]]; then
-  printf 'pinned service platform is %s, want linux/amd64\n' "$image_platform" >&2
+if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
+  printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
   exit 1
 fi
-IMAGE_REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LIMA_SERVICE_IMAGE")
+IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$LIMA_SERVICE_IMAGE")
+image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE_ID")
+if [[ $image_platform != linux/amd64 ]]; then
+  printf 'Lima service platform is %s, want linux/amd64\n' "$image_platform" >&2
+  exit 1
+fi
+IMAGE_REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_ID")
 test -n "$IMAGE_REVISION"
+if [[ -z ${TEAGRAMD_SOURCE_REVISION:-} ]]; then
+  echo 'TEAGRAMD_SOURCE_REVISION is required to bind the probe to the workflow commit' >&2
+  exit 1
+fi
+if [[ $IMAGE_REVISION != "$TEAGRAMD_SOURCE_REVISION" ]]; then
+  printf 'Lima service image revision is %s, want %s\n' "$IMAGE_REVISION" "$TEAGRAMD_SOURCE_REVISION" >&2
+  exit 1
+fi
 docker volume create "$KEY_VOLUME" >/dev/null
 docker volume create "$BLOB_VOLUME" >/dev/null
-docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$LIMA_SERVICE_IMAGE" bootstrap-identity >/dev/null
+docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$IMAGE_ID" bootstrap-identity >/dev/null
 
 docker run --detach --name "$CONTAINER" \
   --network host \
@@ -99,9 +111,12 @@ docker run --detach --name "$CONTAINER" \
   --env TG_POSTGRES_DSN --env TG_AUTHKEY_ENC_KEY \
   --env TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
   --env TG_ADVERTISE_ADDR=127.0.0.1:2443 --env TG_LISTEN_ADDR=:2443 \
+  --env TG_WEBSOCKET_LISTEN_ADDR=:2446 \
+  --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
+  --env TG_WEBSOCKET_BROWSER_ONLY=false \
   --env TG_REGISTRATION=closed --env TG_PG_MAX_CONNS=3 \
   --env GOMAXPROCS=1 --env GOMEMLIMIT=24MiB \
-  "$LIMA_SERVICE_IMAGE" >/dev/null
+  "$IMAGE_ID" >/dev/null
 
 # Setup CLI processes do not belong in the server's measured 44 MiB cgroup.
 run_setup_command() {
@@ -116,6 +131,9 @@ run_setup_command() {
     --env TG_PUBLIC_LINK_PREFIX=https://links.example.test/
     --env TG_ADVERTISE_ADDR=127.0.0.1:2443
     --env TG_LISTEN_ADDR=:2443
+    --env TG_WEBSOCKET_LISTEN_ADDR=:2446
+    --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+    --env TG_WEBSOCKET_BROWSER_ONLY=false
     --env TG_REGISTRATION=closed
     --env TG_PG_MAX_CONNS=3
   )
@@ -123,7 +141,7 @@ run_setup_command() {
     docker_flags+=(--interactive --user 0)
     shift
   fi
-  docker run "${docker_flags[@]}" "$LIMA_SERVICE_IMAGE" "$@"
+  docker run "${docker_flags[@]}" "$IMAGE_ID" "$@"
 }
 
 sample_memory_cgroup() {
@@ -179,6 +197,20 @@ done
 memory_limit=$(<"$MEMORY_CGROUP_DIR/memory.max")
 if [[ $memory_limit != "$EXPECTED_LIMIT" ]]; then
   printf 'service memory.max is %s bytes, want %s\n' "$memory_limit" "$EXPECTED_LIMIT" >&2
+  exit 1
+fi
+
+websocket_listener_ready=false
+for attempt in $(seq 30); do
+  if curl --noproxy '*' --connect-timeout 1 --max-time 2 --silent --output /dev/null \
+    http://127.0.0.1:2446/apiws; then
+    websocket_listener_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ $websocket_listener_ready != true ]]; then
+  echo 'Lima WebSocket listener did not accept an HTTP connection on :2446' >&2
   exit 1
 fi
 
