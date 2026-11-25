@@ -94,7 +94,7 @@ ACTIVITY_STATE_DIR=/var/lib/teagram-demo-activity
 WIPE_LOCK="$ACTIVITY_STATE_DIR/wipe.lock"
 [[ -d "$ACTIVITY_STATE_DIR" && ! -L "$ACTIVITY_STATE_DIR" ]] ||
   demo_fail 'activity state directory is missing or unsafe'
-demo_wipe_lock_prepare "$WIPE_LOCK" 0 || demo_fail 'wipe lock is missing or unsafe'
+WIPE_LOCK=$(demo_wipe_lock_select "$WIPE_LOCK" 0) || demo_fail 'wipe lock is missing or unsafe'
 demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200 ||
   demo_fail 'timed out waiting for scheduled activity to stop'
 # Stop every public path before resetting data. The seed-only overlay never

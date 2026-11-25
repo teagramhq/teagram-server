@@ -1153,6 +1153,7 @@ for name, text, fragments in [
     ("weekly wipe installer", weekly_installer, [
         "demo_cron_require_daemon",
         "demo_cron_require_utc",
+        'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
         "demo_cron_install_entry weekly-wipe '0 3 * * 0'",
     ]),
     ("activity runner", runner, [
@@ -1163,7 +1164,7 @@ for name, text, fragments in [
         "skipped: wipe running",
     ]),
     ("cron helper", cron, ["# teagram-demo:", "crontab -", "pgrep -x crond"]),
-    ("activity guards", guards, ["flock -s -n 9", 'flock -x -w "$timeout" 8']),
+    ("activity guards", guards, ["demo_wipe_lock_select", "flock -s -n 9", 'flock -x -w "$timeout" 8']),
 ]:
     if any(fragment not in text for fragment in fragments):
         raise SystemExit(f"{name}: missing required cron or lock setting")
@@ -1171,6 +1172,7 @@ if "PASSWORD" in runner:
     raise SystemExit("activity runner: the account password must never be passed to the runner")
 assert_text_order(runner, "activity runner inventory and lock gate", [
     'demo_activity_inventory_check "$ACTIVITY_INVENTORY" 0',
+    'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
     'demo_activity_try_shared_lock "$WIPE_LOCK"',
     "demo_compose run --rm --no-deps --pull never",
 ])
@@ -1181,6 +1183,7 @@ for fragment in [
     if fragment not in wipe:
         raise SystemExit("wipe-weekly.sh: the wipe must hold the shared wipe lock exclusively")
 assert_text_order(wipe, "wipe-weekly.sh activity gate", [
+    'WIPE_LOCK=$(demo_wipe_lock_select "$WIPE_LOCK" 0)',
     'demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200',
     "demo_compose stop edge haproxy",
     "dropdb -U postgres --if-exists teagram",

@@ -698,12 +698,41 @@ or not root-owned mode 0600. The password is not passed in arguments,
 environment variables, or logs. The activity container can reach only the
 internal backend network and has no database credentials.
 
+### Activity credential threat model
+
+The protected asset is the seeded guest account inventory at
+`/var/lib/teagram-demo/secrets/demo-accounts/inventory.json`. The activity
+container runs as uid 0 and can read the entire inventory, including passwords
+for accounts other than `demo_ren`; the read-only bind mount prevents writes but
+does not hide its contents. The host's root account and Docker daemon are
+trusted. A compromised activity process or image can use those demo accounts
+against the private API and can modify the mounted activity session and rate
+state, but it has no database credential or published port. Dropping container
+capabilities, using a read-only root filesystem, and limiting it to the
+internal backend network reduce host access but do not protect mounted data
+from the container itself.
+
+The inventory remains root-owned mode 0600 on the host between runs and is
+rewritten with fresh random account passwords during each weekly reseed. Each
+activity container is one-off and removed after its run; its read-only
+credential mount disappears with it. The activity MTProto session is stored
+separately in `/var/lib/teagram-demo-activity/session.json` and remains on the
+host across wipes, but the database reset invalidates that session and the next
+activity run removes it before signing in with the newly seeded password. A
+compromise of host root or the Docker daemon crosses this boundary and can read
+both the inventory and persisted session.
+
 The weekly wipe and activity share `/var/lib/teagram-demo-activity/wipe.lock`.
 The wipe holds it exclusively for the whole reset. Each activity run takes it
 shared and without waiting, so a run that finds the wipe in progress exits 0
 with `skipped: wipe running`. The wipe waits up to 20 minutes for an in-flight
 activity run; if that run is still going, the wipe fails before it stops any
-public path or deletes any data.
+public path or deletes any data. The host coordination lock stays separate from
+the container's own `activity.lock`. During migration from the manually
+installed systemd units, the updated activity runner creates the separate host
+lock on its first run. An old wipe service that cannot create that lock under
+its read-only filesystem uses the existing activity lock until the host lock
+exists.
 
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome

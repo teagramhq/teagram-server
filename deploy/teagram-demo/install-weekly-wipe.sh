@@ -5,7 +5,10 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=deploy/teagram-demo/demo-cron.sh
 source "$SCRIPT_DIR/demo-cron.sh"
+# shellcheck source=deploy/teagram-demo/activity-guards.sh
+source "$SCRIPT_DIR/activity-guards.sh"
 WIPE_LOG_DIR=/var/log/teagram-demo
+ACTIVITY_STATE_DIR=/var/lib/teagram-demo-activity
 
 [[ "$EUID" -eq 0 ]] || { echo 'install-weekly-wipe.sh must run as root' >&2; exit 1; }
 [[ "$REPO_ROOT" == /opt/teagram-demo ]] || {
@@ -23,6 +26,19 @@ git -C "$REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/
 demo_cron_require_daemon
 demo_cron_require_utc
 "$SCRIPT_DIR/seed-demo.sh" --check
+
+[[ ! -L "$ACTIVITY_STATE_DIR" ]] || {
+  echo 'activity state directory must not be a symlink' >&2
+  exit 1
+}
+mkdir -p "$ACTIVITY_STATE_DIR"
+chown root:root "$ACTIVITY_STATE_DIR"
+chmod 0700 "$ACTIVITY_STATE_DIR"
+WIPE_LOCK="$ACTIVITY_STATE_DIR/wipe.lock"
+demo_wipe_lock_prepare "$WIPE_LOCK" 0 || {
+  echo 'the shared wipe lock is missing or unsafe' >&2
+  exit 1
+}
 
 mkdir -p "$WIPE_LOG_DIR"
 chown root:root "$WIPE_LOG_DIR"
