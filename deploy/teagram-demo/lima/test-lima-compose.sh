@@ -395,7 +395,16 @@ if [[ ! -s $TEAGRAM_TEST_MKFS_LOG ]]; then
 else
   not_ok 'prepare-blobs does not format an existing image'
 fi
-if require_gnu_coreutils >/dev/null 2>"$PREPARE_ERR"; then
+GNU_COREUTILS_BIN=$TMP_DIR/mock-gnu-coreutils
+mkdir -p "$GNU_COREUTILS_BIN"
+for tool in chown chmod stat; do
+  cat > "$GNU_COREUTILS_BIN/$tool" <<'EOF'
+#!/usr/bin/env bash
+printf '%s (GNU coreutils) 9.1\n' "${0##*/}"
+EOF
+  chmod 755 "$GNU_COREUTILS_BIN/$tool"
+done
+if PATH="$GNU_COREUTILS_BIN:$PATH" require_gnu_coreutils >/dev/null 2>"$PREPARE_ERR"; then
   ok 'prepare-blobs accepts GNU coreutils'
 else
   not_ok 'prepare-blobs accepts GNU coreutils'
