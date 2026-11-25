@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/gotd/td/tg"
 )
@@ -18,6 +19,8 @@ import (
 const (
 	mediaPartSize = 512 * 1024
 	maxSmokeMedia = 64 * 1024 * 1024
+	// Keep profile photo uploads within the server's accepted encoded-JPEG cap.
+	maxSmokePhoto = 10 * 1024 * 1024
 )
 
 type mediaReference struct {
@@ -77,6 +80,87 @@ func uploadMediaSmoke(ctx context.Context, api *tg.Client, payloadPath, manifest
 	return nil
 }
 
+func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payloadPath, startGateFile string) error {
+	payload, err := readSmokeProfilePhoto(payloadPath)
+	if err != nil {
+		return err
+	}
+	fileID, err := randomPositiveInt64()
+	if err != nil {
+		return fmt.Errorf("create profile photo upload id: %w", err)
+	}
+	parts := 0
+	for offset := 0; offset < len(payload); offset += mediaPartSize {
+		end := min(offset+mediaPartSize, len(payload))
+		saved, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+			FileID: fileID, FilePart: parts, Bytes: payload[offset:end],
+		})
+		if err != nil {
+			return fmt.Errorf("save profile photo upload part %d: %w", parts, err)
+		}
+		if !saved {
+			return fmt.Errorf("save profile photo upload part %d returned false", parts)
+		}
+		parts++
+	}
+	checksum := md5.Sum(payload) // #nosec G401 -- Telegram requires the legacy checksum for InputFile uploads.
+	if startGateFile != "" {
+		if _, err := fmt.Fprintln(os.Stdout, "Profile photo upload ready"); err != nil {
+			return fmt.Errorf("write profile photo readiness: %w", err)
+		}
+		if err := waitForSmokeGate(ctx, startGateFile); err != nil {
+			return err
+		}
+	}
+	request := &tg.PhotosUploadProfilePhotoRequest{}
+	request.SetFile(&tg.InputFile{
+		ID: fileID, Parts: parts, Name: "lima-memory-probe.jpg", MD5Checksum: hex.EncodeToString(checksum[:]),
+	})
+	result, err := api.PhotosUploadProfilePhoto(ctx, request)
+	if err != nil {
+		return fmt.Errorf("upload profile photo: %w", err)
+	}
+	if result == nil {
+		return errors.New("upload profile photo returned no result")
+	}
+	photo, ok := result.Photo.(*tg.Photo)
+	if !ok || photo == nil || photo.ID <= 0 {
+		return fmt.Errorf("upload profile photo returned %T/%+v, want stored photo", result.Photo, result.Photo)
+	}
+	for _, candidate := range result.Users {
+		user, ok := candidate.(*tg.User)
+		if !ok || user == nil || user.Username != username {
+			continue
+		}
+		profile, hasPhoto := user.GetPhoto()
+		selected, selectedOK := profile.(*tg.UserProfilePhoto)
+		if hasPhoto && selectedOK && selected != nil && selected.PhotoID == photo.ID {
+			return nil
+		}
+		return fmt.Errorf("profile photo response for %s did not select uploaded photo %d", username, photo.ID)
+	}
+	return fmt.Errorf("profile photo response omitted user %s", username)
+}
+
+func waitForSmokeGate(ctx context.Context, path string) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := os.Stat(path)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect profile photo start gate: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for profile photo start gate: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 func downloadMediaSmoke(ctx context.Context, api *tg.Client, manifestPath, outputPath string) error {
 	reference, err := readMediaReference(manifestPath)
 	if err != nil {
@@ -128,21 +212,29 @@ func downloadMediaSmoke(ctx context.Context, api *tg.Client, manifestPath, outpu
 }
 
 func readSmokeMedia(path string) (payload []byte, returnErr error) {
+	return readSmokePayload(path, maxSmokeMedia, "media upload")
+}
+
+func readSmokeProfilePhoto(path string) (payload []byte, returnErr error) {
+	return readSmokePayload(path, maxSmokePhoto, "profile photo")
+}
+
+func readSmokePayload(path string, maxBytes int64, kind string) (payload []byte, returnErr error) {
 	file, err := os.Open(path) // #nosec G304 -- CI supplies a run-owned fixture path.
 	if err != nil {
-		return nil, fmt.Errorf("open media upload fixture: %w", err)
+		return nil, fmt.Errorf("open %s fixture: %w", kind, err)
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("close media upload fixture: %w", err))
+			returnErr = errors.Join(returnErr, fmt.Errorf("close %s fixture: %w", kind, err))
 		}
 	}()
-	payload, err = io.ReadAll(io.LimitReader(file, maxSmokeMedia+1))
+	payload, err = io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read media upload fixture: %w", err)
+		return nil, fmt.Errorf("read %s fixture: %w", kind, err)
 	}
-	if len(payload) == 0 || len(payload) > maxSmokeMedia {
-		return nil, fmt.Errorf("media upload fixture size must be between 1 and %d bytes", maxSmokeMedia)
+	if len(payload) == 0 || int64(len(payload)) > maxBytes {
+		return nil, fmt.Errorf("%s fixture size must be between 1 and %d bytes", kind, maxBytes)
 	}
 	return payload, nil
 }

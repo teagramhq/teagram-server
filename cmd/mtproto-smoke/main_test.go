@@ -90,6 +90,29 @@ func TestReadSmokeCredentialRequiresProtectedSingleLineFile(t *testing.T) {
 	}
 }
 
+func TestReadSmokeProfilePhotoRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "profile.jpg")
+	if err := os.WriteFile(path, make([]byte, maxSmokePhoto+1), 0o600); err != nil {
+		t.Fatalf("write oversized photo fixture: %v", err)
+	}
+	if _, err := readSmokeProfilePhoto(path); err == nil || !strings.Contains(err.Error(), "profile photo fixture size") {
+		t.Fatalf("read oversized profile photo error = %v, want size rejection", err)
+	}
+}
+
+func TestWaitForSmokeGateHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	path := filepath.Join(t.TempDir(), "not-ready")
+	if err := waitForSmokeGate(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForSmokeGate error = %v, want context cancellation", err)
+	}
+}
+
 func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
