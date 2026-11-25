@@ -32,6 +32,7 @@ REAL_DOCKER=$(command -v docker)
 REAL_MOUNTPOINT=$(command -v mountpoint)
 REAL_FINDMNT=$(command -v findmnt)
 REAL_FALLOCATE=$(command -v fallocate)
+REAL_MKFS_EXT4=$(command -v mkfs.ext4)
 export TEAGRAM_TEST_REAL_STAT="$REAL_STAT"
 mkdir -p "$SECRETS_DIR"
 mkdir -p "$MOCK_BIN"
@@ -155,7 +156,7 @@ chmod 755 "$MOCK_BIN/blkid"
 
 cat > "$MOCK_BIN/mkfs.ext4" <<'EOF'
 #!/usr/bin/env bash
-printf 'format\n' >> "$TEAGRAM_TEST_MKFS_LOG"
+printf 'format %s\n' "$*" >> "$TEAGRAM_TEST_MKFS_LOG"
 if [[ ${TEAGRAM_TEST_MKFS_FAIL:-0} == 1 ]]; then
   exit 9
 fi
@@ -487,13 +488,14 @@ else
 fi
 if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_BLKID_TYPE='' TEAGRAM_TEST_BLKID_STATUS=2 \
   prepare_blob_filesystem "$TMP_DIR/created-here.img" 1 >/dev/null; then
-  if [[ $(wc -l < "$TEAGRAM_TEST_MKFS_LOG") == 1 ]]; then
-    ok 'prepare-blobs formats an image created in this invocation'
+  if [[ $(wc -l < "$TEAGRAM_TEST_MKFS_LOG") == 1 ]] \
+    && grep -Fq -- '-E nodiscard' "$TEAGRAM_TEST_MKFS_LOG"; then
+    ok 'prepare-blobs formats new images without discarding reserved blocks'
   else
-    not_ok 'prepare-blobs formats an image created in this invocation'
+    not_ok 'prepare-blobs formats new images without discarding reserved blocks'
   fi
 else
-  not_ok 'prepare-blobs formats an image created in this invocation'
+  not_ok 'prepare-blobs formats new images without discarding reserved blocks'
 fi
 if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_MKFS_FAIL=1 TEAGRAM_TEST_BLKID_TYPE='' TEAGRAM_TEST_BLKID_STATUS=2 \
   prepare_blob_filesystem "$TMP_DIR/partial-format.img" 1 >/dev/null 2>"$PREPARE_ERR"; then
@@ -503,6 +505,50 @@ elif grep -Fq "$TMP_DIR/partial-format.img" "$PREPARE_ERR" \
   ok 'prepare-blobs diagnoses and identifies a partial image after mkfs failure'
 else
   not_ok 'prepare-blobs diagnoses mkfs failure and partial image recovery'
+  cat "$PREPARE_ERR" >&2
+fi
+
+# A real ext4 format must keep fallocate's backing blocks allocated. The test
+# exercises the production formatter against a small file-backed filesystem.
+REAL_FORMAT_BYTES=$((64 * 1024 * 1024))
+REAL_FORMAT_IMAGE=$TMP_DIR/real-formatted.img
+REAL_MKFS_BIN=$TMP_DIR/real-mkfs-bin
+mkdir -p "$REAL_MKFS_BIN"
+cat > "$REAL_MKFS_BIN/mkfs.ext4" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec "$TEAGRAM_TEST_REAL_MKFS_EXT4" "$@"
+EOF
+chmod 755 "$REAL_MKFS_BIN/mkfs.ext4"
+"$REAL_FALLOCATE" -l "$REAL_FORMAT_BYTES" -- "$REAL_FORMAT_IMAGE"
+if PATH="$REAL_MKFS_BIN:$PATH" TEAGRAM_TEST_REAL_MKFS_EXT4="$REAL_MKFS_EXT4" \
+  prepare_blob_filesystem "$REAL_FORMAT_IMAGE" 1 >/dev/null; then
+  read -r formatted_blocks formatted_block_size < <(stat -c '%b %B' -- "$REAL_FORMAT_IMAGE")
+  if ((formatted_blocks * formatted_block_size >= REAL_FORMAT_BYTES)); then
+    ok 'prepare-blobs retains allocated blocks after real ext4 formatting'
+  else
+    not_ok 'prepare-blobs retains allocated blocks after real ext4 formatting'
+  fi
+else
+  not_ok 'prepare-blobs formats a real ext4 image for the allocation regression'
+fi
+
+# A failed reservation on an existing ext4 image must preserve its contents
+# and tell the operator to free host space and rerun, never to delete the image.
+REAL_FORMAT_SHA_BEFORE=$(sha256sum "$REAL_FORMAT_IMAGE")
+if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_AVAILABLE_BYTES=1073741824 TEAGRAM_TEST_FALLOCATE_FAIL=1 \
+  reserve_blob_space "$REAL_FORMAT_IMAGE" "$REAL_FORMAT_BYTES" 0 >/dev/null 2>"$PREPARE_ERR"; then
+  not_ok 'prepare-blobs preserves an existing image when reservation fails'
+elif grep -Fq "$REAL_FORMAT_IMAGE" "$PREPARE_ERR" \
+  && grep -Fq 'existing image data is preserved' "$PREPARE_ERR" \
+  && grep -Fq 'free host disk space and rerun' "$PREPARE_ERR" \
+  && grep -Fq 'do not remove it' "$PREPARE_ERR" \
+  && ! grep -Fq 'remove it before rerunning' "$PREPARE_ERR" \
+  && [[ -f $REAL_FORMAT_IMAGE ]] \
+  && [[ $(sha256sum "$REAL_FORMAT_IMAGE") == "$REAL_FORMAT_SHA_BEFORE" ]]; then
+  ok 'prepare-blobs preserves an existing image and explains retry after reservation failure'
+else
+  not_ok 'prepare-blobs gives safe guidance after existing-image reservation failure'
   cat "$PREPARE_ERR" >&2
 fi
 

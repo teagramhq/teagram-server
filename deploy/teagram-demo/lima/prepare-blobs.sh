@@ -66,14 +66,22 @@ reserve_blob_space() {
   if ((available_bytes < required_bytes)); then
     if ((created_here == 1)); then
       rm -f -- "$image"
+      printf 'prepare-blobs: insufficient host disk space on %s: need %s bytes available to reserve %s and keep 100 MiB free; have %s bytes\n' \
+        "$parent" "$required_bytes" "$bytes" "$available_bytes" >&2
+    else
+      printf 'prepare-blobs: insufficient host disk space on %s: need %s bytes available to reserve %s and keep 100 MiB free; have %s bytes; existing image data is preserved, free host disk space and rerun to retry reservation\n' \
+        "$parent" "$required_bytes" "$bytes" "$available_bytes" >&2
     fi
-    printf 'prepare-blobs: insufficient host disk space on %s: need %s bytes available to reserve %s and keep 100 MiB free; have %s bytes\n' \
-      "$parent" "$required_bytes" "$bytes" "$available_bytes" >&2
     return 1
   fi
   if ! fallocate -l "$bytes" -- "$image"; then
-    printf 'prepare-blobs: could not reserve %s bytes in %s; verify any partial allocation and remove it before rerunning\n' \
-      "$bytes" "$image" >&2
+    if ((created_here == 1)); then
+      printf 'prepare-blobs: could not reserve %s bytes in newly created %s; verify the partial image and remove it before rerunning\n' \
+        "$bytes" "$image" >&2
+    else
+      printf 'prepare-blobs: could not reserve %s bytes in existing %s; existing image data is preserved, free host disk space and rerun to retry reservation; do not remove it\n' \
+        "$bytes" "$image" >&2
+    fi
     return 1
   fi
   if ! available_bytes=$(available_space_bytes "$parent"); then
@@ -85,7 +93,7 @@ reserve_blob_space() {
       printf 'prepare-blobs: reserving %s would leave less than 100 MiB free on %s; removed newly created %s\n' \
         "$image" "$parent" "$image" >&2
     else
-      printf 'prepare-blobs: reserving %s left less than 100 MiB free on %s; free host disk space before running the demo\n' \
+      printf 'prepare-blobs: reserving %s left less than 100 MiB free on %s; existing image data is preserved, free host disk space and rerun to complete reservation before running the demo\n' \
         "$image" "$parent" >&2
     fi
     return 1
@@ -149,7 +157,7 @@ ensure_fstab_entry() {
 prepare_blob_filesystem() {
   local image=$1 created_here=$2 fs_type
   if [[ $created_here == 1 ]]; then
-    if ! mkfs.ext4 -q -F -L teagram-blobs -m 0 "$image"; then
+    if ! mkfs.ext4 -q -F -L teagram-blobs -m 0 -E nodiscard "$image"; then
       printf 'prepare-blobs: could not format newly created %s; verify it is partial and remove it before rerunning\n' \
         "$image" >&2
       return 1
