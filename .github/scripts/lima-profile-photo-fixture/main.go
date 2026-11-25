@@ -15,18 +15,19 @@ const (
 	photoWidth  = 1600
 	photoHeight = 1600
 	photoBytes  = 256 * 1024
+	photoPath   = "lima-memory-photo.jpg"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fatal(errors.New("usage: generate-lima-profile-photo <output-path>"))
+	if len(os.Args) != 1 {
+		fatal(errors.New("generate-lima-profile-photo takes no arguments"))
 	}
-	if err := generate(os.Args[1]); err != nil {
+	if err := generate(); err != nil {
 		fatal(err)
 	}
 }
 
-func generate(path string) error {
+func generate() error {
 	pixels := image.NewRGBA(image.Rect(0, 0, photoWidth, photoHeight))
 	for y := range photoHeight {
 		for x := range photoWidth {
@@ -56,7 +57,7 @@ func generate(path string) error {
 			return fmt.Errorf("invalid JPEG padding segment size %d", segmentSize)
 		}
 		output.Write([]byte{0xff, 0xe1, 0, 0})
-		binary.BigEndian.PutUint16(output.Bytes()[output.Len()-2:], uint16(segmentSize-2))
+		binary.BigEndian.PutUint16(output.Bytes()[output.Len()-2:], uint16(segmentSize-2)) //nolint:gosec // segmentSize is capped at 65,537, so the JPEG length fits uint16.
 		output.Write(make([]byte, segmentSize-4))
 		padding -= segmentSize
 	}
@@ -71,7 +72,7 @@ func generate(path string) error {
 	if config.Width != photoWidth || config.Height != photoHeight {
 		return fmt.Errorf("generated JPEG dimensions are %dx%d, want %dx%d", config.Width, config.Height, photoWidth, photoHeight)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(photoPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create profile photo fixture: %w", err)
 	}

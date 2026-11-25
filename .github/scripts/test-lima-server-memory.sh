@@ -111,7 +111,8 @@ fi
 docker exec "$CONTAINER" /usr/local/bin/teagramd client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"
 go build -o "$RUNNER_TEMP/mtproto-smoke" ./cmd/mtproto-smoke
-go run .github/scripts/generate-lima-profile-photo.go "$RUNNER_TEMP/lima-memory-photo.jpg"
+go build -o "$RUNNER_TEMP/generate-lima-memory-photo" ./.github/scripts/lima-profile-photo-fixture
+(cd "$RUNNER_TEMP" && ./generate-lima-memory-photo)
 
 password_file="$RUNNER_TEMP/lima-memory-password"
 printf 'lima-memory-probe-only-password\n' >"$password_file"
