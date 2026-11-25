@@ -18,6 +18,7 @@ demo_run_activity() {
   local owner=${3:-0}
   local settings=${4:-$ACTIVITY_SETTINGS}
   local wipe_lock="$state_dir/wipe.lock" legacy_lock="$state_dir/activity.lock" lock_status
+  local image_ref image_lock_protocol
 
   demo_require_root || return $?
 
@@ -67,11 +68,45 @@ demo_run_activity() {
     lock_status=$?
     if [[ "$lock_status" == 1 ]]; then
       exec 9>&-
+      exec 10>&-
       printf '%s\n' 'demo activity: skipped: wipe running'
       return 0
     fi
+    exec 9>&-
+    exec 10>&-
     return "$lock_status"
   fi
+
+  if ! image_ref=$(demo_compose_image_ref); then
+    exec 9>&-
+    exec 10>&-
+    return 1
+  fi
+  if ! image_lock_protocol=$(docker image inspect \
+    --format '{{index .Config.Labels "com.teagram.demo.activity-lock"}}' "$image_ref"); then
+    demo_fail 'could not inspect the activity image lock protocol'
+    exec 9>&-
+    exec 10>&-
+    return 1
+  fi
+  case "$image_lock_protocol" in
+    container-activity.lock)
+      # The current image uses a separate in-container lock, so the host may
+      # keep the shared legacy lock for the full activity run.
+      ;;
+    ''|'<no value>')
+      # Older images still take activity.lock exclusively inside the
+      # container. Release the temporary host hold so that lock can work.
+      exec 10>&-
+      ;;
+    *)
+      demo_fail "unsupported activity image lock protocol: $image_lock_protocol"
+      exec 9>&-
+      exec 10>&-
+      return 1
+      ;;
+  esac
+  export TEAGRAM_DEMO_IMAGE_REF="$image_ref"
 
   TARGET="${TEAGRAM_DEMO_ACTIVITY_TARGET:-river}"
   MAX_PER_HOUR="${TEAGRAM_DEMO_ACTIVITY_MAX_PER_HOUR:-6}"

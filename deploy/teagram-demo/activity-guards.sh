@@ -2,9 +2,10 @@
 # Guards shared by scheduled activity, the weekly wipe, and their tests. Sourced only.
 #
 # The wipe holds the wipe lock and legacy activity lock exclusively for the
-# whole reset. Activity takes both shared and non-blocking so old systemd wipes
-# keep coordinating during the lock migration. The container uses its own
-# container-activity.lock to prevent overlapping activity posts.
+# whole reset. Activity holds both shared and non-blocking while it identifies
+# the image protocol. Current images keep both holds for the run; legacy images
+# release the activity lock so their container can acquire it exclusively.
+# Current containers use container-activity.lock to prevent overlapping posts.
 
 demo_activity_inventory_check() {
   local inventory=$1 owner=$2

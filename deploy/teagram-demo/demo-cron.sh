@@ -7,7 +7,6 @@
 
 DEMO_CRON_REPO=/opt/teagram-demo
 DEMO_CRON_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-DEMO_CRON_INSTALL_LOCK=/run/lock/teagram-demo-cron-install.lock
 
 demo_cron_fail() {
   printf 'teagram-demo: %s\n' "$1" >&2
@@ -83,7 +82,7 @@ demo_cron_read_current() {
 }
 
 demo_cron_lock_installers() {
-  local lock=$DEMO_CRON_INSTALL_LOCK owner
+  local lock="${ACTIVITY_STATE_DIR:-/var/lib/teagram-demo-activity}/cron-install.lock" owner
   command -v flock >/dev/null 2>&1 || {
     demo_cron_fail 'flock is required to serialize root crontab updates'
     return 1

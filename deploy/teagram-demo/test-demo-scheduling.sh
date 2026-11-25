@@ -93,10 +93,11 @@ SH
 chmod 0755 "$BIN/crontab" "$BIN/pgrep"
 export CRON_STORE CRON_WRITES
 export PATH="$BIN:$PATH"
+ACTIVITY_STATE_DIR="$WORK_DIR/cron-install-state"
+mkdir -m 0700 "$ACTIVITY_STATE_DIR"
 
 # shellcheck source=deploy/teagram-demo/demo-cron.sh
 source "$SCRIPT_DIR/demo-cron.sh"
-DEMO_CRON_INSTALL_LOCK="$WORK_DIR/crontab-install.lock"
 # shellcheck source=deploy/teagram-demo/activity-guards.sh
 source "$SCRIPT_DIR/activity-guards.sh"
 demo_fail() {
@@ -115,6 +116,9 @@ MOCK_CROND=1 demo_cron_require_daemon || fail 'daemon check rejected a running c
 CRONTAB_ABSENT_STYLE=busybox demo_cron_install_entry activity '*/10 * * * *' \
   /opt/teagram-demo/deploy/teagram-demo/run-activity.sh /var/log/teagram-demo/activity.log
 [[ "$(grep -Fc -- '# teagram-demo:activity' "$CRON_STORE")" == 1 ]] || fail 'missing crontab was not initialized with the activity entry'
+CRON_INSTALL_LOCK="$ACTIVITY_STATE_DIR/cron-install.lock"
+[[ "$(stat -c '%u:%a' "$CRON_INSTALL_LOCK")" == "$(id -u):600" ]] ||
+  fail 'default cron installer lock was not created safely under the activity state directory'
 
 printf '%s\n' '17 4 * * * /usr/bin/true # unrelated job' > "$CRON_STORE"
 before_store=$(cat "$CRON_STORE")
@@ -189,7 +193,33 @@ printf '{}\n' > "$RUNNER_INVENTORY"
 chmod 0600 "$RUNNER_INVENTORY"
 cat > "$RUNNER_BIN/docker" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$ACTIVITY_DOCKER_CALLS"
+set -Eeuo pipefail
+case "${1:-} ${2:-}" in
+  'image inspect')
+    printf '%s\n' image-inspect >> "$ACTIVITY_DOCKER_CALLS"
+    printf '%s\n' "${ACTIVITY_IMAGE_LOCK_LABEL:-<no value>}"
+    ;;
+  'compose run')
+    printf '%s\n' compose >> "$ACTIVITY_DOCKER_CALLS"
+    printf '%s\n' "$@" >> "$ACTIVITY_DOCKER_ARGS"
+    if [[ "${ACTIVITY_IMAGE_LOCK_LABEL:-<no value>}" == container-activity.lock ]]; then
+      if (exec 8<"$ACTIVITY_TEST_STATE/activity.lock"; flock -x -n 8); then
+        printf '%s\n' 'new image did not inherit the host activity lock' >&2
+        exit 1
+      fi
+    else
+      if ! (exec 8<"$ACTIVITY_TEST_STATE/activity.lock"; flock -x -n 8); then
+        printf '%s\n' 'old image could not acquire its legacy activity lock' >&2
+        exit 1
+      fi
+      printf '%s\n' legacy-exclusive-acquired >> "$ACTIVITY_DOCKER_CALLS"
+    fi
+    ;;
+  *)
+    printf 'unexpected docker call: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
 SH
 chmod 0755 "$RUNNER_BIN/docker"
 cat > "$WORK_DIR/run-activity-harness.sh" <<'SH'
@@ -201,6 +231,7 @@ demo_require_root() {
 }
 demo_require_env() { :; }
 demo_compose() { docker compose "$@"; }
+demo_compose_image_ref() { printf '%s\n' "${ACTIVITY_TEST_IMAGE_REF:-teagramd:fixture}"; }
 if [[ "${ACTIVITY_SKIP_LOCK_PREPARE:-0}" == 1 ]]; then
   demo_wipe_lock_prepare() { :; }
 fi
@@ -213,8 +244,12 @@ export ACTIVITY_TEST_INVENTORY="$RUNNER_INVENTORY"
 export ACTIVITY_TEST_OWNER="$OWNER"
 export ACTIVITY_TEST_SETTINGS="$WORK_DIR/missing-activity-settings"
 export ACTIVITY_DOCKER_CALLS="$WORK_DIR/activity-docker-calls"
+export ACTIVITY_DOCKER_ARGS="$WORK_DIR/activity-docker-args"
+export ACTIVITY_TEST_IMAGE_REF=teagramd:fixture
+export ACTIVITY_IMAGE_LOCK_LABEL=container-activity.lock
 
 : > "$ACTIVITY_DOCKER_CALLS"
+: > "$ACTIVITY_DOCKER_ARGS"
 : > "$RUNNER_STATE/wipe.lock"
 chmod 0600 "$RUNNER_STATE/wipe.lock"
 : > "$RUNNER_STATE/activity.lock"
@@ -287,11 +322,27 @@ fi
 [[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'flock operational failure still invoked Docker'
 
 : > "$ACTIVITY_DOCKER_CALLS"
+: > "$ACTIVITY_DOCKER_ARGS"
 ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" ||
   fail 'activity runner rejected a free shared lock'
 grep -Fxq 'compose' "$ACTIVITY_DOCKER_CALLS" || fail 'free lock did not invoke Docker Compose'
-grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$ACTIVITY_DOCKER_CALLS" ||
+grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$ACTIVITY_DOCKER_ARGS" ||
   fail 'activity runner did not pass the read-only inventory bind mount'
+
+# A pre-migration image still takes activity.lock exclusively inside the
+# container. The runner must release its temporary shared hold before Compose.
+: > "$ACTIVITY_DOCKER_CALLS"
+: > "$ACTIVITY_DOCKER_ARGS"
+ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" || fail 'legacy activity image could not run with the host wrapper'
+grep -Fxq 'legacy-exclusive-acquired' "$ACTIVITY_DOCKER_CALLS" ||
+  fail 'legacy image could not acquire activity.lock exclusively'
+grep -Fxq 'compose' "$ACTIVITY_DOCKER_CALLS" || fail 'legacy image did not reach Docker Compose'
+grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$ACTIVITY_DOCKER_ARGS" ||
+  fail 'legacy image run did not pass the read-only inventory bind mount'
+
+grep -Fq 'com.teagram.demo.activity-lock="container-activity.lock"' "$SCRIPT_DIR/../../Dockerfile" ||
+  fail 'runtime image does not declare its activity lock protocol'
 
 # Wipe lock: created safely, refused when unsafe.
 LOCK="$WORK_DIR/activity-state/wipe.lock"
