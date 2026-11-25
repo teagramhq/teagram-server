@@ -18,9 +18,11 @@ demo_run_activity() (
   local activity_inventory=$inventory
   local owner=${3:-0}
   local settings=${4:-$ACTIVITY_SETTINGS}
+  local compatibility_runtime_dir=${5:-/run/teagram-demo-activity-credential}
+  local run_dir=${6:-/run}
   local wipe_lock="$state_dir/wipe.lock" legacy_lock="$state_dir/activity.lock"
   local container_lock="$state_dir/container-activity.lock" lock_status
-  local image_ref image_lock_protocol
+  local image_ref image_lock_protocol compatibility_template
   local compatibility_dir=''
   local -a extra_volumes=()
 
@@ -118,7 +120,18 @@ demo_run_activity() (
       # Older images require a 0400 inventory and use activity.lock inside
       # the container. Copy the credential privately and alias that old lock
       # path to the current container lock, keeping the host wipe lock held.
-      compatibility_dir=$(mktemp -d /run/teagram-demo-activity.XXXXXXXX) || {
+      if [[ -e "$compatibility_runtime_dir" || -L "$compatibility_runtime_dir" ]]; then
+        [[ -d "$compatibility_runtime_dir" && ! -L "$compatibility_runtime_dir" &&
+          "$(stat -c '%u:%a' -- "$compatibility_runtime_dir")" == "$owner:700" ]] || {
+          demo_fail 'legacy activity runtime directory must be a private owner-owned mode 0700 directory'
+          return 1
+        }
+        compatibility_template="$compatibility_runtime_dir/legacy.XXXXXXXX"
+      else
+        # Cron has no systemd RuntimeDirectory, so use its writable /run.
+        compatibility_template="$run_dir/teagram-demo-activity.XXXXXXXX"
+      fi
+      compatibility_dir=$(mktemp -d "$compatibility_template") || {
         demo_fail 'could not create a private temporary directory for legacy activity credentials'
         return 1
       }

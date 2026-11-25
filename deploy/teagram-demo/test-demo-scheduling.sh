@@ -6,6 +6,7 @@ WORK_DIR=$(mktemp -d /tmp/teagram-demo-scheduling-test.XXXXXXXX)
 HOLDER_PID=''
 ACTIVITY_PID=''
 LEGACY_WIPE_PID=''
+RUNNER_RUN_DIR=''
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
@@ -22,6 +23,9 @@ cleanup() {
   if [[ -n "$HOLDER_PID" ]]; then
     kill "$HOLDER_PID" 2>/dev/null || true
     wait "$HOLDER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$RUNNER_RUN_DIR" && -d "$RUNNER_RUN_DIR" ]]; then
+    chmod 0700 "$RUNNER_RUN_DIR" || status=1
   fi
   case "$WORK_DIR" in
     /tmp/teagram-demo-scheduling-test.????????) rm -rf -- "$WORK_DIR" || status=1 ;;
@@ -219,23 +223,19 @@ demo_activity_inventory_check "$WORK_DIR/missing.json" "$OWNER" && fail 'missing
 RUNNER_STATE="$WORK_DIR/activity-runner-state"
 RUNNER_INVENTORY="$WORK_DIR/activity-runner-inventory.json"
 RUNNER_BIN="$WORK_DIR/activity-runner-bin"
-RUNNER_PRIVATE_TMP="$WORK_DIR/activity-private-tmp"
+RUNNER_RUN_DIR="$WORK_DIR/activity-read-only-run"
+RUNNER_RUNTIME_DIR="$RUNNER_RUN_DIR/teagram-demo-activity-credential"
 ACTIVITY_LEGACY_READER="$WORK_DIR/legacy-activity-credential-reader"
-ACTIVITY_REAL_MKTEMP=$(command -v mktemp)
-mkdir -m 0700 "$RUNNER_STATE" "$RUNNER_BIN" "$RUNNER_PRIVATE_TMP"
+mkdir -m 0700 "$RUNNER_STATE" "$RUNNER_BIN" "$RUNNER_RUN_DIR"
+mkdir -m 0700 "$RUNNER_RUNTIME_DIR"
+chmod 0555 "$RUNNER_RUN_DIR"
+[[ "$(stat -c '%a' "$RUNNER_RUN_DIR")" == 555 ]] || fail 'test /run root is not read-only'
+if ( : > "$RUNNER_RUN_DIR/outside-runtime-directory" ) 2>/dev/null; then
+  fail 'test /run root allowed writes outside the runtime directory'
+fi
 go build -o "$ACTIVITY_LEGACY_READER" "$SCRIPT_DIR/testdata/legacy-activity-credential-reader.go"
 printf '%s\n' '{"demo_ren":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' > "$RUNNER_INVENTORY"
 chmod 0600 "$RUNNER_INVENTORY"
-cat > "$RUNNER_BIN/mktemp" <<'SH'
-#!/bin/sh
-set -eu
-case "${2:-}" in
-  /run/teagram-demo-activity.*)
-    exec "$ACTIVITY_REAL_MKTEMP" -d "$ACTIVITY_COMPAT_TEMP_ROOT/teagram-demo-activity.XXXXXXXX"
-    ;;
-esac
-exec "$ACTIVITY_REAL_MKTEMP" "$@"
-SH
 cat > "$RUNNER_BIN/docker" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -288,6 +288,13 @@ case "${1:-} ${2:-}" in
         chmod 0600 "$ACTIVITY_TEST_STATE/container-activity.lock"
       fi
     else
+      case "$inventory_source" in
+        "$ACTIVITY_TEST_LEGACY_COPY_PREFIX"*) ;;
+        *)
+          printf '%s\n' 'legacy inventory copy was not staged inside the selected private directory' >&2
+          exit 1
+          ;;
+      esac
       [[ -n "$legacy_lock_source" && "$legacy_lock_source" == "$ACTIVITY_TEST_STATE/container-activity.lock" ]] || {
         printf '%s\n' 'legacy image activity lock was not aliased to the common container lock' >&2
         exit 1
@@ -315,7 +322,7 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 SH
-chmod 0755 "$RUNNER_BIN/mktemp" "$RUNNER_BIN/docker"
+chmod 0755 "$RUNNER_BIN/docker"
 cat > "$WORK_DIR/run-activity-harness.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -329,7 +336,8 @@ demo_compose_image_ref() { printf '%s\n' "${ACTIVITY_TEST_IMAGE_REF:-teagramd:fi
 if [[ "${ACTIVITY_SKIP_LOCK_PREPARE:-0}" == 1 ]]; then
   demo_wipe_lock_prepare() { :; }
 fi
-demo_run_activity "$ACTIVITY_TEST_STATE" "$ACTIVITY_TEST_INVENTORY" "$ACTIVITY_TEST_OWNER" "$ACTIVITY_TEST_SETTINGS"
+demo_run_activity "$ACTIVITY_TEST_STATE" "$ACTIVITY_TEST_INVENTORY" "$ACTIVITY_TEST_OWNER" \
+  "$ACTIVITY_TEST_SETTINGS" "${ACTIVITY_TEST_COMPAT_RUNTIME_DIR:-}" "${ACTIVITY_TEST_RUN_DIR:-}"
 SH
 chmod 0755 "$WORK_DIR/run-activity-harness.sh"
 export ACTIVITY_RUNNER="$SCRIPT_DIR/run-activity.sh"
@@ -340,8 +348,6 @@ export ACTIVITY_TEST_SETTINGS="$WORK_DIR/missing-activity-settings"
 export ACTIVITY_DOCKER_CALLS="$WORK_DIR/activity-docker-calls"
 export ACTIVITY_DOCKER_ARGS="$WORK_DIR/activity-docker-args"
 export ACTIVITY_LEGACY_READER
-export ACTIVITY_REAL_MKTEMP
-export ACTIVITY_COMPAT_TEMP_ROOT="$RUNNER_PRIVATE_TMP"
 export ACTIVITY_TEST_IMAGE_REF=teagramd:fixture
 export ACTIVITY_IMAGE_LOCK_LABEL=container-activity.lock
 
@@ -431,17 +437,36 @@ grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$
 # lock path to the common container lock and copies credentials privately.
 : > "$ACTIVITY_DOCKER_CALLS"
 : > "$ACTIVITY_DOCKER_ARGS"
-ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" \
+ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_ROOT_ALLOWED=1 \
+  ACTIVITY_TEST_COMPAT_RUNTIME_DIR="$RUNNER_RUNTIME_DIR" ACTIVITY_TEST_RUN_DIR="$RUNNER_RUN_DIR" \
+  ACTIVITY_TEST_LEGACY_COPY_PREFIX="$RUNNER_RUNTIME_DIR/legacy." \
+  PATH="$RUNNER_BIN:$PATH" \
   "$WORK_DIR/run-activity-harness.sh" || fail 'legacy activity image could not run with the host wrapper'
 grep -Fxq 'legacy activity credential read' "$ACTIVITY_DOCKER_CALLS" ||
   fail 'pre-change activity reader could not read its mode 0400 credential copy'
 grep -Fxq 'compose' "$ACTIVITY_DOCKER_CALLS" || fail 'legacy image did not reach Docker Compose'
-grep -Eq '^/tmp/teagram-demo-scheduling-test\.[^:]+/activity-private-tmp/teagram-demo-activity\.[^:]+/inventory.json:/run/secrets/demo-activity-inventory.json:ro$' "$ACTIVITY_DOCKER_ARGS" ||
-  fail 'legacy image run did not pass the private read-only inventory copy'
+grep -Fq -- "$RUNNER_RUNTIME_DIR/legacy." "$ACTIVITY_DOCKER_ARGS" ||
+  fail 'legacy image did not stage its private credential copy in the writable runtime directory'
 grep -Fq -- "$RUNNER_STATE/container-activity.lock:/var/lib/teagram-demo-activity/activity.lock:rw" "$ACTIVITY_DOCKER_ARGS" ||
   fail 'legacy image activity lock was not mapped to the common container lock'
-[[ ! -e "$(find "$RUNNER_PRIVATE_TMP" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]] ||
+[[ ! -e "$(find "$RUNNER_RUNTIME_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]] ||
   fail 'legacy credential copy survived the activity run'
+
+# Cron has no systemd runtime directory, so its legacy-image copy uses writable /run.
+CRON_RUN_DIR="$WORK_DIR/activity-cron-run"
+mkdir -m 0700 "$CRON_RUN_DIR"
+: > "$ACTIVITY_DOCKER_CALLS"
+: > "$ACTIVITY_DOCKER_ARGS"
+ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_ROOT_ALLOWED=1 \
+  ACTIVITY_TEST_COMPAT_RUNTIME_DIR="$CRON_RUN_DIR/missing-runtime-directory" \
+  ACTIVITY_TEST_RUN_DIR="$CRON_RUN_DIR" \
+  ACTIVITY_TEST_LEGACY_COPY_PREFIX="$CRON_RUN_DIR/teagram-demo-activity." \
+  PATH="$RUNNER_BIN:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" || fail 'legacy activity image could not use cron temporary storage'
+grep -Fxq 'legacy activity credential read' "$ACTIVITY_DOCKER_CALLS" ||
+  fail 'legacy cron image could not read its mode 0400 credential copy'
+[[ ! -e "$(find "$CRON_RUN_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]] ||
+  fail 'legacy cron credential copy survived the activity run'
 
 # A systemd wipe can select the legacy lock before the runner creates wipe.lock.
 # If it starts during image preparation, it must wait until the activity run exits.
@@ -465,6 +490,8 @@ rm -f -- "$HANDOFF_INSPECT_STARTED" "$HANDOFF_INSPECT_RELEASE" \
   "$HANDOFF_COMPOSE_STARTED" "$HANDOFF_COMPOSE_RELEASE" \
   "$WORK_DIR/handoff-wipe-attempted" "$WORK_DIR/handoff-wipe-acquired"
 ACTIVITY_IMAGE_LOCK_LABEL='<no value>' ACTIVITY_TEST_STATE="$HANDOFF_STATE" \
+  ACTIVITY_TEST_COMPAT_RUNTIME_DIR="$RUNNER_RUNTIME_DIR" ACTIVITY_TEST_RUN_DIR="$RUNNER_RUN_DIR" \
+  ACTIVITY_TEST_LEGACY_COPY_PREFIX="$RUNNER_RUNTIME_DIR/legacy." \
   ACTIVITY_INSPECT_STARTED="$HANDOFF_INSPECT_STARTED" \
   ACTIVITY_INSPECT_RELEASE="$HANDOFF_INSPECT_RELEASE" \
   ACTIVITY_COMPOSE_STARTED="$HANDOFF_COMPOSE_STARTED" \
