@@ -1173,6 +1173,8 @@ for name, text, fragments in [
 if "PASSWORD" in runner:
     raise SystemExit("activity runner: the account password must never be passed to the runner")
 assert_text_order(runner, "activity runner inventory and lock gate", [
+    'local compatibility_runtime_dir=${5:-/run/teagram-demo-activity-credential}',
+    'local run_dir=${6:-/run}',
     'demo_activity_state_check "$state_dir" "$owner"',
     'demo_activity_inventory_check "$inventory" "$owner"',
     'demo_wipe_lock_prepare "$wipe_lock" "$owner"',
@@ -1180,7 +1182,10 @@ assert_text_order(runner, "activity runner inventory and lock gate", [
     'demo_activity_try_shared_lock "$wipe_lock" 9',
     'demo_activity_try_shared_lock "$legacy_lock" 10',
     'case "$image_lock_protocol" in',
-    'compatibility_dir=$(mktemp -d /run/teagram-demo-activity.XXXXXXXX)',
+    'if [[ -e "$compatibility_runtime_dir" || -L "$compatibility_runtime_dir" ]]; then',
+    'compatibility_template="$compatibility_runtime_dir/legacy.XXXXXXXX"',
+    'compatibility_template="$run_dir/teagram-demo-activity.XXXXXXXX"',
+    'compatibility_dir=$(mktemp -d "$compatibility_template")',
     'install -o "$owner" -m 0400 -- "$inventory"',
     'demo_wipe_lock_prepare "$container_lock" "$owner"',
     "demo_compose run --rm --no-deps --pull never",
