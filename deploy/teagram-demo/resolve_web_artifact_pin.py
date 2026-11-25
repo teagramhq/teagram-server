@@ -415,6 +415,16 @@ def validate_published_release_identity(
     return resolved
 
 
+def _is_demo_server_deploy_check(job: Any) -> bool:
+    name = job.get("name")
+    if name == "check: server-deploy-result":
+        return True
+    if not isinstance(name, str):
+        return False
+    path = name.split(" / ")
+    return path[-1] == "check: server-deploy-result" and "deploy: demo" in path[:-1]
+
+
 def verify_rollback_authorization(
     run_id: int, server_sha: str, publication_run_id: int, *, fetch: Callable[[str], Any] = fetch_json
 ) -> None:
@@ -443,7 +453,7 @@ def verify_rollback_authorization(
     ).get("jobs")
     if not isinstance(jobs, list):
         raise ValueError("rollback workflow jobs are invalid")
-    checks = [job for job in jobs if isinstance(job, dict) and job.get("name") == "check: server-deploy-result"]
+    checks = [job for job in jobs if isinstance(job, dict) and _is_demo_server_deploy_check(job)]
     if len(checks) != 1 or checks[0].get("status") != "completed" or checks[0].get("conclusion") != "success":
         raise ValueError("rollback dispatch did not pass issue and main-ref validation")
 
