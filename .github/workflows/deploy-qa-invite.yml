@@ -54,11 +54,9 @@ jobs:
           QA_INVITE_DEPLOY_PORT: ${{ vars.QA_INVITE_DEPLOY_PORT }}
           QA_INVITE_DEPLOY_KNOWN_HOSTS: ${{ vars.QA_INVITE_DEPLOY_KNOWN_HOSTS }}
           QA_INVITE_DEPLOY_USER: ${{ vars.QA_INVITE_DEPLOY_USER }}
-          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           QA_ACCOUNTS_HOST: ${{ vars.QA_ACCOUNTS_HOST }}
           QA_ACCOUNTS_PORT: ${{ vars.QA_ACCOUNTS_PORT }}
           QA_ACCOUNTS_KNOWN_HOSTS: ${{ vars.QA_ACCOUNTS_KNOWN_HOSTS }}
-          QA_ACCOUNTS_SSH_KEY: ${{ inputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == refs/heads/main ]] || {
@@ -78,10 +76,6 @@ jobs:
             QA_INVITE_DEPLOY_PORT "$QA_INVITE_DEPLOY_PORT" \
             QA_INVITE_DEPLOY_KNOWN_HOSTS "$QA_INVITE_DEPLOY_KNOWN_HOSTS" \
             QA_INVITE_DEPLOY_USER "$QA_INVITE_DEPLOY_USER"
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" ]] || {
-            echo "::error::DEMO_DEPLOY_SSH_KEY is empty"
-            exit 1
-          }
           if [[ "$REQUESTED_ACTION" == create-account ]]; then
             [[ "$ACCOUNT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]] || {
               echo "::error::Account name is malformed"
@@ -93,10 +87,6 @@ jobs:
               QA_ACCOUNTS_PORT "$QA_ACCOUNTS_PORT" \
               QA_ACCOUNTS_KNOWN_HOSTS "$QA_ACCOUNTS_KNOWN_HOSTS" \
               QA_ACCOUNTS_USER qa
-            [[ -n "$QA_ACCOUNTS_SSH_KEY" ]] || {
-              echo "::error::QA_ACCOUNTS_SSH_KEY is empty"
-              exit 1
-            }
           fi
           printf 'action=%s\naccount_name=%s\n' "$REQUESTED_ACTION" "$ACCOUNT_NAME" >> "$GITHUB_OUTPUT"
 
@@ -136,6 +126,16 @@ jobs:
           QA_ACCOUNTS_SSH_KEY: ${{ steps.input.outputs.action == 'create-account' && secrets.QA_ACCOUNTS_SSH_KEY || '' }}
           QA_ACCOUNTS_KNOWN_HOSTS: ${{ steps.input.outputs.action == 'create-account' && vars.QA_ACCOUNTS_KNOWN_HOSTS || '' }}
         run: |
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" ]] || {
+            echo "::error::DEMO_DEPLOY_SSH_KEY is empty"
+            exit 1
+          }
+          if [[ "$REQUESTED_ACTION" == create-account ]]; then
+            [[ -n "$QA_ACCOUNTS_SSH_KEY" ]] || {
+              echo "::error::QA_ACCOUNTS_SSH_KEY is empty"
+              exit 1
+            }
+          fi
           install -d -m 0700 "$RUNNER_TEMP/ssh-qa-invite"
           (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-qa-invite/id_demo")
           printf '%s\n' "$QA_INVITE_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"
