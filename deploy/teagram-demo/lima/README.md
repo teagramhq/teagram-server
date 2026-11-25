@@ -57,8 +57,8 @@ so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
 Compose image remains pinned to linux/amd64.
 
 A separate stress probe used a 40 MiB cgroup with swap capped at 40 MiB,
-`GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and `TG_PG_MAX_CONNS=3`. It submitted two
-concurrent 1600×1600 `photos.uploadProfilePhoto` requests and two concurrent
+`GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and the Lima pool limit of three. It submitted
+two concurrent 1600×1600 `photos.uploadProfilePhoto` requests and two concurrent
 `messages.sendMedia` photo assembly requests. The peak was 33.0 MiB, with no
 memory high, max, or OOM events. This was measured using the API test process
 and its `photothumb` child on ARM64, not the pinned linux/amd64 service image.
