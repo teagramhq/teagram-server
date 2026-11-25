@@ -63,15 +63,15 @@ x-server-environment: &server-environment
   TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
-  # Soft limit below the 40 MiB container limit, so the collector runs before
+  # Soft limit below the 44 MiB container limit, so the collector runs before
   # the kernel OOM-kills either server slot.
   GOMEMLIMIT: 24MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}
   stop_grace_period: 120s
-  mem_limit: 40m
-  memswap_limit: 40m
+  mem_limit: 44m
+  memswap_limit: 44m
   cpus: "0.5"
   pids_limit: 128
   environment: *server-environment
@@ -102,8 +102,8 @@ services:
   postgres:
     image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
     platform: linux/amd64
-    mem_limit: 56m
-    memswap_limit: 56m
+    mem_limit: 49m
+    memswap_limit: 49m
     cpus: "0.5"
     pids_limit: 64
     shm_size: 16m
@@ -263,8 +263,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 4m
-    memswap_limit: 4m
+    mem_limit: 3m
+    memswap_limit: 3m
     cpus: "0.25"
     pids_limit: 64
     volumes:

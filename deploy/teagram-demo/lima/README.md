@@ -40,27 +40,31 @@ when the `candidate` profile is enabled.
 
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
-| postgres | 56 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image) |
-| teagramd | 40 | 46 on Charlie before the Lima cap; 30.09 MiB for the pinned amd64 service in hosted CI during concurrent profile-photo uploads |
-| teagramd-next (candidate) | 40 | Same image and `GOMEMLIMIT` as teagramd; not measured at the new setting |
+| postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
+| teagramd | 44 | 46 on Charlie before the Lima cap; 30.09 MiB profile-only at 40 MiB; combined profile and media-photo uploads hit the 40 MiB cap (`max=1`, `oom=0`) |
+| teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
 | haproxy | 10 | 10 |
-| edge (nginx) | 4 | 2 |
+| edge (nginx) | 3 | 2 |
 | **Total with candidate** | **199** | |
 
 The lima Compose environment caps each server's pool at `TG_PG_MAX_CONNS=3`.
 During rollout, both server pools, their two LISTEN connections, and migrate
 use at most nine PostgreSQL client backends. A 20-second, 9-client pgbench run
-sampled 43.82 MiB under the 56 MiB container limit. The local host is ARM64,
+sampled 43.82 MiB under the prior 56 MiB container limit; the Lima limit is
+49 MiB, leaving 5.18 MiB above that sample. The local host is ARM64,
 so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
 Compose image remains pinned to linux/amd64.
 
-Hosted x86 CI measured the pinned linux/amd64 service image in a 40 MiB cgroup
-with swap capped at 40 MiB, `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
+Hosted x86 CI first measured the pinned linux/amd64 service image with a
+40 MiB memory and swap cap, `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
 `TG_PG_MAX_CONNS=3`. Two synchronized 1600×1600 `photos.uploadProfilePhoto`
-requests both passed. Peak cgroup memory was 30.09 MiB (31,555,584 bytes) with
-`memory.max=41,943,040`, `max=0`, `oom=0`, and `oom_kill=0`. The image was
+requests passed at 30.09 MiB (31,555,584 bytes), with `max=0`, `oom=0`, and
+`oom_kill=0`. The combined profile-photo and media-photo run also passed both
+uploads, but reached the 40 MiB cap (`memory.peak=41,943,040`,
+`memory.max=41,943,040`, `max=1`, `oom=0`, `oom_kill=0`). The server slots now
+have 44 MiB limits and the combined probe is rerunning at that cap. The image was
 `ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6`, revision
 `609ae698dbacbb94d1028d6d6e45327a82078080` ([hosted CI run](https://github.com/teagramhq/teagram-server/actions/runs/45662146460)).
 

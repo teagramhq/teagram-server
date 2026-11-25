@@ -286,6 +286,10 @@ expect_candidate 'criterion 2: candidate-enabled limits total exactly 199 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 199 * 1048576'
 expect_candidate 'criterion 2: both server pools are capped at three for rollout' \
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"'
+expect_candidate 'criterion 2: both server slots have 44 MiB for concurrent photo uploads' \
+  '(.services.teagramd.mem_limit | tonumber) == 46137344 and (.services["teagramd-next"].mem_limit | tonumber) == 46137344'
+expect_candidate 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
+  '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \
   '.services.postgres.volumes | any(.target == "/etc/postgresql/postgresql.conf" and (.source | endswith("deploy/teagram-demo/lima/postgresql.conf")))'
 expect 'criterion 2: only the edge publishes a host port' \
@@ -301,7 +305,7 @@ expect 'criterion 4: fixed subnets are documented values' \
   '.networks.backend.ipam.config[0].subnet == "198.18.130.0/24" and .networks.egress.ipam.config[0].subnet == "198.18.132.0/24" and .networks.edge.ipam.config[0].subnet == "198.18.133.0/24"'
 
 # Postgres sized for its limit: the config file must keep shared_buffers and
-# max_connections small enough to fit 56 MiB.
+# max_connections small enough to fit 49 MiB.
 if grep -Eq '^shared_buffers = ([1-8])MB$' "$SCRIPT_DIR/postgresql.conf" \
   && grep -Eq '^max_connections = (2[0-9]|3[0-2])$' "$SCRIPT_DIR/postgresql.conf"; then
   ok 'postgres config: shared_buffers at most 8 MB, max_connections at most 32'
@@ -309,8 +313,9 @@ else
   not_ok 'postgres config: shared_buffers at most 8 MB, max_connections at most 32'
 fi
 
-# The candidate teagramd-next exists only under its profile and has a limit.
-if jq -e '.services["teagramd-next"] | .profiles == ["candidate"] and (.mem_limit | tonumber) == 41943040' \
+# The candidate teagramd-next exists only under its profile and has the raised
+# limit needed for concurrent media-photo and profile-photo requests.
+if jq -e '.services["teagramd-next"] | .profiles == ["candidate"] and (.mem_limit | tonumber) == 46137344' \
   "$CANDIDATE_JSON" >/dev/null; then
   ok 'candidate teagramd-next is profile-gated and limited'
 else
