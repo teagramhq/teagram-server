@@ -1138,38 +1138,53 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 		}
 	}
 	pool := store.StorePool(s)
+	const deleteChatGateKey int64 = 730001234567890
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO message_search_unready_dialogs (owner_id, peer_type, peer_id, last_local_id)
 		VALUES ($1, $2, $3, 2)
 	`, owner.ID, int16(store.PeerTypeChat), chat.ID); err != nil {
 		t.Fatalf("mark chat dialog partially initialized: %v", err)
 	}
+	// Hold DeleteChat in its first-copy trigger until the initializer's blocked
+	// state is visible in PostgreSQL.
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE FUNCTION public.test_pause_delete_chat_first_copy() RETURNS trigger
+		CREATE FUNCTION public.test_gate_delete_chat_first_copy() RETURNS trigger
 		LANGUAGE plpgsql AS $function$
 		BEGIN
 			IF OLD.owner_id = %d AND OLD.peer_type = %d AND OLD.peer_id = %d AND OLD.local_id = %d THEN
-				PERFORM pg_sleep(3);
+				PERFORM pg_advisory_xact_lock(%d::bigint);
 			END IF;
 			RETURN NEW;
 		END;
 		$function$;
-		CREATE TRIGGER zzz_test_pause_delete_chat_first_copy
+		CREATE TRIGGER zzz_test_gate_delete_chat_first_copy
 		AFTER UPDATE OF deleted ON public.messages
 		FOR EACH ROW
 		WHEN (OLD.deleted = false AND NEW.deleted = true)
-		EXECUTE FUNCTION public.test_pause_delete_chat_first_copy();
-	`, owner.ID, int16(store.PeerTypeChat), chat.ID, first.LocalID)); err != nil {
-		t.Fatalf("install DeleteChat pause fixture: %v", err)
+		EXECUTE FUNCTION public.test_gate_delete_chat_first_copy();
+	`, owner.ID, int16(store.PeerTypeChat), chat.ID, first.LocalID, deleteChatGateKey)); err != nil {
+		t.Fatalf("install DeleteChat gate fixture: %v", err)
 	}
 	defer func() {
 		if _, err := pool.Exec(context.Background(), `
-			DROP TRIGGER IF EXISTS zzz_test_pause_delete_chat_first_copy ON public.messages;
-			DROP FUNCTION IF EXISTS public.test_pause_delete_chat_first_copy();
+			DROP TRIGGER IF EXISTS zzz_test_gate_delete_chat_first_copy ON public.messages;
+			DROP FUNCTION IF EXISTS public.test_gate_delete_chat_first_copy();
 		`); err != nil {
-			t.Errorf("remove DeleteChat pause fixture: %v", err)
+			t.Errorf("remove DeleteChat gate fixture: %v", err)
 		}
 	}()
+	gateTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin DeleteChat gate transaction: %v", err)
+	}
+	defer func() { _ = gateTx.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
+	var gatePID int32
+	if err := gateTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&gatePID); err != nil {
+		t.Fatalf("get DeleteChat gate backend PID: %v", err)
+	}
+	if _, err := gateTx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, deleteChatGateKey); err != nil {
+		t.Fatalf("hold DeleteChat gate lock: %v", err)
+	}
 
 	type deleteResult struct{ err error }
 	deleteCtx, cancelDelete := context.WithTimeout(ctx, 12*time.Second)
@@ -1181,34 +1196,37 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
+	var deletePID int32
 	for {
-		var paused bool
 		if err := pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
+			SELECT COALESCE((
+				SELECT pid
 				FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid()
+				  AND datname = current_database()
 				  AND state = 'active'
-				  AND wait_event = 'PgSleep'
+				  AND wait_event_type = 'Lock'
 				  AND query ILIKE '%UPDATE messages SET deleted%'
-			)
-		`).Scan(&paused); err != nil {
-			t.Fatalf("check DeleteChat first-copy pause: %v", err)
+				  AND $1 = ANY (pg_blocking_pids(pid))
+				LIMIT 1
+			), 0)
+		`, gatePID).Scan(&deletePID); err != nil {
+			t.Fatalf("check DeleteChat first-copy gate: %v", err)
 		}
-		if paused {
+		if deletePID != 0 {
 			break
 		}
 		if time.Now().After(deadline) {
 			select {
 			case result := <-deleteDone:
-				t.Fatalf("DeleteChat returned before its first-copy pause: %v", result.err)
+				t.Fatalf("DeleteChat returned before its first-copy gate: %v", result.err)
 			default:
-				t.Fatal("DeleteChat did not pause after deleting its first copy")
+				t.Fatal("DeleteChat did not wait at its first-copy gate")
 			}
 		}
 		select {
 		case result := <-deleteDone:
-			t.Fatalf("DeleteChat returned before its first-copy pause: %v", result.err)
+			t.Fatalf("DeleteChat returned before its first-copy gate: %v", result.err)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -1227,20 +1245,23 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		var initializerWaiting bool
+		var initializerPID int32
 		if err := pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM pg_stat_activity
-				WHERE pid <> pg_backend_pid()
-				  AND state = 'active'
-				  AND wait_event_type = 'Lock'
-				  AND query ILIKE '%WITH source_messages AS MATERIALIZED%'
-			)
-		`).Scan(&initializerWaiting); err != nil {
+			SELECT COALESCE((
+				SELECT activity.pid
+				FROM pg_stat_activity AS activity
+				WHERE activity.pid <> pg_backend_pid()
+				  AND activity.datname = current_database()
+				  AND activity.state = 'active'
+				  AND activity.wait_event_type = 'Lock'
+				  AND activity.query ILIKE '%WITH source_messages AS MATERIALIZED%'
+				  AND $1 = ANY (pg_blocking_pids(activity.pid))
+				LIMIT 1
+			), 0)
+		`, deletePID).Scan(&initializerPID); err != nil {
 			t.Fatalf("check initializer wait during DeleteChat: %v", err)
 		}
-		if initializerWaiting {
+		if initializerPID != 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -1259,6 +1280,9 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	if err := gateTx.Commit(ctx); err != nil {
+		t.Fatalf("release DeleteChat gate: %v", err)
+	}
 
 	select {
 	case result := <-deleteDone:
@@ -1266,7 +1290,7 @@ func TestDeleteChatLocksAllMessageRowsBeforePostingBuckets(t *testing.T) {
 			t.Fatalf("DeleteChat while initializer waits on a chunk: %v", result.err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("DeleteChat did not finish after its pause")
+		t.Fatal("DeleteChat did not finish after releasing its gate")
 	}
 	select {
 	case result := <-initDone:

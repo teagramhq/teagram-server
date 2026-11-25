@@ -39,8 +39,9 @@ layout and policy:
   intentionally stays below the earlier 2-vCPU / 4-GiB guidance.
 - Docker Engine and Compose v5.6.1. The bootstrap overlay uses
   Compose's `!override` merge tag.
-- Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock` and a
-  systemd timer service. The included weekly reset installer uses systemd.
+- Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock`,
+  and a running cron daemon (`crond`) on a UTC clock. The installers schedule
+  both jobs in root's crontab and refuse to install without that daemon.
 - A dedicated filesystem between 3 GiB and 4 GiB, mounted at
   `/srv/teagram-demo-blobs`. The aggregate upload store is a bind volume at
   `/srv/teagram-demo-blobs/data`; it must never fall back to the root disk.
@@ -680,7 +681,8 @@ Scheduled activity is disabled until explicitly installed. From
 sudo deploy/teagram-demo/install-activity.sh
 ```
 
-The timer runs about every ten minutes with a randomized delay. Each run uses
+The root crontab runs it every ten minutes; output is appended to
+`/var/log/teagram-demo/activity.log`. Each run uses
 the seeded `demo_ren` account to post one fixed fictional message in the
 `river` megagroup (`teagramdemoriver`). The root-owned settings file at
 `/etc/default/teagram-demo-activity` can select `river`, `garden`, or
@@ -689,14 +691,53 @@ of at least five minutes. The client checks the resolved peer is one of those
 seeded megagroups before sending. It does not reply or mention anyone.
 
 The activity session and persistent rate limit live in
-`/var/lib/teagram-demo-activity`, outside the weekly wipe. The wipe pauses the
-timer during reseeding and resumes it only after the seed and public checks
-succeed. It refreshes the systemd credential from the seed's root-only account
-inventory for every run. The runner stages it in a root-only transient `/run`
-directory for Docker's bind mount, removes the file after the run, and systemd
-removes the directory on stop. The password is not passed in arguments,
-environment variables, or logs. The activity container can reach only the
-internal backend network and has no database credentials.
+`/var/lib/teagram-demo-activity`, outside the weekly wipe. The runner bind-mounts
+the seed's root-only account inventory read-only into the one-off activity
+container for each run. It refuses to start if that file is missing, a symlink,
+or not root-owned mode 0600. Images built before the activity lock protocol
+label require mode 0400, so the runner makes a private copy under `/run`, mounts
+that copy read-only, and removes it when the run exits. The password is not
+passed in arguments, environment variables, or logs. The activity container can
+reach only the internal backend network and has no database credentials.
+
+### Activity credential threat model
+
+The protected asset is the seeded guest account inventory at
+`/var/lib/teagram-demo/secrets/demo-accounts/inventory.json`. The activity
+container runs as uid 0 and can read the entire inventory, including passwords
+for accounts other than `demo_ren`; the read-only bind mount prevents writes but
+does not hide its contents. The host's root account and Docker daemon are
+trusted. A compromised activity process or image can use those demo accounts
+against the private API and can modify the mounted activity session and rate
+state, but it has no database credential or published port. Dropping container
+capabilities, using a read-only root filesystem, and limiting it to the
+internal backend network reduce host access but do not protect mounted data
+from the container itself.
+
+The inventory remains root-owned mode 0600 on the host between runs and is
+rewritten with fresh random account passwords during each weekly reseed. For an
+older image, the host creates a root-only mode 0400 copy under `/run` for the
+duration of the run and removes it on exit; the container sees either inventory
+mount as read-only. Each activity container is one-off and removed after its
+run. The activity MTProto session is stored separately in
+`/var/lib/teagram-demo-activity/session.json` and remains on the host across
+wipes, but the database reset invalidates that session and the next activity
+run removes it before signing in with the newly seeded password. A compromise
+of host root or the Docker daemon crosses this boundary and can read both the
+inventory and persisted session.
+
+The weekly wipe and activity share `/var/lib/teagram-demo-activity/wipe.lock`;
+they also coordinate through the legacy `activity.lock` so manually installed
+systemd wipes remain safe during migration. The current wipe holds both locks
+exclusively for the reset. Each activity run holds both shared locks through
+container exit and skips without waiting if either is busy. The wipe waits up to
+20 minutes for an in-flight activity run; if that run is still going, the wipe
+fails before it stops any public path or deletes any data. Current images use
+`container-activity.lock` to prevent overlapping posts. For a legacy image, the
+runner mounts that same lock file at the old `activity.lock` container path,
+allowing the host to retain the shared lock that blocks an older systemd wipe.
+An old wipe service that cannot create `wipe.lock` under its read-only
+filesystem uses the existing `activity.lock`.
 
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome
@@ -712,22 +753,22 @@ uses bounded signup/code limits, and disables the message-send rate limit only
 while edge and HAProxy are down. Production Compose settings are restored
 before the edge can start.
 
-The timer is Sunday at 03:00 UTC with a persistent catch-up and randomized
-delay. Install it only after the tracked, executable
-`deploy/teagram-demo/seed-demo.sh` supports `--check` and seeds the demo through
-the API:
+The root crontab runs the wipe at 03:00 UTC every Sunday, and its output is
+appended to `/var/log/teagram-demo/weekly-wipe.log`. Install it only after the
+tracked, executable `deploy/teagram-demo/seed-demo.sh` supports `--check` and
+seeds the demo through the API:
 
 ```sh
 cd /opt/teagram-demo
 deploy/teagram-demo/install-weekly-wipe.sh
 ```
 
-The installer refuses to enable a timer without that seed command. Check a
-run with `systemctl status teagram-demo-weekly-wipe.service` and
-`journalctl -u teagram-demo-weekly-wipe.service`; manually triggering the
-service is a destructive reset of public demo content.
-After a reviewed fix is deployed, the operations menu can run the service and
-return the current run's verification line:
+The installer refuses to schedule the wipe without that seed command or without
+a running cron daemon, and reinstalling keeps exactly one crontab line for it.
+Check the last run in `/var/log/teagram-demo/weekly-wipe.log`; manually
+triggering the wipe is a destructive reset of public demo content.
+After a reviewed fix is deployed, the operations menu runs the wipe in the
+foreground and reports its own exit status and verification line:
 
 ```sh
 ssh -T teagram-demo 'run <main-sha> weekly-wipe'

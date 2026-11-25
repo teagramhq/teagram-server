@@ -19,6 +19,32 @@ func TestParseActivityMode(t *testing.T) {
 	}
 }
 
+func TestActivityContainerLockIsSeparateFromLegacyWipeLock(t *testing.T) {
+	stateDir := t.TempDir()
+	lock, err := acquireActivityLock(stateDir)
+	if err != nil {
+		t.Fatalf("acquire container activity lock: %v", err)
+	}
+	if err := releaseActivityLock(lock); err != nil {
+		t.Fatalf("release container activity lock: %v", err)
+	}
+
+	containerLockPath := filepath.Join(stateDir, activityLockFileName)
+	info, err := os.Stat(containerLockPath)
+	if err != nil {
+		t.Fatalf("stat container activity lock: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("container activity lock mode = %04o, want 0600", info.Mode().Perm())
+	}
+	if activityLockFileName == "activity.lock" {
+		t.Fatal("container lock reuses the legacy host wipe lock")
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, "activity.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy host wipe lock unexpectedly created by container: %v", err)
+	}
+}
+
 func TestParseActivityConfiguration(t *testing.T) {
 	for _, target := range []string{"river", "garden", "workshop"} {
 		args := []string{"--activity", "--target", target, "--max-actions-per-hour", "4", "--min-interval", "10m"}
@@ -247,6 +273,12 @@ func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) 
 	if password != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 		t.Fatal("readActivityPasswordAt returned a different credential")
 	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readActivityPasswordAt(path, account); err != nil {
+		t.Fatalf("read activity credential from read-only bind source mode 0600: %v", err)
+	}
 	if err := os.Chmod(path, 0644); err != nil { // #nosec G302 -- deliberately weaken permissions to test rejection.
 		t.Fatal(err)
 	}
@@ -254,6 +286,9 @@ func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) 
 		t.Fatal("readActivityPasswordAt accepted a group/world-readable credential")
 	}
 	if err := os.WriteFile(path, []byte(`{"demo_iona":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readActivityPasswordAt(path, account); err == nil {
