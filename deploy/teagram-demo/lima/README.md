@@ -49,6 +49,11 @@ when the `candidate` profile is enabled.
 | edge (nginx) | 4 | 2 |
 | **Total with candidate** | **199** | |
 
+The lima Compose environment caps each server's pool at `TG_PG_MAX_CONNS=2`.
+During rollout, both server pools, their two LISTEN connections, and migrate
+use at most seven PostgreSQL client backends, within the 8-client pgbench run
+that used 52 MiB.
+
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd
 during rollout.

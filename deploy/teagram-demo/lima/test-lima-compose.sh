@@ -3,8 +3,8 @@
 # acceptance criteria: no qa-invite and no build keys, digest-pinned images,
 # memory limits within the 200 MiB budget, the blob bind, fixed subnets, and
 # secrets named by check.sh. It also checks that lima's teagramd environment
-# matches the charlie file except for GOMEMLIMIT, and that check.sh never
-# prints a secret.
+# matches the charlie file except for the lima-specific memory and pool caps,
+# and that check.sh never prints a secret.
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -241,6 +241,8 @@ jq '.services.postgres.image = "postgres:18-alpine"' "$CANDIDATE_JSON" > "$TAMPE
 jq '.services.postgres.build = "."' "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/build.json"
 jq '.services["qa-invite"] = (.services.migrate | .mem_limit = "1")' \
   "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/qa-invite.json"
+jq '.services.teagramd.environment.TG_PG_MAX_CONNS = "8" | .services["teagramd-next"].environment.TG_PG_MAX_CONNS = "8"' \
+  "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/postgres-pool.json"
 jq '.services["budget-probe"] = {image: ("fixture@sha256:" + ("a" * 64)), mem_limit: "2097152"}' \
   "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
 jq '.networks.egress.ipam.config[0].subnet = "198.18.134.0/24"' \
@@ -282,6 +284,8 @@ expect 'criterion 2: long-running limits total at most 200 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add <= 209715200'
 expect_candidate 'criterion 2: candidate-enabled limits total exactly 199 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 199 * 1048576'
+expect_candidate 'criterion 2: both server pools are capped at two for rollout' \
+  '.services.teagramd.environment.TG_PG_MAX_CONNS == "2" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "2"'
 expect 'criterion 2: postgres runs with the lima config file' \
   '.services.postgres.volumes | any(.target == "/etc/postgresql/postgresql.conf" and (.source | endswith("deploy/teagram-demo/lima/postgresql.conf")))'
 expect 'criterion 2: only the edge publishes a host port' \
@@ -318,11 +322,12 @@ fi
 assert_config_failure 'check.sh rejects a tag-only image' 'FAIL image-digests:' "$TAMPERED_CONFIG_DIR/digest.json"
 assert_config_failure 'check.sh rejects a build key' 'FAIL config-build:' "$TAMPERED_CONFIG_DIR/build.json"
 assert_config_failure 'check.sh rejects qa-invite' 'FAIL config-qa-invite:' "$TAMPERED_CONFIG_DIR/qa-invite.json"
+assert_config_failure 'check.sh rejects an uncapped Postgres pool' 'FAIL postgres-pool:' "$TAMPERED_CONFIG_DIR/postgres-pool.json"
 assert_config_failure 'check.sh rejects a memory sum over 200 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/memory.json"
 assert_config_failure 'check.sh rejects an unexpected subnet' 'FAIL subnets:' "$TAMPERED_CONFIG_DIR/subnet.json"
 
 # Drift guard: images shared with the charlie file are the same digests, and
-# teagramd's environment matches it apart from GOMEMLIMIT.
+# teagramd's environment matches it apart from the lima-specific caps.
 ROOT_JSON=$TMP_DIR/root.json
 compose -f "$ROOT_COMPOSE" --project-name teagram-demo --profile demo config --format json > "$ROOT_JSON"
 for service in postgres migrate turnstile-egress haproxy edge; do
@@ -333,11 +338,11 @@ for service in postgres migrate turnstile-egress haproxy edge; do
     not_ok "image parity with charlie: $service"
   fi
 done
-if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT)' "$ROOT_JSON") \
-  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT)' "$LIMA_JSON") >/dev/null; then
-  ok 'teagramd environment matches the charlie file apart from GOMEMLIMIT'
+if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS)' "$ROOT_JSON") \
+  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS)' "$LIMA_JSON") >/dev/null; then
+  ok 'teagramd environment matches the charlie file apart from lima memory and pool caps'
 else
-  not_ok 'teagramd environment matches the charlie file apart from GOMEMLIMIT'
+  not_ok 'teagramd environment matches the charlie file apart from lima memory and pool caps'
 fi
 
 # The image helper rejects unknown existing images and blkid errors without
@@ -571,7 +576,7 @@ else
   not_ok 'check.sh rejects an unmounted blob cap'
   cat "$CHECK_OUT" >&2
 fi
-for name in env-file secret-files tunnel-token compose-config config-build config-qa-invite image-digests mem-limits subnets; do
+for name in env-file secret-files tunnel-token compose-config config-build config-qa-invite postgres-pool image-digests mem-limits subnets; do
   if grep -q "^PASS $name" "$CHECK_OUT"; then
     ok "check.sh passes $name on the fixture"
   else
