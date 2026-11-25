@@ -2,8 +2,8 @@ name: Deploy demo.
 
 run-name: ${{ inputs.issue && format('{0} [{1}]{2}', github.workflow, inputs.issue, inputs.web_rollback_run_id && format(' [web-rollback={0}]', inputs.web_rollback_run_id) || '') || '' }}
 
-# Keep the public demo deployment result separate from the server Deploy.
-# This workflow consumes the exact tested SHA and CI run selected by Deploy.
+# Keep demo and dev deployments separate from each other and from server Deploy.
+# Each caller queue holds target resolution through that target's deployment.
 on:
   workflow_run:
     workflows: [Deploy.]
@@ -24,368 +24,40 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-teagram-demo
-  cancel-in-progress: false
-
 jobs:
-  check-server-deploy-result:
-    name: 'check: server-deploy-result'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      actions: read
-
-    outputs:
-      succeeded: ${{ steps.verify.outputs.succeeded || steps.manual.outputs.succeeded }}
-
-    steps:
-      - name: Verify the triggering server deploy job succeeded
-        id: verify
-        if: ${{ github.event_name == 'workflow_run' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEPLOY_RUN_ID: ${{ github.event.workflow_run.id }}
-        run: |
-          [[ "$DEPLOY_RUN_ID" =~ ^[0-9]+$ ]]
-          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOY_RUN_ID/jobs?per_page=100")
-          deploy_conclusion=$(jq -r '[.jobs[] | select(.name == "deploy: server (prod)")] | if length == 1 then .[0].conclusion // "missing" else "missing-or-ambiguous" end' <<<"$jobs")
-          if [[ "$deploy_conclusion" == success ]]; then
-            echo "succeeded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "succeeded=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Server Deploy job did not succeed ($deploy_conclusion); public demo deployment skipped"
-          fi
-
-      - name: Validate the direct deployment request
-        id: manual
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          ISSUE_KEY: ${{ inputs.issue }}
-          WEB_ROLLBACK_RUN_ID: ${{ inputs.web_rollback_run_id }}
-        run: |
-          [[ "$GITHUB_REF" == refs/heads/main ]]
-          [[ "$ISSUE_KEY" =~ ^MAIN-[0-9]+$ ]]
-          [[ -z "$WEB_ROLLBACK_RUN_ID" || "$WEB_ROLLBACK_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]
-          echo "succeeded=true" >> "$GITHUB_OUTPUT"
-
-  build-demo-web:
-    name: 'build: demo-web'
-    needs: check-server-deploy-result
-    if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
-      (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    # Let the server deploy proceed; the deploy job reports a failed web build.
-    continue-on-error: true
-    permissions:
-      contents: read
-    outputs:
-      source_commit: ${{ steps.publication.outputs.source_commit }}
-      artifact_digest: ${{ steps.publication.outputs.artifact_digest }}
-      publication_run_id: ${{ steps.publication.outputs.run_id }}
-      artifact_name: ${{ steps.package.outputs.name }}
-      result: ${{ steps.build_result.outputs.result }}
-    steps:
-      - name: Check out the workflow source commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-
-      - name: Resolve the current live web publication
-        id: publication
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          publication=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
-          deployable=$(jq -er '.deployable | tostring' <<<"$publication")
-          source_commit=$(jq -er '.sourceCommit' <<<"$publication")
-          artifact_digest=$(jq -er '.artifactDigest' <<<"$publication")
-          run_id=$(jq -er '.runId | numbers | select(. > 0) | tostring' <<<"$publication")
-          [[ "$deployable" == true ]]
-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
-          printf 'source_commit=%s\nartifact_digest=%s\nrun_id=%s\n' "$source_commit" "$artifact_digest" "$run_id" >> "$GITHUB_OUTPUT"
-
-      - name: Check out the resolved web source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: teagramhq/teagram-web
-          ref: ${{ steps.publication.outputs.source_commit }}
-          path: teagram-web
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
-        with:
-          version: 11.16.0
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 24.18.0
-
-      - name: Rebuild and verify the live web artifact
-        working-directory: teagram-web
-        env:
-          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.publication.outputs.artifact_digest }}
-        run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
-
-      - name: Package the verified web artifact
-        id: package
-        env:
-          WEB_SOURCE_SHA: ${{ steps.publication.outputs.source_commit }}
-        run: |
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
-          tar -czf "$archive" -C teagram-web/dist-private .
-          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          printf '%s\n' "$archive_sha256" > "$archive.sha256"
-          printf 'name=demo-web-release-%s-%s\n' "$WEB_SOURCE_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the verified web artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ${{ steps.package.outputs.name }}
-          path: |
-            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz
-            ${{ runner.temp }}/demo-web-${{ steps.publication.outputs.source_commit }}.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Expose the web build result
-        id: build_result
-        if: ${{ always() }}
-        env:
-          WEB_BUILD_STATUS: ${{ job.status }}
-        run: printf 'result=%s\n' "$WEB_BUILD_STATUS" >> "$GITHUB_OUTPUT"
-
+  # Hold this slot across the target lookup, web build, and both publication steps.
   deploy-demo:
     name: 'deploy: demo'
-    needs:
-      - check-server-deploy-result
-      - build-demo-web
     if: >-
-      !cancelled() && needs.check-server-deploy-result.result == 'success' &&
-      ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
-      (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))
-    runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    environment: demo
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    concurrency:
+      group: deploy-teagram-demo-target
+      cancel-in-progress: false
+      queue: max
     permissions:
       actions: read
       contents: read
+    uses: ./.github/workflows/deploy-demo-target.yml
+    with:
+      issue: ${{ inputs.issue || '' }}
+      web_rollback_run_id: ${{ inputs.web_rollback_run_id || '' }}
+    secrets: inherit
 
-    steps:
-      - name: Check the demo deployment gate
-        id: demo-gate
-        env:
-          TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-        run: |
-          if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" != 'true' ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment is disabled"
-          elif [[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Resolve the tested server deployment target
-        id: target
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          DEPLOY_RUN_ID: ${{ github.event.workflow_run.id }}
-          ISSUE_KEY: ${{ inputs.issue }}
-        run: |
-          artifact_dir="$RUNNER_TEMP/demo-deploy-target"
-          mkdir -p "$artifact_dir"
-          if [[ "$EVENT_NAME" == workflow_run ]]; then
-            [[ "$DEPLOY_RUN_ID" =~ ^[0-9]+$ ]]
-            gh run download "$DEPLOY_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-              --name "demo-deploy-target-$DEPLOY_RUN_ID" --dir "$artifact_dir"
-            target_file="$artifact_dir/demo-deploy-target.json"
-            [[ -f "$target_file" && ! -L "$target_file" ]]
-            deploy_sha=$(jq -er '.deploy_sha | strings' "$target_file")
-            ci_run_id=$(jq -er '.ci_run_id | strings' "$target_file")
-          else
-            [[ "$EVENT_NAME" == workflow_dispatch ]]
-            [[ "$GITHUB_REF" == refs/heads/main ]]
-            [[ "$ISSUE_KEY" =~ ^MAIN-[0-9]+$ ]]
-            main_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
-            [[ "$main_sha" == "$GITHUB_SHA" ]]
-            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=100")
-            ci_run_id=$(jq -er --arg sha "$main_sha" '
-              [.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")]
-              | max_by(.run_number).id
-            ' <<< "$runs")
-            deploy_sha="$main_sha"
-          fi
-          [[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$ci_run_id" =~ ^[0-9]+$ ]]
-          printf 'sha=%s\nci_run_id=%s\n' "$deploy_sha" "$ci_run_id" >> "$GITHUB_OUTPUT"
-
-      - name: Check out the workflow source commit
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-
-      - name: Check the web publication gate
-        id: web-gate
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEMO_WEB_BUILD_RESULT: ${{ needs.build-demo-web.outputs.result }}
-          DEMO_WEB_JOB_RESULT: ${{ needs.build-demo-web.result }}
-        run: |
-          if [[ "$DEMO_WEB_BUILD_RESULT" == 'success' && "$DEMO_WEB_JOB_RESULT" == 'success' ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Live web publication is unavailable; the public server deployment will continue"
-          fi
-
-      - name: Resolve the tested image digest
-        id: demo-image
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ steps.target.outputs.ci_run_id }}
-          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-        run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-image"
-          mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-image-digest-$DEPLOY_SHA" --dir "$artifact_dir"
-          [[ -f "$artifact_dir/demo-image-digest.txt" && ! -L "$artifact_dir/demo-image-digest.txt" ]]
-          digest=$(<"$artifact_dir/demo-image-digest.txt")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Join the tailnet
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci-deploy
-          ping: ${{ vars.DEMO_DEPLOY_HOST }}
-
-      - name: Install the demo deploy key
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
-          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" && -n "$DEMO_DEPLOY_PORT" ]]
-          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
-          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
-          install -d -m 700 "$RUNNER_TEMP/ssh-demo"
-          (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-demo/id_deploy")
-          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
-
-      - name: Deploy the tested server commit after the dev deploy
-        id: server-deploy
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-          DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
-
-      - name: Fail after server deploy when web build failed
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && (needs.build-demo-web.result != 'success' || needs.build-demo-web.outputs.result != 'success') && steps.server-deploy.outcome == 'success' }}
-        run: |
-          echo "::error::Public server deployed, but the live web publication build failed"
-          exit 1
-
-      - name: Download the web artifact from this deploy run
-        id: demo-web-artifact
-        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WEB_SOURCE_SHA: ${{ needs.build-demo-web.outputs.source_commit }}
-          WEB_ARTIFACT_NAME: ${{ needs.build-demo-web.outputs.artifact_name }}
-        run: |
-          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$WEB_ARTIFACT_NAME" =~ ^demo-web-release-${WEB_SOURCE_SHA}-[1-9][0-9]*$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-web-artifact"
-          mkdir -p "$artifact_dir"
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "$WEB_ARTIFACT_NAME" --dir "$artifact_dir"
-          archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
-          checksum_file="$archive.sha256"
-          [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
-          archive_sha256=$(<"$checksum_file")
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          actual_sha256=$(sha256sum "$archive" | awk '{print $1}')
-          [[ "$actual_sha256" == "$archive_sha256" ]]
-          {
-            printf 'archive=%s\n' "$archive"
-            printf 'archive_sha256=%s\n' "$archive_sha256"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Fail if the live web publication is not deployable
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}
-        run: |
-          echo "::error::Public server deployed, but the live web publication is not deployable"
-          exit 1
-
-      - name: Publish the verified web artifact on the demo origin
-        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
-        env:
-          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ needs.build-demo-web.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ needs.build-demo-web.outputs.artifact_digest }}
-          WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
-          WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
-          WEB_ROLLBACK_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.web_rollback_run_id || '' }}
-          WEB_PUBLICATION_RUN_ID: ${{ needs.build-demo-web.outputs.publication_run_id }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$WEB_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$WEB_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ -s "$WEB_ARCHIVE" ]]
-          rollback_dispatch_run_id=0
-          if [[ -n "$WEB_ROLLBACK_REQUESTED" ]]; then
-            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-            [[ "$WEB_ROLLBACK_REQUESTED" =~ ^[1-9][0-9]{0,18}$ && "$WEB_ROLLBACK_REQUESTED" == "$WEB_PUBLICATION_RUN_ID" ]]
-            rollback_dispatch_run_id="$GITHUB_RUN_ID"
-          fi
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" \
-            "web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256 $rollback_dispatch_run_id" < "$WEB_ARCHIVE"
-
-      - name: Remove the demo deploy key
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' }}
-        run: rm -rf "$RUNNER_TEMP/ssh-demo"
+  # Hold this independent slot from before target lookup through the dev rollout.
+  deploy-dev:
+    name: 'deploy: dev'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    concurrency:
+      group: deploy-teagram-dev-target
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/deploy-dev-target.yml
+    with:
+      issue: ${{ inputs.issue || '' }}
+    secrets: inherit

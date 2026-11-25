@@ -490,6 +490,18 @@ def check_rollback_requires_explicit_dispatch() -> None:
     jobs_url = url + "/jobs?per_page=100"
     jobs = {"jobs": [{"name": "check: server-deploy-result", "status": "completed", "conclusion": "success"}]}
     MODULE.verify_rollback_authorization(RUN_ID, SOURCE_SHA, publication_run_id, fetch=fake_fetch({url: run, jobs_url: jobs}))
+    nested_jobs = {
+        "jobs": [
+            {"name": "deploy: demo / check: server-deploy-result", "status": "completed", "conclusion": "success"},
+            {"name": "deploy: dev / check: server-deploy-result", "status": "completed", "conclusion": "success"},
+        ]
+    }
+    MODULE.verify_rollback_authorization(
+        RUN_ID,
+        SOURCE_SHA,
+        publication_run_id,
+        fetch=fake_fetch({url: run, jobs_url: nested_jobs}),
+    )
     for field, value in (("event", "workflow_run"), ("status", "completed"),
                          ("head_sha", "4" * 40), ("path", ".github/workflows/ci.yml"),
                          ("head_branch", "other"), ("id", RUN_ID + 1),
@@ -509,6 +521,37 @@ def check_rollback_requires_explicit_dispatch() -> None:
         pass
     else:
         raise SystemExit("rollback accepted a dispatch whose issue validation failed")
+    dev_only_jobs = {
+        "jobs": [{"name": "deploy: dev / check: server-deploy-result", "status": "completed", "conclusion": "success"}]
+    }
+    try:
+        MODULE.verify_rollback_authorization(
+            RUN_ID,
+            SOURCE_SHA,
+            publication_run_id,
+            fetch=fake_fetch({url: run, jobs_url: dev_only_jobs}),
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("rollback accepted the dev path's dispatch check as demo authorization")
+    duplicate_demo_jobs = {
+        "jobs": [
+            {"name": "deploy: demo / check: server-deploy-result", "status": "completed", "conclusion": "success"},
+            {"name": "deploy: demo / check: server-deploy-result", "status": "completed", "conclusion": "success"},
+        ]
+    }
+    try:
+        MODULE.verify_rollback_authorization(
+            RUN_ID,
+            SOURCE_SHA,
+            publication_run_id,
+            fetch=fake_fetch({url: run, jobs_url: duplicate_demo_jobs}),
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("rollback accepted an ambiguous dispatch check list")
     try:
         MODULE.verify_rollback_authorization(RUN_ID, SOURCE_SHA, publication_run_id + 1, fetch=fake_fetch({url: run, jobs_url: jobs}))
     except ValueError:

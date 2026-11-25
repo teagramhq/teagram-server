@@ -1097,15 +1097,16 @@ jobs:
       - name: Lint deployment, performance, and real-client workflows
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
-            .github/workflows/deploy-demo.yml \
             .github/workflows/deploy-qa-invite.yml \
+            .github/workflows/deploy-demo-target.yml \
+            .github/workflows/deploy-dev-target.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           # actionlint v1.7.12 predates GitHub's concurrency.queue key.
           # The deploy and QA contracts validate the permitted value and location.
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             -ignore '^unexpected key "queue" for "concurrency" section' \
-            .github/workflows/deploy.yml .github/workflows/qa-bot.yml
+            .github/workflows/deploy-demo.yml .github/workflows/deploy.yml .github/workflows/qa-bot.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
@@ -1340,6 +1341,7 @@ jobs:
             deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
+            .github/scripts/validate-deploy-target.sh \
             .github/scripts/test-deploy-workflow-contract.sh
           shellcheck --shell=bash deploy/teagram/ops/blob-encryption-common.inc
           shellcheck deploy/teagram-demo/ops/rotate-turnstile-qa-bypass-token.sh

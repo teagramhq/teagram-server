@@ -205,7 +205,9 @@ if ((${#workflow_files[@]})); then
     other_workflow_files=()
     queue_workflow_files=()
     for workflow in "${workflow_files[@]}"; do
-      if [[ "$workflow" == .github/workflows/qa-bot.yml || "$workflow" == .github/workflows/deploy.yml ]]; then
+      if [[ "$workflow" == .github/workflows/qa-bot.yml ||
+        "$workflow" == .github/workflows/deploy.yml ||
+        "$workflow" == .github/workflows/deploy-demo.yml ]]; then
         queue_workflow_files+=("$workflow")
       else
         other_workflow_files+=("$workflow")

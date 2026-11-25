@@ -348,7 +348,7 @@ class PrePushHookTests(unittest.TestCase):
         self.git("checkout", "--quiet", "-b", "workflow-queue")
         workflows = self.repo / ".github/workflows"
         workflows.mkdir(parents=True)
-        for name in ("qa-bot.yml", "deploy.yml", "other.yml"):
+        for name in ("qa-bot.yml", "deploy.yml", "deploy-demo.yml", "other.yml"):
             (workflows / name).write_text("name: fixture\n", encoding="utf-8")
         self.git("add", ".github/workflows")
         self.git("commit", "--quiet", "-m", "test: add workflow fixtures")
@@ -366,12 +366,15 @@ class PrePushHookTests(unittest.TestCase):
         lint = [args for tool, _, args in calls if tool == "actionlint"]
         qa = [args for args in lint if ".github/workflows/qa-bot.yml" in args]
         deploy = [args for args in lint if ".github/workflows/deploy.yml" in args]
+        demo = [args for args in lint if ".github/workflows/deploy-demo.yml" in args]
         other = [args for args in lint if ".github/workflows/other.yml" in args]
         self.assertEqual(len(qa), 1, lint)
         self.assertEqual(len(deploy), 1, lint)
+        self.assertEqual(len(demo), 1, lint)
         self.assertEqual(len(other), 1, lint)
         self.assertIn('unexpected key "queue"', qa[0])
         self.assertIn('unexpected key "queue"', deploy[0])
+        self.assertIn('unexpected key "queue"', demo[0])
         self.assertNotIn('unexpected key "queue"', other[0])
 
         rejected = self.run_hook(local_sha=workflow_sha, ref_name="workflow-queue", fail_tool="bash")
