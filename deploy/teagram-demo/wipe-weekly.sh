@@ -5,6 +5,8 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=deploy/teagram-demo/demo-common.sh
 source "$SCRIPT_DIR/demo-common.sh"
+# shellcheck source=deploy/teagram-demo/activity-guards.sh
+source "$SCRIPT_DIR/activity-guards.sh"
 
 demo_require_root
 demo_require_env
@@ -84,26 +86,17 @@ cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public clien
 
 # The seed check and public identity probe run before any destructive operation.
 # The separate tgkey volume and .env are deliberately never removed or rewritten.
-# Pause scheduled activity and wait for any in-flight API call before the
-# database is reset. Its session and rate state live outside the weekly wipe.
-ACTIVITY_TIMER=/etc/systemd/system/teagram-demo-activity.timer
-ACTIVITY_SERVICE=/etc/systemd/system/teagram-demo-activity.service
-ACTIVITY_TIMER_WAS_ACTIVE=0
-if [[ -f "$ACTIVITY_TIMER" ]]; then
-  if systemctl is-active --quiet teagram-demo-activity.timer; then
-    ACTIVITY_TIMER_WAS_ACTIVE=1
-    systemctl stop teagram-demo-activity.timer
-  fi
-fi
-if [[ -f "$ACTIVITY_SERVICE" ]]; then
-  systemctl stop teagram-demo-activity.service
-fi
-ACTIVITY_LOCK=/var/lib/teagram-demo-activity/activity.lock
-if [[ -d /var/lib/teagram-demo-activity && ! -L /var/lib/teagram-demo-activity && -e "$ACTIVITY_LOCK" ]]; then
-  [[ -f "$ACTIVITY_LOCK" && ! -L "$ACTIVITY_LOCK" && "$(stat -c '%u:%a' "$ACTIVITY_LOCK")" == '0:600' ]] ||
-    demo_fail 'activity lock file is unsafe'
-  flock -x -w 20m "$ACTIVITY_LOCK" true || demo_fail 'timed out waiting for scheduled activity to stop'
-fi
+# Hold the wipe lock exclusively until exit, so scheduled activity skips rather
+# than posting into a reset. Wait a bounded time for an in-flight activity run;
+# if it is still running, fail before anything is stopped or deleted. Session
+# and rate state live outside the weekly wipe.
+ACTIVITY_STATE_DIR=/var/lib/teagram-demo-activity
+WIPE_LOCK="$ACTIVITY_STATE_DIR/wipe.lock"
+[[ -d "$ACTIVITY_STATE_DIR" && ! -L "$ACTIVITY_STATE_DIR" ]] ||
+  demo_fail 'activity state directory is missing or unsafe'
+demo_wipe_lock_prepare "$WIPE_LOCK" 0 || demo_fail 'wipe lock is missing or unsafe'
+demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200 ||
+  demo_fail 'timed out waiting for scheduled activity to stop'
 # Stop every public path before resetting data. The seed-only overlay never
 # starts HAProxy or edge.
 demo_compose stop edge haproxy "$ACTIVE_SERVER" turnstile-egress
@@ -164,10 +157,4 @@ ACTIVE_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-active-after-wipe.json
 [[ "$ACTIVE_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
 ACTIVE_GENERATION=$(jq -er '.demo.wipe_generation' "$TMP_DIR/client-active-after-wipe.json")
 [[ "$ACTIVE_GENERATION" == "$AFTER_GENERATION" ]] || demo_fail 'active server advertises a different wipe generation'
-if [[ -f "$ACTIVITY_SERVICE" ]]; then
-  systemctl reset-failed teagram-demo-activity.service
-  if ((ACTIVITY_TIMER_WAS_ACTIVE)); then
-    systemctl start teagram-demo-activity.timer
-  fi
-fi
 printf 'weekly wipe=verified rsa_identity=preserved blob_mount=%s\n' "$BLOB_PATH"
