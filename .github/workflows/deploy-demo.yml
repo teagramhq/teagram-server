@@ -24,10 +24,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-teagram-demo
-  cancel-in-progress: false
-
 jobs:
   check-server-deploy-result:
     name: 'check: server-deploy-result'
@@ -265,6 +261,10 @@ jobs:
 
   deploy-demo:
     name: 'deploy: demo'
+    concurrency:
+      group: deploy-teagram-demo-target
+      cancel-in-progress: false
+      queue: max
     needs:
       - check-server-deploy-result
       - check-demo-deploy-target
@@ -446,6 +446,10 @@ jobs:
 
   deploy-dev:
     name: 'deploy: dev'
+    concurrency:
+      group: deploy-teagram-dev-target
+      cancel-in-progress: false
+      queue: max
     needs:
       - check-server-deploy-result
       - check-demo-deploy-target

@@ -708,7 +708,7 @@ check_demo_credential_gate() (
 )
 
 check_contract() {
-  local qa_ssh_runs demo_dev_run qa_validate_index qa_tailnet_index dev_target_index dev_tailnet_index
+  local qa_create_account_run qa_operation_run qa_key_install_run demo_dev_run qa_validate_index qa_tailnet_index dev_target_index dev_tailnet_index
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
   [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
@@ -736,7 +736,7 @@ check_contract() {
   [[ "$(query '.concurrency.queue')" == 'max' ]] ||
     fail 'production deploys must not replace pending runs in the shared group'
   [[ "$(query '[.jobs | to_entries[] | select(.value.concurrency.queue != null) | .key] | join(",")')" == '' ]] ||
-    fail 'only the production workflow may declare a queue'
+    fail 'the production workflow must use its workflow-level queue without job-level queues'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
@@ -877,13 +877,37 @@ check_contract() {
   [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' &&
     "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' ]] ||
     fail 'all qa-invite deploy commands must use the configured login user'
-  qa_ssh_runs="$(qa_query '.jobs.qa-invite.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run')"
-  grep -Fq '"$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST"' <<< "$qa_ssh_runs" ||
-    fail 'qa-invite SSH commands must use the configured target login and host'
-  grep -Fq 'ssh -T -p "$QA_INVITE_DEPLOY_PORT"' <<< "$qa_ssh_runs" ||
-    fail 'qa-invite SSH commands must use the configured target port'
-  grep -Fq 'StrictHostKeyChecking=yes' <<< "$qa_ssh_runs" ||
-    fail 'qa-invite SSH commands must verify the pinned target host key'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .env.QA_INVITE_DEPLOY_HOST')" == '${{ vars.QA_INVITE_DEPLOY_HOST }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .env.QA_INVITE_DEPLOY_PORT')" == '${{ vars.QA_INVITE_DEPLOY_PORT }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' ]] ||
+    fail 'create-account must receive the configured QA invite host, port, and user'
+  [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .env.QA_INVITE_DEPLOY_HOST')" == '${{ vars.QA_INVITE_DEPLOY_HOST }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .env.QA_INVITE_DEPLOY_PORT')" == '${{ vars.QA_INVITE_DEPLOY_PORT }}' &&
+    "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .env.QA_INVITE_DEPLOY_USER')" == '${{ vars.QA_INVITE_DEPLOY_USER }}' ]] ||
+    fail 'QA operations must receive the configured QA invite host, port, and user'
+  qa_create_account_run="$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .run')"
+  qa_operation_run="$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .run')"
+  qa_key_install_run="$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Install the restricted deployment keys") | .run')"
+  if [[ "$(qa_query '.jobs.qa-invite.steps[] | select(.name == "Install the restricted deployment keys") | .env.QA_INVITE_DEPLOY_KNOWN_HOSTS')" != '${{ vars.QA_INVITE_DEPLOY_KNOWN_HOSTS }}' ]] ||
+    ! grep -Fq 'QA_INVITE_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"' <<< "$qa_key_install_run"; then
+    fail 'qa-invite must install the configured host pin for its target'
+  fi
+  grep -Fq '"$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST"' <<< "$qa_create_account_run" ||
+    fail 'create-account SSH must use the configured QA invite login and host'
+  grep -Fq 'ssh -T -p "$QA_INVITE_DEPLOY_PORT"' <<< "$qa_create_account_run" ||
+    fail 'create-account SSH must use the configured QA invite port'
+  if ! grep -Fq 'StrictHostKeyChecking=yes' <<< "$qa_create_account_run" ||
+    ! grep -Fq 'UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"' <<< "$qa_create_account_run"; then
+    fail 'create-account SSH must verify the configured QA invite host pin'
+  fi
+  grep -Fq '"$QA_INVITE_DEPLOY_USER@$QA_INVITE_DEPLOY_HOST"' <<< "$qa_operation_run" ||
+    fail 'QA operation SSH must use the configured QA invite login and host'
+  grep -Fq 'ssh -T -p "$QA_INVITE_DEPLOY_PORT"' <<< "$qa_operation_run" ||
+    fail 'QA operation SSH must use the configured QA invite port'
+  if ! grep -Fq 'StrictHostKeyChecking=yes' <<< "$qa_operation_run" ||
+    ! grep -Fq 'UserKnownHostsFile="$RUNNER_TEMP/ssh-qa-invite/demo_known_hosts"' <<< "$qa_operation_run"; then
+    fail 'QA operation SSH must verify the configured QA invite host pin'
+  fi
 
   [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
@@ -907,10 +931,18 @@ check_contract() {
     fail 'the demo workflow must be limited to Deploy. runs from main'
   [[ "$(demo_query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'the demo workflow must use contents: read only'
-  [[ "$(demo_query '.concurrency.group')" == 'deploy-teagram-demo' ]] ||
-    fail 'demo deploys must share their own concurrency group'
-  [[ "$(demo_query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
-    fail 'demo deploys must not cancel an in-progress rollout'
+  [[ "$(demo_query '.concurrency // ""')" == '' ]] ||
+    fail 'demo and dev deploys must not share a workflow-wide concurrency slot'
+  [[ "$(demo_query '.jobs.deploy-demo.concurrency.group')" == 'deploy-teagram-demo-target' &&
+    "$(demo_query '.jobs.deploy-demo.concurrency."cancel-in-progress"')" == 'false' &&
+    "$(demo_query '.jobs.deploy-demo.concurrency.queue')" == 'max' ]] ||
+    fail 'demo deployments must have an independent non-canceling max queue'
+  [[ "$(demo_query '.jobs.deploy-dev.concurrency.group')" == 'deploy-teagram-dev-target' &&
+    "$(demo_query '.jobs.deploy-dev.concurrency."cancel-in-progress"')" == 'false' &&
+    "$(demo_query '.jobs.deploy-dev.concurrency.queue')" == 'max' ]] ||
+    fail 'dev deployments must have an independent non-canceling max queue'
+  [[ "$(demo_query '.jobs.deploy-demo.concurrency.group == .jobs.deploy-dev.concurrency.group')" == 'false' ]] ||
+    fail 'demo and dev deployments must use separate concurrency groups'
   [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'build-demo-web,check-demo-deploy-target,check-dev-deploy-target,check-server-deploy-result,deploy-demo,deploy-dev' ]] ||
     fail 'the demo workflow must resolve one tested target for independent demo and dev deployments'
   [[ "$(demo_query '.jobs.check-server-deploy-result.name')" == 'check: server-deploy-result' ]] ||
@@ -1328,6 +1360,14 @@ self_test() {
   local qa_mutations=(
     '(.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings") | .env.QA_INVITE_DEPLOY_HOST) = "${{ vars.DEMO_DEPLOY_HOST }}"'
     'del(.jobs.qa-invite.steps[] | select(.name == "Validate operation and deployment settings").env.QA_INVITE_DEPLOY_USER)'
+    '(.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .run) |= sub("QA_INVITE_DEPLOY_USER"; "root")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .run) |= sub("QA_INVITE_DEPLOY_USER"; "root")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .run) |= sub("QA_INVITE_DEPLOY_PORT"; "QA_ACCOUNTS_PORT")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .run) |= sub("QA_INVITE_DEPLOY_PORT"; "QA_ACCOUNTS_PORT")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .run) |= sub("QA_INVITE_DEPLOY_HOST"; "QA_ACCOUNTS_HOST")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .run) |= sub("QA_INVITE_DEPLOY_HOST"; "QA_ACCOUNTS_HOST")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Create an operator account and store its credential on QA") | .run) |= sub("demo_known_hosts"; "qa_known_hosts")'
+    '(.jobs.qa-invite.steps[] | select(.name == "Run the reviewed QA invite operation") | .run) |= sub("demo_known_hosts"; "qa_known_hosts")'
   )
   for mutation in "${qa_mutations[@]}"; do
     yq "$mutation" "$qa_workflow" > "$tmp/deploy-qa-invite.yml"
@@ -1338,6 +1378,14 @@ self_test() {
   done
 
   local demo_mutations=(
+    '.concurrency.group = "deploy-teagram-demo-workflow"'
+    'del(.jobs."deploy-demo".concurrency)'
+    '.jobs."deploy-demo".concurrency.queue = "single"'
+    '.jobs."deploy-demo".concurrency."cancel-in-progress" = true'
+    '.jobs."deploy-dev".concurrency.group = "deploy-teagram-demo-target"'
+    'del(.jobs."deploy-dev".concurrency)'
+    '.jobs."deploy-dev".concurrency.queue = "single"'
+    '.jobs."deploy-dev".concurrency."cancel-in-progress" = true'
     'del(.jobs."deploy-demo")'
     'del(.jobs."check-demo-deploy-target")'
     'del(.jobs."check-dev-deploy-target")'
