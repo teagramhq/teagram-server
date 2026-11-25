@@ -1282,8 +1282,9 @@ check_contract() {
     fail 'the demo job must use its environment-scoped deploy key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||
     fail 'the demo job must use its pinned known-hosts value'
-  ! grep -Fq 'root@' "$demo_workflow" && ! grep -Fq 'root@' "$demo_entrypoint_workflow" ||
+  if grep -Fq 'root@' "$demo_workflow" || grep -Fq 'root@' "$demo_entrypoint_workflow"; then
     fail 'the demo workflow must not hard-code root as a deploy login'
+  fi
 
   [[ "$(demo_query '.jobs.deploy-dev.name')" == 'deploy: dev' &&
     "$(demo_query '.jobs.deploy-dev.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target,check-dev-deploy-target' &&
