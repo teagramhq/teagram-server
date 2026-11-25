@@ -29,6 +29,7 @@ SECRETS_DIR=$TMP_DIR/secrets
 MOCK_BIN=$TMP_DIR/mock-bin
 REAL_STAT=$(command -v stat)
 REAL_DOCKER=$(command -v docker)
+REAL_MOUNTPOINT=$(command -v mountpoint)
 REAL_TRUNCATE=$(command -v truncate)
 mkdir -p "$SECRETS_DIR"
 mkdir -p "$MOCK_BIN"
@@ -52,6 +53,18 @@ chmod 600 "$SECRETS_DIR/cloudflared.env"
 cat > "$MOCK_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+if [[ ${1:-} == -f && ${2:-} == -c && ${3:-} == '%b %S' && ${4:-} == -- \
+  && ${5:-} == "$TEAGRAM_DEMO_BLOB_MOUNT" ]]; then
+  printf '%s %s\n' "${TEAGRAM_TEST_STATFS_BLOCKS:-983040}" "${TEAGRAM_TEST_STATFS_BLOCK_SIZE:-4096}"
+  printf '%s %s %s\n' "$5" "${TEAGRAM_TEST_STATFS_BLOCKS:-983040}" "${TEAGRAM_TEST_STATFS_BLOCK_SIZE:-4096}" \
+    >> "$TEAGRAM_TEST_STATFS_LOG"
+  exit 0
+fi
+if [[ ${1:-} == -c && ${2:-} == '%u:%g %a' && ${3:-} == -- \
+  && ${4:-} == "$TEAGRAM_DEMO_BLOB_MOUNT/data" ]]; then
+  printf '65532:65532 700\n'
+  exit 0
+fi
 if [[ ${1:-} == -c && ${2:-} == '%u:%g:%a' && ${3:-} == -- ]]; then
   path=$4
   owner=
@@ -69,6 +82,16 @@ fi
 exec "$TEAGRAM_TEST_REAL_STAT" "$@"
 EOF
 chmod 755 "$MOCK_BIN/stat"
+
+cat > "$MOCK_BIN/mountpoint" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == -q && ${2:-} == "$TEAGRAM_DEMO_BLOB_MOUNT" ]]; then
+  [[ ${TEAGRAM_TEST_MOUNTED:-0} == 1 ]]
+  exit
+fi
+exec "$TEAGRAM_TEST_REAL_MOUNTPOINT" "$@"
+EOF
+chmod 755 "$MOCK_BIN/mountpoint"
 
 cat > "$MOCK_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
@@ -131,17 +154,24 @@ run_check() {
   local bad_owner_path=${1:-} fail_network_ls=${2:-0} config_file=${3:-}
   local network_ids_file=${4:-} network_inspect_file=${5:-} fail_network_inspect=${6:-0}
   local env_file=${7:-$ENV_FILE}
+  local blob_mount=${8:-/srv/teagram-demo-blobs} mounted=${9:-0}
   PATH="$MOCK_BIN:$PATH" \
     TEAGRAM_TEST_REAL_STAT="$REAL_STAT" \
     TEAGRAM_TEST_REAL_DOCKER="$REAL_DOCKER" \
+    TEAGRAM_TEST_REAL_MOUNTPOINT="$REAL_MOUNTPOINT" \
     TEAGRAM_TEST_BAD_OWNER_PATH="$bad_owner_path" \
     TEAGRAM_TEST_FAIL_NETWORK_LS="$fail_network_ls" \
+    TEAGRAM_TEST_MOUNTED="$mounted" \
+    TEAGRAM_TEST_STATFS_BLOCKS=983040 \
+    TEAGRAM_TEST_STATFS_BLOCK_SIZE=4096 \
+    TEAGRAM_TEST_STATFS_LOG="$TMP_DIR/statfs.log" \
     TEAGRAM_TEST_CONFIG_FILE="$config_file" \
     TEAGRAM_TEST_NETWORK_IDS_FILE="$network_ids_file" \
     TEAGRAM_TEST_NETWORK_INSPECT_FILE="$network_inspect_file" \
     TEAGRAM_TEST_FAIL_NETWORK_INSPECT="$fail_network_inspect" \
     TEAGRAM_DEMO_LIMA_ENV_FILE="$env_file" \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
+    TEAGRAM_DEMO_BLOB_MOUNT="$blob_mount" \
     "$SCRIPT_DIR/check.sh"
 }
 
@@ -368,26 +398,23 @@ else
   cat "$PREPARE_ERR" >&2
 fi
 
-# Criterion 6 and the check: config and network discovery are fixture-backed.
-# The blob-cap result is host-dependent because it depends on the mounted
-# /srv/teagram-demo-blobs filesystem. The output must not leak values.
+# Criterion 6 and the check: config, network discovery and filesystem state are
+# fixture-backed. The unmounted case must reject; the mounted case uses stat -f
+# values from the fixture. The output must not leak values.
 CHECK_OUT=$TMP_DIR/check.out
+STATFS_LOG=$TMP_DIR/statfs.log
+: > "$STATFS_LOG"
 set +e
 run_check > "$CHECK_OUT" 2>&1
 check_status=$?
 set -e
-if grep -q '^FAIL blob-cap:' "$CHECK_OUT" \
+if grep -qxF 'FAIL blob-cap: /srv/teagram-demo-blobs is not a mount point' "$CHECK_OUT" \
   && ((check_status == 1)) \
   && grep -qx 'would_reject (1 failing)' "$CHECK_OUT" \
   && [[ $(grep -c '^FAIL ' "$CHECK_OUT") == 1 ]]; then
-  ok 'check.sh reports the host-dependent blob-cap failure for a complete fixture'
-elif grep -q '^PASS blob-cap$' "$CHECK_OUT" \
-  && ((check_status == 0)) \
-  && grep -qx 'would_apply' "$CHECK_OUT" \
-  && ! grep -q '^FAIL ' "$CHECK_OUT"; then
-  ok 'check.sh reports the host-dependent blob-cap pass for a complete fixture'
+  ok 'check.sh rejects an unmounted blob cap'
 else
-  not_ok 'check.sh reports the host-dependent blob-cap result for a complete fixture'
+  not_ok 'check.sh rejects an unmounted blob cap'
   cat "$CHECK_OUT" >&2
 fi
 for name in env-file secrets compose-config config-build config-qa-invite image-digests mem-limits subnets; do
@@ -406,6 +433,29 @@ if grep -qF -- "$PASSWORD_FIXTURE" "$CHECK_OUT" || grep -qF -- "fixture-tunnel-t
   not_ok 'check.sh prints no secret values'
 else
   ok 'check.sh prints no secret values'
+fi
+
+BLOB_MOUNT_FIXTURE=$TMP_DIR/blob-mount
+mkdir -p "$BLOB_MOUNT_FIXTURE/data"
+chmod 700 "$BLOB_MOUNT_FIXTURE/data"
+BLOB_MOUNT_CONFIG=$TMP_DIR/blob-mount-config.json
+jq --arg src "$BLOB_MOUNT_FIXTURE/data" \
+  '.services.teagramd.volumes |= map(if .type == "bind" and .target == "/var/lib/teagramd-blobs" then .source = $src else . end)' \
+  "$CANDIDATE_JSON" > "$BLOB_MOUNT_CONFIG"
+: > "$STATFS_LOG"
+set +e
+run_check "" 0 "$BLOB_MOUNT_CONFIG" "" "" 0 "$ENV_FILE" "$BLOB_MOUNT_FIXTURE" 1 > "$CHECK_OUT" 2>&1
+check_status=$?
+set -e
+if ((check_status == 0)) \
+  && grep -qx 'PASS blob-cap' "$CHECK_OUT" \
+  && grep -qx 'would_apply' "$CHECK_OUT" \
+  && grep -qx "$BLOB_MOUNT_FIXTURE 983040 4096" "$STATFS_LOG"; then
+  ok 'check.sh accepts a mounted blob cap using the stat -f fixture'
+else
+  not_ok 'check.sh accepts a mounted blob cap using the stat -f fixture'
+  cat "$CHECK_OUT" >&2
+  cat "$STATFS_LOG" >&2
 fi
 
 # Both documented Turnstile modes must let runtime gid 65532 read the mounted
