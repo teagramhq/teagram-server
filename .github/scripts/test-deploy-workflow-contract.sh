@@ -7,16 +7,18 @@
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
-demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo.yml}"
+demo_workflow="${DEMO_DEPLOY_WORKFLOW:-.github/workflows/deploy-demo-target.yml}"
+demo_entrypoint_workflow="${DEMO_ENTRYPOINT_WORKFLOW:-.github/workflows/deploy-demo.yml}"
 qa_workflow="${QA_INVITE_DEPLOY_WORKFLOW:-.github/workflows/deploy-qa-invite.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
-expected_demo_build_if="(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true')"
+expected_demo_build_if="\${{ needs.check-demo-deploy-target.result == 'success' }}"
 expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
 expected_dev_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && needs.check-dev-deploy-target.result == 'success' && needs.check-dev-deploy-target.outputs.configured == 'true' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
+expected_demo_caller_if="github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
@@ -41,7 +43,15 @@ query() {
 }
 
 demo_query() {
+  if [[ "$1" == *'deploy-dev'* || "$1" == *'check-dev-deploy-target'* ]]; then
+    yq -r "$1" "$demo_entrypoint_workflow"
+    return
+  fi
   yq -r "$1" "$demo_workflow"
+}
+
+demo_entry_query() {
+  yq -r "$1" "$demo_entrypoint_workflow"
 }
 
 qa_query() {
@@ -91,6 +101,12 @@ check_ci_contract() {
     ci_fail 'the demo publication job must record its result after failures'
   [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "publication_result").env.PUBLICATION_JOB_STATUS')" == '${{ job.status }}' ]] ||
     ci_fail 'the publisher result must preserve the raw publication job status'
+  local actionlint_deploy_run
+  actionlint_deploy_run="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Lint deployment, performance, and real-client workflows") | .run')"
+  grep -Fq '.github/workflows/deploy-demo-target.yml' <<< "$actionlint_deploy_run" ||
+    ci_fail 'CI must actionlint the reusable demo target workflow'
+  grep -Fq '.github/workflows/deploy-demo.yml' <<< "$actionlint_deploy_run" ||
+    ci_fail 'CI must actionlint the demo queue caller with the queue schema exception'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
@@ -909,46 +925,70 @@ check_contract() {
     fail 'QA operation SSH must verify the configured QA invite host pin'
   fi
 
-  [[ "$(demo_query '.name')" == 'Deploy demo.' ]] ||
+  [[ "$(demo_entry_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
-  [[ "$(demo_query '.run-name')" == "$expected_demo_run_name" ]] ||
+  [[ "$(demo_entry_query '.run-name')" == "$expected_demo_run_name" ]] ||
     fail 'direct demo deploy runs must include the issue key in the name for failure routing'
-  [[ "$(demo_query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
+  [[ "$(demo_entry_query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'the demo workflow must support automatic and direct deployments'
-  [[ "$(demo_query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == 'issue,web_rollback_run_id' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_dispatch.inputs | keys | sort | join(",")')" == 'issue,web_rollback_run_id' ]] ||
     fail 'a direct demo deployment must accept only the issue key and explicit web rollback flag'
-  [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_dispatch.inputs.issue.required')" == 'true' ]] ||
     fail 'a direct demo deployment must require an issue key for CI routing'
-  [[ "$(demo_query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
     fail 'the direct demo deployment issue key must be a string'
-  [[ "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.type')" == 'string' && "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.default')" == '' && "$(demo_query '.on.workflow_dispatch.inputs.web_rollback_run_id.required')" == 'false' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_dispatch.inputs.web_rollback_run_id.type')" == 'string' && "$(demo_entry_query '.on.workflow_dispatch.inputs.web_rollback_run_id.default')" == '' && "$(demo_entry_query '.on.workflow_dispatch.inputs.web_rollback_run_id.required')" == 'false' ]] ||
     fail 'web rollback must require an explicit publication run ID and default to no rollback'
-  [[ "$(demo_query '.on.workflow_run.workflows | join(",")')" == 'Deploy.' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_run.workflows | join(",")')" == 'Deploy.' ]] ||
     fail 'the demo workflow must start from the server Deploy. workflow'
-  [[ "$(demo_query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
     fail 'the demo workflow must observe completed Deploy. runs'
-  [[ "$(demo_query '.on.workflow_run.branches | join(",")')" == 'main' ]] ||
+  [[ "$(demo_entry_query '.on.workflow_run.branches | join(",")')" == 'main' ]] ||
     fail 'the demo workflow must be limited to Deploy. runs from main'
-  [[ "$(demo_query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
+  [[ "$(demo_entry_query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'the demo workflow must use contents: read only'
-  [[ "$(demo_query '.concurrency // ""')" == '' ]] ||
+  [[ "$(demo_entry_query '.concurrency // ""')" == '' ]] ||
     fail 'demo and dev deploys must not share a workflow-wide concurrency slot'
-  [[ "$(demo_query '.jobs.deploy-demo.concurrency.group')" == 'deploy-teagram-demo-target' &&
-    "$(demo_query '.jobs.deploy-demo.concurrency."cancel-in-progress"')" == 'false' &&
-    "$(demo_query '.jobs.deploy-demo.concurrency.queue')" == 'max' ]] ||
-    fail 'demo deployments must have an independent non-canceling max queue'
-  [[ "$(demo_query '.jobs."build-demo-web".concurrency.group')" == 'deploy-teagram-demo-target' &&
-    "$(demo_query '.jobs."build-demo-web".concurrency."cancel-in-progress"')" == 'false' &&
-    "$(demo_query '.jobs."build-demo-web".concurrency.queue')" == 'max' ]] ||
-    fail 'demo web builds must enter the demo deployment queue before building'
-  [[ "$(demo_query '.jobs.deploy-dev.concurrency.group')" == 'deploy-teagram-dev-target' &&
-    "$(demo_query '.jobs.deploy-dev.concurrency."cancel-in-progress"')" == 'false' &&
-    "$(demo_query '.jobs.deploy-dev.concurrency.queue')" == 'max' ]] ||
+  [[ "$(demo_query '.name')" == 'Deploy demo target.' &&
+    "$(demo_query '.on | keys | join(",")')" == 'workflow_call' ]] ||
+    fail 'the demo target workflow must only run as a reusable workflow'
+  [[ "$(demo_query '.on.workflow_call.inputs | keys | sort | join(",")')" == 'issue,web_rollback_run_id' &&
+    "$(demo_query '.on.workflow_call.inputs.issue.type')" == 'string' &&
+    "$(demo_query '.on.workflow_call.inputs.issue.default')" == '' &&
+    "$(demo_query '.on.workflow_call.inputs.web_rollback_run_id.type')" == 'string' &&
+    "$(demo_query '.on.workflow_call.inputs.web_rollback_run_id.default')" == '' ]] ||
+    fail 'the reusable demo target must accept the issue key and explicit rollback run ID'
+  [[ "$(demo_query '.permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=read,contents=read' ]] ||
+    fail 'the reusable demo target must use read-only permissions'
+  [[ "$(demo_entry_query '.jobs.deploy-demo.concurrency.group')" == 'deploy-teagram-demo-target' &&
+    "$(demo_entry_query '.jobs.deploy-demo.concurrency."cancel-in-progress"')" == 'false' &&
+    "$(demo_entry_query '.jobs.deploy-demo.concurrency.queue')" == 'max' ]] ||
+    fail 'the demo caller must hold an independent non-canceling max queue'
+  [[ "$(demo_entry_query '.jobs.deploy-demo.needs // [] | join(",")')" == '' &&
+    "$(demo_entry_query '.jobs.deploy-demo.if')" == "$expected_demo_caller_if" &&
+    "$(demo_entry_query '.jobs.deploy-demo.uses')" == './.github/workflows/deploy-demo-target.yml' &&
+    "$(demo_entry_query '.jobs.deploy-demo.with.issue')" == "\${{ inputs.issue || '' }}" &&
+    "$(demo_entry_query '.jobs.deploy-demo.with.web_rollback_run_id')" == "\${{ inputs.web_rollback_run_id || '' }}" &&
+    "$(demo_entry_query '.jobs.deploy-demo.secrets')" == 'inherit' ]] ||
+    fail 'the demo queue must start before target lookup and cover the reusable target workflow'
+  [[ "$(demo_query '.jobs.check-demo-deploy-target.needs')" == 'check-server-deploy-result' &&
+    "$(demo_query '.jobs."build-demo-web".needs')" == 'check-demo-deploy-target' &&
+    "$(demo_query '.jobs.deploy-demo.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target,build-demo-web' ]] ||
+    fail 'the held reusable call must resolve the target before building and publish before releasing its queue'
+  [[ "$(demo_entry_query '.jobs.deploy-dev.concurrency.group')" == 'deploy-teagram-dev-target' &&
+    "$(demo_entry_query '.jobs.deploy-dev.concurrency."cancel-in-progress"')" == 'false' &&
+    "$(demo_entry_query '.jobs.deploy-dev.concurrency.queue')" == 'max' ]] ||
     fail 'dev deployments must have an independent non-canceling max queue'
-  [[ "$(demo_query '.jobs.deploy-demo.concurrency.group == .jobs.deploy-dev.concurrency.group')" == 'false' ]] ||
+  [[ "$(demo_entry_query '.jobs.deploy-demo.concurrency.group == .jobs.deploy-dev.concurrency.group')" == 'false' ]] ||
     fail 'demo and dev deployments must use separate concurrency groups'
-  [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'build-demo-web,check-demo-deploy-target,check-dev-deploy-target,check-server-deploy-result,deploy-demo,deploy-dev' ]] ||
-    fail 'the demo workflow must resolve one tested target for independent demo and dev deployments'
+  [[ "$(demo_query '.concurrency // ""')" == '' &&
+    "$(demo_query '.jobs.build-demo-web.concurrency // ""')" == '' &&
+    "$(demo_query '.jobs.deploy-demo.concurrency // ""')" == '' ]] ||
+    fail 'the reusable demo target must rely on the caller queue instead of nested concurrency locks'
+  [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'build-demo-web,check-demo-deploy-target,check-server-deploy-result,deploy-demo' ]] ||
+    fail 'the reusable target must keep lookup, web build, and publication in the serialized call'
+  [[ "$(demo_entry_query '.jobs | keys | sort | join(",")')" == 'check-demo-deploy-target,check-dev-deploy-target,check-server-deploy-result,deploy-demo,deploy-dev' ]] ||
+    fail 'the caller must leave the dev path outside the demo queue'
   [[ "$(demo_query '.jobs.check-server-deploy-result.name')" == 'check: server-deploy-result' ]] ||
     fail 'the server deploy verification job must follow the check-stage naming contract'
   [[ "$(demo_query '.jobs.check-server-deploy-result.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read' ]] ||
@@ -962,7 +1002,13 @@ check_contract() {
   [[ "$(demo_query '.jobs.check-demo-deploy-target.outputs.sha')" == '${{ steps.target.outputs.sha }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.outputs.ci_run_id')" == '${{ steps.target.outputs.ci_run_id }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.outputs.digest')" == '${{ steps.image.outputs.digest }}' ]] ||
-    fail 'the shared deploy target must expose the tested SHA and image digest to both deployments'
+    fail 'the demo target must expose the tested SHA and image digest inside the held queue'
+  [[ "$(demo_entry_query '.jobs.check-demo-deploy-target.outputs.sha')" == '${{ steps.target.outputs.sha }}' &&
+    "$(demo_entry_query '.jobs.check-demo-deploy-target.outputs.digest')" == '${{ steps.image.outputs.digest }}' ]] ||
+    fail 'the independent dev path must resolve the tested SHA and image digest'
+  [[ "$(demo_entry_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .run')" == "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .run')" &&
+    "$(demo_entry_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .run')" == "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .run')" ]] ||
+    fail 'the independent dev path must resolve the same server target and image digest as demo'
   [[ "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.EVENT_NAME')" == '${{ github.event_name }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .env.ISSUE_KEY')" == '${{ inputs.issue }}' ]] ||
@@ -996,8 +1042,8 @@ check_contract() {
     fail 'the verifier must identify the production server deploy job'
   [[ "$(demo_query '.jobs."build-demo-web".name')" == 'build: demo-web' ]] ||
     fail 'the web build job must follow the build-stage naming contract'
-  [[ "$(demo_query '.jobs."build-demo-web".needs')" == 'check-server-deploy-result' && "$(demo_query '.jobs."build-demo-web".if')" == "$expected_demo_build_if" ]] ||
-    fail 'the web build must require a successful server deployment'
+  [[ "$(demo_query '.jobs."build-demo-web".needs')" == 'check-demo-deploy-target' && "$(demo_query '.jobs."build-demo-web".if')" == "$expected_demo_build_if" ]] ||
+    fail 'the web build must wait for the tested target lookup while holding the caller queue'
   [[ "$(demo_query '.jobs."build-demo-web".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'the web build must use only read-only contents permission'
   [[ "$(demo_query '.jobs."build-demo-web".environment // ""')" == '' ]] ||
@@ -1236,7 +1282,8 @@ check_contract() {
     fail 'the demo job must use its environment-scoped deploy key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||
     fail 'the demo job must use its pinned known-hosts value'
-  ! grep -Fq 'root@' "$demo_workflow" || fail 'the demo workflow must not hard-code root as a deploy login'
+  ! grep -Fq 'root@' "$demo_workflow" && ! grep -Fq 'root@' "$demo_entrypoint_workflow" ||
+    fail 'the demo workflow must not hard-code root as a deploy login'
 
   [[ "$(demo_query '.jobs.deploy-dev.name')" == 'deploy: dev' &&
     "$(demo_query '.jobs.deploy-dev.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target,check-dev-deploy-target' &&
@@ -1296,6 +1343,10 @@ check_contract() {
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(demo_query '.jobs[].steps[].uses // ""')
+  while IFS= read -r uses; do
+    [[ -n "$uses" ]] || continue
+    [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
+  done < <(demo_entry_query '.jobs[].steps[].uses // ""')
   check_target_selection
   check_demo_image_digest_download
 }
@@ -1382,30 +1433,21 @@ self_test() {
   done
 
   local demo_mutations=(
-    '.concurrency.group = "deploy-teagram-demo-workflow"'
-    'del(.jobs."build-demo-web".concurrency)'
-    '.jobs."build-demo-web".concurrency.group = "deploy-teagram-dev-target"'
-    '.jobs."build-demo-web".concurrency.queue = "single"'
-    '.jobs."build-demo-web".concurrency."cancel-in-progress" = true'
-    'del(.jobs."deploy-demo".concurrency)'
-    '.jobs."deploy-demo".concurrency.queue = "single"'
-    '.jobs."deploy-demo".concurrency."cancel-in-progress" = true'
-    '.jobs."deploy-dev".concurrency.group = "deploy-teagram-demo-target"'
-    'del(.jobs."deploy-dev".concurrency)'
-    '.jobs."deploy-dev".concurrency.queue = "single"'
-    '.jobs."deploy-dev".concurrency."cancel-in-progress" = true'
-    'del(.jobs."deploy-demo")'
-    'del(.jobs."check-demo-deploy-target")'
-    'del(.jobs."check-dev-deploy-target")'
-    'del(.jobs."deploy-dev")'
-    '.jobs."deploy-demo".needs = []'
-    '.jobs."deploy-demo".if = "${{ always() }}"'
-    '.jobs."deploy-demo".continue-on-error = true'
-    '.on.workflow_dispatch.inputs.web_rollback_run_id.default = "123"'
-    '(.jobs."deploy-demo".steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ROLLBACK_REQUESTED) = "true"'
+    '.concurrency.group = "deploy-teagram-demo-target"'
+    '.on.workflow_call.inputs.web_rollback_run_id.default = "123"'
+    '.jobs."build-demo-web".concurrency.group = "deploy-teagram-demo-target"'
+    '.jobs."deploy-demo".concurrency.group = "deploy-teagram-demo-target"'
     'del(.jobs."check-server-deploy-result")'
     '(.jobs."check-server-deploy-result".steps[] | select(.id == "verify") | .run) |= sub("deploy: server"; "wrong deploy job")'
-    '.jobs."deploy-demo".steps |= map(select(.name != "Fail after server deploy when web build failed"))'
+    'del(.jobs."check-demo-deploy-target")'
+    '(.jobs."check-demo-deploy-target".needs) = []'
+    '.jobs."build-demo-web".needs = ["check-server-deploy-result"]'
+    '.jobs."build-demo-web".if = "${{ always() }}"'
+    '.jobs."deploy-demo".needs = ["check-server-deploy-result", "build-demo-web"]'
+    '.jobs."deploy-demo".if = "${{ always() }}"'
+    '.jobs."deploy-demo"."continue-on-error" = true'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Publish the verified web artifact on the demo origin") | .env.WEB_ROLLBACK_REQUESTED) = "true"'
+    'del(.jobs."deploy-demo".steps[] | select(.name == "Fail after server deploy when web build failed"))'
     '(.jobs."deploy-demo".steps[] | select(.id == "web-gate") | .env.DEMO_WEB_BUILD_RESULT) = "success"'
     '.jobs."build-demo-web".environment = "demo"'
     '.jobs."build-demo-web".env.TOKEN = "${{ secrets.DEMO_DEPLOY_SSH_KEY }}"'
@@ -1427,10 +1469,6 @@ self_test() {
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT) = "${{ vars.WRONG_PORT }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_USER) = "${{ vars.WRONG_USER }}"'
-    '.jobs."deploy-dev".if = "${{ always() }}"'
-    '(.jobs."deploy-dev".steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_IMAGE_DIGEST) = "${{ github.sha }}"'
-    '.jobs."deploy-dev".needs += ["deploy-demo"]'
-    '(.jobs."deploy-dev".steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER) = "${{ vars.DEMO_DEPLOY_USER }}"'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run) |= sub("StrictHostKeyChecking=yes"; "StrictHostKeyChecking=no")'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run) |= sub("ssh -T -p"; "ssh -T")'
     '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEPLOY_SHA) = "${{ github.sha }}"'
@@ -1439,6 +1477,37 @@ self_test() {
     yq "$mutation" "$demo_workflow" > "$tmp/deploy-demo.yml"
     if DEMO_DEPLOY_WORKFLOW="$tmp/deploy-demo.yml" "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken demo workflow: %s\n' "$mutation" >&2
+      exit 1
+    fi
+  done
+
+  local demo_entry_mutations=(
+    '.concurrency.group = "deploy-teagram-demo-target"'
+    'del(.jobs."deploy-demo".concurrency)'
+    '.jobs."deploy-demo".concurrency.group = "deploy-teagram-dev-target"'
+    '.jobs."deploy-demo".concurrency.queue = "single"'
+    '.jobs."deploy-demo".concurrency."cancel-in-progress" = true'
+    '.jobs."deploy-demo".needs = ["check-demo-deploy-target"]'
+    '.jobs."deploy-demo".if = "${{ always() }}"'
+    '.jobs."deploy-demo".uses = "./.github/workflows/deploy-demo.yml"'
+    'del(.jobs."deploy-demo")'
+    'del(.jobs."check-demo-deploy-target")'
+    'del(.jobs."check-dev-deploy-target")'
+    'del(.jobs."deploy-dev")'
+    '.jobs."deploy-dev".concurrency.group = "deploy-teagram-demo-target"'
+    'del(.jobs."deploy-dev".concurrency)'
+    '.jobs."deploy-dev".concurrency.queue = "single"'
+    '.jobs."deploy-dev".concurrency."cancel-in-progress" = true'
+    '.jobs."deploy-dev".needs += ["deploy-demo"]'
+    '.on.workflow_dispatch.inputs.issue.required = false'
+    '.on.workflow_dispatch.inputs.web_rollback_run_id.default = "123"'
+    'del(.on.workflow_run.branches)'
+    '.permissions.contents = "write"'
+  )
+  for mutation in "${demo_entry_mutations[@]}"; do
+    yq "$mutation" "$demo_entrypoint_workflow" > "$tmp/deploy-demo-entry.yml"
+    if DEMO_ENTRYPOINT_WORKFLOW="$tmp/deploy-demo-entry.yml" "$0" --contract-only 2>/dev/null; then
+      printf 'contract accepted a broken demo queue caller: %s\n' "$mutation" >&2
       exit 1
     fi
   done

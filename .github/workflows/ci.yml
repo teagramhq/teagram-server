@@ -1098,6 +1098,7 @@ jobs:
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy-qa-invite.yml \
+            .github/workflows/deploy-demo-target.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           # actionlint v1.7.12 predates GitHub's concurrency.queue key.
