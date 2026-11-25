@@ -102,6 +102,24 @@ func TestReadSmokeProfilePhotoRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+func TestValidateMediaPhotoUpdatesRequiresSentPhoto(t *testing.T) {
+	t.Parallel()
+
+	valid := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1}}}},
+	}}
+	if err := validateMediaPhotoUpdates(valid); err != nil {
+		t.Fatalf("validate media photo updates: %v", err)
+	}
+
+	invalid := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaEmpty{}}},
+	}}
+	if err := validateMediaPhotoUpdates(invalid); err == nil || !strings.Contains(err.Error(), "no photo message") {
+		t.Fatalf("validate empty media updates error = %v, want missing photo message", err)
+	}
+}
+
 func TestWaitForSmokeGateHonorsContext(t *testing.T) {
 	t.Parallel()
 

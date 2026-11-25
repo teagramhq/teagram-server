@@ -85,25 +85,10 @@ func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payl
 	if err != nil {
 		return err
 	}
-	fileID, err := randomPositiveInt64()
+	fileID, parts, checksum, err := uploadPhotoParts(ctx, api, payload)
 	if err != nil {
-		return fmt.Errorf("create profile photo upload id: %w", err)
+		return fmt.Errorf("upload profile photo parts: %w", err)
 	}
-	parts := 0
-	for offset := 0; offset < len(payload); offset += mediaPartSize {
-		end := min(offset+mediaPartSize, len(payload))
-		saved, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
-			FileID: fileID, FilePart: parts, Bytes: payload[offset:end],
-		})
-		if err != nil {
-			return fmt.Errorf("save profile photo upload part %d: %w", parts, err)
-		}
-		if !saved {
-			return fmt.Errorf("save profile photo upload part %d returned false", parts)
-		}
-		parts++
-	}
-	checksum := md5.Sum(payload) // #nosec G401 -- Telegram requires the legacy checksum for InputFile uploads.
 	if startGateFile != "" {
 		if _, err := fmt.Fprintln(os.Stdout, "Profile photo upload ready"); err != nil {
 			return fmt.Errorf("write profile photo readiness: %w", err)
@@ -114,7 +99,7 @@ func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payl
 	}
 	request := &tg.PhotosUploadProfilePhotoRequest{}
 	request.SetFile(&tg.InputFile{
-		ID: fileID, Parts: parts, Name: "lima-memory-probe.jpg", MD5Checksum: hex.EncodeToString(checksum[:]),
+		ID: fileID, Parts: parts, Name: "lima-memory-profile-photo.jpg", MD5Checksum: checksum,
 	})
 	result, err := api.PhotosUploadProfilePhoto(ctx, request)
 	if err != nil {
@@ -142,6 +127,95 @@ func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payl
 	return fmt.Errorf("profile photo response omitted user %s", username)
 }
 
+func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, startGateFile string) error {
+	payload, err := readSmokeMediaPhoto(payloadPath)
+	if err != nil {
+		return err
+	}
+	fileID, parts, checksum, err := uploadPhotoParts(ctx, api, payload)
+	if err != nil {
+		return fmt.Errorf("upload media photo parts: %w", err)
+	}
+	if startGateFile != "" {
+		if _, err := fmt.Fprintln(os.Stdout, "Media photo upload ready"); err != nil {
+			return fmt.Errorf("write media photo readiness: %w", err)
+		}
+		if err := waitForSmokeGate(ctx, startGateFile); err != nil {
+			return err
+		}
+	}
+	updates, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+		Peer: &tg.InputPeerSelf{},
+		Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+			ID: fileID, Parts: parts, Name: "lima-memory-media-photo.jpg", MD5Checksum: checksum,
+		}},
+		Message:  "lima media photo memory probe",
+		RandomID: fileID,
+	})
+	if err != nil {
+		return fmt.Errorf("send uploaded media photo: %w", err)
+	}
+	if err := validateMediaPhotoUpdates(updates); err != nil {
+		return err
+	}
+	return nil
+}
+
+func uploadPhotoParts(ctx context.Context, api *tg.Client, payload []byte) (int64, int, string, error) {
+	fileID, err := randomPositiveInt64()
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("create photo upload id: %w", err)
+	}
+	parts := 0
+	for offset := 0; offset < len(payload); offset += mediaPartSize {
+		end := min(offset+mediaPartSize, len(payload))
+		saved, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+			FileID: fileID, FilePart: parts, Bytes: payload[offset:end],
+		})
+		if err != nil {
+			return 0, 0, "", fmt.Errorf("save photo upload part %d: %w", parts, err)
+		}
+		if !saved {
+			return 0, 0, "", fmt.Errorf("save photo upload part %d returned false", parts)
+		}
+		parts++
+	}
+	checksum := md5.Sum(payload) // #nosec G401 -- Telegram requires the legacy checksum for InputFile uploads.
+	return fileID, parts, hex.EncodeToString(checksum[:]), nil
+}
+
+func validateMediaPhotoUpdates(updates tg.UpdatesClass) error {
+	var entries []tg.UpdateClass
+	switch result := updates.(type) {
+	case *tg.Updates:
+		entries = result.Updates
+	case *tg.UpdatesCombined:
+		entries = result.Updates
+	default:
+		return fmt.Errorf("send uploaded media photo returned %T, want updates", updates)
+	}
+	for _, update := range entries {
+		newMessage, ok := update.(*tg.UpdateNewMessage)
+		if !ok {
+			continue
+		}
+		message, ok := newMessage.Message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaPhoto)
+		if !ok {
+			continue
+		}
+		photo, ok := media.Photo.(*tg.Photo)
+		if !ok || photo.ID <= 0 {
+			return fmt.Errorf("send uploaded media photo returned invalid photo %T", media.Photo)
+		}
+		return nil
+	}
+	return errors.New("send uploaded media photo returned no photo message")
+}
+
 func waitForSmokeGate(ctx context.Context, path string) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -151,11 +225,11 @@ func waitForSmokeGate(ctx context.Context, path string) error {
 			return nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect profile photo start gate: %w", err)
+			return fmt.Errorf("inspect smoke start gate: %w", err)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("wait for profile photo start gate: %w", ctx.Err())
+			return fmt.Errorf("wait for smoke start gate: %w", ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -217,6 +291,10 @@ func readSmokeMedia(path string) (payload []byte, returnErr error) {
 
 func readSmokeProfilePhoto(path string) (payload []byte, returnErr error) {
 	return readSmokePayload(path, maxSmokePhoto, "profile photo")
+}
+
+func readSmokeMediaPhoto(path string) (payload []byte, returnErr error) {
+	return readSmokePayload(path, maxSmokePhoto, "media photo")
 }
 
 func readSmokePayload(path string, maxBytes int64, kind string) (payload []byte, returnErr error) {

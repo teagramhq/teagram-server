@@ -200,57 +200,61 @@ for suffix in a b; do
 done
 
 PROBE_PHASE=photo_client_setup
-for suffix in a b; do
-  "$RUNNER_TEMP/mtproto-smoke" \
-    --endpoint 127.0.0.1:2443 \
-    --discovery-file "$RUNNER_TEMP/lima-memory-client.json" \
-    --username-file "$RUNNER_TEMP/lima-memory-username-$suffix" \
-    --password-file "$password_file" \
-    --profile-photo-upload-file "$RUNNER_TEMP/lima-memory-photo.jpg" \
-    --profile-photo-start-gate-file "$RUNNER_TEMP/lima-memory-start-gate" \
-    >"$RUNNER_TEMP/lima-memory-client-$suffix.log" 2>&1 &
-  if [[ $suffix == a ]]; then
-    client_a_pid=$!
-  else
-    client_b_pid=$!
-  fi
-done
+"$RUNNER_TEMP/mtproto-smoke" \
+  --endpoint 127.0.0.1:2443 \
+  --discovery-file "$RUNNER_TEMP/lima-memory-client.json" \
+  --username-file "$RUNNER_TEMP/lima-memory-username-a" \
+  --password-file "$password_file" \
+  --profile-photo-upload-file "$RUNNER_TEMP/lima-memory-photo.jpg" \
+  --profile-photo-start-gate-file "$RUNNER_TEMP/lima-memory-start-gate" \
+  >"$RUNNER_TEMP/lima-memory-client-a.log" 2>&1 &
+client_a_pid=$!
+
+"$RUNNER_TEMP/mtproto-smoke" \
+  --endpoint 127.0.0.1:2443 \
+  --discovery-file "$RUNNER_TEMP/lima-memory-client.json" \
+  --username-file "$RUNNER_TEMP/lima-memory-username-b" \
+  --password-file "$password_file" \
+  --media-photo-upload-file "$RUNNER_TEMP/lima-memory-photo.jpg" \
+  --media-photo-start-gate-file "$RUNNER_TEMP/lima-memory-start-gate" \
+  >"$RUNNER_TEMP/lima-memory-client-media.log" 2>&1 &
+media_client_pid=$!
 
 gate_ready=0
 for attempt in $(seq 300); do
   if grep -q 'Profile photo upload ready' "$RUNNER_TEMP/lima-memory-client-a.log" 2>/dev/null &&
-    grep -q 'Profile photo upload ready' "$RUNNER_TEMP/lima-memory-client-b.log" 2>/dev/null; then
+    grep -q 'Media photo upload ready' "$RUNNER_TEMP/lima-memory-client-media.log" 2>/dev/null; then
     gate_ready=1
     break
   fi
-  if ! kill -0 "$client_a_pid" 2>/dev/null || ! kill -0 "$client_b_pid" 2>/dev/null; then
-    cat "$RUNNER_TEMP/lima-memory-client-a.log" "$RUNNER_TEMP/lima-memory-client-b.log"
-    echo 'a profile photo client exited before reaching the upload barrier' >&2
+  if ! kill -0 "$client_a_pid" 2>/dev/null || ! kill -0 "$media_client_pid" 2>/dev/null; then
+    cat "$RUNNER_TEMP/lima-memory-client-a.log" "$RUNNER_TEMP/lima-memory-client-media.log"
+    echo 'a photo client exited before reaching the upload barrier' >&2
     exit 1
   fi
   sleep 0.1
 done
 if [[ $gate_ready -ne 1 ]]; then
-  echo 'profile photo clients did not reach the upload barrier' >&2
+  echo 'profile and media photo clients did not reach the upload barrier' >&2
   exit 1
 fi
-PROBE_PHASE=concurrent_profile_photo_uploads
+PROBE_PHASE=concurrent_profile_and_media_photo_uploads
 touch "$RUNNER_TEMP/lima-memory-start-gate"
 
 set +e
 wait "$client_a_pid"
 client_a_status=$?
-wait "$client_b_pid"
-client_b_status=$?
+wait "$media_client_pid"
+media_client_status=$?
 set -e
-cat "$RUNNER_TEMP/lima-memory-client-a.log" "$RUNNER_TEMP/lima-memory-client-b.log"
-if [[ $client_a_status -ne 0 || $client_b_status -ne 0 ]]; then
-  UPLOAD_OUTCOME="failed(client_a=$client_a_status,client_b=$client_b_status)"
-  printf 'concurrent profile photo uploads failed (client statuses %d, %d)\n' \
-    "$client_a_status" "$client_b_status" >&2
+cat "$RUNNER_TEMP/lima-memory-client-a.log" "$RUNNER_TEMP/lima-memory-client-media.log"
+if [[ $client_a_status -ne 0 || $media_client_status -ne 0 ]]; then
+  UPLOAD_OUTCOME="failed(profile=$client_a_status,media_photo=$media_client_status)"
+  printf 'concurrent profile and media photo uploads failed (client statuses %d, %d)\n' \
+    "$client_a_status" "$media_client_status" >&2
   exit 1
 fi
-UPLOAD_OUTCOME=2_passed
+UPLOAD_OUTCOME=profile_passed,media_photo_passed
 
 peak_bytes=$(<"$MEMORY_PEAK_FILE")
 events=$(<"$MEMORY_EVENTS_FILE")
