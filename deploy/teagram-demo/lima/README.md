@@ -38,9 +38,9 @@ the tunnel token. Never print it to a log, a comment or a PR.
 Limits of the long-running services, in MiB. The sum stays at or below 200 even
 when the `candidate` profile is enabled.
 
-| Service | Limit | Measured on charlie |
+| Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
-| postgres | 56 | 83 (128 MB `shared_buffers`); 52 with the lima config under 8-client pgbench |
+| postgres | 56 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image) |
 | teagramd | 40 | 46 before the lima `GOMEMLIMIT` reduction to 24 MiB |
 | teagramd-next (candidate) | 40 | Same image and `GOMEMLIMIT` as teagramd; not measured at the new setting |
 | cloudflared | 25 | 25 |
@@ -49,10 +49,12 @@ when the `candidate` profile is enabled.
 | edge (nginx) | 4 | 2 |
 | **Total with candidate** | **199** | |
 
-The lima Compose environment caps each server's pool at `TG_PG_MAX_CONNS=2`.
+The lima Compose environment caps each server's pool at `TG_PG_MAX_CONNS=3`.
 During rollout, both server pools, their two LISTEN connections, and migrate
-use at most seven PostgreSQL client backends, within the 8-client pgbench run
-that used 52 MiB.
+use at most nine PostgreSQL client backends. A 20-second, 9-client pgbench run
+sampled 43.82 MiB under the 56 MiB container limit. The local host is ARM64,
+so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
+Compose image remains pinned to linux/amd64.
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd

@@ -162,9 +162,9 @@ check_config_shape() {
     pass config-qa-invite
   fi
 
-  if ! jq -e '.services.teagramd.environment.TG_PG_MAX_CONNS == "2" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "2"' \
+  if ! jq -e '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"' \
     <<<"$CONFIG_JSON" >/dev/null; then
-    fail postgres-pool "both server pools must set TG_PG_MAX_CONNS=2 for the 56 MiB postgres limit"
+    fail postgres-pool "both server pools must set TG_PG_MAX_CONNS=3 for the 56 MiB postgres limit"
   else
     pass postgres-pool
   fi
