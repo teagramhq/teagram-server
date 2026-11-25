@@ -1122,24 +1122,19 @@ jq -e '
   and any(.services["demo-activity"].volumes[]; .target == "/var/lib/teagram-demo-activity" and (.read_only // false) == false)
 ' "$TMP_DIR/activity-profile.json" >/dev/null
 
-python3 - "$SCRIPT_DIR/teagram-demo-activity.service" \
-  "$SCRIPT_DIR/teagram-demo-activity.timer" "$SCRIPT_DIR/install-activity.sh" \
-  "$SCRIPT_DIR/run-activity.sh" "$SCRIPT_DIR/wipe-weekly.sh" \
-  "$SCRIPT_DIR/teagram-demo-weekly-wipe.service" \
-  "$SCRIPT_DIR/activity-credential.sh" \
-  "$SCRIPT_DIR/test-activity-credential-handoff.sh" <<'PY'
+python3 - "$SCRIPT_DIR/install-activity.sh" "$SCRIPT_DIR/run-activity.sh" \
+  "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/install-weekly-wipe.sh" \
+  "$SCRIPT_DIR/demo-cron.sh" "$SCRIPT_DIR/activity-guards.sh" <<'PY'
 from pathlib import Path
 import sys
 
 
-service = Path(sys.argv[1]).read_text(encoding="utf-8")
-timer = Path(sys.argv[2]).read_text(encoding="utf-8")
-installer = Path(sys.argv[3]).read_text(encoding="utf-8")
-runner = Path(sys.argv[4]).read_text(encoding="utf-8")
-wipe = Path(sys.argv[5]).read_text(encoding="utf-8")
-wipe_service = Path(sys.argv[6]).read_text(encoding="utf-8")
-credential_helper = Path(sys.argv[7]).read_text(encoding="utf-8")
-credential_handoff_test = Path(sys.argv[8]).read_text(encoding="utf-8")
+installer = Path(sys.argv[1]).read_text(encoding="utf-8")
+runner = Path(sys.argv[2]).read_text(encoding="utf-8")
+wipe = Path(sys.argv[3]).read_text(encoding="utf-8")
+weekly_installer = Path(sys.argv[4]).read_text(encoding="utf-8")
+cron = Path(sys.argv[5]).read_text(encoding="utf-8")
+guards = Path(sys.argv[6]).read_text(encoding="utf-8")
 
 
 def assert_text_order(text: str, name: str, fragments: list[str]) -> None:
@@ -1149,62 +1144,79 @@ def assert_text_order(text: str, name: str, fragments: list[str]) -> None:
 
 
 for name, text, fragments in [
-    ("activity service", service, [
-        "LoadCredential=inventory.json:/var/lib/teagram-demo/secrets/demo-accounts/inventory.json",
-        "RuntimeDirectory=teagram-demo-activity-credential",
-        "RuntimeDirectoryMode=0700",
-        "RuntimeDirectoryPreserve=no",
-        "ReadWritePaths=/var/lib/teagram-demo-activity /run/teagram-demo-activity-credential /run/docker.sock /var/run/docker.sock",
-        "StateDirectory=teagram-demo-activity",
-        "StateDirectoryMode=0700",
-        "TimeoutStartSec=infinity",
-        "StartLimitBurst=3",
-        "StartLimitIntervalSec=1h",
-        "ProtectSystem=strict",
+    ("activity installer", installer, [
+        "demo_cron_require_daemon",
+        "demo_cron_require_utc",
+        "demo_cron_install_entry activity '*/10 * * * *'",
+        'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
+        'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
     ]),
-    ("activity timer", timer, ["OnBootSec=8m", "OnUnitActiveSec=10m", "Persistent=true", "RandomizedDelaySec=5m"]),
-    ("activity installer", installer, ["enable --now teagram-demo-activity.timer"]),
-    ("activity runner", runner, ["--volume", "demo-activity", "--activity", "--target", "--max-actions-per-hour", "--min-interval"]),
+    ("weekly wipe installer", weekly_installer, [
+        "demo_cron_require_daemon",
+        "demo_cron_require_utc",
+        'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
+        'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
+        "demo_cron_install_entry weekly-wipe '0 3 * * 0'",
+    ]),
+    ("activity runner", runner, [
+        'ACTIVITY_SETTINGS=/etc/default/teagram-demo-activity',
+        '--volume "$activity_inventory:/run/secrets/demo-activity-inventory.json:ro"',
+        "--activity",
+        '--target "$TARGET"',
+        "skipped: wipe running",
+    ]),
+    ("cron helper", cron, ["# teagram-demo:", "crontab -", "pgrep -x crond", "flock -x 7"]),
+    ("activity guards", guards, ["demo_wipe_lock_select", 'flock -s -n "$fd"', 'flock -x -w "$timeout" "$fd"']),
 ]:
     if any(fragment not in text for fragment in fragments):
-        raise SystemExit(f"{name}: missing required activity scheduling or credential setting")
-if "PASSWORD" in runner or "CREDENTIALS_DIRECTORY" in runner:
-    raise SystemExit("activity runner: credentials must be staged without passing their value or private path")
+        raise SystemExit(f"{name}: missing required cron or lock setting")
+if "PASSWORD" in runner:
+    raise SystemExit("activity runner: the account password must never be passed to the runner")
+assert_text_order(runner, "activity runner inventory and lock gate", [
+    'local compatibility_runtime_dir=${5:-/run/teagram-demo-activity-credential}',
+    'local run_dir=${6:-/run}',
+    'demo_activity_state_check "$state_dir" "$owner"',
+    'demo_activity_inventory_check "$inventory" "$owner"',
+    'demo_wipe_lock_prepare "$wipe_lock" "$owner"',
+    'demo_wipe_lock_prepare "$legacy_lock" "$owner"',
+    'demo_activity_try_shared_lock "$wipe_lock" 9',
+    'demo_activity_try_shared_lock "$legacy_lock" 10',
+    'case "$image_lock_protocol" in',
+    'if [[ -e "$compatibility_runtime_dir" || -L "$compatibility_runtime_dir" ]]; then',
+    'compatibility_template="$compatibility_runtime_dir/legacy.XXXXXXXX"',
+    'compatibility_template="$run_dir/teagram-demo-activity.XXXXXXXX"',
+    'compatibility_dir=$(mktemp -d "$compatibility_template")',
+    'install -o "$owner" -m 0400 -- "$inventory"',
+    'demo_wipe_lock_prepare "$container_lock" "$owner"',
+    "demo_compose run --rm --no-deps --pull never",
+])
 for fragment in [
-    'source "$SCRIPT_DIR/activity-credential.sh"',
-    'ACTIVITY_CREDENTIAL_FILE=$(demo_stage_activity_credential)',
-    'trap \'demo_cleanup_activity_credential "$ACTIVITY_CREDENTIAL_FILE"\' EXIT',
-    '--volume "$ACTIVITY_CREDENTIAL_FILE:/run/secrets/demo-activity-inventory.json:ro"',
+    'source "$SCRIPT_DIR/activity-guards.sh"',
+    'demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200',
 ]:
-    if fragment not in runner:
-        raise SystemExit("activity runner: daemon-visible credential staging and cleanup are required")
-for fragment in [
-    "CREDENTIALS_DIRECTORY",
-    "RUNTIME_DIRECTORY",
-    "install -o root -g root -m 0400",
-    "demo_cleanup_activity_credential",
-]:
-    if fragment not in credential_helper:
-        raise SystemExit("activity credential helper: protected staging and cleanup are required")
-for fragment in [
-    "--property=ProtectSystem=strict",
-    'RuntimeDirectory=$RUNTIME_DIRECTORY_NAME',
-    "docker run --rm --network none",
-    'source=$ACTIVITY_CREDENTIAL_FILE,target=/inventory,readonly',
-    "credential handoff verified",
-]:
-    if fragment not in credential_handoff_test:
-        raise SystemExit("activity credential integration test: real systemd and Docker handoff is required")
-if "TimeoutStartSec=60min" not in wipe_service:
-    raise SystemExit("weekly wipe service: timeout must cover stopping scheduled activity and reseeding")
+    if fragment not in wipe:
+        raise SystemExit("wipe-weekly.sh: the wipe must hold the shared wipe lock exclusively")
+if 'DEMO_DEPLOY_LOCK_HELD' not in wipe or 'flock -n 9' not in wipe:
+    raise SystemExit("wipe-weekly.sh: ops invocation must reuse and verify the inherited deployment lock")
 assert_text_order(wipe, "wipe-weekly.sh activity gate", [
-    "systemctl stop teagram-demo-activity.timer",
-    "flock -x -w 20m",
+    'WIPE_LOCK=$(demo_wipe_lock_select "$WIPE_LOCK" 0)',
+    'demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200',
+    'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
+    'demo_wipe_take_exclusive_lock "$LEGACY_ACTIVITY_LOCK" 1200 7',
+    "demo_compose stop edge haproxy",
     "dropdb -U postgres --if-exists teagram",
-    "systemctl reset-failed teagram-demo-activity.service",
-    "systemctl start teagram-demo-activity.timer",
 ])
 PY
+
+for stale in \
+  teagram-demo-activity.service teagram-demo-activity.timer \
+  teagram-demo-weekly-wipe.service teagram-demo-weekly-wipe.timer \
+  activity-credential.sh test-activity-credential-handoff.sh; do
+  [[ ! -e "$SCRIPT_DIR/$stale" ]] || {
+    printf '%s must be removed from the demo deploy tree\n' "$stale" >&2
+    exit 1
+  }
+done
 
 python3 "$SCRIPT_DIR/blob-mode/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
@@ -1587,13 +1599,17 @@ for fragment in [
 if 'demo_compose run --rm --no-deps teagramd-maintenance client-config' not in deploy:
     raise SystemExit("deploy-main.sh: candidate config must use the dynamic-address maintenance service")
 for fragment in [
-    'systemctl reset-failed "$SERVICE"',
-    'systemctl start "$SERVICE"',
-    'systemctl show --property=Result --value "$SERVICE"',
-    'journalctl --unit "$SERVICE" --since "$STARTED_AT" --output cat --no-pager',
+    'REPO=/opt/teagram-demo',
+    'OPS_SHA=${OPS_SHA:-}',
+    'flock -x 9',
+    'head=$(git -C "$REPO" rev-parse HEAD)',
+    'status=$(git --no-optional-locks -C "$REPO" status --porcelain --untracked-files=all)',
+    'output=$(DEMO_DEPLOY_LOCK_HELD=1 OPS_SHA="$OPS_SHA" "$WIPE" 2>>"$WIPE_LOG") || status=$?',
+    'weekly wipe=verified ',
+    'print_wipe_log_tail',
 ]:
     if fragment not in weekly_wipe_op:
-        raise SystemExit("weekly-wipe ops: must verify the service result and current run's verification line")
+        raise SystemExit("weekly-wipe ops: must run the wipe in the foreground and verify its own output line")
 assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "unset DEMO_DEPLOY_LOCK_HELD",
     'readonly IMAGE_DIGEST=${BASH_REMATCH[2]}',
@@ -1815,23 +1831,96 @@ BASH
 env CLIENT_CONFIG_HELPER="$CLIENT_CONFIG_HELPER" ACTIVE_SERVER_UP=true SEED_COMPOSE_CALLS="$TMP_DIR/seed-compose-calls" \
   bash "$TMP_DIR/client-config-active-server-regression.sh"
 
-MOCK_BIN="$TMP_DIR/weekly-wipe-bin"
-mkdir -p "$MOCK_BIN"
-cat > "$MOCK_BIN/systemctl" <<'SH'
+OPS_TEST_DIR="$TMP_DIR/weekly-wipe-ops"
+OPS_TEST_REPO="$OPS_TEST_DIR/repo"
+mkdir -p "$OPS_TEST_REPO/.state" "$OPS_TEST_REPO/deploy/teagram-demo"
+git -C "$OPS_TEST_REPO" init -q
+git -C "$OPS_TEST_REPO" checkout -q -b main
+git -C "$OPS_TEST_REPO" config user.name 'Weekly wipe ops test'
+git -C "$OPS_TEST_REPO" config user.email 'weekly-wipe-ops-test@example.invalid'
+printf '%s\n' '.state/' > "$OPS_TEST_REPO/.gitignore"
+cat > "$OPS_TEST_REPO/deploy/teagram-demo/wipe-weekly.sh" <<'SH'
 #!/bin/sh
-case "$*" in
-  'reset-failed teagram-demo-weekly-wipe.service'|'start teagram-demo-weekly-wipe.service') exit 0 ;;
-  'show --property=Result --value teagram-demo-weekly-wipe.service') printf 'success\n' ;;
-  *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 1 ;;
+set -eu
+[ "${DEMO_DEPLOY_LOCK_HELD:-}" = 1 ] || { printf '%s\n' 'deploy lock was not passed' >&2; exit 1; }
+[ "$(git -C "$OPS_TEST_REPO" rev-parse HEAD)" = "$OPS_SHA" ] || { printf '%s\n' 'reviewed SHA was not passed' >&2; exit 1; }
+exec 8>> "$OPS_TEST_REPO/.state/deploy.lock"
+if flock -n -x 8; then
+  printf '%s\n' 'weekly wipe did not inherit the deploy lock' >&2
+  exit 1
+else
+  lock_status=$?
+  [ "$lock_status" -eq 1 ] || exit "$lock_status"
+fi
+printf '%s\n' ran > "$OPS_TEST_MARKER"
+case "${OPS_TEST_WIPE_MODE:-verified}" in
+  verified)
+    printf '%s\n' 'verified wipe diagnostic' >&2
+    printf '%s\n' 'wipe step complete'
+    printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
+    ;;
+  failed)
+    printf '%s\n' 'teagram-demo: seed check failed' >&2
+    exit 1
+    ;;
+  unverified)
+    printf '%s\n' 'wipe step complete'
+    ;;
 esac
 SH
-cat > "$MOCK_BIN/journalctl" <<'SH'
-#!/bin/sh
-printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
-SH
-chmod +x "$MOCK_BIN/systemctl" "$MOCK_BIN/journalctl"
-OPS_OUTPUT=$(PATH="$MOCK_BIN:/usr/bin:/bin" bash "$SCRIPT_DIR/ops/weekly-wipe.sh")
-[[ "$OPS_OUTPUT" == 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data' ]]
+chmod 0755 "$OPS_TEST_REPO/deploy/teagram-demo/wipe-weekly.sh"
+git -C "$OPS_TEST_REPO" add .gitignore deploy/teagram-demo/wipe-weekly.sh
+git -C "$OPS_TEST_REPO" commit -qm 'weekly wipe ops fixture'
+OPS_REVIEWED_SHA=$(git -C "$OPS_TEST_REPO" rev-parse HEAD)
+OPS_TEST_MARKER="$OPS_TEST_DIR/wipe-ran"
+: > "$OPS_TEST_MARKER"
+sed \
+  -e "s|^REPO=/opt/teagram-demo\$|REPO=$OPS_TEST_REPO|" \
+  -e "s|^WIPE_LOG_DIR=/var/log/teagram-demo\$|WIPE_LOG_DIR=$OPS_TEST_DIR/log|" \
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" > "$OPS_TEST_DIR/ops-weekly-wipe.sh"
+OPS_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=verified \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh")
+[[ "$OPS_OUTPUT" == $'wipe step complete\nweekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data' ]]
+[[ "$(<"$OPS_TEST_DIR/log/weekly-wipe.log")" == 'verified wipe diagnostic' ]]
+[[ "$(<"$OPS_TEST_MARKER")" == ran ]]
+: > "$OPS_TEST_MARKER"
+if OPS_FAILED_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=failed \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" 2>&1); then
+  printf '%s\n' 'weekly-wipe ops accepted a failed wipe' >&2
+  exit 1
+fi
+[[ "$OPS_FAILED_OUTPUT" == *'failed with exit status 1'* ]]
+[[ "$OPS_FAILED_OUTPUT" == *'teagram-demo: seed check failed'* ]]
+[[ "$(<"$OPS_TEST_DIR/log/weekly-wipe.log")" == $'verified wipe diagnostic\nteagram-demo: seed check failed' ]]
+: > "$OPS_TEST_MARKER"
+if OPS_UNVERIFIED_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=unverified \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" 2>&1); then
+  printf '%s\n' 'weekly-wipe ops accepted a wipe without its verification line' >&2
+  exit 1
+fi
+[[ "$OPS_UNVERIFIED_OUTPUT" == *'without its verification line'* ]]
+
+: > "$OPS_TEST_MARKER"
+if OPS_SHA=0000000000000000000000000000000000000000 OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" > "$OPS_TEST_DIR/ops-bad-sha.out" 2>&1; then
+  printf '%s\n' 'weekly-wipe ops accepted a mismatched reviewed SHA' >&2
+  exit 1
+fi
+[[ ! -s "$OPS_TEST_MARKER" ]] || { printf '%s\n' 'weekly-wipe ran after the reviewed SHA check failed' >&2; exit 1; }
+[[ "$(<"$OPS_TEST_DIR/ops-bad-sha.out")" == *'differs from the reviewed SHA'* ]]
+
+: > "$OPS_TEST_MARKER"
+: > "$OPS_TEST_REPO/untracked-change"
+if OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" > "$OPS_TEST_DIR/ops-dirty-tree.out" 2>&1; then
+  printf '%s\n' 'weekly-wipe ops accepted a dirty checkout' >&2
+  exit 1
+fi
+[[ ! -s "$OPS_TEST_MARKER" ]] || { printf '%s\n' 'weekly-wipe ran after the clean-checkout guard failed' >&2; exit 1; }
+[[ "$(<"$OPS_TEST_DIR/ops-dirty-tree.out")" == *'tracked or untracked changes'* ]]
 
 INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"
 sed -n '/^demo_lock_init() {$/,/^}/p' "$SCRIPT_DIR/init-demo.sh" > "$INIT_LOCK_FUNCTION"
@@ -2391,15 +2480,5 @@ python3 "$SCRIPT_DIR/test-validate-env.py"
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
-if systemctl --system show-environment >/dev/null 2>&1; then
-  if [[ "$EUID" -eq 0 ]]; then
-    "$SCRIPT_DIR/test-activity-credential-handoff.sh"
-  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo -n env "PATH=$PATH" "$SCRIPT_DIR/test-activity-credential-handoff.sh"
-  else
-    printf 'systemd-to-container credential integration skipped (root access is unavailable)\n'
-  fi
-else
-  printf 'systemd-to-container credential integration skipped (active system manager is unavailable)\n'
-fi
+"$SCRIPT_DIR/test-demo-scheduling.sh"
 printf 'demo Compose contract holds\n'

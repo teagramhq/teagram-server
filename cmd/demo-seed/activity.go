@@ -27,7 +27,7 @@ const (
 	activityStateDir        = "/var/lib/teagram-demo-activity"
 	activitySessionFileName = "session.json"
 	activityRateFileName    = "rate.json"
-	activityLockFileName    = "activity.lock"
+	activityLockFileName    = "container-activity.lock"
 )
 
 var errActivitySessionInvalid = errors.New("activity session is invalid")
@@ -179,10 +179,11 @@ func readActivityPasswordAt(path string, account accountSpec) (string, error) {
 	if err != nil {
 		return "", errors.New("activity credential inventory is unavailable")
 	}
-	if !isOwnedByCurrentUser(info) || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 || info.Size() > 64*1024 {
-		return "", errors.New("activity credential inventory must be an owned regular mode 0400 file")
+	mode := info.Mode().Perm()
+	if !isOwnedByCurrentUser(info) || !info.Mode().IsRegular() || (mode != 0400 && mode != 0600) || info.Size() > 64*1024 {
+		return "", errors.New("activity credential inventory must be an owned regular mode 0400 or 0600 file")
 	}
-	data, err := os.ReadFile(path) // #nosec G304 -- path is the fixed systemd credential file; tests use a private temporary file.
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the fixed activity inventory; tests use a private temporary file.
 	if err != nil {
 		return "", errors.New("activity credential inventory is unavailable")
 	}

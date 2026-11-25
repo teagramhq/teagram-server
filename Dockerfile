@@ -138,4 +138,5 @@ ENTRYPOINT ["/usr/local/bin/teagramd"]
 
 ARG TEAGRAMD_SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${TEAGRAMD_SOURCE_REVISION}" \
-      org.opencontainers.image.source="https://github.com/teagramhq/teagram-server"
+      org.opencontainers.image.source="https://github.com/teagramhq/teagram-server" \
+      com.teagram.demo.activity-lock="container-activity.lock"

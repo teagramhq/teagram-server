@@ -3,10 +3,16 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=deploy/teagram-demo/demo-cron.sh
+source "$SCRIPT_DIR/demo-cron.sh"
+# shellcheck source=deploy/teagram-demo/activity-guards.sh
+source "$SCRIPT_DIR/activity-guards.sh"
+WIPE_LOG_DIR=/var/log/teagram-demo
+ACTIVITY_STATE_DIR=/var/lib/teagram-demo-activity
 
 [[ "$EUID" -eq 0 ]] || { echo 'install-weekly-wipe.sh must run as root' >&2; exit 1; }
 [[ "$REPO_ROOT" == /opt/teagram-demo ]] || {
-  echo 'weekly wipe units are installed only from /opt/teagram-demo' >&2
+  echo 'weekly wipe cron entry is installed only from /opt/teagram-demo' >&2
   exit 1
 }
 git -C "$REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/dev/null 2>&1 || {
@@ -17,12 +23,31 @@ git -C "$REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/
   echo 'tracked API seed-demo.sh must be executable' >&2
   exit 1
 }
+demo_cron_require_daemon
+demo_cron_require_utc
 "$SCRIPT_DIR/seed-demo.sh" --check
 
-install -o root -g root -m 0644 "$SCRIPT_DIR/teagram-demo-weekly-wipe.service" \
-  /etc/systemd/system/teagram-demo-weekly-wipe.service
-install -o root -g root -m 0644 "$SCRIPT_DIR/teagram-demo-weekly-wipe.timer" \
-  /etc/systemd/system/teagram-demo-weekly-wipe.timer
-systemctl daemon-reload
-systemctl enable --now teagram-demo-weekly-wipe.timer
-systemctl list-timers teagram-demo-weekly-wipe.timer --no-pager
+[[ ! -L "$ACTIVITY_STATE_DIR" ]] || {
+  echo 'activity state directory must not be a symlink' >&2
+  exit 1
+}
+mkdir -p "$ACTIVITY_STATE_DIR"
+chown root:root "$ACTIVITY_STATE_DIR"
+chmod 0700 "$ACTIVITY_STATE_DIR"
+WIPE_LOCK="$ACTIVITY_STATE_DIR/wipe.lock"
+demo_wipe_lock_prepare "$WIPE_LOCK" 0 || {
+  echo 'the shared wipe lock is missing or unsafe' >&2
+  exit 1
+}
+LEGACY_ACTIVITY_LOCK="$ACTIVITY_STATE_DIR/activity.lock"
+demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0 || {
+  echo 'the legacy activity lock is missing or unsafe' >&2
+  exit 1
+}
+
+mkdir -p "$WIPE_LOG_DIR"
+chown root:root "$WIPE_LOG_DIR"
+chmod 0750 "$WIPE_LOG_DIR"
+demo_cron_install_entry weekly-wipe '0 3 * * 0' \
+  "$REPO_ROOT/deploy/teagram-demo/wipe-weekly.sh" "$WIPE_LOG_DIR/weekly-wipe.log"
+printf '%s\n' 'weekly wipe scheduled in root crontab: 0 3 * * 0 (UTC)'
