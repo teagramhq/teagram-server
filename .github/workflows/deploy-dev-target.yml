@@ -55,8 +55,12 @@ jobs:
 
   check-demo-deploy-target:
     name: 'check: demo-deploy-target'
-    needs: check-server-deploy-result
-    if: ${{ needs.check-server-deploy-result.outputs.succeeded == 'true' }}
+    needs:
+      - check-server-deploy-result
+      - check-dev-deploy-target
+    if: >-
+      needs.check-server-deploy-result.outputs.succeeded == 'true' &&
+      needs.check-dev-deploy-target.outputs.configured == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -123,12 +127,9 @@ jobs:
 
   check-dev-deploy-target:
     name: 'check: dev-deploy-target'
-    needs:
-      - check-server-deploy-result
-      - check-demo-deploy-target
+    needs: check-server-deploy-result
     if: >-
       !cancelled() && needs.check-server-deploy-result.result == 'success' &&
-      needs.check-demo-deploy-target.result == 'success' &&
       ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||
       (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))
     runs-on: ubuntu-26.04

@@ -19,6 +19,7 @@ expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_build_if="\${{ needs.check-demo-deploy-target.result == 'success' }}"
 expected_demo_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
 expected_dev_if="!cancelled() && needs.check-server-deploy-result.result == 'success' && needs.check-demo-deploy-target.result == 'success' && needs.check-dev-deploy-target.result == 'success' && needs.check-dev-deploy-target.outputs.configured == 'true' && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') || (github.event_name == 'workflow_dispatch' && needs.check-server-deploy-result.outputs.succeeded == 'true'))"
+expected_dev_target_if="needs.check-server-deploy-result.outputs.succeeded == 'true' && needs.check-dev-deploy-target.outputs.configured == 'true'"
 expected_demo_caller_if="github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
@@ -597,7 +598,7 @@ check_deploy_target_validator() (
   assert_invalid DEMO_DEPLOY_HOST DEMO_DEPLOY_PORT DEMO_DEPLOY_KNOWN_HOSTS DEMO_DEPLOY_USER DEMO_DEPLOY_KNOWN_HOSTS 100.100.162.10 2223 '[100.100.162.10]:2223 ssh-ed25519 invalid!' root
   assert_invalid DEV_DEPLOY_HOST DEV_DEPLOY_PORT DEV_DEPLOY_KNOWN_HOSTS DEV_DEPLOY_USER DEV_DEPLOY_USER 100.100.162.10 2223 "$known_hosts" 'root@charlie'
 
-  demo_query '.jobs."check-dev-deploy-target".steps[] | select(.id == "target") | .run' > "$tmp/dev-gate.sh"
+  dev_query '.jobs."check-dev-deploy-target".steps[] | select(.id == "target") | .run' > "$tmp/dev-gate.sh"
   : > "$tmp/output"
   output=$(DEV_DEPLOY_HOST='' GITHUB_OUTPUT="$tmp/output" \
     bash -euo pipefail "$tmp/dev-gate.sh" 2>&1)
@@ -606,6 +607,9 @@ check_deploy_target_validator() (
   [[ "$(grep -Fc '::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset' <<< "$output")" == 1 &&
     "$(cat "$tmp/output")" == 'configured=false' ]] ||
     fail 'an unset dev host must produce one notice and skip the deploy job'
+  [[ "$(dev_query '.jobs.check-demo-deploy-target.needs | join(",")')" == 'check-server-deploy-result,check-dev-deploy-target' &&
+    "$(dev_query '.jobs.check-demo-deploy-target.if')" == "$expected_dev_target_if" ]] ||
+    fail 'an unset dev host must skip target and image lookup even when no digest artifact exists'
 
   demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .run' > "$tmp/dev-target.sh"
 
@@ -1028,10 +1032,11 @@ check_contract() {
     "$(demo_query '.jobs.check-demo-deploy-target.outputs.ci_run_id')" == '${{ steps.target.outputs.ci_run_id }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.outputs.digest')" == '${{ steps.image.outputs.digest }}' ]] ||
     fail 'the demo target must expose the tested SHA and image digest inside the held queue'
-  [[ "$(dev_query '.jobs.check-demo-deploy-target.needs')" == 'check-server-deploy-result' &&
+  [[ "$(dev_query '.jobs.check-demo-deploy-target.needs | join(",")')" == 'check-server-deploy-result,check-dev-deploy-target' &&
+    "$(dev_query '.jobs.check-demo-deploy-target.if')" == "$expected_dev_target_if" &&
     "$(dev_query '.jobs.check-demo-deploy-target.outputs.sha')" == '${{ steps.target.outputs.sha }}' &&
     "$(dev_query '.jobs.check-demo-deploy-target.outputs.digest')" == '${{ steps.image.outputs.digest }}' ]] ||
-    fail 'the queued dev path must resolve its tested target and image digest after the server result'
+    fail 'the queued dev path must resolve its target and digest only after the configured-host gate'
   [[ "$(dev_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .run')" == "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "target") | .run')" &&
     "$(dev_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .run')" == "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .run')" ]] ||
     fail 'the independent dev path must resolve the same server target and image digest as demo'
@@ -1042,15 +1047,15 @@ check_contract() {
   [[ "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .env.CI_RUN_ID')" == '${{ steps.target.outputs.ci_run_id }}' &&
     "$(demo_query '.jobs.check-demo-deploy-target.steps[] | select(.id == "image") | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
     fail 'the shared image digest must come from the CI run selected for the target SHA'
-  [[ "$(demo_query '.jobs.check-dev-deploy-target.name')" == 'check: dev-deploy-target' &&
-    "$(demo_query '.jobs.check-dev-deploy-target.needs | join(",")')" == 'check-server-deploy-result,check-demo-deploy-target' &&
-    "$(demo_query '.jobs.check-dev-deploy-target.outputs.configured')" == '${{ steps.target.outputs.configured }}' &&
-    "$(demo_query '.jobs.check-dev-deploy-target.environment')" == 'demo' ]] ||
-    fail 'the dev target gate must report configuration after successful target resolution'
-  [[ "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
+  [[ "$(dev_query '.jobs.check-dev-deploy-target.name')" == 'check: dev-deploy-target' &&
+    "$(dev_query '.jobs.check-dev-deploy-target.needs')" == 'check-server-deploy-result' &&
+    "$(dev_query '.jobs.check-dev-deploy-target.outputs.configured')" == '${{ steps.target.outputs.configured }}' &&
+    "$(dev_query '.jobs.check-dev-deploy-target.environment')" == 'demo' ]] ||
+    fail 'the dev target gate must run before image lookup inside the held dev queue'
+  [[ "$(dev_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
     fail 'the dev target gate must inspect the demo-environment host variable'
-  [[ "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'configured=false'* &&
-    "$(demo_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset'* ]] ||
+  [[ "$(dev_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'configured=false'* &&
+    "$(dev_query '.jobs.check-dev-deploy-target.steps[] | select(.id == "target") | .run')" == *'::notice::Dev deployment skipped because DEV_DEPLOY_HOST is unset'* ]] ||
     fail 'an unset dev host must report one notice and skip the deploy job'
   [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify").if')" == '${{ github.event_name == '"'"'workflow_run'"'"' }}' ]] ||
     fail 'the server deploy check must run only for workflow_run events'
@@ -1554,6 +1559,8 @@ self_test() {
     'del(.jobs."check-dev-deploy-target")'
     'del(.jobs."deploy-dev")'
     '.jobs."check-demo-deploy-target".needs = "check-dev-deploy-target"'
+    '.jobs."check-dev-deploy-target".needs = ["check-server-deploy-result", "check-demo-deploy-target"]'
+    '.jobs."check-demo-deploy-target".if = "${{ always() }}"'
     '.jobs."deploy-dev".needs = ["check-server-deploy-result", "check-dev-deploy-target"]'
     '.jobs."deploy-dev".concurrency.group = "deploy-teagram-dev-target"'
     '(.jobs."deploy-dev".steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_SHA) = "${{ github.sha }}"'
