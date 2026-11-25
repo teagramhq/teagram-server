@@ -39,6 +39,11 @@ demo_wipe_lock_prepare "$WIPE_LOCK" 0 || {
   echo 'the shared wipe lock is missing or unsafe' >&2
   exit 1
 }
+LEGACY_ACTIVITY_LOCK="$ACTIVITY_STATE_DIR/activity.lock"
+demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0 || {
+  echo 'the legacy activity lock is missing or unsafe' >&2
+  exit 1
+}
 
 mkdir -p "$WIPE_LOG_DIR"
 chown root:root "$WIPE_LOG_DIR"

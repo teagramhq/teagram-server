@@ -1149,11 +1149,13 @@ for name, text, fragments in [
         "demo_cron_require_utc",
         "demo_cron_install_entry activity '*/10 * * * *'",
         'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
+        'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
     ]),
     ("weekly wipe installer", weekly_installer, [
         "demo_cron_require_daemon",
         "demo_cron_require_utc",
         'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
+        'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
         "demo_cron_install_entry weekly-wipe '0 3 * * 0'",
     ]),
     ("activity runner", runner, [
@@ -1163,8 +1165,8 @@ for name, text, fragments in [
         '--target "$TARGET"',
         "skipped: wipe running",
     ]),
-    ("cron helper", cron, ["# teagram-demo:", "crontab -", "pgrep -x crond"]),
-    ("activity guards", guards, ["demo_wipe_lock_select", "flock -s -n 9", 'flock -x -w "$timeout" 8']),
+    ("cron helper", cron, ["# teagram-demo:", "crontab -", "pgrep -x crond", "flock -x 7"]),
+    ("activity guards", guards, ["demo_wipe_lock_select", 'flock -s -n "$fd"', 'flock -x -w "$timeout" "$fd"']),
 ]:
     if any(fragment not in text for fragment in fragments):
         raise SystemExit(f"{name}: missing required cron or lock setting")
@@ -1174,7 +1176,9 @@ assert_text_order(runner, "activity runner inventory and lock gate", [
     'demo_activity_state_check "$state_dir" "$owner"',
     'demo_activity_inventory_check "$inventory" "$owner"',
     'demo_wipe_lock_prepare "$wipe_lock" "$owner"',
-    'demo_activity_try_shared_lock "$wipe_lock"',
+    'demo_wipe_lock_prepare "$legacy_lock" "$owner"',
+    'demo_activity_try_shared_lock "$wipe_lock" 9',
+    'demo_activity_try_shared_lock "$legacy_lock" 10',
     "demo_compose run --rm --no-deps --pull never",
 ])
 for fragment in [
@@ -1183,9 +1187,13 @@ for fragment in [
 ]:
     if fragment not in wipe:
         raise SystemExit("wipe-weekly.sh: the wipe must hold the shared wipe lock exclusively")
+if 'DEMO_DEPLOY_LOCK_HELD' not in wipe or 'flock -n 9' not in wipe:
+    raise SystemExit("wipe-weekly.sh: ops invocation must reuse and verify the inherited deployment lock")
 assert_text_order(wipe, "wipe-weekly.sh activity gate", [
     'WIPE_LOCK=$(demo_wipe_lock_select "$WIPE_LOCK" 0)',
     'demo_wipe_take_exclusive_lock "$WIPE_LOCK" 1200',
+    'demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0',
+    'demo_wipe_take_exclusive_lock "$LEGACY_ACTIVITY_LOCK" 1200 7',
     "demo_compose stop edge haproxy",
     "dropdb -U postgres --if-exists teagram",
 ])
@@ -1582,8 +1590,12 @@ for fragment in [
 if 'demo_compose run --rm --no-deps teagramd-maintenance client-config' not in deploy:
     raise SystemExit("deploy-main.sh: candidate config must use the dynamic-address maintenance service")
 for fragment in [
-    'WIPE=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh',
-    'output=$("$WIPE" 2>>"$WIPE_LOG") || status=$?',
+    'REPO=/opt/teagram-demo',
+    'OPS_SHA=${OPS_SHA:-}',
+    'flock -x 9',
+    'head=$(git -C "$REPO" rev-parse HEAD)',
+    'status=$(git --no-optional-locks -C "$REPO" status --porcelain --untracked-files=all)',
+    'output=$(DEMO_DEPLOY_LOCK_HELD=1 OPS_SHA="$OPS_SHA" "$WIPE" 2>>"$WIPE_LOG") || status=$?',
     'weekly wipe=verified ',
     'print_wipe_log_tail',
 ]:
@@ -1811,47 +1823,95 @@ env CLIENT_CONFIG_HELPER="$CLIENT_CONFIG_HELPER" ACTIVE_SERVER_UP=true SEED_COMP
   bash "$TMP_DIR/client-config-active-server-regression.sh"
 
 OPS_TEST_DIR="$TMP_DIR/weekly-wipe-ops"
-mkdir -p "$OPS_TEST_DIR"
-cat > "$OPS_TEST_DIR/wipe-verified.sh" <<'SH'
+OPS_TEST_REPO="$OPS_TEST_DIR/repo"
+mkdir -p "$OPS_TEST_REPO/.state" "$OPS_TEST_REPO/deploy/teagram-demo"
+git -C "$OPS_TEST_REPO" init -q
+git -C "$OPS_TEST_REPO" checkout -q -b main
+git -C "$OPS_TEST_REPO" config user.name 'Weekly wipe ops test'
+git -C "$OPS_TEST_REPO" config user.email 'weekly-wipe-ops-test@example.invalid'
+printf '%s\n' '.state/' > "$OPS_TEST_REPO/.gitignore"
+cat > "$OPS_TEST_REPO/deploy/teagram-demo/wipe-weekly.sh" <<'SH'
 #!/bin/sh
-printf '%s\n' 'verified wipe diagnostic' >&2
-printf '%s\n' 'wipe step complete'
-printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
+set -eu
+[ "${DEMO_DEPLOY_LOCK_HELD:-}" = 1 ] || { printf '%s\n' 'deploy lock was not passed' >&2; exit 1; }
+[ "$(git -C "$OPS_TEST_REPO" rev-parse HEAD)" = "$OPS_SHA" ] || { printf '%s\n' 'reviewed SHA was not passed' >&2; exit 1; }
+exec 8>> "$OPS_TEST_REPO/.state/deploy.lock"
+if flock -n -x 8; then
+  printf '%s\n' 'weekly wipe did not inherit the deploy lock' >&2
+  exit 1
+else
+  lock_status=$?
+  [ "$lock_status" -eq 1 ] || exit "$lock_status"
+fi
+printf '%s\n' ran > "$OPS_TEST_MARKER"
+case "${OPS_TEST_WIPE_MODE:-verified}" in
+  verified)
+    printf '%s\n' 'verified wipe diagnostic' >&2
+    printf '%s\n' 'wipe step complete'
+    printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
+    ;;
+  failed)
+    printf '%s\n' 'teagram-demo: seed check failed' >&2
+    exit 1
+    ;;
+  unverified)
+    printf '%s\n' 'wipe step complete'
+    ;;
+esac
 SH
-cat > "$OPS_TEST_DIR/wipe-failed.sh" <<'SH'
-#!/bin/sh
-printf '%s\n' 'teagram-demo: seed check failed' >&2
-exit 1
-SH
-cat > "$OPS_TEST_DIR/wipe-unverified.sh" <<'SH'
-#!/bin/sh
-printf '%s\n' 'wipe step complete'
-SH
-chmod 0755 "$OPS_TEST_DIR"/wipe-*.sh
-for case_name in verified failed unverified; do
-  sed \
-    -e "s|^WIPE=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh\$|WIPE=$OPS_TEST_DIR/wipe-$case_name.sh|" \
-    -e "s|^WIPE_LOG_DIR=/var/log/teagram-demo\$|WIPE_LOG_DIR=$OPS_TEST_DIR/log-$case_name|" \
-    -e "s|^WIPE_LOG=\"\$WIPE_LOG_DIR/weekly-wipe.log\"\$|WIPE_LOG=\"$OPS_TEST_DIR/log-$case_name/weekly-wipe.log\"|" \
-    "$SCRIPT_DIR/ops/weekly-wipe.sh" > "$OPS_TEST_DIR/ops-$case_name.sh"
-  grep -Fq "WIPE=$OPS_TEST_DIR/wipe-$case_name.sh" "$OPS_TEST_DIR/ops-$case_name.sh"
-  grep -Fq "WIPE_LOG_DIR=$OPS_TEST_DIR/log-$case_name" "$OPS_TEST_DIR/ops-$case_name.sh"
-done
-OPS_OUTPUT=$(sh "$OPS_TEST_DIR/ops-verified.sh")
+chmod 0755 "$OPS_TEST_REPO/deploy/teagram-demo/wipe-weekly.sh"
+git -C "$OPS_TEST_REPO" add .gitignore deploy/teagram-demo/wipe-weekly.sh
+git -C "$OPS_TEST_REPO" commit -qm 'weekly wipe ops fixture'
+OPS_REVIEWED_SHA=$(git -C "$OPS_TEST_REPO" rev-parse HEAD)
+OPS_TEST_MARKER="$OPS_TEST_DIR/wipe-ran"
+: > "$OPS_TEST_MARKER"
+sed \
+  -e "s|^REPO=/opt/teagram-demo\$|REPO=$OPS_TEST_REPO|" \
+  -e "s|^WIPE_LOG_DIR=/var/log/teagram-demo\$|WIPE_LOG_DIR=$OPS_TEST_DIR/log|" \
+  "$SCRIPT_DIR/ops/weekly-wipe.sh" > "$OPS_TEST_DIR/ops-weekly-wipe.sh"
+OPS_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=verified \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh")
 [[ "$OPS_OUTPUT" == $'wipe step complete\nweekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data' ]]
-[[ "$(<"$OPS_TEST_DIR/log-verified/weekly-wipe.log")" == 'verified wipe diagnostic' ]]
-if OPS_FAILED_OUTPUT=$(sh "$OPS_TEST_DIR/ops-failed.sh" 2>&1); then
+[[ "$(<"$OPS_TEST_DIR/log/weekly-wipe.log")" == 'verified wipe diagnostic' ]]
+[[ "$(<"$OPS_TEST_MARKER")" == ran ]]
+: > "$OPS_TEST_MARKER"
+if OPS_FAILED_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=failed \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" 2>&1); then
   printf '%s\n' 'weekly-wipe ops accepted a failed wipe' >&2
   exit 1
 fi
 [[ "$OPS_FAILED_OUTPUT" == *'failed with exit status 1'* ]]
 [[ "$OPS_FAILED_OUTPUT" == *'teagram-demo: seed check failed'* ]]
-[[ "$(<"$OPS_TEST_DIR/log-failed/weekly-wipe.log")" == 'teagram-demo: seed check failed' ]]
-if OPS_UNVERIFIED_OUTPUT=$(sh "$OPS_TEST_DIR/ops-unverified.sh" 2>&1); then
+[[ "$(<"$OPS_TEST_DIR/log/weekly-wipe.log")" == $'verified wipe diagnostic\nteagram-demo: seed check failed' ]]
+: > "$OPS_TEST_MARKER"
+if OPS_UNVERIFIED_OUTPUT=$(OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" OPS_TEST_WIPE_MODE=unverified \
+  sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" 2>&1); then
   printf '%s\n' 'weekly-wipe ops accepted a wipe without its verification line' >&2
   exit 1
 fi
 [[ "$OPS_UNVERIFIED_OUTPUT" == *'without its verification line'* ]]
+
+: > "$OPS_TEST_MARKER"
+if OPS_SHA=0000000000000000000000000000000000000000 OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" > "$OPS_TEST_DIR/ops-bad-sha.out" 2>&1; then
+  printf '%s\n' 'weekly-wipe ops accepted a mismatched reviewed SHA' >&2
+  exit 1
+fi
+[[ ! -s "$OPS_TEST_MARKER" ]] || { printf '%s\n' 'weekly-wipe ran after the reviewed SHA check failed' >&2; exit 1; }
+[[ "$(<"$OPS_TEST_DIR/ops-bad-sha.out")" == *'differs from the reviewed SHA'* ]]
+
+: > "$OPS_TEST_MARKER"
+: > "$OPS_TEST_REPO/untracked-change"
+if OPS_SHA="$OPS_REVIEWED_SHA" OPS_TEST_REPO="$OPS_TEST_REPO" \
+  OPS_TEST_MARKER="$OPS_TEST_MARKER" sh "$OPS_TEST_DIR/ops-weekly-wipe.sh" > "$OPS_TEST_DIR/ops-dirty-tree.out" 2>&1; then
+  printf '%s\n' 'weekly-wipe ops accepted a dirty checkout' >&2
+  exit 1
+fi
+[[ ! -s "$OPS_TEST_MARKER" ]] || { printf '%s\n' 'weekly-wipe ran after the clean-checkout guard failed' >&2; exit 1; }
+[[ "$(<"$OPS_TEST_DIR/ops-dirty-tree.out")" == *'tracked or untracked changes'* ]]
 
 INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"
 sed -n '/^demo_lock_init() {$/,/^}/p' "$SCRIPT_DIR/init-demo.sh" > "$INIT_LOCK_FUNCTION"

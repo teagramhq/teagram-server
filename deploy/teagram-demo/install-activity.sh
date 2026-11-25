@@ -64,6 +64,11 @@ demo_wipe_lock_prepare "$WIPE_LOCK" 0 || {
   echo 'the shared wipe lock is missing or unsafe' >&2
   exit 1
 }
+LEGACY_ACTIVITY_LOCK="$ACTIVITY_STATE_DIR/activity.lock"
+demo_wipe_lock_prepare "$LEGACY_ACTIVITY_LOCK" 0 || {
+  echo 'the legacy activity lock is missing or unsafe' >&2
+  exit 1
+}
 
 demo_cron_install_entry activity '*/10 * * * *' \
   "$REPO_ROOT/deploy/teagram-demo/run-activity.sh" "$ACTIVITY_LOG_DIR/activity.log"

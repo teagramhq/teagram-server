@@ -722,17 +722,17 @@ activity run removes it before signing in with the newly seeded password. A
 compromise of host root or the Docker daemon crosses this boundary and can read
 both the inventory and persisted session.
 
-The weekly wipe and activity share `/var/lib/teagram-demo-activity/wipe.lock`.
-The wipe holds it exclusively for the whole reset. Each activity run takes it
-shared and without waiting, so a run that finds the wipe in progress exits 0
-with `skipped: wipe running`. The wipe waits up to 20 minutes for an in-flight
-activity run; if that run is still going, the wipe fails before it stops any
-public path or deletes any data. The host coordination lock stays separate from
-the container's own `activity.lock`. During migration from the manually
-installed systemd units, the updated activity runner creates the separate host
-lock on its first run. An old wipe service that cannot create that lock under
-its read-only filesystem uses the existing activity lock until the host lock
-exists.
+The weekly wipe and activity share `/var/lib/teagram-demo-activity/wipe.lock`;
+they also coordinate through the legacy `activity.lock` so manually installed
+systemd wipes remain safe during migration. The current wipe holds both locks
+exclusively for the reset. Each activity run takes both shared and without
+waiting, so it exits 0 with `skipped: wipe running` if either wipe lock is
+held. The wipe waits up to 20 minutes for an in-flight activity run; if that
+run is still going, the wipe fails before it stops any public path or deletes
+any data. The container uses its separate `container-activity.lock` to prevent
+overlapping activity posts while the host runner holds the legacy lock shared.
+An old wipe service that cannot create `wipe.lock` under its read-only
+filesystem uses the existing `activity.lock`.
 
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome

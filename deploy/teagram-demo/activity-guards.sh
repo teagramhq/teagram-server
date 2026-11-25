@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Guards shared by scheduled activity, the weekly wipe, and their tests. Sourced only.
 #
-# The wipe holds the wipe lock exclusively for the whole reset. Each activity
-# run holds it shared and non-blocking, so a wipe in progress makes activity
-# skip, while the container's own activity.lock still refuses overlapping
-# activity posts.
+# The wipe holds the wipe lock and legacy activity lock exclusively for the
+# whole reset. Activity takes both shared and non-blocking so old systemd wipes
+# keep coordinating during the lock migration. The container uses its own
+# container-activity.lock to prevent overlapping activity posts.
 
 demo_activity_inventory_check() {
   local inventory=$1 owner=$2
@@ -73,19 +73,33 @@ demo_wipe_lock_select() {
   printf '%s\n' "$lock"
 }
 
-# Returns non-zero when a wipe holds the lock. The descriptor stays open on fd 9
-# for the rest of the caller's run, which keeps the shared lock until it exits.
+# Returns 1 only when a wipe holds the lock. The descriptor stays open for the
+# rest of the caller's run, which keeps the shared lock until it exits.
 demo_activity_try_shared_lock() {
-  local lock=$1 flock_output flock_status
+  local lock=$1 fd=${2:-9} flock_output flock_status
   command -v flock >/dev/null 2>&1 || {
     demo_fail 'flock is not installed; cannot check the activity lock'
     return 2
   }
-  if ! exec 9<"$lock"; then
-    demo_fail "could not open the shared wipe lock $lock"
-    return 2
-  fi
-  if flock_output=$(flock -s -n 9 2>&1); then
+  case "$fd" in
+    9)
+      if ! exec 9<"$lock"; then
+        demo_fail "could not open the shared activity lock $lock"
+        return 2
+      fi
+      ;;
+    10)
+      if ! exec 10<"$lock"; then
+        demo_fail "could not open the shared activity lock $lock"
+        return 2
+      fi
+      ;;
+    *)
+      demo_fail "unsupported activity lock descriptor $fd"
+      return 2
+      ;;
+  esac
+  if flock_output=$(flock -s -n "$fd" 2>&1); then
     return 0
   else
     flock_status=$?
@@ -98,10 +112,14 @@ demo_activity_try_shared_lock() {
 }
 
 # Returns non-zero when an activity run still holds the lock after the timeout.
-# The descriptor stays open on fd 8 until the wipe exits, so no activity starts
-# while the reset runs.
+# The selected descriptor stays open until the wipe exits, so no activity
+# starts while the reset runs.
 demo_wipe_take_exclusive_lock() {
-  local lock=$1 timeout=$2
-  exec 8<"$lock" || return 1
-  flock -x -w "$timeout" 8
+  local lock=$1 timeout=$2 fd=${3:-8}
+  case "$fd" in
+    7) exec 7<"$lock" || return 1 ;;
+    8) exec 8<"$lock" || return 1 ;;
+    *) demo_fail "unsupported wipe lock descriptor $fd"; return 1 ;;
+  esac
+  flock -x -w "$timeout" "$fd"
 }

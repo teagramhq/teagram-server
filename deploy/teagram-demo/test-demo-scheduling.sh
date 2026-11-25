@@ -61,6 +61,7 @@ cat > "$BIN/crontab" <<'SH'
 set -eu
 case "${1:-}" in
   -l)
+    [ -z "${CRONTAB_READ_DELAY:-}" ] || sleep "$CRONTAB_READ_DELAY"
     if [ -n "${CRONTAB_READ_ERROR:-}" ]; then
       printf '%s\n' "$CRONTAB_READ_ERROR" >&2
       exit 2
@@ -76,8 +77,11 @@ case "${1:-}" in
     cat "$CRON_STORE"
     ;;
   -)
+    temporary="$CRON_STORE.$$.tmp"
+    cat > "$temporary"
+    [ -z "${CRONTAB_WRITE_DELAY:-}" ] || sleep "$CRONTAB_WRITE_DELAY"
+    mv -f "$temporary" "$CRON_STORE"
     printf '%s\n' write >> "$CRON_WRITES"
-    cat > "$CRON_STORE"
     ;;
   *) printf 'unexpected crontab call: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -92,6 +96,7 @@ export PATH="$BIN:$PATH"
 
 # shellcheck source=deploy/teagram-demo/demo-cron.sh
 source "$SCRIPT_DIR/demo-cron.sh"
+DEMO_CRON_INSTALL_LOCK="$WORK_DIR/crontab-install.lock"
 # shellcheck source=deploy/teagram-demo/activity-guards.sh
 source "$SCRIPT_DIR/activity-guards.sh"
 demo_fail() {
@@ -135,6 +140,30 @@ grep -Eq '^\*/10 \* \* \* \* cd /opt/teagram-demo && env PATH=[^ ]+ /opt/teagram
   fail 'activity cron line does not match the expected schedule and command'
 grep -Eq '^0 3 \* \* 0 cd /opt/teagram-demo && env PATH=[^ ]+ /opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh >>/var/log/teagram-demo/weekly-wipe.log 2>&1 # teagram-demo:weekly-wipe$' "$CRON_STORE" ||
   fail 'weekly wipe cron line does not match the expected schedule and command'
+
+# Concurrent installers must serialize their complete read/replace/verify
+# cycle, preserving both jobs and unrelated root crontab lines.
+printf '%s\n' '17 4 * * * /usr/bin/true # unrelated concurrent job' > "$CRON_STORE"
+: > "$CRON_WRITES"
+CRONTAB_READ_DELAY=0.1
+CRONTAB_WRITE_DELAY=0.1
+export CRONTAB_READ_DELAY CRONTAB_WRITE_DELAY
+(
+  demo_cron_install_entry activity '*/10 * * * *' \
+    /opt/teagram-demo/deploy/teagram-demo/run-activity.sh /var/log/teagram-demo/activity.log
+) &
+activity_install_pid=$!
+(
+  demo_cron_install_entry weekly-wipe '0 3 * * 0' \
+    /opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh /var/log/teagram-demo/weekly-wipe.log
+) &
+wipe_install_pid=$!
+if ! wait "$activity_install_pid"; then fail 'concurrent activity installer failed'; fi
+if ! wait "$wipe_install_pid"; then fail 'concurrent weekly-wipe installer failed'; fi
+unset CRONTAB_READ_DELAY CRONTAB_WRITE_DELAY
+[[ "$(grep -Fc -- '# teagram-demo:activity' "$CRON_STORE")" == 1 ]] || fail 'concurrent installs lost the activity entry'
+[[ "$(grep -Fc -- '# teagram-demo:weekly-wipe' "$CRON_STORE")" == 1 ]] || fail 'concurrent installs lost the weekly wipe entry'
+[[ "$(grep -Fc -- 'unrelated concurrent job' "$CRON_STORE")" == 1 ]] || fail 'concurrent installs lost the unrelated crontab line'
 
 # Activity inventory: must be a regular, non-symlink, mode 0600 file owned by the expected uid.
 OWNER=$(id -u)
@@ -188,11 +217,31 @@ export ACTIVITY_DOCKER_CALLS="$WORK_DIR/activity-docker-calls"
 : > "$ACTIVITY_DOCKER_CALLS"
 : > "$RUNNER_STATE/wipe.lock"
 chmod 0600 "$RUNNER_STATE/wipe.lock"
+: > "$RUNNER_STATE/activity.lock"
+chmod 0600 "$RUNNER_STATE/activity.lock"
 start_holder -x "$RUNNER_STATE/wipe.lock" "$WORK_DIR/activity-wipe-holder.ready"
 ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-busy.out" 2>&1 ||
   fail 'busy wipe lock made the activity runner fail'
 [[ "$(<"$WORK_DIR/activity-busy.out")" == *'skipped: wipe running'* ]] || fail 'busy wipe lock was not reported as a skip'
 [[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'activity runner invoked Docker while wipe held the lock'
+stop_holder
+
+# A manually installed systemd wipe may still hold activity.lock without the
+# new wipe.lock. The first updated run may create wipe.lock, but must still
+# skip before launching Docker during that reset.
+LEGACY_TRANSITION_STATE="$WORK_DIR/legacy-transition-state"
+mkdir -m 0700 "$LEGACY_TRANSITION_STATE"
+: > "$LEGACY_TRANSITION_STATE/activity.lock"
+chmod 0600 "$LEGACY_TRANSITION_STATE/activity.lock"
+: > "$ACTIVITY_DOCKER_CALLS"
+start_holder -x "$LEGACY_TRANSITION_STATE/activity.lock" "$WORK_DIR/legacy-wipe-holder.ready"
+ACTIVITY_ROOT_ALLOWED=1 ACTIVITY_TEST_STATE="$LEGACY_TRANSITION_STATE" PATH="$RUNNER_BIN:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-legacy-wipe.out" 2>&1 ||
+  fail 'legacy wipe lock made the activity runner fail'
+[[ "$(<"$WORK_DIR/activity-legacy-wipe.out")" == *'skipped: wipe running'* ]] ||
+  fail 'legacy wipe lock was not reported as a skip'
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'activity runner invoked Docker while the legacy wipe held activity.lock'
+[[ -f "$LEGACY_TRANSITION_STATE/wipe.lock" ]] || fail 'first updated activity run did not prepare wipe.lock during migration'
 stop_holder
 
 chmod 0644 "$RUNNER_INVENTORY"
@@ -211,7 +260,7 @@ if ACTIVITY_ROOT_ALLOWED=1 ACTIVITY_SKIP_LOCK_PREPARE=1 \
   "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-lock-open.out" 2>&1; then
   fail 'activity runner accepted a missing lock file'
 fi
-[[ "$(<"$WORK_DIR/activity-lock-open.out")" == *'could not open the shared wipe lock'* ]] ||
+[[ "$(<"$WORK_DIR/activity-lock-open.out")" == *'could not open the shared activity lock'* ]] ||
   fail 'failed lock open did not report an operational error'
 [[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'failed lock open still invoked Docker'
 
@@ -333,7 +382,7 @@ if output=$(demo_activity_try_shared_lock "$WORK_DIR/missing-activity.lock" 2>&1
 else
   lock_status=$?
 fi
-[[ "$lock_status" == 2 && "$output" == *'could not open the shared wipe lock'* ]] ||
+[[ "$lock_status" == 2 && "$output" == *'could not open the shared activity lock'* ]] ||
   fail 'failed lock open was not distinguished from contention'
 
 mkdir -m 0700 "$WORK_DIR/no-flock-bin"

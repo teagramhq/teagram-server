@@ -7,6 +7,7 @@
 
 DEMO_CRON_REPO=/opt/teagram-demo
 DEMO_CRON_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+DEMO_CRON_INSTALL_LOCK=/run/lock/teagram-demo-cron-install.lock
 
 demo_cron_fail() {
   printf 'teagram-demo: %s\n' "$1" >&2
@@ -81,7 +82,44 @@ demo_cron_read_current() {
   return 0
 }
 
-demo_cron_install_entry() {
+demo_cron_lock_installers() {
+  local lock=$DEMO_CRON_INSTALL_LOCK owner
+  command -v flock >/dev/null 2>&1 || {
+    demo_cron_fail 'flock is required to serialize root crontab updates'
+    return 1
+  }
+  owner=$(id -u) || {
+    demo_cron_fail 'could not identify the crontab installer owner'
+    return 1
+  }
+  [[ ! -L "$lock" ]] || {
+    demo_cron_fail 'root crontab installer lock must not be a symlink'
+    return 1
+  }
+  if [[ ! -e "$lock" ]]; then
+    if ! (umask 077 && set -o noclobber && : >"$lock") 2>/dev/null; then
+      [[ -e "$lock" || -L "$lock" ]] || {
+        demo_cron_fail 'could not create the root crontab installer lock'
+        return 1
+      }
+    fi
+  fi
+  [[ -f "$lock" && ! -L "$lock" && "$(stat -c '%u:%a' -- "$lock")" == "$owner:600" ]] || {
+    demo_cron_fail 'root crontab installer lock must be a regular mode 0600 file owned by the installer'
+    return 1
+  }
+  if ! exec 7>>"$lock"; then
+    demo_cron_fail 'could not open the root crontab installer lock'
+    return 1
+  fi
+  if ! flock -x 7; then
+    exec 7>&-
+    demo_cron_fail 'could not acquire the root crontab installer lock'
+    return 1
+  fi
+}
+
+demo_cron_install_entry_locked() {
   local tag=$1 schedule=$2 script=$3 log=$4
   local marker="# teagram-demo:$tag"
   local job="cd $DEMO_CRON_REPO && env PATH=$DEMO_CRON_PATH $script >>$log 2>&1 $marker"
@@ -98,4 +136,17 @@ demo_cron_install_entry() {
   marker_count=$(printf '%s\n' "$verified" | grep -Fc -- "$marker") || marker_count=0
   [[ "$marker_count" == 1 ]] ||
     { demo_cron_fail "root crontab does not hold exactly one $tag entry"; return 1; }
+}
+
+demo_cron_install_entry() {
+  local status
+  demo_cron_lock_installers || return 1
+  if demo_cron_install_entry_locked "$@"; then
+    exec 7>&-
+    return 0
+  else
+    status=$?
+    exec 7>&-
+    return "$status"
+  fi
 }

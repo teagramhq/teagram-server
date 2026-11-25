@@ -27,7 +27,7 @@ const (
 	activityStateDir        = "/var/lib/teagram-demo-activity"
 	activitySessionFileName = "session.json"
 	activityRateFileName    = "rate.json"
-	activityLockFileName    = "activity.lock"
+	activityLockFileName    = "container-activity.lock"
 )
 
 var errActivitySessionInvalid = errors.New("activity session is invalid")

@@ -17,7 +17,7 @@ demo_run_activity() {
   local inventory=${2:-$ACTIVITY_INVENTORY}
   local owner=${3:-0}
   local settings=${4:-$ACTIVITY_SETTINGS}
-  local wipe_lock="$state_dir/wipe.lock" lock_status
+  local wipe_lock="$state_dir/wipe.lock" legacy_lock="$state_dir/activity.lock" lock_status
 
   demo_require_root || return $?
 
@@ -47,11 +47,26 @@ demo_run_activity() {
     demo_fail 'wipe lock is missing or unsafe'
     return 1
   }
-  if demo_activity_try_shared_lock "$wipe_lock"; then
+  demo_wipe_lock_prepare "$legacy_lock" "$owner" || {
+    demo_fail 'legacy activity lock is missing or unsafe'
+    return 1
+  }
+  if demo_activity_try_shared_lock "$wipe_lock" 9; then
     :
   else
     lock_status=$?
     if [[ "$lock_status" == 1 ]]; then
+      printf '%s\n' 'demo activity: skipped: wipe running'
+      return 0
+    fi
+    return "$lock_status"
+  fi
+  if demo_activity_try_shared_lock "$legacy_lock" 10; then
+    :
+  else
+    lock_status=$?
+    if [[ "$lock_status" == 1 ]]; then
+      exec 9>&-
       printf '%s\n' 'demo activity: skipped: wipe running'
       return 0
     fi
