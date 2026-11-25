@@ -11,6 +11,9 @@ MEMORY_CGROUP_DIR=
 MEMORY_PEAK_FILE=
 MEMORY_EVENTS_FILE=
 IMAGE_REVISION=
+MEMORY_MAX_BYTES=unknown
+PROBE_PHASE=server_startup
+UPLOAD_OUTCOME=not_started
 
 finish() {
   local status=$?
@@ -25,22 +28,26 @@ finish() {
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
     max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
-    printf 'LIMA_MEMORY_PROBE image=%s revision=%s peak_mib=%s peak_bytes=%s limit_bytes=%s max_events=%s oom=%s oom_kill=%s\n' \
-      "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$EXPECTED_LIMIT" \
+    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s revision=%s peak_mib=%s peak_bytes=%s memory_max_bytes=%s max_events=%s oom=%s oom_kill=%s\n' \
+      "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
+      "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Image | Revision | Peak cgroup memory | Limit | max events | OOM events | OOM kills |\n'
-        printf '| --- | --- | ---: | ---: | ---: | ---: | ---: |\n'
-        printf '| `%s` | `%s` | %s MiB (%s bytes) | %s bytes | %s | %s | %s |\n' \
-          "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$EXPECTED_LIMIT" \
+        printf '| Result | Phase | Uploads | Image | Revision | Peak cgroup memory | memory.max | max events | OOM events | OOM kills |\n'
+        printf '| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n'
+        printf '| %s | %s | %s | %s | %s | %s MiB (%s bytes) | %s bytes | %s | %s | %s |\n' \
+          "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
+          "$LIMA_SERVICE_IMAGE" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
           "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
   fi
 
   if [[ $status -ne 0 ]]; then
+    docker inspect --format 'LIMA_MEMORY_CONTAINER state={{.State.Status}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} error={{.State.Error}}' \
+      "$CONTAINER" 2>&1 || true
     docker logs "$CONTAINER" 2>&1 | tail -80
   fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1
@@ -78,9 +85,35 @@ docker run --detach --name "$CONTAINER" \
   --env GOMAXPROCS=1 --env GOMEMLIMIT=24MiB \
   "$LIMA_SERVICE_IMAGE" >/dev/null
 
+container_pid=$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")
+if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
+  cgroup_path=$(awk -F: '$1 == "0" { print $3 }' "/proc/$container_pid/cgroup")
+  if [[ -n $cgroup_path ]]; then
+    MEMORY_CGROUP_DIR="/sys/fs/cgroup$cgroup_path"
+    MEMORY_PEAK_FILE="$MEMORY_CGROUP_DIR/memory.peak"
+    MEMORY_EVENTS_FILE="$MEMORY_CGROUP_DIR/memory.events"
+    if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CGROUP_DIR/memory.max ]]; then
+      MEMORY_MAX_BYTES=$(<"$MEMORY_CGROUP_DIR/memory.max")
+    else
+      echo 'service container cgroup does not expose memory.peak, memory.max, and memory.events' >&2
+      exit 1
+    fi
+  else
+    echo 'runner does not expose the service container cgroup v2 path' >&2
+    exit 1
+  fi
+else
+  echo "service container exited before measurement (pid=$container_pid)" >&2
+  exit 1
+fi
+
 for attempt in $(seq 30); do
   if docker logs "$CONTAINER" 2>&1 | grep -q 'msg=listening'; then
     break
+  fi
+  if [[ $(docker inspect --format '{{.State.Running}}' "$CONTAINER") != true ]]; then
+    echo 'pinned Lima service container exited before reaching msg=listening' >&2
+    exit 1
   fi
   if [[ $attempt -eq 30 ]]; then
     echo 'pinned Lima service image did not reach msg=listening' >&2
@@ -89,19 +122,6 @@ for attempt in $(seq 30); do
   sleep 1
 done
 
-container_pid=$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")
-cgroup_path=$(awk -F: '$1 == "0" { print $3 }' "/proc/$container_pid/cgroup")
-if [[ -z $cgroup_path ]]; then
-  echo 'runner does not expose the service container cgroup v2 path' >&2
-  exit 1
-fi
-MEMORY_CGROUP_DIR="/sys/fs/cgroup$cgroup_path"
-MEMORY_PEAK_FILE="$MEMORY_CGROUP_DIR/memory.peak"
-MEMORY_EVENTS_FILE="$MEMORY_CGROUP_DIR/memory.events"
-if [[ ! -r $MEMORY_PEAK_FILE || ! -r $MEMORY_EVENTS_FILE ]]; then
-  echo 'service container cgroup does not expose memory.peak and memory.events' >&2
-  exit 1
-fi
 memory_limit=$(<"$MEMORY_CGROUP_DIR/memory.max")
 if [[ $memory_limit != "$EXPECTED_LIMIT" ]]; then
   printf 'service memory.max is %s bytes, want %s\n' "$memory_limit" "$EXPECTED_LIMIT" >&2
@@ -126,6 +146,7 @@ for suffix in a b; do
     /usr/local/bin/teagramd admin create-user --username "$username" <"$password_file"
 done
 
+PROBE_PHASE=photo_client_setup
 for suffix in a b; do
   "$RUNNER_TEMP/mtproto-smoke" \
     --endpoint 127.0.0.1:2443 \
@@ -160,6 +181,7 @@ if [[ $gate_ready -ne 1 ]]; then
   echo 'profile photo clients did not reach the upload barrier' >&2
   exit 1
 fi
+PROBE_PHASE=concurrent_profile_photo_uploads
 touch "$RUNNER_TEMP/lima-memory-start-gate"
 
 set +e
@@ -170,10 +192,12 @@ client_b_status=$?
 set -e
 cat "$RUNNER_TEMP/lima-memory-client-a.log" "$RUNNER_TEMP/lima-memory-client-b.log"
 if [[ $client_a_status -ne 0 || $client_b_status -ne 0 ]]; then
+  UPLOAD_OUTCOME="failed(client_a=$client_a_status,client_b=$client_b_status)"
   printf 'concurrent profile photo uploads failed (client statuses %d, %d)\n' \
     "$client_a_status" "$client_b_status" >&2
   exit 1
 fi
+UPLOAD_OUTCOME=2_passed
 
 peak_bytes=$(<"$MEMORY_PEAK_FILE")
 events=$(<"$MEMORY_EVENTS_FILE")
