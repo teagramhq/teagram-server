@@ -10,7 +10,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | --- | --- |
 | `compose.yaml` | The stack: postgres, migrate, teagramd, teagramd-next (profile `candidate`), turnstile-egress, haproxy, edge, cloudflared. |
 | `postgresql.conf` | Postgres settings sized for its 56 MiB limit. |
-| `prepare-blobs.sh` | Root, idempotent: 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`. Run once at cutover. |
+| `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem. Run once at cutover. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 
@@ -27,7 +27,8 @@ Nothing secret is in the repository.
 | `.../secrets/cloudflared.env` | root:root 0600 | `TUNNEL_TOKEN=...` and nothing else. |
 
 `TEAGRAM_DEMO_LIMA_ENV_FILE` and `TEAGRAM_DEMO_SECRETS_DIR` override the
-default paths, for tests only.
+default paths, for tests only. `TEAGRAM_DEMO_BLOB_MOUNT` can likewise point the
+preflight at a test fixture.
 
 `docker compose config` prints environment values, including the password and
 the tunnel token. Never print it to a log, a comment or a PR.
@@ -54,15 +55,18 @@ during rollout.
 
 ## Blobs
 
-`prepare-blobs.sh` makes a 4 GiB sparse image at
+`prepare-blobs.sh` reserves the full 4 GiB backing image at
 `/var/lib/teagram-demo/blobs.img`, formats it ext4 with no reserved blocks, and
-mounts it at `/srv/teagram-demo-blobs` through `/etc/fstab`. The demo's
+mounts it at `/srv/teagram-demo-blobs` through `/etc/fstab`. It checks that at
+least 100 MiB remains available on the backing filesystem before and after
+reservation. The demo's
 `/srv/teagram-demo-blobs/data` directory (owner 65532, mode 0700) is a bind
 mount, so a write past 4 GiB fails inside the demo with ENOSPC. The rest of the
-root disk is untouched. The script formats only an image it created during that
-invocation. An existing image must be identified as ext4; unknown images and
-`blkid` errors are rejected without formatting. It also refuses to mount over a
-non-empty directory.
+root disk keeps at least 100 MiB free. The script formats only an image it
+created during that invocation. An existing image must be identified as ext4;
+unknown images and `blkid` errors are rejected without formatting. It also
+refuses to mount over a non-empty directory. The host needs GNU coreutils and
+`fallocate` from util-linux, in addition to e2fsprogs and util-linux `blkid`.
 
 ## Checking
 
@@ -71,8 +75,11 @@ TEAGRAM_DEMO_LIMA_ENV_FILE=/var/lib/teagram-demo/lima.env \
   deploy/teagram-demo/lima/check.sh
 ```
 
-The check needs `docker`, `jq` and `python3`. It fails if the blob cap is not
-mounted, so it is expected to reject until `prepare-blobs.sh` has run.
+The check needs `docker`, `jq`, `python3`, GNU `stat`, and `mountpoint` and
+`findmnt` from util-linux. It fails if the blob cap is not mounted read-write,
+so it is expected to reject until `prepare-blobs.sh` has run. Compose parser
+diagnostics are withheld because malformed dotenv values can appear in its
+error text.
 
 ## Cutover notes
 

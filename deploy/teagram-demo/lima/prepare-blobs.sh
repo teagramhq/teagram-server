@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Prepares lima's blob store as a 4 GiB ext4 filesystem, loop-mounted at
-# /srv/teagram-demo-blobs. A write past the cap fails with ENOSPC inside the
-# demo and cannot consume the rest of lima's root disk.
+# Prepares lima's blob store as a fully allocated 4 GiB ext4 filesystem,
+# loop-mounted at /srv/teagram-demo-blobs. A write past the cap fails with
+# ENOSPC inside the demo and cannot consume the rest of lima's root disk.
 #
-# Run once as root at cutover. It needs mkfs.ext4 (e2fsprogs) and blkid on the
-# host; the script stops with a clear message when one is missing.
+# Run once as root at cutover. It needs GNU coreutils, fallocate (util-linux),
+# mkfs.ext4 (e2fsprogs) and blkid on the host; the script stops with a clear
+# message when one is missing.
 # Re-running leaves an existing ext4 image intact. It formats only an image
 # created in this invocation and refuses unknown images and non-empty mounts.
 set -Eeuo pipefail
@@ -13,23 +14,83 @@ BACKING_IMAGE=/var/lib/teagram-demo/blobs.img
 BLOB_MOUNT=/srv/teagram-demo-blobs
 BLOB_DATA=$BLOB_MOUNT/data
 IMAGE_BYTES=$((4 * 1024 * 1024 * 1024))
+MIN_HOST_FREE_BYTES=$((100 * 1024 * 1024))
 FSTAB=/etc/fstab
 
 die() { printf 'prepare-blobs: %s\n' "$1" >&2; exit 1; }
 log() { printf 'prepare-blobs: %s\n' "$1"; }
 
 create_blob_image() {
-  local image=$1 bytes=$2
+  local image=$1
   if ! (set -o noclobber; : > "$image"); then
     printf 'prepare-blobs: could not create %s; check whether the path already exists\n' "$image" >&2
     return 1
   fi
-  if ! truncate -s "$bytes" "$image"; then
-    printf 'prepare-blobs: could not size newly created %s; verify it is partial and remove it before rerunning\n' \
-      "$image" >&2
+  return 0
+}
+
+available_space_bytes() {
+  local path=$1 stats blocks block_size
+  if ! stats=$(stat -f -c '%a %S' -- "$path"); then
+    printf 'prepare-blobs: could not inspect free space on %s\n' "$path" >&2
     return 1
   fi
-  return 0
+  read -r blocks block_size <<<"$stats"
+  if [[ ! $blocks =~ ^[0-9]+$ || ! $block_size =~ ^[0-9]+$ ]]; then
+    printf 'prepare-blobs: could not parse free-space data for %s\n' "$path" >&2
+    return 1
+  fi
+  printf '%s\n' "$((blocks * block_size))"
+}
+
+reserve_blob_space() {
+  local image=$1 bytes=$2 created_here=$3 parent stats blocks block_size allocated_bytes missing_bytes
+  local available_bytes required_bytes
+  parent=$(dirname "$image")
+  if ! stats=$(stat -c '%b %B' -- "$image"); then
+    printf 'prepare-blobs: could not inspect allocated space in %s\n' "$image" >&2
+    return 1
+  fi
+  read -r blocks block_size <<<"$stats"
+  if [[ ! $blocks =~ ^[0-9]+$ || ! $block_size =~ ^[0-9]+$ ]]; then
+    printf 'prepare-blobs: could not parse allocated-space data for %s\n' "$image" >&2
+    return 1
+  fi
+  allocated_bytes=$((blocks * block_size))
+  ((allocated_bytes > bytes)) && allocated_bytes=$bytes
+  missing_bytes=$((bytes - allocated_bytes))
+  required_bytes=$((missing_bytes + MIN_HOST_FREE_BYTES))
+  if ! available_bytes=$(available_space_bytes "$parent"); then
+    return 1
+  fi
+  if ((available_bytes < required_bytes)); then
+    if ((created_here == 1)); then
+      rm -f -- "$image"
+    fi
+    printf 'prepare-blobs: insufficient host disk space on %s: need %s bytes available to reserve %s and keep 100 MiB free; have %s bytes\n' \
+      "$parent" "$required_bytes" "$bytes" "$available_bytes" >&2
+    return 1
+  fi
+  if ! fallocate -l "$bytes" -- "$image"; then
+    printf 'prepare-blobs: could not reserve %s bytes in %s; verify any partial allocation and remove it before rerunning\n' \
+      "$bytes" "$image" >&2
+    return 1
+  fi
+  if ! available_bytes=$(available_space_bytes "$parent"); then
+    return 1
+  fi
+  if ((available_bytes < MIN_HOST_FREE_BYTES)); then
+    if ((created_here == 1)); then
+      rm -f -- "$image"
+      printf 'prepare-blobs: reserving %s would leave less than 100 MiB free on %s; removed newly created %s\n' \
+        "$image" "$parent" "$image" >&2
+    else
+      printf 'prepare-blobs: reserving %s left less than 100 MiB free on %s; free host disk space before running the demo\n' \
+        "$image" "$parent" >&2
+    fi
+    return 1
+  fi
+  log "reserved $bytes bytes for $image; at least 100 MiB remains free on $parent"
 }
 
 ensure_fstab_entry() {
@@ -110,6 +171,17 @@ prepare_blob_filesystem() {
   return 0
 }
 
+require_gnu_coreutils() {
+  local tool version
+  for tool in chown chmod stat; do
+    if ! version=$("$tool" --version 2>&1) || [[ $version != *"(GNU coreutils)"* ]]; then
+      printf 'prepare-blobs: GNU coreutils %s is required; install coreutils before running\n' "$tool" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
 # Sourcing exposes the image decision for the regression test without running
 # host preparation or changing files.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
@@ -118,25 +190,32 @@ fi
 
 umask 077
 [[ $EUID -eq 0 ]] || die 'run as root'
-for tool in truncate mkfs.ext4 blkid mountpoint install stat awk mktemp cat chown chmod mv rm; do
+for tool in fallocate mkfs.ext4 blkid mountpoint install stat awk mktemp cat chown chmod mv rm; do
   command -v "$tool" >/dev/null 2>&1 || die "missing $tool"
 done
+require_gnu_coreutils || exit 1
 
 install -d -m 0700 "$(dirname "$BACKING_IMAGE")"
 created_image=0
 [[ ! -L $BACKING_IMAGE ]] || die "$BACKING_IMAGE must not be a symlink"
 if [[ ! -e $BACKING_IMAGE ]]; then
-  create_blob_image "$BACKING_IMAGE" "$IMAGE_BYTES" || exit 1
+  create_blob_image "$BACKING_IMAGE" || exit 1
   created_image=1
-  log "created sparse $BACKING_IMAGE of $IMAGE_BYTES bytes"
+else
+  size=$(stat -c '%s' -- "$BACKING_IMAGE")
+  [[ $size == "$IMAGE_BYTES" ]] || die "$BACKING_IMAGE is $size bytes, expected $IMAGE_BYTES; if partial from a failed run, verify and remove it before rerunning"
+  prepare_blob_filesystem "$BACKING_IMAGE" 0 || exit 1
+fi
+
+# Allocate the entire backing file before mounting it, leaving a 100 MiB host
+# reserve so container writes cannot fill lima's root filesystem first.
+reserve_blob_space "$BACKING_IMAGE" "$IMAGE_BYTES" "$created_image" || exit 1
+if ((created_image == 1)); then
+  prepare_blob_filesystem "$BACKING_IMAGE" 1 || exit 1
+  log "created and formatted $BACKING_IMAGE with $IMAGE_BYTES reserved bytes"
 fi
 size=$(stat -c '%s' -- "$BACKING_IMAGE")
 [[ $size == "$IMAGE_BYTES" ]] || die "$BACKING_IMAGE is $size bytes, expected $IMAGE_BYTES; if partial from a failed run, verify and remove it before rerunning"
-
-# Reserved blocks are zero, so the whole 4 GiB is usable and the cap is the
-# filesystem size itself. Existing images must be positively identified as
-# ext4; blkid errors and unknown signatures never authorize formatting.
-prepare_blob_filesystem "$BACKING_IMAGE" "$created_image" || exit 1
 
 ensure_fstab_entry "$FSTAB" "$BACKING_IMAGE" "$BLOB_MOUNT" || exit 1
 if ! grep -qx loop /etc/modules 2>/dev/null; then

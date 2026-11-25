@@ -31,7 +31,7 @@ fail() {
 
 check_tools() {
   local tool missing=()
-  for tool in docker jq python3 stat mountpoint; do
+  for tool in docker jq python3 stat mountpoint findmnt; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
   if ((${#missing[@]} > 0)); then
@@ -100,7 +100,6 @@ check_secrets() {
     elif [[ $owner_mode != '0:0:600' ]]; then
       bad+=("cloudflared.env ($owner_mode; expected root:root mode 0600)")
     fi
-    grep -q '^TUNNEL_TOKEN=.' -- "$path" || missing+=("cloudflared.env:TUNNEL_TOKEN")
   fi
   if ((${#missing[@]} > 0)); then
     fail secrets "missing: ${missing[*]}"
@@ -114,17 +113,17 @@ check_secrets() {
     fail secrets "wrong ownership or mode on: ${bad[*]}"
     return 0
   fi
-  pass secrets
+  pass secret-files
 }
 
 # Renders the stack the way deploy will. The output is kept in a variable and
 # never printed.
 render_config() {
-  local stdout_fd stderr status=0
+  local stdout_fd compose_stderr status=0
   # Compose lets shell variables override --env-file, so an exported value
   # would silently replace the one the operator wrote to the env file.
   exec {stdout_fd}>&1
-  stderr=$(env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  compose_stderr=$(env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u POSTGRES_PASSWORD -u TG_PUBLIC_LINK_PREFIX -u TG_AUTHKEY_ENC_KEY \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
@@ -132,10 +131,21 @@ render_config() {
     -f "$COMPOSE_FILE" --project-name teagram-demo --profile candidate \
     config --format json 2>&1 1>&"$stdout_fd") || status=$?
   exec {stdout_fd}>&-
-  if [[ -n $stderr ]]; then
-    printf 'compose-config diagnostic: %s\n' "${stderr%%$'\n'*}" >&2
+  if ((status != 0)); then
+    printf 'compose-config diagnostic: Docker Compose config failed; details withheld because dotenv errors may include values\n' >&2
+  elif [[ -n $compose_stderr ]]; then
+    printf 'compose-config diagnostic: Docker Compose emitted a diagnostic; details withheld because they may include dotenv values\n' >&2
   fi
   return "$status"
+}
+
+check_tunnel_token() {
+  if ! jq -e '.services.cloudflared.environment.TUNNEL_TOKEN | type == "string" and length > 0' \
+    <<<"$CONFIG_JSON" >/dev/null; then
+    fail tunnel-token "cloudflared.env:TUNNEL_TOKEN is missing or empty"
+  else
+    pass tunnel-token
+  fi
 }
 
 # Each check below reads the rendered JSON from CONFIG_JSON.
@@ -187,7 +197,7 @@ check_config_shape() {
 # The Compose blob bind must be the capped mount. The capped filesystem itself
 # is checked on the host, so one FAIL line covers every blob problem.
 check_blob_cap() {
-  local blocks block_size total data_dev mount_dev owner_mode
+  local blocks block_size total data_dev mount_dev owner_mode mount_options
   if ! jq -e --arg src "$BLOB_DATA" '.services.teagramd.volumes | any(.type == "bind" and .source == $src)' <<<"$CONFIG_JSON" >/dev/null; then
     fail blob-cap "teagramd does not bind $BLOB_DATA"
     return 0
@@ -202,6 +212,17 @@ check_blob_cap() {
     fail blob-cap "$BLOB_MOUNT is $total bytes, expected 3 to 4 GiB"
     return 0
   fi
+  if ! mount_options=$(findmnt -n -o OPTIONS --target "$BLOB_MOUNT" 2>/dev/null) || [[ -z $mount_options ]]; then
+    fail blob-cap "could not inspect mount options for $BLOB_MOUNT"
+    return 0
+  fi
+  case ",$mount_options," in
+    *,rw,*) ;;
+    *)
+      fail blob-cap "$BLOB_MOUNT is mounted read-only"
+      return 0
+      ;;
+  esac
   if [[ ! -d $BLOB_DATA ]]; then
     fail blob-cap "missing $BLOB_DATA"
     return 0
@@ -285,7 +306,10 @@ if CONFIG_JSON=$(render_config) && [[ -n $CONFIG_JSON ]]; then
   check_config_shape
   check_blob_cap
 else
-  fail compose-config "render failed; first diagnostic is printed above; command: $COMPOSE_RENDER_COMMAND"
+  fail compose-config "render failed; Compose diagnostics are withheld to protect dotenv values; command: $COMPOSE_RENDER_COMMAND"
+fi
+if [[ -n $CONFIG_JSON ]]; then
+  check_tunnel_token
 fi
 check_subnet_overlap
 

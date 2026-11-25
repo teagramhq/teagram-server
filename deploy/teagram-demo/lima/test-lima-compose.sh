@@ -30,7 +30,9 @@ MOCK_BIN=$TMP_DIR/mock-bin
 REAL_STAT=$(command -v stat)
 REAL_DOCKER=$(command -v docker)
 REAL_MOUNTPOINT=$(command -v mountpoint)
-REAL_TRUNCATE=$(command -v truncate)
+REAL_FINDMNT=$(command -v findmnt)
+REAL_FALLOCATE=$(command -v fallocate)
+export TEAGRAM_TEST_REAL_STAT="$REAL_STAT"
 mkdir -p "$SECRETS_DIR"
 mkdir -p "$MOCK_BIN"
 chmod 700 "$SECRETS_DIR"
@@ -58,6 +60,11 @@ if [[ ${1:-} == -f && ${2:-} == -c && ${3:-} == '%b %S' && ${4:-} == -- \
   printf '%s %s\n' "${TEAGRAM_TEST_STATFS_BLOCKS:-983040}" "${TEAGRAM_TEST_STATFS_BLOCK_SIZE:-4096}"
   printf '%s %s %s\n' "$5" "${TEAGRAM_TEST_STATFS_BLOCKS:-983040}" "${TEAGRAM_TEST_STATFS_BLOCK_SIZE:-4096}" \
     >> "$TEAGRAM_TEST_STATFS_LOG"
+  exit 0
+fi
+if [[ ${1:-} == -f && ${2:-} == -c && ${3:-} == '%a %S' && ${4:-} == -- \
+  && -n ${TEAGRAM_TEST_AVAILABLE_BYTES:-} ]]; then
+  printf '%s 1\n' "$TEAGRAM_TEST_AVAILABLE_BYTES"
   exit 0
 fi
 if [[ ${1:-} == -c && ${2:-} == '%u:%g %a' && ${3:-} == -- \
@@ -92,6 +99,21 @@ fi
 exec "$TEAGRAM_TEST_REAL_MOUNTPOINT" "$@"
 EOF
 chmod 755 "$MOCK_BIN/mountpoint"
+
+cat > "$MOCK_BIN/findmnt" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == -n && ${2:-} == -o && ${3:-} == OPTIONS \
+  && ${4:-} == --target && ${5:-} == "$TEAGRAM_DEMO_BLOB_MOUNT" ]]; then
+  if [[ ${TEAGRAM_TEST_MOUNT_READONLY:-0} == 1 ]]; then
+    printf 'ro,relatime\n'
+  else
+    printf 'rw,relatime\n'
+  fi
+  exit 0
+fi
+exec "$TEAGRAM_TEST_REAL_FINDMNT" "$@"
+EOF
+chmod 755 "$MOCK_BIN/findmnt"
 
 cat > "$MOCK_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
@@ -140,28 +162,33 @@ fi
 EOF
 chmod 755 "$MOCK_BIN/mkfs.ext4"
 
-cat > "$MOCK_BIN/truncate" <<'EOF'
+cat > "$MOCK_BIN/fallocate" <<'EOF'
 #!/usr/bin/env bash
-if [[ ${TEAGRAM_TEST_TRUNCATE_FAIL:-0} == 1 ]]; then
-  printf 'mock truncate: No space left on device\n' >&2
+set -Eeuo pipefail
+if [[ ${TEAGRAM_TEST_FALLOCATE_FAIL:-0} == 1 ]]; then
+  printf 'mock fallocate: No space left on device\n' >&2
   exit 1
 fi
-exec "$TEAGRAM_TEST_REAL_TRUNCATE" "$@"
+printf '%s\n' "$*" >> "$TEAGRAM_TEST_FALLOCATE_LOG"
+exec "$TEAGRAM_TEST_REAL_FALLOCATE" "$@"
 EOF
-chmod 755 "$MOCK_BIN/truncate"
+chmod 755 "$MOCK_BIN/fallocate"
 
 run_check() {
   local bad_owner_path=${1:-} fail_network_ls=${2:-0} config_file=${3:-}
   local network_ids_file=${4:-} network_inspect_file=${5:-} fail_network_inspect=${6:-0}
   local env_file=${7:-$ENV_FILE}
   local blob_mount=${8:-/srv/teagram-demo-blobs} mounted=${9:-0}
+  local read_only=${10:-0}
   PATH="$MOCK_BIN:$PATH" \
     TEAGRAM_TEST_REAL_STAT="$REAL_STAT" \
     TEAGRAM_TEST_REAL_DOCKER="$REAL_DOCKER" \
     TEAGRAM_TEST_REAL_MOUNTPOINT="$REAL_MOUNTPOINT" \
+    TEAGRAM_TEST_REAL_FINDMNT="$REAL_FINDMNT" \
     TEAGRAM_TEST_BAD_OWNER_PATH="$bad_owner_path" \
     TEAGRAM_TEST_FAIL_NETWORK_LS="$fail_network_ls" \
     TEAGRAM_TEST_MOUNTED="$mounted" \
+    TEAGRAM_TEST_MOUNT_READONLY="$read_only" \
     TEAGRAM_TEST_STATFS_BLOCKS=983040 \
     TEAGRAM_TEST_STATFS_BLOCK_SIZE=4096 \
     TEAGRAM_TEST_STATFS_LOG="$TMP_DIR/statfs.log" \
@@ -318,9 +345,11 @@ fi
 # shellcheck source=deploy/teagram-demo/lima/prepare-blobs.sh
 source "$SCRIPT_DIR/prepare-blobs.sh"
 TEAGRAM_TEST_MKFS_LOG=$TMP_DIR/mkfs.log
+TEAGRAM_TEST_FALLOCATE_LOG=$TMP_DIR/fallocate.log
 PREPARE_ERR=$TMP_DIR/prepare.err
-export TEAGRAM_TEST_MKFS_LOG
+export TEAGRAM_TEST_MKFS_LOG TEAGRAM_TEST_FALLOCATE_LOG
 : > "$TEAGRAM_TEST_MKFS_LOG"
+: > "$TEAGRAM_TEST_FALLOCATE_LOG"
 FSTAB_FIXTURE=$TMP_DIR/fstab
 : > "$FSTAB_FIXTURE"
 if ensure_fstab_entry "$FSTAB_FIXTURE" "$TMP_DIR/blobs.img" "$TMP_DIR/blobs" >/dev/null \
@@ -366,15 +395,85 @@ if [[ ! -s $TEAGRAM_TEST_MKFS_LOG ]]; then
 else
   not_ok 'prepare-blobs does not format an existing image'
 fi
-if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_REAL_TRUNCATE="$REAL_TRUNCATE" TEAGRAM_TEST_TRUNCATE_FAIL=1 \
-  create_blob_image "$TMP_DIR/partial.img" 4096 >/dev/null 2>"$PREPARE_ERR"; then
-  not_ok 'prepare-blobs rejects a partial image after truncate failure'
-elif grep -Fq "$TMP_DIR/partial.img" "$PREPARE_ERR" \
+if require_gnu_coreutils >/dev/null 2>"$PREPARE_ERR"; then
+  ok 'prepare-blobs accepts GNU coreutils'
+else
+  not_ok 'prepare-blobs accepts GNU coreutils'
+  cat "$PREPARE_ERR" >&2
+fi
+cat > "$MOCK_BIN/chown" <<'EOF'
+#!/usr/bin/env bash
+printf 'chown (BusyBox) 1.36.1\n'
+EOF
+chmod 755 "$MOCK_BIN/chown"
+if PATH="$MOCK_BIN:$PATH" require_gnu_coreutils >/dev/null 2>"$PREPARE_ERR"; then
+  not_ok 'prepare-blobs rejects BusyBox chown before setup'
+elif grep -Fq 'GNU coreutils chown is required' "$PREPARE_ERR"; then
+  ok 'prepare-blobs rejects BusyBox chown before setup'
+else
+  not_ok 'prepare-blobs diagnoses an incompatible chown'
+  cat "$PREPARE_ERR" >&2
+fi
+rm -f "$MOCK_BIN/chown"
+
+LOW_SPACE_IMAGE=$TMP_DIR/low-space.img
+create_blob_image "$LOW_SPACE_IMAGE"
+LOW_SPACE_AVAILABLE=$((IMAGE_BYTES + MIN_HOST_FREE_BYTES - 1))
+if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_AVAILABLE_BYTES="$LOW_SPACE_AVAILABLE" \
+  reserve_blob_space "$LOW_SPACE_IMAGE" "$IMAGE_BYTES" 1 >/dev/null 2>"$PREPARE_ERR"; then
+  not_ok 'prepare-blobs rejects a reservation that would leave less than 100 MiB free'
+elif grep -Fq 'insufficient host disk space' "$PREPARE_ERR" \
+  && [[ ! -e $LOW_SPACE_IMAGE ]] \
+  && [[ ! -s $TEAGRAM_TEST_FALLOCATE_LOG ]]; then
+  ok 'prepare-blobs rejects insufficient host space before allocating the image'
+else
+  not_ok 'prepare-blobs diagnoses insufficient host space before allocating the image'
+  cat "$PREPARE_ERR" >&2
+fi
+
+ALLOCATED_IMAGE=$TMP_DIR/allocated.img
+create_blob_image "$ALLOCATED_IMAGE"
+if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_REAL_FALLOCATE="$REAL_FALLOCATE" \
+  TEAGRAM_TEST_AVAILABLE_BYTES=1073741824 \
+  reserve_blob_space "$ALLOCATED_IMAGE" 4096 1 >/dev/null; then
+  if [[ $(stat -c '%s' -- "$ALLOCATED_IMAGE") == 4096 ]] \
+    && grep -Fq -- '-l 4096 --' "$TEAGRAM_TEST_FALLOCATE_LOG"; then
+    ok 'prepare-blobs reserves backing blocks before use'
+  else
+    not_ok 'prepare-blobs reserves backing blocks before use'
+  fi
+else
+  not_ok 'prepare-blobs reserves backing blocks before use'
+fi
+
+SPARSE_IMAGE=$TMP_DIR/existing-sparse.img
+truncate -s 4096 "$SPARSE_IMAGE"
+if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_REAL_FALLOCATE="$REAL_FALLOCATE" \
+  TEAGRAM_TEST_AVAILABLE_BYTES=1073741824 \
+  reserve_blob_space "$SPARSE_IMAGE" 4096 0 >/dev/null; then
+  if [[ $(stat -c '%s' -- "$SPARSE_IMAGE") == 4096 ]] \
+    && [[ $(stat -c '%b' -- "$SPARSE_IMAGE") -gt 0 ]] \
+    && grep -Fq -- '-l 4096 --' "$TEAGRAM_TEST_FALLOCATE_LOG"; then
+    ok 'prepare-blobs reserves holes in an existing sparse image'
+  else
+    not_ok 'prepare-blobs reserves holes in an existing sparse image'
+  fi
+else
+  not_ok 'prepare-blobs reserves holes in an existing sparse image'
+fi
+
+PARTIAL_IMAGE=$TMP_DIR/partial.img
+create_blob_image "$PARTIAL_IMAGE"
+if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_REAL_FALLOCATE="$REAL_FALLOCATE" \
+  TEAGRAM_TEST_AVAILABLE_BYTES=1073741824 TEAGRAM_TEST_FALLOCATE_FAIL=1 \
+  reserve_blob_space "$PARTIAL_IMAGE" 4096 1 >/dev/null 2>"$PREPARE_ERR"; then
+  not_ok 'prepare-blobs rejects a partial image after fallocate failure'
+elif grep -Fq "$PARTIAL_IMAGE" "$PREPARE_ERR" \
   && grep -Fq 'No space left on device' "$PREPARE_ERR" \
   && grep -Fq 'remove it before rerunning' "$PREPARE_ERR"; then
-  ok 'prepare-blobs diagnoses and identifies a partial image after truncate failure'
+  ok 'prepare-blobs diagnoses and identifies a partial image after fallocate failure'
 else
-  not_ok 'prepare-blobs diagnoses truncate failure and partial image recovery'
+  not_ok 'prepare-blobs diagnoses allocation failure and partial image recovery'
   cat "$PREPARE_ERR" >&2
 fi
 if PATH="$MOCK_BIN:$PATH" TEAGRAM_TEST_BLKID_TYPE='' TEAGRAM_TEST_BLKID_STATUS=2 \
@@ -417,7 +516,7 @@ else
   not_ok 'check.sh rejects an unmounted blob cap'
   cat "$CHECK_OUT" >&2
 fi
-for name in env-file secrets compose-config config-build config-qa-invite image-digests mem-limits subnets; do
+for name in env-file secret-files tunnel-token compose-config config-build config-qa-invite image-digests mem-limits subnets; do
   if grep -q "^PASS $name" "$CHECK_OUT"; then
     ok "check.sh passes $name on the fixture"
   else
@@ -454,6 +553,23 @@ if ((check_status == 0)) \
   ok 'check.sh accepts a mounted blob cap using the stat -f fixture'
 else
   not_ok 'check.sh accepts a mounted blob cap using the stat -f fixture'
+  cat "$CHECK_OUT" >&2
+  cat "$STATFS_LOG" >&2
+fi
+
+: > "$STATFS_LOG"
+set +e
+run_check "" 0 "$BLOB_MOUNT_CONFIG" "" "" 0 "$ENV_FILE" "$BLOB_MOUNT_FIXTURE" 1 1 \
+  > "$CHECK_OUT" 2>&1
+check_status=$?
+set -e
+if ((check_status == 1)) \
+  && grep -qx "FAIL blob-cap: $BLOB_MOUNT_FIXTURE is mounted read-only" "$CHECK_OUT" \
+  && grep -qx "$BLOB_MOUNT_FIXTURE 983040 4096" "$STATFS_LOG" \
+  && grep -q '^would_reject' "$CHECK_OUT"; then
+  ok 'check.sh rejects a read-only mounted blob filesystem'
+else
+  not_ok 'check.sh rejects a read-only mounted blob filesystem'
   cat "$CHECK_OUT" >&2
   cat "$STATFS_LOG" >&2
 fi
@@ -582,13 +698,72 @@ set -e
 if ((check_status == 1)) \
   && grep -q '^FAIL env-file: missing keys: POSTGRES_PASSWORD$' "$CHECK_OUT" \
   && grep -q '^FAIL compose-config: render failed;' "$CHECK_OUT" \
-  && grep -q '^compose-config diagnostic: .*POSTGRES_PASSWORD' "$CHECK_OUT" \
+  && grep -q '^compose-config diagnostic: Docker Compose config failed; details withheld' "$CHECK_OUT" \
   && grep -q 'command: docker compose --env-file <lima.env> --project-directory <checkout>' "$CHECK_OUT" \
   && grep -q '^would_reject' "$CHECK_OUT"; then
   ok 'check.sh reports a missing env key and Compose diagnostic'
 else
   not_ok 'check.sh reports a missing env key and Compose diagnostic'
   cat "$CHECK_OUT" >&2
+fi
+
+# The effective env_file value can be empty even when the file contains a
+# TUNNEL_TOKEN assignment, so inspect Compose's resolved environment.
+printf 'TUNNEL_TOKEN=""\n' > "$SECRETS_DIR/cloudflared.env"
+chmod 600 "$SECRETS_DIR/cloudflared.env"
+set +e
+run_check > "$CHECK_OUT" 2>&1
+check_status=$?
+set -e
+printf 'TUNNEL_TOKEN=fixture-tunnel-token\n' > "$SECRETS_DIR/cloudflared.env"
+chmod 600 "$SECRETS_DIR/cloudflared.env"
+if ((check_status == 1)) \
+  && grep -q '^FAIL tunnel-token: cloudflared.env:TUNNEL_TOKEN is missing or empty$' "$CHECK_OUT" \
+  && grep -q '^would_reject' "$CHECK_OUT"; then
+  ok 'check.sh rejects an empty effective tunnel token'
+else
+  not_ok 'check.sh rejects an empty effective tunnel token'
+  cat "$CHECK_OUT" >&2
+fi
+
+# Compose dotenv parse errors can echo the offending value. Verify the
+# preflight withholds the parser text from both stdout and stderr.
+CHECK_ERR=$TMP_DIR/check.err
+MALFORMED_DB_SECRET=fixture-malformed-db-secret-must-not-leak
+MALFORMED_DB_ENV=$TMP_DIR/malformed-db.env
+sed "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=\"$MALFORMED_DB_SECRET/" "$ENV_FILE" > "$MALFORMED_DB_ENV"
+chmod 600 "$MALFORMED_DB_ENV"
+set +e
+run_check "" 0 "" "" "" 0 "$MALFORMED_DB_ENV" > "$CHECK_OUT" 2> "$CHECK_ERR"
+check_status=$?
+set -e
+if ((check_status == 1)) \
+  && grep -q '^FAIL compose-config: render failed;' "$CHECK_OUT" \
+  && grep -q '^compose-config diagnostic: Docker Compose config failed; details withheld' "$CHECK_ERR" \
+  && ! grep -Fq "$MALFORMED_DB_SECRET" "$CHECK_OUT" \
+  && ! grep -Fq "$MALFORMED_DB_SECRET" "$CHECK_ERR"; then
+  ok 'check.sh withholds malformed database dotenv values from both streams'
+else
+  not_ok 'check.sh withholds malformed database dotenv values from both streams'
+fi
+
+MALFORMED_TUNNEL_SECRET=fixture-malformed-tunnel-secret-must-not-leak
+cp "$SECRETS_DIR/cloudflared.env" "$TMP_DIR/cloudflared.env.saved"
+printf 'TUNNEL_TOKEN="%s\n' "$MALFORMED_TUNNEL_SECRET" > "$SECRETS_DIR/cloudflared.env"
+chmod 600 "$SECRETS_DIR/cloudflared.env"
+set +e
+run_check > "$CHECK_OUT" 2> "$CHECK_ERR"
+check_status=$?
+set -e
+mv "$TMP_DIR/cloudflared.env.saved" "$SECRETS_DIR/cloudflared.env"
+if ((check_status == 1)) \
+  && grep -q '^FAIL compose-config: render failed;' "$CHECK_OUT" \
+  && grep -q '^compose-config diagnostic: Docker Compose config failed; details withheld' "$CHECK_ERR" \
+  && ! grep -Fq "$MALFORMED_TUNNEL_SECRET" "$CHECK_OUT" \
+  && ! grep -Fq "$MALFORMED_TUNNEL_SECRET" "$CHECK_ERR"; then
+  ok 'check.sh withholds malformed tunnel dotenv values from both streams'
+else
+  not_ok 'check.sh withholds malformed tunnel dotenv values from both streams'
 fi
 
 # A missing tunnel token is named by key, and the check rejects.
