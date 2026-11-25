@@ -166,6 +166,10 @@ jobs:
 
   build-demo-web:
     name: 'build: demo-web'
+    concurrency:
+      group: deploy-teagram-demo-target
+      cancel-in-progress: false
+      queue: max
     needs: check-server-deploy-result
     if: >-
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true') ||

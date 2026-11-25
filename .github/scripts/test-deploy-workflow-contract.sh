@@ -937,6 +937,10 @@ check_contract() {
     "$(demo_query '.jobs.deploy-demo.concurrency."cancel-in-progress"')" == 'false' &&
     "$(demo_query '.jobs.deploy-demo.concurrency.queue')" == 'max' ]] ||
     fail 'demo deployments must have an independent non-canceling max queue'
+  [[ "$(demo_query '.jobs."build-demo-web".concurrency.group')" == 'deploy-teagram-demo-target' &&
+    "$(demo_query '.jobs."build-demo-web".concurrency."cancel-in-progress"')" == 'false' &&
+    "$(demo_query '.jobs."build-demo-web".concurrency.queue')" == 'max' ]] ||
+    fail 'demo web builds must enter the demo deployment queue before building'
   [[ "$(demo_query '.jobs.deploy-dev.concurrency.group')" == 'deploy-teagram-dev-target' &&
     "$(demo_query '.jobs.deploy-dev.concurrency."cancel-in-progress"')" == 'false' &&
     "$(demo_query '.jobs.deploy-dev.concurrency.queue')" == 'max' ]] ||
@@ -1379,6 +1383,10 @@ self_test() {
 
   local demo_mutations=(
     '.concurrency.group = "deploy-teagram-demo-workflow"'
+    'del(.jobs."build-demo-web".concurrency)'
+    '.jobs."build-demo-web".concurrency.group = "deploy-teagram-dev-target"'
+    '.jobs."build-demo-web".concurrency.queue = "single"'
+    '.jobs."build-demo-web".concurrency."cancel-in-progress" = true'
     'del(.jobs."deploy-demo".concurrency)'
     '.jobs."deploy-demo".concurrency.queue = "single"'
     '.jobs."deploy-demo".concurrency."cancel-in-progress" = true'
