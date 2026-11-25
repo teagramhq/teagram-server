@@ -41,7 +41,7 @@ when the `candidate` profile is enabled.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before the Lima cap; 30.09 MiB profile-only at 40 MiB; combined profile and media-photo uploads hit the 40 MiB cap (`max=1`, `oom=0`) |
+| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; 37.72 MiB combined profile and media-photo uploads at 44 MiB in hosted CI |
 | teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
@@ -57,16 +57,16 @@ sampled 43.82 MiB under the prior 56 MiB container limit; the Lima limit is
 so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
 Compose image remains pinned to linux/amd64.
 
-Hosted x86 CI first measured the pinned linux/amd64 service image with a
-40 MiB memory and swap cap, `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
-`TG_PG_MAX_CONNS=3`. Two synchronized 1600×1600 `photos.uploadProfilePhoto`
-requests passed at 30.09 MiB (31,555,584 bytes), with `max=0`, `oom=0`, and
-`oom_kill=0`. The combined profile-photo and media-photo run also passed both
-uploads, but reached the 40 MiB cap (`memory.peak=41,943,040`,
-`memory.max=41,943,040`, `max=1`, `oom=0`, `oom_kill=0`). The server slots now
-have 44 MiB limits and the combined probe is rerunning at that cap. The image was
+Hosted x86 CI measured the pinned linux/amd64 service image in a 44 MiB memory
+and swap cgroup with `GOMEMLIMIT=24MiB`, `GOMAXPROCS=1`, and
+`TG_PG_MAX_CONNS=3`. One synchronized 1600×1600 profile-photo upload and one
+media-photo send both passed in phase
+`concurrent_profile_and_media_photo_uploads`. Peak cgroup memory was 37.72 MiB
+(39,555,072 bytes), with `memory.max=46,137,344`, `max=0`, `oom=0`, and
+`oom_kill=0`. An earlier run at 40 MiB reached that cap (`max=1`), prompting
+the server-slot rebalance. The image was
 `ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6`, revision
-`609ae698dbacbb94d1028d6d6e45327a82078080` ([hosted CI run](https://github.com/teagramhq/teagram-server/actions/runs/45662146460)).
+`609ae698dbacbb94d1028d6d6e45327a82078080` ([hosted CI run](https://github.com/teagramhq/teagram-server/actions/runs/45710872548)).
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd
