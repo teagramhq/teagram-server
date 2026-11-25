@@ -11,16 +11,28 @@ demo_activity_inventory_check() {
   [[ -f "$inventory" && ! -L "$inventory" && "$(stat -c '%u:%a' -- "$inventory")" == "$owner:600" ]]
 }
 
+demo_activity_state_check() {
+  local state_dir=$1 owner=$2
+  [[ -d "$state_dir" && ! -L "$state_dir" && "$(stat -c '%u:%a' -- "$state_dir")" == "$owner:700" ]]
+}
+
 demo_wipe_lock_check() {
   local lock=$1 owner=$2
   [[ -f "$lock" && ! -L "$lock" && "$(stat -c '%u:%a' -- "$lock")" == "$owner:600" ]]
 }
 
 demo_wipe_lock_create() {
-  local lock=$1
-  (umask 077 && set -o noclobber && : >"$lock") 2>/dev/null || {
-    [[ -e "$lock" || -L "$lock" ]] || return 1
-  }
+  local lock=$1 error
+  if error=$( (umask 077 && set -o noclobber && : >"$lock") 2>&1); then
+    return 0
+  fi
+  # A concurrent creator may have installed the path; prepare() still checks
+  # its type, owner, and mode before accepting it.
+  if [[ -e "$lock" || -L "$lock" ]]; then
+    return 0
+  fi
+  printf 'teagram-demo: could not create shared wipe lock %s: %s\n' "$lock" "${error:-creation failed}" >&2
+  return 1
 }
 
 demo_wipe_lock_prepare() {
@@ -31,9 +43,13 @@ demo_wipe_lock_prepare() {
   demo_wipe_lock_check "$lock" "$owner"
 }
 
+demo_wipe_lock_state_dir_writable() {
+  local state_dir=$1
+  [[ -d "$state_dir" && ! -L "$state_dir" && -w "$state_dir" ]]
+}
+
 # The old wipe unit ran under ProtectSystem=strict without a writable activity
-# state path. If it cannot create the new lock, use the old activity lock so an
-# already-running legacy container still finishes before the wipe.
+# state path. Only that sandboxed case may use the old activity lock.
 demo_wipe_lock_select() {
   local lock=$1 owner=$2 legacy="${1%/*}/activity.lock"
   if [[ -e "$lock" || -L "$lock" ]]; then
@@ -41,21 +57,44 @@ demo_wipe_lock_select() {
     printf '%s\n' "$lock"
     return 0
   fi
-  if demo_wipe_lock_prepare "$lock" "$owner"; then
-    printf '%s\n' "$lock"
+  if ! demo_wipe_lock_state_dir_writable "${lock%/*}"; then
+    if ! demo_wipe_lock_check "$legacy" "$owner"; then
+      printf '%s\n' 'teagram-demo: activity state directory is not writable and the legacy activity lock is missing or unsafe' >&2
+      return 1
+    fi
+    printf '%s\n' 'teagram-demo: activity state directory is not writable; using the legacy activity lock' >&2
+    printf '%s\n' "$legacy"
     return 0
   fi
-  [[ ! -e "$lock" && ! -L "$lock" ]] || return 1
-  demo_wipe_lock_check "$legacy" "$owner" || return 1
-  printf '%s\n' "$legacy"
+  if ! demo_wipe_lock_prepare "$lock" "$owner"; then
+    printf 'teagram-demo: could not create or validate shared wipe lock %s\n' "$lock" >&2
+    return 1
+  fi
+  printf '%s\n' "$lock"
 }
 
 # Returns non-zero when a wipe holds the lock. The descriptor stays open on fd 9
 # for the rest of the caller's run, which keeps the shared lock until it exits.
 demo_activity_try_shared_lock() {
-  local lock=$1
-  exec 9<"$lock" || return 1
-  flock -s -n 9
+  local lock=$1 flock_output flock_status
+  command -v flock >/dev/null 2>&1 || {
+    demo_fail 'flock is not installed; cannot check the activity lock'
+    return 2
+  }
+  if ! exec 9<"$lock"; then
+    demo_fail "could not open the shared wipe lock $lock"
+    return 2
+  fi
+  if flock_output=$(flock -s -n 9 2>&1); then
+    return 0
+  else
+    flock_status=$?
+  fi
+  if [[ "$flock_status" == 1 && -z "$flock_output" ]]; then
+    return 1
+  fi
+  demo_fail "flock failed while checking the activity lock (exit $flock_status): ${flock_output:-no diagnostic output}"
+  return 2
 }
 
 # Returns non-zero when an activity run still holds the lock after the timeout.

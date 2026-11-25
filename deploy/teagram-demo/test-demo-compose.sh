@@ -1158,7 +1158,7 @@ for name, text, fragments in [
     ]),
     ("activity runner", runner, [
         'ACTIVITY_SETTINGS=/etc/default/teagram-demo-activity',
-        '--volume "$ACTIVITY_INVENTORY:/run/secrets/demo-activity-inventory.json:ro"',
+        '--volume "$inventory:/run/secrets/demo-activity-inventory.json:ro"',
         "--activity",
         '--target "$TARGET"',
         "skipped: wipe running",
@@ -1171,9 +1171,10 @@ for name, text, fragments in [
 if "PASSWORD" in runner:
     raise SystemExit("activity runner: the account password must never be passed to the runner")
 assert_text_order(runner, "activity runner inventory and lock gate", [
-    'demo_activity_inventory_check "$ACTIVITY_INVENTORY" 0',
-    'demo_wipe_lock_prepare "$WIPE_LOCK" 0',
-    'demo_activity_try_shared_lock "$WIPE_LOCK"',
+    'demo_activity_state_check "$state_dir" "$owner"',
+    'demo_activity_inventory_check "$inventory" "$owner"',
+    'demo_wipe_lock_prepare "$wipe_lock" "$owner"',
+    'demo_activity_try_shared_lock "$wipe_lock"',
     "demo_compose run --rm --no-deps --pull never",
 ])
 for fragment in [
@@ -1582,8 +1583,9 @@ if 'demo_compose run --rm --no-deps teagramd-maintenance client-config' not in d
     raise SystemExit("deploy-main.sh: candidate config must use the dynamic-address maintenance service")
 for fragment in [
     'WIPE=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh',
-    'output=$("$WIPE") || status=$?',
+    'output=$("$WIPE" 2>>"$WIPE_LOG") || status=$?',
     'weekly wipe=verified ',
+    'print_wipe_log_tail',
 ]:
     if fragment not in weekly_wipe_op:
         raise SystemExit("weekly-wipe ops: must run the wipe in the foreground and verify its own output line")
@@ -1812,6 +1814,7 @@ OPS_TEST_DIR="$TMP_DIR/weekly-wipe-ops"
 mkdir -p "$OPS_TEST_DIR"
 cat > "$OPS_TEST_DIR/wipe-verified.sh" <<'SH'
 #!/bin/sh
+printf '%s\n' 'verified wipe diagnostic' >&2
 printf '%s\n' 'wipe step complete'
 printf '%s\n' 'weekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data'
 SH
@@ -1826,17 +1829,24 @@ printf '%s\n' 'wipe step complete'
 SH
 chmod 0755 "$OPS_TEST_DIR"/wipe-*.sh
 for case_name in verified failed unverified; do
-  sed "s|^WIPE=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh\$|WIPE=$OPS_TEST_DIR/wipe-$case_name.sh|" \
+  sed \
+    -e "s|^WIPE=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh\$|WIPE=$OPS_TEST_DIR/wipe-$case_name.sh|" \
+    -e "s|^WIPE_LOG_DIR=/var/log/teagram-demo\$|WIPE_LOG_DIR=$OPS_TEST_DIR/log-$case_name|" \
+    -e "s|^WIPE_LOG=\"\$WIPE_LOG_DIR/weekly-wipe.log\"\$|WIPE_LOG=\"$OPS_TEST_DIR/log-$case_name/weekly-wipe.log\"|" \
     "$SCRIPT_DIR/ops/weekly-wipe.sh" > "$OPS_TEST_DIR/ops-$case_name.sh"
   grep -Fq "WIPE=$OPS_TEST_DIR/wipe-$case_name.sh" "$OPS_TEST_DIR/ops-$case_name.sh"
+  grep -Fq "WIPE_LOG_DIR=$OPS_TEST_DIR/log-$case_name" "$OPS_TEST_DIR/ops-$case_name.sh"
 done
 OPS_OUTPUT=$(sh "$OPS_TEST_DIR/ops-verified.sh")
 [[ "$OPS_OUTPUT" == $'wipe step complete\nweekly wipe=verified rsa_identity=preserved blob_mount=/srv/teagram-demo-blobs/data' ]]
+[[ "$(<"$OPS_TEST_DIR/log-verified/weekly-wipe.log")" == 'verified wipe diagnostic' ]]
 if OPS_FAILED_OUTPUT=$(sh "$OPS_TEST_DIR/ops-failed.sh" 2>&1); then
   printf '%s\n' 'weekly-wipe ops accepted a failed wipe' >&2
   exit 1
 fi
 [[ "$OPS_FAILED_OUTPUT" == *'failed with exit status 1'* ]]
+[[ "$OPS_FAILED_OUTPUT" == *'teagram-demo: seed check failed'* ]]
+[[ "$(<"$OPS_TEST_DIR/log-failed/weekly-wipe.log")" == 'teagram-demo: seed check failed' ]]
 if OPS_UNVERIFIED_OUTPUT=$(sh "$OPS_TEST_DIR/ops-unverified.sh" 2>&1); then
   printf '%s\n' 'weekly-wipe ops accepted a wipe without its verification line' >&2
   exit 1

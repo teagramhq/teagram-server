@@ -94,6 +94,10 @@ export PATH="$BIN:$PATH"
 source "$SCRIPT_DIR/demo-cron.sh"
 # shellcheck source=deploy/teagram-demo/activity-guards.sh
 source "$SCRIPT_DIR/activity-guards.sh"
+demo_fail() {
+  printf 'teagram-demo: %s\n' "$1" >&2
+  return 1
+}
 
 # Missing daemon: the installer must refuse and name crond.
 if output=$(MOCK_CROND=0 demo_cron_require_daemon 2>&1); then
@@ -145,6 +149,100 @@ chmod 0600 "$INVENTORY"
 ln -s "$INVENTORY" "$WORK_DIR/inventory-link.json"
 demo_activity_inventory_check "$WORK_DIR/inventory-link.json" "$OWNER" && fail 'symlinked inventory was accepted'
 demo_activity_inventory_check "$WORK_DIR/missing.json" "$OWNER" && fail 'missing inventory was accepted'
+
+# The host runner must distinguish lock contention from operational failures
+# and must not invoke Docker for invalid inputs.
+RUNNER_STATE="$WORK_DIR/activity-runner-state"
+RUNNER_INVENTORY="$WORK_DIR/activity-runner-inventory.json"
+RUNNER_BIN="$WORK_DIR/activity-runner-bin"
+mkdir -m 0700 "$RUNNER_STATE" "$RUNNER_BIN"
+printf '{}\n' > "$RUNNER_INVENTORY"
+chmod 0600 "$RUNNER_INVENTORY"
+cat > "$RUNNER_BIN/docker" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$ACTIVITY_DOCKER_CALLS"
+SH
+chmod 0755 "$RUNNER_BIN/docker"
+cat > "$WORK_DIR/run-activity-harness.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$ACTIVITY_RUNNER"
+demo_require_root() {
+  [[ "${ACTIVITY_ROOT_ALLOWED:-1}" == 1 ]] || demo_fail 'injected root check failed'
+}
+demo_require_env() { :; }
+demo_compose() { docker compose "$@"; }
+if [[ "${ACTIVITY_SKIP_LOCK_PREPARE:-0}" == 1 ]]; then
+  demo_wipe_lock_prepare() { :; }
+fi
+demo_run_activity "$ACTIVITY_TEST_STATE" "$ACTIVITY_TEST_INVENTORY" "$ACTIVITY_TEST_OWNER" "$ACTIVITY_TEST_SETTINGS"
+SH
+chmod 0755 "$WORK_DIR/run-activity-harness.sh"
+export ACTIVITY_RUNNER="$SCRIPT_DIR/run-activity.sh"
+export ACTIVITY_TEST_STATE="$RUNNER_STATE"
+export ACTIVITY_TEST_INVENTORY="$RUNNER_INVENTORY"
+export ACTIVITY_TEST_OWNER="$OWNER"
+export ACTIVITY_TEST_SETTINGS="$WORK_DIR/missing-activity-settings"
+export ACTIVITY_DOCKER_CALLS="$WORK_DIR/activity-docker-calls"
+
+: > "$ACTIVITY_DOCKER_CALLS"
+: > "$RUNNER_STATE/wipe.lock"
+chmod 0600 "$RUNNER_STATE/wipe.lock"
+start_holder -x "$RUNNER_STATE/wipe.lock" "$WORK_DIR/activity-wipe-holder.ready"
+ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-busy.out" 2>&1 ||
+  fail 'busy wipe lock made the activity runner fail'
+[[ "$(<"$WORK_DIR/activity-busy.out")" == *'skipped: wipe running'* ]] || fail 'busy wipe lock was not reported as a skip'
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'activity runner invoked Docker while wipe held the lock'
+stop_holder
+
+chmod 0644 "$RUNNER_INVENTORY"
+: > "$ACTIVITY_DOCKER_CALLS"
+if ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-invalid-inventory.out" 2>&1; then
+  fail 'activity runner accepted a mode 0644 inventory'
+fi
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'invalid inventory still invoked Docker'
+chmod 0600 "$RUNNER_INVENTORY"
+
+# Skip prepare only in this injected case so the runner reaches the failed-open
+# path; it must fail instead of reporting a contention skip.
+mkdir -m 0700 "$WORK_DIR/missing-lock-state"
+if ACTIVITY_ROOT_ALLOWED=1 ACTIVITY_SKIP_LOCK_PREPARE=1 \
+  ACTIVITY_TEST_STATE="$WORK_DIR/missing-lock-state" PATH="$RUNNER_BIN:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-lock-open.out" 2>&1; then
+  fail 'activity runner accepted a missing lock file'
+fi
+[[ "$(<"$WORK_DIR/activity-lock-open.out")" == *'could not open the shared wipe lock'* ]] ||
+  fail 'failed lock open did not report an operational error'
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'failed lock open still invoked Docker'
+
+: > "$ACTIVITY_DOCKER_CALLS"
+if ACTIVITY_ROOT_ALLOWED=0 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-root.out" 2>&1; then
+  fail 'activity runner accepted a failed injected root check'
+fi
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'failed root check still invoked Docker'
+
+mkdir -p "$WORK_DIR/flock-error-bin"
+cat > "$WORK_DIR/flock-error-bin/flock" <<'SH'
+#!/bin/sh
+printf '%s\n' 'injected flock failure' >&2
+exit 2
+SH
+chmod 0755 "$WORK_DIR/flock-error-bin/flock"
+: > "$ACTIVITY_DOCKER_CALLS"
+if ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$WORK_DIR/flock-error-bin:$PATH" \
+  "$WORK_DIR/run-activity-harness.sh" > "$WORK_DIR/activity-flock-error.out" 2>&1; then
+  fail 'activity runner accepted a flock operational failure'
+fi
+[[ "$(<"$WORK_DIR/activity-flock-error.out")" == *'injected flock failure'* ]] ||
+  fail 'flock operational failure was not reported'
+[[ ! -s "$ACTIVITY_DOCKER_CALLS" ]] || fail 'flock operational failure still invoked Docker'
+
+: > "$ACTIVITY_DOCKER_CALLS"
+ACTIVITY_ROOT_ALLOWED=1 PATH="$RUNNER_BIN:$PATH" "$WORK_DIR/run-activity-harness.sh" ||
+  fail 'activity runner rejected a free shared lock'
+grep -Fxq 'compose' "$ACTIVITY_DOCKER_CALLS" || fail 'free lock did not invoke Docker Compose'
+grep -Fxq -- "$RUNNER_INVENTORY:/run/secrets/demo-activity-inventory.json:ro" "$ACTIVITY_DOCKER_CALLS" ||
+  fail 'activity runner did not pass the read-only inventory bind mount'
 
 # Wipe lock: created safely, refused when unsafe.
 LOCK="$WORK_DIR/activity-state/wipe.lock"
@@ -201,18 +299,50 @@ mkdir -m 0700 "$FALLBACK_DIR"
 FALLBACK_LOCK="$FALLBACK_DIR/activity.lock"
 : > "$FALLBACK_LOCK"
 chmod 0600 "$FALLBACK_LOCK"
-demo_wipe_lock_create() { return 1; }
+demo_wipe_lock_state_dir_writable() { return 1; }
 if selected_lock=$(demo_wipe_lock_select "$FALLBACK_DIR/wipe.lock" "$OWNER"); then
   :
 else
   fail 'existing systemd wipe could not fall back to the legacy activity lock'
 fi
-unset -f demo_wipe_lock_create
 [[ "$selected_lock" == "$FALLBACK_LOCK" ]] || fail 'legacy wipe did not select the existing activity lock'
 start_holder -x "$FALLBACK_LOCK" "$WORK_DIR/fallback-holder.ready"
 if (demo_wipe_take_exclusive_lock "$selected_lock" 1); then
   fail 'legacy wipe ignored an in-flight activity using the old lock'
 fi
 stop_holder
+
+# A writable state directory with a lock creation error must fail closed,
+# rather than silently selecting the legacy lock.
+demo_wipe_lock_state_dir_writable() {
+  local state_dir=$1
+  [[ -d "$state_dir" && ! -L "$state_dir" && -w "$state_dir" ]]
+}
+demo_wipe_lock_create() {
+  printf '%s\n' 'injected lock creation failure' >&2
+  return 1
+}
+if output=$(demo_wipe_lock_select "$FALLBACK_DIR/wipe.lock" "$OWNER" 2>&1); then
+  fail 'writable state directory fell back after a lock creation error'
+fi
+[[ "$output" == *'injected lock creation failure'* && "$output" == *'could not create or validate shared wipe lock'* ]] ||
+  fail 'lock creation error was not preserved'
+
+if output=$(demo_activity_try_shared_lock "$WORK_DIR/missing-activity.lock" 2>&1); then
+  fail 'activity lock open unexpectedly succeeded for a missing path'
+else
+  lock_status=$?
+fi
+[[ "$lock_status" == 2 && "$output" == *'could not open the shared wipe lock'* ]] ||
+  fail 'failed lock open was not distinguished from contention'
+
+mkdir -m 0700 "$WORK_DIR/no-flock-bin"
+if output=$(PATH="$WORK_DIR/no-flock-bin" demo_activity_try_shared_lock "$LOCK" 2>&1); then
+  fail 'activity lock check succeeded without flock'
+else
+  lock_status=$?
+fi
+[[ "$lock_status" == 2 && "$output" == *'flock is not installed'* ]] ||
+  fail 'missing flock was not reported as an operational failure'
 
 printf '%s\n' 'demo scheduling holds: cron entries idempotent, activity and wipe share the lock, inventory is checked'
