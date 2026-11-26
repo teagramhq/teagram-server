@@ -42,6 +42,7 @@ const (
 	workerEnvironmentProcs        = "GOMAXPROCS=1"
 	workerPixelLimitArgument      = "2560000"
 	maxConcurrentPhotoWorkers     = 2
+	workerMemoryLimitDivisor      = maxConcurrentPhotoWorkers + 2
 )
 
 // FailureReason is a fixed, bounded class suitable for metrics. It never
@@ -665,10 +666,10 @@ func workerMemoryEnvironment() string {
 func workerMemoryEnvironmentForLimit(parentLimit int64) string {
 	limit := int64(workerDefaultMemoryLimitBytes)
 	if parentLimit >= 0 {
-		// Each worker is a separate Go runtime in the server's cgroup. Share a
-		// constrained parent budget across the server and every worker slot so
-		// concurrent workers do not each receive the full parent limit.
-		limit = parentLimit / (maxConcurrentPhotoWorkers + 1)
+		// Each worker is a separate Go runtime in the server's cgroup. Divide
+		// across the server, worker slots and one reserve share because Go's
+		// memory limit is soft and the cgroup also charges kernel memory.
+		limit = parentLimit / workerMemoryLimitDivisor
 		limit = min(limit, workerDefaultMemoryLimitBytes)
 	}
 	return workerEnvironmentMemory + "=" + formatMemoryLimit(limit)
