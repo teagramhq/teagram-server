@@ -1368,6 +1368,12 @@ common = Path(sys.argv[4]).read_text(encoding="utf-8")
 cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
 if 'demo_remove_candidate_services "$CANDIDATE_SERVER" || rc=1' not in cleanup:
     raise SystemExit("deploy-main.sh: rollback must stop, remove, and verify both candidate services")
+retention = deploy.split('if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then\n', 1)[1].split("\nfi\n", 1)[0]
+if 'POST_CUTOVER_RETENTION_FAILED=1' not in retention or 'demo_fail' in retention:
+    raise SystemExit("deploy-main.sh: committed image-retention failure must not fail the deploy")
+if 'POST_CUTOVER_RETENTION_FAILED == 1' not in cleanup or \
+  'image retention failed, continuing with the verified release' not in cleanup:
+    raise SystemExit("deploy-main.sh: cleanup must report committed retention failures separately")
 seed_wrapper = common.split("demo_seed_compose() {", 1)[1].split("\n}", 1)[0]
 for mapping in (
     'teagramd) mapped_args+=(teagramd-seed)',
@@ -2289,6 +2295,67 @@ if env \
   exit 1
 fi
 [[ "$(<"$TMP_DIR/prune-failure-calls")" == 'sha256:previous' ]]
+
+DEPLOY_RETENTION_BLOCK="$TMP_DIR/deploy-committed-retention-block.sh"
+# The sed pattern is literal source text from the deployment script.
+# shellcheck disable=SC2016
+sed -n '/^if ! demo_prune_images "\$CANDIDATE_IMAGE_ID"; then$/,/^  "\$SHA" "\$PREV_SHA" "\$CANDIDATE_SERVER" "\$BACKUP_DIR"$/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$DEPLOY_RETENTION_BLOCK"
+cat > "$TMP_DIR/deploy-committed-retention-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$IMAGE_CLEANUP_FUNCTION"
+CUTOVER_COMMITTED=1
+POST_CUTOVER_RETENTION_FAILED=0
+BACKUP_READY=1
+BACKUP_DIR="$TEST_ROOT/backup"
+DEMO_ENV_BACKUP=
+TMP_DIR=
+SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+PREV_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+CANDIDATE_SERVER=teagramd-next
+CANDIDATE_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+DEMO_PROXY_TMPFS_ATTEMPTED=()
+demo_prune_images() {
+  [[ "$*" == "$CANDIDATE_IMAGE_ID" ]]
+  printf 'could not remove demo image %s\n' "$CANDIDATE_IMAGE_ID" >&2
+  return 1
+}
+demo_fail() { printf 'teagram-demo: %s\n' "$1" >&2; return 1; }
+trap demo_cleanup EXIT
+source "$DEPLOY_RETENTION_BLOCK"
+BASH
+if env \
+  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  DEPLOY_RETENTION_BLOCK="$DEPLOY_RETENTION_BLOCK" \
+  TEST_ROOT="$TMP_DIR/deploy-committed-retention" \
+  bash "$TMP_DIR/deploy-committed-retention-regression.sh" \
+    > "$TMP_DIR/deploy-committed-retention.out" 2> "$TMP_DIR/deploy-committed-retention.err"; then
+  grep -Fq 'could not remove demo image sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+    "$TMP_DIR/deploy-committed-retention.err" || {
+      cat "$TMP_DIR/deploy-committed-retention.err" >&2
+      printf '%s\n' 'committed charlie deploy did not report the image-removal error' >&2
+      exit 1
+    }
+  grep -Fq 'demo cutover remains committed at revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; image retention failed, continuing with the verified release' \
+    "$TMP_DIR/deploy-committed-retention.err" || {
+      cat "$TMP_DIR/deploy-committed-retention.err" >&2
+      printf '%s\n' 'committed charlie deploy did not report the retention warning' >&2
+      exit 1
+    }
+  grep -Fq 'demo deployed sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa previous_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb active_server=teagramd-next' \
+    "$TMP_DIR/deploy-committed-retention.out" || {
+      cat "$TMP_DIR/deploy-committed-retention.out" >&2
+      printf '%s\n' 'committed charlie deploy omitted its success line' >&2
+      exit 1
+    }
+  printf '%s\n' 'committed charlie retention failure reports the removal error and exits zero'
+else
+  cat "$TMP_DIR/deploy-committed-retention.err" >&2
+  printf '%s\n' 'committed charlie retention failure must not fail the deploy' >&2
+  exit 1
+fi
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n '/^demo_backup_database() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"

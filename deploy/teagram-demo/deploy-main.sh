@@ -304,7 +304,10 @@ demo_cleanup() {
       printf 'demo environment rollback snapshot retained at %s\n' "$DEMO_ENV_BACKUP" >&2
     fi
   fi
-  if (( rc != 0 && CUTOVER_COMMITTED == 1 )); then
+  if (( rc == 0 && CUTOVER_COMMITTED == 1 && POST_CUTOVER_RETENTION_FAILED == 1 )); then
+    printf 'demo cutover remains committed at revision=%s; image retention failed, continuing with the verified release\n' \
+      "$SHA" >&2
+  elif (( rc != 0 && CUTOVER_COMMITTED == 1 )); then
     if (( POST_CUTOVER_RETENTION_FAILED == 1 )); then
       printf 'demo cutover remains committed at revision=%s; image retention failed and checkout must stay on this revision\n' \
         "$SHA" >&2
@@ -568,7 +571,6 @@ demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF"
   "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
 if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then
   POST_CUTOVER_RETENTION_FAILED=1
-  demo_fail 'demo cutover committed but image retention cleanup failed'
 fi
 BACKUP_READY=0
 printf 'demo deployed sha=%s previous_sha=%s active_server=%s backup=%s\n' \
