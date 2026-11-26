@@ -33,7 +33,7 @@ case "$(docker info --format '{{.Architecture}}')" in
 esac
 
 GOOS=linux CGO_ENABLED=0 GOARCH="$GOARCH" go build \
-  -trimpath -o "$TMP_DIR/probe" "$SCRIPT_DIR/testdata/tailnet-source-probe.go"
+  -trimpath -o "$TMP_DIR/probe" "$SCRIPT_DIR/testdata/tailnet-source-probe/main.go"
 docker network create --internal \
   --subnet 198.18.130.0/24 \
   --ip-range 198.18.130.128/26 \
