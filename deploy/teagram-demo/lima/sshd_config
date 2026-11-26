@@ -10,7 +10,6 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
 PermitEmptyPasswords no
-UsePAM no
 AuthorizedKeysFile /etc/ssh/authorized_keys/%u
 StrictModes yes
 ForceCommand /usr/local/libexec/teagram-demo-deploy-entry

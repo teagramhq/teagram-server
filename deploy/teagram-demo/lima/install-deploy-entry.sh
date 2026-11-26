@@ -21,6 +21,7 @@ TMP_DIR=
 SSH_BASE_HASH=
 SSH_DROPIN_HASH=
 SSH_BASE_EFFECTIVE=
+SSHD_BIN=
 
 fail() {
   printf 'lima deploy entry install: %s\n' "$1" >&2
@@ -37,6 +38,49 @@ sudo_commands_are_restricted() {
     }
   ' "$sudo_list") || return 1
   [[ "$effective_commands" == "(root) NOPASSWD: $ROOT_WRAPPER" ]]
+}
+
+verify_checkout_ownership() {
+  local path path_state path_owner path_mode unsafe_checkout_path=
+  while IFS= read -r -d '' path; do
+    path_state=$(stat -c '%u:%a' "$path") || {
+      printf 'could not inspect checkout path: %s\n' "$path" >&2
+      return 1
+    }
+    path_owner=${path_state%%:*}
+    path_mode=${path_state#*:}
+    if [[ "$path_owner" != 0 ]] || (( (8#$path_mode & 0022) != 0 )); then
+      unsafe_checkout_path=$path
+      break
+    fi
+  done < <(find "$REPO" -xdev -print0)
+  [[ -z "$unsafe_checkout_path" ]] || {
+    printf 'checkout contains a non-root-owned or writable path: %s\n' "$unsafe_checkout_path" >&2
+    return 1
+  }
+}
+
+ensure_deploy_account() {
+  local password_hash password
+  if ! awk -F: -v name="$DEPLOY_USER" '$1 == name { count++; home=$6; shell=$7 } END { exit !(count == 1 && home == "/var/empty" && shell == "/bin/sh") }' /etc/passwd; then
+    if awk -F: -v name="$DEPLOY_USER" '$1 == name { found=1 } END { exit !found }' /etc/passwd; then
+      fail 'existing deploy account must use /var/empty and /bin/sh'
+    fi
+    install -d -o root -g root -m 0755 /var/empty
+    adduser -S -D -H -h /var/empty -s /bin/sh "$DEPLOY_USER" || fail 'could not create the deploy account'
+  fi
+
+  password_hash=$(awk -F: -v name="$DEPLOY_USER" '$1 == name { print $2 }' /etc/shadow) ||
+    fail 'could not inspect deploy account password state'
+  case "$password_hash" in
+    ''|'!'*|'*'*)
+      command -v chpasswd >/dev/null 2>&1 || fail 'chpasswd is required to enable deploy key authentication'
+      password=$(head -c 48 /dev/urandom | base64 | tr -d '\n') || fail 'could not generate deploy account credential'
+      [[ -n "$password" && "$password" != *:* ]] || fail 'generated deploy account credential is invalid'
+      printf '%s:%s\n' "$DEPLOY_USER" "$password" | chpasswd || fail 'could not enable deploy key authentication'
+      unset password
+      ;;
+  esac
 }
 
 cleanup() {
@@ -113,17 +157,7 @@ for executable in \
   "$REPO/deploy/teagram-demo/demo-common.sh" "$REPO/deploy/teagram-demo/image-retention.sh"; do
   require_root_owned "$executable"
 done
-unsafe_checkout_path=
-while IFS= read -r -d '' path; do
-  path_state=$(stat -c '%u:%a' "$path") || fail "could not inspect checkout path: $path"
-  path_owner=${path_state%%:*}
-  path_mode=${path_state#*:}
-  if [[ "$path_owner" != 0 ]] || (( (8#$path_mode & 0022) != 0 )); then
-    unsafe_checkout_path=$path
-    break
-  fi
-done < <(find "$REPO" -xdev -print0)
-[[ -z "$unsafe_checkout_path" ]] || fail "checkout contains a non-root-owned or writable path: $unsafe_checkout_path"
+verify_checkout_ownership || fail 'checkout ownership or permissions are unsafe'
 [[ -x "$SCRIPT_DIR/deploy-main.sh" && -x "$SCRIPT_DIR/check.sh" ]] || fail 'lima deployment scripts must be executable'
 
 [[ -n "$PUBLIC_KEY" && "$PUBLIC_KEY" != *$'\n'* ]] || fail 'TEAGRAM_DEMO_DEPLOY_PUBLIC_KEY must contain one public key line'
@@ -134,13 +168,14 @@ read -r KEY_TYPE KEY_DATA KEY_COMMENT <<< "$PUBLIC_KEY"
 KEY_LINE="restrict,command=\"$ENTRY_PATH\" $KEY_TYPE $KEY_DATA $KEY_COMMENT"
 
 [[ -f /etc/ssh/sshd_config && ! -L /etc/ssh/sshd_config ]] || fail 'the existing SSH config is unavailable'
-command -v sshd >/dev/null 2>&1 || fail 'OpenSSH server is not installed'
-sshd -T -f /etc/ssh/sshd_config > /dev/null || fail 'the existing SSH config does not pass sshd -T'
+SSHD_BIN=$(command -v sshd) || fail 'OpenSSH server is not installed'
+[[ "$SSHD_BIN" == /* ]] || fail 'OpenSSH server path is not absolute'
+"$SSHD_BIN" -T -f /etc/ssh/sshd_config > /dev/null || fail 'the existing SSH config does not pass sshd -T'
 SSH_BASE_HASH=$(sha256sum /etc/ssh/sshd_config | awk '{print $1}')
 SSH_DROPIN_HASH=$(directory_hash /etc/ssh/sshd_config.d)
 TMP_DIR=$(mktemp -d /tmp/teagram-demo-deploy-entry.XXXXXXXX) || fail 'could not create installer verification directory'
 SSH_BASE_EFFECTIVE="$TMP_DIR/sshd-main.before"
-sshd -T -f /etc/ssh/sshd_config > "$SSH_BASE_EFFECTIVE" || fail 'could not capture the current SSH port 22 configuration'
+"$SSHD_BIN" -T -f /etc/ssh/sshd_config > "$SSH_BASE_EFFECTIVE" || fail 'could not capture the current SSH port 22 configuration'
 
 command -v apk >/dev/null 2>&1 || fail 'Alpine apk is required to install sudo when missing'
 if ! command -v sudo >/dev/null 2>&1; then
@@ -150,13 +185,7 @@ command -v visudo >/dev/null 2>&1 || fail 'visudo is required to validate sudoer
 [[ -r /etc/sudoers && $(grep -Ec '^[[:space:]]*(@includedir|#includedir)[[:space:]]+/etc/sudoers.d([[:space:]]|$)' /etc/sudoers) -eq 1 ]] ||
   fail '/etc/sudoers must include /etc/sudoers.d exactly once'
 
-if ! awk -F: -v name="$DEPLOY_USER" '$1 == name { count++; home=$6; shell=$7 } END { exit !(count == 1 && home == "/var/empty" && shell == "/bin/sh") }' /etc/passwd; then
-  if awk -F: -v name="$DEPLOY_USER" '$1 == name { found=1 } END { exit !found }' /etc/passwd; then
-    fail 'existing deploy account must use /var/empty and /bin/sh'
-  fi
-  install -d -o root -g root -m 0755 /var/empty
-  adduser -S -D -H -h /var/empty -s /bin/sh "$DEPLOY_USER" || fail 'could not create the deploy account'
-fi
+ensure_deploy_account
 [[ "$(id -u "$DEPLOY_USER")" != 0 ]] || fail 'deploy account must not be root'
 groups=$(id -nG "$DEPLOY_USER") || fail 'could not inspect deploy account groups'
 read -r -a account_groups <<< "$groups"
@@ -203,8 +232,8 @@ grep -Fq 'env_reset' "$TMP_DIR/sudo-list" || fail 'sudo env_reset must remain en
 sudo_commands_are_restricted "$TMP_DIR/sudo-list" ||
   fail 'deploy user must have only the root wrapper as an effective sudo command'
 
-sshd -t -f "$SSH_CONFIG" || fail 'dedicated deploy sshd config failed validation'
-sshd -T -f "$SSH_CONFIG" > "$TMP_DIR/sshd-deploy.effective" || fail 'could not inspect dedicated deploy sshd config'
+"$SSHD_BIN" -t -f "$SSH_CONFIG" || fail 'dedicated deploy sshd config failed validation'
+"$SSHD_BIN" -T -f "$SSH_CONFIG" > "$TMP_DIR/sshd-deploy.effective" || fail 'could not inspect dedicated deploy sshd config'
 for expected in \
   'port 2223' 'addressfamily inet' 'listenaddress 100.117.107.78:2223' \
   'allowusers teagram-deploy' 'authenticationmethods publickey' \
@@ -242,7 +271,7 @@ fi
   fail 'port 22 sshd_config changed during deploy entry installation'
 [[ "$(directory_hash /etc/ssh/sshd_config.d)" == "$SSH_DROPIN_HASH" ]] ||
   fail 'port 22 sshd_config.d changed during deploy entry installation'
-sshd -T -f /etc/ssh/sshd_config > "$TMP_DIR/sshd-main.after" || fail 'port 22 sshd config failed its post-install check'
+"$SSHD_BIN" -T -f /etc/ssh/sshd_config > "$TMP_DIR/sshd-main.after" || fail 'port 22 sshd config failed its post-install check'
 cmp -s "$SSH_BASE_EFFECTIVE" "$TMP_DIR/sshd-main.after" || fail 'effective port 22 sshd config changed'
 
 printf 'deploy_user=%s listener=%s:%s key_file=%s port22_config=unchanged\n' \

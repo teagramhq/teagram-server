@@ -33,6 +33,7 @@ BACKUP_READY=0
 CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 CLIENT_CONFIG_UPDATED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
 EDGE_CONTAINER_ID=
@@ -194,8 +195,10 @@ demo_cleanup() {
   fi
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
-      printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
-        "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
+      if (( POST_CUTOVER_RETENTION_FAILED == 0 )); then
+        printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
+          "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
+      fi
     else
       if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
         rollback_confirmed=0
@@ -243,7 +246,7 @@ demo_cleanup() {
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
     fi
   fi
-  if (( rc != 0 )) && [[ -n "${DEMO_IMAGE_HISTORY_FILE:-}" &&
+  if (( rc != 0 && POST_CUTOVER_RETENTION_FAILED == 0 )) && [[ -n "${DEMO_IMAGE_HISTORY_FILE:-}" &&
     -f "$DEMO_IMAGE_HISTORY_FILE" && ! -L "$DEMO_IMAGE_HISTORY_FILE" ]]; then
     local -a retained_ids=()
     [[ -n "${PREV_IMAGE_ID:-}" ]] && retained_ids+=("$PREV_IMAGE_ID")
@@ -300,6 +303,18 @@ demo_cleanup() {
     else
       printf 'demo environment rollback snapshot retained at %s\n' "$DEMO_ENV_BACKUP" >&2
     fi
+  fi
+  if (( rc != 0 && CUTOVER_COMMITTED == 1 )); then
+    if (( POST_CUTOVER_RETENTION_FAILED == 1 )); then
+      printf 'demo cutover remains committed at revision=%s; image retention failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    else
+      printf 'demo cutover remains committed at revision=%s; post-cutover operation failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    fi
+    rc=75
+  elif (( rc == 75 )); then
+    rc=1
   fi
   exit "$rc"
 }
@@ -551,7 +566,10 @@ CUTOVER_COMMITTED=1
 docker rm "${SERVER_IDS[0]}" >/dev/null || demo_fail 'stopped previous demo server container could not be removed'
 demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF" \
   "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
-demo_prune_images "$CANDIDATE_IMAGE_ID"
+if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then
+  POST_CUTOVER_RETENTION_FAILED=1
+  demo_fail 'demo cutover committed but image retention cleanup failed'
+fi
 BACKUP_READY=0
 printf 'demo deployed sha=%s previous_sha=%s active_server=%s backup=%s\n' \
   "$SHA" "$PREV_SHA" "$CANDIDATE_SERVER" "$BACKUP_DIR"

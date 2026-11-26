@@ -1619,8 +1619,11 @@ assert_text_order(forced_command, "forced-command.sh deploy lock", [
     'git -C "$REPO" fetch',
     'git -C "$REPO" reset --hard "$SHA"',
     'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
-    'git -C "$REPO" reset --hard "$previous"',
+    'restore_checkout_after_deploy "$deploy_rc" "$previous"',
 ])
+checkout_restore = forced_command.split("restore_checkout_after_deploy() {", 1)[1].split("\n}", 1)[0]
+if 'git -C "$REPO" reset --hard "$previous"' not in checkout_restore:
+    raise SystemExit("forced-command.sh: ordinary deploy failures must restore the previous checkout")
 assert_order(deploy_path, [
     'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"',
     'if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then',
@@ -2164,6 +2167,7 @@ DEMO_PROXY_TMPFS_ATTEMPTED=(haproxy)
 CANDIDATE_STARTED=1
 CLIENT_CONFIG_UPDATED=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 PUBLIC_ACTIVATION_STARTED=1
 PREV_IMAGE_ID=sha256:previous
 SHA=0123456789abcdef0123456789abcdef01234567
@@ -2215,6 +2219,7 @@ set -Eeuo pipefail
 source "$CLEANUP_FUNCTION"
 BACKUP_READY=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 PUBLIC_ACTIVATION_STARTED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
 DEMO_PROXY_TMPFS_ATTEMPTED=(turnstile-egress haproxy)
@@ -2239,6 +2244,7 @@ set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
 BACKUP_READY=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
 DEMO_PROXY_TMPFS_ATTEMPTED=()
 PREV_IMAGE_ID=sha256:previous

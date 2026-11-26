@@ -290,6 +290,9 @@ expect 'criterion 2: edge health check is reachable only on loopback port 8080' 
 # already exist, and the bind refuses to create a missing host path.
 expect 'criterion 3: teagramd binds the capped blob directory' \
   '.services.teagramd.volumes | any(.type == "bind" and .source == "/srv/teagram-demo-blobs/data" and .target == "/var/lib/teagramd-blobs" and .bind.create_host_path == false)'
+# shellcheck disable=SC2016 # jq variables are intentional literals.
+expect 'container-writable proxy runtime binds are outside the checkout' \
+  '. as $config | (all(["turnstile-egress", "haproxy", "edge"][]; . as $service | [$config.services[$service].volumes[] | select(.target == "/tmp")] as $mounts | ($mounts | length) == 1 and $mounts[0].type == "bind" and ($mounts[0].read_only // false) == false and $mounts[0].bind.create_host_path == false and ($mounts[0].source | startswith("/var/lib/teagram-demo/lima/runtime/tmp/")))) and ([$config.services.haproxy.volumes[] | select(.target == "/run/haproxy" and .type == "bind" and .read_only != true and .bind.create_host_path == false and .source == "/var/lib/teagram-demo/lima/runtime/haproxy-run")] | length) == 1'
 
 # Criterion 4: the subnets are fixed and match the documented values.
 expect 'criterion 4: fixed subnets are documented values' \

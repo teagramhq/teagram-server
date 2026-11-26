@@ -6,6 +6,23 @@ readonly REPO=/opt/teagram-demo
 readonly COMMAND=${SSH_ORIGINAL_COMMAND:-}
 unset DEMO_DEPLOY_LOCK_HELD
 
+restore_checkout_after_deploy() {
+  local deploy_rc=$1 previous=$2
+  # The deploy scripts reserve status 75 for a committed cutover with failed post-cutover maintenance.
+  if (( deploy_rc == 75 )); then
+    printf 'deployment cutover committed at revision=%s; preserving the checkout after post-cutover maintenance failed\n' \
+      "$SHA" >&2
+    return 0
+  fi
+  if (( deploy_rc == 0 )); then
+    return 0
+  fi
+  git -C "$REPO" reset --hard "$previous" || {
+    echo "deploy failed and checkout restore failed; requested=$SHA previous=$previous" >&2
+    return 1
+  }
+}
+
 if [[ "$EUID" -ne 0 ]]; then
   echo 'demo deploy key must run as root' >&2
   exit 1
@@ -75,12 +92,7 @@ if [[ "$ACTION" == server ]]; then
     DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
       bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
   fi
-  if (( deploy_rc != 0 )); then
-    git -C "$REPO" reset --hard "$previous" || {
-      echo "deploy failed and checkout restore failed; requested=$SHA previous=$previous" >&2
-      exit 1
-    }
-  fi
+  restore_checkout_after_deploy "$deploy_rc" "$previous" || exit 1
   exit "$deploy_rc"
 fi
 

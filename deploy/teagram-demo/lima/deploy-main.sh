@@ -26,6 +26,7 @@ OLD_SERVER_STOPPED=0
 DEPLOY_COMMITTED=0
 HISTORY_READY=0
 ACTIVE_RELEASE_UPDATED=0
+POST_COMMIT_RETENTION_FAILED=0
 
 lima_compose() {
   local image_ref=$1
@@ -36,12 +37,17 @@ lima_compose() {
 }
 
 lima_wait_health() {
-  local attempt
-  for ((attempt = 0; attempt < 60; attempt++)); do
-    if wget -q -O /dev/null "$HEALTH_URL"; then
+  local probe_timeout=$1 deadline remaining
+  (( probe_timeout > 0 )) || return 1
+  deadline=$((SECONDS + probe_timeout))
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    if timeout "$remaining" wget -q -O /dev/null -T "$remaining" "$HEALTH_URL"; then
       return 0
     fi
-    sleep 1
+    remaining=$((deadline - SECONDS))
+    if (( remaining > 0 )); then
+      sleep 1
+    fi
   done
   return 1
 }
@@ -86,7 +92,7 @@ lima_rollout_candidate() {
   CANDIDATE_STARTED=1
   lima_compose "$CANDIDATE_IMAGE_REF" up -d --no-deps --force-recreate \
     --wait --wait-timeout 120 teagramd
-  lima_wait_health || demo_fail 'new lima server did not pass /healthz within 60 seconds'
+  lima_wait_health 60 || demo_fail 'new lima server did not pass /healthz within 60 seconds'
   mapfile -t candidate_ids < <(lima_compose "$CANDIDATE_IMAGE_REF" ps --status running -q teagramd)
   ((${#candidate_ids[@]} == 1)) || demo_fail 'new lima server is missing or ambiguous after health check'
   CANDIDATE_RUNNING_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${candidate_ids[0]}")
@@ -104,7 +110,10 @@ lima_rollout_candidate() {
   demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF" \
     "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
   DEPLOY_COMMITTED=1
-  demo_prune_images "$CANDIDATE_IMAGE_ID"
+  if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then
+    POST_COMMIT_RETENTION_FAILED=1
+    demo_fail 'lima cutover committed but image retention cleanup failed'
+  fi
   printf 'lima demo deployed revision=%s previous_revision=%s backup=%s healthz=passed\n' \
     "$SHA" "$PREV_IMAGE_REVISION" "$BACKUP_DIR"
 }
@@ -112,7 +121,16 @@ lima_rollout_candidate() {
 lima_cleanup() {
   local rc=$? cleanup_failed=0 rollback_failed=0
   trap - EXIT
-  if (( rc != 0 && OLD_SERVER_STOPPED == 1 && DEPLOY_COMMITTED == 0 )); then
+  if (( rc != 0 && DEPLOY_COMMITTED == 1 )); then
+    if (( POST_COMMIT_RETENTION_FAILED == 1 )); then
+      printf 'lima cutover remains committed at revision=%s; image retention failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    else
+      printf 'lima cutover remains committed at revision=%s; post-cutover operation failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    fi
+    rc=75
+  elif (( rc != 0 && OLD_SERVER_STOPPED == 1 )); then
     if (( CANDIDATE_STARTED == 1 )); then
       lima_compose "$CANDIDATE_IMAGE_REF" stop teagramd || cleanup_failed=1
       lima_compose "$CANDIDATE_IMAGE_REF" rm -f teagramd || cleanup_failed=1
@@ -134,7 +152,7 @@ lima_cleanup() {
       }
     fi
     if ! lima_compose "$PREV_IMAGE_REF" up -d --no-deps --force-recreate \
-      --wait --wait-timeout 120 teagramd || ! lima_wait_health; then
+      --wait --wait-timeout 120 teagramd || ! lima_wait_health 60; then
       rollback_failed=1
       printf 'lima rollback health failed requested_revision=%s previous_revision=%s; database was not restored or changed during rollback\n' \
         "$SHA" "$PREV_IMAGE_REVISION" >&2
@@ -149,6 +167,9 @@ lima_cleanup() {
     demo_prune_images "$PREV_IMAGE_ID" || cleanup_failed=1
   fi
   if (( cleanup_failed != 0 )); then
+    rc=1
+  fi
+  if (( rc == 75 && DEPLOY_COMMITTED == 0 )); then
     rc=1
   fi
   exit "$rc"

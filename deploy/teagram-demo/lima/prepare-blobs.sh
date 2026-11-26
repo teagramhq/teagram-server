@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Prepares lima's blob store as a fully allocated 4 GiB ext4 filesystem,
-# loop-mounted at /srv/teagram-demo-blobs. A write past the cap fails with
-# ENOSPC inside the demo and cannot consume the rest of lima's root disk.
+# loop-mounted at /srv/teagram-demo-blobs, and creates writable proxy runtime
+# paths outside the privileged checkout.
+# A blob write past the cap fails with ENOSPC inside the demo and cannot
+# consume the rest of lima's root disk.
 #
 # Run once as root at cutover. It needs GNU coreutils, fallocate (util-linux),
 # mkfs.ext4 (e2fsprogs) and blkid on the host; the script stops with a clear
@@ -13,6 +15,7 @@ set -Eeuo pipefail
 BACKING_IMAGE=/var/lib/teagram-demo/blobs.img
 BLOB_MOUNT=/srv/teagram-demo-blobs
 BLOB_DATA=$BLOB_MOUNT/data
+RUNTIME_DIR=/var/lib/teagram-demo/lima/runtime
 IMAGE_BYTES=$((4 * 1024 * 1024 * 1024))
 MIN_HOST_FREE_BYTES=$((100 * 1024 * 1024))
 FSTAB=/etc/fstab
@@ -179,6 +182,36 @@ prepare_blob_filesystem() {
   return 0
 }
 
+prepare_runtime_dirs() {
+  local runtime_dir=$RUNTIME_DIR
+  local runtime_tmp_dir="$runtime_dir/tmp"
+  local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"
+  local haproxy_tmp_dir="$runtime_tmp_dir/haproxy"
+  local edge_tmp_dir="$runtime_tmp_dir/edge"
+  local haproxy_run_dir="$runtime_dir/haproxy-run" path
+
+  for path in /var/lib/teagram-demo /var/lib/teagram-demo/lima "$runtime_dir" \
+    "$runtime_tmp_dir" "$turnstile_tmp_dir" "$haproxy_tmp_dir" "$edge_tmp_dir" "$haproxy_run_dir"; do
+    [[ ! -L $path ]] || {
+      printf 'prepare-blobs: proxy runtime path must not be a symlink: %s\n' "$path" >&2
+      return 1
+    }
+  done
+  install -d -o root -g root -m 0755 /var/lib/teagram-demo /var/lib/teagram-demo/lima \
+    "$runtime_dir" "$runtime_tmp_dir" || return 1
+  install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir" || return 1
+  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" || return 1
+  install -d -o 99 -g 99 -m 0700 "$haproxy_run_dir" || return 1
+  [[ $(stat -c '%u:%g:%a' "$runtime_dir") == '0:0:755' &&
+    $(stat -c '%u:%g:%a' "$turnstile_tmp_dir") == '584792:584792:1777' &&
+    $(stat -c '%u:%g:%a' "$haproxy_tmp_dir") == '0:0:1777' &&
+    $(stat -c '%u:%g:%a' "$edge_tmp_dir") == '0:0:1777' &&
+    $(stat -c '%u:%g:%a' "$haproxy_run_dir") == '99:99:700' ]] || {
+    printf 'prepare-blobs: proxy runtime directory ownership or mode could not be verified\n' >&2
+    return 1
+  }
+}
+
 require_gnu_coreutils() {
   local tool version
   for tool in chown chmod stat; do
@@ -245,4 +278,6 @@ read -r blocks block_size < <(stat -f -c '%b %S' -- "$BLOB_MOUNT")
 (( blocks * block_size <= IMAGE_BYTES )) || die "$BLOB_MOUNT is larger than the 4 GiB cap"
 
 install -d -o 65532 -g 65532 -m 0700 "$BLOB_DATA"
-log "ready: $BLOB_DATA owned by 65532:65532, mode 0700; run lima/check.sh to confirm"
+prepare_runtime_dirs || exit 1
+log "ready: $BLOB_DATA owned by 65532:65532, mode 0700; proxy runtime paths are outside the checkout"
+log 'run lima/check.sh to confirm'

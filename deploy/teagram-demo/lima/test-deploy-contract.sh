@@ -4,7 +4,12 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
 TMP_DIR=$(mktemp -d)
-trap 'rm -rf -- "$TMP_DIR"' EXIT
+ALPINE_CONTAINER=
+cleanup_test() {
+  [[ -z "$ALPINE_CONTAINER" ]] || docker rm -f "$ALPINE_CONTAINER" >/dev/null 2>&1 || true
+  rm -rf -- "$TMP_DIR"
+}
+trap cleanup_test EXIT
 
 failures=0
 ok() { printf 'ok - %s\n' "$1"; }
@@ -69,6 +74,7 @@ for expected in \
   'AuthorizedKeysFile /etc/ssh/authorized_keys/%u' \
   'AuthenticationMethods publickey' \
   'PasswordAuthentication no' \
+  'PermitEmptyPasswords no' \
   'DisableForwarding yes' \
   'PermitTTY no' \
   'PermitTunnel no' \
@@ -86,6 +92,13 @@ if grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-d
   ok 'sudoers grants only the root wrapper'
 else
   not_ok 'sudoers grants only the root wrapper'
+fi
+if grep -Fq 'ensure_deploy_account' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  grep -Fq 'chpasswd' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  grep -Fq 'verify_checkout_ownership || fail' "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'installer provisions a key-authenticating account and exposes the checkout scan for regression tests'
+else
+  not_ok 'installer provisions a key-authenticating account and exposes the checkout scan for regression tests'
 fi
 SUDO_LIST_VALIDATOR="$TMP_DIR/sudo-list-validator.sh"
 {
@@ -163,6 +176,129 @@ if grep -Fq 'cmp -s "$SSH_BASE_EFFECTIVE" "$TMP_DIR/sshd-main.after"' \
 else
   not_ok 'installer verifies sshd -T for port 22 is unchanged'
 fi
+
+FORCED_CHECKOUT_FUNCTION="$TMP_DIR/forced-checkout-function.sh"
+{
+  printf '%s\n' 'REPO=/opt/teagram-demo' "SHA=$SHA"
+  sed -n '/^restore_checkout_after_deploy() {$/,/^}/p' "$REPO_ROOT/deploy/teagram-demo/forced-command.sh"
+} > "$FORCED_CHECKOUT_FUNCTION"
+cat > "$TMP_DIR/forced-checkout-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$FORCED_CHECKOUT_FUNCTION"
+GIT_LOG=$TMP_DIR/forced-git.log
+git() { printf '%s\n' "$*" >> "$GIT_LOG"; }
+: > "$GIT_LOG"
+restore_checkout_after_deploy 75 previous-revision 2> "$TMP_DIR/post-cutover.err"
+[[ ! -s "$GIT_LOG" ]]
+grep -Fq 'preserving the checkout after post-cutover maintenance failed' "$TMP_DIR/post-cutover.err"
+restore_checkout_after_deploy 1 previous-revision
+grep -Fqx -- '-C /opt/teagram-demo reset --hard previous-revision' "$GIT_LOG"
+BASH
+if env FORCED_CHECKOUT_FUNCTION="$FORCED_CHECKOUT_FUNCTION" TMP_DIR="$TMP_DIR" \
+  bash "$TMP_DIR/forced-checkout-regression.sh"; then
+  ok 'post-cutover failures preserve the committed checkout while pre-cutover failures restore it'
+else
+  not_ok 'post-cutover failures preserve the committed checkout while pre-cutover failures restore it'
+fi
+
+ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
+{
+  printf '%s\n' 'REPO=/opt/teagram-demo' 'DEPLOY_USER=teagram-deploy' \
+    'RUNTIME_DIR=/var/lib/teagram-demo/lima/runtime'
+  sed -n '/^verify_checkout_ownership() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^ensure_deploy_account() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^prepare_runtime_dirs() {$/,/^}/p' "$SCRIPT_DIR/prepare-blobs.sh"
+} > "$ALPINE_FUNCTIONS"
+cat > "$TMP_DIR/alpine-deploy-entry-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source /tmp/alpine-functions.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+chmod 0755 /
+
+mkdir -p "$REPO/.git" "$REPO/deploy/teagram-demo"
+printf 'root-owned checkout fixture\n' > "$REPO/deploy/teagram-demo/fixture"
+chown -R root:root "$REPO"
+chmod 0755 "$REPO" "$REPO/.git" "$REPO/deploy" "$REPO/deploy/teagram-demo"
+chmod 0644 "$REPO/deploy/teagram-demo/fixture"
+
+prepare_runtime_dirs
+[[ "$RUNTIME_DIR" != "$REPO" && "$RUNTIME_DIR" != "$REPO/"* ]]
+verify_checkout_ownership
+touch "$RUNTIME_DIR/haproxy-run/admin.sock" "$RUNTIME_DIR/tmp/haproxy/proxy-temp" \
+  "$RUNTIME_DIR/tmp/edge/proxy-temp" "$RUNTIME_DIR/tmp/turnstile-egress/proxy-temp"
+chown 99:99 "$RUNTIME_DIR/haproxy-run/admin.sock" "$RUNTIME_DIR/tmp/haproxy/proxy-temp" \
+  "$RUNTIME_DIR/tmp/edge/proxy-temp"
+chown 584792:584792 "$RUNTIME_DIR/tmp/turnstile-egress/proxy-temp"
+verify_checkout_ownership
+
+ensure_deploy_account
+ssh-keygen -q -t ed25519 -N '' -f /tmp/fixture-key
+install -d -o root -g root -m 0755 /etc/ssh/authorized_keys
+printf 'restrict,command="/tmp/key-authenticated" %s\n' "$(cat /tmp/fixture-key.pub)" \
+  > /etc/ssh/authorized_keys/$DEPLOY_USER
+chown root:root /etc/ssh/authorized_keys/$DEPLOY_USER
+chmod 0644 /etc/ssh/authorized_keys/$DEPLOY_USER
+cat > /tmp/key-authenticated <<'COMMAND'
+#!/bin/sh
+printf 'key-authenticated\n'
+COMMAND
+chmod 0755 /tmp/key-authenticated
+ssh-keygen -A >/dev/null
+sed -e 's#^ListenAddress .*#ListenAddress 127.0.0.1:2223#' \
+  -e 's#^PidFile .*#PidFile /tmp/sshd.pid#' \
+  -e 's#^ForceCommand .*#ForceCommand /tmp/key-authenticated#' \
+  /tmp/lima-sshd_config > /tmp/sshd_config
+/usr/sbin/sshd -t -f /tmp/sshd_config
+/usr/sbin/sshd -E /tmp/sshd.log -f /tmp/sshd_config
+output=
+for _ in {1..10}; do
+  if output=$(ssh -F /dev/null -p 2223 -i /tmp/fixture-key -o IdentitiesOnly=yes \
+    -o BatchMode=yes -o PreferredAuthentications=publickey \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$DEPLOY_USER@127.0.0.1" ignored-command 2>/tmp/ssh.err); then
+    break
+  fi
+  sleep 1
+done
+if [[ "$output" != key-authenticated ]]; then
+  cat /tmp/ssh.err /tmp/sshd.log >&2
+fi
+[[ "$output" == key-authenticated ]]
+BASH
+
+ALPINE_CONTAINER="teagram-lima-deploy-$RANDOM-$$"
+alpine_test_status=0
+alpine_test_stage=container
+if ! docker run -d --name "$ALPINE_CONTAINER" alpine:3.22 sh -c 'sleep 300' >/dev/null; then
+  alpine_test_status=1
+else
+  alpine_test_stage=package-install
+  if ! docker exec "$ALPINE_CONTAINER" sh -c 'apk add --no-cache bash openssh' >/dev/null; then
+    alpine_test_status=1
+  else
+    alpine_test_stage=copy-scripts
+    if ! docker cp "$ALPINE_FUNCTIONS" "$ALPINE_CONTAINER:/tmp/alpine-functions.sh" ||
+      ! docker cp "$SCRIPT_DIR/sshd_config" "$ALPINE_CONTAINER:/tmp/lima-sshd_config" ||
+      ! docker cp "$TMP_DIR/alpine-deploy-entry-regression.sh" "$ALPINE_CONTAINER:/tmp/alpine-deploy-entry-regression.sh"; then
+      alpine_test_status=1
+    else
+      alpine_test_stage=run-regression
+      if ! docker exec "$ALPINE_CONTAINER" bash /tmp/alpine-deploy-entry-regression.sh \
+        > "$TMP_DIR/alpine-deploy-entry.out" 2> "$TMP_DIR/alpine-deploy-entry.err"; then
+        alpine_test_status=1
+      fi
+    fi
+  fi
+fi
+if (( alpine_test_status == 0 )); then
+  ok 'Alpine deploy account accepts a fixture SSH key and the second installer ownership check passes after runtime setup'
+else
+  not_ok 'Alpine deploy account accepts a fixture SSH key and the second installer ownership check passes after runtime setup'
+  printf 'Alpine regression stage failed: %s\n' "$alpine_test_stage" >&2
+  cat "$TMP_DIR/alpine-deploy-entry.out" "$TMP_DIR/alpine-deploy-entry.err" >&2 2>/dev/null || true
+fi
+docker rm -f "$ALPINE_CONTAINER" >/dev/null 2>&1 || true
+ALPINE_CONTAINER=
 
 # Exercise retention with a foreign repository and a shared image. Only
 # unreferenced images owned exclusively by the demo repository may be removed.
@@ -284,6 +420,9 @@ root = pathlib.Path(sys.argv[1])
 compose = (root / "deploy/teagram-demo/lima/compose.yaml").read_text()
 rollout = (root / "deploy/teagram-demo/lima/deploy-main.sh").read_text()
 cleanup = rollout.split("lima_cleanup() {", 1)[1].split("\n}", 1)[0]
+charlie = (root / "deploy/teagram-demo/deploy-main.sh").read_text()
+charlie_cleanup = charlie.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
+forced = (root / "deploy/teagram-demo/forced-command.sh").read_text()
 checks = {
     "lima Compose has no candidate server": "teagramd-next:" not in compose,
     "maintenance window stops before migration and start": (
@@ -295,7 +434,20 @@ checks = {
         rollout.index("lima_backup_database\n") < rollout.index("lima_rollout_candidate\n")
     ),
     "new release health is checked through loopback /healthz": 'HEALTH_URL=http://127.0.0.1:8080/healthz' in rollout
-    and 'lima_wait_health || demo_fail' in rollout,
+    and 'lima_wait_health 60 || demo_fail' in rollout,
+    "each candidate health probe is bounded by the remaining deadline": 'timeout "$remaining" wget -q -O /dev/null -T "$remaining" "$HEALTH_URL"' in rollout,
+    "post-cutover image retention failure preserves the committed revision": 'POST_COMMIT_RETENTION_FAILED=1' in rollout
+    and 'rc=75' in cleanup and 'checkout must stay on this revision' in cleanup
+    and 'rc == 75 && DEPLOY_COMMITTED == 0' in cleanup,
+    "charlie reports post-cutover retention failures without rewinding the checkout": 'POST_CUTOVER_RETENTION_FAILED=1' in charlie
+    and 'rc=75' in charlie_cleanup and 'checkout must stay on this revision' in charlie_cleanup
+    and 'elif (( rc == 75 ))' in charlie_cleanup,
+    "forced command skips checkout restore for committed deploy status": 'deploy_rc == 75' in forced
+    and 'restore_checkout_after_deploy "$deploy_rc" "$previous"' in forced,
+    "all writable proxy paths are outside the privileged checkout": all(
+        f"/var/lib/teagram-demo/lima/runtime/{suffix}" in compose
+        for suffix in ("tmp/turnstile-egress", "tmp/haproxy", "tmp/edge", "haproxy-run")
+    ) and ".state/teagram-demo/tmp/" not in compose,
     "rollback removes the candidate and restarts the previous image": 'rm -f teagramd' in cleanup
     and 'lima_compose "$PREV_IMAGE_REF" up -d --no-deps --force-recreate' in cleanup,
     "rollback failure names both revisions and does not restore the database": 'requested_revision=%s previous_revision=%s' in cleanup
@@ -307,6 +459,37 @@ for description, passed in checks.items():
 if not all(checks.values()):
     raise SystemExit(1)
 PY
+
+HEALTH_FUNCTION="$TMP_DIR/lima-health-function.sh"
+sed -n '/^lima_wait_health() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$HEALTH_FUNCTION"
+SLOW_WGET_DIR="$TMP_DIR/slow-wget"
+mkdir -p "$SLOW_WGET_DIR"
+cat > "$SLOW_WGET_DIR/wget" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" > "$WGET_LOG"
+exec sleep 10
+SH
+chmod 0755 "$SLOW_WGET_DIR/wget"
+cat > "$TMP_DIR/lima-health-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$HEALTH_FUNCTION"
+HEALTH_URL=http://127.0.0.1:8080/healthz
+SECONDS=0
+started=$(date +%s)
+if lima_wait_health 1; then
+  printf 'slow health response unexpectedly passed\n' >&2
+  exit 1
+fi
+elapsed=$(( $(date +%s) - started ))
+[[ $elapsed -le 2 ]]
+[[ "$(<"$WGET_LOG")" == '-q -O /dev/null -T 1 http://127.0.0.1:8080/healthz' ]]
+BASH
+if HEALTH_FUNCTION="$HEALTH_FUNCTION" WGET_LOG="$TMP_DIR/wget.log" \
+  PATH="$SLOW_WGET_DIR:$PATH" bash "$TMP_DIR/lima-health-regression.sh"; then
+  ok 'a slow health response receives the remaining timeout and cannot extend the rollout deadline'
+else
+  not_ok 'a slow health response receives the remaining timeout and cannot extend the rollout deadline'
+fi
 
 BACKUP_FUNCTIONS="$TMP_DIR/lima-backup-functions.sh"
 {
@@ -377,6 +560,7 @@ sed -n '/^lima_rollout_candidate() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$R
 cat > "$TMP_DIR/lima-success-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$ROLLOUT_FUNCTION"
+source "$CLEANUP_FUNCTION"
 SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 PREV_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -391,6 +575,7 @@ OLD_SERVER_STOPPED=0
 CANDIDATE_STARTED=0
 ACTIVE_RELEASE_UPDATED=0
 DEPLOY_COMMITTED=0
+POST_COMMIT_RETENTION_FAILED=0
 
 demo_pull_image_by_sha() { printf '%s\n' "$LIMA_CANDIDATE_REF"; }
 lima_compose() {
@@ -415,7 +600,12 @@ demo_write_active_release() {
   printf 'active-release %s %s\n' "$1" "$2" >> "$LIMA_ROLLOUT_LOG"
 }
 demo_record_successful_image() { printf 'record-success\n' >> "$LIMA_ROLLOUT_LOG"; }
-demo_prune_images() { printf 'prune %s\n' "$*" >> "$LIMA_ROLLOUT_LOG"; }
+demo_prune_images() {
+  printf 'prune %s\n' "$*" >> "$LIMA_ROLLOUT_LOG"
+  [[ ${FAIL_PRUNE:-0} != 1 ]]
+}
+demo_fail() { printf '%s\n' "$1" >&2; return 1; }
+trap lima_cleanup EXIT
 
 lima_rollout_candidate
 [[ $OLD_SERVER_STOPPED == 1 && $CANDIDATE_STARTED == 1 &&
@@ -425,7 +615,7 @@ ROLLOUT_LOG="$TMP_DIR/lima-success.log"
 ACTIVE_RELEASE_FILE="$TMP_DIR/active-release"
 LIMA_CANDIDATE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 LIMA_CANDIDATE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" LIMA_ROLLOUT_LOG="$ROLLOUT_LOG" \
+if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" CLEANUP_FUNCTION="$CLEANUP_FUNCTION" LIMA_ROLLOUT_LOG="$ROLLOUT_LOG" \
   LIMA_ACTIVE_RELEASE_FILE="$ACTIVE_RELEASE_FILE" LIMA_CANDIDATE_REF="$LIMA_CANDIDATE_REF" \
   LIMA_CANDIDATE_ID="$LIMA_CANDIDATE_ID" \
   bash "$TMP_DIR/lima-success-regression.sh" > "$TMP_DIR/lima-success.out" 2> "$TMP_DIR/lima-success.err"; then
@@ -449,6 +639,27 @@ if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" LIMA_ROLLOUT_LOG="$ROLLOUT_LOG" \
   fi
 else
   not_ok 'healthy candidate rollout exits zero and records the active release after health'
+fi
+
+RETENTION_LOG="$TMP_DIR/lima-retention-failure.log"
+ACTIVE_RELEASE_FILE="$TMP_DIR/active-release-retention-failure"
+if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" CLEANUP_FUNCTION="$CLEANUP_FUNCTION" LIMA_ROLLOUT_LOG="$RETENTION_LOG" \
+  LIMA_ACTIVE_RELEASE_FILE="$ACTIVE_RELEASE_FILE" LIMA_CANDIDATE_REF="$LIMA_CANDIDATE_REF" \
+  LIMA_CANDIDATE_ID="$LIMA_CANDIDATE_ID" FAIL_PRUNE=1 \
+  bash "$TMP_DIR/lima-success-regression.sh" > "$TMP_DIR/lima-retention-failure.out" \
+    2> "$TMP_DIR/lima-retention-failure.err"; then
+  not_ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
+else
+  retention_status=$?
+  if [[ $retention_status == 75 ]] && grep -Fq 'image retention failed and checkout must stay on this revision' \
+    "$TMP_DIR/lima-retention-failure.err" &&
+    grep -Fqx "teagramd $LIMA_CANDIDATE_REF" "$ACTIVE_RELEASE_FILE" &&
+    ! grep -Fq 'compose previous-image up' "$RETENTION_LOG"; then
+    ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
+  else
+    not_ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
+    cat "$TMP_DIR/lima-retention-failure.err" >&2
+  fi
 fi
 
 cat > "$TMP_DIR/lima-rollback-regression.sh" <<'BASH'

@@ -1,8 +1,10 @@
 # Public demo on lima: the demo stack from the root compose file without
 # qa-invite, sized for a 972 MiB host that also runs other stacks.
 #
-# Run with the checkout as the project directory so the relative paths resolve
-# as they do in the root file:
+# Run `prepare-blobs.sh` once as root before starting the stack. It also creates
+# the writable proxy runtime paths outside the root-owned checkout. Then run
+# with the checkout as the project directory so the relative paths resolve as
+# they do in the root file:
 #   docker compose --env-file <lima env file> --project-directory <checkout> \
 #     -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo up -d
 #
@@ -175,7 +177,7 @@ services:
       - /var/spool/squid:rw,noexec,nosuid,nodev,size=4m,uid=584792,gid=584792,mode=0750
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/turnstile-egress
+        source: /var/lib/teagram-demo/lima/runtime/tmp/turnstile-egress
         target: /tmp
         read_only: false
         bind:
@@ -216,7 +218,7 @@ services:
     pids_limit: 64
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/haproxy
+        source: /var/lib/teagram-demo/lima/runtime/tmp/haproxy
         target: /tmp
         read_only: false
         bind:
@@ -226,8 +228,10 @@ services:
         target: /usr/local/etc/haproxy
         read_only: true
       - type: bind
-        source: ./.state/teagram-demo/haproxy-run
+        source: /var/lib/teagram-demo/lima/runtime/haproxy-run
         target: /run/haproxy
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
       interval: 10s
@@ -259,7 +263,7 @@ services:
     pids_limit: 64
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/edge
+        source: /var/lib/teagram-demo/lima/runtime/tmp/edge
         target: /tmp
         read_only: false
         bind:

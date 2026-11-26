@@ -10,7 +10,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | --- | --- |
 | `compose.yaml` | The stack: postgres, migrate, one teagramd, turnstile-egress, haproxy, edge, cloudflared. |
 | `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
-| `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem. Run once at cutover. |
+| `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
@@ -125,9 +125,10 @@ At cutover, derive the public half of the existing `DEMO_DEPLOY_SSH_KEY` and
 pass it to the root installer as `TEAGRAM_DEMO_DEPLOY_PUBLIC_KEY`. The installer
 creates a non-root `teagram-deploy` account outside the Docker group and a
 separate OpenRC managed sshd bound only to `100.117.107.78:2223`. The account
-can invoke only `/usr/local/sbin/teagram-demo-deploy`; the root wrapper checks
-the command again before it reaches the root-owned checkout. Lima's regular
-sshd configuration and listener on port 22 are verified unchanged.
+can authenticate with the configured public key and invoke only
+`/usr/local/sbin/teagram-demo-deploy`; the root wrapper checks the command again
+before it reaches the root-owned checkout. Lima's regular sshd configuration
+and listener on port 22 are verified unchanged.
 
 The deploy workflow continues to read host, port, known hosts, and login user
 from the `demo` environment variables. At cutover, set those values to lima and
