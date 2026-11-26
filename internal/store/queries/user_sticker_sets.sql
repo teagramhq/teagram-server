@@ -276,7 +276,9 @@ ORDER BY i.file_id;
 -- name: UserStickerSetMessageReferencedFileIDs :many
 WITH requested AS (
     SELECT DISTINCT unnest(sqlc.arg(file_ids)::text[]) AS file_id
-), -- Filter channel memberships before resolving channel history.
+), -- Only current participant rows for this owner enter the visible set:
+   -- absent rows exclude nonmembers, active bans and deleted channels are
+   -- filtered, and the per-channel history floor is applied in the join below.
 visible_channels AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
     FROM channel_participants cp
@@ -290,7 +292,8 @@ visible_channels AS MATERIALIZED (
     JOIN visible_channels vc
       ON vc.channel_id = cm.channel_id
      AND cm.local_id > vc.available_min_id
-    -- Keep the visible channel IDs indexable with the document-ID predicate.
+    -- Repeat this authorized set only to make channel_id a GIN index condition;
+    -- the join above remains authoritative for membership and min-ID visibility.
     WHERE cm.channel_id = ANY(ARRAY(SELECT channel_id FROM visible_channels))
       AND cm.deleted = false
       AND cm.entities IS NOT NULL
