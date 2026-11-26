@@ -41,7 +41,7 @@ when the `candidate` profile is enabled.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined profile and media-photo runs at 37.72 MiB and 43.25 MiB in hosted CI |
+| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; built-image WebSocket run at 39.13 MiB; gate now uses `GOMEMLIMIT=20MiB` and requires 2 MiB headroom |
 | teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
@@ -69,10 +69,14 @@ peaked at 43.25 MiB (45,346,816 bytes), 0.75 MiB below the cap. Both had
 `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed.
 These pinned release runs did not enable the WebSocket listener. The image was
 `ghcr.io/teagramhq/teagram-server-demo@sha256:65c6c2445df3a1e9e4a11160d78c9cc45dbaf927d309262e255165e2d4ad41e6`, revision
-`609ae698dbacbb94d1028d6d6e45327a82078080`. The follow-on CI gate measures
-the image built by that workflow, verifies its revision label, and enables the
-Lima WebSocket listener at `:2446` with the Compose origin and browser-only
-settings; this current-image measurement determines the final headroom.
+`609ae698dbacbb94d1028d6d6e45327a82078080`. At `df13493`, the built-image
+probe enabled Lima's WebSocket listener at `:2446` with the Compose origin and
+browser-only settings. It peaked at 39.13 MiB (41,029,632 bytes), with
+`memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed
+([CI job](https://github.com/teagramhq/teagram-server/actions/runs/45721450279/job/139580703653)).
+The gate now runs three times on each head with `GOMEMLIMIT=20MiB` and fails
+unless each run retains at least 2 MiB below the 44 MiB cap. The worst of the
+three runs on the updated head is the acceptance measurement.
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd

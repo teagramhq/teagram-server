@@ -6,6 +6,8 @@ CONTAINER=teagramd-lima-memory
 KEY_VOLUME=tg-lima-memory-key
 BLOB_VOLUME=tg-lima-memory-blobs
 EXPECTED_LIMIT=$((44 * 1024 * 1024))
+MIN_HEADROOM=$((2 * 1024 * 1024))
+LIMA_GOMEMLIMIT=20MiB
 MEMORY_CGROUP_DIR=
 MEMORY_PEAK_FILE=
 MEMORY_EVENTS_FILE=
@@ -46,18 +48,18 @@ finish() {
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
     max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
-    printf 'LIMA_MEMORY_PROBE result=%s phase=%s uploads=%s image=%s image_id=%s revision=%s websocket_listener=:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
-      "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
+    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
+      "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}/3" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
+      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Result | Phase | Uploads | Image | Image ID | Revision | WebSocket settings | Peak cgroup memory | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
-        printf '| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |\n'
-        printf '| %s | %s | %s | %s | %s | %s | :2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s | %s | %s | %s |\n' \
-          "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
+        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
+        printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |\n'
+        printf '| %s/3 | %s | %s | %s | %s | %s | %s | %s | :2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s | %s | %s | %s |\n' \
+          "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
+          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_MAX_BYTES" \
           "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
@@ -78,6 +80,7 @@ if [[ $(uname -m) != x86_64 ]]; then
   echo 'Lima service memory probe requires an x86_64 runner' >&2
   exit 1
 fi
+rm -f "$RUNNER_TEMP/lima-memory-start-gate"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
   printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
   exit 1
@@ -115,7 +118,7 @@ docker run --detach --name "$CONTAINER" \
   --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
   --env TG_WEBSOCKET_BROWSER_ONLY=false \
   --env TG_REGISTRATION=closed --env TG_PG_MAX_CONNS=3 \
-  --env GOMAXPROCS=1 --env GOMEMLIMIT=24MiB \
+  --env GOMAXPROCS=1 --env "GOMEMLIMIT=$LIMA_GOMEMLIMIT" \
   "$IMAGE_ID" >/dev/null
 
 # Setup CLI processes do not belong in the server's measured 44 MiB cgroup.
@@ -293,8 +296,13 @@ events=$(<"$MEMORY_EVENTS_FILE")
 max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
 oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
 oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
-if (( peak_bytes >= EXPECTED_LIMIT )) || [[ ${max_events:-0} != 0 || ${oom:-0} != 0 || ${oom_kill:-0} != 0 ]]; then
-  printf 'memory probe exceeded safe headroom: peak=%s limit=%s max=%s oom=%s oom_kill=%s\n' \
+if (( peak_bytes > EXPECTED_LIMIT - MIN_HEADROOM )); then
+  printf 'memory probe did not retain 2 MiB headroom: peak=%s limit=%s max=%s oom=%s oom_kill=%s\n' \
     "$peak_bytes" "$EXPECTED_LIMIT" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" >&2
+  exit 1
+fi
+if [[ ${max_events:-0} != 0 || ${oom:-0} != 0 || ${oom_kill:-0} != 0 ]]; then
+  printf 'memory probe recorded cgroup pressure: peak=%s max=%s oom=%s oom_kill=%s\n' \
+    "$peak_bytes" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" >&2
   exit 1
 fi

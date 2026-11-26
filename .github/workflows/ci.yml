@@ -3437,7 +3437,15 @@ jobs:
       - name: Measure the built Lima image with concurrent photo uploads and WebSocket
         env:
           LIMA_SERVICE_IMAGE: teagramd:ci
-        run: .github/scripts/test-lima-server-memory.sh
+        run: |
+          probe_failed=0
+          for attempt in 1 2 3; do
+            echo "Lima service memory probe attempt $attempt/3"
+            if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" .github/scripts/test-lima-server-memory.sh; then
+              probe_failed=1
+            fi
+          done
+          exit "$probe_failed"
 
   # Brings the compose stack up the way a developer does, then restarts it to
   # prove the named volumes carry the state that matters: database rows, the

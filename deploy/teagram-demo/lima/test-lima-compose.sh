@@ -288,6 +288,8 @@ expect_candidate 'criterion 2: both server pools are capped at three for rollout
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"'
 expect_candidate 'criterion 2: both server slots have 44 MiB for concurrent photo uploads' \
   '(.services.teagramd.mem_limit | tonumber) == 46137344 and (.services["teagramd-next"].mem_limit | tonumber) == 46137344'
+expect_candidate 'criterion 2: both server slots use a 20 MiB Go heap limit for memory headroom' \
+  '.services.teagramd.environment.GOMEMLIMIT == "20MiB" and .services["teagramd-next"].environment.GOMEMLIMIT == "20MiB"'
 expect_candidate 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \

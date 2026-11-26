@@ -65,7 +65,7 @@ x-server-environment: &server-environment
   GOMAXPROCS: "1"
   # Soft limit below the 44 MiB container limit, so the collector runs before
   # the kernel OOM-kills either server slot.
-  GOMEMLIMIT: 24MiB
+  GOMEMLIMIT: 20MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}
