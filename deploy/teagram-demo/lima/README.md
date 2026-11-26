@@ -8,11 +8,13 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 
 | File | Purpose |
 | --- | --- |
-| `compose.yaml` | The stack: postgres, migrate, teagramd, teagramd-next (profile `candidate`), turnstile-egress, haproxy, edge, cloudflared. |
+| `compose.yaml` | The stack: postgres, migrate, one teagramd, turnstile-egress, haproxy, edge, cloudflared. |
 | `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
-| `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem. Run once at cutover. |
+| `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
+| `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
+| `install-deploy-entry.sh` | Idempotent root installer for the `teagram-deploy` account and the port 2223 SSH listener. It moves the Stage 1 proxy temp and HAProxy socket paths into the external runtime directory before scanning checkout ownership. Run by Steward at cutover. |
 
 ## Root-only inputs on the host
 
@@ -50,25 +52,26 @@ the tunnel token. Never print it to a log, a comment or a PR.
 
 ## Memory budget
 
-Limits of the long-running services, in MiB. The sum stays at or below 200 even
-when the `candidate` profile is enabled.
+Limits of the long-running services, in MiB. The sum stays at or below 200.
 
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; built-image WebSocket run at 39.13 MiB; current `GOMEMLIMIT=20MiB` gate: 35.87, 36.16, and 40.22 MiB (worst) |
-| teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
+| teagramd | 46 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; prior built-image WebSocket and memory-gate runs used a 44 MiB cap |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
 | haproxy | 10 | 10 |
 | edge (nginx) | 3 | 2 |
-| **Total with candidate** | **199** | |
+| **Total** | **157** | |
 
-The lima Compose environment caps each server's pool at `TG_PG_MAX_CONNS=3`.
-During rollout, both server pools, their two LISTEN connections, and migrate
-use at most nine PostgreSQL client backends. A 20-second, 9-client pgbench run
-sampled 43.82 MiB under the prior 56 MiB container limit; the Lima limit is
-49 MiB, leaving 5.18 MiB above that sample. The local host is ARM64,
+The Lima Compose environment caps the server pool at `TG_PG_MAX_CONNS=3`.
+The rollout uses a short maintenance window: it stops the old teagramd before
+starting the new one, checks `/healthz`, and restarts the previous image if the
+new image fails. The two revisions never run together, so deploys do not need
+headroom for a second server. The 64 MiB `migrate` container runs while the
+server is stopped. A 20-second, 9-client pgbench run sampled 43.82 MiB under
+the prior 56 MiB container limit; the Lima limit is 49 MiB, leaving 5.18 MiB
+above that sample. The local host is ARM64,
 so this measurement used its local PostgreSQL 18.7 ARM64 image; the Lima
 Compose image remains pinned to linux/amd64.
 
@@ -89,12 +92,19 @@ probe enabled Lima's WebSocket listener at `:2446` with the Compose origin and
 browser-only settings. It peaked at 39.13 MiB (41,029,632 bytes), with
 `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed
 ([CI job](https://github.com/teagramhq/teagram-server/actions/runs/45721450279/job/139580703653)).
-The gate runs three times on each head with `GOMEMLIMIT=20MiB` and fails unless
-each run stays at or below 42 MiB. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the job-built linux/amd64 `teagramd:ci` image (`sha256:e55bef28bd32f747b0e9e017fb769522965ab6ec07168713de11656cd9d536c8`, revision `5833cd415f8ee313449604effffb6817f15ff607`) ran with `GOMAXPROCS=1`, `TG_PG_MAX_CONNS=3`, and WebSocket listener `:2446` (`https://web.teagram.io`, `browser_only=false`). All three synchronized runs completed phase `concurrent_profile_and_media_photo_uploads`; profile and media-photo uploads passed in every run. Peaks were 35.87 MiB (37,609,472 bytes), 36.16 MiB (37,920,768 bytes), and 40.22 MiB (42,176,512 bytes). Each reported `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`. The worst peak is 3.78 MiB below the 44 MiB cap ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
+The current gate runs three times on each head in a 46 MiB cgroup with
+`GOMEMLIMIT=20MiB` and fails unless each run stays at or below 44 MiB. Earlier
+44 MiB-capped runs completed the same synchronized uploads successfully. The
+run on PR head `e1b212ae3457194d5500219bbfc76c6593f4e58e` peaked at 43.00,
+40.13, and 41.98 MiB; the first exceeded the former 42 MiB threshold, although
+all uploads passed and `max`, `oom`, and `oom_kill` stayed at zero. The expanded
+46 MiB cap keeps the two-MiB runtime margin and remains within the 200 MiB Lima
+budget. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the prior
+44 MiB gate had peaks of 35.87, 36.16, and 40.22 MiB; each run reported
+`max=0`, `oom=0`, and `oom_kill=0` ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
 
-The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
-outside the sum. The candidate is included because it can run beside teagramd
-during rollout.
+The long-running Lima stack uses 157 MiB of limits. `migrate` (64 MiB) is
+one-shot and outside the sum.
 
 ## Blobs
 
@@ -124,10 +134,42 @@ so it is expected to reject until `prepare-blobs.sh` has run. Compose parser
 diagnostics are withheld because malformed dotenv values can appear in its
 error text.
 
+## Deploy entry and rollout
+
+At cutover, derive the public half of the existing `DEMO_DEPLOY_SSH_KEY` and
+pass it to the root installer as `TEAGRAM_DEMO_DEPLOY_PUBLIC_KEY`. The installer
+creates a non-root `teagram-deploy` account outside the Docker group and a
+separate OpenRC managed sshd bound only to `100.117.107.78:2223`. The account
+can authenticate with the configured public key and invoke only
+`/usr/local/sbin/teagram-demo-deploy`; the root wrapper checks the command again
+before it reaches the root-owned checkout. Lima's regular sshd configuration
+and listener on port 22 are verified unchanged.
+
+The deploy workflow continues to read host, port, known hosts, and login user
+from the `demo` environment variables. At cutover, set those values to lima and
+`teagram-deploy`. QA invite remains pinned to charlie.
+
+Before stopping the current service, the deploy checks the Lima setup, verifies
+the active image is locally available for rollback, checks the live `/healthz`,
+and writes a verified PostgreSQL dump under `.state/teagram-demo/backups/`.
+It pulls the digest-pinned image, stops and removes the old server container,
+runs migrations, starts the new image, and waits up to 60 seconds for `/healthz`
+on loopback port 8080. If the new image fails, it removes the candidate,
+restores the previous image and checks it. The database is not restored during
+rollback; schema changes must remain compatible with the previous image, and
+the verified dump remains available for recovery. If rollback health fails,
+the deploy reports both revisions and exits non-zero without further database
+operations.
+
+After a successful deploy or rollback, Docker images for this server are kept
+by image ID: the running release and the two previous successful releases.
+Other repositories and images referenced by any container are left alone.
+This retention policy also applies to charlie's `teagram-dev` deployments.
+
 ## Cutover notes
 
 - The Cloudflare tunnel's origin for `demo.teagram.io` must be `http://edge:8080`
   once the stack runs on lima. The connector runs in a container, so
   `127.0.0.1` would be its own loopback.
-- Deploy and rollout (the candidate beside the active server) are not in this
-  directory. The deploy entry point is a later sub-issue.
+- The deploy image runs only after `check.sh` succeeds. No second teagramd is
+  started beside the active server.

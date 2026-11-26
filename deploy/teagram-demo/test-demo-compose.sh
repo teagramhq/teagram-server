@@ -521,7 +521,7 @@ PY
       printf '%s %s\n' "$3" "$MOCK_TARGET_HASH"
     elif [[ "$1" == config && "$2" == --format && "$3" == json ]]; then
       if [[ "$MOCK_EDGE_DRIFT" == none ]]; then
-        cat "$TMP_DIR/target.json" | tee "$MOCK_CURRENT_RENDER"
+        tee "$MOCK_CURRENT_RENDER" < "$TMP_DIR/target.json"
       else
         jq --arg drift "$MOCK_EDGE_DRIFT" '
           if $drift == "image" then .services.edge.image += "-drift"
@@ -1368,6 +1368,12 @@ common = Path(sys.argv[4]).read_text(encoding="utf-8")
 cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
 if 'demo_remove_candidate_services "$CANDIDATE_SERVER" || rc=1' not in cleanup:
     raise SystemExit("deploy-main.sh: rollback must stop, remove, and verify both candidate services")
+retention = deploy.split('if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then\n', 1)[1].split("\nfi\n", 1)[0]
+if 'POST_CUTOVER_RETENTION_FAILED=1' not in retention or 'demo_fail' in retention:
+    raise SystemExit("deploy-main.sh: committed image-retention failure must not fail the deploy")
+if 'POST_CUTOVER_RETENTION_FAILED == 1' not in cleanup or \
+  'image retention failed, continuing with the verified release' not in cleanup:
+    raise SystemExit("deploy-main.sh: cleanup must report committed retention failures separately")
 seed_wrapper = common.split("demo_seed_compose() {", 1)[1].split("\n}", 1)[0]
 for mapping in (
     'teagramd) mapped_args+=(teagramd-seed)',
@@ -1636,8 +1642,11 @@ assert_text_order(forced_command, "forced-command.sh deploy lock", [
     'git -C "$REPO" fetch',
     'git -C "$REPO" reset --hard "$SHA"',
     'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
-    'git -C "$REPO" reset --hard "$previous"',
+    'restore_checkout_after_deploy "$deploy_rc" "$previous"',
 ])
+checkout_restore = forced_command.split("restore_checkout_after_deploy() {", 1)[1].split("\n}", 1)[0]
+if 'git -C "$REPO" reset --hard "$previous"' not in checkout_restore:
+    raise SystemExit("forced-command.sh: ordinary deploy failures must restore the previous checkout")
 assert_order(deploy_path, [
     'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"',
     'if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then',
@@ -2047,28 +2056,12 @@ env \
   PRUNE_FUNCTION="$PRUNE_FUNCTION" \
   bash "$TMP_DIR/backup-prune-regression.sh"
 
-IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
+IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-image-retention-cleanup.sh"
 printf '%s\n' 'DEMO_ENV_BACKUP=' > "$IMAGE_CLEANUP_FUNCTION"
 sed -n \
   -e '/^demo_cleanup() {$/,/^}/p' \
-  -e '/^demo_remove_previous_image() {$/,/^}/p' \
   -e '/^demo_restore_env_after_rollback() {$/,/^}/p' \
   "$SCRIPT_DIR/deploy-main.sh" >> "$IMAGE_CLEANUP_FUNCTION"
-cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
-set -Eeuo pipefail
-source "$IMAGE_CLEANUP_FUNCTION"
-DOCKER_CALLS="$TMP_DIR/docker-image-calls"
-docker() { printf '%s\n' "$*" >> "$DOCKER_CALLS"; }
-demo_remove_previous_image sha256:previous sha256:active
-[[ "$(cat "$DOCKER_CALLS")" == 'image rm sha256:previous' ]]
-: > "$DOCKER_CALLS"
-demo_remove_previous_image sha256:active sha256:active
-[[ ! -s "$DOCKER_CALLS" ]]
-BASH
-env \
-  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
-  TMP_DIR="$TMP_DIR" \
-  bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
 LEGACY_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/demo-restore-legacy-edge.sh"
 sed -n '/^demo_restore_legacy_edge_after_rollback() {$/,/^}/p' \
@@ -2197,6 +2190,7 @@ DEMO_PROXY_TMPFS_ATTEMPTED=(haproxy)
 CANDIDATE_STARTED=1
 CLIENT_CONFIG_UPDATED=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 PUBLIC_ACTIVATION_STARTED=1
 PREV_IMAGE_ID=sha256:previous
 SHA=0123456789abcdef0123456789abcdef01234567
@@ -2248,6 +2242,7 @@ set -Eeuo pipefail
 source "$CLEANUP_FUNCTION"
 BACKUP_READY=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 PUBLIC_ACTIVATION_STARTED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
 DEMO_PROXY_TMPFS_ATTEMPTED=(turnstile-egress haproxy)
@@ -2270,35 +2265,97 @@ fi
 cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
-PUBLIC_ACTIVATION_STARTED=1
-BACKUP_READY=1
+BACKUP_READY=0
+CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
+EDGE_CONFIG_RELOAD_ATTEMPTED=0
 DEMO_PROXY_TMPFS_ATTEMPTED=()
-SERVICES_STOPPED=1
+PREV_IMAGE_ID=sha256:previous
+CANDIDATE_IMAGE_ID=
+DEMO_IMAGE_HISTORY_FILE="$TMP_DIR/successful-images.json"
+printf '[]\n' > "$DEMO_IMAGE_HISTORY_FILE"
+chmod 0600 "$DEMO_IMAGE_HISTORY_FILE"
 RESTORE_DB=
 RESTORE_DB_CREATED=0
 TEST_TMP_DIR="$TMP_DIR"
 TMP_DIR=
-DEPLOY_CONTINUED="$TEST_TMP_DIR/deploy-continued"
-PRESERVE_CALLED="$TEST_TMP_DIR/preserve-called"
-demo_preserve_after_activation_failure() { : > "$PRESERVE_CALLED"; }
-docker() {
-  [[ "$*" == 'image rm sha256:previous' ]] || return 0
+PRUNE_CALLS="$TEST_TMP_DIR/prune-failure-calls"
+demo_prune_images() {
+  printf '%s\n' "$*" >> "$PRUNE_CALLS"
   return 1
 }
 trap demo_cleanup EXIT
-demo_remove_previous_image sha256:previous sha256:active
-BACKUP_READY=0
-: > "$DEPLOY_CONTINUED"
+false
 BASH
-if ! env \
+if env \
   IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-failure-regression.sh"; then
-  printf '%s\n' 'deploy failed after previous-image cleanup failed' >&2
+  printf '%s\n' 'cleanup accepted a failed image-retention prune' >&2
   exit 1
 fi
-[[ -e "$TMP_DIR/deploy-continued" ]]
-[[ ! -e "$TMP_DIR/preserve-called" ]]
+[[ "$(<"$TMP_DIR/prune-failure-calls")" == 'sha256:previous' ]]
+
+DEPLOY_RETENTION_BLOCK="$TMP_DIR/deploy-committed-retention-block.sh"
+# The sed pattern is literal source text from the deployment script.
+# shellcheck disable=SC2016
+sed -n '/^if ! demo_prune_images "\$CANDIDATE_IMAGE_ID"; then$/,/^  "\$SHA" "\$PREV_SHA" "\$CANDIDATE_SERVER" "\$BACKUP_DIR"$/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$DEPLOY_RETENTION_BLOCK"
+cat > "$TMP_DIR/deploy-committed-retention-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$IMAGE_CLEANUP_FUNCTION"
+CUTOVER_COMMITTED=1
+POST_CUTOVER_RETENTION_FAILED=0
+BACKUP_READY=1
+BACKUP_DIR="$TEST_ROOT/backup"
+DEMO_ENV_BACKUP=
+TMP_DIR=
+SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+PREV_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+CANDIDATE_SERVER=teagramd-next
+CANDIDATE_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+DEMO_PROXY_TMPFS_ATTEMPTED=()
+demo_prune_images() {
+  [[ "$*" == "$CANDIDATE_IMAGE_ID" ]]
+  printf 'could not remove demo image %s\n' "$CANDIDATE_IMAGE_ID" >&2
+  return 1
+}
+demo_fail() { printf 'teagram-demo: %s\n' "$1" >&2; return 1; }
+trap demo_cleanup EXIT
+source "$DEPLOY_RETENTION_BLOCK"
+BASH
+if env \
+  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  DEPLOY_RETENTION_BLOCK="$DEPLOY_RETENTION_BLOCK" \
+  TEST_ROOT="$TMP_DIR/deploy-committed-retention" \
+  bash "$TMP_DIR/deploy-committed-retention-regression.sh" \
+    > "$TMP_DIR/deploy-committed-retention.out" 2> "$TMP_DIR/deploy-committed-retention.err"; then
+  grep -Fq 'could not remove demo image sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+    "$TMP_DIR/deploy-committed-retention.err" || {
+      cat "$TMP_DIR/deploy-committed-retention.err" >&2
+      printf '%s\n' 'committed charlie deploy did not report the image-removal error' >&2
+      exit 1
+    }
+  grep -Fq 'demo cutover remains committed at revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; image retention failed, continuing with the verified release' \
+    "$TMP_DIR/deploy-committed-retention.err" || {
+      cat "$TMP_DIR/deploy-committed-retention.err" >&2
+      printf '%s\n' 'committed charlie deploy did not report the retention warning' >&2
+      exit 1
+    }
+  grep -Fq 'demo deployed sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa previous_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb active_server=teagramd-next' \
+    "$TMP_DIR/deploy-committed-retention.out" || {
+      cat "$TMP_DIR/deploy-committed-retention.out" >&2
+      printf '%s\n' 'committed charlie deploy omitted its success line' >&2
+      exit 1
+    }
+  printf '%s\n' 'committed charlie retention failure reports the removal error and exits zero'
+else
+  cat "$TMP_DIR/deploy-committed-retention.err" >&2
+  printf '%s\n' 'committed charlie retention failure must not fail the deploy' >&2
+  exit 1
+fi
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n '/^demo_backup_database() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"
@@ -2504,4 +2561,5 @@ bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
 "$SCRIPT_DIR/test-demo-scheduling.sh"
 "$SCRIPT_DIR/lima/test-lima-compose.sh"
+"$SCRIPT_DIR/lima/test-deploy-contract.sh"
 printf 'demo Compose contract holds\n'

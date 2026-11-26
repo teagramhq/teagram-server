@@ -1,8 +1,10 @@
 # Public demo on lima: the demo stack from the root compose file without
 # qa-invite, sized for a 972 MiB host that also runs other stacks.
 #
-# Run with the checkout as the project directory so the relative paths resolve
-# as they do in the root file:
+# Run `prepare-blobs.sh` once as root before starting the stack. It also creates
+# the writable proxy runtime paths outside the root-owned checkout. Then run
+# with the checkout as the project directory so the relative paths resolve as
+# they do in the root file:
 #   docker compose --env-file <lima env file> --project-directory <checkout> \
 #     -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo up -d
 #
@@ -10,8 +12,7 @@
 # password and the tunnel token. Never print it into a log or a comment.
 #
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
-# MiB) of all long-running services add up to 199 MiB even with the candidate
-# profile enabled; migrate is one-shot.
+# MiB) of all long-running services add up to 157 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
 # 198.18.133.0/24. The egress-isolation rules in DOCKER-USER name these.
 
@@ -53,7 +54,7 @@ x-server-environment: &server-environment
   TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
   HTTP_PROXY: http://turnstile-egress:3128
   HTTPS_PROXY: http://turnstile-egress:3128
-  NO_PROXY: localhost,127.0.0.1,postgres,teagramd,teagramd-next
+  NO_PROXY: localhost,127.0.0.1,postgres,teagramd
   TG_REPLICA_COUNT: "1"
   TG_CLIENT_ADDR_TRUST: proxy-v2
   TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
@@ -64,15 +65,15 @@ x-server-environment: &server-environment
   TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
-  # Soft limit below the 44 MiB container limit, so the collector runs before
-  # the kernel OOM-kills either server slot.
+  # Soft limit below the 46 MiB container limit, so the collector runs before
+  # the kernel OOM-kills the server.
   GOMEMLIMIT: 20MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}
   stop_grace_period: 120s
-  mem_limit: 44m
-  memswap_limit: 44m
+  mem_limit: 46m
+  memswap_limit: 46m
   cpus: "0.5"
   pids_limit: 128
   environment: *server-environment
@@ -161,15 +162,6 @@ services:
       backend:
         ipv4_address: 198.18.130.253
 
-  # Rollout candidate. Both server slots are included in the 199 MiB limit sum
-  # when this profile is enabled.
-  teagramd-next:
-    <<: *server
-    profiles: [candidate]
-    networks:
-      backend:
-        ipv4_address: 198.18.130.251
-
   turnstile-egress:
     image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
     platform: linux/amd64
@@ -186,7 +178,7 @@ services:
       - /var/spool/squid:rw,noexec,nosuid,nodev,size=4m,uid=584792,gid=584792,mode=0750
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/turnstile-egress
+        source: /var/lib/teagram-demo/lima/runtime/tmp/turnstile-egress
         target: /tmp
         read_only: false
         bind:
@@ -227,7 +219,7 @@ services:
     pids_limit: 64
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/haproxy
+        source: /var/lib/teagram-demo/lima/runtime/tmp/haproxy
         target: /tmp
         read_only: false
         bind:
@@ -237,8 +229,10 @@ services:
         target: /usr/local/etc/haproxy
         read_only: true
       - type: bind
-        source: ./.state/teagram-demo/haproxy-run
+        source: /var/lib/teagram-demo/lima/runtime/haproxy-run
         target: /run/haproxy
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
       interval: 10s
@@ -270,7 +264,7 @@ services:
     pids_limit: 64
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/tmp/edge
+        source: /var/lib/teagram-demo/lima/runtime/tmp/edge
         target: /tmp
         read_only: false
         bind:

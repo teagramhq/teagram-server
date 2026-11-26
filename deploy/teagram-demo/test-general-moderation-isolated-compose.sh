@@ -122,8 +122,8 @@ compose.write_text(contents.replace(mount, "", 1), encoding="utf-8")
 common = pathlib.Path(sys.argv[3])
 contents = common.read_text(encoding="utf-8")
 project_flag = "--project-name teagram-demo"
-if contents.count(project_flag) != 2:
-    raise SystemExit("isolated Compose fixture expected two default project-name arguments")
+if contents.count(project_flag) != 3:
+    raise SystemExit("isolated Compose fixture expected three default project-name arguments")
 common.write_text(contents.replace(project_flag, f"--project-name {sys.argv[2]}"), encoding="utf-8")
 PY
 }

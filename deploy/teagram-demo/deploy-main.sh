@@ -5,6 +5,8 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=deploy/teagram-demo/demo-common.sh
 source "$SCRIPT_DIR/demo-common.sh"
+# shellcheck source=deploy/teagram-demo/image-retention.sh
+source "$SCRIPT_DIR/image-retention.sh"
 
 readonly SHA=${DEPLOY_SHA:-}
 readonly IMAGE_DIGEST=${DEPLOY_IMAGE_DIGEST:-}
@@ -19,8 +21,10 @@ readonly TS
 TMP_DIR=
 BACKUP_DIR=
 PREV_IMAGE_ID=
+PREV_IMAGE_REVISION=
 PREV_IMAGE_REF=
 CANDIDATE_IMAGE_REF=
+CANDIDATE_IMAGE_ID=
 DB_DUMP=
 RESTORE_DB=
 RESTORE_DB_CREATED=0
@@ -29,6 +33,7 @@ BACKUP_READY=0
 CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
 CUTOVER_COMMITTED=0
+POST_CUTOVER_RETENTION_FAILED=0
 CLIENT_CONFIG_UPDATED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
 EDGE_CONTAINER_ID=
@@ -37,13 +42,6 @@ PREV_WEB_LINK=
 DEMO_PROXY_TMPFS_LEGACY_COMPOSE=
 DEMO_PROXY_TMPFS_ATTEMPTED=()
 DEMO_ENV_BACKUP=
-
-demo_remove_previous_image() {
-  local previous_image_id="$1" active_image_id="$2"
-  [[ "$previous_image_id" != "$active_image_id" ]] || return 0
-  docker image rm "$previous_image_id" ||
-    printf 'could not remove previous image %s\n' "$previous_image_id" >&2
-}
 
 demo_capture_env_for_rollback() {
   [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
@@ -197,8 +195,10 @@ demo_cleanup() {
   fi
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
-      printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
-        "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
+      if (( POST_CUTOVER_RETENTION_FAILED == 0 )); then
+        printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
+          "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
+      fi
     else
       if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
         rollback_confirmed=0
@@ -244,6 +244,17 @@ demo_cleanup() {
       fi
       printf 'demo rollout retained previous server=%s database state and backup=%s\n' \
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+    fi
+  fi
+  if (( rc != 0 && POST_CUTOVER_RETENTION_FAILED == 0 )) && [[ -n "${DEMO_IMAGE_HISTORY_FILE:-}" &&
+    -f "$DEMO_IMAGE_HISTORY_FILE" && ! -L "$DEMO_IMAGE_HISTORY_FILE" ]]; then
+    local -a retained_ids=()
+    [[ -n "${PREV_IMAGE_ID:-}" ]] && retained_ids+=("$PREV_IMAGE_ID")
+    if (( rollback_confirmed == 0 )) && [[ -n "${CANDIDATE_IMAGE_ID:-}" ]]; then
+      retained_ids+=("$CANDIDATE_IMAGE_ID")
+    fi
+    if ((${#retained_ids[@]} > 0)); then
+      demo_prune_images "${retained_ids[@]}" || rc=1
     fi
   fi
   if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_RELOAD_ATTEMPTED:-0} == 1 )); then
@@ -292,6 +303,21 @@ demo_cleanup() {
     else
       printf 'demo environment rollback snapshot retained at %s\n' "$DEMO_ENV_BACKUP" >&2
     fi
+  fi
+  if (( rc == 0 && CUTOVER_COMMITTED == 1 && POST_CUTOVER_RETENTION_FAILED == 1 )); then
+    printf 'demo cutover remains committed at revision=%s; image retention failed, continuing with the verified release\n' \
+      "$SHA" >&2
+  elif (( rc != 0 && CUTOVER_COMMITTED == 1 )); then
+    if (( POST_CUTOVER_RETENTION_FAILED == 1 )); then
+      printf 'demo cutover remains committed at revision=%s; image retention failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    else
+      printf 'demo cutover remains committed at revision=%s; post-cutover operation failed and checkout must stay on this revision\n' \
+        "$SHA" >&2
+    fi
+    rc=75
+  elif (( rc == 75 )); then
+    rc=1
   fi
   exit "$rc"
 }
@@ -437,11 +463,16 @@ mapfile -t SERVER_IDS < <(demo_compose ps -q "$ACTIVE_SERVER")
 (("${#SERVER_IDS[@]}" == 1)) || demo_fail 'active demo server is missing or ambiguous'
 PREV_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 [[ "$PREV_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'running demo image ID is invalid'
+PREV_IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$PREV_IMAGE_ID")
+[[ "$PREV_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'running demo image revision label is invalid'
 PREV_IMAGE_REF=$(demo_active_image_ref)
 PREV_IMAGE_REF_ID=$(docker image inspect --format '{{.Id}}' "$PREV_IMAGE_REF")
 [[ "$PREV_IMAGE_REF_ID" == "$PREV_IMAGE_ID" ]] ||
   demo_fail 'active release image does not match the running server container'
+demo_initialize_image_history "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
 CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
+CANDIDATE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE_REF")
+[[ "$CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'pulled candidate image ID is invalid'
 printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
 printf '%s\n' "$ACTIVE_SERVER" > "$BACKUP_DIR/active-server.txt"
 printf '%s\n' "$PREV_IMAGE_REF" > "$BACKUP_DIR/previous-image-ref.txt"
@@ -535,7 +566,12 @@ demo_prepare_haproxy_runtime
 # existing connections before its graceful stop signal.
 demo_compose stop "$ACTIVE_SERVER"
 CUTOVER_COMMITTED=1
-demo_remove_previous_image "$PREV_IMAGE_ID" "$CANDIDATE_IMAGE_ID"
+docker rm "${SERVER_IDS[0]}" >/dev/null || demo_fail 'stopped previous demo server container could not be removed'
+demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF" \
+  "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
+if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then
+  POST_CUTOVER_RETENTION_FAILED=1
+fi
 BACKUP_READY=0
 printf 'demo deployed sha=%s previous_sha=%s active_server=%s backup=%s\n' \
   "$SHA" "$PREV_SHA" "$CANDIDATE_SERVER" "$BACKUP_DIR"

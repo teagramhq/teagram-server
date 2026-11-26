@@ -1258,6 +1258,14 @@ jobs:
           bash -n deploy/teagram-demo/activity-guards.sh
           bash -n deploy/teagram-demo/test-demo-scheduling.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/image-retention.sh
+          bash -n deploy/teagram-demo/lima/command-contract.sh
+          bash -n deploy/teagram-demo/lima/deploy-main.sh
+          bash -n deploy/teagram-demo/lima/deploy-root-wrapper.sh
+          bash -n deploy/teagram-demo/lima/install-deploy-entry.sh
+          bash -n deploy/teagram-demo/lima/test-deploy-contract.sh
+          sh -n deploy/teagram-demo/lima/deploy-entry.sh
+          sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
           bash -n deploy/teagram-demo/test-identity-import.sh
           bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
@@ -1330,10 +1338,18 @@ jobs:
             deploy/teagram-demo/run-activity.sh \
             deploy/teagram-demo/demo-cron.sh \
             deploy/teagram-demo/activity-guards.sh \
+            deploy/teagram-demo/image-retention.sh \
             deploy/teagram-demo/test-demo-scheduling.sh \
             deploy/teagram-demo/test-demo-compose.sh \
             deploy/teagram-demo/test-identity-import.sh \
             deploy/teagram-demo/lima/check.sh \
+            deploy/teagram-demo/lima/command-contract.sh \
+            deploy/teagram-demo/lima/deploy-entry.sh \
+            deploy/teagram-demo/lima/deploy-main.sh \
+            deploy/teagram-demo/lima/deploy-root-wrapper.sh \
+            deploy/teagram-demo/lima/install-deploy-entry.sh \
+            deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd \
+            deploy/teagram-demo/lima/test-deploy-contract.sh \
             deploy/teagram-demo/lima/prepare-blobs.sh \
             deploy/teagram-demo/lima/test-lima-compose.sh \
             deploy/teagram-demo/ops/weekly-wipe.sh \

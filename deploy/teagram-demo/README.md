@@ -371,6 +371,13 @@ The active slot and image digest are persisted atomically so a host or proxy
 restart recreates the same release. WebSocket sessions already connected to
 the old process drain during its configured 120-second graceful stop.
 
+That candidate-slot rollout remains the charlie `teagram-dev` path. Lima uses
+`lima/deploy-main.sh`: it stops the active server before starting the new image,
+checks `/healthz`, and restarts the previous image if needed. Lima never runs a
+second teagramd beside the first. Both paths keep the running demo image and
+the two previous successful releases; removal is by image ID, scoped to the
+demo repository, and skips any image still referenced by a container.
+
 Before rendering the mounted HAProxy config, a deploy compares the running
 HAProxy and edge Compose hashes with the target. A proxy image, `haproxy.cfg`
 or HAProxy renderer change still stops the deploy for the maintenance path.
@@ -421,8 +428,10 @@ The separate `multica-daemon@delta` root key is restricted to
 `env-names`, `fingerprints`, `logs <RFC3339-UTC>`, and
 `run <main-sha> <name>`. `run` fetches `origin/main` and executes only the
 executable `deploy/teagram-demo/ops/<name>.sh` blob from that commit. The menu
-does not accept shell commands. The `DEMO_DEPLOY_SSH_KEY` remains bound to
-`forced-command.sh`; demo deploys still send a tested SHA and image digest.
+does not accept shell commands. The charlie `DEMO_DEPLOY_SSH_KEY` remains bound
+to `forced-command.sh`; demo deploys still send a tested SHA and image digest.
+Lima authorizes the same key for `teagram-deploy` on a separate SSH listener,
+through a restricted entry and a root wrapper that revalidates each command.
 
 After the installer commit is on `main`, stream that reviewed installer from
 a trusted checkout to the demo LXC. It fetches and verifies the requested main

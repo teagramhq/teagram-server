@@ -457,7 +457,7 @@ run_lima_identity_import() {
     return 1
   fi
 
-  if ! lima_compose --profile candidate config --format json \
+  if ! lima_compose config --format json \
     >"$TMP_DIR/lima-compose.json" 2>"$TMP_DIR/lima-compose.stderr"; then
     demo_fail 'Lima Compose configuration is invalid'
     return 1
@@ -469,12 +469,11 @@ run_lima_identity_import() {
     and ((.volumes.tgkey.driver_opts // {}) | length == 0)
     and (.volumes.tgkey.name // "teagram-demo_tgkey") == "teagram-demo_tgkey"
     and .services.teagramd.environment.TG_RSA_KEY_FINGERPRINT == $fingerprint
-    and .services["teagramd-next"].environment.TG_RSA_KEY_FINGERPRINT == $fingerprint
-    and .services.teagramd.image == .services["teagramd-next"].image
+    and .services.teagramd.environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+    and (.services | has("teagramd-next") | not)
     and (.services.teagramd.image | test("@sha256:[0-9a-f]{64}$"))
     and (.services.postgres.image | test("@sha256:[0-9a-f]{64}$"))
     and ([.services.teagramd.volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length == 1)
-    and ([.services["teagramd-next"].volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length == 1)
   ' "$TMP_DIR/lima-compose.json" >/dev/null || {
     demo_fail 'Compose configuration is not the pinned Lima identity variant'
     return 1

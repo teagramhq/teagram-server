@@ -234,35 +234,24 @@ compose() {
 
 LIMA_JSON=$TMP_DIR/lima.json
 compose -f "$LIMA_COMPOSE" --project-name teagram-demo config --format json > "$LIMA_JSON"
-CANDIDATE_JSON=$TMP_DIR/lima-candidate.json
-compose --profile candidate -f "$LIMA_COMPOSE" --project-name teagram-demo config --format json > "$CANDIDATE_JSON"
 
 TAMPERED_CONFIG_DIR=$TMP_DIR/tampered-config
 mkdir -p "$TAMPERED_CONFIG_DIR"
-jq '.services.postgres.image = "postgres:18-alpine"' "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/digest.json"
-jq '.services.postgres.build = "."' "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/build.json"
+jq '.services.postgres.image = "postgres:18-alpine"' "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/digest.json"
+jq '.services.postgres.build = "."' "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/build.json"
 jq '.services["qa-invite"] = (.services.migrate | .mem_limit = "1")' \
-  "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/qa-invite.json"
-jq '.services.teagramd.environment.TG_PG_MAX_CONNS = "8" | .services["teagramd-next"].environment.TG_PG_MAX_CONNS = "8"' \
-  "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/postgres-pool.json"
-jq '.services["budget-probe"] = {image: ("fixture@sha256:" + ("a" * 64)), mem_limit: "2097152"}' \
-  "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/qa-invite.json"
+jq '.services.teagramd.environment.TG_PG_MAX_CONNS = "8"' \
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/postgres-pool.json"
+jq '.services["budget-probe"] = {image: ("fixture@sha256:" + ("a" * 64)), mem_limit: "52428800"}' \
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
 jq '.networks.egress.ipam.config[0].subnet = "198.18.134.0/24"' \
-  "$CANDIDATE_JSON" > "$TAMPERED_CONFIG_DIR/subnet.json"
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/subnet.json"
 
 # expect DESCRIPTION JQ-FILTER: the filter must evaluate to true on lima's config.
 expect() {
   local description=$1 filter=$2
   if jq -e "$filter" "$LIMA_JSON" >/dev/null; then
-    ok "$description"
-  else
-    not_ok "$description"
-  fi
-}
-
-expect_candidate() {
-  local description=$1 filter=$2
-  if jq -e "$filter" "$CANDIDATE_JSON" >/dev/null; then
     ok "$description"
   else
     not_ok "$description"
@@ -284,25 +273,28 @@ expect 'criterion 2: every service has a memory limit' \
   '(.services | length) as $n | [.services[] | select((.mem_limit // "0" | tonumber) > 0)] | length == $n'
 expect 'criterion 2: long-running limits total at most 200 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add <= 209715200'
-expect_candidate 'criterion 2: candidate-enabled limits total exactly 199 MiB' \
-  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 199 * 1048576'
-expect_candidate 'criterion 2: both server pools are capped at three for rollout' \
-  '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"'
-expect_candidate 'criterion 2: both server slots have 44 MiB for concurrent photo uploads' \
-  '(.services.teagramd.mem_limit | tonumber) == 46137344 and (.services["teagramd-next"].mem_limit | tonumber) == 46137344'
-expect_candidate 'criterion 2: both server slots use a 20 MiB Go heap limit for memory headroom' \
-  '.services.teagramd.environment.GOMEMLIMIT == "20MiB" and .services["teagramd-next"].environment.GOMEMLIMIT == "20MiB"'
-expect_candidate 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
+expect 'criterion 2: long-running limits total exactly 157 MiB' \
+  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 157 * 1048576'
+expect 'criterion 2: only the single server pool is capped at three' \
+  '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)'
+expect 'criterion 2: server has a 46 MiB limit and 20 MiB Go heap limit' \
+  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "20MiB"'
+expect 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \
   '.services.postgres.volumes | any(.target == "/etc/postgresql/postgresql.conf" and (.source | endswith("deploy/teagram-demo/lima/postgresql.conf")))'
 expect 'criterion 2: only the edge publishes a host port' \
   '[.services | to_entries[] | select(.value.ports != null) | .key] == ["edge"]'
+expect 'criterion 2: edge health check is reachable only on loopback port 8080' \
+  '.services.edge.ports | any(.host_ip == "127.0.0.1" and (.published | tostring) == "8080" and (.target | tostring) == "8080")'
 
 # Criterion 3: teagramd's blobs are a bind of the capped mount, which must
 # already exist, and the bind refuses to create a missing host path.
 expect 'criterion 3: teagramd binds the capped blob directory' \
   '.services.teagramd.volumes | any(.type == "bind" and .source == "/srv/teagram-demo-blobs/data" and .target == "/var/lib/teagramd-blobs" and .bind.create_host_path == false)'
+# shellcheck disable=SC2016 # jq variables are intentional literals.
+expect 'container-writable proxy runtime binds are outside the checkout' \
+  '. as $config | (all(["turnstile-egress", "haproxy", "edge"][]; . as $service | [$config.services[$service].volumes[] | select(.target == "/tmp")] as $mounts | ($mounts | length) == 1 and $mounts[0].type == "bind" and ($mounts[0].read_only // false) == false and $mounts[0].bind.create_host_path == false and ($mounts[0].source | startswith("/var/lib/teagram-demo/lima/runtime/tmp/")))) and ([$config.services.haproxy.volumes[] | select(.target == "/run/haproxy" and .type == "bind" and .read_only != true and .bind.create_host_path == false and .source == "/var/lib/teagram-demo/lima/runtime/haproxy-run")] | length) == 1'
 
 # Criterion 4: the subnets are fixed and match the documented values.
 expect 'criterion 4: fixed subnets are documented values' \
@@ -317,16 +309,14 @@ else
   not_ok 'postgres config: shared_buffers at most 8 MB, max_connections at most 32'
 fi
 
-# The candidate teagramd-next exists only under its profile and has the raised
-# limit needed for concurrent media-photo and profile-photo requests.
-if jq -e '.services["teagramd-next"] | .profiles == ["candidate"] and (.mem_limit | tonumber) == 46137344' \
-  "$CANDIDATE_JSON" >/dev/null; then
-  ok 'candidate teagramd-next is profile-gated and limited'
+# A second server is never rendered beside the running service on lima.
+if jq -e '(.services | has("teagramd-next") | not)' "$LIMA_JSON" >/dev/null; then
+  ok 'lima Compose contains no second teagramd service'
 else
-  not_ok 'candidate teagramd-next is profile-gated and limited'
+  not_ok 'lima Compose contains no second teagramd service'
 fi
 
-# Every rendered-config guard must reject a deliberately tampered candidate
+# Every rendered-config guard must reject a deliberately tampered
 # config instead of ending with would_apply.
 assert_config_failure 'check.sh rejects a tag-only image' 'FAIL image-digests:' "$TAMPERED_CONFIG_DIR/digest.json"
 assert_config_failure 'check.sh rejects a build key' 'FAIL config-build:' "$TAMPERED_CONFIG_DIR/build.json"
@@ -336,7 +326,8 @@ assert_config_failure 'check.sh rejects a memory sum over 200 MiB' 'FAIL mem-lim
 assert_config_failure 'check.sh rejects an unexpected subnet' 'FAIL subnets:' "$TAMPERED_CONFIG_DIR/subnet.json"
 
 # Drift guard: images shared with the charlie file are the same digests, and
-# teagramd's environment matches it apart from the lima-specific caps.
+# teagramd's environment matches apart from lima's caps and single-server
+# proxy settings.
 ROOT_JSON=$TMP_DIR/root.json
 compose -f "$ROOT_COMPOSE" --project-name teagram-demo --profile demo config --format json > "$ROOT_JSON"
 for service in postgres migrate turnstile-egress haproxy edge; do
@@ -347,14 +338,14 @@ for service in postgres migrate turnstile-egress haproxy edge; do
     not_ok "image parity with charlie: $service"
   fi
 done
-if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .TG_RSA_KEY_FINGERPRINT)' "$ROOT_JSON") \
-  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .TG_RSA_KEY_FINGERPRINT)' "$LIMA_JSON") >/dev/null; then
-  ok 'teagramd environment matches the charlie file apart from lima memory and pool caps'
+if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY, .TG_RSA_KEY_FINGERPRINT)' "$ROOT_JSON") \
+  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY, .TG_RSA_KEY_FINGERPRINT)' "$LIMA_JSON") >/dev/null; then
+  ok 'teagramd environment matches the charlie file apart from lima caps and proxy settings'
 else
-  not_ok 'teagramd environment matches the charlie file apart from lima memory and pool caps'
+  not_ok 'teagramd environment matches the charlie file apart from lima caps and proxy settings'
 fi
-expect_candidate 'criterion 6: both lima server slots pin the imported RSA fingerprint' \
-  '.services.teagramd.environment.TG_RSA_KEY_FINGERPRINT == "42" and .services["teagramd-next"].environment.TG_RSA_KEY_FINGERPRINT == "42"'
+expect 'criterion 6: the single lima server pins the imported RSA fingerprint' \
+  '.services.teagramd.environment.TG_RSA_KEY_FINGERPRINT == "42" and .services.teagramd.environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem" and ([.services.teagramd.volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length) == 1'
 
 # The image helper rejects unknown existing images and blkid errors without
 # calling mkfs, accepts a recognized ext4 image unchanged, and formats only an
@@ -588,17 +579,17 @@ else
   not_ok 'check.sh rejects an unmounted blob cap'
   cat "$CHECK_OUT" >&2
 fi
-for name in env-file secret-files tunnel-token compose-config config-build config-qa-invite postgres-pool image-digests mem-limits subnets; do
+for name in env-file secret-files tunnel-token compose-config config-build config-qa-invite edge-health-bind postgres-pool image-digests mem-limits subnets; do
   if grep -q "^PASS $name" "$CHECK_OUT"; then
     ok "check.sh passes $name on the fixture"
   else
     not_ok "check.sh passes $name on the fixture"
   fi
 done
-if grep -q '^PASS mem-limits .*with candidate enabled)$' "$CHECK_OUT"; then
-  ok 'check.sh validates the memory ceiling with the candidate enabled'
+if grep -q '^PASS mem-limits (157 MiB of 200 MiB)$' "$CHECK_OUT"; then
+  ok 'check.sh validates the single-server memory ceiling'
 else
-  not_ok 'check.sh validates the memory ceiling with the candidate enabled'
+  not_ok 'check.sh validates the single-server memory ceiling'
 fi
 if grep -qF -- "$PASSWORD_FIXTURE" "$CHECK_OUT" || grep -qF -- "fixture-tunnel-token" "$CHECK_OUT"; then
   not_ok 'check.sh prints no secret values'
@@ -612,7 +603,7 @@ chmod 700 "$BLOB_MOUNT_FIXTURE/data"
 BLOB_MOUNT_CONFIG=$TMP_DIR/blob-mount-config.json
 jq --arg src "$BLOB_MOUNT_FIXTURE/data" \
   '.services.teagramd.volumes |= map(if .type == "bind" and .target == "/var/lib/teagramd-blobs" then .source = $src else . end)' \
-  "$CANDIDATE_JSON" > "$BLOB_MOUNT_CONFIG"
+  "$LIMA_JSON" > "$BLOB_MOUNT_CONFIG"
 : > "$STATFS_LOG"
 set +e
 run_check "" 0 "$BLOB_MOUNT_CONFIG" "" "" 0 "$ENV_FILE" "$BLOB_MOUNT_FIXTURE" 1 > "$CHECK_OUT" 2>&1

@@ -24,6 +24,7 @@ POSTGRES_PASSWORD_FIXTURE=$(printf 'b%.0s' {1..64})
 AUTHKEY_FIXTURE=$(printf 'c%.0s' {1..64})
 IMAGE_DIGEST=$(printf 'a%.0s' {1..64})
 REAL_DOCKER=$(command -v docker)
+REAL_LN=$(command -v ln)
 
 mkdir -p "$TEST_SCRIPT_DIR/lima" "$MOCK_BIN"
 cp "$SCRIPT_DIR/init-demo.sh" "$TEST_INIT"
@@ -214,7 +215,7 @@ if [[ "${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" == 1 &&
   "${2:-}" == "$TEAGRAM_TEST_VOLUME_ROOT/$TEAGRAM_TEST_VOLUME_NAME/server_key.pem" ]]; then
   printf 'sentinel\n' > "$2"
 fi
-exec /usr/bin/ln "$@"
+exec "$TEAGRAM_TEST_REAL_LN" "$@"
 BASH
 chmod 0755 "$MOCK_BIN/ln"
 
@@ -343,6 +344,7 @@ run_import() {
     TEAGRAM_TEST_VOLUME_ROOT="$CASE_VOLUME_ROOT" \
     TEAGRAM_TEST_VOLUME_NAME="$VOLUME_NAME" \
     TEAGRAM_TEST_REAL_DOCKER="$REAL_DOCKER" \
+    TEAGRAM_TEST_REAL_LN="$REAL_LN" \
     TEAGRAM_TEST_INSPECT_COUNT="$CASE_INSPECT_COUNT" \
     TEAGRAM_TEST_SERVER_IMAGE="${TEAGRAM_TEST_SERVER_IMAGE:-}" \
     TEAGRAM_TEST_RUN_REAL_CLIENT_CONFIG="$run_real_client_config" \
@@ -385,7 +387,7 @@ fi
 
 new_case success
 if ! run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
-  cat "$CASE_OUTPUT" >&2
+  cat "$CASE_OUTPUT" "$CASE_LOG" >&2
   exit 1
 fi
 [[ -f "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" ]]
