@@ -206,8 +206,11 @@ installed isolation. The stack supervisor creates the networks, applies the
 rules, and then starts Compose; every ten seconds it checks the six long-running
 services and restarts only missing services one at a time in dependency order,
 waiting up to 120 seconds for each service to become healthy or start. Recovery
-disables dependency startup, leaving the one-shot `migrate` service for explicit
-bootstrap and rollout. It reapplies the rules before recovery. It retries
+starts `teagramd` before waiting for HAProxy's health check, and disables
+dependency startup so the one-shot `migrate` service stays stopped. A first boot
+without an active release uses project Compose startup to run the bootstrap
+migration; respawns with an active release use migration-free recovery. It
+reapplies the rules before recovery. It retries
 while dockerd is unavailable and shares the deploy lock, so it does not start an
 old release during a rollout. OpenRC respawns the supervisor if it exits. Its
 output is sent to syslog with the `teagram-demo-stack` tag. Start and stop the

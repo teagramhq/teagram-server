@@ -510,8 +510,12 @@ stack_start_locked() {
   compose_stack "$active_image_ref" create --no-build \
     || fail 'cannot create Lima demo containers before applying their egress rules'
   apply_rules
-  compose_stack "$active_image_ref" up -d --no-build \
-    || fail 'cannot start the Lima demo stack after applying its egress rules'
+  if [[ -n $active_image_ref ]]; then
+    stack_reconcile_locked
+  else
+    compose_stack "$active_image_ref" up -d --no-build \
+      || fail 'cannot start the Lima demo stack after applying its egress rules'
+  fi
   stack_lock_release
 }
 
@@ -560,7 +564,7 @@ stack_reconcile_locked() {
   local -a running_services_list=()
   local -a missing_services=()
   local -A running=()
-  local -a expected_services=(postgres turnstile-egress haproxy teagramd edge cloudflared)
+  local -a expected_services=(postgres turnstile-egress teagramd haproxy edge cloudflared)
 
   active_image_ref=$(active_release_image_ref) \
     || fail 'cannot read the validated active Lima release'

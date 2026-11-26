@@ -641,9 +641,9 @@ stack_reconcile_locked
                     f"compose:{active_ref}:up -d --no-build --no-deps "
                     "--wait --wait-timeout 120 turnstile-egress",
                     f"compose:{active_ref}:up -d --no-build --no-deps "
-                    "--wait --wait-timeout 120 haproxy",
-                    f"compose:{active_ref}:up -d --no-build --no-deps "
                     "--wait --wait-timeout 120 teagramd",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 haproxy",
                     f"compose:{active_ref}:up -d --no-build --no-deps "
                     "--wait --wait-timeout 120 edge",
                     f"compose:{active_ref}:up -d --no-build --no-deps "
@@ -663,7 +663,116 @@ stack_reconcile_locked
             )
             self.assertNotIn("migrate", running_services.read_text(encoding="utf-8"))
 
-    def test_stack_start_uses_active_digest_and_applies_rules_before_compose_up(self) -> None:
+    def test_supervisor_restart_after_recovery_failure_leaves_migrate_stopped(self) -> None:
+        shell = r'''
+source "$1"
+active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
+disable_existing_restart_policies() { :; }
+compose_stack() {
+  local image_ref=$1
+  shift
+  local operation=$1
+  shift
+  printf 'compose:%s:%s %s\n' "$image_ref" "$operation" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+  if [[ $operation == create ]]; then
+    return 0
+  elif [[ $operation == ps ]]; then
+    cat "$TEAGRAM_TEST_RUNNING_SERVICES"
+  elif [[ $operation == up ]]; then
+    local service
+    local -a services=()
+    while (( $# > 0 )); do
+      if [[ $1 == --wait-timeout ]]; then
+        shift 2
+      elif [[ $1 == -* ]]; then
+        shift
+      else
+        services+=("$1")
+        shift
+      fi
+    done
+    if (( ${#services[@]} == 0 )); then
+      services=(postgres migrate turnstile-egress teagramd haproxy edge cloudflared)
+    fi
+    for service in "${services[@]}"; do
+      if [[ $service == "$TEAGRAM_TEST_FAIL_SERVICE" && ! -e $TEAGRAM_TEST_FAIL_ONCE_FILE ]]; then
+        : > "$TEAGRAM_TEST_FAIL_ONCE_FILE"
+        return 1
+      fi
+      if ! grep -Fqx "$service" "$TEAGRAM_TEST_RUNNING_SERVICES"; then
+        printf '%s\n' "$service" >> "$TEAGRAM_TEST_RUNNING_SERVICES"
+      fi
+    done
+  else
+    return 2
+  fi
+}
+apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
+stack_lock_release() { :; }
+stack_start_locked
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "supervisor-restart.log"
+            running_services = pathlib.Path(directory) / "running-services"
+            running_services.write_text(
+                "\n".join(("postgres", "turnstile-egress", "teagramd")) + "\n",
+                encoding="utf-8",
+            )
+            failed_once = pathlib.Path(directory) / "failed-once"
+            active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "e" * 64
+            env = os.environ.copy()
+            env["TEAGRAM_TEST_ACTIVE_IMAGE_REF"] = active_ref
+            env["TEAGRAM_TEST_FAIL_SERVICE"] = "haproxy"
+            env["TEAGRAM_TEST_FAIL_ONCE_FILE"] = str(failed_once)
+            env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            env["TEAGRAM_TEST_RUNNING_SERVICES"] = str(running_services)
+
+            failed_recovery = subprocess.run(
+                ["bash", "-c", shell, "test-supervisor-restart", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(failed_recovery.returncode, 0)
+            self.assertIn("teagramd", running_services.read_text(encoding="utf-8"))
+            self.assertNotIn("migrate", running_services.read_text(encoding="utf-8"))
+
+            restarted_supervisor = subprocess.run(
+                ["bash", "-c", shell, "test-supervisor-restart", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(restarted_supervisor.returncode, 0, restarted_supervisor.stderr)
+            running = set(running_services.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(
+                running,
+                {
+                    "postgres",
+                    "turnstile-egress",
+                    "teagramd",
+                    "haproxy",
+                    "edge",
+                    "cloudflared",
+                },
+            )
+            up_calls = [
+                line
+                for line in log.read_text(encoding="utf-8").splitlines()
+                if ":up " in line
+            ]
+            self.assertEqual(
+                [line.rsplit(" ", 1)[-1] for line in up_calls],
+                ["haproxy"] * 2 + ["edge", "cloudflared"],
+            )
+            self.assertTrue(
+                all("--no-deps --wait --wait-timeout 120 " in line for line in up_calls)
+            )
+
+    def test_stack_start_uses_active_digest_and_applies_rules_before_recovery(self) -> None:
         shell = r'''
 source "$1"
 active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
@@ -674,6 +783,9 @@ compose_stack() {
   local image_ref=$1
   shift
   printf 'compose:%s:%s\n' "$image_ref" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+  if [[ "$1" == ps ]]; then
+    printf '%s\n' postgres turnstile-egress haproxy edge cloudflared
+  fi
 }
 apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
 stack_lock_release() { :; }
@@ -700,7 +812,44 @@ stack_start_locked
                     "disable-restart-policies",
                     f"compose:{active_ref}:create --no-build",
                     "firewall",
-                    f"compose:{active_ref}:up -d --no-build",
+                    f"compose:{active_ref}:ps --status running --services",
+                    "firewall",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 teagramd",
+                ],
+            )
+
+    def test_stack_start_runs_project_up_for_bootstrap_without_active_release(self) -> None:
+        shell = r'''
+source "$1"
+active_release_image_ref() { printf '\n'; }
+disable_existing_restart_policies() { :; }
+compose_stack() {
+  printf 'compose:%s:%s\n' "${1:-}" "${*:2}" >> "$TEAGRAM_TEST_STACK_LOG"
+}
+apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
+stack_lock_release() { :; }
+stack_start_locked
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "bootstrap-start.log"
+            env = os.environ.copy()
+            env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-bootstrap-stack-start", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "compose::create --no-build",
+                    "firewall",
+                    "compose::up -d --no-build",
                 ],
             )
 
