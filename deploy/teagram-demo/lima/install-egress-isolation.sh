@@ -223,7 +223,7 @@ apply_family() {
   local binary=$1 family=$2
   shift 2
   local -a subnets=("$@")
-  local line status chain
+  local line status chain rendered_rules
 
   command -v "$binary" >/dev/null 2>&1 || fail "$binary is required for $family isolation"
   if chain_listing "$binary" DOCKER-USER; then
@@ -241,6 +241,8 @@ apply_family() {
   fi
   require_firewall_rule "$binary has no FORWARD hook to DOCKER-USER" \
     "$binary" -w 10 -C FORWARD -j DOCKER-USER
+  rendered_rules=$(render_rules "$family" "${subnets[@]}") \
+    || fail "$family isolation rules could not be rendered"
   for chain in "$IPTABLES_CHAIN" "$IPTABLES_INPUT_CHAIN"; do
     if chain_listing "$binary" "$chain"; then
       :
@@ -259,7 +261,7 @@ apply_family() {
       [[ "$line" == "-A $IPTABLES_CHAIN "* || "$line" == "-A $IPTABLES_INPUT_CHAIN "* ]] \
         || continue
       printf '%s\n' "$line"
-    done < <(render_rules "$family" "${subnets[@]}")
+    done <<< "$rendered_rules"
     printf 'COMMIT\n'
   } | "${binary}-restore" -w 10 --noflush
 

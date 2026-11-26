@@ -314,6 +314,35 @@ class EgressIsolationRuleTests(unittest.TestCase):
         os.geteuid() == 0 or shutil.which("sudo"),
         "fake firewall integration requires root or passwordless sudo",
     )
+    def test_render_failure_aborts_apply_without_changing_input_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            python = mock_bin / "python3"
+            python.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "import sys\n"
+                "if sys.argv[1:2] == ['-']:\n"
+                "    raise SystemExit(1)\n"
+                f"real_python = {sys.executable!r}\n"
+                "os.execv(real_python, [real_python, *sys.argv[1:]])\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            before = json.loads(state_file.read_text(encoding="utf-8"))
+
+            result = self._run_firewall_mode(mock_bin, state_file, "apply-rules")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot derive the bridge gateway", result.stderr)
+            after = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(after["iptables"]["INPUT"], before["iptables"]["INPUT"])
+            self.assertEqual(after, before)
+
+    @unittest.skipUnless(
+        os.geteuid() == 0 or shutil.which("sudo"),
+        "fake firewall integration requires root or passwordless sudo",
+    )
     def test_inspection_errors_abort_apply_and_remove_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mock_bin, state_file = self._mock_firewall(directory)
