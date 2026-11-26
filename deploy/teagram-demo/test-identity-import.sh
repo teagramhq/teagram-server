@@ -332,10 +332,11 @@ EOF
 run_import() {
   local key_path=$1 expected_spki=$2 client_spki=${3:-$VALID_SPKI}
   local run_real_client_config=0
+  local import_status
   if [[ -n "${TEAGRAM_TEST_SERVER_IMAGE:-}" && "$client_spki" == "$VALID_SPKI" ]]; then
     run_real_client_config=1
   fi
-  timeout 15s env PATH="$MOCK_BIN:$PATH" \
+  if timeout 15s env PATH="$MOCK_BIN:$PATH" \
     TEAGRAM_DEMO_LIMA_ENV_FILE="$CASE_ENV" \
     TEAGRAM_DEMO_SECRETS_DIR="$CASE_ROOT/secrets" \
     TEAGRAM_TEST_DOCKER_LOG="$CASE_LOG" \
@@ -351,7 +352,13 @@ run_import() {
     TEAGRAM_TEST_FORCE_LN_COLLISION="${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" \
     TEAGRAM_TEST_FAIL_CLEANUP_INSPECT="${TEAGRAM_TEST_FAIL_CLEANUP_INSPECT:-0}" \
     "$TEST_INIT" --import-key "$key_path" --expected-rsa-spki "$expected_spki" \
-    >"$CASE_OUTPUT" 2>&1
+    >"$CASE_OUTPUT" 2>&1; then
+    import_status=0
+  else
+    import_status=$?
+  fi
+  printf '%s\n' "$import_status" > "$CASE_ROOT/import.exit"
+  return "$import_status"
 }
 
 assert_no_secret_output() {
@@ -453,6 +460,7 @@ if run_import "$CASE_ROOT/key.fifo" "$VALID_SPKI"; then
 fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
 grep -Fq 'RSA import key is missing or unsafe' "$CASE_OUTPUT"
+[[ "$(<"$CASE_ROOT/import.exit")" != 124 ]]
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
@@ -506,6 +514,20 @@ if run_import "$CASE_ROOT/pkcs8.pem" "$VALID_SPKI"; then
   exit 1
 fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case encrypted
+openssl rsa -in "$TMP_ROOT/server_key.pem" -traditional -aes256 \
+  -passout pass:fixture-encrypted-key-passphrase -out "$CASE_ROOT/encrypted-key.pem" \
+  >/dev/null 2>&1
+chmod 0600 "$CASE_ROOT/encrypted-key.pem"
+if run_import "$CASE_ROOT/encrypted-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted an encrypted RSA key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+grep -Fq 'RSA import key must be an unencrypted PKCS#1 PEM' "$CASE_OUTPUT"
+assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
 new_case wrong-size
@@ -583,6 +605,8 @@ if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
 fi
 [[ -p "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" ]]
 [[ "$before_volume_hash" == "$(sha256sum "$CASE_VOLUME_ROOT/volume.json")" ]]
+grep -Fq 'existing Lima key volume does not contain one secure server key' "$CASE_OUTPUT"
+[[ "$(<"$CASE_ROOT/import.exit")" != 124 ]]
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 

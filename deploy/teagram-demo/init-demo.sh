@@ -169,7 +169,25 @@ PY
     demo_fail 'RSA import key copy could not be secured'
     return 1
   fi
-  if ! openssl rsa -in "$key_copy" -check -noout \
+  if ! python3 - "$key_copy" >"$TMP_DIR/pem-format.stdout" 2>"$TMP_DIR/pem-format.stderr" <<'PY'
+import pathlib
+import re
+import sys
+
+raw = pathlib.Path(sys.argv[1]).read_bytes().strip(b" \t\r\n")
+match = re.fullmatch(
+    rb"-----BEGIN RSA PRIVATE KEY-----\s+(.*?)\s+-----END RSA PRIVATE KEY-----",
+    raw,
+    flags=re.DOTALL,
+)
+if match is None or re.search(rb"(?m)^(?:Proc-Type|DEK-Info):", match.group(1)):
+    raise SystemExit(1)
+PY
+  then
+    demo_fail 'RSA import key must be an unencrypted PKCS#1 PEM'
+    return 1
+  fi
+  if ! openssl rsa -in "$key_copy" -passin pass: -check -noout \
     >/dev/null 2>"$TMP_DIR/openssl.stderr"; then
     demo_fail 'RSA import key is not a valid PKCS#1 key'
     return 1
@@ -246,7 +264,7 @@ PY
     demo_fail 'RSA import key is not a single 2048-bit PKCS#1 key'
     return 1
   fi
-  if ! { openssl pkey -in "$key_copy" -pubout -outform DER |
+  if ! { openssl pkey -in "$key_copy" -passin pass: -pubout -outform DER |
     base64 | tr -d '\n' > "$TMP_DIR/$prefix-spki"; } 2>"$TMP_DIR/openssl.stderr"; then
     demo_fail 'RSA import key public identity could not be read'
     return 1
