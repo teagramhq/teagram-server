@@ -37,6 +37,8 @@ DEMO_WEB_CURRENT_LINK="$DEMO_WEB_ROOT/current"
 # shellcheck disable=SC2034
 DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
 # shellcheck disable=SC2034
+DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+# shellcheck disable=SC2034
 DEMO_AUTHORITY_DIR="$DEMO_REPO_ROOT/.state/blob-mode"
 # shellcheck disable=SC2034
 DEMO_SEED_SECRET_DIR="/var/lib/teagram-demo/secrets"
@@ -928,6 +930,35 @@ demo_prepare_client_config_dir() {
   mv -f -- "$temporary" "$config_file"
 }
 
+demo_prepare_tailnet_client_config() {
+  local temporary
+  [[ -f "$DEMO_CLIENT_CONFIG" && ! -L "$DEMO_CLIENT_CONFIG" ]] || {
+    demo_fail 'public client config is missing or unsafe for tailnet discovery'
+    return 1
+  }
+  [[ ! -L "$DEMO_TAILNET_CLIENT_CONFIG" ]] || {
+    demo_fail 'tailnet client config must not be a symlink'
+    return 1
+  }
+  jq -e '
+    type == "object"
+    and (.websocket | type == "object")
+    and .websocket.endpoint == "wss://demo.teagram.io/apiws"
+  ' "$DEMO_CLIENT_CONFIG" >/dev/null || {
+    demo_fail 'public client config has an invalid WebSocket endpoint for tailnet discovery'
+    return 1
+  }
+  temporary=$(mktemp "$DEMO_CLIENT_CONFIG_DIR/.client-tailnet.XXXXXXXX")
+  if ! jq '.websocket.endpoint = "wss://teagram-dev.tailaa4918.ts.net/apiws"' \
+    "$DEMO_CLIENT_CONFIG" > "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet client config could not be generated'
+    return 1
+  fi
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$DEMO_TAILNET_CLIENT_CONFIG"
+}
+
 demo_reload_edge() {
   local -a edge_ids=()
   demo_prepare_edge_config_permissions || return 1
@@ -989,6 +1020,7 @@ demo_reload_tailnet_edge() {
     return 0
   fi
 
+  demo_prepare_tailnet_client_config || return 1
   demo_prepare_tailnet_edge_config_permissions || return 1
   demo_tailnet_compose run --rm -T --no-deps --entrypoint nginx edge-tailnet \
     -c /etc/nginx/tailnet/nginx.conf -t >/dev/null || {

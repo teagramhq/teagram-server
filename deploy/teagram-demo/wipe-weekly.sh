@@ -164,6 +164,7 @@ AFTER_GENERATION=$(jq -er '.demo.wipe_generation' "$TMP_DIR/client-after-wipe.js
 [[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]] || demo_fail 'weekly wipe reused the previous wipe generation'
 install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+demo_prepare_tailnet_client_config
 demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
 demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-active-after-wipe.json"

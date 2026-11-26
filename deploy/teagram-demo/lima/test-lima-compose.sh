@@ -299,6 +299,13 @@ from pathlib import Path
 
 public_nginx = Path(sys.argv[1]).read_text(encoding="utf-8")
 tailnet_nginx = Path(sys.argv[2]).read_text(encoding="utf-8")
+public_listeners = re.findall(
+    r"^\s*listen\s+([^;\s]+)",
+    public_nginx,
+    flags=re.MULTILINE,
+)
+if public_listeners != ["8080"]:
+    raise SystemExit("Lima Nginx must listen only on port 8080")
 cf_sources = re.findall(
     r"^\s*proxy_set_header\s+CF-Connecting-IP\s+([^;]+);",
     public_nginx,

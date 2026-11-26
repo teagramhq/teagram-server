@@ -724,6 +724,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding'
   install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
   mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+  demo_prepare_tailnet_client_config
   demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
   demo_seed_compose up -d "$ACTIVE_SERVER"
   demo_prepare_seed_owner "$TMP_DIR"
@@ -797,6 +798,7 @@ jq -e '
 ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding; wait for MAIN-2196'
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+demo_prepare_tailnet_client_config
 demo_bootstrap_compose up -d teagramd
 
 mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)

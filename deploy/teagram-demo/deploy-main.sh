@@ -210,6 +210,7 @@ demo_cleanup() {
             chown root:root "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
             chmod 0644 "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
             mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rollback_rc=1
+            demo_prepare_tailnet_client_config || rollback_rc=1
           fi
           export TEAGRAM_DEMO_IMAGE_REF="$PREV_IMAGE_REF"
           if [[ -n "${PREV_WEB_RELEASE:-}" ]]; then
@@ -545,6 +546,7 @@ demo_haproxy_control drain "$ACTIVE_SERVER"
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 CLIENT_CONFIG_UPDATED=1
+demo_prepare_tailnet_client_config
 TAILNET_SMOKE_ARGS=()
 TAILNET_ENABLED=$(demo_tailnet_enabled)
 if [[ "$TAILNET_ENABLED" == true ]]; then

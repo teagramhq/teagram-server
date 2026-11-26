@@ -18,6 +18,7 @@ import urllib.request
 
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+TAILNET_WEBSOCKET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"
 DEMO_CSP = (
     "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
     "frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; "
@@ -25,6 +26,10 @@ DEMO_CSP = (
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; "
     "media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; "
     "connect-src 'self' wss://demo.teagram.io https://challenges.cloudflare.com;"
+)
+TAILNET_CSP = DEMO_CSP.replace(
+    "wss://demo.teagram.io",
+    "wss://demo.teagram.io wss://teagram-dev.tailaa4918.ts.net",
 )
 
 
@@ -45,9 +50,9 @@ def read_response(url: str, *, headers: dict[str, str] | None = None) -> tuple[i
         return response.status, response.headers, response.read()
 
 
-def check_security_headers(headers: object) -> None:
+def check_security_headers(headers: object, *, expected_csp: str = DEMO_CSP) -> None:
     csp = headers.get("Content-Security-Policy", "")
-    if csp != DEMO_CSP:
+    if csp != expected_csp:
         fail("Content-Security-Policy differs from the approved demo web policy")
     for name, expected in (
         ("X-Content-Type-Options", "nosniff"),
@@ -255,10 +260,25 @@ def main() -> None:
         tailnet_status, tailnet_headers, tailnet_body = read_response(tailnet_url + "/")
         if tailnet_status != 200 or tailnet_body != body:
             fail("tailnet edge root response differs from the public edge")
-        check_security_headers(tailnet_headers)
+        check_security_headers(tailnet_headers, expected_csp=TAILNET_CSP)
         tailnet_admin_status, _, _ = read_response(tailnet_url + "/admin/")
         if tailnet_admin_status != 404:
             fail(f"tailnet /admin/ returned HTTP {tailnet_admin_status}, want 404")
+        tailnet_discovery_status, _, tailnet_discovery_body = read_response(
+            tailnet_url + "/.well-known/teagramd/client"
+        )
+        if tailnet_discovery_status != 200:
+            fail(f"tailnet discovery HTTP status is {tailnet_discovery_status}")
+        try:
+            tailnet_discovery = json.loads(tailnet_discovery_body)
+            expected_tailnet_discovery = json.loads(json.dumps(expected))
+            expected_tailnet_discovery["websocket"]["endpoint"] = TAILNET_WEBSOCKET_ENDPOINT
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            fail(f"tailnet discovery document is invalid: {error}")
+        if tailnet_discovery != expected_tailnet_discovery:
+            fail("tailnet discovery document differs from the dev-specific client config")
+        if tailnet_discovery.get("websocket", {}).get("endpoint") != TAILNET_WEBSOCKET_ENDPOINT:
+            fail("tailnet discovery WebSocket endpoint is incorrect")
         websocket_handshake(
             args.tailnet_port,
             "https://teagram-dev.tailaa4918.ts.net",

@@ -351,8 +351,27 @@ jq -e \
   and any(.services["edge-tailnet"].volumes[]; .source == ($tmpRoot + "/edge-tailnet") and .target == "/tmp" and (.read_only // false) == false)
   and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-tailnet.conf")) and .target == "/etc/nginx/tailnet/nginx.conf" and .read_only)
   and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
+  and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (([.services | to_entries[] | .value.ports[]?.published | tostring] | sort) == ["8080", "8081"])
 ' "$TMP_DIR/tailnet-enabled.json" >/dev/null
+
+(
+  DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-client"
+  DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
+  DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+  mkdir -p "$DEMO_CLIENT_CONFIG_DIR"
+  cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
+{"version":1,"mtproto":{"endpoint":"demo.teagram.io:443"},"websocket":{"endpoint":"wss://demo.teagram.io/apiws"},"demo":{"guest_sign_up":true}}
+JSON
+  demo_prepare_tailnet_client_config
+  jq -e '
+    .version == 1
+    and .mtproto.endpoint == "demo.teagram.io:443"
+    and .websocket.endpoint == "wss://teagram-dev.tailaa4918.ts.net/apiws"
+    and .demo.guest_sign_up == true
+  ' "$DEMO_TAILNET_CLIENT_CONFIG" >/dev/null
+  jq -e '.websocket.endpoint == "wss://demo.teagram.io/apiws"' "$DEMO_CLIENT_CONFIG" >/dev/null
+)
 
 (
   TEAGRAM_DEV_TAILNET_ENABLED=true
@@ -1312,6 +1331,13 @@ grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-con
 # shellcheck disable=SC2016
 grep -Fq 'if ($http_origin = "https://teagram-dev.tailaa4918.ts.net") { return 403; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client-tailnet;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'alias $teagramd_client_discovery;' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+grep -Fq 'wss://teagram-dev.tailaa4918.ts.net https://challenges.cloudflare.com' "$SCRIPT_DIR/nginx-tailnet.conf"
 grep -Fq 'set_real_ip_from 198.18.134.1/32;' "$SCRIPT_DIR/nginx-tailnet.conf"
 grep -Fq 'real_ip_header X-Forwarded-For;' "$SCRIPT_DIR/nginx-tailnet.conf"
 grep -Fq 'real_ip_recursive off;' "$SCRIPT_DIR/nginx-tailnet.conf"
@@ -1361,6 +1387,10 @@ PY
 grep -Fq 'cf_connecting_ip: str | None = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/common-locations.conf"
 grep -Fq 'args.tailnet_port' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_url + "/.well-known/teagramd/client"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'TAILNET_WEBSOCKET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'TAILNET_CSP = DEMO_CSP.replace(' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'check_security_headers(tailnet_headers, expected_csp=TAILNET_CSP)' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, None, 403, "browser-only")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, "https://web.teagram.io", 101)' "$SCRIPT_DIR/smoke.py"
@@ -1600,6 +1630,8 @@ deploy_steps = [
     'demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60',
     'demo_haproxy_control drain "$ACTIVE_SERVER"',
     'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
+    'CLIENT_CONFIG_UPDATED=1',
+    'demo_prepare_tailnet_client_config',
     '--web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
     'demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"',
@@ -1611,6 +1643,11 @@ if any(position < 0 for position in deploy_positions) or deploy_positions != sor
     raise SystemExit("deploy-main.sh: candidate health and traffic cutover must precede stopping the old server")
 if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "migrated database preserved" not in deploy:
     raise SystemExit("deploy-main.sh: failed cutover must retain the migrated database and dump")
+rollback_client_config = deploy.split('if (( CLIENT_CONFIG_UPDATED == 1 )); then', 1)[1].split("\n          fi", 1)[0]
+assert_text_order(rollback_client_config, "deploy-main.sh client config rollback", [
+    'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
+])
 if 'demo_compose stop edge' in deploy or 'demo_compose stop haproxy' in deploy:
     raise SystemExit("deploy-main.sh: normal deploy must keep the public edge and HAProxy running")
 if 'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"' not in deploy:
@@ -1690,18 +1727,21 @@ assert_text_order(wipe, "wipe-weekly.sh wipe generation publication", [
     '[[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]]',
     'install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
     'demo_compose up -d edge',
 ])
 assert_text_order(init, "init-demo.sh resume client config after migrations", [
     "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
     'client-config > "$TMP_DIR/client.json"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
 ])
 bootstrap_wait = init.index("demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'")
 assert_text_order(init, "init-demo.sh fresh client config after migrations", [
     "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'",
     'client-config > "$TMP_DIR/client.json"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
 ], start=bootstrap_wait)
 assert_text_order(deploy, "deploy-main.sh client config after migrations", [
     "demo_wait_migration demo_compose 'deployment migrations'",
