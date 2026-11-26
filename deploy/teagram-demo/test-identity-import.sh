@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ "$EUID" -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo -n -- bash "$0" "$@"
+  fi
+  printf 'identity import tests require root or passwordless sudo\n' >&2
+  exit 77
+fi
+
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+TMP_ROOT=$(mktemp -d /tmp/teagram-demo-identity-test.XXXXXXXX)
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
+chmod 0700 "$TMP_ROOT"
+
+TEST_REPO="$TMP_ROOT/repo"
+TEST_SCRIPT_DIR="$TEST_REPO/deploy/teagram-demo"
+TEST_INIT="$TEST_SCRIPT_DIR/init-demo.sh"
+MOCK_BIN="$TMP_ROOT/mock-bin"
+CONFIG_TEMPLATE="$TMP_ROOT/compose.json"
+VOLUME_NAME=teagram-demo_tgkey
+POSTGRES_PASSWORD_FIXTURE=$(printf 'b%.0s' {1..64})
+AUTHKEY_FIXTURE=$(printf 'c%.0s' {1..64})
+IMAGE_DIGEST=$(printf 'a%.0s' {1..64})
+
+mkdir -p "$TEST_SCRIPT_DIR/lima" "$MOCK_BIN"
+cp "$SCRIPT_DIR/init-demo.sh" "$TEST_INIT"
+cp "$SCRIPT_DIR/demo-common.sh" "$TEST_SCRIPT_DIR/demo-common.sh"
+cp "$SCRIPT_DIR/validate-env.py" "$TEST_SCRIPT_DIR/validate-env.py"
+cp "$SCRIPT_DIR/haproxy.cfg" "$TEST_SCRIPT_DIR/haproxy.cfg"
+cp "$SCRIPT_DIR/render-haproxy-config.py" "$TEST_SCRIPT_DIR/render-haproxy-config.py"
+mkdir -p "$TEST_SCRIPT_DIR/nginx-config"
+cp "$SCRIPT_DIR/nginx-config/nginx.conf" "$TEST_SCRIPT_DIR/nginx-config/nginx.conf"
+cp "$SCRIPT_DIR/lima/compose.yaml" "$TEST_SCRIPT_DIR/lima/compose.yaml"
+chmod 0755 "$TEST_INIT"
+
+cat > "$CONFIG_TEMPLATE" <<'JSON'
+{
+  "name": "teagram-demo",
+  "volumes": {"tgkey": {"name": "teagram-demo_tgkey", "driver": "local"}},
+  "services": {
+    "postgres": {"image": "postgres:18-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "teagramd": {
+      "image": "teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": {"TG_RSA_KEY_FINGERPRINT": "__FINGERPRINT__"},
+      "volumes": [{"type": "volume", "source": "teagram-demo_tgkey", "target": "/var/lib/teagramd"}]
+    },
+    "teagramd-next": {
+      "image": "teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": {"TG_RSA_KEY_FINGERPRINT": "__FINGERPRINT__"},
+      "volumes": [{"type": "volume", "source": "teagram-demo_tgkey", "target": "/var/lib/teagramd"}]
+    }
+  }
+}
+JSON
+
+cat > "$MOCK_BIN/docker" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$TEAGRAM_TEST_DOCKER_LOG"
+
+volume_dir="$TEAGRAM_TEST_VOLUME_ROOT/$TEAGRAM_TEST_VOLUME_NAME"
+volume_json="$TEAGRAM_TEST_VOLUME_ROOT/volume.json"
+
+case "${1:-}" in
+  compose)
+    if [[ " $* " == *" config "* ]]; then
+      sed "s/__FINGERPRINT__/$TG_RSA_KEY_FINGERPRINT/g" "$TEAGRAM_TEST_CONFIG_TEMPLATE"
+      exit 0
+    fi
+    if [[ " $* " == *" client-config "* ]]; then
+      printf '{"mtproto":{"rsa_spki":"%s"}}\n' "$TEAGRAM_TEST_CLIENT_SPKI"
+      exit 0
+    fi
+    exit 0
+    ;;
+  image)
+    [[ "${2:-}" == inspect ]]
+    exit 0
+    ;;
+  pull)
+    exit 0
+    ;;
+  volume)
+    case "${2:-}" in
+      ls)
+        if [[ -f "$volume_json" ]]; then
+          printf '%s\n' "$TEAGRAM_TEST_VOLUME_NAME"
+        fi
+        ;;
+      inspect)
+        [[ -f "$volume_json" ]] || exit 1
+        cat "$volume_json"
+        ;;
+      create)
+        name=
+        run_token=
+        while (($#)); do
+          case "$1" in
+            --label)
+              shift
+              [[ "$1" != com.teagram.demo.identity-import-run=* ]] || run_token=${1#*=}
+              ;;
+            --driver)
+              shift
+              ;;
+            *) name=$1 ;;
+          esac
+          shift
+        done
+        [[ "$name" == "$TEAGRAM_TEST_VOLUME_NAME" && ! -e "$volume_json" ]]
+        mkdir -m 0700 "$volume_dir"
+        jq -n --arg name "$name" --arg token "$run_token" \
+          '[{Name:$name,Driver:"local",Options:{},Labels:{"com.teagram.demo.identity-import-run":$token}}]' \
+          > "$volume_json"
+        printf '%s\n' "$name"
+        ;;
+      rm)
+        [[ "${3:-}" == "$TEAGRAM_TEST_VOLUME_NAME" && -f "$volume_json" ]]
+        rm -rf -- "$volume_dir" "$volume_json"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  run)
+    if [[ "$*" == *"dst=/key,readonly"* ]]; then
+      [[ "$(stat -c '%u:%g:%a' "$volume_dir")" == 65532:65532:700 ]]
+      [[ "$(stat -c '%u:%g:%a' "$volume_dir/server_key.pem")" == 65532:65532:600 ]]
+      cat "$volume_dir/server_key.pem"
+      exit 0
+    fi
+    source_key=
+    for argument in "$@"; do
+      case "$argument" in
+        type=bind,src=*,dst=/tmp/server_key.pem,readonly)
+          source_key=${argument#type=bind,src=}
+          source_key=${source_key%,dst=/tmp/server_key.pem,readonly}
+          ;;
+      esac
+    done
+    [[ -n "$source_key" && -f "$source_key" ]]
+    for entry in "$volume_dir"/.[!.]* "$volume_dir"/..?* "$volume_dir"/*; do
+      [[ -e "$entry" || -L "$entry" ]] || continue
+      exit 41
+    done
+    chown 65532:65532 "$volume_dir"
+    chmod 0700 "$volume_dir"
+    temporary="$volume_dir/.server_key.pem.import-mock"
+    cat "$source_key" > "$temporary"
+    chmod 0600 "$temporary"
+    chown 65532:65532 "$temporary"
+    ln "$temporary" "$volume_dir/server_key.pem"
+    rm "$temporary"
+    ;;
+  *) exit 1 ;;
+esac
+BASH
+chmod 0755 "$MOCK_BIN/docker"
+
+openssl genrsa -traditional -out "$TMP_ROOT/server_key.pem" 2048 >/dev/null 2>&1
+chmod 0600 "$TMP_ROOT/server_key.pem"
+openssl pkey -in "$TMP_ROOT/server_key.pem" -pubout -outform DER \
+  2>/dev/null | base64 | tr -d '\n' > "$TMP_ROOT/server-spki"
+VALID_SPKI=$(<"$TMP_ROOT/server-spki")
+openssl genrsa -traditional -out "$TMP_ROOT/other_key.pem" 2048 >/dev/null 2>&1
+chmod 0600 "$TMP_ROOT/other_key.pem"
+
+cat > "$TMP_ROOT/fingerprint.go" <<'GO'
+package main
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"os"
+
+	"github.com/gotd/td/crypto"
+)
+
+func main() {
+	data, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	block, _ := pem.Decode(data)
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(crypto.RSAFingerprint(&key.PublicKey))
+}
+GO
+if command -v go >/dev/null 2>&1; then
+  EXPECTED_FINGERPRINT=$(cd "$REPO_ROOT" && go run "$TMP_ROOT/fingerprint.go" "$TMP_ROOT/server_key.pem")
+else
+  EXPECTED_FINGERPRINT=$(python3 - "$TMP_ROOT/server_key.pem" <<'PY'
+import base64
+import hashlib
+import pathlib
+import re
+import sys
+
+
+def read_tlv(data, offset, tag):
+    if data[offset] != tag:
+        raise ValueError("invalid DER")
+    first = data[offset + 1]
+    cursor = offset + 2
+    if first & 0x80:
+        count = first & 0x7f
+        length = int.from_bytes(data[cursor : cursor + count], "big")
+        cursor += count
+    else:
+        length = first
+    end = cursor + length
+    return data[cursor:end], end
+
+
+def tl_bytes(value):
+    length = len(value)
+    if length <= 254:
+        encoded = bytes((length,)) + value
+    else:
+        encoded = b"\xfe" + length.to_bytes(3, "little") + value
+    return encoded + b"\x00" * ((-len(encoded)) % 4)
+
+
+pem_data = pathlib.Path(sys.argv[1]).read_bytes()
+body = re.fullmatch(
+    rb"\s*-----BEGIN RSA PRIVATE KEY-----\s+(.*?)\s+-----END RSA PRIVATE KEY-----\s*",
+    pem_data,
+    flags=re.DOTALL,
+).group(1)
+der = base64.b64decode(re.sub(rb"\s+", b"", body), validate=True)
+sequence, _ = read_tlv(der, 0, 0x30)
+_, offset = read_tlv(sequence, 0, 0x02)
+modulus, offset = read_tlv(sequence, offset, 0x02)
+exponent, _ = read_tlv(sequence, offset, 0x02)
+modulus = int.from_bytes(modulus, "big").to_bytes(256, "big")
+exponent = int.from_bytes(exponent, "big").to_bytes((int.from_bytes(exponent, "big").bit_length() + 7) // 8, "big")
+digest = hashlib.sha1(tl_bytes(modulus) + tl_bytes(exponent)).digest()
+print(int.from_bytes(digest[12:], "little", signed=True))
+PY
+  )
+fi
+
+new_case() {
+  CASE_ROOT="$TMP_ROOT/$1"
+  CASE_ENV="$CASE_ROOT/lima.env"
+  CASE_VOLUME_ROOT="$CASE_ROOT/volumes"
+  CASE_LOG="$CASE_ROOT/docker.log"
+  CASE_OUTPUT="$CASE_ROOT/output.log"
+  mkdir -p "$CASE_ROOT" "$CASE_VOLUME_ROOT"
+  cat > "$CASE_ENV" <<EOF
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD_FIXTURE
+TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
+TG_AUTHKEY_ENC_KEY=$AUTHKEY_FIXTURE
+TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
+TEAGRAM_DEMO_IMAGE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:$IMAGE_DIGEST
+EOF
+  chmod 0600 "$CASE_ENV"
+  : > "$CASE_LOG"
+}
+
+run_import() {
+  local key_path=$1 expected_spki=$2 client_spki=${3:-$VALID_SPKI}
+  env PATH="$MOCK_BIN:$PATH" \
+    TEAGRAM_DEMO_LIMA_ENV_FILE="$CASE_ENV" \
+    TEAGRAM_DEMO_SECRETS_DIR="$CASE_ROOT/secrets" \
+    TEAGRAM_TEST_DOCKER_LOG="$CASE_LOG" \
+    TEAGRAM_TEST_VOLUME_ROOT="$CASE_VOLUME_ROOT" \
+    TEAGRAM_TEST_VOLUME_NAME="$VOLUME_NAME" \
+    TEAGRAM_TEST_CONFIG_TEMPLATE="$CONFIG_TEMPLATE" \
+    TEAGRAM_TEST_CLIENT_SPKI="$client_spki" \
+    "$TEST_INIT" --import-key "$key_path" --expected-rsa-spki "$expected_spki" \
+    >"$CASE_OUTPUT" 2>&1
+}
+
+assert_no_secret_output() {
+  if grep -Fq "$POSTGRES_PASSWORD_FIXTURE" "$CASE_OUTPUT" "$CASE_LOG" \
+    || grep -Fq "$AUTHKEY_FIXTURE" "$CASE_OUTPUT" "$CASE_LOG" \
+    || grep -Fq 'BEGIN RSA PRIVATE KEY' "$CASE_OUTPUT" "$CASE_LOG"; then
+    printf 'identity import exposed a test secret or key marker\n' >&2
+    return 1
+  fi
+}
+
+assert_not_contains() {
+  local value=$1 file=$2
+  if grep -Fq -- "$value" "$file"; then
+    printf 'identity import test found an unexpected value in %s\n' "$file" >&2
+    return 1
+  fi
+}
+
+if [[ ! -x "$(command -v openssl)" ]]; then
+  printf 'identity import tests require OpenSSL\n' >&2
+  exit 1
+fi
+
+new_case success
+if ! run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  cat "$CASE_OUTPUT" >&2
+  exit 1
+fi
+[[ -f "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" ]]
+cmp -s "$TMP_ROOT/server_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+[[ "$(stat -c '%u:%g:%a' "$CASE_VOLUME_ROOT/$VOLUME_NAME")" == 65532:65532:700 ]]
+[[ "$(stat -c '%u:%g:%a' "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")" == 65532:65532:600 ]]
+grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
+grep -Fq -- '--network none' "$CASE_LOG"
+grep -Fq 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
+assert_no_secret_output
+
+new_case mismatch
+cp "$CASE_ENV" "$CASE_ROOT/env.before"
+if run_import "$TMP_ROOT/server_key.pem" 'AAAA'; then
+  printf 'identity import accepted a mismatched rsa_spki\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_not_contains 'volume create' "$CASE_LOG"
+cmp -s "$CASE_ENV" "$CASE_ROOT/env.before"
+assert_no_secret_output
+
+new_case missing
+if run_import "$CASE_ROOT/not-a-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a missing key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_not_contains 'volume create' "$CASE_LOG"
+assert_no_secret_output
+
+new_case unreadable
+cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/unreadable.pem"
+chmod 0000 "$CASE_ROOT/unreadable.pem"
+if run_import "$CASE_ROOT/unreadable.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a key without owner read permission\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case group-readable
+cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/group-readable.pem"
+chmod 0640 "$CASE_ROOT/group-readable.pem"
+if run_import "$CASE_ROOT/group-readable.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a group-readable key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case non-pkcs1
+openssl pkcs8 -topk8 -nocrypt -in "$TMP_ROOT/server_key.pem" -out "$CASE_ROOT/pkcs8.pem" 2>/dev/null
+chmod 0600 "$CASE_ROOT/pkcs8.pem"
+if run_import "$CASE_ROOT/pkcs8.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a non-PKCS#1 RSA key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case wrong-size
+openssl genrsa -traditional -out "$CASE_ROOT/large-key.pem" 4096 >/dev/null 2>&1
+chmod 0600 "$CASE_ROOT/large-key.pem"
+if run_import "$CASE_ROOT/large-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted an RSA key that was not 2048 bits\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case trailing-data
+cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/trailing-key.pem"
+printf '\ntrailing data\n' >> "$CASE_ROOT/trailing-key.pem"
+chmod 0600 "$CASE_ROOT/trailing-key.pem"
+if run_import "$CASE_ROOT/trailing-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted trailing data after the PEM block\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case existing-different
+mkdir -m 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+cp "$TMP_ROOT/other_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chown 65532:65532 "$CASE_VOLUME_ROOT/$VOLUME_NAME" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chmod 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+chmod 0600 "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+jq -n --arg name "$VOLUME_NAME" \
+  '[{Name:$name,Driver:"local",Options:{},Labels:{}}]' > "$CASE_VOLUME_ROOT/volume.json"
+before_hash=$(sha256sum "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")
+if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a different key in the existing volume\n' >&2
+  exit 1
+fi
+[[ "$before_hash" == "$(sha256sum "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")" ]]
+assert_not_contains 'volume create' "$CASE_LOG"
+assert_no_secret_output
+
+new_case existing-same
+mkdir -m 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+cp "$TMP_ROOT/server_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chown 65532:65532 "$CASE_VOLUME_ROOT/$VOLUME_NAME" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chmod 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+chmod 0600 "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+jq -n --arg name "$VOLUME_NAME" \
+  '[{Name:$name,Driver:"local",Options:{},Labels:{}}]' > "$CASE_VOLUME_ROOT/volume.json"
+if ! run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  cat "$CASE_OUTPUT" >&2
+  exit 1
+fi
+assert_not_contains 'volume create' "$CASE_LOG"
+assert_not_contains 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
+grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
+assert_no_secret_output
+
+new_case postcheck-failure
+if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI" 'different-public-identity'; then
+  printf 'identity import accepted a client-config SPKI mismatch\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_not_contains "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
+grep -Fq 'volume rm teagram-demo_tgkey' "$CASE_LOG"
+assert_no_secret_output
+
+new_case no-import
+if env PATH="$MOCK_BIN:$PATH" TEAGRAM_DEMO_LIMA_ENV_FILE="$CASE_ENV" \
+  TEAGRAM_TEST_DOCKER_LOG="$CASE_LOG" "$TEST_INIT" "sha256:$IMAGE_DIGEST" \
+  >"$CASE_OUTPUT" 2>&1; then
+  printf 'Lima init accepted a start without identity import\n' >&2
+  exit 1
+fi
+grep -Fq 'Lima installs require identity import' "$CASE_OUTPUT"
+assert_not_contains 'bootstrap-identity' "$CASE_LOG"
+assert_no_secret_output
+
+printf 'demo identity import contract holds\n'

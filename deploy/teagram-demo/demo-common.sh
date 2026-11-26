@@ -2,7 +2,11 @@
 
 DEMO_SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEMO_REPO_ROOT=$(cd -P "$DEMO_SCRIPT_DIR/../.." && pwd)
-DEMO_ENV_FILE="$DEMO_SCRIPT_DIR/.env"
+if [[ "${TEAGRAM_DEMO_VARIANT:-charlie}" == lima ]]; then
+  DEMO_ENV_FILE=${TEAGRAM_DEMO_LIMA_ENV_FILE:-/var/lib/teagram-demo/lima.env}
+else
+  DEMO_ENV_FILE="$DEMO_SCRIPT_DIR/.env"
+fi
 # These variables are shared with scripts that source this file.
 # shellcheck disable=SC2034
 DEMO_STATE_DIR="$DEMO_REPO_ROOT/.state/teagram-demo"
@@ -601,6 +605,14 @@ demo_ensure_qa_bypass_token() {
 }
 
 demo_require_env() {
+  if [[ "${TEAGRAM_DEMO_VARIANT:-charlie}" == lima ]]; then
+    [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
+      demo_fail 'lima environment file is missing or not a regular file'
+      return 1
+    }
+    python3 "$DEMO_SCRIPT_DIR/validate-env.py" --lima "$DEMO_ENV_FILE"
+    return $?
+  fi
   [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
     demo_fail 'deploy/teagram-demo/.env is missing or not a regular file'
     return 1

@@ -1402,8 +1402,10 @@ assert_text_order(init, "init-demo.sh image release", [
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
     'demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity',
 ])
-if '[[ "$#" -ne 1 || ! "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]' not in init:
+if '[[ "$#" -eq 1 && "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]' not in init:
     raise SystemExit("init-demo.sh: first install must require the digest copied from the selected main CI run")
+if '[[ "$#" -eq 4 && "${1:-}" == --import-key' not in init:
+    raise SystemExit("init-demo.sh: Lima identity import must require a copied key and explicit SPKI")
 deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1)[1].split(
     'docker inspect "${CONTAINER_IDS[@]}"', 1
 )[0]
@@ -1652,7 +1654,7 @@ assert_order(Path(sys.argv[2]), [
     "demo_compose up -d edge",
     'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
     "exit 0",
-])
+], start=init.index('if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then'))
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
@@ -2477,6 +2479,11 @@ BASH
 )
 
 python3 "$SCRIPT_DIR/test-validate-env.py"
+if [[ "$EUID" -eq 0 ]] || sudo -n true >/dev/null 2>&1; then
+  "$SCRIPT_DIR/test-identity-import.sh"
+else
+  printf 'skip - identity import contract requires root or passwordless sudo\n'
+fi
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
