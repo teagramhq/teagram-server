@@ -60,6 +60,36 @@ verify_checkout_ownership() {
   }
 }
 
+migrate_legacy_runtime_path() {
+  local legacy_path=$1 runtime_path=$2 runtime_contents legacy_device runtime_device
+  if [[ ! -e "$legacy_path" && ! -L "$legacy_path" ]]; then
+    return 0
+  fi
+  [[ ! -L "$legacy_path" && -d "$legacy_path" ]] || fail "legacy runtime path is not a real directory: $legacy_path"
+  [[ ! -L "$runtime_path" && -d "$runtime_path" ]] || fail "runtime destination is not a real directory: $runtime_path"
+  runtime_contents=$(find "$runtime_path" -mindepth 1 -maxdepth 1 -print -quit) || fail "could not inspect runtime destination: $runtime_path"
+  [[ -z "$runtime_contents" ]] || fail "runtime destination is not empty: $runtime_path"
+  legacy_device=$(stat -c '%d' "$legacy_path") || fail "could not inspect legacy runtime device: $legacy_path"
+  runtime_device=$(stat -c '%d' "$RUNTIME_DIR") || fail "could not inspect runtime device: $RUNTIME_DIR"
+  [[ "$legacy_device" == "$runtime_device" ]] || fail "legacy runtime migration crosses filesystems: $legacy_path"
+  rmdir -- "$runtime_path" || fail "could not remove empty runtime destination: $runtime_path"
+  mv -- "$legacy_path" "$runtime_path" || fail "could not migrate legacy runtime path: $legacy_path"
+}
+
+migrate_legacy_runtime_paths() {
+  local legacy_state="$REPO/.state/teagram-demo" legacy_tmp="$REPO/.state/teagram-demo/tmp" path
+  for path in "$REPO/.state" "$legacy_state" "$legacy_tmp"; do
+    [[ ! -L "$path" ]] || fail "legacy runtime parent is a symlink: $path"
+  done
+
+  prepare_runtime_dirs || fail 'could not prepare proxy runtime paths for legacy migration'
+  migrate_legacy_runtime_path "$legacy_tmp/turnstile-egress" "$RUNTIME_DIR/tmp/turnstile-egress"
+  migrate_legacy_runtime_path "$legacy_tmp/haproxy" "$RUNTIME_DIR/tmp/haproxy"
+  migrate_legacy_runtime_path "$legacy_tmp/edge" "$RUNTIME_DIR/tmp/edge"
+  migrate_legacy_runtime_path "$legacy_state/haproxy-run" "$RUNTIME_DIR/haproxy-run"
+  prepare_runtime_dirs || fail 'migrated proxy runtime paths have unexpected ownership or modes'
+}
+
 ensure_deploy_account() {
   local password_hash password
   if ! awk -F: -v name="$DEPLOY_USER" '$1 == name { count++; home=$6; shell=$7 } END { exit !(count == 1 && home == "/var/empty" && shell == "/bin/sh") }' /etc/passwd; then
@@ -154,9 +184,13 @@ for executable in \
   /opt "$REPO" "$REPO/.git" "$REPO/deploy/teagram-demo/forced-command.sh" \
   "$SCRIPT_DIR/command-contract.sh" "$SCRIPT_DIR/deploy-root-wrapper.sh" \
   "$SCRIPT_DIR/deploy-entry.sh" "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/check.sh" \
-  "$REPO/deploy/teagram-demo/demo-common.sh" "$REPO/deploy/teagram-demo/image-retention.sh"; do
+  "$SCRIPT_DIR/prepare-blobs.sh" "$REPO/deploy/teagram-demo/demo-common.sh" \
+  "$REPO/deploy/teagram-demo/image-retention.sh"; do
   require_root_owned "$executable"
 done
+# shellcheck source=deploy/teagram-demo/lima/prepare-blobs.sh
+source "$SCRIPT_DIR/prepare-blobs.sh"
+migrate_legacy_runtime_paths || fail 'could not migrate legacy proxy runtime paths out of the checkout'
 verify_checkout_ownership || fail 'checkout ownership or permissions are unsafe'
 [[ -x "$SCRIPT_DIR/deploy-main.sh" && -x "$SCRIPT_DIR/check.sh" ]] || fail 'lima deployment scripts must be executable'
 

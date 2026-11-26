@@ -100,6 +100,15 @@ if grep -Fq 'ensure_deploy_account' "$SCRIPT_DIR/install-deploy-entry.sh" &&
 else
   not_ok 'installer provisions a key-authenticating account and exposes the checkout scan for regression tests'
 fi
+if awk '
+  index($0, "migrate_legacy_runtime_paths || fail") { migration = NR }
+  index($0, "verify_checkout_ownership || fail") { scan = NR }
+  END { exit !(migration > 0 && scan > migration) }
+' "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'installer migrates legacy runtime paths before scanning checkout ownership'
+else
+  not_ok 'installer migrates legacy runtime paths before scanning checkout ownership'
+fi
 SUDO_LIST_VALIDATOR="$TMP_DIR/sudo-list-validator.sh"
 {
   printf '%s\n' 'ROOT_WRAPPER=/usr/local/sbin/teagram-demo-deploy'
@@ -206,6 +215,8 @@ ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
   printf '%s\n' 'REPO=/opt/teagram-demo' 'DEPLOY_USER=teagram-deploy' \
     'RUNTIME_DIR=/var/lib/teagram-demo/lima/runtime'
   sed -n '/^verify_checkout_ownership() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^migrate_legacy_runtime_path() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^migrate_legacy_runtime_paths() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^ensure_deploy_account() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^prepare_runtime_dirs() {$/,/^}/p' "$SCRIPT_DIR/prepare-blobs.sh"
 } > "$ALPINE_FUNCTIONS"
@@ -223,6 +234,38 @@ chmod 0644 "$REPO/deploy/teagram-demo/fixture"
 
 prepare_runtime_dirs
 [[ "$RUNTIME_DIR" != "$REPO" && "$RUNTIME_DIR" != "$REPO/"* ]]
+verify_checkout_ownership
+legacy_state="$REPO/.state/teagram-demo"
+legacy_tmp="$legacy_state/tmp"
+mkdir -p "$legacy_tmp/turnstile-egress" "$legacy_tmp/haproxy" "$legacy_tmp/edge" \
+  "$legacy_state/haproxy-run"
+chmod 0755 "$REPO/.state" "$legacy_state" "$legacy_tmp"
+printf 'legacy-turnstile\n' > "$legacy_tmp/turnstile-egress/migration-marker"
+printf 'legacy-haproxy-tmp\n' > "$legacy_tmp/haproxy/migration-marker"
+printf 'legacy-edge-tmp\n' > "$legacy_tmp/edge/migration-marker"
+printf 'legacy-haproxy-socket\n' > "$legacy_state/haproxy-run/admin.sock"
+chown 584792:584792 "$legacy_tmp/turnstile-egress" "$legacy_tmp/turnstile-egress/migration-marker"
+chown 99:99 "$legacy_tmp/haproxy" "$legacy_tmp/edge" "$legacy_state/haproxy-run" \
+  "$legacy_state/haproxy-run/admin.sock"
+chmod 1777 "$legacy_tmp/turnstile-egress" "$legacy_tmp/haproxy" "$legacy_tmp/edge"
+chmod 0700 "$legacy_state/haproxy-run"
+if verify_checkout_ownership 2>/dev/null; then
+  printf 'legacy container-owned runtime paths were accepted inside the checkout\n' >&2
+  exit 1
+fi
+migrate_legacy_runtime_paths
+[[ ! -e "$legacy_tmp/turnstile-egress" && ! -e "$legacy_tmp/haproxy" && ! -e "$legacy_tmp/edge" &&
+  ! -e "$legacy_state/haproxy-run" ]]
+grep -Fqx 'legacy-turnstile' "$RUNTIME_DIR/tmp/turnstile-egress/migration-marker"
+grep -Fqx 'legacy-haproxy-tmp' "$RUNTIME_DIR/tmp/haproxy/migration-marker"
+grep -Fqx 'legacy-edge-tmp' "$RUNTIME_DIR/tmp/edge/migration-marker"
+grep -Fqx 'legacy-haproxy-socket' "$RUNTIME_DIR/haproxy-run/admin.sock"
+[[ $(stat -c '%u:%g:%a' "$RUNTIME_DIR/tmp/turnstile-egress") == '584792:584792:1777' &&
+  $(stat -c '%u:%g:%a' "$RUNTIME_DIR/tmp/haproxy") == '0:0:1777' &&
+  $(stat -c '%u:%g:%a' "$RUNTIME_DIR/tmp/edge") == '0:0:1777' &&
+  $(stat -c '%u:%g:%a' "$RUNTIME_DIR/haproxy-run") == '99:99:700' ]]
+verify_checkout_ownership
+migrate_legacy_runtime_paths
 verify_checkout_ownership
 touch "$RUNTIME_DIR/haproxy-run/admin.sock" "$RUNTIME_DIR/tmp/haproxy/proxy-temp" \
   "$RUNTIME_DIR/tmp/edge/proxy-temp" "$RUNTIME_DIR/tmp/turnstile-egress/proxy-temp"
@@ -291,9 +334,9 @@ else
   fi
 fi
 if (( alpine_test_status == 0 )); then
-  ok 'Alpine deploy account accepts a fixture SSH key and the second installer ownership check passes after runtime setup'
+  ok 'Alpine migration moves the Stage 1 runtime paths before the ownership scan and accepts a fixture SSH key'
 else
-  not_ok 'Alpine deploy account accepts a fixture SSH key and the second installer ownership check passes after runtime setup'
+  not_ok 'Alpine migration moves the Stage 1 runtime paths before the ownership scan and accepts a fixture SSH key'
   printf 'Alpine regression stage failed: %s\n' "$alpine_test_stage" >&2
   cat "$TMP_DIR/alpine-deploy-entry.out" "$TMP_DIR/alpine-deploy-entry.err" >&2 2>/dev/null || true
 fi

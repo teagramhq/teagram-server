@@ -14,7 +14,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
-| `install-deploy-entry.sh` | Idempotent root installer for the `teagram-deploy` account and the port 2223 SSH listener. Run by Steward at cutover. |
+| `install-deploy-entry.sh` | Idempotent root installer for the `teagram-deploy` account and the port 2223 SSH listener. It moves the Stage 1 proxy temp and HAProxy socket paths into the external runtime directory before scanning checkout ownership. Run by Steward at cutover. |
 
 ## Root-only inputs on the host
 
