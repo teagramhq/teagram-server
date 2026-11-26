@@ -261,6 +261,16 @@ func TestEvaluateBlocksCounterRegressionAgainstBase(t *testing.T) {
 	}
 }
 
+func TestEvaluateIgnoresUnmeasuredBaseRows(t *testing.T) {
+	name := "messages.getHistory jump to date"
+	base := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 0), result(1.5, 2.3, 6, 0))...)
+	head := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 230), result(1.5, 2.3, 6, 130))...)
+	v := perfreport.Evaluate(perfreport.Input{Head: head, Base: base})
+	if got := reasons(v.Failures); got != "" {
+		t.Fatalf("newly measured rows failed against an unmeasured base: %s", got)
+	}
+}
+
 func TestEvaluateReportsBaseRelativeTimingUntilCalibrated(t *testing.T) {
 	base := rounds(pair("read", perfreport.Read,
 		result(2, 3, 5, 100), result(10, 21, 5, 100))...)
