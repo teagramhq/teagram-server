@@ -41,7 +41,7 @@ when the `candidate` profile is enabled.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; built-image WebSocket run at 39.13 MiB; gate now uses `GOMEMLIMIT=20MiB` and requires 2 MiB headroom |
+| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; built-image WebSocket run at 39.13 MiB; current `GOMEMLIMIT=20MiB` gate: 35.87, 36.16, and 40.22 MiB (worst) |
 | teagramd-next (candidate) | 44 | Same image and `GOMEMLIMIT` as teagramd; combined workload is measured on the primary slot |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
@@ -74,9 +74,8 @@ probe enabled Lima's WebSocket listener at `:2446` with the Compose origin and
 browser-only settings. It peaked at 39.13 MiB (41,029,632 bytes), with
 `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed
 ([CI job](https://github.com/teagramhq/teagram-server/actions/runs/45721450279/job/139580703653)).
-The gate now runs three times on each head with `GOMEMLIMIT=20MiB` and fails
-unless each run retains at least 2 MiB below the 44 MiB cap. The worst of the
-three runs on the updated head is the acceptance measurement.
+The gate runs three times on each head with `GOMEMLIMIT=20MiB` and fails unless
+each run stays at or below 42 MiB. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the job-built linux/amd64 `teagramd:ci` image (`sha256:e55bef28bd32f747b0e9e017fb769522965ab6ec07168713de11656cd9d536c8`, revision `5833cd415f8ee313449604effffb6817f15ff607`) ran with `GOMAXPROCS=1`, `TG_PG_MAX_CONNS=3`, and WebSocket listener `:2446` (`https://web.teagram.io`, `browser_only=false`). All three synchronized runs completed phase `concurrent_profile_and_media_photo_uploads`; profile and media-photo uploads passed in every run. Peaks were 35.87 MiB (37,609,472 bytes), 36.16 MiB (37,920,768 bytes), and 40.22 MiB (42,176,512 bytes). Each reported `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`. The worst peak is 3.78 MiB below the 44 MiB cap ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
 
 The default stack uses 159 MiB of limits. `migrate` (64 MiB) is one-shot and
 outside the sum. The candidate is included because it can run beside teagramd
