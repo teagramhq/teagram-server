@@ -11,6 +11,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `compose.yaml` | The stack: postgres, migrate, one teagramd, turnstile-egress, haproxy, edge, cloudflared. |
 | `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
 | `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
+| `install-egress-isolation.sh` | Root, idempotent: installs source-scoped `DOCKER-USER` rules and enables an OpenRC service that reapplies them after Docker starts at boot. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
@@ -165,6 +166,50 @@ After a successful deploy or rollback, Docker images for this server are kept
 by image ID: the running release and the two previous successful releases.
 Other repositories and images referenced by any container are left alone.
 This retention policy also applies to charlie's `teagram-dev` deployments.
+
+## Egress isolation
+
+Run the root installer while Docker is running:
+
+```sh
+deploy/teagram-demo/lima/install-egress-isolation.sh
+deploy/teagram-demo/lima/install-egress-isolation.sh check
+```
+
+It manages only the `TEAGRAM_DEMO_EGRESS` chain and its single jump from
+`DOCKER-USER`. The rules match the three fixed Lima demo source subnets, allow
+traffic between those demo networks, drop RFC1918, carrier-grade NAT, link-local
+and multicast destinations, then return all remaining traffic to Docker. This
+keeps Docker DNS, public DNS and public internet flows available. If a demo
+network has IPv6 enabled, the IPv6 chain also drops ULA, link-local and
+multicast destinations. Other containers and host-originated traffic do not
+match the demo source ranges.
+
+The installer enables `teagram-demo-egress` in OpenRC's default runlevel with a
+dependency on Docker, so the rules are installed after Docker creates its
+chains during boot. Docker's `DOCKER-USER` chain remains user-managed across a
+daemon restart. The read-only `check` mode reports missing, duplicate,
+misordered or drifted rules and makes no changes.
+
+On Lima, run the probe as root after the Compose stack is up:
+
+```sh
+python3 deploy/teagram-demo/probe_tailnet_isolation.py
+```
+
+The probe enters the running `turnstile-egress` container's network namespace,
+tests a tailnet peer and the host's private default-route gateway for timeouts,
+then requires Docker embedded DNS and a verified HTTPS response from
+`example.com`. The existing `--charlie` mode keeps teagram-dev's host-network
+checks for its Turnstile rollout.
+
+To roll the firewall change back, run as root:
+
+```sh
+rc-update del teagram-demo-egress default
+rc-service teagram-demo-egress stop
+deploy/teagram-demo/lima/install-egress-isolation.sh remove
+```
 
 ## Cutover notes
 
