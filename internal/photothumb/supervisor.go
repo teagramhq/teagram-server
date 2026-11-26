@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,11 +35,12 @@ const (
 	thumbnailLongSide = 320
 	strippedLongSide  = 40
 
-	workerTotalTimeout       = 30 * time.Second
-	workerAfterInputTimeout  = 5 * time.Second
-	workerEnvironmentMemory  = "GOMEMLIMIT=224MiB"
-	workerEnvironmentProcs   = "GOMAXPROCS=1"
-	workerPixelLimitArgument = "2560000"
+	workerTotalTimeout            = 30 * time.Second
+	workerAfterInputTimeout       = 5 * time.Second
+	workerEnvironmentMemory       = "GOMEMLIMIT"
+	workerDefaultMemoryLimitBytes = 224 << 20
+	workerEnvironmentProcs        = "GOMAXPROCS=1"
+	workerPixelLimitArgument      = "2560000"
 )
 
 // FailureReason is a fixed, bounded class suitable for metrics. It never
@@ -470,7 +472,7 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 	args := formatWorkerArgs(input, width, height)
 	cmd := exec.CommandContext(ctx, s.workerPath, args...) // #nosec G204 -- verified fixed executable and bounded numeric arguments.
 	cmd.Dir = "/"
-	cmd.Env = []string{workerEnvironmentProcs, workerEnvironmentMemory}
+	cmd.Env = []string{workerEnvironmentProcs, workerMemoryEnvironment()}
 	cmd.ExtraFiles = nil
 
 	stdin, err := cmd.StdinPipe()
@@ -653,6 +655,38 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 			}
 		}
 	}
+}
+
+func workerMemoryEnvironment() string {
+	return workerMemoryEnvironmentForLimit(debug.SetMemoryLimit(-1))
+}
+
+func workerMemoryEnvironmentForLimit(parentLimit int64) string {
+	limit := int64(workerDefaultMemoryLimitBytes)
+	if parentLimit >= 0 && parentLimit < limit {
+		limit = parentLimit
+	}
+	return workerEnvironmentMemory + "=" + formatMemoryLimit(limit)
+}
+
+func formatMemoryLimit(bytes int64) string {
+	if bytes == 0 {
+		return "0B"
+	}
+	for _, unit := range []struct {
+		suffix string
+		bytes  int64
+	}{
+		{suffix: "TiB", bytes: 1 << 40},
+		{suffix: "GiB", bytes: 1 << 30},
+		{suffix: "MiB", bytes: 1 << 20},
+		{suffix: "KiB", bytes: 1 << 10},
+	} {
+		if bytes%unit.bytes == 0 {
+			return strconv.FormatInt(bytes/unit.bytes, 10) + unit.suffix
+		}
+	}
+	return strconv.FormatInt(bytes, 10) + "B"
 }
 
 type boundedBuffer struct {

@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -615,7 +616,7 @@ func TestWorkerReceivesOnlyAcceptedProcessConfiguration(t *testing.T) {
 	if got, want := state.Args, []string{"worker", strconv.Itoa(len(reportFile)), "1600", "1600", "2560000"}; !equalStrings(got, want) {
 		t.Fatalf("worker args = %v, want %v", got, want)
 	}
-	if got, want := state.Environment, []string{"GOMAXPROCS=1", "GOMEMLIMIT=224MiB"}; !equalStrings(got, want) {
+	if got, want := state.Environment, []string{"GOMAXPROCS=1", workerMemoryEnvironment()}; !equalStrings(got, want) {
 		t.Fatalf("worker environment = %v, want exactly %v", got, want)
 	}
 	if state.WorkingDir != "/" {
@@ -646,6 +647,26 @@ func TestWorkerReceivesOnlyAcceptedProcessConfiguration(t *testing.T) {
 		t.Fatal("cancelled worker did not exit")
 	}
 	waitProcessGone(t, state.PID)
+}
+
+func TestWorkerMemoryEnvironmentUsesLowerParentLimitAndPreservesDefaultCap(t *testing.T) {
+	tests := []struct {
+		name        string
+		parentLimit int64
+		want        string
+	}{
+		{name: "zero parent limit", parentLimit: 0, want: "GOMEMLIMIT=0B"},
+		{name: "constrained parent", parentLimit: 20 << 20, want: "GOMEMLIMIT=20MiB"},
+		{name: "larger parent", parentLimit: 320 << 20, want: "GOMEMLIMIT=224MiB"},
+		{name: "unset parent", parentLimit: math.MaxInt64, want: "GOMEMLIMIT=224MiB"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := workerMemoryEnvironmentForLimit(test.parentLimit); got != test.want {
+				t.Fatalf("worker memory environment = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestParentRejectsMalformedAndOversizedFrames(t *testing.T) {
