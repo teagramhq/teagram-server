@@ -1558,6 +1558,72 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 	}
 }
 
+func TestHistoryPageByDateAroundReadsHistoryWithoutDateIndex(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-date-no-index-owner', 'Owner'), (2, '+history-date-no-index-peer', 'Peer')`,
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, date)
+			 SELECT 1, n, 1, 2, 1, 'history date plan message', true, to_timestamp(n::double precision)
+			 FROM generate_series(1, 20000) n`,
+		`DROP INDEX messages_owner_peer_date_idx`,
+		`ANALYZE messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("prepare date history without date index: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	_, err = db.New(traced).HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+		OwnerID: 1, PeerType: 1, PeerID: 2, OffsetDate: 10001, AddOffset: -pageSize / 2, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("history page by date around without date index: %v", err)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("date history page issued %d statements without its date index, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain date history page without date index: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode date history plan without date index: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("date history explain returned %d plans without date index, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFrom("messages")
+	if readRows <= pageSize+10 {
+		t.Fatalf("date history page read %.0f message rows without its date index, want more than %d", readRows, pageSize+10)
+	}
+}
+
 func TestHistoryPageByDateAroundReadsMiddleWindow(t *testing.T) {
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
