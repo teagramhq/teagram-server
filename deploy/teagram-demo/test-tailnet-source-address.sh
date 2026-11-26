@@ -8,11 +8,12 @@ TAILNET_NETWORK_NAME="$NETWORK_NAME-publish"
 ECHO_CONTAINER_NAME="teagram-tailnet-echo-$$"
 NGINX_CONTAINER_NAME="teagram-tailnet-nginx-$$"
 CLIENT_CONTAINER_NAME="teagram-tailnet-client-$$"
+PEER_CONTAINER_NAME="teagram-tailnet-peer-$$"
 ALPINE_IMAGE=alpine:3.22
 NGINX_IMAGE=${TEAGRAM_TEST_NGINX_IMAGE:-mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c}
 
 cleanup() {
-  docker rm -f "$NGINX_CONTAINER_NAME" "$ECHO_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker rm -f "$NGINX_CONTAINER_NAME" "$ECHO_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" "$PEER_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker network rm "$TAILNET_NETWORK_NAME" "$NETWORK_NAME" >/dev/null 2>&1 || true
   rm -rf -- "$TMP_DIR"
 }
@@ -62,7 +63,7 @@ docker exec "$ECHO_CONTAINER_NAME" chmod 0555 /echo
 docker exec -d "$ECHO_CONTAINER_NAME" /echo
 
 docker create --name "$NGINX_CONTAINER_NAME" --platform "$PLATFORM" \
-  --network "$TAILNET_NETWORK_NAME" --user 101:101 \
+  --network "$TAILNET_NETWORK_NAME" --network-alias tailnet-edge --user 101:101 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
   -p '127.0.0.1::8081' --entrypoint sh "$NGINX_IMAGE" -c 'sleep 3600' >/dev/null
 docker cp "$SCRIPT_DIR/nginx-tailnet.conf" \
@@ -85,7 +86,16 @@ docker create --name "$CLIENT_CONTAINER_NAME" --platform "$PLATFORM" --network h
 docker cp "$TMP_DIR/client" "$CLIENT_CONTAINER_NAME:/client" >/dev/null
 docker start "$CLIENT_CONTAINER_NAME" >/dev/null
 docker exec "$CLIENT_CONTAINER_NAME" chmod 0555 /client
-docker exec "$CLIENT_CONTAINER_NAME" /client "$port" || {
+docker exec "$CLIENT_CONTAINER_NAME" /client host "$port" || {
+  docker logs "$NGINX_CONTAINER_NAME" >&2 || true
+  exit 1
+}
+docker create --name "$PEER_CONTAINER_NAME" --platform "$PLATFORM" --network "$TAILNET_NETWORK_NAME" \
+  --entrypoint sh "$ALPINE_IMAGE" -c 'sleep 3600' >/dev/null
+docker cp "$TMP_DIR/client" "$PEER_CONTAINER_NAME:/client" >/dev/null
+docker start "$PEER_CONTAINER_NAME" >/dev/null
+docker exec "$PEER_CONTAINER_NAME" chmod 0555 /client
+docker exec "$PEER_CONTAINER_NAME" /client peer || {
   docker logs "$NGINX_CONTAINER_NAME" >&2 || true
   exit 1
 }

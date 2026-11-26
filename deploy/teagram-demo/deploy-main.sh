@@ -36,6 +36,8 @@ CUTOVER_COMMITTED=0
 POST_CUTOVER_RETENTION_FAILED=0
 CLIENT_CONFIG_UPDATED=0
 EDGE_CONFIG_RELOAD_ATTEMPTED=0
+TAILNET_STATE_CAPTURED=0
+PREV_TAILNET_ENABLED=
 EDGE_CONTAINER_ID=
 PREV_WEB_RELEASE=
 PREV_WEB_LINK=
@@ -188,7 +190,7 @@ demo_restore_legacy_edge_after_rollback() {
 
 demo_cleanup() {
   local rc=$?
-  local rollback_rc=0 rollback_confirmed=1 edge_rollback_rc nginx_rollback_file
+  local rollback_rc=0 rollback_confirmed=1 edge_rollback_rc tailnet_rollback_rc nginx_rollback_file
   trap - EXIT
   if (( rc != 0 && CUTOVER_COMMITTED == 0 )); then
     demo_restore_env_after_rollback || rc=1
@@ -278,6 +280,16 @@ demo_cleanup() {
       printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
     else
       printf 'demo edge configuration rollback could not be confirmed; inspect the public edge\n' >&2
+      rc=1
+    fi
+  fi
+  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${TAILNET_STATE_CAPTURED:-0} == 1 )); then
+    tailnet_rollback_rc=0
+    demo_restore_tailnet_listener_state "$PREV_TAILNET_ENABLED" || tailnet_rollback_rc=1
+    if (( tailnet_rollback_rc == 0 )); then
+      printf 'demo tailnet listener restored to its pre-deploy state (%s)\n' "$PREV_TAILNET_ENABLED" >&2
+    else
+      printf 'demo tailnet listener rollback could not be confirmed; inspect the dev edge\n' >&2
       rc=1
     fi
   fi
@@ -432,6 +444,8 @@ demo_require_proxy_configuration_current edge "" 1 "$PREV_SHA"
 mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
 ((${#EDGE_IDS[@]} == 1)) || demo_fail 'running edge proxy is missing or ambiguous'
 EDGE_CONTAINER_ID=${EDGE_IDS[0]}
+PREV_TAILNET_ENABLED=$(demo_capture_tailnet_listener_state) || demo_fail 'tailnet listener state could not be captured before deployment'
+TAILNET_STATE_CAPTURED=1
 EDGE_CONFIG_RELOAD_ATTEMPTED=1
 demo_reload_edge
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)

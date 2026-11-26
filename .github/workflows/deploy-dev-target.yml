@@ -254,7 +254,14 @@ jobs:
             -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-dev/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST $TEAGRAM_DEV_TAILNET_ENABLED" </dev/null
+            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
+          if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then
+            ssh -T -p "$DEV_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-dev/id_deploy" \
+              -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-dev/known_hosts" \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+              "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true" </dev/null
+          fi
 
       - name: Remove the dev deploy key
         if: ${{ always() && steps.target.outputs.enabled == 'true' }}

@@ -27,15 +27,16 @@ func failf(format string, args ...any) {
 	os.Exit(1)
 }
 
-func request(port int, forwardedFor, cfConnectingIP string) (int, []byte) {
+func request(target string, port int, forwardedFor, cfConnectingIP, origin string) (int, []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/apiws", port), nil) //nolint:gosec // Port is the validated loopback publication allocated for this test.
+	requestURL := "http://" + net.JoinHostPort(target, strconv.Itoa(port)) + "/apiws"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil) //nolint:gosec // The harness selects only loopback or its fixed tailnet-edge alias.
 	if err != nil {
 		failf("create request: %v", err)
 	}
 	request.Host = "teagram-dev.tailaa4918.ts.net"
-	request.Header.Set("Origin", "https://teagram-dev.tailaa4918.ts.net")
+	request.Header.Set("Origin", origin)
 	if forwardedFor != "<missing>" {
 		request.Header.Set("X-Forwarded-For", forwardedFor)
 	}
@@ -46,7 +47,7 @@ func request(port int, forwardedFor, cfConnectingIP string) (int, []byte) {
 			Proxy: nil,
 		},
 	}
-	response, err := client.Do(request) //nolint:gosec // The request is confined to the validated local test port.
+	response, err := client.Do(request) //nolint:gosec // The request target is selected by the fixed local harness modes.
 	if err != nil {
 		failf("GET /apiws: %v", err)
 	}
@@ -62,7 +63,7 @@ func request(port int, forwardedFor, cfConnectingIP string) (int, []byte) {
 }
 
 func assertForwardedHeaders(port int) {
-	status, body := request(port, "203.0.113.8, 192.0.2.44", "198.51.100.99")
+	status, body := request("127.0.0.1", port, "203.0.113.8, 192.0.2.44", "198.51.100.99", "https://teagram-dev.tailaa4918.ts.net")
 	if status != http.StatusOK {
 		failf("valid X-Forwarded-For returned HTTP %d: %s", status, body)
 	}
@@ -80,10 +81,26 @@ func assertForwardedHeaders(port int) {
 
 func assertRejectedForwardedHeaders(port int) {
 	for _, forwardedFor := range []string{"<missing>", "not-an-ip"} {
-		status, _ := request(port, forwardedFor, "198.51.100.99")
+		status, _ := request("127.0.0.1", port, forwardedFor, "198.51.100.99", "https://teagram-dev.tailaa4918.ts.net")
 		if status != http.StatusBadRequest {
 			failf("X-Forwarded-For %q returned HTTP %d, want 400", forwardedFor, status)
 		}
+	}
+}
+
+func assertRejectedPublicOrigins(port int) {
+	for _, origin := range []string{"https://demo.teagram.io", "https://web.teagram.io"} {
+		status, _ := request("127.0.0.1", port, "203.0.113.8", "198.51.100.99", origin)
+		if status != http.StatusForbidden {
+			failf("Origin %q returned HTTP %d, want 403", origin, status)
+		}
+	}
+}
+
+func assertUntrustedPeerRejected() {
+	status, _ := request("tailnet-edge", 8081, "203.0.113.8", "198.51.100.99", "https://teagram-dev.tailaa4918.ts.net")
+	if status != http.StatusBadRequest {
+		failf("untrusted container peer returned HTTP %d, want 400", status)
 	}
 }
 
@@ -137,15 +154,21 @@ func assertWebSocketHandshake(port int) {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		failf("usage: tailnet-source-client <port>")
+	if len(os.Args) == 2 && os.Args[1] == "peer" {
+		assertUntrustedPeerRejected()
+		fmt.Println("untrusted tailnet-network peer is rejected")
+		return
 	}
-	port, err := strconv.Atoi(os.Args[1])
+	if len(os.Args) != 3 || os.Args[1] != "host" {
+		failf("usage: tailnet-source-client host <published-port> | peer")
+	}
+	port, err := strconv.Atoi(os.Args[2])
 	if err != nil || port < 1 || port > 65535 {
-		failf("invalid published port %q", os.Args[1])
+		failf("invalid published port %q", os.Args[2])
 	}
 	assertForwardedHeaders(port)
 	assertRejectedForwardedHeaders(port)
+	assertRejectedPublicOrigins(port)
 	assertWebSocketHandshake(port)
-	fmt.Println("tailnet Nginx source-address and WebSocket checks pass")
+	fmt.Println("tailnet Nginx source-address, origin, and WebSocket checks pass")
 }

@@ -1235,6 +1235,34 @@ demo_tailnet_compose() {
     demo_compose_with_file "$DEMO_REPO_ROOT/docker-compose.yml" "$@"
 }
 
+demo_capture_tailnet_listener_state() {
+  local running_ids_output
+  local -a running_ids=()
+  running_ids_output=$(demo_tailnet_compose ps --status running -q edge-tailnet) || return 1
+  if [[ -n "$running_ids_output" ]]; then
+    mapfile -t running_ids <<< "$running_ids_output"
+  fi
+  case "${#running_ids[@]}" in
+    0) printf '%s\n' false ;;
+    1) printf '%s\n' true ;;
+    *)
+      demo_fail 'running tailnet edge proxy is missing or ambiguous'
+      return 1
+      ;;
+  esac
+}
+
+demo_restore_tailnet_listener_state() {
+  case "${1:-}" in
+    true|false) ;;
+    *)
+      demo_fail 'captured tailnet listener state is invalid'
+      return 1
+      ;;
+  esac
+  TEAGRAM_DEV_TAILNET_ENABLED="$1" demo_reload_tailnet_edge
+}
+
 demo_validation_compose() {
   local image_ref
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1

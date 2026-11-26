@@ -392,6 +392,7 @@ JSON
   [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.client-tailnet.*' -print -quit)" ]]
 )
 
+# shellcheck disable=SC2030,SC2031 # Tailnet enablement is isolated to the test subshells below.
 (
   export TEAGRAM_DEV_TAILNET_ENABLED=true
   DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-reload-client"
@@ -437,6 +438,36 @@ DOCKER
   [[ "${tailnet_calls[2]}" == compose*' ps --status running -q edge-tailnet' ]]
   [[ "${tailnet_calls[3]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -t' ]]
   [[ "${tailnet_calls[4]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -s reload' ]]
+)
+
+(
+  demo_tailnet_compose() {
+    [[ "$*" == 'ps --status running -q edge-tailnet' ]] || return 1
+    if [[ "$MOCK_TAILNET_RUNNING" == true ]]; then
+      printf 'tailnet-edge\n'
+    fi
+  }
+  demo_reload_tailnet_edge() {
+    MOCK_TAILNET_RUNNING=${TEAGRAM_DEV_TAILNET_ENABLED:-false}
+  }
+
+  for previous_state in false true; do
+    case "$previous_state" in
+      false) requested_state=true ;;
+      true) requested_state=false ;;
+    esac
+    MOCK_TAILNET_RUNNING=$previous_state
+    captured_state=$(demo_capture_tailnet_listener_state)
+    [[ "$captured_state" == "$previous_state" ]]
+    TEAGRAM_DEV_TAILNET_ENABLED="$requested_state" demo_reload_tailnet_edge
+    [[ "$MOCK_TAILNET_RUNNING" == "$requested_state" ]]
+    demo_restore_tailnet_listener_state "$captured_state"
+    [[ "$MOCK_TAILNET_RUNNING" == "$previous_state" ]] || {
+      printf 'failed tailnet transition rollback: previous=%s requested=%s actual=%s\n' \
+        "$previous_state" "$requested_state" "$MOCK_TAILNET_RUNNING" >&2
+      exit 1
+    }
+  done
 )
 
 (
@@ -1408,6 +1439,10 @@ grep -Fq 'set_real_ip_from 198.18.134.1/32;' "$SCRIPT_DIR/nginx-tailnet.conf"
 grep -Fq 'real_ip_header X-Forwarded-For;' "$SCRIPT_DIR/nginx-tailnet.conf"
 grep -Fq 'real_ip_recursive off;' "$SCRIPT_DIR/nginx-tailnet.conf"
 # shellcheck disable=SC2016
+grep -Fq 'if ($http_origin != "https://teagram-dev.tailaa4918.ts.net") { return 403; }' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016
+grep -Fq 'if ($realip_remote_addr != 198.18.134.1) { return 400; }' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016
 grep -Fq 'if ($remote_addr = 198.18.134.1) { return 400; }' "$SCRIPT_DIR/nginx-tailnet.conf"
 # These patterns match literal Nginx variables.
 # shellcheck disable=SC2016
@@ -1436,6 +1471,10 @@ if "proxy_set_header CF-Connecting-IP $remote_addr;" not in tailnet_config:
     raise SystemExit("the tailnet edge must pass its validated client IP to HAProxy")
 if 'proxy_set_header X-Forwarded-For "";' not in tailnet_config or 'proxy_set_header X-Real-IP "";' not in tailnet_config:
     raise SystemExit("the tailnet edge must clear client-supplied forwarding headers")
+if 'if ($http_origin != "https://teagram-dev.tailaa4918.ts.net") { return 403; }' not in tailnet_config:
+    raise SystemExit("the tailnet edge must reject public and unknown browser origins")
+if 'if ($realip_remote_addr != 198.18.134.1) { return 400; }' not in tailnet_config:
+    raise SystemExit("the tailnet edge must reject peers other than the trusted Docker gateway")
 if public_config.count("include /etc/nginx/demo/common-locations.conf;") != 1 or tailnet_config.count(
     "include /etc/nginx/demo/common-locations.conf;"
 ) != 1:
@@ -1605,6 +1644,8 @@ if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanu
     raise SystemExit("deploy-main.sh: legacy edge restore must run before the wrapper returns")
 if "demo_reload_edge" not in cleanup:
     raise SystemExit("deploy-main.sh: directory-mounted edge rollback must reload gracefully")
+if 'demo_restore_tailnet_listener_state "$PREV_TAILNET_ENABLED" || tailnet_rollback_rc=1' not in cleanup:
+    raise SystemExit("deploy-main.sh: failed rollout must restore the captured tailnet listener state")
 forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
 weekly_wipe_op = Path(sys.argv[7]).read_text(encoding="utf-8")
 if "demo_restore_legacy_edge_after_rollback" in forced_command:
@@ -1636,6 +1677,8 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_migrate_proxy_tmpfs "$PREV_SHA" "$ACTIVE_SERVER"',
     'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
     'demo_require_proxy_configuration_current edge "" 1',
+    'PREV_TAILNET_ENABLED=$(demo_capture_tailnet_listener_state)',
+    'TAILNET_STATE_CAPTURED=1',
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])

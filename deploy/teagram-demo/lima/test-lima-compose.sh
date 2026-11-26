@@ -297,8 +297,32 @@ import re
 import sys
 from pathlib import Path
 
-public_nginx = Path(sys.argv[1]).read_text(encoding="utf-8")
+public_nginx_path = Path(sys.argv[1]).resolve()
+config_root = public_nginx_path.parent
 tailnet_nginx = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+
+def expand_demo_includes(path: Path, active: tuple[Path, ...] = ()) -> str:
+    path = path.resolve()
+    if path in active:
+        raise SystemExit(f"cyclic Lima Nginx include: {path}")
+    content = path.read_text(encoding="utf-8")
+
+    def replace_include(match: re.Match[str]) -> str:
+        include = match.group(2).strip()
+        prefix = "/etc/nginx/demo/"
+        if not include.startswith(prefix):
+            return match.group(0)
+        local_include = include[len(prefix):]
+        matches = sorted(config_root.glob(local_include))
+        if not matches:
+            raise SystemExit(f"Lima Nginx include is missing: {include}")
+        return "\n".join(expand_demo_includes(item, (*active, path)) for item in matches)
+
+    return re.sub(r"(?m)^(\s*)include\s+([^;]+);", replace_include, content)
+
+
+public_nginx = expand_demo_includes(public_nginx_path)
 public_listeners = re.findall(
     r"^\s*listen\s+([^;\s]+)",
     public_nginx,
