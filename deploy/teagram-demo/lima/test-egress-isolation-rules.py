@@ -15,7 +15,9 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name("install-egress-isolation.sh")
 IPTABLES_CHAIN = "TEAGRAM_DEMO_EGRESS"
+INPUT_CHAIN = "TEAGRAM_DEMO_INPUT"
 EXAMPLE_IPV4_SUBNET = "198.18.90.0/24"
+EXAMPLE_IPV4_GATEWAY = "198.18.90.1"
 EXAMPLE_IPV6_SUBNET = "fd42:1234:5678::/64"
 PRIVATE_IPV4_CIDRS = (
     "10.0.0.0/8",
@@ -101,6 +103,9 @@ if tool.endswith("-restore"):
 operation = args[0]
 if operation == "-S":
     chain = args[1]
+    if os.environ.get("TEAGRAM_TEST_LISTING_FAILURE") == f"{family}:{chain}":
+        print(f"{tool}: Resource temporarily unavailable (xtables lock)", file=sys.stderr)
+        raise SystemExit(4)
     if chain not in firewall:
         missing_chain(chain)
     print(f"-N {chain}")
@@ -202,6 +207,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         mode: str,
         missing_networks: tuple[str, ...] = (),
         ipv6_networks: tuple[str, ...] = (),
+        listing_failure: str = "",
     ) -> subprocess.CompletedProcess[str]:
         path = os.pathsep.join((str(mock_bin), os.environ.get("PATH", "")))
         env = os.environ.copy()
@@ -211,6 +217,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
                 "TEAGRAM_TEST_MISSING_NETWORKS": ",".join(missing_networks),
                 "TEAGRAM_TEST_IPV6_NETWORKS": ",".join(ipv6_networks),
+                "TEAGRAM_TEST_LISTING_FAILURE": listing_failure,
             }
         )
         command = [str(SCRIPT), mode]
@@ -226,6 +233,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 f"TEAGRAM_TEST_FIREWALL_STATE={state_file}",
                 f"TEAGRAM_TEST_MISSING_NETWORKS={','.join(missing_networks)}",
                 f"TEAGRAM_TEST_IPV6_NETWORKS={','.join(ipv6_networks)}",
+                f"TEAGRAM_TEST_LISTING_FAILURE={listing_failure}",
                 *command,
             ]
         return subprocess.run(command, capture_output=True, text=True, env=env)
@@ -238,7 +246,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         env["TEAGRAM_TEST_FIREWALL_STATE"] = str(state_file)
         listings = []
         for binary in ("iptables", "ip6tables"):
-            for chain in ("DOCKER-USER", "INPUT", IPTABLES_CHAIN):
+            for chain in ("DOCKER-USER", "INPUT", IPTABLES_CHAIN, INPUT_CHAIN):
                 result = subprocess.run(
                     [str(mock_bin / binary), "-w", "10", "-S", chain],
                     check=False,
@@ -293,13 +301,47 @@ class EgressIsolationRuleTests(unittest.TestCase):
             state = json.loads(state_file.read_text(encoding="utf-8"))
             for family in ("iptables", "ip6tables"):
                 self.assertNotIn(IPTABLES_CHAIN, state[family])
+                self.assertNotIn(INPUT_CHAIN, state[family])
                 self.assertFalse(
                     any(
-                        rule.endswith(f"-j {IPTABLES_CHAIN}")
+                        rule.endswith((f"-j {IPTABLES_CHAIN}", f"-j {INPUT_CHAIN}"))
                         for chain in ("DOCKER-USER", "INPUT")
                         for rule in state[family][chain]
                     )
                 )
+
+    @unittest.skipUnless(
+        os.geteuid() == 0 or shutil.which("sudo"),
+        "fake firewall integration requires root or passwordless sudo",
+    )
+    def test_inspection_errors_abort_apply_and_remove_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            apply = self._run_firewall_mode(mock_bin, state_file, "apply-rules")
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+
+            before_remove = state_file.read_bytes()
+            remove = self._run_firewall_mode(
+                mock_bin,
+                state_file,
+                "remove",
+                listing_failure="iptables:INPUT",
+            )
+            self.assertNotEqual(remove.returncode, 0)
+            self.assertIn("could not inspect INPUT", remove.stderr)
+            self.assertIn("Resource temporarily unavailable", remove.stderr)
+            self.assertEqual(state_file.read_bytes(), before_remove)
+
+            before_apply = state_file.read_bytes()
+            apply = self._run_firewall_mode(
+                mock_bin,
+                state_file,
+                "apply-rules",
+                listing_failure=f"iptables:{IPTABLES_CHAIN}",
+            )
+            self.assertNotEqual(apply.returncode, 0)
+            self.assertIn("could not inspect", apply.stderr)
+            self.assertEqual(state_file.read_bytes(), before_apply)
 
     @unittest.skipUnless(
         os.geteuid() == 0 or shutil.which("sudo"),
@@ -364,7 +406,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                     f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}"
                 )
                 state["ip6tables"]["INPUT"].append(
-                    f"-A INPUT -s {subnet} -j {IPTABLES_CHAIN}"
+                    f"-A INPUT -s {subnet} -j {INPUT_CHAIN}"
                 )
             state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
             ipv6_before = json.dumps(state["ip6tables"], sort_keys=True)
@@ -409,7 +451,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 for subnet in subnets
                 for hook in (
                     f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}",
-                    f"-A INPUT -s {subnet} -j {IPTABLES_CHAIN}",
+                    f"-A INPUT -s {subnet} -j {INPUT_CHAIN}",
                 )
             ],
         )
@@ -428,6 +470,13 @@ class EgressIsolationRuleTests(unittest.TestCase):
             sum(rule.startswith("-A INPUT ") for rule in rules),
             len(subnets),
         )
+        self.assertFalse(
+            any(
+                rule.startswith(f"-A {INPUT_CHAIN} -d {subnet} -j RETURN")
+                for rule in rules
+                for subnet in subnets
+            )
+        )
         self.assertTrue(
             all(rules.count(rule) == 1 for rule in rules[: 3 * len(subnets)])
         )
@@ -442,7 +491,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -s {EXAMPLE_IPV4_SUBNET} -j {IPTABLES_CHAIN}",
+            f"-A INPUT -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}",
         )
         self.assertEqual(
             rules[2],
@@ -453,7 +502,22 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 f"-A {IPTABLES_CHAIN} -d {destination} -j DROP",
                 rules,
             )
-        self.assertEqual(rules[-1], f"-A {IPTABLES_CHAIN} -j RETURN")
+            self.assertIn(
+                f"-A {INPUT_CHAIN} -d {destination} -j DROP",
+                rules,
+            )
+        self.assertIn(
+            f"-A {INPUT_CHAIN} -d {EXAMPLE_IPV4_GATEWAY}/32 -j DROP",
+            rules,
+        )
+        self.assertFalse(
+            any(
+                rule.startswith(f"-A {INPUT_CHAIN} -d {EXAMPLE_IPV4_SUBNET} -j RETURN")
+                for rule in rules
+            )
+        )
+        self.assertIn(f"-A {IPTABLES_CHAIN} -j RETURN", rules)
+        self.assertEqual(rules[-1], f"-A {INPUT_CHAIN} -j RETURN")
         self.assertIn(
             f"-A {IPTABLES_CHAIN} -m conntrack "
             "--ctstate RELATED,ESTABLISHED -j RETURN",
@@ -470,7 +534,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -s {EXAMPLE_IPV6_SUBNET} -j {IPTABLES_CHAIN}",
+            f"-A INPUT -s {EXAMPLE_IPV6_SUBNET} -j {INPUT_CHAIN}",
         )
         self.assertEqual(
             rules[2],
@@ -481,11 +545,20 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 f"-A {IPTABLES_CHAIN} -d {destination} -j DROP",
                 rules,
             )
-        self.assertEqual(rules[-1], f"-A {IPTABLES_CHAIN} -j RETURN")
+            self.assertIn(
+                f"-A {INPUT_CHAIN} -d {destination} -j DROP",
+                rules,
+            )
+        self.assertIn(f"-A {IPTABLES_CHAIN} -j RETURN", rules)
+        self.assertEqual(rules[-1], f"-A {INPUT_CHAIN} -j RETURN")
 
     def test_established_replies_return_before_private_destination_drops(self) -> None:
         established_rule = (
             f"-A {IPTABLES_CHAIN} -m conntrack "
+            "--ctstate RELATED,ESTABLISHED -j RETURN"
+        )
+        established_input_rule = (
+            f"-A {INPUT_CHAIN} -m conntrack "
             "--ctstate RELATED,ESTABLISHED -j RETURN"
         )
         for family, subnet, blocked_cidrs in (
@@ -505,6 +578,12 @@ class EgressIsolationRuleTests(unittest.TestCase):
                         rules.index(
                             f"-A {IPTABLES_CHAIN} -d {destination} -j DROP"
                         ),
+                    )
+                input_established_index = rules.index(established_input_rule)
+                for destination in blocked_cidrs:
+                    self.assertLess(
+                        input_established_index,
+                        rules.index(f"-A {INPUT_CHAIN} -d {destination} -j DROP"),
                     )
 
     def test_rendering_is_stable_and_contains_no_duplicate_rules(self) -> None:

@@ -178,11 +178,13 @@ deploy/teagram-demo/lima/install-egress-isolation.sh check
 ```
 
 The installer manages the `TEAGRAM_DEMO_EGRESS` chain and one source hook per
-demo subnet in both `DOCKER-USER` and host `INPUT`. The rules allow traffic
-between demo networks, drop RFC1918, carrier-grade NAT, link-local and
-multicast destinations, then return all other traffic to Docker or the host
-firewall. This keeps Docker DNS, public DNS and public internet flows available
-while blocking access to Lima's own private and tailnet addresses. Other
+demo subnet in `DOCKER-USER`, plus a separate `TEAGRAM_DEMO_INPUT` chain for
+traffic addressed to Lima. The egress chain allows traffic between demo
+networks, drops RFC1918, carrier-grade NAT, link-local and multicast
+destinations, then returns all other traffic to Docker. The INPUT chain allows
+established replies first, then blocks those destinations and each bridge
+gateway address without a subnet return. Docker's embedded DNS is queried at
+`127.0.0.11`; no direct DNS exception to the bridge gateways is needed. Other
 containers and host-originated traffic do not match the demo source ranges.
 If any Docker demo networks are absent, apply reports their names and defers
 IPv6 updates without removing an existing IPv6 chain; `check` rejects until all
@@ -194,8 +196,11 @@ the firewall service. Every Compose service has `restart: "no"`; OpenRC starts
 the stack only after isolation is installed. The installer also disables
 restart policies on existing demo containers. Start and stop the stack with
 `rc-service teagram-demo-stack start|stop`; invoking Compose directly bypasses
-the ordering guarantee. The read-only `check` mode reports missing, duplicate,
-misordered or drifted hooks and chain rules without changing them.
+the ordering guarantee. If Docker restarts or crashes after boot, the stack
+stays stopped; after Docker is healthy again, run
+`rc-service teagram-demo-stack restart`. The read-only `check` mode reports
+missing, duplicate, misordered or drifted hooks and chain rules without
+changing them.
 
 On Lima, run the probe as root after the Compose stack is up:
 
@@ -203,13 +208,13 @@ On Lima, run the probe as root after the Compose stack is up:
 python3 deploy/teagram-demo/probe_tailnet_isolation.py
 ```
 
-The probe first confirms the tailnet peer answers from Lima's host namespace,
-then enters the running `turnstile-egress` container's network namespace. It
-requires timeouts to the tailnet peer, the host's private default-route
-gateway, and Lima's own private/tailnet addresses, then requires Docker
-embedded DNS and a verified HTTPS response from `example.com`. The existing
-`--charlie` mode keeps teagram-dev's host-network checks for its Turnstile
-rollout.
+The probe first confirms the tailnet peer, Lima's private default-route
+gateway, and each demo bridge gateway answer from the host namespace, then
+enters the running `turnstile-egress` container's network namespace. It
+requires timeouts to those gateways and Lima's own private/tailnet addresses,
+then requires Docker embedded DNS and a verified HTTPS response from
+`example.com`. The existing `--charlie` mode keeps teagram-dev's host-network
+checks for its Turnstile rollout.
 
 To roll the firewall change back, run as root:
 

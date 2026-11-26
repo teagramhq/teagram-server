@@ -18,6 +18,11 @@ from collections.abc import Callable
 
 
 TAILNET_PEER = ("tailnet", "100.124.236.66", 22)
+LIMA_DEMO_GATEWAY_TARGETS = (
+    ("lima-demo-backend-gateway", "198.18.130.1", 22),
+    ("lima-demo-egress-gateway", "198.18.132.1", 22),
+    ("lima-demo-edge-gateway", "198.18.133.1", 22),
+)
 CHARLIE_TARGETS = (
     TAILNET_PEER,
     ("charlie", "192.168.64.128", 22),
@@ -270,14 +275,19 @@ def probe_lima_inside_network(
     lan_gateway: str,
     host_addresses: tuple[tuple[str, str, int], ...] = (),
 ) -> None:
-    targets = (TAILNET_PEER, ("lima-lan-gateway", lan_gateway, 22), *host_addresses)
+    targets = (
+        TAILNET_PEER,
+        ("lima-lan-gateway", lan_gateway, 22),
+        *LIMA_DEMO_GATEWAY_TARGETS,
+        *host_addresses,
+    )
     for name, address, port in targets:
         probe_target(name, address, port)
     public_address = dns_query_a(PUBLIC_HOST)
     public_https_request(PUBLIC_HOST, public_address)
     print(
         "tailnet_isolation_probe=pass tailnet=timeout lan_gateway=timeout "
-        "lima_addresses=timeout dns=pass https=pass"
+        "demo_gateways=timeout lima_addresses=timeout dns=pass https=pass"
     )
 
 
@@ -292,6 +302,9 @@ def run_lima_probe_from_host() -> None:
         fail("lima-probe-must-run-as-root-to-enter-the-Docker-network-namespace")
     require_host_control_target(*TAILNET_PEER)
     lan_gateway = lima_lan_gateway()
+    require_host_control_target("lima-lan-gateway", lan_gateway, 22)
+    for target in LIMA_DEMO_GATEWAY_TARGETS:
+        require_host_control_target(*target)
     host_targets = lima_host_address_targets()
     pid = lima_probe_container_pid()
     script_path = pathlib.Path(__file__).resolve()

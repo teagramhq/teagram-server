@@ -268,6 +268,13 @@ expect 'criterion 1: every image is pinned by sha256 digest' \
 expect 'criterion 1: Docker does not auto-start demo containers before isolation' \
   '[.services[] | select(.restart != "no")] | length == 0'
 
+if grep -Fq 'Docker restarts or crashes after boot' "$SCRIPT_DIR/README.md" \
+  && grep -Fq 'rc-service teagram-demo-stack restart' "$SCRIPT_DIR/README.md"; then
+  ok 'Docker daemon restart recovery is documented'
+else
+  not_ok 'Docker daemon restart recovery is documented'
+fi
+
 # Criterion 2: every service has a memory limit, and the long-running ones fit
 # in 200 MiB. migrate is one-shot, so it is outside that sum.
 # shellcheck disable=SC2016 # $n is a jq variable, not a shell expansion.

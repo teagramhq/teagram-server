@@ -18,6 +18,16 @@ import probe_tailnet_isolation  # noqa: E402
 
 
 class ProbeTailnetIsolationTests(unittest.TestCase):
+    def test_demo_bridge_gateways_are_isolation_targets(self) -> None:
+        self.assertEqual(
+            probe_tailnet_isolation.LIMA_DEMO_GATEWAY_TARGETS,
+            (
+                ("lima-demo-backend-gateway", "198.18.130.1", 22),
+                ("lima-demo-egress-gateway", "198.18.132.1", 22),
+                ("lima-demo-edge-gateway", "198.18.133.1", 22),
+            ),
+        )
+
     def test_lima_targets_tailnet_peer_and_discovered_lan_gateway(self) -> None:
         host_targets = (
             ("lima-host-eth0", "10.0.0.2", 22),
@@ -41,6 +51,10 @@ class ProbeTailnetIsolationTests(unittest.TestCase):
             [
                 ("100.124.236.66", 22),
                 ("10.0.0.1", 22),
+                *(
+                    (address, port)
+                    for _, address, port in probe_tailnet_isolation.LIMA_DEMO_GATEWAY_TARGETS
+                ),
                 ("10.0.0.2", 22),
                 ("100.100.0.3", 22),
             ],
@@ -81,7 +95,14 @@ class ProbeTailnetIsolationTests(unittest.TestCase):
         self.assertEqual(command[-1], "--inside")
         self.assertEqual(run.call_args.kwargs["env"]["TEAGRAM_DEMO_LAN_GATEWAY"], "10.0.0.1")
         self.assertEqual(run.call_args.kwargs["env"]["TEAGRAM_DEMO_HOST_ADDRESSES"], "10.0.0.2")
-        host_control.assert_called_once_with(*probe_tailnet_isolation.TAILNET_PEER)
+        self.assertEqual(
+            [call.args for call in host_control.call_args_list],
+            [
+                probe_tailnet_isolation.TAILNET_PEER,
+                ("lima-lan-gateway", "10.0.0.1", 22),
+                *probe_tailnet_isolation.LIMA_DEMO_GATEWAY_TARGETS,
+            ],
+        )
 
     def test_lan_gateway_uses_the_host_private_default_route(self) -> None:
         routes = """Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
@@ -138,14 +159,22 @@ tailscale0 00000000 01006464 0003 0 0 00000000 00000000 0 0 0
             probe_tailnet_isolation.probe_target("tailnet", "100.124.236.66", 22)
 
     def test_host_control_timeout_fails_instead_of_proving_isolation(self) -> None:
-        with mock.patch.object(
-            probe_tailnet_isolation.socket,
-            "create_connection",
-            side_effect=TimeoutError,
-        ), self.assertRaises(SystemExit):
-            probe_tailnet_isolation.require_host_control_target(
-                *probe_tailnet_isolation.TAILNET_PEER
-            )
+        targets = (
+            probe_tailnet_isolation.TAILNET_PEER,
+            ("lima-lan-gateway", "10.0.0.1", 22),
+            *probe_tailnet_isolation.LIMA_DEMO_GATEWAY_TARGETS,
+        )
+        for target in targets:
+            with (
+                self.subTest(target=target),
+                mock.patch.object(
+                    probe_tailnet_isolation.socket,
+                    "create_connection",
+                    side_effect=TimeoutError,
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                probe_tailnet_isolation.require_host_control_target(*target)
 
     def test_host_control_accept_and_reset_prove_target_is_online(self) -> None:
         connection = mock.Mock()
