@@ -169,7 +169,7 @@ def read_tlv(data: bytes, offset: int, tag: int) -> tuple[bytes, int]:
 
 def tl_bytes(value: bytes) -> bytes:
     length = len(value)
-    if length <= 254:
+    if length <= 253:
         encoded = bytes((length,)) + value
     else:
         encoded = b"\xfe" + length.to_bytes(3, "little") + value

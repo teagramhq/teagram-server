@@ -112,6 +112,9 @@ case "${1:-}" in
         done
         [[ "$name" == "$TEAGRAM_TEST_VOLUME_NAME" && ! -e "$volume_json" ]]
         mkdir -m 0700 "$volume_dir"
+        if [[ "${TEAGRAM_TEST_SEED_STRAY:-0}" == 1 ]]; then
+          printf 'unexpected\n' > "$volume_dir/unexpected"
+        fi
         jq -n --arg name "$name" --arg token "$run_token" \
           '[{Name:$name,Driver:"local",Options:{},Labels:{"com.teagram.demo.identity-import-run":$token}}]' \
           > "$volume_json"
@@ -125,39 +128,73 @@ case "${1:-}" in
     esac
     ;;
   run)
-    if [[ "$*" == *"dst=/key,readonly"* ]]; then
-      [[ "$(stat -c '%u:%g:%a' "$volume_dir")" == 65532:65532:700 ]]
-      [[ "$(stat -c '%u:%g:%a' "$volume_dir/server_key.pem")" == 65532:65532:600 ]]
-      cat "$volume_dir/server_key.pem"
-      exit 0
-    fi
+    shift
+    entrypoint=
+    mounts=()
+    while (($#)); do
+      case "$1" in
+        --pull=*) shift ;;
+        --rm|--read-only) shift ;;
+        --network|--user|--cap-drop|--cap-add|--security-opt)
+          shift 2
+          ;;
+        --mount)
+          mounts+=("$2")
+          shift 2
+          ;;
+        --entrypoint)
+          entrypoint=$2
+          shift 2
+          ;;
+        *)
+          image=$1
+          shift
+          break
+          ;;
+      esac
+    done
+    [[ "$entrypoint" == /bin/sh && "${1:-}" == -ec && "$#" -ge 2 ]]
+    script=$2
     source_key=
-    for argument in "$@"; do
-      case "$argument" in
+    has_volume_mount=0
+    for mount in "${mounts[@]}"; do
+      case "$mount" in
+        "type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key"|"type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key,readonly")
+          has_volume_mount=1
+          ;;
         type=bind,src=*,dst=/tmp/server_key.pem,readonly)
-          source_key=${argument#type=bind,src=}
+          source_key=${mount#type=bind,src=}
           source_key=${source_key%,dst=/tmp/server_key.pem,readonly}
           ;;
       esac
     done
-    [[ -n "$source_key" && -f "$source_key" ]]
-    for entry in "$volume_dir"/.[!.]* "$volume_dir"/..?* "$volume_dir"/*; do
-      [[ -e "$entry" || -L "$entry" ]] || continue
-      exit 41
-    done
-    chown 65532:65532 "$volume_dir"
-    chmod 0700 "$volume_dir"
-    temporary="$volume_dir/.server_key.pem.import-mock"
-    cat "$source_key" > "$temporary"
-    chmod 0600 "$temporary"
-    chown 65532:65532 "$temporary"
-    ln "$temporary" "$volume_dir/server_key.pem"
-    rm "$temporary"
+    [[ "$has_volume_mount" == 1 ]]
+    if [[ -n "$source_key" ]]; then
+      [[ -f "$source_key" ]]
+      rewritten_script=$(printf '%s\n' "$script" | sed \
+        -e "s|/tmp/server_key\\.pem|$source_key|g" \
+        -e "s|/key|$volume_dir|g")
+    else
+      rewritten_script=$(printf '%s\n' "$script" | sed \
+        -e "s|/key|$volume_dir|g")
+    fi
+    sh -ec "$rewritten_script"
     ;;
   *) exit 1 ;;
 esac
 BASH
 chmod 0755 "$MOCK_BIN/docker"
+
+cat > "$MOCK_BIN/ln" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" == 1 &&
+  "${2:-}" == "$TEAGRAM_TEST_VOLUME_ROOT/$TEAGRAM_TEST_VOLUME_NAME/server_key.pem" ]]; then
+  printf 'sentinel\n' > "$2"
+fi
+exec /usr/bin/ln "$@"
+BASH
+chmod 0755 "$MOCK_BIN/ln"
 
 openssl genrsa -traditional -out "$TMP_ROOT/server_key.pem" 2048 >/dev/null 2>&1
 chmod 0600 "$TMP_ROOT/server_key.pem"
@@ -220,7 +257,7 @@ def read_tlv(data, offset, tag):
 
 def tl_bytes(value):
     length = len(value)
-    if length <= 254:
+    if length <= 253:
         encoded = bytes((length,)) + value
     else:
         encoded = b"\xfe" + length.to_bytes(3, "little") + value
@@ -274,6 +311,8 @@ run_import() {
     TEAGRAM_TEST_VOLUME_NAME="$VOLUME_NAME" \
     TEAGRAM_TEST_CONFIG_TEMPLATE="$CONFIG_TEMPLATE" \
     TEAGRAM_TEST_CLIENT_SPKI="$client_spki" \
+    TEAGRAM_TEST_SEED_STRAY="${TEAGRAM_TEST_SEED_STRAY:-0}" \
+    TEAGRAM_TEST_FORCE_LN_COLLISION="${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" \
     "$TEST_INIT" --import-key "$key_path" --expected-rsa-spki "$expected_spki" \
     >"$CASE_OUTPUT" 2>&1
 }
@@ -314,6 +353,24 @@ grep -Fq -- '--network none' "$CASE_LOG"
 grep -Fq 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
 assert_no_secret_output
 
+new_case stray-volume-entry
+if TEAGRAM_TEST_SEED_STRAY=1 run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a stray file in the new volume\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+grep -Fq 'volume rm teagram-demo_tgkey' "$CASE_LOG"
+assert_no_secret_output
+
+new_case no-clobber
+if TEAGRAM_TEST_FORCE_LN_COLLISION=1 run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  printf 'identity import overwrote a key published during the no-clobber race\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+grep -Fq 'volume rm teagram-demo_tgkey' "$CASE_LOG"
+assert_no_secret_output
+
 new_case mismatch
 cp "$CASE_ENV" "$CASE_ROOT/env.before"
 if run_import "$TMP_ROOT/server_key.pem" 'AAAA'; then
@@ -334,6 +391,15 @@ fi
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
+new_case symlink
+ln -s "$TMP_ROOT/server_key.pem" "$CASE_ROOT/symlink.pem"
+if run_import "$CASE_ROOT/symlink.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a symlink to the valid RSA key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
 new_case unreadable
 cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/unreadable.pem"
 chmod 0000 "$CASE_ROOT/unreadable.pem"
@@ -344,11 +410,33 @@ fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
 assert_no_secret_output
 
+new_case non-root-owner
+cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/non-root-key.pem"
+chown 65534:65534 "$CASE_ROOT/non-root-key.pem"
+chmod 0600 "$CASE_ROOT/non-root-key.pem"
+if run_import "$CASE_ROOT/non-root-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted an RSA key not owned by root\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
 new_case group-readable
 cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/group-readable.pem"
 chmod 0640 "$CASE_ROOT/group-readable.pem"
 if run_import "$CASE_ROOT/group-readable.pem" "$VALID_SPKI"; then
   printf 'identity import accepted a group-readable key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case oversize-valid-key
+cp "$TMP_ROOT/server_key.pem" "$CASE_ROOT/oversize-key.pem"
+head -c 16384 /dev/zero | tr '\000' ' ' >> "$CASE_ROOT/oversize-key.pem"
+chmod 0600 "$CASE_ROOT/oversize-key.pem"
+if run_import "$CASE_ROOT/oversize-key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a valid key padded past 16 KiB\n' >&2
   exit 1
 fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
@@ -399,6 +487,28 @@ if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
   exit 1
 fi
 [[ "$before_hash" == "$(sha256sum "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")" ]]
+assert_not_contains 'volume create' "$CASE_LOG"
+assert_no_secret_output
+
+new_case existing-stray
+mkdir -m 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+cp "$TMP_ROOT/server_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+printf 'unexpected\n' > "$CASE_VOLUME_ROOT/$VOLUME_NAME/unexpected"
+chown 65532:65532 "$CASE_VOLUME_ROOT/$VOLUME_NAME" \
+  "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" \
+  "$CASE_VOLUME_ROOT/$VOLUME_NAME/unexpected"
+chmod 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+chmod 0600 "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" \
+  "$CASE_VOLUME_ROOT/$VOLUME_NAME/unexpected"
+jq -n --arg name "$VOLUME_NAME" \
+  '[{Name:$name,Driver:"local",Options:{},Labels:{}}]' > "$CASE_VOLUME_ROOT/volume.json"
+before_hash=$(sha256sum "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")
+if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a stray file in the existing volume\n' >&2
+  exit 1
+fi
+[[ "$before_hash" == "$(sha256sum "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem")" ]]
+[[ -f "$CASE_VOLUME_ROOT/$VOLUME_NAME/unexpected" ]]
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
