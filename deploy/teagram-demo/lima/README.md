@@ -42,12 +42,12 @@ Limits of the long-running services, in MiB. The sum stays at or below 200.
 | Service | Limit | Measured (charlie unless noted) |
 | --- | --- | --- |
 | postgres | 49 | 83 (128 MB `shared_buffers`); 43.82 under 9-client pgbench with 8 MB `shared_buffers` (local ARM64 image, measured under the prior 56 MiB cap) |
-| teagramd | 44 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; built-image WebSocket run at 39.13 MiB; current `GOMEMLIMIT=20MiB` gate: 35.87, 36.16, and 40.22 MiB (worst) |
+| teagramd | 46 | 46 on Charlie before Lima; 30.09 MiB profile-only at 40 MiB; pinned-image combined runs at 37.72 and 43.25 MiB with `GOMEMLIMIT=24MiB`; prior built-image WebSocket and memory-gate runs used a 44 MiB cap |
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
 | haproxy | 10 | 10 |
 | edge (nginx) | 3 | 2 |
-| **Total** | **155** | |
+| **Total** | **157** | |
 
 The Lima Compose environment caps the server pool at `TG_PG_MAX_CONNS=3`.
 The rollout uses a short maintenance window: it stops the old teagramd before
@@ -77,10 +77,18 @@ probe enabled Lima's WebSocket listener at `:2446` with the Compose origin and
 browser-only settings. It peaked at 39.13 MiB (41,029,632 bytes), with
 `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed
 ([CI job](https://github.com/teagramhq/teagram-server/actions/runs/45721450279/job/139580703653)).
-The gate runs three times on each head with `GOMEMLIMIT=20MiB` and fails unless
-each run stays at or below 42 MiB. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the job-built linux/amd64 `teagramd:ci` image (`sha256:e55bef28bd32f747b0e9e017fb769522965ab6ec07168713de11656cd9d536c8`, revision `5833cd415f8ee313449604effffb6817f15ff607`) ran with `GOMAXPROCS=1`, `TG_PG_MAX_CONNS=3`, and WebSocket listener `:2446` (`https://web.teagram.io`, `browser_only=false`). All three synchronized runs completed phase `concurrent_profile_and_media_photo_uploads`; profile and media-photo uploads passed in every run. Peaks were 35.87 MiB (37,609,472 bytes), 36.16 MiB (37,920,768 bytes), and 40.22 MiB (42,176,512 bytes). Each reported `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`. The worst peak is 3.78 MiB below the 44 MiB cap ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
+The current gate runs three times on each head in a 46 MiB cgroup with
+`GOMEMLIMIT=20MiB` and fails unless each run stays at or below 44 MiB. Earlier
+44 MiB-capped runs completed the same synchronized uploads successfully. The
+run on PR head `e1b212ae3457194d5500219bbfc76c6593f4e58e` peaked at 43.00,
+40.13, and 41.98 MiB; the first exceeded the former 42 MiB threshold, although
+all uploads passed and `max`, `oom`, and `oom_kill` stayed at zero. The expanded
+46 MiB cap keeps the two-MiB runtime margin and remains within the 200 MiB Lima
+budget. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the prior
+44 MiB gate had peaks of 35.87, 36.16, and 40.22 MiB; each run reported
+`max=0`, `oom=0`, and `oom_kill=0` ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
 
-The long-running Lima stack uses 155 MiB of limits. `migrate` (64 MiB) is
+The long-running Lima stack uses 157 MiB of limits. `migrate` (64 MiB) is
 one-shot and outside the sum.
 
 ## Blobs

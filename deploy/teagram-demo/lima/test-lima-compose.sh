@@ -271,12 +271,12 @@ expect 'criterion 2: every service has a memory limit' \
   '(.services | length) as $n | [.services[] | select((.mem_limit // "0" | tonumber) > 0)] | length == $n'
 expect 'criterion 2: long-running limits total at most 200 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add <= 209715200'
-expect 'criterion 2: long-running limits total exactly 155 MiB' \
-  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 155 * 1048576'
+expect 'criterion 2: long-running limits total exactly 157 MiB' \
+  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 157 * 1048576'
 expect 'criterion 2: only the single server pool is capped at three' \
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)'
-expect 'criterion 2: server has a 44 MiB limit and 20 MiB Go heap limit' \
-  '(.services.teagramd.mem_limit | tonumber) == 46137344 and .services.teagramd.environment.GOMEMLIMIT == "20MiB"'
+expect 'criterion 2: server has a 46 MiB limit and 20 MiB Go heap limit' \
+  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "20MiB"'
 expect 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \
@@ -578,7 +578,7 @@ for name in env-file secret-files tunnel-token compose-config config-build confi
     not_ok "check.sh passes $name on the fixture"
   fi
 done
-if grep -q '^PASS mem-limits (155 MiB of 200 MiB)$' "$CHECK_OUT"; then
+if grep -q '^PASS mem-limits (157 MiB of 200 MiB)$' "$CHECK_OUT"; then
   ok 'check.sh validates the single-server memory ceiling'
 else
   not_ok 'check.sh validates the single-server memory ceiling'

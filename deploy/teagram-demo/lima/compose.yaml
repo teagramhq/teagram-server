@@ -10,7 +10,7 @@
 # password and the tunnel token. Never print it into a log or a comment.
 #
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
-# MiB) of all long-running services add up to 155 MiB; migrate is one-shot.
+# MiB) of all long-running services add up to 157 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
 # 198.18.133.0/24. The egress-isolation rules in DOCKER-USER name these.
 
@@ -62,15 +62,15 @@ x-server-environment: &server-environment
   TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
-  # Soft limit below the 44 MiB container limit, so the collector runs before
+  # Soft limit below the 46 MiB container limit, so the collector runs before
   # the kernel OOM-kills the server.
   GOMEMLIMIT: 20MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}
   stop_grace_period: 120s
-  mem_limit: 44m
-  memswap_limit: 44m
+  mem_limit: 46m
+  memswap_limit: 46m
   cpus: "0.5"
   pids_limit: 128
   environment: *server-environment

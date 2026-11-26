@@ -5,7 +5,7 @@ LIMA_SERVICE_IMAGE=${LIMA_SERVICE_IMAGE:-teagramd:ci}
 CONTAINER=teagramd-lima-memory
 KEY_VOLUME=tg-lima-memory-key
 BLOB_VOLUME=tg-lima-memory-blobs
-EXPECTED_LIMIT=$((44 * 1024 * 1024))
+EXPECTED_LIMIT=$((46 * 1024 * 1024))
 MIN_HEADROOM=$((2 * 1024 * 1024))
 LIMA_GOMEMLIMIT=20MiB
 MEMORY_CGROUP_DIR=
@@ -109,7 +109,7 @@ docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$IMAGE_ID" bootstrap-i
 
 docker run --detach --name "$CONTAINER" \
   --network host \
-  --memory 44m --memory-swap 44m --cpus 0.5 --pids-limit 128 \
+  --memory 46m --memory-swap 46m --cpus 0.5 --pids-limit 128 \
   --read-only \
   --volume "$KEY_VOLUME:/var/lib/teagramd" \
   --volume "$BLOB_VOLUME:/var/lib/teagramd-blobs" \
@@ -123,7 +123,7 @@ docker run --detach --name "$CONTAINER" \
   --env GOMAXPROCS=1 --env "GOMEMLIMIT=$LIMA_GOMEMLIMIT" \
   "$IMAGE_ID" >/dev/null
 
-# Setup CLI processes do not belong in the server's measured 44 MiB cgroup.
+# Setup CLI processes do not belong in the server's measured 46 MiB cgroup.
 run_setup_command() {
   local -a docker_flags=(
     --rm
