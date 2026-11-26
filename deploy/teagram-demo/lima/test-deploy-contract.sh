@@ -87,6 +87,62 @@ if grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-d
 else
   not_ok 'sudoers grants only the root wrapper'
 fi
+SUDO_LIST_VALIDATOR="$TMP_DIR/sudo-list-validator.sh"
+{
+  printf '%s\n' 'ROOT_WRAPPER=/usr/local/sbin/teagram-demo-deploy'
+  sed -n '/^sudo_commands_are_restricted() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+} > "$SUDO_LIST_VALIDATOR"
+if [[ -s "$SUDO_LIST_VALIDATOR" ]]; then
+  # shellcheck disable=SC1090
+  source "$SUDO_LIST_VALIDATOR"
+  cat > "$TMP_DIR/sudo-list-wrapper-only" <<'EOF'
+Matching Defaults entries for teagram-deploy on lima:
+    env_reset, secure_path=/usr/sbin:/usr/bin
+
+User teagram-deploy may run the following commands on lima:
+    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
+    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
+EOF
+  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-wrapper-only"; then
+    ok 'sudo list accepts the root wrapper as the only command'
+  else
+    not_ok 'sudo list accepts the root wrapper as the only command'
+  fi
+  cat > "$TMP_DIR/sudo-list-extra-group-grant" <<'EOF'
+Matching Defaults entries for teagram-deploy on lima:
+    env_reset, secure_path=/usr/sbin:/usr/bin
+
+User teagram-deploy may run the following commands on lima:
+    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
+    (ALL : ALL) ALL
+EOF
+  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-extra-group-grant"; then
+    not_ok 'sudo list rejects an additional group grant'
+  else
+    ok 'sudo list rejects an additional group grant'
+  fi
+  cat > "$TMP_DIR/sudo-list-extra-user-alias-grant" <<'EOF'
+Matching Defaults entries for teagram-deploy on lima:
+    env_reset, secure_path=/usr/sbin:/usr/bin
+
+User teagram-deploy may run the following commands on lima:
+    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
+    (root) NOPASSWD: /bin/sh
+EOF
+  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-extra-user-alias-grant"; then
+    not_ok 'sudo list rejects an additional user-alias command'
+  else
+    ok 'sudo list rejects an additional user-alias command'
+  fi
+else
+  not_ok 'installer validates the complete effective sudo command list'
+fi
+# shellcheck disable=SC2016 # Match the literal installer invocation.
+if grep -Fq 'sudo_commands_are_restricted "$TMP_DIR/sudo-list"' "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'installer enforces the effective sudo command limit'
+else
+  not_ok 'installer enforces the effective sudo command limit'
+fi
 # shellcheck disable=SC2016 # Match literal source text without expanding it.
 if grep -Fq 'exec sudo -n /usr/local/sbin/teagram-demo-deploy "${SSH_ORIGINAL_COMMAND:-}"' \
   "$SCRIPT_DIR/deploy-entry.sh"; then
