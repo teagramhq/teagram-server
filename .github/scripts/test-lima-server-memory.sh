@@ -378,8 +378,12 @@ fi
 IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
   <"$MEMORY_SAMPLE_PROCESS_FILE"
 stat_sample_peak_bytes=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
-if [[ $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
-  $process_attribution != complete ||
+if [[ ! $process_sample_peak_bytes =~ ^[0-9]+$ ||
+  ! $stat_sample_peak_bytes =~ ^[0-9]+$ ||
+  $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
+  ( $process_attribution != complete && $process_attribution != incomplete ) ||
+  ( $process_attribution == complete && $process_incomplete_pids != - ) ||
+  ( $process_attribution == incomplete && ( $process_incomplete_pids == - || $process_incomplete_pids == unknown ) ) ||
   ! $server_process_pid =~ ^[1-9][0-9]*$ ||
   ! $server_process_rss_bytes =~ ^[0-9]+$ ||
   ! $server_process_anon_bytes =~ ^[0-9]+$ ||
@@ -387,6 +391,10 @@ if [[ $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
   $photo_worker_processes == unknown ]]; then
   printf 'memory probe process attribution is incomplete or does not match the sampled peak: status=%s pids=%s\n' \
     "${process_attribution:-unknown}" "${process_incomplete_pids:-unknown}" >&2
+  exit 1
+fi
+if ! lima_memory_process_attribution_check \
+  "$LIMA_MEMORY_PROBE_ATTEMPTS" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids"; then
   exit 1
 fi
 

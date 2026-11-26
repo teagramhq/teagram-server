@@ -129,4 +129,31 @@ if [[ "$actual" != "$expected" ]]; then
   exit 1
 fi
 
+if normal_report="$(lima_memory_process_attribution_check 3 3000000 incomplete 102 2>&1)"; then
+  normal_status=0
+else
+  normal_status=$?
+fi
+expected='memory probe sampled incomplete process attribution at 3000000 bytes: pids=102'
+if [[ "$normal_status" != 0 || "$normal_report" != "$expected" ]]; then
+  printf 'normal probe attribution report = %s (status %s), want %s (status 0)\n' \
+    "$normal_report" "$normal_status" "$expected" >&2
+  exit 1
+fi
+
+if diagnostic_report="$(lima_memory_process_attribution_check 10 3000000 incomplete 102 2>&1)"; then
+  diagnostic_status=0
+else
+  diagnostic_status=$?
+fi
+if [[ "$diagnostic_status" == 0 || "$diagnostic_report" != "$expected" ]]; then
+  printf 'diagnostic attribution report = %s (status %s), want %s (nonzero)\n' \
+    "$diagnostic_report" "$diagnostic_status" "$expected" >&2
+  exit 1
+fi
+if ! lima_memory_process_attribution_check 10 3000000 complete -; then
+  printf 'diagnostic probe rejected complete process attribution\n' >&2
+  exit 1
+fi
+
 printf 'Lima process snapshot fixture passed\n'
