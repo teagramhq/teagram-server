@@ -291,6 +291,9 @@ checks = {
         < rollout.index('lima_compose "$CANDIDATE_IMAGE_REF" run --rm -T --no-deps migrate')
         < rollout.index('lima_compose "$CANDIDATE_IMAGE_REF" up -d --no-deps --force-recreate')
     ),
+    "verified database backup precedes the candidate rollout": (
+        rollout.index("lima_backup_database\n") < rollout.index("lima_rollout_candidate\n")
+    ),
     "new release health is checked through loopback /healthz": 'HEALTH_URL=http://127.0.0.1:8080/healthz' in rollout
     and 'lima_wait_health || demo_fail' in rollout,
     "rollback removes the candidate and restarts the previous image": 'rm -f teagramd' in cleanup
@@ -305,8 +308,149 @@ if not all(checks.values()):
     raise SystemExit(1)
 PY
 
+BACKUP_FUNCTIONS="$TMP_DIR/lima-backup-functions.sh"
+{
+  sed -n '/^lima_compose() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh"
+  sed -n '/^lima_backup_database() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh"
+} > "$BACKUP_FUNCTIONS"
+BACKUP_BIN="$TMP_DIR/backup-bin"
+mkdir -m 0700 "$BACKUP_BIN"
+cat > "$BACKUP_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case "$*" in
+  *' pg_dump -U postgres -Fc teagram')
+    printf 'fake custom-format postgres dump\n'
+    ;;
+  *' pg_restore --list')
+    input_bytes=$(wc -c)
+    printf 'pg_restore stdin bytes=%s\n' "$input_bytes" >&2
+    if (( input_bytes == 0 )); then
+      printf 'pg_restore received empty stdin\n' >&2
+      exit 1
+    fi
+    ;;
+  *)
+    printf 'unexpected docker invocation: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+EOF
+cat > "$BACKUP_BIN/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0755 "$BACKUP_BIN/docker" "$BACKUP_BIN/chown"
+cat > "$TMP_DIR/lima-backup-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$LIMA_BACKUP_FUNCTIONS"
+SCRIPT_DIR=$LIMA_SCRIPT_DIR
+REPO_ROOT=$LIMA_REPO_ROOT
+ENV_FILE=$LIMA_ENV_FILE
+BACKUP_DIR=$LIMA_BACKUP_DIR
+PREV_IMAGE_REF=previous-image
+demo_fail() { printf '%s\n' "$1" >&2; return 1; }
+lima_backup_database
+[[ -s "$BACKUP_DIR/postgres.dump" && -s "$BACKUP_DIR/postgres.dump.sha256" ]]
+[[ "$(stat -c '%a' "$BACKUP_DIR/postgres.dump")" == 600 ]]
+BASH
+BACKUP_DIR="$TMP_DIR/lima-backup"
+mkdir -m 0700 "$BACKUP_DIR"
+if LIMA_BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" LIMA_SCRIPT_DIR="$SCRIPT_DIR" \
+  LIMA_REPO_ROOT="$REPO_ROOT" LIMA_ENV_FILE="$TMP_DIR/lima.env" \
+  LIMA_BACKUP_DIR="$BACKUP_DIR" PATH="$BACKUP_BIN:$PATH" \
+  bash "$TMP_DIR/lima-backup-regression.sh" > /dev/null 2> "$TMP_DIR/lima-backup.err"; then
+  if grep -Eq '^pg_restore stdin bytes=[1-9][0-9]*$' "$TMP_DIR/lima-backup.err"; then
+    ok 'database restore-list check receives the generated dump on stdin'
+  else
+    not_ok 'database restore-list check receives the generated dump on stdin'
+  fi
+else
+  not_ok 'database restore-list check receives the generated dump on stdin'
+fi
+
 CLEANUP_FUNCTION="$TMP_DIR/lima-cleanup-function.sh"
 sed -n '/^lima_cleanup() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$CLEANUP_FUNCTION"
+
+ROLLOUT_FUNCTION="$TMP_DIR/lima-rollout-function.sh"
+sed -n '/^lima_rollout_candidate() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$ROLLOUT_FUNCTION"
+cat > "$TMP_DIR/lima-success-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$ROLLOUT_FUNCTION"
+SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+PREV_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PREV_IMAGE_REVISION=$PREV_SHA
+PREV_IMAGE_REF=previous-image
+PREV_IMAGE_ID=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PREV_WEB_RELEASE=
+BACKUP_DIR=verified-backup
+CANDIDATE_IMAGE_REF=
+CANDIDATE_IMAGE_ID=
+OLD_SERVER_STOPPED=0
+CANDIDATE_STARTED=0
+ACTIVE_RELEASE_UPDATED=0
+DEPLOY_COMMITTED=0
+
+demo_pull_image_by_sha() { printf '%s\n' "$LIMA_CANDIDATE_REF"; }
+lima_compose() {
+  printf 'compose %s %s\n' "$1" "${*:2}" >> "$LIMA_ROLLOUT_LOG"
+  if [[ "${*:2}" == 'ps --status running -q teagramd' ]]; then
+    printf 'candidate-container\n'
+  fi
+}
+lima_wait_health() { printf 'health-check\n' >> "$LIMA_ROLLOUT_LOG"; }
+docker() {
+  printf 'docker %s\n' "$*" >> "$LIMA_ROLLOUT_LOG"
+  case "$*" in
+    "image inspect --format {{.Id}} $LIMA_CANDIDATE_REF"|"inspect --format {{.Image}} candidate-container")
+      printf '%s\n' "$LIMA_CANDIDATE_ID"
+      ;;
+    *'org.opencontainers.image.revision'*) printf '%s\n' "$SHA" ;;
+    *) printf 'unexpected docker invocation: %s\n' "$*" >&2; return 2 ;;
+  esac
+}
+demo_write_active_release() {
+  printf '%s %s\n' "$1" "$2" > "$LIMA_ACTIVE_RELEASE_FILE"
+  printf 'active-release %s %s\n' "$1" "$2" >> "$LIMA_ROLLOUT_LOG"
+}
+demo_record_successful_image() { printf 'record-success\n' >> "$LIMA_ROLLOUT_LOG"; }
+demo_prune_images() { printf 'prune %s\n' "$*" >> "$LIMA_ROLLOUT_LOG"; }
+
+lima_rollout_candidate
+[[ $OLD_SERVER_STOPPED == 1 && $CANDIDATE_STARTED == 1 &&
+  $ACTIVE_RELEASE_UPDATED == 1 && $DEPLOY_COMMITTED == 1 ]]
+BASH
+ROLLOUT_LOG="$TMP_DIR/lima-success.log"
+ACTIVE_RELEASE_FILE="$TMP_DIR/active-release"
+LIMA_CANDIDATE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+LIMA_CANDIDATE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" LIMA_ROLLOUT_LOG="$ROLLOUT_LOG" \
+  LIMA_ACTIVE_RELEASE_FILE="$ACTIVE_RELEASE_FILE" LIMA_CANDIDATE_REF="$LIMA_CANDIDATE_REF" \
+  LIMA_CANDIDATE_ID="$LIMA_CANDIDATE_ID" \
+  bash "$TMP_DIR/lima-success-regression.sh" > "$TMP_DIR/lima-success.out" 2> "$TMP_DIR/lima-success.err"; then
+  stop_line=$(grep -nF 'compose previous-image stop teagramd' "$ROLLOUT_LOG" | cut -d: -f1)
+  migrate_line=$(grep -nF 'compose '"$LIMA_CANDIDATE_REF"' run --rm -T --no-deps migrate' "$ROLLOUT_LOG" | cut -d: -f1)
+  start_line=$(grep -nF 'compose '"$LIMA_CANDIDATE_REF"' up -d --no-deps --force-recreate --wait --wait-timeout 120 teagramd' \
+    "$ROLLOUT_LOG" | cut -d: -f1)
+  health_line=$(grep -nFx 'health-check' "$ROLLOUT_LOG" | cut -d: -f1)
+  release_line=$(grep -nF 'active-release teagramd '"$LIMA_CANDIDATE_REF" "$ROLLOUT_LOG" | cut -d: -f1)
+  record_line=$(grep -nFx 'record-success' "$ROLLOUT_LOG" | cut -d: -f1)
+  prune_line=$(grep -nF 'prune '"$LIMA_CANDIDATE_ID" "$ROLLOUT_LOG" | cut -d: -f1)
+  if [[ -n "$stop_line" && -n "$migrate_line" && -n "$start_line" &&
+    -n "$health_line" && -n "$release_line" && -n "$record_line" && -n "$prune_line" ]] &&
+    (( stop_line < migrate_line && migrate_line < start_line && start_line < health_line &&
+      health_line < release_line && release_line < record_line && record_line < prune_line )) &&
+    grep -Fqx "teagramd $LIMA_CANDIDATE_REF" "$ACTIVE_RELEASE_FILE" &&
+    grep -Fq 'lima demo deployed revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$TMP_DIR/lima-success.out"; then
+    ok 'healthy candidate rollout exits zero and records the active release after health'
+  else
+    not_ok 'healthy candidate rollout exits zero and records the active release after health'
+  fi
+else
+  not_ok 'healthy candidate rollout exits zero and records the active release after health'
+fi
+
 cat > "$TMP_DIR/lima-rollback-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$CLEANUP_FUNCTION"

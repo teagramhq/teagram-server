@@ -55,13 +55,58 @@ lima_backup_database() {
   chown root:root "$dump"
   chmod 0600 "$dump"
   [[ -s "$dump" ]] || { demo_fail 'lima database dump is empty'; return 1; }
-  lima_compose "$PREV_IMAGE_REF" exec -T postgres pg_restore --list < "$dump" > /dev/null || {
+  # pg_restore must receive the dump on stdin. lima_compose drains stdin for
+  # commands that do not read input, so this call runs Compose directly.
+  env -i PATH="$PATH" HOME=/root TEAGRAM_DEMO_IMAGE_REF="$PREV_IMAGE_REF" \
+    docker compose --env-file "$ENV_FILE" --project-directory "$REPO_ROOT" \
+      --file "$SCRIPT_DIR/compose.yaml" --project-name teagram-demo \
+      exec -T postgres pg_restore --list < "$dump" > /dev/null || {
     demo_fail 'lima database dump failed its restore-list check'
     return 1
   }
   sha256sum "$dump" > "$BACKUP_DIR/postgres.dump.sha256"
   chown root:root "$BACKUP_DIR/postgres.dump.sha256"
   chmod 0600 "$BACKUP_DIR/postgres.dump.sha256"
+}
+
+lima_rollout_candidate() {
+  # Pull and verify the new image only after the read-only preflight, old-image
+  # rollback check, health checks, and verified database backup have succeeded.
+  CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
+  CANDIDATE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE_REF")
+  [[ "$CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'lima candidate image ID is invalid'
+
+  OLD_SERVER_STOPPED=1
+  lima_compose "$PREV_IMAGE_REF" stop teagramd
+  lima_compose "$PREV_IMAGE_REF" rm -f teagramd
+
+  # Keep migrations separate from rollback. If the candidate fails, rollback
+  # changes only the server image and never restores or otherwise touches data.
+  lima_compose "$CANDIDATE_IMAGE_REF" run --rm -T --no-deps migrate
+  CANDIDATE_STARTED=1
+  lima_compose "$CANDIDATE_IMAGE_REF" up -d --no-deps --force-recreate \
+    --wait --wait-timeout 120 teagramd
+  lima_wait_health || demo_fail 'new lima server did not pass /healthz within 60 seconds'
+  mapfile -t candidate_ids < <(lima_compose "$CANDIDATE_IMAGE_REF" ps --status running -q teagramd)
+  ((${#candidate_ids[@]} == 1)) || demo_fail 'new lima server is missing or ambiguous after health check'
+  CANDIDATE_RUNNING_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${candidate_ids[0]}")
+  [[ "$CANDIDATE_RUNNING_IMAGE_ID" == "$CANDIDATE_IMAGE_ID" ]] || demo_fail 'running lima server image differs from the verified candidate'
+  [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_RUNNING_IMAGE_ID")" == "$SHA" ]] ||
+    demo_fail 'running lima server revision does not match the requested SHA'
+
+  if [[ -n "$PREV_WEB_RELEASE" ]]; then
+    demo_write_active_release teagramd "$CANDIDATE_IMAGE_REF" \
+      "${PREV_WEB_RELEASE%% *}" "sha256:${PREV_WEB_RELEASE#* }"
+  else
+    demo_write_active_release teagramd "$CANDIDATE_IMAGE_REF"
+  fi
+  ACTIVE_RELEASE_UPDATED=1
+  demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF" \
+    "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
+  DEPLOY_COMMITTED=1
+  demo_prune_images "$CANDIDATE_IMAGE_ID"
+  printf 'lima demo deployed revision=%s previous_revision=%s backup=%s healthz=passed\n' \
+    "$SHA" "$PREV_IMAGE_REVISION" "$BACKUP_DIR"
 }
 
 lima_cleanup() {
@@ -167,41 +212,4 @@ BACKUP_DIR="$DEMO_STATE_DIR/backups/lima-deploy-${SHA:0:12}-$TS"
 install -d -o root -g root -m 0700 "$DEMO_STATE_DIR/backups" "$BACKUP_DIR"
 [[ "$(stat -c '%u:%a' "$BACKUP_DIR")" == '0:700' ]] || demo_fail 'lima backup directory must be root-owned mode 0700'
 lima_backup_database
-
-# Pull and verify the new image only after the read-only preflight, old-image
-# rollback check, health checks, and verified database backup have succeeded.
-CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
-CANDIDATE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE_REF")
-[[ "$CANDIDATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'lima candidate image ID is invalid'
-
-OLD_SERVER_STOPPED=1
-lima_compose "$PREV_IMAGE_REF" stop teagramd
-lima_compose "$PREV_IMAGE_REF" rm -f teagramd
-
-# Keep migrations separate from rollback. If the candidate fails, rollback
-# changes only the server image and never restores or otherwise touches data.
-lima_compose "$CANDIDATE_IMAGE_REF" run --rm -T --no-deps migrate
-CANDIDATE_STARTED=1
-lima_compose "$CANDIDATE_IMAGE_REF" up -d --no-deps --force-recreate \
-  --wait --wait-timeout 120 teagramd
-lima_wait_health || demo_fail 'new lima server did not pass /healthz within 60 seconds'
-mapfile -t candidate_ids < <(lima_compose "$CANDIDATE_IMAGE_REF" ps --status running -q teagramd)
-((${#candidate_ids[@]} == 1)) || demo_fail 'new lima server is missing or ambiguous after health check'
-CANDIDATE_RUNNING_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${candidate_ids[0]}")
-[[ "$CANDIDATE_RUNNING_IMAGE_ID" == "$CANDIDATE_IMAGE_ID" ]] || demo_fail 'running lima server image differs from the verified candidate'
-[[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_RUNNING_IMAGE_ID")" == "$SHA" ]] ||
-  demo_fail 'running lima server revision does not match the requested SHA'
-
-if [[ -n "$PREV_WEB_RELEASE" ]]; then
-  demo_write_active_release teagramd "$CANDIDATE_IMAGE_REF" \
-    "${PREV_WEB_RELEASE%% *}" "sha256:${PREV_WEB_RELEASE#* }"
-else
-  demo_write_active_release teagramd "$CANDIDATE_IMAGE_REF"
-fi
-ACTIVE_RELEASE_UPDATED=1
-demo_record_successful_image "$SHA" "$CANDIDATE_IMAGE_ID" "$CANDIDATE_IMAGE_REF" \
-  "$PREV_IMAGE_REVISION" "$PREV_IMAGE_ID" "$PREV_IMAGE_REF"
-DEPLOY_COMMITTED=1
-demo_prune_images "$CANDIDATE_IMAGE_ID"
-printf 'lima demo deployed revision=%s previous_revision=%s backup=%s healthz=passed\n' \
-  "$SHA" "$PREV_IMAGE_REVISION" "$BACKUP_DIR"
+lima_rollout_candidate
