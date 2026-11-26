@@ -45,7 +45,11 @@ const (
 
 func main() {
 	runtime.GOMAXPROCS(1)
-	debug.SetMemoryLimit(workerGoMemoryLimit)
+	workerMemoryLimit := debug.SetMemoryLimit(-1)
+	if workerMemoryLimit < 0 || workerMemoryLimit > workerGoMemoryLimit {
+		workerMemoryLimit = workerGoMemoryLimit
+	}
+	debug.SetMemoryLimit(workerMemoryLimit)
 	if err := setWorkerLimits(); err != nil {
 		fail(err)
 	}
