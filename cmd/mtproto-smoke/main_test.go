@@ -102,14 +102,44 @@ func TestReadSmokeProfilePhotoRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
-func TestValidateMediaPhotoUpdatesRequiresSentPhoto(t *testing.T) {
+func TestValidateMediaPhotoUpdatesRequiresSentPhotoAndThumbnails(t *testing.T) {
 	t.Parallel()
 
 	valid := &tg.Updates{Updates: []tg.UpdateClass{
-		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1}}}},
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{
+			ID: 1,
+			Sizes: []tg.PhotoSizeClass{
+				&tg.PhotoStrippedSize{Type: "i", Bytes: []byte{1, 40, 40, 0xff}},
+				&tg.PhotoSize{Type: "m", W: 320, H: 320, Size: 120},
+				&tg.PhotoSize{Type: "w", W: 1600, H: 1600, Size: 10_000},
+			},
+		}}}},
 	}}
 	if err := validateMediaPhotoUpdates(valid); err != nil {
 		t.Fatalf("validate media photo updates: %v", err)
+	}
+
+	fallback := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{
+			ID:    1,
+			Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "w", W: 1600, H: 1600, Size: 10_000}},
+		}}}},
+	}}
+	if err := validateMediaPhotoUpdates(fallback); err == nil || !strings.Contains(err.Error(), "stripped thumbnail") {
+		t.Fatalf("validate original-only fallback error = %v, want missing stripped thumbnail", err)
+	}
+
+	missingM := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{
+			ID: 1,
+			Sizes: []tg.PhotoSizeClass{
+				&tg.PhotoStrippedSize{Type: "i", Bytes: []byte{1, 40, 40, 0xff}},
+				&tg.PhotoSize{Type: "w", W: 1600, H: 1600, Size: 10_000},
+			},
+		}}}},
+	}}
+	if err := validateMediaPhotoUpdates(missingM); err == nil || !strings.Contains(err.Error(), "m thumbnail") {
+		t.Fatalf("validate photo without m thumbnail error = %v, want missing m thumbnail", err)
 	}
 
 	invalid := &tg.Updates{Updates: []tg.UpdateClass{
