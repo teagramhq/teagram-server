@@ -1,0 +1,1 @@
+teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy

@@ -2,7 +2,27 @@
 
 DEMO_SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEMO_REPO_ROOT=$(cd -P "$DEMO_SCRIPT_DIR/../.." && pwd)
-DEMO_ENV_FILE="$DEMO_SCRIPT_DIR/.env"
+DEMO_DEPLOY_TARGET=${DEMO_DEPLOY_TARGET:-charlie}
+if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
+  DEMO_ENV_FILE=${TEAGRAM_DEMO_LIMA_ENV_FILE:-/var/lib/teagram-demo/lima.env}
+  DEMO_COMPOSE_FILE="$DEMO_SCRIPT_DIR/lima/compose.yaml"
+  DEMO_COMPOSE_ARGS=(
+    --env-file "$DEMO_ENV_FILE"
+    --project-directory "$DEMO_REPO_ROOT"
+    --project-name teagram-demo
+    --file "$DEMO_COMPOSE_FILE"
+  )
+else
+  DEMO_ENV_FILE="$DEMO_SCRIPT_DIR/.env"
+  DEMO_COMPOSE_FILE="$DEMO_REPO_ROOT/docker-compose.yml"
+  DEMO_COMPOSE_ARGS=(
+    --env-file "$DEMO_ENV_FILE"
+    --project-directory "$DEMO_REPO_ROOT"
+    --project-name teagram-demo
+    --file "$DEMO_COMPOSE_FILE"
+    --profile demo
+  )
+fi
 # These variables are shared with scripts that source this file.
 # shellcheck disable=SC2034
 DEMO_STATE_DIR="$DEMO_REPO_ROOT/.state/teagram-demo"
@@ -37,14 +57,6 @@ DEMO_SEED_OWNER_USERNAME="demo_seed_owner"
 # shellcheck disable=SC2034
 DEMO_IMAGE_REPOSITORY="ghcr.io/teagramhq/teagram-server-demo"
 DEMO_ACTIVE_RELEASE_FILE="$DEMO_STATE_DIR/active-release.json"
-DEMO_COMPOSE_ARGS=(
-  --env-file "$DEMO_ENV_FILE"
-  --project-directory "$DEMO_REPO_ROOT"
-  --project-name teagram-demo
-  --file "$DEMO_REPO_ROOT/docker-compose.yml"
-  --profile demo
-)
-
 demo_fail() {
   printf 'teagram-demo: %s\n' "$1" >&2
   return 1
@@ -601,6 +613,10 @@ demo_ensure_qa_bypass_token() {
 }
 
 demo_require_env() {
+  if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
+    "$DEMO_SCRIPT_DIR/lima/check.sh"
+    return $?
+  fi
   [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
     demo_fail 'deploy/teagram-demo/.env is missing or not a regular file'
     return 1
@@ -1004,12 +1020,16 @@ demo_compose_with_file() {
     --project-directory "$DEMO_REPO_ROOT"
     --project-name teagram-demo
   )
-  if [[ "$compose_file" != "$DEMO_REPO_ROOT/docker-compose.yml" ]]; then
+  if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
+    compose_args+=(--file "$DEMO_COMPOSE_FILE")
+  elif [[ "$compose_file" != "$DEMO_REPO_ROOT/docker-compose.yml" ]]; then
     compose_args+=(--file "$compose_file")
   else
     compose_args+=(--file "$DEMO_REPO_ROOT/docker-compose.yml")
   fi
-  compose_args+=(--profile demo)
+  if [[ "$DEMO_DEPLOY_TARGET" != lima ]]; then
+    compose_args+=(--profile demo)
+  fi
   shift
   demo_prepare_runtime_tmp_dirs_for_up "$@" || return 1
   if ! image_ref=$(demo_compose_image_ref); then
@@ -1024,7 +1044,10 @@ demo_compose_with_file() {
 }
 
 demo_compose() {
-  local arg server=''
+  local arg server='' compose_file="$DEMO_REPO_ROOT/docker-compose.yml"
+  if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
+    compose_file="$DEMO_COMPOSE_FILE"
+  fi
   if [[ "${1:-}" == up ]]; then
     for arg in "$@"; do
       case "$arg" in
@@ -1036,7 +1059,7 @@ demo_compose() {
     demo_seed_compose stop "$server" || return 1
     demo_seed_compose rm -f "$server" || return 1
   fi
-  demo_compose_with_file "$DEMO_REPO_ROOT/docker-compose.yml" "$@"
+  demo_compose_with_file "$compose_file" "$@"
 }
 
 demo_validation_compose() {

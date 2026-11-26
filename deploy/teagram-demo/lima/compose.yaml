@@ -10,8 +10,7 @@
 # password and the tunnel token. Never print it into a log or a comment.
 #
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
-# MiB) of all long-running services add up to 199 MiB even with the candidate
-# profile enabled; migrate is one-shot.
+# MiB) of all long-running services add up to 155 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
 # 198.18.133.0/24. The egress-isolation rules in DOCKER-USER name these.
 
@@ -52,7 +51,7 @@ x-server-environment: &server-environment
   TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
   HTTP_PROXY: http://turnstile-egress:3128
   HTTPS_PROXY: http://turnstile-egress:3128
-  NO_PROXY: localhost,127.0.0.1,postgres,teagramd,teagramd-next
+  NO_PROXY: localhost,127.0.0.1,postgres,teagramd
   TG_REPLICA_COUNT: "1"
   TG_CLIENT_ADDR_TRUST: proxy-v2
   TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
@@ -64,7 +63,7 @@ x-server-environment: &server-environment
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
   # Soft limit below the 44 MiB container limit, so the collector runs before
-  # the kernel OOM-kills either server slot.
+  # the kernel OOM-kills the server.
   GOMEMLIMIT: 20MiB
 
 x-server: &server
@@ -159,15 +158,6 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.253
-
-  # Rollout candidate. Both server slots are included in the 199 MiB limit sum
-  # when this profile is enabled.
-  teagramd-next:
-    <<: *server
-    profiles: [candidate]
-    networks:
-      backend:
-        ipv4_address: 198.18.130.251
 
   turnstile-egress:
     image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb

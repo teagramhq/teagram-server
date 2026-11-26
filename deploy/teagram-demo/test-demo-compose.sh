@@ -2030,28 +2030,12 @@ env \
   PRUNE_FUNCTION="$PRUNE_FUNCTION" \
   bash "$TMP_DIR/backup-prune-regression.sh"
 
-IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
+IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-image-retention-cleanup.sh"
 printf '%s\n' 'DEMO_ENV_BACKUP=' > "$IMAGE_CLEANUP_FUNCTION"
 sed -n \
   -e '/^demo_cleanup() {$/,/^}/p' \
-  -e '/^demo_remove_previous_image() {$/,/^}/p' \
   -e '/^demo_restore_env_after_rollback() {$/,/^}/p' \
   "$SCRIPT_DIR/deploy-main.sh" >> "$IMAGE_CLEANUP_FUNCTION"
-cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
-set -Eeuo pipefail
-source "$IMAGE_CLEANUP_FUNCTION"
-DOCKER_CALLS="$TMP_DIR/docker-image-calls"
-docker() { printf '%s\n' "$*" >> "$DOCKER_CALLS"; }
-demo_remove_previous_image sha256:previous sha256:active
-[[ "$(cat "$DOCKER_CALLS")" == 'image rm sha256:previous' ]]
-: > "$DOCKER_CALLS"
-demo_remove_previous_image sha256:active sha256:active
-[[ ! -s "$DOCKER_CALLS" ]]
-BASH
-env \
-  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
-  TMP_DIR="$TMP_DIR" \
-  bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
 LEGACY_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/demo-restore-legacy-edge.sh"
 sed -n '/^demo_restore_legacy_edge_after_rollback() {$/,/^}/p' \
@@ -2253,35 +2237,35 @@ fi
 cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
-PUBLIC_ACTIVATION_STARTED=1
-BACKUP_READY=1
+BACKUP_READY=0
+CUTOVER_COMMITTED=0
+EDGE_CONFIG_RELOAD_ATTEMPTED=0
 DEMO_PROXY_TMPFS_ATTEMPTED=()
-SERVICES_STOPPED=1
+PREV_IMAGE_ID=sha256:previous
+CANDIDATE_IMAGE_ID=
+DEMO_IMAGE_HISTORY_FILE="$TMP_DIR/successful-images.json"
+printf '[]\n' > "$DEMO_IMAGE_HISTORY_FILE"
+chmod 0600 "$DEMO_IMAGE_HISTORY_FILE"
 RESTORE_DB=
 RESTORE_DB_CREATED=0
 TEST_TMP_DIR="$TMP_DIR"
 TMP_DIR=
-DEPLOY_CONTINUED="$TEST_TMP_DIR/deploy-continued"
-PRESERVE_CALLED="$TEST_TMP_DIR/preserve-called"
-demo_preserve_after_activation_failure() { : > "$PRESERVE_CALLED"; }
-docker() {
-  [[ "$*" == 'image rm sha256:previous' ]] || return 0
+PRUNE_CALLS="$TEST_TMP_DIR/prune-failure-calls"
+demo_prune_images() {
+  printf '%s\n' "$*" >> "$PRUNE_CALLS"
   return 1
 }
 trap demo_cleanup EXIT
-demo_remove_previous_image sha256:previous sha256:active
-BACKUP_READY=0
-: > "$DEPLOY_CONTINUED"
+false
 BASH
-if ! env \
+if env \
   IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-failure-regression.sh"; then
-  printf '%s\n' 'deploy failed after previous-image cleanup failed' >&2
+  printf '%s\n' 'cleanup accepted a failed image-retention prune' >&2
   exit 1
 fi
-[[ -e "$TMP_DIR/deploy-continued" ]]
-[[ ! -e "$TMP_DIR/preserve-called" ]]
+[[ "$(<"$TMP_DIR/prune-failure-calls")" == 'sha256:previous' ]]
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n '/^demo_backup_database() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"
@@ -2482,4 +2466,5 @@ bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
 "$SCRIPT_DIR/test-demo-scheduling.sh"
 "$SCRIPT_DIR/lima/test-lima-compose.sh"
+"$SCRIPT_DIR/lima/test-deploy-contract.sh"
 printf 'demo Compose contract holds\n'

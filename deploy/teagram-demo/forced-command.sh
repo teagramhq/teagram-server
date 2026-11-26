@@ -68,8 +68,13 @@ if [[ "$ACTION" == server ]]; then
 
   git -C "$REPO" reset --hard "$SHA"
   deploy_rc=0
-  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
-    bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
+  if [[ "${DEMO_DEPLOY_TARGET:-charlie}" == lima ]]; then
+    DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
+      bash "$REPO/deploy/teagram-demo/lima/deploy-main.sh" || deploy_rc=$?
+  else
+    DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
+      bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
+  fi
   if (( deploy_rc != 0 )); then
     git -C "$REPO" reset --hard "$previous" || {
       echo "deploy failed and checkout restore failed; requested=$SHA previous=$previous" >&2
@@ -80,6 +85,10 @@ if [[ "$ACTION" == server ]]; then
 fi
 
 if [[ "$ACTION" == qa-invite ]]; then
+  if [[ "${DEMO_DEPLOY_TARGET:-charlie}" == lima ]]; then
+    echo 'qa-invite operations remain pinned to charlie' >&2
+    exit 1
+  fi
   git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main || {
     echo "$SHA is not on origin/main; refusing" >&2
     exit 1

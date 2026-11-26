@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+
+description="Teagram demo deploy SSH listener"
+supervisor=supervise-daemon
+command=/usr/sbin/sshd
+command_args="-D -e -f /etc/ssh/teagram-demo-deploy_sshd_config"
+supervise_daemon_args="--respawn-delay 2 --respawn-max 5 --respawn-period 60"
+
+depend() {
+  need net
+  after tailscale
+}

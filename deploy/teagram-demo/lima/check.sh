@@ -17,7 +17,7 @@ BLOB_DATA=$BLOB_MOUNT/data
 BLOB_MIN_BYTES=$((3 * 1024 * 1024 * 1024))
 BLOB_MAX_BYTES=$((4 * 1024 * 1024 * 1024))
 MEMORY_BUDGET_BYTES=$((200 * 1024 * 1024))
-COMPOSE_RENDER_COMMAND='docker compose --env-file <lima.env> --project-directory <checkout> -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo --profile candidate config --format json'
+COMPOSE_RENDER_COMMAND='docker compose --env-file <lima.env> --project-directory <checkout> -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo config --format json'
 DEMO_SUBNETS=(198.18.130.0/24 198.18.132.0/24 198.18.133.0/24)
 REQUIRED_ENV_KEYS=(POSTGRES_PASSWORD TG_PUBLIC_LINK_PREFIX TG_AUTHKEY_ENC_KEY TEAGRAM_DEMO_TURNSTILE_SITE_KEY TEAGRAM_DEMO_IMAGE_REF)
 SECRET_FILES=(turnstile-secret-key turnstile-qa-bypass-token)
@@ -128,7 +128,7 @@ render_config() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
     docker compose --env-file "$ENV_FILE" --project-directory "$REPO_ROOT" \
-    -f "$COMPOSE_FILE" --project-name teagram-demo --profile candidate \
+    -f "$COMPOSE_FILE" --project-name teagram-demo \
     config --format json 2>&1 1>&"$stdout_fd") || status=$?
   exec {stdout_fd}>&-
   if ((status != 0)); then
@@ -162,9 +162,16 @@ check_config_shape() {
     pass config-qa-invite
   fi
 
-  if ! jq -e '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"' \
+  if ! jq -e '.services.edge.ports | any(.host_ip == "127.0.0.1" and (.published | tostring) == "8080" and (.target | tostring) == "8080")' \
     <<<"$CONFIG_JSON" >/dev/null; then
-    fail postgres-pool "both server pools must set TG_PG_MAX_CONNS=3 for the 49 MiB postgres limit"
+    fail edge-health-bind "edge must publish loopback port 8080 for the local /healthz rollout check"
+  else
+    pass edge-health-bind
+  fi
+
+  if ! jq -e '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)' \
+    <<<"$CONFIG_JSON" >/dev/null; then
+    fail postgres-pool "the single server must set TG_PG_MAX_CONNS=3 and there must be no candidate service"
   else
     pass postgres-pool
   fi
@@ -188,7 +195,7 @@ check_config_shape() {
     if (( sum > MEMORY_BUDGET_BYTES )); then
       fail mem-limits "all services except one-shot migrate total $((sum / 1048576)) MiB, budget is 200 MiB"
     else
-      pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB with candidate enabled)"
+      pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB)"
     fi
   fi
 
