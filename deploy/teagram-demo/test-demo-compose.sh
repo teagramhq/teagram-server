@@ -748,6 +748,7 @@ PY
         fi
       done
       [[ -f "$config_file" && "${args[-3]} ${args[-2]} ${args[-1]}" == 'config --hash edge' ]] || return 1
+      # shellcheck disable=SC2031 # This stub is exercised with an isolated state-directory override.
       jq -e \
         --slurpfile current "$MOCK_CURRENT_RENDER" \
         --arg legacyFile "$DEMO_SCRIPT_DIR/nginx.conf" \
@@ -945,6 +946,7 @@ PY
         elif [[ "$state" == old ]]; then
           printf '[]\n'
         else
+          # shellcheck disable=SC2031 # This stub reads the current test's isolated state directory.
           local source="$DEMO_STATE_DIR/tmp/$service"
           [[ "$service" != "$MIGRATION_BAD_BIND_SERVICE" ]] || source="$MIGRATION_TEST_DIR/unexpected"
           jq -n --arg source "$source" '[{Type:"bind",Source:$source,Destination:"/tmp",RW:true}]'
