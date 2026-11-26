@@ -95,13 +95,16 @@ browser-only settings. It peaked at 39.13 MiB (41,029,632 bytes), with
 `memory.max=46,137,344`, `max=0`, `oom=0`, and `oom_kill=0`; both uploads passed
 ([CI job](https://github.com/teagramhq/teagram-server/actions/runs/45721450279/job/139580703653)).
 The current gate runs three times on each head in a 46 MiB cgroup with
-`GOMEMLIMIT=20MiB` and fails unless each run stays at or below 44 MiB. Earlier
-44 MiB-capped runs completed the same synchronized uploads successfully. The
-run on PR head `e1b212ae3457194d5500219bbfc76c6593f4e58e` peaked at 43.00,
+`GOMEMLIMIT=18MiB` and fails unless each run stays at or below 44 MiB. The
+previous 20 MiB soft limit reached 44.31 MiB and 44.04 MiB on PR head
+`fab6469765ac507753abbba443ee2e42559e9b00`, leaving less than the required
+two-MiB margin. The lower limit keeps that margin under concurrent uploads; the
+46 MiB cap remains within the 200 MiB Lima budget. Earlier 44 MiB-capped runs
+completed the same synchronized uploads successfully. The run on PR head
+`e1b212ae3457194d5500219bbfc76c6593f4e58e` peaked at 43.00,
 40.13, and 41.98 MiB; the first exceeded the former 42 MiB threshold, although
-all uploads passed and `max`, `oom`, and `oom_kill` stayed at zero. The expanded
-46 MiB cap keeps the two-MiB runtime margin and remains within the 200 MiB Lima
-budget. On PR head `9d960759718f21e34998f4cf33524e1742c2401f`, the prior
+all uploads passed and `max`, `oom`, and `oom_kill` stayed at zero. On PR head
+`9d960759718f21e34998f4cf33524e1742c2401f`, the prior
 44 MiB gate had peaks of 35.87, 36.16, and 40.22 MiB; each run reported
 `max=0`, `oom=0`, and `oom_kill=0` ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
 

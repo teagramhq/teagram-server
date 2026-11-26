@@ -66,9 +66,9 @@ x-server-environment: &server-environment
   TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
-  # Soft limit below the 46 MiB container limit, so the collector runs before
-  # the kernel OOM-kills the server.
-  GOMEMLIMIT: 20MiB
+  # Soft limit leaves extra room below the 46 MiB container limit for
+  # non-heap memory and concurrent uploads.
+  GOMEMLIMIT: 18MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}

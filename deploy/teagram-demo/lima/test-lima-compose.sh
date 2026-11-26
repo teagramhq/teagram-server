@@ -296,8 +296,14 @@ expect 'criterion 2: long-running limits total exactly 157 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 157 * 1048576'
 expect 'criterion 2: only the single server pool is capped at three' \
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)'
-expect 'criterion 2: server has a 46 MiB limit and 20 MiB Go heap limit' \
-  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "20MiB"'
+expect 'criterion 2: server has a 46 MiB limit and 18 MiB Go memory limit' \
+  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "18MiB"'
+PROBE_GOMEMLIMIT=$(sed -n 's/^LIMA_GOMEMLIMIT=//p' "$REPO_ROOT/.github/scripts/test-lima-server-memory.sh")
+if [[ $PROBE_GOMEMLIMIT == "$(jq -r '.services.teagramd.environment.GOMEMLIMIT' "$LIMA_JSON")" ]]; then
+  ok 'criterion 2: memory probe uses the Lima Go memory limit'
+else
+  not_ok 'criterion 2: memory probe uses the Lima Go memory limit'
+fi
 expect 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \
