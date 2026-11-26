@@ -9,7 +9,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | File | Purpose |
 | --- | --- |
 | `compose.yaml` | The stack: postgres, migrate, teagramd, teagramd-next (profile `candidate`), turnstile-egress, haproxy, edge, cloudflared. |
-| `postgresql.conf` | Postgres settings sized for its 56 MiB limit. |
+| `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
 | `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem. Run once at cutover. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |

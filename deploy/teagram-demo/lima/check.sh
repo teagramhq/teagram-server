@@ -164,7 +164,7 @@ check_config_shape() {
 
   if ! jq -e '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and .services["teagramd-next"].environment.TG_PG_MAX_CONNS == "3"' \
     <<<"$CONFIG_JSON" >/dev/null; then
-    fail postgres-pool "both server pools must set TG_PG_MAX_CONNS=3 for the 56 MiB postgres limit"
+    fail postgres-pool "both server pools must set TG_PG_MAX_CONNS=3 for the 49 MiB postgres limit"
   else
     pass postgres-pool
   fi
