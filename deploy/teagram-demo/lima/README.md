@@ -12,6 +12,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
 | `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
 | `install-egress-isolation.sh` | Root, idempotent: installs source-scoped `DOCKER-USER` and host `INPUT` rules and enables ordered OpenRC firewall and stack services. |
+| `egress-isolation-threat-model.md` | Scope, trust boundaries, controls, and residual risks for the Lima demo firewall policy. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
@@ -23,7 +24,7 @@ Nothing secret is in the repository.
 
 | Path | Mode | Contents |
 | --- | --- | --- |
-| `/var/lib/teagram-demo/lima.env` | root:root 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, `TEAGRAM_DEMO_IMAGE_REF` (a `name@sha256:` reference), and the `TG_RSA_KEY_FINGERPRINT` written by identity import. |
+| `/var/lib/teagram-demo/lima.env` | root:root 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, the bootstrap `TEAGRAM_DEMO_IMAGE_REF` (`name@sha256:`), and the `TG_RSA_KEY_FINGERPRINT` written by identity import. Once present, `.state/teagram-demo/active-release.json` selects the validated active image on boot. |
 | `/var/lib/teagram-demo/secrets/` | root:root 0700 | Directory. |
 | `.../secrets/turnstile-secret-key` | root:65532 0440 | Siteverify secret, readable by the server uid through its group. |
 | `.../secrets/turnstile-qa-bypass-token` | root:65532 0440 | QA bypass token, readable by the server uid through its group. |
@@ -191,16 +192,18 @@ IPv6 updates without removing an existing IPv6 chain; `check` rejects until all
 three networks exist. The stack service creates the networks without starting
 containers, reapplies IPv4 and IPv6 rules, then starts the stack.
 
-OpenRC enables `teagram-demo-egress` after Docker and `teagram-demo-stack` after
-the firewall service. Every Compose service has `restart: "no"`; OpenRC starts
-the stack only after isolation is installed. The installer also disables
-restart policies on existing demo containers. Start and stop the stack with
-`rc-service teagram-demo-stack start|stop`; invoking Compose directly bypasses
-the ordering guarantee. If Docker restarts or crashes after boot, the stack
-stays stopped; after Docker is healthy again, run
-`rc-service teagram-demo-stack restart`. The read-only `check` mode reports
-missing, duplicate, misordered or drifted hooks and chain rules without
-changing them.
+OpenRC enables `teagram-demo-egress` after Docker and a supervised
+`teagram-demo-stack` service after the firewall service. Every Compose service
+has `restart: "no"`, so dockerd cannot start demo containers before OpenRC has
+installed isolation. The stack supervisor creates the networks, applies the
+rules, and then starts Compose; every ten seconds it checks the six long-running
+services and restarts stopped services after reapplying the rules. It retries
+while dockerd is unavailable and shares the deploy lock, so it does not start an
+old release during a rollout. OpenRC respawns the supervisor if it exits. Its
+output is sent to syslog with the `teagram-demo-stack` tag. Start and stop the
+stack with `rc-service teagram-demo-stack start|stop`; invoking Compose directly
+bypasses the ordering guarantee. The read-only `check` mode reports missing,
+duplicate, misordered or drifted hooks and chain rules without changing them.
 
 On Lima, run the probe as root after the Compose stack is up:
 
@@ -211,10 +214,11 @@ python3 deploy/teagram-demo/probe_tailnet_isolation.py
 The probe first confirms the tailnet peer, Lima's private default-route
 gateway, and each demo bridge gateway answer from the host namespace, then
 enters the running `turnstile-egress` container's network namespace. It
-requires timeouts to those gateways and Lima's own private/tailnet addresses,
-then requires Docker embedded DNS and a verified HTTPS response from
-`example.com`. The existing `--charlie` mode keeps teagram-dev's host-network
-checks for its Turnstile rollout.
+requires timeouts to those gateways and Lima's own private addresses; it adds
+Lima's IPv6 tailnet address only when Docker reports IPv6 enabled on the
+`teagram-demo_egress` network. It then requires Docker embedded DNS and a
+verified HTTPS response from `example.com`. The existing `--charlie` mode keeps
+teagram-dev's host-network checks for its Turnstile rollout.
 
 To roll the firewall change back, run as root:
 

@@ -37,6 +37,8 @@ readonly -a BLOCKED_IPV6_CIDRS=(
 IPV6_SUBNETS=()
 MISSING_DEMO_NETWORKS=()
 CHAIN_LISTING=''
+STACK_LOCK_ACQUIRED=0
+STACK_LOCK_SKIPPED=0
 
 fail() {
   printf 'demo egress isolation: %s\n' "$1" >&2
@@ -206,19 +208,6 @@ chain_listing_error() {
   esac
 }
 
-require_firewall_rule() {
-  local description=$1 first_line output status
-  shift
-  if output=$("$@" 2>&1); then
-    return 0
-  else
-    status=$?
-  fi
-  first_line=${output%%$'\n'*}
-  [[ -n $first_line ]] || first_line='no diagnostic was returned'
-  fail "$description (exit $status): $first_line"
-}
-
 apply_family() {
   local binary=$1 family=$2
   shift 2
@@ -239,8 +228,7 @@ apply_family() {
     status=$?
     chain_listing_error "$binary" INPUT "$status" "$binary has no INPUT chain"
   fi
-  require_firewall_rule "$binary has no FORWARD hook to DOCKER-USER" \
-    "$binary" -w 10 -C FORWARD -j DOCKER-USER
+  ensure_forward_hook "$binary"
   rendered_rules=$(render_rules "$family" "${subnets[@]}") \
     || fail "$family isolation rules could not be rendered"
   for chain in "$IPTABLES_CHAIN" "$IPTABLES_INPUT_CHAIN"; do
@@ -321,6 +309,56 @@ ensure_source_hooks() {
       "$binary" -w 10 -D "$parent_chain" "$((index + 1))"
     fi
   done
+}
+
+ensure_forward_hook() {
+  local binary=$1 listing status index hook_count=0 rule
+  local -a forward_rules=()
+
+  if chain_listing "$binary" FORWARD; then
+    listing=$CHAIN_LISTING
+  else
+    status=$?
+    chain_listing_error "$binary" FORWARD "$status" "$binary is missing FORWARD"
+  fi
+  mapfile -t forward_rules < <(sed -n '/^-A FORWARD /p' <<<"$listing")
+  for rule in "${forward_rules[@]}"; do
+    if [[ "$rule" == '-A FORWARD -j DOCKER-USER' ]]; then
+      ((hook_count += 1))
+    fi
+  done
+  if [[ "${forward_rules[0]:-}" == '-A FORWARD -j DOCKER-USER' ]] \
+    && (( hook_count == 1 )); then
+    return 0
+  fi
+
+  for ((index = ${#forward_rules[@]} - 1; index >= 0; index--)); do
+    if [[ "${forward_rules[$index]}" == '-A FORWARD -j DOCKER-USER' ]]; then
+      "$binary" -w 10 -D FORWARD "$((index + 1))"
+    fi
+  done
+  "$binary" -w 10 -I FORWARD 1 -j DOCKER-USER
+}
+
+check_forward_hook() {
+  local binary=$1 family=$2 listing status rule hook_count=0
+  local -a forward_rules=()
+
+  if chain_listing "$binary" FORWARD; then
+    listing=$CHAIN_LISTING
+  else
+    status=$?
+    chain_listing_error "$binary" FORWARD "$status" "$binary is missing FORWARD for $family"
+  fi
+  mapfile -t forward_rules < <(sed -n '/^-A FORWARD /p' <<<"$listing")
+  [[ "${forward_rules[0]:-}" == '-A FORWARD -j DOCKER-USER' ]] \
+    || fail "$family FORWARD hook is missing or shadowed"
+  for rule in "${forward_rules[@]}"; do
+    if [[ "$rule" == '-A FORWARD -j DOCKER-USER' ]]; then
+      ((hook_count += 1))
+    fi
+  done
+  [[ "$hook_count" -eq 1 ]] || fail "$family FORWARD hook is duplicated"
 }
 
 remove_family() {
@@ -430,8 +468,7 @@ check_family() {
   check_source_hooks "$binary" "$family" DOCKER-USER "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
   check_source_hooks "$binary" "$family" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" \
     "$INPUT_BRIDGE_INTERFACE" "${subnets[@]}"
-  require_firewall_rule "$family FORWARD hook to DOCKER-USER is missing" \
-    "$binary" -w 10 -C FORWARD -j DOCKER-USER
+  check_forward_hook "$binary" "$family"
   if chain_listing "$binary" "$IPTABLES_CHAIN"; then
     chain_rules=$CHAIN_LISTING
   else
@@ -455,13 +492,35 @@ check_family() {
 }
 
 compose_stack() {
+  local active_image_ref=${1:-}
+  shift
+  local -a image_override=()
+  if [[ -n $active_image_ref ]]; then
+    image_override=("TEAGRAM_DEMO_IMAGE_REF=$active_image_ref")
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u POSTGRES_PASSWORD -u TG_PUBLIC_LINK_PREFIX -u TG_AUTHKEY_ENC_KEY \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
     -u TG_RSA_KEY_FINGERPRINT \
+    "${image_override[@]}" \
     TEAGRAM_DEMO_SECRETS_DIR="$COMPOSE_SECRETS_DIR" \
     docker compose --env-file "$COMPOSE_ENV_FILE" --project-directory "$REPO_ROOT" \
       -f "$COMPOSE_FILE" --project-name teagram-demo "$@"
+}
+
+active_release_image_ref() {
+  local active_file=${1:-"$REPO_ROOT/.state/teagram-demo/active-release.json"}
+  local script_dir
+  if [[ ! -e $active_file && ! -L $active_file ]]; then
+    printf '\n'
+    return 0
+  fi
+  script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  DEMO_DEPLOY_TARGET=lima
+  # shellcheck source=../demo-common.sh
+  source "$script_dir/../demo-common.sh"
+  DEMO_ACTIVE_RELEASE_FILE=$active_file
+  demo_active_image_ref
 }
 
 disable_existing_restart_policies() {
@@ -478,16 +537,132 @@ disable_existing_restart_policies() {
 stack_start() {
   require_root
   require_repo_path
+  stack_lock_try
+  (( STACK_LOCK_ACQUIRED == 1 )) || return 2
+  stack_start_locked
+}
+
+stack_start_locked() {
+  local active_image_ref
+  active_image_ref=$(active_release_image_ref) \
+    || fail 'cannot read the validated active Lima release'
   disable_existing_restart_policies
-  compose_stack create --no-build
+  compose_stack "$active_image_ref" create --no-build \
+    || fail 'cannot create Lima demo containers before applying their egress rules'
   apply_rules
-  compose_stack up -d --no-build
+  compose_stack "$active_image_ref" up -d --no-build \
+    || fail 'cannot start the Lima demo stack after applying its egress rules'
+  stack_lock_release
 }
 
 stack_stop() {
+  local active_image_ref
   require_root
   require_repo_path
-  compose_stack --profile candidate stop
+  active_image_ref=$(active_release_image_ref) \
+    || fail 'cannot read the validated active Lima release'
+  compose_stack "$active_image_ref" --profile candidate stop \
+    || fail 'cannot stop the Lima demo stack'
+}
+
+stack_lock_try() {
+  local state_dir="$REPO_ROOT/.state" lock_path="$REPO_ROOT/.state/deploy.lock" status
+  [[ ! -L $state_dir && ! -L $lock_path ]] || fail 'lima deploy lock path must not be a symlink'
+  install -d -o root -g root -m 0755 "$state_dir" \
+    || fail 'cannot create lima deploy state directory'
+  exec 9>>"$lock_path" || fail 'cannot open lima deploy lock'
+  if flock -n -s -E 75 9; then
+    STACK_LOCK_ACQUIRED=1
+    STACK_LOCK_SKIPPED=0
+    return 0
+  else
+    status=$?
+  fi
+  exec 9>&-
+  if (( status == 75 )); then
+    STACK_LOCK_ACQUIRED=0
+    STACK_LOCK_SKIPPED=1
+    return 0
+  fi
+  fail "cannot acquire a shared lima deploy lock (exit $status)"
+}
+
+stack_lock_release() {
+  if (( STACK_LOCK_ACQUIRED == 1 )); then
+    flock -u 9 || fail 'cannot release the shared lima deploy lock'
+    exec 9>&-
+    STACK_LOCK_ACQUIRED=0
+  fi
+}
+
+stack_reconcile_locked() {
+  local active_image_ref running_services service missing=''
+  local -a running_services_list=()
+  local -A running=()
+  local -a expected_services=(postgres teagramd turnstile-egress haproxy edge cloudflared)
+
+  active_image_ref=$(active_release_image_ref) \
+    || fail 'cannot read the validated active Lima release'
+  running_services=$(compose_stack "$active_image_ref" ps --status running --services) \
+    || fail 'cannot inspect running Lima demo services'
+  mapfile -t running_services_list <<<"$running_services"
+  for service in "${running_services_list[@]}"; do
+    [[ -n $service ]] && running[$service]=1
+  done
+  for service in "${expected_services[@]}"; do
+    if [[ -z ${running[$service]:-} ]]; then
+      missing+=" $service"
+    fi
+  done
+  if [[ -n $missing ]]; then
+    apply_rules
+    compose_stack "$active_image_ref" up -d --no-build \
+      || fail "cannot recover stopped Lima demo services:$missing"
+    printf 'restarted Lima demo services:%s\n' "$missing"
+  fi
+  stack_lock_release
+}
+
+stack_supervise_stop() {
+  trap - TERM INT
+  printf '%s\n' 'stopping the supervised Lima demo stack'
+  stack_stop || fail 'could not stop the supervised Lima demo stack'
+  exit 0
+}
+
+stack_supervise() {
+  local docker_state=unknown
+  require_root
+  require_repo_path
+  trap stack_supervise_stop TERM INT
+  while true; do
+    stack_lock_try
+    if (( STACK_LOCK_SKIPPED == 1 )); then
+      sleep 5
+      continue
+    fi
+    stack_start_locked
+    break
+  done
+
+  while true; do
+    if docker info >/dev/null 2>&1; then
+      if [[ $docker_state == unavailable ]]; then
+        printf '%s\n' 'Docker daemon recovered; checking Lima demo services'
+      fi
+      docker_state=available
+      stack_lock_try
+      if (( STACK_LOCK_SKIPPED == 0 )); then
+        stack_reconcile_locked
+      fi
+    else
+      if [[ $docker_state != unavailable ]]; then
+        printf '%s\n' 'Docker daemon is unavailable; waiting before reconciling the Lima demo stack'
+      fi
+      docker_state=unavailable
+    fi
+    sleep 10
+  done
 }
 
 install_openrc_services() {
@@ -527,17 +702,15 @@ depend() {
   need teagram-demo-egress
 }
 
-start() {
-  ebegin "Creating demo networks, applying isolation, then starting the stack"
-  /opt/teagram-demo/deploy/teagram-demo/lima/install-egress-isolation.sh stack-start
-  eend $?
-}
-
-stop() {
-  ebegin "Stopping the teagram demo stack"
-  /opt/teagram-demo/deploy/teagram-demo/lima/install-egress-isolation.sh stack-stop
-  eend $?
-}
+supervisor=supervise-daemon
+command=/opt/teagram-demo/deploy/teagram-demo/lima/install-egress-isolation.sh
+command_args_foreground="stack-supervise"
+respawn_delay=5
+respawn_max=0
+respawn_period=60
+output_logger="logger -t teagram-demo-stack"
+error_logger="logger -t teagram-demo-stack"
+retry="TERM/30/KILL/5"
 OPENRC
   chown root:root "$temp_file"
   chmod 0755 "$temp_file"
@@ -617,6 +790,14 @@ uninstall_openrc_services() {
   local service
   require_root
   command -v rc-update >/dev/null 2>&1 || fail 'rc-update is required on lima'
+  if [[ -x /etc/init.d/$OPENRC_STACK_SERVICE ]]; then
+    command -v rc-service >/dev/null 2>&1 || fail 'rc-service is required to stop the Lima stack supervisor'
+    rc-service "$OPENRC_STACK_SERVICE" stop \
+      || fail 'cannot stop the Lima stack supervisor before uninstalling it'
+    stack_stop
+  else
+    stack_stop
+  fi
   registered_services=$(rc-update show default) || fail 'cannot inspect the OpenRC default runlevel'
   for service in "$OPENRC_STACK_SERVICE" "$OPENRC_SERVICE"; do
     if grep -Eq "^[[:space:]]*$service([[:space:]]|\|)" <<<"$registered_services"; then
@@ -631,7 +812,7 @@ usage() {
 Usage:
   install-egress-isolation.sh [install]
   install-egress-isolation.sh apply-rules|check|remove|uninstall
-  install-egress-isolation.sh stack-start|stack-stop (OpenRC stack service)
+  install-egress-isolation.sh stack-start|stack-stop|stack-supervise
   install-egress-isolation.sh --render-v4 [source-subnet ...]
   install-egress-isolation.sh --render-v6 source-subnet [...]
 
@@ -640,35 +821,37 @@ modes print the desired rules without reading or changing a firewall.
 USAGE
 }
 
-mode=${1:-install}
-case "$mode" in
-  install)
-    require_root
-    require_repo_path
-    command -v rc-update >/dev/null 2>&1 || fail 'rc-update is required on lima'
-    apply_rules
-    disable_existing_restart_policies
-    install_openrc_services
-    printf '%s\n' 'OpenRC egress isolation and ordered stack services enabled'
-    ;;
-  apply-rules) apply_rules ;;
-  check) check_rules ;;
-  remove) remove_rules ;;
-  stack-start) stack_start ;;
-  stack-stop) stack_stop ;;
-  uninstall)
-    stack_stop
-    uninstall_openrc_services
-    remove_rules
-    ;;
-  --render-v4)
-    shift
-    render_mode ipv4 "$@"
-    ;;
-  --render-v6)
-    shift
-    render_mode ipv6 "$@"
-    ;;
-  -h|--help) usage ;;
-  *) usage >&2; fail "unknown mode: $mode" ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  mode=${1:-install}
+  case "$mode" in
+    install)
+      require_root
+      require_repo_path
+      command -v rc-update >/dev/null 2>&1 || fail 'rc-update is required on lima'
+      apply_rules
+      disable_existing_restart_policies
+      install_openrc_services
+      printf '%s\n' 'OpenRC egress isolation and ordered stack services enabled'
+      ;;
+    apply-rules) apply_rules ;;
+    check) check_rules ;;
+    remove) remove_rules ;;
+    stack-start) stack_start ;;
+    stack-stop) stack_stop ;;
+    stack-supervise) stack_supervise ;;
+    uninstall)
+      uninstall_openrc_services
+      remove_rules
+      ;;
+    --render-v4)
+      shift
+      render_mode ipv4 "$@"
+      ;;
+    --render-v6)
+      shift
+      render_mode ipv6 "$@"
+      ;;
+    -h|--help) usage ;;
+    *) usage >&2; fail "unknown mode: $mode" ;;
+  esac
+fi

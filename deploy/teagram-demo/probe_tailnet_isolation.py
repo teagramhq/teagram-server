@@ -121,6 +121,22 @@ def lima_host_address_targets() -> tuple[tuple[str, str, int], ...]:
     return targets
 
 
+def lima_demo_ipv6_enabled() -> bool:
+    value = _one_line_command(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            "{{.EnableIPv6}}",
+            "teagram-demo_egress",
+        ]
+    )
+    if value not in ("true", "false"):
+        fail("docker-returned-an-invalid-egress-network-IPv6-setting")
+    return value == "true"
+
+
 def lan_gateway_from_route_table(route_table: str) -> str:
     candidates: list[tuple[int, str]] = []
     for line in route_table.splitlines()[1:]:
@@ -274,7 +290,14 @@ def public_https_request(hostname: str, address: str) -> None:
 def probe_lima_inside_network(
     lan_gateway: str,
     host_addresses: tuple[tuple[str, str, int], ...] = (),
+    ipv6_enabled: bool = True,
 ) -> None:
+    if not ipv6_enabled:
+        host_addresses = tuple(
+            target
+            for target in host_addresses
+            if ipaddress.ip_address(target[1]).version == 4
+        )
     targets = (
         TAILNET_PEER,
         ("lima-lan-gateway", lan_gateway, 22),
@@ -306,6 +329,7 @@ def run_lima_probe_from_host() -> None:
     for target in LIMA_DEMO_GATEWAY_TARGETS:
         require_host_control_target(*target)
     host_targets = lima_host_address_targets()
+    ipv6_enabled = lima_demo_ipv6_enabled()
     pid = lima_probe_container_pid()
     script_path = pathlib.Path(__file__).resolve()
     environment = os.environ.copy()
@@ -313,6 +337,7 @@ def run_lima_probe_from_host() -> None:
     environment["TEAGRAM_DEMO_HOST_ADDRESSES"] = " ".join(
         address for _, address, _ in host_targets
     )
+    environment["TEAGRAM_DEMO_IPV6_ENABLED"] = str(ipv6_enabled).lower()
     try:
         result = subprocess.run(
             [
@@ -364,11 +389,16 @@ def main() -> None:
         addresses = os.environ.get("TEAGRAM_DEMO_HOST_ADDRESSES", "").split()
         if not addresses:
             fail("TEAGRAM_DEMO_HOST_ADDRESSES-must-include-Lima-private-or-tailnet-addresses")
+        ipv6_enabled = os.environ.get("TEAGRAM_DEMO_IPV6_ENABLED", "")
+        if ipv6_enabled not in ("true", "false"):
+            fail("TEAGRAM_DEMO_IPV6_ENABLED-must-be-true-or-false")
         host_targets = tuple(
             (f"lima-host-{index}", address, 22)
             for index, address in enumerate(addresses, start=1)
         )
-        probe_lima_inside_network(str(parsed_gateway), host_targets)
+        probe_lima_inside_network(
+            str(parsed_gateway), host_targets, ipv6_enabled=ipv6_enabled == "true"
+        )
     else:
         run_lima_probe_from_host()
 

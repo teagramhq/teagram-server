@@ -268,11 +268,21 @@ expect 'criterion 1: every image is pinned by sha256 digest' \
 expect 'criterion 1: Docker does not auto-start demo containers before isolation' \
   '[.services[] | select(.restart != "no")] | length == 0'
 
-if grep -Fq 'Docker restarts or crashes after boot' "$SCRIPT_DIR/README.md" \
-  && grep -Fq 'rc-service teagram-demo-stack restart' "$SCRIPT_DIR/README.md"; then
-  ok 'Docker daemon restart recovery is documented'
+if grep -Fq 'supervisor=supervise-daemon' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'command_args_foreground="stack-supervise"' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'respawn_max=0' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'need teagram-demo-egress' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'stack_reconcile_locked' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'shared lima deploy lock' "$SCRIPT_DIR/install-egress-isolation.sh"; then
+  ok 'OpenRC supervises service recovery after firewall-first startup'
 else
-  not_ok 'Docker daemon restart recovery is documented'
+  not_ok 'OpenRC supervises service recovery after firewall-first startup'
+fi
+
+if grep -Fq 'egress-isolation-threat-model.md' "$SCRIPT_DIR/README.md"; then
+  ok 'Lima egress threat model is listed with the firewall files'
+else
+  not_ok 'Lima egress threat model is listed with the firewall files'
 fi
 
 # Criterion 2: every service has a memory limit, and the long-running ones fit

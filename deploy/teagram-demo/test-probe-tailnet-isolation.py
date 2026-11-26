@@ -79,6 +79,11 @@ class ProbeTailnetIsolationTests(unittest.TestCase):
             ),
             mock.patch.object(
                 probe_tailnet_isolation,
+                "lima_demo_ipv6_enabled",
+                return_value=False,
+            ),
+            mock.patch.object(
+                probe_tailnet_isolation,
                 "lima_probe_container_pid",
                 return_value=4321,
             ),
@@ -95,12 +100,55 @@ class ProbeTailnetIsolationTests(unittest.TestCase):
         self.assertEqual(command[-1], "--inside")
         self.assertEqual(run.call_args.kwargs["env"]["TEAGRAM_DEMO_LAN_GATEWAY"], "10.0.0.1")
         self.assertEqual(run.call_args.kwargs["env"]["TEAGRAM_DEMO_HOST_ADDRESSES"], "10.0.0.2")
+        self.assertEqual(run.call_args.kwargs["env"]["TEAGRAM_DEMO_IPV6_ENABLED"], "false")
         self.assertEqual(
             [call.args for call in host_control.call_args_list],
             [
                 probe_tailnet_isolation.TAILNET_PEER,
                 ("lima-lan-gateway", "10.0.0.1", 22),
                 *probe_tailnet_isolation.LIMA_DEMO_GATEWAY_TARGETS,
+            ],
+        )
+
+    def test_ipv4_only_demo_does_not_probe_hosts_ipv6_address(self) -> None:
+        host_addresses = (
+            ("lima-host-eth0", "10.0.0.2", 22),
+            ("lima-host-tailscale0", "fd7a:115c:a1e0::1234", 22),
+        )
+        with (
+            mock.patch.object(
+                probe_tailnet_isolation.socket,
+                "create_connection",
+                side_effect=TimeoutError,
+            ) as connect,
+            mock.patch.object(
+                probe_tailnet_isolation, "dns_query_a", return_value="93.184.216.34"
+            ),
+            mock.patch.object(probe_tailnet_isolation, "public_https_request"),
+        ):
+            probe_tailnet_isolation.probe_lima_inside_network(
+                "10.0.0.1", host_addresses, ipv6_enabled=False
+            )
+
+        probed_addresses = [call.args[0] for call in connect.call_args_list]
+        self.assertIn(("10.0.0.2", 22), probed_addresses)
+        self.assertNotIn(("fd7a:115c:a1e0::1234", 22), probed_addresses)
+
+    def test_lima_demo_ipv6_setting_comes_from_egress_network(self) -> None:
+        with mock.patch.object(
+            probe_tailnet_isolation, "_one_line_command", return_value="false"
+        ) as command:
+            self.assertFalse(probe_tailnet_isolation.lima_demo_ipv6_enabled())
+
+        self.assertEqual(
+            command.call_args.args[0],
+            [
+                "docker",
+                "network",
+                "inspect",
+                "--format",
+                "{{.EnableIPv6}}",
+                "teagram-demo_egress",
             ],
         )
 

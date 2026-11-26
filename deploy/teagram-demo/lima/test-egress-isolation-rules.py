@@ -426,6 +426,215 @@ class EgressIsolationRuleTests(unittest.TestCase):
         os.geteuid() == 0 or shutil.which("sudo"),
         "fake firewall integration requires root or passwordless sudo",
     )
+    def test_check_rejects_shadowed_forward_hook_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            apply = self._run_firewall_mode(mock_bin, state_file, "apply-rules")
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state["iptables"]["FORWARD"].insert(0, "-A FORWARD -j ACCEPT")
+            state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            before_check = state_file.read_bytes()
+
+            result = self._run_firewall_mode(mock_bin, state_file, "check")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FORWARD hook is missing or shadowed", result.stderr)
+            self.assertEqual(state_file.read_bytes(), before_check)
+
+    @unittest.skipUnless(
+        os.geteuid() == 0 or shutil.which("sudo"),
+        "fake firewall integration requires root or passwordless sudo",
+    )
+    def test_apply_moves_docker_user_hook_ahead_of_terminal_forward_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state["iptables"]["FORWARD"].insert(0, "-A FORWARD -j ACCEPT")
+            state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            result = self._run_firewall_mode(mock_bin, state_file, "apply-rules")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            forward_rules = state["iptables"]["FORWARD"]
+            self.assertEqual(forward_rules[0], "-A FORWARD -j DOCKER-USER")
+            self.assertEqual(forward_rules.count("-A FORWARD -j DOCKER-USER"), 1)
+            self.assertEqual(forward_rules[1], "-A FORWARD -j ACCEPT")
+
+    def test_stack_reconciler_reapplies_rules_before_restarting_stopped_services(self) -> None:
+        shell = r'''
+source "$1"
+active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
+compose_stack() {
+  local image_ref=$1
+  shift
+  if [[ "$1" == ps ]]; then
+    printf '%s\n' postgres teagramd turnstile-egress haproxy edge
+  elif [[ "$1" == up ]]; then
+    printf 'compose:%s:%s\n' "$image_ref" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+  else
+    return 2
+  fi
+}
+apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
+stack_lock_release() { :; }
+stack_reconcile_locked
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "reconcile.log"
+            active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "c" * 64
+            env = os.environ.copy()
+            env["TEAGRAM_TEST_ACTIVE_IMAGE_REF"] = active_ref
+            env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-stack-reconcile", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "firewall",
+                    f"compose:{active_ref}:up -d --no-build",
+                ],
+            )
+
+    def test_stack_start_uses_active_digest_and_applies_rules_before_compose_up(self) -> None:
+        shell = r'''
+source "$1"
+active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
+disable_existing_restart_policies() {
+  printf '%s\n' disable-restart-policies >> "$TEAGRAM_TEST_STACK_LOG"
+}
+compose_stack() {
+  local image_ref=$1
+  shift
+  printf 'compose:%s:%s\n' "$image_ref" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+}
+apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
+stack_lock_release() { :; }
+stack_start_locked
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "stack-start.log"
+            active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "d" * 64
+            env = os.environ.copy()
+            env["TEAGRAM_TEST_ACTIVE_IMAGE_REF"] = active_ref
+            env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-stack-start", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "disable-restart-policies",
+                    f"compose:{active_ref}:create --no-build",
+                    "firewall",
+                    f"compose:{active_ref}:up -d --no-build",
+                ],
+            )
+
+    def test_active_release_digest_overrides_bootstrap_image_for_compose(self) -> None:
+        active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "c" * 64
+        bootstrap_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "b" * 64
+        shell = r'''
+source "$1"
+active_ref=$(active_release_image_ref "$2")
+compose_stack "$active_ref" config
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            env_file = root / "lima.env"
+            env_file.write_text(
+                f"TEAGRAM_DEMO_IMAGE_REF={bootstrap_ref}\n", encoding="utf-8"
+            )
+            active_file = root / "active-release.json"
+            active_file.write_text('{"image_ref":"fixture"}\n', encoding="utf-8")
+            (mock_bin / "stat").write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -c ] && [ \"$2\" = '%u:%a' ]; then\n"
+                "  printf '0:600\\n'\n"
+                "else\n"
+                f"  exec {shutil.which('stat')} \"$@\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            (mock_bin / "jq").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$TEAGRAM_TEST_ACTIVE_IMAGE_REF\"\n",
+                encoding="utf-8",
+            )
+            (mock_bin / "docker").write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys\n"
+                "ref = os.environ.get('TEAGRAM_DEMO_IMAGE_REF')\n"
+                "if ref is None:\n"
+                "    args = sys.argv[1:]\n"
+                "    env_file = pathlib.Path(args[args.index('--env-file') + 1])\n"
+                "    ref = next(\n"
+                "        (line.split('=', 1)[1] for line in env_file.read_text().splitlines()\n"
+                "         if line.startswith('TEAGRAM_DEMO_IMAGE_REF=')),\n"
+                "        '',\n"
+                "    )\n"
+                "print(ref)\n",
+                encoding="utf-8",
+            )
+            for name in ("stat", "jq", "docker"):
+                (mock_bin / name).chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
+                    "TEAGRAM_DEMO_LIMA_ENV_FILE": str(env_file),
+                    "TEAGRAM_TEST_ACTIVE_IMAGE_REF": active_ref,
+                }
+            )
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-active-image-ref", str(SCRIPT), str(active_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), active_ref)
+            self.assertNotEqual(result.stdout.strip(), bootstrap_ref)
+
+            no_active_release = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    shell,
+                    "test-bootstrap-image-ref",
+                    str(SCRIPT),
+                    str(root / "missing-active-release.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(no_active_release.returncode, 0, no_active_release.stderr)
+            self.assertEqual(no_active_release.stdout.strip(), bootstrap_ref)
+
+    @unittest.skipUnless(
+        os.geteuid() == 0 or shutil.which("sudo"),
+        "fake firewall integration requires root or passwordless sudo",
+    )
     def test_missing_networks_are_named_and_existing_ipv6_rules_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mock_bin, state_file = self._mock_firewall(directory)
