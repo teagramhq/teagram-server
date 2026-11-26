@@ -665,12 +665,12 @@ func workerMemoryEnvironment() string {
 
 func workerMemoryEnvironmentForLimit(parentLimit int64) string {
 	limit := int64(workerDefaultMemoryLimitBytes)
-	if parentLimit >= 0 {
+	if parentLimit >= 0 && parentLimit < workerDefaultMemoryLimitBytes {
 		// Each worker is a separate Go runtime in the server's cgroup. Divide
 		// across the server, worker slots and one reserve share because Go's
-		// memory limit is soft and the cgroup also charges kernel memory.
+		// memory limit is soft and the cgroup also charges kernel memory. Keep
+		// the established worker cap when the parent has at least that budget.
 		limit = parentLimit / workerMemoryLimitDivisor
-		limit = min(limit, workerDefaultMemoryLimitBytes)
 	}
 	return workerEnvironmentMemory + "=" + formatMemoryLimit(limit)
 }

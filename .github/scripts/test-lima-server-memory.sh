@@ -70,7 +70,7 @@ finish() {
       stat_file_bytes=$(<"$MEMORY_SAMPLE_FILE_FILE")
       stat_kernel_bytes=$(<"$MEMORY_SAMPLE_KERNEL_FILE")
     fi
-    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
       "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
@@ -79,7 +79,7 @@ finish() {
         printf '\n### Lima service memory probe\n\n'
         printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Stat sample interval | Peak at stat sample | Sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills |\n'
         printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |\n'
-        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | :2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s ms | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s |\n' \
+        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s ms | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s |\n' \
           "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
           "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
           "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}"
@@ -133,8 +133,8 @@ docker volume create "$KEY_VOLUME" >/dev/null
 docker volume create "$BLOB_VOLUME" >/dev/null
 docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$IMAGE_ID" bootstrap-identity >/dev/null
 
-# Ten runs make twenty successful sign-ins from this disposable loopback client.
-# Keep the smoke server's per-IP login budgets above that test-only volume.
+# This disposable CI server is loopback-only, has registration closed, and its volumes are
+# removed on exit. Keep auth budgets above the twenty test sign-ins from the loopback client.
 docker run --detach --name "$CONTAINER" \
   --network host \
   --memory 44m --memory-swap 44m --cpus 0.5 --pids-limit 128 \
@@ -143,8 +143,8 @@ docker run --detach --name "$CONTAINER" \
   --volume "$BLOB_VOLUME:/var/lib/teagramd-blobs" \
   --env TG_POSTGRES_DSN --env TG_AUTHKEY_ENC_KEY \
   --env TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-  --env TG_ADVERTISE_ADDR=127.0.0.1:2443 --env TG_LISTEN_ADDR=:2443 \
-  --env TG_WEBSOCKET_LISTEN_ADDR=:2446 \
+  --env TG_ADVERTISE_ADDR=127.0.0.1:2443 --env TG_LISTEN_ADDR=127.0.0.1:2443 \
+  --env TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2446 \
   --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
   --env TG_WEBSOCKET_BROWSER_ONLY=false \
   --env TG_REGISTRATION=closed --env TG_PG_MAX_CONNS=3 \
@@ -165,8 +165,8 @@ run_setup_command() {
     --env TG_AUTHKEY_ENC_KEY
     --env TG_PUBLIC_LINK_PREFIX=https://links.example.test/
     --env TG_ADVERTISE_ADDR=127.0.0.1:2443
-    --env TG_LISTEN_ADDR=:2443
-    --env TG_WEBSOCKET_LISTEN_ADDR=:2446
+    --env TG_LISTEN_ADDR=127.0.0.1:2443
+    --env TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2446
     --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
     --env TG_WEBSOCKET_BROWSER_ONLY=false
     --env TG_REGISTRATION=closed
@@ -278,7 +278,7 @@ for attempt in $(seq 30); do
   sleep 1
 done
 if [[ $websocket_listener_ready != true ]]; then
-  echo 'Lima WebSocket listener did not accept an HTTP connection on :2446' >&2
+  echo 'Lima WebSocket listener did not accept an HTTP connection on 127.0.0.1:2446' >&2
   exit 1
 fi
 
