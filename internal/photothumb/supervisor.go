@@ -41,6 +41,7 @@ const (
 	workerDefaultMemoryLimitBytes = 224 << 20
 	workerEnvironmentProcs        = "GOMAXPROCS=1"
 	workerPixelLimitArgument      = "2560000"
+	maxConcurrentPhotoWorkers     = 2
 )
 
 // FailureReason is a fixed, bounded class suitable for metrics. It never
@@ -203,7 +204,7 @@ func (s *Supervisor) TryAcquire(accountID int64) (*Lease, FailureReason) {
 	}
 	s.admission.mu.Lock()
 	defer s.admission.mu.Unlock()
-	if s.admission.active >= 2 {
+	if s.admission.active >= maxConcurrentPhotoWorkers {
 		s.record(FailureBusy)
 		return nil, FailureBusy
 	}
@@ -663,8 +664,12 @@ func workerMemoryEnvironment() string {
 
 func workerMemoryEnvironmentForLimit(parentLimit int64) string {
 	limit := int64(workerDefaultMemoryLimitBytes)
-	if parentLimit >= 0 && parentLimit < limit {
-		limit = parentLimit
+	if parentLimit >= 0 {
+		// Each worker is a separate Go runtime in the server's cgroup. Share a
+		// constrained parent budget across the server and every worker slot so
+		// concurrent workers do not each receive the full parent limit.
+		limit = parentLimit / (maxConcurrentPhotoWorkers + 1)
+		limit = min(limit, workerDefaultMemoryLimitBytes)
 	}
 	return workerEnvironmentMemory + "=" + formatMemoryLimit(limit)
 }

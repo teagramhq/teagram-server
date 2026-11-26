@@ -656,8 +656,9 @@ func TestWorkerMemoryEnvironmentUsesLowerParentLimitAndPreservesDefaultCap(t *te
 		want        string
 	}{
 		{name: "zero parent limit", parentLimit: 0, want: "GOMEMLIMIT=0B"},
-		{name: "constrained parent", parentLimit: 20 << 20, want: "GOMEMLIMIT=20MiB"},
-		{name: "larger parent", parentLimit: 320 << 20, want: "GOMEMLIMIT=224MiB"},
+		{name: "constrained parent shares budget with two workers", parentLimit: 20 << 20, want: "GOMEMLIMIT=6990506B"},
+		{name: "larger parent shares budget with two workers", parentLimit: 320 << 20, want: "GOMEMLIMIT=111848106B"},
+		{name: "large parent preserves default cap", parentLimit: 768 << 20, want: "GOMEMLIMIT=224MiB"},
 		{name: "unset parent", parentLimit: math.MaxInt64, want: "GOMEMLIMIT=224MiB"},
 	}
 	for _, test := range tests {
